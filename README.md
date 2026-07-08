@@ -191,3 +191,17 @@ default in code (Q1-Q4, U1-U5, U8) run on a documented default behind a switch m
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
 controller.
+
+## License
+
+dsl41 is dual-licensed:
+
+- **Open source:** [GNU AGPL-3.0-only](LICENSE). Distributing modified versions,
+  or offering them as a network service, requires offering the complete
+  corresponding source under the same terms.
+- **Commercial:** organizations that cannot accept AGPL obligations can obtain a
+  commercial license — see [COMMERCIAL.md](COMMERCIAL.md).
+
+Copyright (C) 2026 dsl41 authors. External contributions require a signed CLA
+preserving the dual-licensing right; corpus hygiene rules also apply
+(see [LICENSING.md](LICENSING.md)).
