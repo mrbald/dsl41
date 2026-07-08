@@ -1,0 +1,13 @@
+/* Machine + external-instance declarations, doc-shaped (UCS/M33, SEM-07). */
+insert_machine: unixagent
+type: a
+node_name: unixagent.example.com
+max_load: 100
+factor: 1.0
+
+insert_machine: virt_pool
+type: v
+max_load: 200
+
+insert_xinst: PRD
+xtype: a

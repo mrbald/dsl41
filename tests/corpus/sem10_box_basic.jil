@@ -1,0 +1,16 @@
+/* Doc-derived: box_success attribute page (Broadcom 12.0). SEM-10/11/12. */
+insert_job: box_a
+job_type: b
+box_success: success(job_a)
+
+insert_job: job_a
+box_name: box_a
+job_type: c
+command: sleep 15
+machine: machine1
+
+insert_job: job_b
+box_name: box_a
+job_type: c
+command: sleep 60
+machine: machine1

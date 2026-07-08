@@ -1,0 +1,17 @@
+/* SEM-31 mutual-exclusivity violations; refused at lowering, never reaches L004. */
+insert_job: both_time_forms
+job_type: c
+command: echo x
+machine: m1
+date_conditions: 1
+start_times: "10:00"
+start_mins: 15, 30
+
+insert_job: both_day_forms
+job_type: c
+command: echo y
+machine: m1
+date_conditions: 1
+days_of_week: mo
+run_calendar: monthly_cal
+start_times: "09:00"

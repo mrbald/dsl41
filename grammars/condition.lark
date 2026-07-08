@@ -1,0 +1,80 @@
+// JIL condition expression grammar (AutoSys AE 12.x)
+// Scope: the value of `condition`, `box_success`, `box_failure` attributes ONLY.
+// Statement-level JIL is a hand scanner — see docs/jil-statement-syntax.md.
+//
+// Semantics references: docs/autosys-semantics.md SEM-02..08.
+//
+// ── Q1 PRECEDENCE SWITCH ─────────────────────────────────────────────────────
+// Broadcom docs say "evaluated left to right, parentheses force precedence"
+// (SEM-03). Until Q1 is resolved on a live instance, TWO start rules exist:
+//   start_flat : & and | at EQUAL precedence, strictly left-associative  [DEFAULT]
+//   start_prec : & binds tighter than |  (C-style)
+// The loader (conditions.py) selects via the CONDITION_PRECEDENCE env var /
+// module setting.
+// After Q1: delete the losing rule, delete this banner, keep the trace test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+start_flat: expr_flat
+start_prec: expr_prec
+
+// ---- flat: single left-recursive level, & and | equal ----
+?expr_flat: expr_flat op atom_or_group_flat   -> binop
+          | atom_or_group_flat
+?atom_or_group_flat: atom
+          | "(" expr_flat ")"                 -> paren
+op: AND | OR
+
+// ---- prec: conventional two-level ----
+?expr_prec: expr_prec OR term                 -> or_
+          | term
+?term: term AND factor                        -> and_
+     | factor
+?factor: atom
+       | "(" expr_prec ")"                    -> paren
+
+// ---- atoms (SEM-02) ----
+?atom: status_atom
+     | exitcode_atom
+     | global_atom
+
+status_atom: STATUS_KW "(" job_ref ("," lookback)? ")"
+exitcode_atom: EXITCODE_KW "(" job_ref ("," lookback)? ")" CMP_OP INT
+global_atom: VALUE_KW "(" global_name ")" CMP_OP global_value
+
+// keywords are case-insensitive ("i" flag); long and short forms (SEM-02)
+STATUS_KW: "success"i | "failure"i | "done"i | "terminated"i | "notrunning"i
+         | "s"i | "f"i | "d"i | "t"i | "n"i
+EXITCODE_KW: "exitcode"i | "e"i
+VALUE_KW: "value"i | "v"i
+
+// job reference, optional cross-instance suffix (SEM-07)
+job_ref: JOB_NAME ("^" INSTANCE_NAME)?
+
+// Job names: JIL parses on `keyword:` so a literal colon inside a name is
+// escaped as `\:` (SEM-04 note; box_failure doc: "Escape the job name that
+// contains a colon with a backslash"). Names may contain dots, #, @, $, etc.
+// Exclusions: whitespace, parens, comma, caret, unescaped colon, & | operators.
+JOB_NAME: /(?:[^\s(),^&|:\\]|\\:)+/
+INSTANCE_NAME: /[A-Za-z0-9_#@$]+/
+
+// lookback token (SEM-04): hhhh.mm  |  hhhh\:mm  |  bare hours  |  0  |  9999
+// Format pitfalls (L015) are validated at lowering, not in the grammar:
+// grammar accepts the lexical shapes; semantics layer rejects ".30" etc.
+lookback: LOOKBACK_TOKEN
+LOOKBACK_TOKEN: /\d{1,4}(\.\d{1,2}|\\:\d{1,2})?/
+
+CMP_OP: "!=" | "<=" | ">=" | "=" | "<" | ">"
+
+global_name: GLOBAL_NAME
+GLOBAL_NAME: /[^\s(),=<>!&|]+/
+// global values may be quoted or bare; comparison semantics at lowering
+global_value: QUOTED | BARE_VALUE
+QUOTED.2: /"[^"]*"/
+BARE_VALUE: /[^\s()&|]+/
+
+AND: "&" | "and"i
+OR: "|" | "or"i
+
+%import common.INT
+%import common.WS
+%ignore WS

@@ -1,0 +1,12 @@
+/* Rule 6: list-valued attributes may span lines without continuation chars
+   (Broadcom start_mins page). Synthetic. */
+insert_job: long_lists
+job_type: c
+machine: m1
+date_conditions: 1
+days_of_week: mo,we,fr
+start_times: "08:00, 09:00,
+10:00, 11:00"
+must_start_times: +2, +2,
++2, +2
+command: /opt/tick.sh

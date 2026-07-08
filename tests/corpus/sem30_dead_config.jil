@@ -1,0 +1,8 @@
+/* SEM-30: time attributes without truthy date_conditions are ignored by
+   AutoSys -- dead configuration. L005 trigger fixture. */
+insert_job: dead_scheduler
+job_type: c
+command: /opt/nightly.sh
+machine: m1
+start_times: "23:00"
+days_of_week: mo,tu,we,th,fr

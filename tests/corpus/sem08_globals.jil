@@ -1,0 +1,10 @@
+/* Globals in conditions and $$ substitution. SEM-08. KB 186248 scenario shape. */
+insert_global: BillID
+value: 0
+
+insert_job: uses_global
+job_type: c
+machine: unixagent
+command: /usr/common/backup $$BillID
+std_err_file: /tmp/$${Today}.err
+condition: value(BillID) = 100

@@ -1,0 +1,19 @@
+/* SEM-04 lookback format pitfalls (L015 triggers): bare token means HOURS
+   (sub-hour windows need a leading 00), single-digit minutes are ambiguous.
+   upstream_feed is defined so L001 stays quiet -- one rule per fixture. */
+insert_job: pitfall_bare_hours
+job_type: c
+command: /opt/a.sh
+machine: m1
+condition: s(upstream_feed, 30)
+
+insert_job: pitfall_single_digit
+job_type: c
+command: /opt/b.sh
+machine: m1
+condition: s(upstream_feed, 2.5)
+
+insert_job: upstream_feed
+job_type: c
+command: /opt/feed.sh
+machine: m1

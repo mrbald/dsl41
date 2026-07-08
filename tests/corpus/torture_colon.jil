@@ -1,0 +1,14 @@
+/* F4 torture: escaped colons, quoted colons, comment-marker lookalikes.
+   Synthetic, shaped from condition-attribute page notes. */
+insert_job: colon_torture   job_type: c
+machine: m\:01
+command: echo "a : b" C\:\\TEMP
+std_out_file: /tmp/out:file.err
+condition: s(JOB\:WITH\:COLONS) & s(DB_BACKUP^PRD)
+description: "hash # and /* markers inside quotes stay value"
+
+insert_job: glob_shell
+job_type: c
+machine: m1
+command: cp /tmp/in/* /tmp/out/ /* stage to out */
+std_err_file: /tmp/log /*unclosed-glob-lookalike

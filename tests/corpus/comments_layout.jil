@@ -1,0 +1,9 @@
+/* leading block comment
+   spanning two lines */
+# leading hash comment
+insert_job: commented   job_type: c /* header trailing */
+# attr leading comment
+command: echo hi # attr trailing
+machine: m1
+
+/* floating comment at EOF */
