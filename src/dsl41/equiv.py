@@ -320,6 +320,19 @@ def equivalent_tier_a(
     }
     if not cycles_equal:
         detail["<cycles>"] = "cycle definitions differ"
+    # Resources and external instances joined tier a with DL-37a: catalog_hash
+    # already covered them, so a difference used to be a hash mismatch with no
+    # tier-a detail -- the ss8 short-circuit and tier (a) disagreed.
+    resources_equal = {r: (v.res_type, v.attrs) for r, v in a.resources.items()} == {
+        r: (v.res_type, v.attrs) for r, v in b.resources.items()
+    }
+    if not resources_equal:
+        detail["<resources>"] = "resource definitions differ"
+    xinsts_equal = {x: (v.xtype, v.attrs) for x, v in a.external_instances.items()} == {
+        x: (v.xtype, v.attrs) for x, v in b.external_instances.items()
+    }
+    if not xinsts_equal:
+        detail["<external_instances>"] = "external-instance definitions differ"
     equivalent = (
         not left_only
         and not right_only
@@ -328,6 +341,8 @@ def equivalent_tier_a(
         and machines_equal
         and calendars_equal
         and cycles_equal
+        and resources_equal
+        and xinsts_equal
     )
     return TierAResult(
         equivalent=equivalent,

@@ -393,7 +393,8 @@ def test_threshold_boundary_is_strictly_greater() -> None:
 def test_default_threshold_keeps_corpus_boxes_expanded() -> None:
     mermaid = to_mermaid(derive_graph(corpus_catalog()))
     # box_a + gate_box + sem24's NIGHT_SB/NIGHT_B nested pair (DL-18)
-    assert mermaid.count("subgraph") == 4
+    # + kitchen_sink's sink_box (DL-37a terminator-flag witness)
+    assert mermaid.count("subgraph") == 5
 
 
 def test_direction_td() -> None:

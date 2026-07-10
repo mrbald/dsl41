@@ -568,11 +568,11 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
     for name, value in catalog.globals_declared.items():
         lines.append(f"c.global_({_py(name)}, {_py(value)})")
     for name, machine in catalog.machines.items():
-        kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type else []
+        kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type is not None else []
         kwargs += _record_kwargs(machine.attrs)
         lines.append(f"c.machine({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
     for name, resource in catalog.resources.items():
-        kwargs = [f"res_type={_py(resource.res_type)}"] if resource.res_type else []
+        kwargs = [f"res_type={_py(resource.res_type)}"] if resource.res_type is not None else []
         kwargs += _record_kwargs(resource.attrs)
         lines.append(f"c.resource({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
     for name, xinst in catalog.external_instances.items():

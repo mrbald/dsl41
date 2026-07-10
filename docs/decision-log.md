@@ -550,3 +550,32 @@
   never produce a module that fails to compile; a standard-calendar attr
   literally named `dates` is refused loudly (would bind the builder
   parameter; no such attr exists in the export format).
+- DL-37a Adversarial-review addendum (2026-07-10). The Opus review of the
+  DL-37 landing confirmed the decompiler logic (parallel/sequence
+  disjointness held in both grammar modes across ~20 adversarial
+  catalogs, including a cyclic join-is-producer case) and found three
+  fixable gaps, all in the --check error path, all fixed same-day:
+  (1) MAJOR -- the CLI ran the check's exec BEFORE emitting the module,
+  and neither the exec nor decompile() itself was guarded, so a module
+  the builder refuses to execute (e.g. a lowered calendar name with outer
+  spaces, legal in IR but not calendar-name-shaped) died as an uncaught
+  traceback with NO module written -- the exact opposite of the DL-37
+  item-3 contract. The module is now emitted before the check; an
+  exec-time exception reports cleanly and exits 1; a decompile-time
+  DslError (the calendar-'dates' refusal) is a clean exit-2 refusal.
+  (2) MINOR -- the no-tier-a-detail fallback message blamed annotations,
+  which are hash-EXEMPT and can never reach that branch; the branch was
+  real for resources/external instances, which catalog_hash covered but
+  tier (a) did not diff (the ss8 short-circuit and tier (a) disagreed,
+  the same defect class DL-36 fixed for calendar spans). Tier (a) now
+  diffs resources (res_type+attrs) and external instances (xtype+attrs)
+  like machines, and the fallback message no longer names a suspect.
+  (3) MINOR -- machine_type=""/res_type="" were dropped by truthiness
+  guards in decompile (now `is not None`); --check had made the loss
+  loud, with an accurate message for machines and, pre-fix-2, the
+  misleading fallback for resources. Separately, the test agent's corpus
+  completeness sweep (the DL-37 structural guard, first run) reported six
+  unwitnessed decompiler-visible fields -- FwSpec owner/profile/
+  std_out_file/std_err_file and box_terminator/job_terminator -- all now
+  witnessed in kitchen_sink.jil; the sweep's skip-list is expected to
+  stay empty.

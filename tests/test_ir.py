@@ -221,6 +221,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "pitfall_bare_hours",
         "pitfall_single_digit",
         "quarter_past",
+        "sink_box",
+        "sink_boxed",
         "sink_cmd",
         "sink_fw",
         "template",

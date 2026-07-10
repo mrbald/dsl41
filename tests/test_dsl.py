@@ -482,14 +482,12 @@ _FIELD_CASES = _SEMANTICS_FIELDS + _EXEC_FIELDS + _FW_FIELDS + _SCHEDULE_FIELDS 
 #: but the corpus's only FW job (kitchen_sink's sink_fw) sets just
 #: machine/watch_* -- no FW job anywhere sets owner/profile/std_out_file/
 #: std_err_file. Box terminators are not witnessed by any corpus job at all.
-_NO_CORPUS_WITNESS = {
-    ("FwSpec", "owner"),
-    ("FwSpec", "profile"),
-    ("FwSpec", "std_out_file"),
-    ("FwSpec", "std_err_file"),
-    ("Extra", "box_terminator"),
-    ("Extra", "job_terminator"),
-}
+#: Fields the sweep found unwitnessed get a corpus fixture, not an entry
+#: here -- the set is expected to stay empty (DL-37a closed the six gaps
+#: the first run of this sweep reported: FwSpec owner/profile/std_out_file/
+#: std_err_file and the box_terminator/job_terminator flags, all now in
+#: kitchen_sink.jil).
+_NO_CORPUS_WITNESS: set[tuple[str, str]] = set()
 
 
 @pytest.mark.parametrize(
@@ -612,6 +610,49 @@ def test_cli_decompile_check_failure_exits_1_but_still_writes_module(
     assert result.exit_code == 1
     assert "round-trip check FAILED" in result.stderr
     assert target.read_text(encoding="utf-8") == broken_source
+
+
+def test_cli_decompile_check_survives_a_module_that_raises(tmp_path: Path) -> None:
+    """DL-37a review finding 1 (MAJOR): a module the builder refuses to
+    execute (here: a calendar name with outer spaces, legal in IR but not
+    calendar-name-shaped for the builder) must still be emitted, with a
+    clean stderr message and exit 1 -- not an uncaught traceback that eats
+    the module."""
+    source_jil = tmp_path / "spaced.jil"
+    source_jil.write_text('calendar: " padded "\n01/01/2026 00:00\n', encoding="utf-8")
+    target = tmp_path / "rebuilt.py"
+    result = runner.invoke(app, ["decompile", "--out", str(target), str(source_jil)])
+    assert result.exit_code == 1
+    assert "round-trip check FAILED" in result.stderr
+    assert "the emitted module raised DslError" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert target.exists()  # emitted BEFORE the check ran
+
+
+def test_cli_decompile_refusal_is_a_clean_exit_2(tmp_path: Path) -> None:
+    """DL-37a review finding 1, decompile-time half: a standard calendar
+    carrying an attr literally named `dates` makes decompile() itself
+    refuse (nothing emittable) -- a clean exit-2 refusal, not a traceback."""
+    source_jil = tmp_path / "datesattr.jil"
+    source_jil.write_text("calendar: c1\ndates: bogus\n01/01/2026 00:00\n", encoding="utf-8")
+    result = runner.invoke(app, ["decompile", str(source_jil)])
+    assert result.exit_code == 2
+    assert "decompile refused" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_decompile_keeps_empty_string_machine_and_resource_types() -> None:
+    """DL-37a review finding 3: `type:`/`res_type:` with an empty value are
+    legal opaque records; truthiness guards used to silently drop them."""
+    catalog = lower_source(
+        "insert_machine: m_empty\ntype:\n\ninsert_resource: r_empty\nres_type:\n"
+    )
+    assert catalog.machines["m_empty"].machine_type == ""
+    assert catalog.resources["r_empty"].res_type == ""
+    rebuilt = roundtrip(catalog)
+    assert rebuilt.machines["m_empty"].machine_type == ""
+    assert rebuilt.resources["r_empty"].res_type == ""
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
 
 
 # =============================================================================

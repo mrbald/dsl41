@@ -36,8 +36,26 @@ priority: 5
 insert_job: sink_fw
 job_type: f
 machine: m1
+owner: watcher@prod
+profile: /etc/profiles/fw
+std_out_file: /var/log/sink_fw.out
+std_err_file: /var/log/sink_fw.err
 watch_file: /data/inbox/trigger.done
 watch_interval: 60
 watch_file_min_size: 1024
 date_conditions: 1
 start_times: "06:00"
+
+/* box_terminator/job_terminator had no corpus witness either (DL-37a);
+   the member is unscheduled and unconditioned, so L011 (in a box) and
+   L013 (no own schedule) both stay quiet. */
+insert_job: sink_box
+job_type: b
+
+insert_job: sink_boxed
+job_type: c
+box_name: sink_box
+machine: m1
+command: /usr/bin/true
+box_terminator: 1
+job_terminator: 1

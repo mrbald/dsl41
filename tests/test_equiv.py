@@ -363,6 +363,25 @@ def test_tier_a_compares_calendar_and_cycle_definitions() -> None:
     assert equivalent_tier_a(a, a).equivalent
 
 
+def test_tier_a_compares_resource_and_xinst_definitions() -> None:
+    """DL-37a review finding 2: catalog_hash always covered resources and
+    external instances, but tier (a) did not diff them -- a difference was
+    a hash mismatch with no tier-a detail (the ss8 short-circuit and
+    tier (a) disagreed). They now diff like machines."""
+    job = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+    a = lower_source(job + "\ninsert_resource: pool\nres_type: T\namount: 2\n")
+    b = lower_source(job + "\ninsert_resource: pool\nres_type: T\namount: 3\n")
+    result = equivalent_tier_a(a, b)
+    assert not result.equivalent
+    assert result.detail["<resources>"] == "resource definitions differ"
+    c = lower_source(job + "\ninsert_xinst: PRD\nxtype: a\nxport: 9000\n")
+    d = lower_source(job + "\ninsert_xinst: PRD\nxtype: a\nxport: 9001\n")
+    result = equivalent_tier_a(c, d)
+    assert not result.equivalent
+    assert result.detail["<external_instances>"] == "external-instance definitions differ"
+    assert equivalent_tier_a(a, a).equivalent
+
+
 # ------------------------------------------------------------------------- 3. Tier a
 
 

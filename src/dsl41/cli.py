@@ -290,34 +290,49 @@ def decompile(
     exits 1 (the module is still emitted for inspection). Exit 2 when the
     input never reached the decompiler.
     """
+    from dsl41.dsl import DslError
     from dsl41.dsl import decompile as decompile_catalog
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
-    source = decompile_catalog(catalog)
-    divergence: str | None = None
-    if check:
-        from dsl41.equiv import catalog_hash, equivalent_tier_a
-
-        namespace: dict[str, object] = {"__name__": "<decompiled>"}
-        exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
-        rebuilt = namespace["catalog"]
-        assert isinstance(rebuilt, CatalogIR)
-        if catalog_hash(rebuilt) != catalog_hash(catalog):
-            result = equivalent_tier_a(catalog, rebuilt)
-            divergence = "; ".join(f"{k}: {v}" for k, v in sorted(result.detail.items())) or (
-                "hash mismatch with no tier-a detail (softer-tier fields, e.g. annotations)"
-            )
+    try:
+        source = decompile_catalog(catalog)
+    except DslError as exc:
+        # a decompiler refusal (nothing emittable) is the same class as a
+        # lowering refusal: the input never became output (DL-37a)
+        typer.echo(f"decompile refused: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    # Emit BEFORE checking (DL-37a): the module must survive for inspection
+    # even when the check finds a decompiler gap.
     if out is None:
         typer.echo(source, nl=False)
     else:
         out.write_text(source, encoding="utf-8")
         typer.echo(f"wrote {out}")
-    if divergence is not None:
-        typer.echo(
-            f"round-trip check FAILED (a decompiler gap, not your input): {divergence}",
-            err=True,
-        )
-        raise typer.Exit(1)
+    if check:
+        from dsl41.equiv import catalog_hash, equivalent_tier_a
+
+        namespace: dict[str, object] = {"__name__": "<decompiled>"}
+        try:
+            exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
+        except Exception as exc:
+            typer.echo(
+                "round-trip check FAILED (a decompiler gap, not your input):"
+                f" the emitted module raised {type(exc).__name__}: {exc}",
+                err=True,
+            )
+            raise typer.Exit(1) from exc
+        rebuilt = namespace["catalog"]
+        assert isinstance(rebuilt, CatalogIR)
+        if catalog_hash(rebuilt) != catalog_hash(catalog):
+            result = equivalent_tier_a(catalog, rebuilt)
+            divergence = "; ".join(f"{k}: {v}" for k, v in sorted(result.detail.items())) or (
+                "hash mismatch with no tier-a detail -- report this with the input"
+            )
+            typer.echo(
+                f"round-trip check FAILED (a decompiler gap, not your input): {divergence}",
+                err=True,
+            )
+            raise typer.Exit(1)
 
 
 @app.command()
