@@ -25,7 +25,16 @@ from dsl41.equiv import (
     equivalent_tier_b,
     equivalent_tier_c,
 )
-from dsl41.ir import CatalogIR, Time, lower_catalog, lower_source
+from dsl41.ir import (
+    CatalogIR,
+    ExecSpec,
+    FwSpec,
+    ScheduleBlock,
+    Semantics,
+    Time,
+    lower_catalog,
+    lower_source,
+)
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 EXPECT_LOWER_ERROR = {"sem31_xor.jil"}
@@ -243,6 +252,302 @@ def test_decompiled_source_is_deterministic() -> None:
     assert decompile(catalog) == decompile(catalog)
 
 
+# --------------------------------------------------------- parallel() sugar (DL-37)
+
+
+def _job_line(source: str, name: str) -> str:
+    """The exact `c.job(...)`/`b.job(...)`/`c.box(...)` call line naming
+    `name` as its subject -- used to check that condition= is suppressed on
+    parallel()/sequence() members (their condition lives in the wiring line
+    instead, module docstring)."""
+    needle = f"({name!r}"
+    matches = [
+        line
+        for line in source.splitlines()
+        if (".job(" in line or ".box(" in line) and needle in line
+    ]
+    assert len(matches) == 1, f"expected exactly one call line for {name!r}, got {matches}"
+    return matches[0]
+
+
+def test_decompile_emits_parallel_for_fanout_without_join() -> None:
+    """DL-37 fan-out: >= 2 jobs whose entire condition is exactly s(seed) for
+    an in-catalog producer become c.parallel([...], after=...) with no
+    then=; each member's own condition= is suppressed."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("c", command="cc", machine="m1", condition="s(seed)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b', 'c'], after='seed')" in source
+    for member in ("a", "b", "c"):
+        assert "condition=" not in _job_line(source, member)
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_emits_parallel_with_unique_join() -> None:
+    """Adding the unique job whose condition is exactly the conjunction of
+    the members' plain successes upgrades the call to then=...; the join's
+    own condition= is suppressed too."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("join", command="j", machine="m1", condition="s(a) & s(b)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b'], after='seed', then='join')" in source
+    for member in ("a", "b", "join"):
+        assert "condition=" not in _job_line(source, member)
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_disqualified_by_member_lookback() -> None:
+    """A lookback on a member's condition is a looser incoming shape than
+    plain s(p) -- the whole group stays explicit (here: group size drops to
+    1, below the >= 2 fan-out threshold)."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed, 12.00)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(" not in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_disqualified_by_member_instance_qualifier() -> None:
+    """s(seed^PRD) fails _plain_s_condition's instance check even though the
+    base name 'seed' matches an in-catalog producer -- the fanout dict's
+    catalog-membership test looks at the base name, but the per-member
+    plain-shape test still requires cond.job.instance is None, so the
+    instance-qualified member never joins the group."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed^PRD)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(" not in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_disqualified_by_extra_conjunct() -> None:
+    """A member ANDing in an extra atom is not exactly s(p) -- stays explicit."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed) & s(other)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(" not in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_disqualified_by_undefined_producer() -> None:
+    """Two consumers share exactly s(seed), but no insert_job defines 'seed'
+    -- the fanout grouping requires the producer to be IN the catalog, so
+    both consumers stay explicit job(condition=...) calls."""
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(" not in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_join_ambiguity_stays_explicit() -> None:
+    """Two DIFFERENT jobs each carry exactly the conjunction of the member
+    set -- the join is ambiguous, so parallel() is emitted WITHOUT then=,
+    and both candidate joins keep their own explicit condition=."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("join1", command="j1", machine="m1", condition="s(a) & s(b)")
+    c.job("join2", command="j2", machine="m1", condition="s(b) & s(a)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b'], after='seed')" in source
+    assert "then=" not in source
+    assert "condition='s(a) & s(b)'" in _job_line(source, "join1")
+    assert "condition='s(b) & s(a)'" in _job_line(source, "join2")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_parallel_join_over_subset_of_members_stays_explicit() -> None:
+    """A conjunction over a strict SUBSET of the fan-out members has a
+    different operand count than the member set, so it never qualifies as
+    the join (same length-mismatch path covers a superset) -- no then=, and
+    the near-miss job keeps its own explicit condition=."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("c", command="cc", machine="m1", condition="s(seed)")
+    c.job("subjoin", command="sj", machine="m1", condition="s(a) & s(b)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b', 'c'], after='seed')" in source
+    assert "then=" not in source
+    assert "condition='s(a) & s(b)'" in _job_line(source, "subjoin")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_emits_parallel_for_box_members() -> None:
+    """DL-37's field requirement: parallel boxes with > 10 same-producer
+    members exist at least twice in the target estate. Built via lower_source
+    with raw box_name attrs (not the builder) to mirror that shape and prove
+    fan-out grouping does not care whether members sit inside a box -- the
+    wiring line is still emitted at module level (c.parallel(...), not
+    b.parallel(...)) since parallel() only exists on CatalogBuilder."""
+    members = [f"member{i}" for i in range(1, 13)]
+    text = "insert_job: seed\njob_type: c\nmachine: m1\ncommand: s\n\n"
+    text += "insert_job: bx\njob_type: b\n\n"
+    for name in members:
+        text += (
+            f"insert_job: {name}\nbox_name: bx\njob_type: c\nmachine: m1\n"
+            f"command: run.sh\ncondition: s(seed)\n\n"
+        )
+    catalog = lower_source(text)
+    source = decompile(catalog)
+    expected_args = "[" + ", ".join(repr(n) for n in members) + "]"
+    assert f"c.parallel({expected_args}, after='seed')" in source
+    for name in members:
+        assert "condition=" not in _job_line(source, name)
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_emits_both_sequence_and_parallel_without_overlap() -> None:
+    """A catalog with both a pure s-chain and a fan-out emits both wirings;
+    disjointness is structural (module docstring / derive._chains: a
+    producer with >= 2 successors can never be a chain link), so no
+    c.sequence(...) line ever names a fan-out member."""
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("head", command="h", machine="m1")
+    c.job("mid", command="m", machine="m1")
+    c.job("tail", command="t", machine="m1")
+    c.sequence("head", "mid", "tail")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.sequence('head', 'mid', 'tail')" in source
+    assert "c.parallel(['a', 'b'], after='seed')" in source
+    sequence_lines = [
+        line for line in source.splitlines() if line.strip().startswith("c.sequence(")
+    ]
+    assert sequence_lines
+    for line in sequence_lines:
+        assert "'a'" not in line
+        assert "'b'" not in line
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ------------------------------------------- decompiler completeness (DL-37)
+
+
+def _typed_field_names(model: type) -> list[str]:
+    """model_fields minus provenance/derived lanes: `*_span` pointers carry
+    no decompiler-visible value, and `kind` is a Literal discriminator, not
+    a typed attribute (DL-37 finding 1's blind spot was exactly a typed
+    attribute with no corpus fixture -- this enumerates every candidate)."""
+    return [name for name in model.model_fields if name != "kind" and not name.endswith("_span")]
+
+
+_SEMANTICS_FIELDS = [("Semantics", name) for name in _typed_field_names(Semantics)]
+_EXEC_FIELDS = [("ExecSpec", name) for name in _typed_field_names(ExecSpec)]
+_FW_FIELDS = [("FwSpec", name) for name in _typed_field_names(FwSpec)]
+_SCHEDULE_FIELDS = [("ScheduleBlock", name) for name in _typed_field_names(ScheduleBlock)]
+#: Non-model-field lanes the decompiler also renders (module docstring /
+#: _job_kwargs): box linkage, box membership, and the FW job_type itself.
+_EXTRA_FIELDS = [
+    ("Extra", "resources"),
+    ("Extra", "annotations"),
+    ("Extra", "passthrough"),
+    ("Extra", "box.box_name"),
+    ("Extra", "box_terminator"),
+    ("Extra", "job_terminator"),
+    ("Extra", "job_type==FW"),
+]
+_FIELD_CASES = _SEMANTICS_FIELDS + _EXEC_FIELDS + _FW_FIELDS + _SCHEDULE_FIELDS + _EXTRA_FIELDS
+
+#: Fields this sweep found with NO corpus witness today. Reported upstream
+#: (final message) rather than papered over by extending the corpus (corpus
+#: hygiene / CLAUDE.md): ExecSpecBase fields are shared by CMD and FW jobs,
+#: but the corpus's only FW job (kitchen_sink's sink_fw) sets just
+#: machine/watch_* -- no FW job anywhere sets owner/profile/std_out_file/
+#: std_err_file. Box terminators are not witnessed by any corpus job at all.
+_NO_CORPUS_WITNESS = {
+    ("FwSpec", "owner"),
+    ("FwSpec", "profile"),
+    ("FwSpec", "std_out_file"),
+    ("FwSpec", "std_err_file"),
+    ("Extra", "box_terminator"),
+    ("Extra", "job_terminator"),
+}
+
+
+@pytest.mark.parametrize(
+    "model_name,field",
+    _FIELD_CASES,
+    ids=[f"{model_name}.{field}" for model_name, field in _FIELD_CASES],
+)
+def test_corpus_witnesses_every_decompiler_visible_field(model_name: str, field: str) -> None:
+    """DL-37 finding (1): _job_kwargs predated the DL-32/DL-33 doc sweep and
+    silently dropped success_codes/fail_codes/std_in_file/envvars because no
+    corpus fixture carried a non-default value for them -- the whole-corpus
+    round-trip test was blind to the gap (it can only catch what the corpus
+    actually exercises). This is the structural guard against a repeat: every
+    typed field of Semantics/ExecSpec/FwSpec/ScheduleBlock, plus the handful
+    of non-model-field lanes the decompiler also renders, must have at least
+    one non-default witness somewhere in the corpus. A future typed field
+    with no fixture FAILS here instead of silently round-tripping as None."""
+    if (model_name, field) in _NO_CORPUS_WITNESS:
+        pytest.skip(f"{model_name}.{field} has no corpus witness today (reported, not padded)")
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    jobs = catalog.jobs.values()
+    if model_name == "Semantics":
+        default = Semantics.model_fields[field].get_default(call_default_factory=True)
+        witnessed = any(getattr(job.sem, field) != default for job in jobs)
+    elif model_name in ("ExecSpec", "FwSpec"):
+        kind = "cmd" if model_name == "ExecSpec" else "fw"
+        model = ExecSpec if model_name == "ExecSpec" else FwSpec
+        default = model.model_fields[field].get_default(call_default_factory=True)
+        witnessed = any(
+            job.exec_ is not None
+            and job.exec_.kind == kind
+            and getattr(job.exec_, field) != default
+            for job in jobs
+        )
+    elif model_name == "ScheduleBlock":
+        default = ScheduleBlock.model_fields[field].get_default(call_default_factory=True)
+        witnessed = any(
+            job.schedule is not None and getattr(job.schedule, field) != default for job in jobs
+        )
+    elif field == "resources":
+        witnessed = any(job.resources for job in jobs)
+    elif field == "annotations":
+        witnessed = any(job.annotations for job in jobs)
+    elif field == "passthrough":
+        witnessed = any(job.passthrough for job in jobs)
+    elif field == "box.box_name":
+        witnessed = any(job.box.box_name for job in jobs)
+    elif field == "box_terminator":
+        witnessed = any(job.box.box_terminator for job in jobs)
+    elif field == "job_terminator":
+        witnessed = any(job.box.job_terminator for job in jobs)
+    elif field == "job_type==FW":
+        witnessed = any(job.job_type == "FW" for job in jobs)
+    else:  # pragma: no cover -- exhaustive by construction of _FIELD_CASES
+        raise AssertionError(f"unhandled case {model_name}.{field}")
+    assert witnessed, f"no corpus job carries a non-default {model_name}.{field}"
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -270,6 +575,43 @@ def test_cli_decompile_out_file(tmp_path: Path) -> None:
 def test_cli_decompile_refusal_exits_2() -> None:
     result = runner.invoke(app, ["decompile", str(CORPUS_DIR / "sem31_xor.jil")])
     assert result.exit_code == 2
+
+
+def test_cli_decompile_no_check_matches_check_output() -> None:
+    """--check defaults on and already round-trips clean on the corpus
+    (test_cli_decompile_stdout_and_roundtrip); --no-check must skip the exec
+    verification but emit byte-identical stdout and still exit 0 (DL-37)."""
+    target = str(CORPUS_DIR / "sem10_box_basic.jil")
+    checked = runner.invoke(app, ["decompile", target])
+    unchecked = runner.invoke(app, ["decompile", "--no-check", target])
+    assert checked.exit_code == 0
+    assert unchecked.exit_code == 0
+    assert unchecked.stdout == checked.stdout
+
+
+def test_cli_decompile_check_failure_exits_1_but_still_writes_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-37 finding (3): --check executes the emitted module and diffs
+    canonical hashes; a genuine decompiler gap must still emit the module
+    for inspection but exit 1 with a loud stderr message. cli.py imports
+    decompile INSIDE the command function (`from dsl41.dsl import decompile
+    as decompile_catalog`), so patching the module attribute dsl41.dsl.decompile
+    is what the deferred import actually picks up."""
+    broken_source = (
+        "from dsl41.dsl import CatalogBuilder\n\n"
+        "c = CatalogBuilder()\n"
+        "c.job('only_one_job', command='x', machine='m1')\n"
+        "catalog = c.build()\n"
+    )
+    monkeypatch.setattr("dsl41.dsl.decompile", lambda catalog: broken_source)
+    target = tmp_path / "rebuilt.py"
+    result = runner.invoke(
+        app, ["decompile", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 1
+    assert "round-trip check FAILED" in result.stderr
+    assert target.read_text(encoding="utf-8") == broken_source
 
 
 # =============================================================================
@@ -506,6 +848,30 @@ def test_calendar_date_row_that_would_reparse_as_an_attribute_is_refused() -> No
         CatalogBuilder().calendar("hols", dates=["surprise: 01/01/2026"])
 
 
+def test_calendar_name_with_spaces_is_quoted_and_roundtrips() -> None:
+    """DL-37 finding (5): calendar names may carry spaces (TechDocs' own
+    example is "shopping days") -- quoted on emission, unquoted at lowering,
+    and the round trip survives decompile+exec hash-equal."""
+    c = CatalogBuilder()
+    c.calendar("shopping days", dates=["01/01/2026 00:00"])
+    assert 'calendar: "shopping days"' in c.to_jil()
+    catalog = c.build()
+    assert catalog.calendars["shopping days"].dates == ["01/01/2026 00:00"]
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["bad\tname", 'bad"name', " leading space", "trailing space "],
+    ids=["tab", "embedded-quote", "leading-space", "trailing-space"],
+)
+def test_calendar_name_shape_refusals(name: str) -> None:
+    """Tabs, embedded double quotes, and non-stripped names would not
+    survive the quote/unquote round trip a spaced name depends on."""
+    with pytest.raises(DslError, match="not calendar-name-shaped"):
+        CatalogBuilder().calendar(name, dates=["01/01/2026 00:00"])
+
+
 def test_resources_kwarg_round_trips_typed() -> None:
     """DL-21: the decompiler renders resources groups canonically; rebuilding
     yields the same typed refs and an equal canonical hash."""
@@ -642,6 +1008,52 @@ def test_decompile_annotations_with_embedded_quotes_roundtrip() -> None:
     catalog = c.build()
     rebuilt = roundtrip(catalog)
     assert rebuilt.jobs["a"].annotations == catalog.jobs["a"].annotations
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+def test_decompile_splats_record_attrs_colliding_with_keywords_or_name() -> None:
+    """DL-37 finding (5) / DL-34a: opaque insert_machine attrs literally
+    named `class` (a Python keyword) or `name` (the builder's positional-only
+    param) would otherwise produce a module that fails to compile/collides;
+    _record_kwargs routes them through a **{} splat instead (machine(),
+    resource(), xinst() attrs are all opaque, DL-18 -- machine exercises it
+    here)."""
+    catalog = lower_source("insert_machine: m1\ntype: r\nclass: heavy\nname: alt\n")
+    source = decompile(catalog)
+    assert "**{'class':" in source
+    assert "'name':" in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_code_ranges_single_code_and_full_span_roundtrip() -> None:
+    """_code_ranges surface forms (DL-37 finding 1): a single exit code
+    (lo == hi) renders bare, and a wide explicit range renders lo-hi."""
+    catalog = lower_source(
+        "insert_job: coded\njob_type: c\nmachine: m1\ncommand: run.sh\n"
+        "success_codes: 4\nfail_codes: 0-9999\n"
+    )
+    source = decompile(catalog)
+    assert "success_codes='4'" in source
+    assert "fail_codes='0-9999'" in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompiled_module_footer_prints_jil_when_run_as_main(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DL-37 finding (4): the emitted module ends with an
+    `if __name__ == "__main__":` footer that prints c.to_jil() -- running
+    the module as a script is the documented iterate-and-diff loop. Exec
+    with __name__ == "__main__" fires the footer; the captured stdout must
+    itself be valid JIL that lowers to a hash-equal catalog."""
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog)
+    assert source.endswith("    sys.stdout.write(c.to_jil())\n")
+    assert '\nif __name__ == "__main__":\n' in source
+    namespace: dict[str, object] = {"__name__": "__main__"}
+    exec(compile(source, "<decompiled-main>", "exec"), namespace)  # noqa: S102
+    printed = capsys.readouterr().out
+    rebuilt = lower_source(printed)
     assert catalog_hash(rebuilt) == catalog_hash(catalog)
 
 
