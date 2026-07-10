@@ -279,11 +279,12 @@ def decompile(
         help="Execute the emitted module and verify the rebuilt catalog's canonical"
         " hash equals the source's; divergence still emits the module but exits 1.",
     ),
-    no_fold: str = typer.Option(
-        "",
+    no_fold: list[str] = typer.Option(
+        [],
         "--no-fold",
-        help="Comma-separated fold codes to disable (DL-38 closed set;"
-        " `dsl41 folds` lists them), e.g. 'T-005,T-007'.",
+        help="Fold code(s) to disable (DL-38 closed set; `dsl41 folds` lists"
+        " them); repeatable, comma-separated values accepted,"
+        " e.g. '--no-fold T-005 --no-fold T-007' or '--no-fold T-005,T-007'.",
     ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -304,7 +305,9 @@ def decompile(
     fold_report: list[str] = []
     try:
         source = decompile_catalog(
-            catalog, disable=no_fold.split(",") if no_fold else (), report=fold_report
+            catalog,
+            disable=[code for chunk in no_fold for code in chunk.split(",")],
+            report=fold_report,
         )
     except DslError as exc:
         # a decompiler refusal (nothing emittable, unknown fold code) is the

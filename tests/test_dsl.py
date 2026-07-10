@@ -1912,3 +1912,188 @@ def test_dl39_builder_escapes_colon_names_in_generated_jil() -> None:
     assert "condition: n(down\\:stream)" in jil  # the head's mutex half
     catalog = c.build()
     assert set(catalog.jobs) == {"up:stream", "down:stream"}
+
+# ------------------------------------------------- DL-40: xhigh review fixes
+
+
+def test_dl40_mutex_refuses_condition_metachar_names() -> None:
+    """A caret name would silently re-target the generated n() atom to an
+    instance-qualified reference (J^2 reads as job J, instance 2 -- M33);
+    whitespace, ( ) , & | and backslash cannot be carried by the grammar's
+    JOB_NAME token at all. The wiring builders refuse them loudly."""
+    c = CatalogBuilder()
+    c.job("J^2", command="/bin/a", machine="m1")
+    c.job("b", command="/bin/b", machine="m1")
+    with pytest.raises(DslError, match="cannot wire"):
+        c.mutex("J^2", "b")
+
+
+def test_dl40_sequence_refuses_unwirable_prev_but_allows_final_follower() -> None:
+    """Only INTERPOLATED names need the JOB_NAME gate: a metachar name may
+    END a chain (its own name never enters a condition) but never produce
+    a link."""
+    c = CatalogBuilder()
+    c.job("a", command="/bin/a", machine="m1")
+    c.job("J^2", command="/bin/b", machine="m1")
+    c.sequence("a", "J^2")  # J^2 only receives s(a) -- fine
+    catalog = c.build()
+    cond = catalog.jobs["J^2"].sem.condition
+    assert cond is not None and cond_to_source(cond) == "s(a)"
+    c2 = CatalogBuilder()
+    c2.job("J^2", command="/bin/a", machine="m1")
+    c2.job("b", command="/bin/b", machine="m1")
+    with pytest.raises(DslError, match="cannot wire"):
+        c2.sequence("J^2", "b")
+
+
+def test_dl40_parallel_gates_members_only_when_joins_exist() -> None:
+    """parallel() members are interpolated only into join conditions: a
+    metachar member may fan out (it just receives s(after)) but a join
+    request over it must refuse."""
+    c = CatalogBuilder()
+    c.job("p", command="/bin/p", machine="m1")
+    c.job("m^1", command="/bin/m", machine="m1")
+    c.job("m2", command="/bin/m", machine="m1")
+    c.parallel(["m^1", "m2"], after="p")  # members only receive s(p)
+    c2 = CatalogBuilder()
+    c2.job("p", command="/bin/p", machine="m1")
+    c2.job("m^1", command="/bin/m", machine="m1")
+    c2.job("m2", command="/bin/m", machine="m1")
+    c2.job("j", command="/bin/j", machine="m1")
+    with pytest.raises(DslError, match="cannot wire"):
+        c2.parallel(["m^1", "m2"], after="p", then="j")
+
+
+def test_dl40_conjoin_preserves_formfeed_in_values() -> None:
+    """_conjoin_condition splits statements on newline ONLY: form feed,
+    vertical tab, NEL, and U+2028 are legal value bytes (the scanner
+    delimits on newline alone) and splitlines() would rewrite them into
+    real newlines -- silently truncating the command and re-parsing its
+    tail as a fresh attribute line."""
+    c = CatalogBuilder()
+    c.job("a", command="run\x0cdescription: oops", machine="m1", condition="s(b)")
+    c.job("b", command="/bin/b", machine="m1")
+    c.mutex("a", "b")
+    catalog = c.build()
+    exec_ = catalog.jobs["a"].exec_
+    assert isinstance(exec_, ExecSpec)
+    assert exec_.command == "run\x0cdescription: oops"
+
+
+def test_dl40_job_refuses_smuggled_condition_and_resources_lines() -> None:
+    """A verbatim resources:/condition: line would bypass the _resourced/
+    _declared registries the wiring no-merge guards read -- contend() would
+    merge into a job already carrying resources, failing much later as a
+    duplicate-attribute LoweringError pointing at generated JIL."""
+    c = CatalogBuilder()
+    with pytest.raises(DslError, match="smuggle"):
+        c.job("a", command="/bin/a", machine="m1", passthrough={"resources": "(R, QUANTITY=1)"})
+    with pytest.raises(DslError, match="smuggle"):
+        c.job("b", command="/bin/b", machine="m1", annotations={"condition": "s(x)"})
+
+
+def test_dl40_parallel_refuses_empty_after() -> None:
+    """after='' used to skip the undeclared-job check (falsy test) yet still
+    wire, stamping every member with the unparseable condition s() -- a
+    cryptic LoweringError at build() instead of an immediate refusal."""
+    c = CatalogBuilder()
+    c.job("a", command="/bin/a", machine="m1")
+    c.job("b", command="/bin/b", machine="m1")
+    with pytest.raises(DslError, match="undeclared job ''"):
+        c.parallel(["a", "b"], after="")
+
+
+def test_dl40_decompile_refuses_job_names_the_builder_cannot_express() -> None:
+    """A space-carrying insert_job subject lowers fine but job() refuses it:
+    emitting it would produce a module that raises at execution and can
+    never rebuild the catalog. Refuse upfront (the T-006 resource-name gate,
+    applied to the DL-39 job-name lane)."""
+    catalog = lower_source("insert_job: my job\njob_type: c\nmachine: m1\ncommand: x\n")
+    with pytest.raises(DslError, match="cannot express"):
+        decompile(catalog)
+
+
+def test_dl40_cli_decompile_space_named_job_is_clean_exit_2(tmp_path: Path) -> None:
+    source_jil = tmp_path / "spacename.jil"
+    source_jil.write_text(
+        "insert_job: my job\njob_type: c\nmachine: m1\ncommand: x\n", encoding="utf-8"
+    )
+    result = runner.invoke(app, ["decompile", str(source_jil)])
+    assert result.exit_code == 2
+    assert "decompile refused" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_dl40_no_fold_t001_keeps_all_fanin_joins_explicit() -> None:
+    """Fan-in joins (then=/then_any=) refine the T-001 parallel machinery
+    (FOLDS dependency note): --no-fold T-001 must keep BOTH joins explicit
+    even on a T-004 f-lane group that still folds join-less."""
+    jil = (
+        "insert_job: p\njob_type: c\nmachine: m1\ncommand: x\n\n"
+        "insert_job: m1j\njob_type: c\nmachine: m1\ncommand: x\ncondition: f(p)\n\n"
+        "insert_job: m2j\njob_type: c\nmachine: m1\ncommand: x\ncondition: f(p)\n\n"
+        "insert_job: jall\njob_type: c\nmachine: m1\ncommand: x\ncondition: s(m1j) & s(m2j)\n\n"
+        "insert_job: jany\njob_type: c\nmachine: m1\ncommand: x\ncondition: s(m1j) | s(m2j)\n"
+    )
+    catalog = lower_source(jil)
+    folded = decompile(catalog)
+    assert "then='jall'" in folded and "then_any='jany'" in folded
+    gated = decompile(catalog, disable=("T-001",))
+    assert "c.parallel(['m1j', 'm2j'], after='p', on='f')" in gated  # T-004 still folds
+    assert "then" not in gated.split("# --- wiring")[1]
+    assert "condition='s(m1j) & s(m2j)'" in gated  # joins stay explicit
+    assert "condition='s(m1j) | s(m2j)'" in gated
+    rebuilt = roundtrip(catalog, disable=("T-001",))
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+def test_dl40_cli_no_fold_repeats_accumulate(tmp_path: Path) -> None:
+    """--no-fold T-005 --no-fold T-007 must disable BOTH: the option is a
+    list (the scalar form silently kept only the last flag, applying folds
+    the user explicitly opted out of)."""
+    jil = (
+        "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\ncondition: n(b)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
+        "insert_job: b\njob_type: c\nmachine: m1\ncommand: x\ncondition: n(a)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    source_jil = tmp_path / "both.jil"
+    source_jil.write_text(jil, encoding="utf-8")
+    baseline = runner.invoke(app, ["decompile", str(source_jil)])
+    assert baseline.exit_code == 0
+    assert "c.mutex('a', 'b')" in baseline.stdout and "SCHED_" in baseline.stdout
+    result = runner.invoke(
+        app, ["decompile", "--no-fold", "T-005", "--no-fold", "T-007", str(source_jil)]
+    )
+    assert result.exit_code == 0
+    assert "c.mutex(" not in result.stdout
+    assert "SCHED_" not in result.stdout
+
+
+def test_dl40_fold_report_covers_nonchain_disqualified_links() -> None:
+    """DL-38: EVERY disqualified link is reported. Links hanging off fan-out
+    nodes never enter graph.chains (the producer has >= 2 successors), so
+    the lookback link seed->b below got no note before -- the audit-trail
+    worklist silently omitted a Q2 item."""
+    jil = (
+        "insert_job: seed\njob_type: c\nmachine: m1\ncommand: x\n\n"
+        "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\ncondition: s(seed)\n\n"
+        "insert_job: b\njob_type: c\nmachine: m1\ncommand: x\ncondition: s(seed, 01.00)\n"
+    )
+    catalog = lower_source(jil)
+    report: list[str] = []
+    decompile(catalog, report=report)
+    assert [n for n in report if "'b'" in n and "lookback-qualified (Q2)" in n], report
+    assert [n for n in report if "'a'" in n], report  # singleton fan-out stays explicit too
+
+
+def test_dl40_decompile_accepts_bare_string_disable() -> None:
+    """disable='T-005' (the natural single-code spelling; a str IS a
+    Collection[str]) means that ONE code -- not the character-wise
+    'unknown fold code(s): -, 0, 5, T' refusal."""
+    jil = (
+        "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\ncondition: n(b)\n\n"
+        "insert_job: b\njob_type: c\nmachine: m1\ncommand: x\ncondition: n(a)\n"
+    )
+    catalog = lower_source(jil)
+    assert decompile(catalog, disable="T-005") == decompile(catalog, disable=("T-005",))

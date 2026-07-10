@@ -195,6 +195,20 @@ def test_report_open_question_ledger_tracks_used_rows_only() -> None:
     assert "**U1**" in report
 
 
+def test_report_u1_absent_without_or_shapes_while_u5_listed() -> None:
+    """Negative gate on the U-question ledger (DL-40): a question whose
+    M-rows the catalog never uses must stay OUT while used-row questions
+    appear. Without this, a regression that lists the whole _U_QUESTIONS
+    table whenever any row applies passes every positive assertion above."""
+    catalog = lower_source(
+        "insert_job: p\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: j\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(p, 12.00)\n"
+    )
+    report = render_migration_report(catalog)
+    assert "**U5**" in report  # the lookback edge uses M02/M03
+    assert "**U1**" not in report  # no M12 OR shape anywhere in the catalog
+
+
 def test_report_u1_appears_when_an_or_shape_exists() -> None:
     catalog = lower_source(
         "insert_job: p1\njob_type: c\ncommand: a\nmachine: m1\n\n"

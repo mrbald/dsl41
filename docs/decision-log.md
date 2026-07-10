@@ -679,3 +679,45 @@
   whole lane (keys, box tree, edges, mutex fold, decompile round trip);
   corpus pins updated deliberately (37 edges, M01 13, L012 3, 6 viz
   subgraphs).
+- DL-40 xhigh-review fixes: wiring name gate, fold-gating contract,
+  worklist completeness (2026-07-11; 21 verified findings, all confirmed,
+  none refuted). Decisions: (1) Names the wiring builders interpolate into
+  GENERATED condition atoms must be carryable by the grammar's JOB_NAME
+  token -- colon is the only escapable metachar (DL-39); whitespace,
+  `( ) , ^ & |`, and backslash are refused loudly (_check_wirable) at
+  sequence()/parallel()/mutex() for interpolated positions ONLY: a
+  metachar name may still END a chain or fan out (it only receives a
+  condition). Before, mutex("J^2", b) silently emitted n(J^2) -- a
+  cross-instance reference to a DIFFERENT job (M33), a no-silent-loss
+  violation. (2) The statement lane is wider than the condition lane:
+  subjects the lowerer accepts but job() refuses (embedded whitespace)
+  make decompile REFUSE upfront (exit 2) instead of emitting a module
+  that raises at execution -- the T-006 resource-name gate applied to the
+  job-name lane. (3) _conjoin_condition splits statements on newline
+  ONLY: \x0b/\x0c/\x85/U+2028 are legal value bytes (the scanner delimits
+  on \n alone) and splitlines() rewrote them into real newlines,
+  silently truncating values. _CTRL_RE stays [\r\n\x00] -- builder and
+  pipeline agree on what a line is. (4) The FOLDS dependency note is now
+  ENFORCED, not aspirational: disabling T-001 keeps every fan-in join
+  (then= AND then_any=) explicit, including on T-004 f/d/t groups, which
+  still fold join-less. (5) --no-fold is a repeatable list option
+  (comma-separated values still accepted); the scalar form silently kept
+  only the last flag. decompile(disable=) also accepts a bare code string
+  (a str IS a Collection[str]; iterating it char-wise produced a
+  gibberish refusal). (6) passthrough=/annotations= refuse `condition`
+  and `resources` keys: verbatim lines would bypass the _declared/
+  _resourced registries the no-merge guards read. parallel(after='')
+  is refused like every other undeclared name (falsy-vs-None check).
+  (7) The stays-explicit worklist is COMPLETE: chain-link verdicts only
+  covered links inside derived chains; every other job whose residual
+  condition survives the folds (fan-out hangers-on, singleton groups,
+  ambiguous joins, chain heads, disabled lanes) now gets a note in
+  DL-38's reason vocabulary (_explicit_notes). (8) Structure per
+  CLAUDE.md style: decompile()'s seven inline passes extracted into
+  small pure functions (_fold_mutex/_fold_chains/_fold_fanout/
+  _fold_schedules/_fold_contends), join detection precomputed in one
+  O(N) shape pass (was O(groups x N)), builder statement lookup through
+  a name->index map (was O(N) scan per wiring call), T-005 target sets
+  built once. Test-suite gap closed: the U-question ledger regained its
+  negative gate (a question whose M-rows the catalog never uses stays
+  OUT of the report).
