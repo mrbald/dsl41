@@ -1879,3 +1879,36 @@ def test_whole_corpus_decompile_roundtrip_is_fold_independent(disable: tuple[str
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     rebuilt = roundtrip(catalog, disable=disable)
     assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+# ----------------------------------------------------- job-name identity (DL-39)
+
+
+def test_dl39_colon_named_jobs_fold_and_roundtrip() -> None:
+    """The DL-38 folds and the builder wiring work on colon-named jobs: the
+    emitted module carries SEMANTIC names, the builder re-escapes at JIL
+    generation (subjects, box_name, condition strings), and the round trip
+    is hash-equal."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "names_colon_join.jil")])
+    source = decompile(catalog)
+    assert "c.sequence('etl:extract', 'etl:load')" in source
+    assert "c.mutex('etl:load', 'etl:probe')" in source
+    assert "with c.box('night:box'" in source
+    rebuilt = roundtrip(catalog)
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+def test_dl39_builder_escapes_colon_names_in_generated_jil() -> None:
+    """Builder API names are semantic; the generated JIL uses the escaped
+    spelling and lowers back to the same catalog."""
+    c = CatalogBuilder()
+    c.job("up:stream", command="/bin/u")
+    c.job("down:stream", command="/bin/d")
+    c.sequence("up:stream", "down:stream")
+    c.mutex("up:stream", "down:stream")
+    jil = c.to_jil()
+    assert "insert_job: up\\:stream" in jil
+    assert "condition: (s(up\\:stream)) & n(up\\:stream)" in jil  # sequence + mutex conjoin
+    assert "condition: n(down\\:stream)" in jil  # the head's mutex half
+    catalog = c.build()
+    assert set(catalog.jobs) == {"up:stream", "down:stream"}

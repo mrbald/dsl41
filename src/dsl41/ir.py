@@ -68,7 +68,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from dsl41.ast_jil import JilFile, JilStatement, RawAttr, SourceSpan
 from dsl41.ast_jil import parse as parse_jil
-from dsl41.conditions import Cond, ConditionParseError, parse_condition
+from dsl41.conditions import Cond, ConditionParseError, parse_condition, unescape_job_name
 
 # ------------------------------------------------------------- attribute inventories
 
@@ -864,6 +864,10 @@ class _Lowerer:
 
     def _lower_job(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "job")
+        if name is not None:
+            # DL-39: the catalog key is the SEMANTIC name -- `\:` unescaped,
+            # same function the condition transformer applies to references.
+            name = unescape_job_name(name)
         if name is not None and name in self.jobs:
             self.err(f"duplicate job name {name!r} in compilation set", stmt.span)
             return
@@ -959,7 +963,9 @@ class _Lowerer:
     def _box_linkage(self, attrs: dict[str, RawAttr]) -> BoxLinkage:
         box_name = None
         if (attr := attrs.pop("box_name", None)) is not None:
-            box_name = _unquote(attr.raw_value)
+            # DL-39: same semantic-name funnel as the job subject and the
+            # condition transformer, so the linkage joins the catalog key.
+            box_name = unescape_job_name(_unquote(attr.raw_value))
             if not box_name:
                 self.err("box_name: empty value", attr.span)
                 box_name = None

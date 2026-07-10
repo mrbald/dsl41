@@ -190,7 +190,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     with l018_calendar_ref.jil (DL-36); sink_cmd/sink_fw with
     kitchen_sink.jil (DL-37). The DL-38 fold_t00*.jil fixtures added the
     fold_or_*/fold_or2_* (T-003), fold_f_*/fold_d_*/fold_mixed_* (T-004/
-    T-002), fold_res_* (T-006), and fold_sched_* (T-007) job sets."""
+    T-002), fold_res_* (T-006), and fold_sched_* (T-007) job sets;
+    names_colon_join.jil (DL-39) the colon-named etl:*/night:box/
+    boxed:member set (semantic, unescaped keys)."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -205,6 +207,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "consumer_stale",
         "consumer_window",
         "dead_scheduler",
+        "etl:extract",
+        "etl:load",
+        "etl:probe",
         "fold_d_m1",
         "fold_d_m2",
         "fold_d_seed",
@@ -238,6 +243,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "gate_outside_job",
         "glob_shell",
         "job_a",
+        "night:box",
+        "boxed:member",
         "job_b",
         "l16_writer",
         "l18_reporter",
@@ -1129,3 +1136,32 @@ def test_dl33_exit_is_success_threshold_fallback_without_lists() -> None:
     assert exit_is_success(3, max_exit_success=2) is False
     assert exit_is_success(0) is True
     assert exit_is_success(1) is False
+
+
+# ----------------------------------------------------- job-name identity (DL-39)
+
+
+def test_dl39_colon_job_names_join_on_the_semantic_name() -> None:
+    """`\\:` in insert_job subjects and box_name values unescapes at lowering
+    through the same function the condition transformer applies to
+    references, so the catalog key, box linkage, and every reference
+    agree (DL-39)."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "names_colon_join.jil")])
+    assert {"etl:extract", "etl:load", "etl:probe", "night:box", "boxed:member"} <= set(
+        catalog.jobs
+    )
+    cond = catalog.jobs["etl:load"].sem.condition
+    assert isinstance(cond, And)
+    refs = {op.job.name for op in cond.operands if isinstance(op, StatusAtom)}
+    assert refs == {"etl:extract", "etl:probe"}  # unescaped, matching the keys
+    assert catalog.jobs["boxed:member"].box.box_name == "night:box"
+
+
+def test_dl39_both_subject_spellings_converge() -> None:
+    """A raw-colon subject (legal value text, rule 4b's no-whitespace shape)
+    and the vendor-canonical escaped spelling lower to the SAME key."""
+    for subject in ("alpha:one", "alpha\\:one"):
+        catalog = lower_source(
+            f"insert_job: {subject}\njob_type: c\ncommand: /bin/x\n", file="<t>"
+        )
+        assert list(catalog.jobs) == ["alpha:one"], subject

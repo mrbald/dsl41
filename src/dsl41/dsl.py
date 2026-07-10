@@ -78,6 +78,7 @@ from dsl41.conditions import (
     Or,
     Paren,
     StatusAtom,
+    escape_job_name,
 )
 from dsl41.derive import DerivedGraph, derive_graph
 from dsl41.ir import CatalogIR, JobIR, ScheduleBlock, SlaSpec, Time, lower_source
@@ -135,7 +136,7 @@ def _lookback_token(lookback: Lookback) -> str:
 
 
 def _job_ref_source(atom: StatusAtom | ExitCodeAtom) -> str:
-    name = atom.job.name.replace(":", "\\:")
+    name = escape_job_name(atom.job.name)
     if atom.job.instance is not None:
         name += f"^{atom.job.instance}"
     return name
@@ -311,9 +312,11 @@ class CatalogBuilder:
         _check_name("job", name)
         if name in self._declared:
             raise DslError(f"job {name!r} declared twice")
-        lines = [f"insert_job: {name}", f"job_type: {job_type}"]
+        # DL-39: builder API names are SEMANTIC; `:` is escaped at JIL
+        # generation and unescaped again at lowering (vendor rule 4b spelling).
+        lines = [f"insert_job: {escape_job_name(name)}", f"job_type: {job_type}"]
         if self._box_stack:
-            lines.append(f"box_name: {self._box_stack[-1]}")
+            lines.append(f"box_name: {escape_job_name(self._box_stack[-1])}")
         for key, value in attrs.items():
             if key in ("annotations", "passthrough"):
                 if not isinstance(value, dict):
@@ -365,7 +368,7 @@ class CatalogBuilder:
                     f"sequence() follower {follower!r} already has a condition;"
                     " refusing to merge (silent loss)"
                 )
-            self._amend_condition(follower, f"{link}({prev})")
+            self._amend_condition(follower, f"{link}({escape_job_name(prev)})")
             self._declared[follower] = True
         return self
 
@@ -398,7 +401,7 @@ class CatalogBuilder:
                         f"parallel() member {member!r} already has a condition;"
                         " refusing to merge (silent loss)"
                     )
-                self._amend_condition(member, f"{on}({after})")
+                self._amend_condition(member, f"{on}({escape_job_name(after)})")
                 self._declared[member] = True
         for join, joiner in ((then, " & "), (then_any, " | ")):
             if join is None:
@@ -408,7 +411,7 @@ class CatalogBuilder:
                     f"parallel() join {join!r} already has a condition;"
                     " refusing to merge (silent loss)"
                 )
-            self._amend_condition(join, joiner.join(f"s({m})" for m in names))
+            self._amend_condition(join, joiner.join(f"s({escape_job_name(m)})" for m in names))
             self._declared[join] = True
         return self
 
@@ -431,8 +434,8 @@ class CatalogBuilder:
                 raise DslError(f"mutex() references undeclared job {name!r}")
         for i, a in enumerate(names):
             for b in names[i + 1 :]:
-                self._conjoin_condition(a, f"n({b})")
-                self._conjoin_condition(b, f"n({a})")
+                self._conjoin_condition(a, f"n({escape_job_name(b)})")
+                self._conjoin_condition(b, f"n({escape_job_name(a)})")
         for name in names:
             self._declared[name] = True
         return self
@@ -477,7 +480,7 @@ class CatalogBuilder:
         self._append_attr_line(job, f"condition: {condition}")
 
     def _conjoin_condition(self, job: str, atom: str) -> None:
-        needle = f"insert_job: {job}\n"
+        needle = f"insert_job: {escape_job_name(job)}\n"
         for index, statement in enumerate(self._statements):
             if statement.startswith(needle):
                 lines = statement.splitlines()
@@ -492,7 +495,7 @@ class CatalogBuilder:
         raise DslError(f"internal: statement for {job!r} not found")  # pragma: no cover
 
     def _append_attr_line(self, job: str, line: str) -> None:
-        needle = f"insert_job: {job}\n"
+        needle = f"insert_job: {escape_job_name(job)}\n"
         for index, statement in enumerate(self._statements):
             if statement.startswith(needle):
                 self._statements[index] = statement + line + "\n"

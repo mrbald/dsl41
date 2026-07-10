@@ -565,19 +565,24 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     in fold_t003_or_join.jil are 10 same-cadence success edges (+10 M01);
     fold_t004_typed_links.jil's uniform f-chain, uniform d-fan-out, and
     mixed s/f/f/d chain add 4 exact M04 (failure) edges, 3 exact M05 (done)
-    edges, and 1 more same-cadence M01 success edge."""
+    edges, and 1 more same-cadence M01 success edge; names_colon_join.jil
+    (DL-39) adds 1 M01 success edge between colon-named jobs."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 36
+    assert len(graph.edges) == 37
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 12, "M02": 8, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 13, "M02": 8, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
 def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert graph.mutex_groups == [["mutex_a", "mutex_b"], ["mutex_serial"]]
+    assert graph.mutex_groups == [
+        ["etl:load", "etl:probe"],  # names_colon_join.jil (DL-39)
+        ["mutex_a", "mutex_b"],
+        ["mutex_serial"],
+    ]
     assert graph.external_boundary == [
         JobRef(name="also_missing", instance="PRD"),  # sem06_dangling.jil
         JobRef(name="DB_BACKUP", instance="PRD"),  # torture_colon.jil

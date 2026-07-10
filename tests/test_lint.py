@@ -546,7 +546,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L011": 3,
             "L015": 2,
             "L008": 2,
-            "L012": 2,
+            "L012": 3,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
             "L002": 3,
             "L005": 2,
             "L009": 1,

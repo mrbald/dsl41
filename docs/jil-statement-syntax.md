@@ -13,6 +13,13 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    by a colon" (Broadcom, condition-attribute page) — therefore:
 2. **Escaped colon** `\:` inside a value is literal and does NOT start a new key. The scanner
    splits on the FIRST unescaped colon of a line whose prefix is a valid key shape.
+   *(Amended 2026-07-10, DL-39: the escape is SURFACE syntax on the job-name lane. Lowering
+   funnels insert_job subjects, box_name values, and condition job references through the one
+   `conditions.unescape_job_name` — mirroring rule 7's "semantic unquoting happens at
+   lowering" — so both estate spellings converge on the semantic catalog key, and every
+   JIL-emitting path re-escapes. Other value lanes stay verbatim in IR: [?] whether the
+   engine unescapes `\:` inside general values (command, std_*_file) needs a live instance
+   before value lanes are ever unescaped.)*
 3. **Statement boundary**: a line whose key is a subcommand (`insert_job`, `update_job`,
    `delete_job`, `rename_job`, `delete_box`, `insert_machine`, `update_machine`,
    `delete_machine`, `insert_global`, `delete_global`, `override_job`, `insert_xinst`,

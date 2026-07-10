@@ -13,8 +13,12 @@ with the owning RawAttr's file-level SourceSpan.
 Decisions pinned here (each with a test):
 - GlobalAtom.value is semantic: quotes are stripped from QUOTED comparands; the
   verbatim expression text survives in the owning RawAttr.
-- JobRef.name is semantic: the `\\:` escape is unescaped to `:` (job names are
-  written unescaped in insert_job subjects; escaping is condition-syntax only).
+- JobRef.name is semantic: the `\\:` escape is unescaped to `:` via
+  unescape_job_name -- the ONE owner of job-name surface<->semantic
+  transcoding (DL-39). Colon is a metachar only in condition syntax, so refs
+  are always written escaped; insert_job subjects and box_name values are
+  raw-to-EOL and may carry either spelling -- lowering funnels them through
+  the same function, so the catalog key and every reference agree.
 - Lookback.raw keeps the token verbatim (incl. the `\\:` form) for Q2 auditing.
 - Bare all-zero token ("0") -> kind="zero"; bare "9999" -> kind="indefinite"
   (legacy explicit form, SEM-04); every dotted/colon form is a window,
@@ -339,10 +343,25 @@ def _combine(is_and: bool, left: Cond, right: Cond, span: CondSpan | None) -> Co
     return Or(operands=operands, span=span)
 
 
+def unescape_job_name(text: str) -> str:
+    """JIL's `\\:` escape -> literal `:` -- the SEMANTIC job name (DL-39).
+    Colon is a metachar in condition syntax (JOB_NAME token), so refs are
+    always written escaped; statement subjects and box_name values are
+    raw-to-EOL and may carry either spelling. Every lowering path funnels
+    job names through this ONE function so the catalog key, the box
+    linkage, and every condition reference agree."""
+    return text.replace("\\:", ":")
+
+
+def escape_job_name(name: str) -> str:
+    """Inverse of unescape_job_name for every JIL-emitting path (DL-39)."""
+    return name.replace(":", "\\:")
+
+
 def _job_ref(tree: Tree[Token]) -> JobRef:
     name_tok = cast(Token, tree.children[0])
     instance = str(tree.children[1]) if len(tree.children) == 2 else None
-    return JobRef(name=str(name_tok).replace("\\:", ":"), instance=instance)
+    return JobRef(name=unescape_job_name(str(name_tok)), instance=instance)
 
 
 def _lookback(tree: Tree[Token]) -> Lookback:

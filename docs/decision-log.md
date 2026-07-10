@@ -649,3 +649,33 @@
   lookback-n() exclusion had no failing test before; the new fixtures
   legitimately grew the whole-corpus derive edge count (18 -> 36) and made
   the U1 open-question ledger fire through a genuine M12 OR-join shape.
+- DL-39 Job-name identity: semantic (unescaped) everywhere in IR
+  (2026-07-10; fix for DL-38a observation 2). The scanner preserved `\:`
+  verbatim in subjects and box_name values while the condition transformer
+  unescaped references, so colon-named jobs never joined: no derive edges,
+  no mutex pairs, no box linkage, no folds -- not silent loss (everything
+  stayed explicit and round-tripped verbatim), but the semantic layer was
+  blind to those references. Decision: rule 7's discipline ("semantic
+  unquoting happens at lowering") now covers the `\:` escape for the
+  JOB-NAME lane. conditions.unescape_job_name/escape_job_name are the ONE
+  owner pair of surface<->semantic transcoding: lowering funnels insert_job
+  subjects and box_name values through the same unescape the condition
+  transformer applies, and every JIL-emitting path (builder subjects and
+  box_name lines, cond_to_source references, the sequence/parallel/mutex
+  wiring strings) escapes on the way out. Both estate spellings -- raw
+  `a:b` subject (legal value text: rule 4b only flags whitespace-preceded
+  key-shaped colons) and vendor-canonical `a\:b` -- converge on the same
+  catalog key. escape/unescape are exact inverses (escape inserts one
+  backslash per colon, unescape removes exactly one), so identity holds
+  even for pathological backslash runs; a name with a backslash-adjacent
+  colon cannot enter via parsing (the JOB_NAME token admits `\` only as
+  `\:`), and hand-built ones fail loudly at reparse. Scope is deliberately
+  the job-name lane ONLY: machine, resource, xinst, calendar, and global
+  names stay verbatim on BOTH sides (their reference lanes never
+  unescaped, so they were and remain self-consistent); whether the engine
+  unescapes `\:` inside general values (command, std_*_file) is unknown --
+  verbatim carry stands until a live instance answers it (rule 2
+  amendment, [?] marker). Witness: names_colon_join.jil exercises the
+  whole lane (keys, box tree, edges, mutex fold, decompile round trip);
+  corpus pins updated deliberately (37 edges, M01 13, L012 3, 6 viz
+  subgraphs).
