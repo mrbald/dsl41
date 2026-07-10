@@ -1,0 +1,79 @@
+/* T-004 typed links (DL-38): fold_f_* is a uniform f()-link chain --
+   decompile() folds it as sequence(link='f'). fold_d_seed's two d()-linked
+   members are a uniform fan-out -- folds as parallel(on='d'). fold_mixed_*
+   is the T-002 witness: an s/f/f/d chain (adjacency alone makes it one
+   derive chain) whose links are NOT all the same letter, so decompile()
+   must split it into three sequence() runs (s; then f,f; then d) rather
+   than claiming the whole chain with one fold or leaving it whole.
+   Synthetic. */
+insert_job: fold_f_seed
+job_type: c
+command: /opt/fold_f_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "02:00"
+
+insert_job: fold_f_b
+job_type: c
+command: /opt/fold_f_b.sh
+machine: m1
+condition: f(fold_f_seed)
+
+insert_job: fold_f_c
+job_type: c
+command: /opt/fold_f_c.sh
+machine: m1
+condition: f(fold_f_b)
+
+insert_job: fold_d_seed
+job_type: c
+command: /opt/fold_d_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "02:30"
+
+insert_job: fold_d_m1
+job_type: c
+command: /opt/fold_d_m1.sh
+machine: m1
+condition: d(fold_d_seed)
+
+insert_job: fold_d_m2
+job_type: c
+command: /opt/fold_d_m2.sh
+machine: m1
+condition: d(fold_d_seed)
+
+insert_job: fold_mixed_a
+job_type: c
+command: /opt/fold_mixed_a.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "03:00"
+
+insert_job: fold_mixed_b
+job_type: c
+command: /opt/fold_mixed_b.sh
+machine: m1
+condition: s(fold_mixed_a)
+
+insert_job: fold_mixed_c
+job_type: c
+command: /opt/fold_mixed_c.sh
+machine: m1
+condition: f(fold_mixed_b)
+
+insert_job: fold_mixed_d
+job_type: c
+command: /opt/fold_mixed_d.sh
+machine: m1
+condition: f(fold_mixed_c)
+
+insert_job: fold_mixed_e
+job_type: c
+command: /opt/fold_mixed_e.sh
+machine: m1
+condition: d(fold_mixed_d)

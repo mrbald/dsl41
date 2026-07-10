@@ -6,6 +6,7 @@ canonical form equals the original's.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from typer.testing import CliRunner
 from dsl41.ast_jil import parse, parse_file
 from dsl41.cli import app
 from dsl41.conditions import GlobalAtom, JobRef, Lookback, StatusAtom, parse_condition
-from dsl41.dsl import CatalogBuilder, DslError, cond_to_source, decompile
+from dsl41.dsl import FOLDS, CatalogBuilder, DslError, cond_to_source, decompile
 from dsl41.equiv import (
     canonical_cond,
     catalog_hash,
@@ -43,8 +44,8 @@ LOWERABLE_CORPUS = [p for p in sorted(CORPUS_DIR.glob("*.jil")) if p.name not in
 runner = CliRunner()
 
 
-def roundtrip(catalog: CatalogIR) -> CatalogIR:
-    source = decompile(catalog)
+def roundtrip(catalog: CatalogIR, *, disable: Collection[str] = ()) -> CatalogIR:
+    source = decompile(catalog, disable=disable)
     # __name__ seeded so the module's `if __name__ == "__main__"` JIL-dump
     # footer (DL-37) resolves without firing
     namespace: dict[str, object] = {"__name__": "<decompiled>"}
@@ -1158,3 +1159,723 @@ def test_decompiled_source_is_pure_across_independent_execs() -> None:
     depend on hidden state -- both rebuilds hash equal."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(roundtrip(catalog))
+
+
+# =============================================================================
+# DL-38 fold registry: closed set T-001..T-007 (dsl.FOLDS), the builder
+# surface it rests on (sequence(link=), parallel(on=, then_any=), mutex(),
+# contend()), the --no-fold opt-out, the fold report, and the CLI surface.
+# =============================================================================
+
+
+# ----------------------------------------------------------- builder: sequence(link=)
+
+
+def test_sequence_link_accepts_f_d_t_and_wires_the_named_letter() -> None:
+    for link in ("f", "d", "t"):
+        c = CatalogBuilder()
+        c.job("head", command="h", machine="m1")
+        c.job("tail", command="t", machine="m1")
+        c.sequence("head", "tail", link=link)
+        catalog = c.build()
+        assert (
+            cond_to_source(catalog.jobs["tail"].sem.condition)  # type: ignore[arg-type]
+            == f"{link}(head)"
+        )
+
+
+def test_sequence_refuses_an_unknown_link_letter() -> None:
+    c = CatalogBuilder()
+    c.job("head", command="h", machine="m1")
+    c.job("tail", command="t", machine="m1")
+    with pytest.raises(DslError, match="not one of s/f/d/t"):
+        c.sequence("head", "tail", link="n")
+
+
+# ------------------------------------------------- builder: parallel(on=, then_any=)
+
+
+def test_parallel_on_accepts_f_d_t_and_wires_the_named_letter() -> None:
+    for on in ("f", "d", "t"):
+        c = CatalogBuilder()
+        c.job("seed", command="s", machine="m1")
+        c.job("m1j", command="a", machine="m1")
+        c.job("m2j", command="b", machine="m1")
+        c.parallel(["m1j", "m2j"], after="seed", on=on)
+        catalog = c.build()
+        assert (
+            cond_to_source(catalog.jobs["m1j"].sem.condition)  # type: ignore[arg-type]
+            == f"{on}(seed)"
+        )
+
+
+def test_parallel_refuses_an_unknown_on_letter() -> None:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("m1j", command="a", machine="m1")
+    c.job("m2j", command="b", machine="m1")
+    with pytest.raises(DslError, match="not one of s/f/d/t"):
+        c.parallel(["m1j", "m2j"], after="seed", on="n")
+
+
+def test_parallel_then_any_fans_in_with_or() -> None:
+    c = CatalogBuilder()
+    c.job("m1j", command="a", machine="m1", condition="s(other1)")
+    c.job("m2j", command="b", machine="m1", condition="s(other2)")
+    c.job("join", command="j", machine="m1")
+    c.parallel(["m1j", "m2j"], then_any="join")
+    catalog = c.build()
+    assert (
+        cond_to_source(catalog.jobs["join"].sem.condition)  # type: ignore[arg-type]
+        == "s(m1j) | s(m2j)"
+    )
+
+
+def test_parallel_then_any_refuses_a_join_that_already_has_a_condition() -> None:
+    c = CatalogBuilder()
+    c.job("m1j", command="a", machine="m1")
+    c.job("m2j", command="b", machine="m1")
+    c.job("join", command="j", machine="m1", condition="s(other)")
+    with pytest.raises(DslError, match="already has a condition"):
+        c.parallel(["m1j", "m2j"], then_any="join")
+
+
+# ------------------------------------------------------------------ builder: mutex()
+
+
+def test_mutex_pairwise_conjoins_bare_n_onto_each_job() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.mutex("a", "b")
+    catalog = c.build()
+    assert cond_to_source(catalog.jobs["a"].sem.condition) == "n(b)"  # type: ignore[arg-type]
+    assert cond_to_source(catalog.jobs["b"].sem.condition) == "n(a)"  # type: ignore[arg-type]
+
+
+def test_mutex_composes_with_an_existing_condition_and_canonicalizes() -> None:
+    """DL-38: mutex() conjoins onto whatever the job already carries --
+    build() must succeed, and the lowered condition canonicalizes equal to
+    the hand-parsed 'n(other) & s(x)' regardless of conjoin order (canonical
+    form sorts conjuncts, module docstring)."""
+    c = CatalogBuilder()
+    c.job("x", command="cx", machine="m1")
+    c.job("a", command="ca", machine="m1", condition="s(x)")
+    c.job("b", command="cb", machine="m1")
+    c.mutex("a", "b")
+    catalog = c.build()
+    assert cond_to_source(catalog.jobs["a"].sem.condition) == "(s(x)) & n(b)"  # type: ignore[arg-type]
+    expected = parse_condition("n(b) & s(x)")
+    assert canonical_cond(catalog.jobs["a"].sem.condition) == canonical_cond(expected)  # type: ignore[arg-type]
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_mutex_of_three_conjoins_every_pair() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.job("c", command="c", machine="m1")
+    c.mutex("a", "b", "c")
+    catalog = c.build()
+    assert canonical_cond(catalog.jobs["a"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+        parse_condition("n(b) & n(c)")
+    )
+    assert canonical_cond(catalog.jobs["b"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+        parse_condition("n(a) & n(c)")
+    )
+    assert canonical_cond(catalog.jobs["c"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+        parse_condition("n(a) & n(b)")
+    )
+
+
+def test_mutex_refuses_fewer_than_two_names() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    with pytest.raises(DslError, match="at least two"):
+        c.mutex("a")
+
+
+def test_mutex_refuses_duplicate_names_in_one_call() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    with pytest.raises(DslError, match="must be distinct"):
+        c.mutex("a", "a")
+
+
+def test_mutex_refuses_an_undeclared_job() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    with pytest.raises(DslError, match="undeclared"):
+        c.mutex("a", "ghost")
+
+
+def test_mutex_then_sequence_refuses_the_conditioned_follower() -> None:
+    """mutex() marks its jobs conditioned -- chain builders must refuse them
+    afterward (DL-38: wire chains BEFORE mutex())."""
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.mutex("a", "b")
+    with pytest.raises(DslError, match="already has a condition"):
+        c.sequence("a", "b")
+
+
+def test_mutex_then_parallel_refuses_the_conditioned_member() -> None:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.mutex("a", "b")
+    with pytest.raises(DslError, match="already has a condition"):
+        c.parallel(["a", "b"], after="seed")
+
+
+def test_decompile_never_folds_a_lookback_qualified_n_atom_into_mutex() -> None:
+    """DL-38: T-005 detection is STRICTER than derive's M07 -- a
+    lookback-qualified n() is a real edge (M03), never a mutex candidate
+    (module docstring's standing exclusions). Otherwise-symmetric pair (a
+    references other, other references a back) but a's side carries a
+    lookback: mutex() can only emit a BARE n(), so folding this pair would
+    silently drop the lookback -- it must stay fully explicit on both
+    sides."""
+    catalog = lower_source(
+        "insert_job: a\njob_type: c\nmachine: m1\ncommand: ca\n"
+        "condition: n(other, 01.00)\n\n"
+        "insert_job: other\njob_type: c\nmachine: m1\ncommand: co\n"
+        "condition: n(a)\n"
+    )
+    source = decompile(catalog)
+    assert "c.mutex(" not in source
+    assert "condition='n(other, 01.00)'" in _job_line(source, "a")
+    assert "condition='n(a)'" in _job_line(source, "other")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ---------------------------------------------------------------- builder: contend()
+
+
+def test_contend_declares_one_shared_resource_group_across_jobs() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.contend(["a", "b"], resource="LOCK1", quantity=2, free="A")
+    assert "resources: (LOCK1, QUANTITY=2, FREE=A)" in c.to_jil()
+    catalog = c.build()
+    for name in ("a", "b"):
+        refs = catalog.jobs[name].resources
+        assert [(r.name, r.quantity, r.free) for r in refs] == [("LOCK1", 2, "A")]
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_contend_free_is_optional() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    c.contend(["a", "b"], resource="LOCK1")
+    assert "resources: (LOCK1, QUANTITY=1)" in c.to_jil()
+
+
+def test_contend_refuses_fewer_than_two_jobs() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    with pytest.raises(DslError, match="at least two"):
+        c.contend(["a"], resource="LOCK1")
+
+
+def test_contend_refuses_an_undeclared_job() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    with pytest.raises(DslError, match="undeclared"):
+        c.contend(["a", "ghost"], resource="LOCK1")
+
+
+def test_contend_refuses_a_job_that_already_carries_resources() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1", resources="(OTHER, QUANTITY=1)")
+    c.job("b", command="b", machine="m1")
+    with pytest.raises(DslError, match="already carries resources"):
+        c.contend(["a", "b"], resource="LOCK1")
+
+
+def test_contend_refuses_quantity_below_one() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    with pytest.raises(DslError, match="quantity must be >= 1"):
+        c.contend(["a", "b"], resource="LOCK1", quantity=0)
+
+
+def test_contend_refuses_an_invalid_free_value() -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    with pytest.raises(DslError, match="not one of Y/N/A"):
+        c.contend(["a", "b"], resource="LOCK1", free="Q")
+
+
+def test_contend_refuses_a_resource_name_with_a_space() -> None:
+    """A space is caught by the shared _check_name helper first (DL-17's
+    generic name-shape guard), before contend()'s own paren/comma check."""
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    with pytest.raises(DslError, match="not JIL-name-shaped"):
+        c.contend(["a", "b"], resource="bad name")
+
+
+@pytest.mark.parametrize("resource", ["bad(name)", "bad,name"], ids=["paren", "comma"])
+def test_contend_refuses_a_resource_name_with_parens_or_commas(resource: str) -> None:
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    c.job("b", command="b", machine="m1")
+    with pytest.raises(DslError, match="not resource-name-shaped"):
+        c.contend(["a", "b"], resource=resource)
+
+
+# ------------------------------------------------------------- decompiler: T-002
+
+
+def _t002_chain_catalog() -> CatalogIR:
+    """h1(scheduled) -> h2 s(h1) -> h3 e(h2)=0 [disqualified: exit-code atom]
+    -> h4 s(h3): one derive chain, split by the middle link into two runs."""
+    c = CatalogBuilder()
+    c.job(
+        "h1",
+        command="x",
+        machine="m1",
+        date_conditions=True,
+        days_of_week=["all"],
+        start_times='"06:00"',
+    )
+    c.job("h2", command="x", machine="m1", condition="s(h1)")
+    c.job("h3", command="x", machine="m1", condition="e(h2) = 0")
+    c.job("h4", command="x", machine="m1", condition="s(h3)")
+    return c.build()
+
+
+def test_decompile_splits_a_chain_with_a_disqualified_middle_link_into_two_runs() -> None:
+    catalog = _t002_chain_catalog()
+    report: list[str] = []
+    source = decompile(catalog, report=report)
+    assert "c.sequence('h1', 'h2')" in source
+    assert "c.sequence('h3', 'h4')" in source
+    assert "condition='e(h2) = 0'" in _job_line(source, "h3")
+    assert any("T-002: 1 chain(s) folded as sub-runs" == line for line in report)
+    assert any("exit-code atom" in line for line in report)
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_leaves_the_disqualified_chain_whole_when_t002_disabled() -> None:
+    catalog = _t002_chain_catalog()
+    report: list[str] = []
+    source = decompile(catalog, disable=("T-002",), report=report)
+    assert "c.sequence(" not in source
+    for name, cond in (("h2", "s(h1)"), ("h3", "e(h2) = 0"), ("h4", "s(h3)")):
+        assert f"condition={cond!r}" in _job_line(source, name)
+    assert any("left whole (T-002 disabled)" in line for line in report)
+    assert catalog_hash(roundtrip(catalog, disable=("T-002",))) == catalog_hash(catalog)
+
+
+# ------------------------------------------------------------- decompiler: T-003
+
+
+def _t003_or_join_catalog() -> CatalogIR:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("join", command="j", machine="m1", condition="s(a) | s(b)")
+    return c.build()
+
+
+def test_decompile_emits_parallel_then_any_for_a_unique_or_join() -> None:
+    catalog = _t003_or_join_catalog()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b'], after='seed', then_any='join')" in source
+    for member in ("a", "b", "join"):
+        assert "condition=" not in _job_line(source, member)
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_keeps_the_or_join_explicit_when_t003_disabled() -> None:
+    catalog = _t003_or_join_catalog()
+    source = decompile(catalog, disable=("T-003",))
+    assert "c.parallel(['a', 'b'], after='seed')" in source
+    assert "then_any=" not in source
+    assert "condition='s(a) | s(b)'" in _job_line(source, "join")
+    assert catalog_hash(roundtrip(catalog, disable=("T-003",))) == catalog_hash(catalog)
+
+
+def test_decompile_two_or_joins_over_the_same_members_is_ambiguous_and_stays_explicit() -> None:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="s(seed)")
+    c.job("b", command="b", machine="m1", condition="s(seed)")
+    c.job("joina", command="ja", machine="m1", condition="s(a) | s(b)")
+    c.job("joinb", command="jb", machine="m1", condition="s(b) | s(a)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b'], after='seed')" in source
+    assert "then_any=" not in source
+    assert "condition='s(a) | s(b)'" in _job_line(source, "joina")
+    assert "condition='s(b) | s(a)'" in _job_line(source, "joinb")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ------------------------------------------------------------- decompiler: T-004
+
+
+def test_decompile_emits_sequence_link_for_a_uniform_f_chain() -> None:
+    c = CatalogBuilder()
+    c.job("f1", command="a", machine="m1")
+    c.job("f2", command="b", machine="m1", condition="f(f1)")
+    c.job("f3", command="c", machine="m1", condition="f(f2)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.sequence('f1', 'f2', 'f3', link='f')" in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_keeps_the_f_chain_explicit_when_t004_disabled() -> None:
+    c = CatalogBuilder()
+    c.job("f1", command="a", machine="m1")
+    c.job("f2", command="b", machine="m1", condition="f(f1)")
+    c.job("f3", command="c", machine="m1", condition="f(f2)")
+    catalog = c.build()
+    source = decompile(catalog, disable=("T-004",))
+    assert "c.sequence(" not in source
+    assert "condition='f(f1)'" in _job_line(source, "f2")
+    assert "condition='f(f2)'" in _job_line(source, "f3")
+    assert catalog_hash(roundtrip(catalog, disable=("T-004",))) == catalog_hash(catalog)
+
+
+def test_decompile_emits_parallel_on_for_a_uniform_d_fanout() -> None:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="d(seed)")
+    c.job("b", command="b", machine="m1", condition="d(seed)")
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "c.parallel(['a', 'b'], after='seed', on='d')" in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_keeps_the_d_fanout_explicit_when_t004_disabled() -> None:
+    c = CatalogBuilder()
+    c.job("seed", command="s", machine="m1")
+    c.job("a", command="a", machine="m1", condition="d(seed)")
+    c.job("b", command="b", machine="m1", condition="d(seed)")
+    catalog = c.build()
+    source = decompile(catalog, disable=("T-004",))
+    assert "c.parallel(" not in source
+    assert "condition='d(seed)'" in _job_line(source, "a")
+    assert "condition='d(seed)'" in _job_line(source, "b")
+    assert catalog_hash(roundtrip(catalog, disable=("T-004",))) == catalog_hash(catalog)
+
+
+# ------------------------------------------------------------- decompiler: T-006
+
+
+def _t006_resources_catalog() -> CatalogIR:
+    c = CatalogBuilder()
+    c.job("ra", command="a", machine="m1", resources="(LOCK1, QUANTITY=1, FREE=A)")
+    c.job("rb", command="b", machine="m1", resources="(LOCK1, QUANTITY=1, FREE=A)")
+    c.job(
+        "multi",
+        command="m",
+        machine="m1",
+        resources="(LOCK1, QUANTITY=1, FREE=A) and (POOL2, QUANTITY=2)",
+    )
+    return c.build()
+
+
+def test_decompile_emits_contend_for_identical_single_group_resources() -> None:
+    catalog = _t006_resources_catalog()
+    source = decompile(catalog)
+    assert "c.contend(['ra', 'rb'], resource='LOCK1', quantity=1, free='A')" in source
+    assert "resources=" not in _job_line(source, "ra")
+    assert "resources=" not in _job_line(source, "rb")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_leaves_a_multi_group_resources_job_explicit() -> None:
+    catalog = _t006_resources_catalog()
+    source = decompile(catalog)
+    assert "resources=" in _job_line(source, "multi")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_keeps_resources_explicit_when_t006_disabled() -> None:
+    catalog = _t006_resources_catalog()
+    source = decompile(catalog, disable=("T-006",))
+    assert "c.contend(" not in source
+    assert "resources=" in _job_line(source, "ra")
+    assert "resources=" in _job_line(source, "rb")
+    assert catalog_hash(roundtrip(catalog, disable=("T-006",))) == catalog_hash(catalog)
+
+
+def test_decompile_reports_a_non_name_shaped_resource_as_staying_explicit() -> None:
+    """A resource NAME can carry a space at the IR level (the `resources:`
+    grammar's group is `\\(([^()]*)\\)`, DL-21) even though contend() itself
+    would refuse to build such a name -- T-006 must skip it with a report
+    note rather than emit an uncallable contend()."""
+    catalog = lower_source(
+        "insert_job: j1\njob_type: c\nmachine: m1\ncommand: x\n"
+        "resources: (BAD NAME, QUANTITY=1)\n\n"
+        "insert_job: j2\njob_type: c\nmachine: m1\ncommand: y\n"
+        "resources: (BAD NAME, QUANTITY=1)\n"
+    )
+    report: list[str] = []
+    source = decompile(catalog, report=report)
+    assert "c.contend(" not in source
+    assert any(
+        "not resource-name-shaped for contend()" in line and "'BAD NAME'" in line
+        for line in report
+    )
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ------------------------------------------------------------- decompiler: T-007
+
+
+def _t007_schedules_catalog() -> CatalogIR:
+    c = CatalogBuilder()
+    c.job(
+        "sa",
+        command="a",
+        machine="m1",
+        date_conditions=True,
+        days_of_week=["mo", "tu"],
+        start_times='"05:00"',
+    )
+    c.job(
+        "sb",
+        command="b",
+        machine="m1",
+        date_conditions=True,
+        days_of_week=["mo", "tu"],
+        start_times='"05:00"',
+    )
+    c.job(
+        "solo",
+        command="c",
+        machine="m1",
+        date_conditions=True,
+        days_of_week=["we"],
+        start_times='"09:00"',
+    )
+    return c.build()
+
+
+def test_decompile_factors_identical_schedules_into_a_shared_dict() -> None:
+    catalog = _t007_schedules_catalog()
+    source = decompile(catalog)
+    assert "SCHED_0500_MO_TU = dict(" in source
+    assert "**SCHED_0500_MO_TU" in _job_line(source, "sa")
+    assert "**SCHED_0500_MO_TU" in _job_line(source, "sb")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_leaves_a_singleton_schedule_inline() -> None:
+    catalog = _t007_schedules_catalog()
+    source = decompile(catalog)
+    assert "date_conditions=True" in _job_line(source, "solo")
+    assert "days_of_week='we'" in _job_line(source, "solo")
+    assert "**SCHED_" not in _job_line(source, "solo")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompile_keeps_schedules_inline_when_t007_disabled() -> None:
+    catalog = _t007_schedules_catalog()
+    source = decompile(catalog, disable=("T-007",))
+    assert "dict(" not in source
+    assert "days_of_week='mo, tu'" in _job_line(source, "sa")
+    assert "days_of_week='mo, tu'" in _job_line(source, "sb")
+    assert catalog_hash(roundtrip(catalog, disable=("T-007",))) == catalog_hash(catalog)
+
+
+def test_decompile_schedule_name_collision_gets_a_deterministic_suffix() -> None:
+    """Two DIFFERENT groups (the second also sets timezone=, so its emitted
+    kwargs differ) whose _schedule_var_name STEM is the same (stem is built
+    from start_times/start_mins + run_calendar/days_of_week only) collide;
+    the second gets a deterministic _2 suffix, first-seen order."""
+    c = CatalogBuilder()
+    c.job(
+        "g1a", command="a", machine="m1", date_conditions=True, run_calendar="CAL",
+        start_times='"05:00"',
+    )
+    c.job(
+        "g1b", command="b", machine="m1", date_conditions=True, run_calendar="CAL",
+        start_times='"05:00"',
+    )
+    c.job(
+        "g2a", command="c", machine="m1", date_conditions=True, run_calendar="CAL",
+        start_times='"05:00"', timezone="UTC",
+    )
+    c.job(
+        "g2b", command="d", machine="m1", date_conditions=True, run_calendar="CAL",
+        start_times='"05:00"', timezone="UTC",
+    )
+    catalog = c.build()
+    source = decompile(catalog)
+    assert "SCHED_0500_CAL = dict(" in source
+    assert "SCHED_0500_CAL_2 = dict(" in source
+    assert "**SCHED_0500_CAL\n" in source.replace(")", "\n")  # g1a/g1b splat the base name
+    assert "**SCHED_0500_CAL_2" in _job_line(source, "g2a")
+    assert "**SCHED_0500_CAL_2" in _job_line(source, "g2b")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ---------------------------------------------------- decompiler: corpus fixtures
+
+
+def test_decompiler_folds_the_t003_corpus_or_join_and_leaves_the_ambiguous_pair_explicit() -> None:
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog)
+    assert (
+        "c.parallel(['fold_or_m1', 'fold_or_m2'], after='fold_or_seed', then_any='fold_or_join')"
+        in source
+    )
+    assert "c.parallel(['fold_or2_m1', 'fold_or2_m2'], after='fold_or2_seed')" in source
+    assert "condition='s(fold_or2_m1) | s(fold_or2_m2)'" in _job_line(source, "fold_or2_joina")
+    assert "condition='s(fold_or2_m2) | s(fold_or2_m1)'" in _job_line(source, "fold_or2_joinb")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompiler_folds_the_t004_corpus_typed_links_and_splits_the_mixed_chain() -> None:
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog)
+    assert "c.sequence('fold_f_seed', 'fold_f_b', 'fold_f_c', link='f')" in source
+    assert "c.parallel(['fold_d_m1', 'fold_d_m2'], after='fold_d_seed', on='d')" in source
+    assert "c.sequence('fold_mixed_a', 'fold_mixed_b')" in source
+    assert "c.sequence('fold_mixed_b', 'fold_mixed_c', 'fold_mixed_d', link='f')" in source
+    assert "c.sequence('fold_mixed_d', 'fold_mixed_e', link='d')" in source
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompiler_folds_the_t006_corpus_resources_and_leaves_the_multi_group_job_explicit() -> (
+    None
+):
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog)
+    assert (
+        "c.contend(['fold_res_a', 'fold_res_b'], resource='FOLD_LOCK', quantity=1, free='A')"
+        in source
+    )
+    assert "resources=" in _job_line(source, "fold_res_multi")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_decompiler_folds_the_t007_corpus_schedules_and_leaves_near_identical_ones_inline() -> (
+    None
+):
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog)
+    assert "**SCHED_0500_MO_TU_WE_TH_FR" in _job_line(source, "fold_sched_a")
+    assert "**SCHED_0500_MO_TU_WE_TH_FR" in _job_line(source, "fold_sched_b")
+    assert "start_times='\"05:01\"'" in _job_line(source, "fold_sched_c")
+    assert "start_times='\"05:02\"'" in _job_line(source, "fold_sched_d")
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+# ------------------------------------------------------------------- fold report
+
+
+def test_report_lists_every_fold_code_that_fired_on_the_whole_corpus() -> None:
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    report: list[str] = []
+    decompile(catalog, report=report)
+    for code in ("T-001", "T-002", "T-003", "T-004", "T-006", "T-007"):
+        assert any(line.startswith(f"{code}:") for line in report), report
+    # T-005 fires on the corpus's mutex chain (m07_mutex.jil, pre-existing).
+    assert any(line.startswith("T-005:") for line in report), report
+
+
+def test_report_omits_a_code_that_finds_nothing() -> None:
+    """A catalog with no resources anywhere must not mention T-006 at all."""
+    c = CatalogBuilder()
+    c.job("a", command="a", machine="m1")
+    catalog = c.build()
+    report: list[str] = []
+    decompile(catalog, report=report)
+    assert not any(line.startswith("T-006:") for line in report)
+
+
+def test_report_explains_why_a_lookback_qualified_link_stays_explicit() -> None:
+    c = CatalogBuilder()
+    c.job("p1", command="x", machine="m1")
+    c.job("p2", command="x", machine="m1", condition="s(p1, 01.00)")
+    catalog = c.build()
+    report: list[str] = []
+    decompile(catalog, report=report)
+    assert any(
+        "explicit: link 'p1'->'p2' -- lookback-qualified (Q2)" in line for line in report
+    )
+
+
+# --------------------------------------------------------------- CLI: folds/--no-fold
+
+
+def test_cli_folds_lists_the_whole_registry() -> None:
+    result = runner.invoke(app, ["folds"])
+    assert result.exit_code == 0
+    assert len(FOLDS) == 7
+    for code, description in FOLDS.items():
+        assert f"{code}  {description}" in result.stdout
+
+
+def test_cli_decompile_no_fold_changes_the_emitted_source() -> None:
+    target = str(CORPUS_DIR / "m07_mutex.jil")
+    with_folds = runner.invoke(app, ["decompile", target])
+    without = runner.invoke(app, ["decompile", "--no-fold", "T-005", target])
+    assert with_folds.exit_code == 0
+    assert without.exit_code == 0
+    assert with_folds.stdout != without.stdout
+    assert "c.mutex(" in with_folds.stdout
+    assert "c.mutex(" not in without.stdout
+
+
+def test_cli_decompile_no_fold_accepts_a_comma_list() -> None:
+    target = str(CORPUS_DIR / "m07_mutex.jil")
+    result = runner.invoke(app, ["decompile", "--no-fold", "T-001,T-005", target])
+    assert result.exit_code == 0
+    assert "c.sequence(" not in result.stdout
+    assert "c.mutex(" not in result.stdout
+
+
+def test_cli_decompile_no_fold_unknown_code_exits_2() -> None:
+    result = runner.invoke(
+        app, ["decompile", "--no-fold", "T-999", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 2
+    assert "unknown fold code" in result.stderr
+
+
+def test_cli_decompile_fold_report_lines_land_on_stderr_prefixed_fold() -> None:
+    result = runner.invoke(app, ["decompile", str(CORPUS_DIR / "m07_mutex.jil")])
+    assert result.exit_code == 0
+    fold_lines = [line for line in result.stderr.splitlines() if line.startswith("fold: ")]
+    assert fold_lines
+    assert any(line.startswith("fold: T-005:") for line in fold_lines)
+    assert "fold:" not in result.stdout
+
+
+# ------------------------------------------------- the fold-independence property
+
+
+_ALL_FOLD_SUBSETS: list[tuple[str, ...]] = [(), *[(code,) for code in FOLDS], tuple(FOLDS)]
+
+
+@pytest.mark.parametrize(
+    "disable",
+    _ALL_FOLD_SUBSETS,
+    ids=["none", *FOLDS, "all"],
+)
+def test_whole_corpus_decompile_roundtrip_is_fold_independent(disable: tuple[str, ...]) -> None:
+    """DL-38's central guarantee: every fold is hash-neutral by construction
+    (canonical form sorts/dedups conjuncts, so e.g. mutex()'s conjoin order
+    cannot matter) -- the whole-corpus round-trip holds whether individual
+    folds are on, off, or the entire registry is disabled at once."""
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    rebuilt = roundtrip(catalog, disable=disable)
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)

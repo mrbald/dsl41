@@ -188,7 +188,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     sem12_external_gate.jil's gate_box/gate_member_a/gate_member_b/
     gate_outside_job (SEM-12 external gating, M16/L008). l18_reporter joined
     with l018_calendar_ref.jil (DL-36); sink_cmd/sink_fw with
-    kitchen_sink.jil (DL-37)."""
+    kitchen_sink.jil (DL-37). The DL-38 fold_t00*.jil fixtures added the
+    fold_or_*/fold_or2_* (T-003), fold_f_*/fold_d_*/fold_mixed_* (T-004/
+    T-002), fold_res_* (T-006), and fold_sched_* (T-007) job sets."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -203,6 +205,33 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "consumer_stale",
         "consumer_window",
         "dead_scheduler",
+        "fold_d_m1",
+        "fold_d_m2",
+        "fold_d_seed",
+        "fold_f_b",
+        "fold_f_c",
+        "fold_f_seed",
+        "fold_mixed_a",
+        "fold_mixed_b",
+        "fold_mixed_c",
+        "fold_mixed_d",
+        "fold_mixed_e",
+        "fold_or2_joina",
+        "fold_or2_joinb",
+        "fold_or2_m1",
+        "fold_or2_m2",
+        "fold_or2_seed",
+        "fold_or_join",
+        "fold_or_m1",
+        "fold_or_m2",
+        "fold_or_seed",
+        "fold_res_a",
+        "fold_res_b",
+        "fold_res_multi",
+        "fold_sched_a",
+        "fold_sched_b",
+        "fold_sched_c",
+        "fold_sched_d",
         "gate_box",
         "gate_member_a",
         "gate_member_b",

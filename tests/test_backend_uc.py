@@ -185,13 +185,14 @@ def test_report_carries_m27_flags_mutex_or_shapes_and_boundary() -> None:
 
 def test_report_open_question_ledger_tracks_used_rows_only() -> None:
     """The U-question section lists a question iff the catalog uses one of
-    its M-rows: the corpus uses M02/M03 (U5), M09 (U8), M15 (U2) -- but has
-    no M12 OR shapes, so U1 must be absent."""
+    its M-rows: the corpus uses M02/M03 (U5), M09 (U8), M15 (U2), and now
+    (DL-38's fold_t003_or_join.jil, an M12 OR shape over fold_or_m1/
+    fold_or_m2's plain successes) M12 too, so U1 must be present."""
     report = render_migration_report(_corpus_catalog())
     assert "**U5**" in report
     assert "**U8**" in report
     assert "**U2**" in report
-    assert "**U1**" not in report
+    assert "**U1**" in report
 
 
 def test_report_u1_appears_when_an_or_shape_exists() -> None:

@@ -558,12 +558,19 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     tests above for the per-edge reasoning. sem24_status_resource.jil
     (DL-18) adds 1 M02 edge: the plain s(SEED_C) gate on the top box --
     producer and consumer are both unscheduled, so the same-cycle detector
-    conservatively classifies the latch as cross-stream (M02), not M01."""
+    conservatively classifies the latch as cross-stream (M02), not M01.
+    DL-38's fold_t003_or_join.jil and fold_t004_typed_links.jil add 18 more
+    edges (fold_t006_resources.jil/fold_t007_schedules.jil carry no
+    `condition:` at all, so they add none): the two fan-out+OR-join groups
+    in fold_t003_or_join.jil are 10 same-cadence success edges (+10 M01);
+    fold_t004_typed_links.jil's uniform f-chain, uniform d-fan-out, and
+    mixed s/f/f/d chain add 4 exact M04 (failure) edges, 3 exact M05 (done)
+    edges, and 1 more same-cadence M01 success edge."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 18
+    assert len(graph.edges) == 36
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M02": 8, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M01": 1, "M15": 1}
+        {"M01": 12, "M02": 8, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
     )
 
 

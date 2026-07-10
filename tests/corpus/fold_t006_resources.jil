@@ -1,0 +1,40 @@
+/* T-006 resource contention (DL-38): fold_res_a/fold_res_b carry the
+   IDENTICAL single-group resources: attr (same name, quantity, free) --
+   decompile() folds them into one contend() call. fold_res_multi carries
+   TWO groups and must stay explicit: a partial merge would have to
+   reproduce group order, exactly the ambiguity contend() refuses (its
+   FOLD_LOCK group matching fold_res_a/b's is not enough). Synthetic. */
+insert_resource: FOLD_LOCK
+res_type: R
+amount: 1
+
+insert_resource: FOLD_POOL
+res_type: T
+amount: 4
+
+insert_job: fold_res_a
+job_type: c
+command: /opt/fold_res_a.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "04:00"
+resources: (FOLD_LOCK, QUANTITY=1, FREE=A)
+
+insert_job: fold_res_b
+job_type: c
+command: /opt/fold_res_b.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "04:15"
+resources: (FOLD_LOCK, QUANTITY=1, FREE=A)
+
+insert_job: fold_res_multi
+job_type: c
+command: /opt/fold_res_multi.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "04:30"
+resources: (FOLD_LOCK, QUANTITY=1, FREE=A) and (FOLD_POOL, QUANTITY=2)
