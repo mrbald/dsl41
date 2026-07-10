@@ -74,18 +74,20 @@ def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> Non
 
 
 def test_report_inventories_calendars_and_surfaces_u6() -> None:
-    """DL-25: calendars are autocal territory (not definable in JIL), so
-    "unknown calendar" is undecidable for the linter -- the report
-    inventories them per job and surfaces U6 via the M24 row instead."""
+    """DL-25: the report inventories referenced calendars per job and
+    surfaces U6 via the M24 row. DL-36 refinement: definitions can now
+    travel as autocal_asc exports, so each row states whether the set
+    carries one."""
     catalog = lower_source(
         "insert_job: calj\njob_type: c\ncommand: x\nmachine: m1\n"
         "date_conditions: 1\nrun_calendar: month_end\nexclude_calendar: holidays\n"
-        'start_times: "22:00"\n'
+        'start_times: "22:00"\n\n'
+        "extended_calendar: month_end\nadjust: 0\n"
     )
     report = render_migration_report(catalog)
     assert "## Calendars (M24" in report
-    assert "`month_end` — used by `calj`" in report
-    assert "`holidays` — used by `calj`" in report
+    assert "`month_end` (extended, defined in set) — used by `calj`" in report
+    assert "`holidays` (NO DEFINITION in set) — used by `calj`" in report
     assert "U6" in report  # calendar parity open question now listed
     # dead-config calendars (no date_conditions) are L005's business, not the report's
     dead = lower_source(

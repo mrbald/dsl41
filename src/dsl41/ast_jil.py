@@ -29,6 +29,11 @@ jil-statement-syntax.md (each pinned by a fixture or unit test):
   attribute-position key matching (insert|update|delete|override)_* that is
   not a recognized subcommand is a loud error, never an attribute -- a missed
   statement boundary folding into the previous statement is structural loss.
+- Calendar exports (rule 11, 2026-07-10 / DL-36): the autocal_asc export
+  statements (`calendar`, `cycle`, `extended_calendar`) are recognized
+  boundaries; a standard `calendar:` body may carry bare date rows, kept
+  verbatim after the attrs. An attribute after a date row is a loud error
+  (re-rendering would reorder it).
 """
 
 from __future__ import annotations
@@ -77,8 +82,23 @@ SUBCOMMANDS = frozenset(
         "insert_connectionprofile",
         "update_connectionprofile",
         "delete_connectionprofile",
+        # DL-36: the autocal_asc -E/-I calendar-export statements (TechDocs
+        # 12.1 "autocal_asc Command") -- NOT jil subcommands; the vendor
+        # processes them with a different binary. Accepted here because
+        # migration estates ship calendar exports alongside JIL and the
+        # format is JIL-shaped except standard-calendar date rows (rule 11).
+        # No documented JIL attribute shares these names, so boundary
+        # recognition costs nothing on valid input (the DL-18 argument).
+        "calendar",
+        "cycle",
+        "extended_calendar",
     }
 )
+
+#: Rule 11 (DL-36): statements whose body may carry bare date rows (the
+#: autocal_asc standard-calendar export). Extended calendars and cycles are
+#: pure `key: value` and stay out.
+_DATE_BODY_SUBCOMMANDS = frozenset({"calendar"})
 
 #: Rule 3 guard (amended 2026-07-09, DL-18; rename_ added 2026-07-10, DL-27):
 #: an attribute-position key shaped like a subcommand but not in SUBCOMMANDS
@@ -147,6 +167,7 @@ class JilStatement(BaseModel):
     subject: str  # the value after the subcommand key (job name, etc.)
     job_type_inline: str | None = None  # 'insert_job: X job_type: c' one-line form
     attrs: list[RawAttr]  # ORDER PRESERVED -- this is the fidelity guarantee
+    date_lines: list[str] = []  # verbatim autocal date rows; `calendar:` only (rule 11)
     comments: list[Comment] = []
     span: SourceSpan
     # layout trivia
@@ -356,6 +377,16 @@ class _Scanner:
                         raise JilParseError(
                             f"attribute line {key!r} before any statement", self.file, i + 1
                         )
+                    if cur.date_lines:
+                        # Rule 11 (DL-36): the export format puts every
+                        # attribute before the date rows; re-rendering an
+                        # interleaved shape would silently reorder it.
+                        raise JilParseError(
+                            f"attribute line {key!r} after the date rows of"
+                            f" {cur.subcommand}: {cur.subject.strip()!r} (rule 11, DL-36)",
+                            self.file,
+                            i + 1,
+                        )
                     if (pair := _find_inline_pair(_mask_closed_blocks(value))) is not None:
                         # Rule 4b (DL-30): JIL permits several `attr: value`
                         # statements on one line; swallowing the second pair
@@ -396,8 +427,22 @@ class _Scanner:
                 self._extend_span(cur.span, i)
                 i += 1
                 continue
+            if (
+                cur is not None
+                and cur.subcommand.lower() in _DATE_BODY_SUBCOMMANDS
+                and not pend_c
+                and not pend_b
+            ):
+                # Rule 11 (DL-36): a bare date row of a standard-calendar
+                # export. Verbatim carry, no comment extraction, must be
+                # contiguous with its statement.
+                cur.date_lines.append(line)
+                self._extend_span(cur.span, i)
+                i += 1
+                continue
             raise JilParseError(
-                "unrecognized line (not an attribute, comment, blank, or continuation)",
+                "unrecognized line (not an attribute, comment, blank, continuation,"
+                " or calendar date row)",
                 self.file,
                 i + 1,
             )
@@ -539,6 +584,7 @@ def render_preserve(jf: JilFile) -> str:
             vlines = a.raw_value.split("\n")
             out.append(a.indent + a.key + ":" + a.sep + vlines[0] + trailing_suffix(a.comments))
             out.extend(vlines[1:])
+        out.extend(stmt.date_lines)
     for c in jf.trailing_comments:
         emit_full_line(c)
     out.extend(jf.eof_blank_lines)
@@ -631,6 +677,7 @@ def render_canonical(jf: JilFile) -> str:
             first = f"{a.key}: {vlines[0]}" if vlines[0] else f"{a.key}:"
             lines.append(first + _canonical_trailing(a.comments))
             lines.extend(vlines[1:])
+        lines.extend(ln.strip() for ln in stmt.date_lines)
         blocks.append("\n".join(lines))
     if jf.trailing_comments:
         lines = []

@@ -21,8 +21,9 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    `insert_monbro`, `update_monbro`, `delete_monbro`, `insert_job_type`,
    `update_job_type`, `delete_job_type`, `insert_connectionprofile`,
    `update_connectionprofile`, `delete_connectionprofile` — the complete TechDocs 12.1
-   inventory, DL-29) begins a new statement; all following attribute lines belong to
-   it until the next subcommand or EOF. Unknown keys are attributes, never boundaries
+   inventory, DL-29 — plus the autocal_asc calendar-export statements `calendar`, `cycle`,
+   `extended_calendar`, rule 11 / DL-36) begins a new statement; all following attribute
+   lines belong to it until the next subcommand or EOF. Unknown keys are attributes, never boundaries
    (forward compatibility) — EXCEPT a key matching the subcommand shape
    `/(insert|update|delete|override|rename)_\w+/i` that is not in the recognized set:
    that is a scanner error. Folding a missed statement boundary into the previous
@@ -83,6 +84,23 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
 10. **Line endings** (amended 2026-07-03): one style per file — `\n` or `\r\n`, the
     `JilFile.newline_style` model field — mixed line endings are a scanner error. A missing
     final newline is layout trivia and survives round-trip.
+11. **Calendar exports** *(added 2026-07-10, DL-36)*: the `autocal_asc -E`/`-I` export
+    statements `calendar`, `cycle`, and `extended_calendar` (TechDocs 12.1 "autocal_asc
+    Command — Manage Calendars") are recognized statement boundaries. They are NOT `jil`
+    subcommands — the vendor processes them with a different binary — but migration estates
+    ship calendar exports alongside JIL, and the format is JIL-shaped except one thing: a
+    standard `calendar:` body carries bare date rows (`MM/DD/YYYY [HH:MM]`, format varies
+    with `-f date_format`). Scanner rules: a non-key-shaped line inside a `calendar:`
+    statement (after rule 6, which never applies there) is a **date row**, carried verbatim
+    (`JilStatement.date_lines`, no comment extraction), contiguous with its statement (an
+    intervening blank line or comment ends the date body). An attribute line after a date
+    row is a scanner error — the export format puts all attributes before the date list, and
+    re-rendering an interleaved shape would silently reorder it. No documented JIL attribute
+    is named `calendar`, `cycle`, or `extended_calendar`, so recognizing these boundaries
+    costs nothing on valid JIL (the DL-18 argument). These verbs deliberately stay OUT of
+    the rule-3 guard-verb inventory note: the guard covers `(insert|update|delete|override|
+    rename)_*` shapes only, and calendar exports have no update/delete verbs (re-import with
+    `-F` overwrites).
 
 ## Corpus policy
 

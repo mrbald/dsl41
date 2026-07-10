@@ -339,6 +339,30 @@ def test_catalog_hash_is_layout_invariant_for_machine_statements() -> None:
     assert catalog_hash(a) == catalog_hash(b)
 
 
+def test_catalog_hash_is_layout_invariant_for_calendar_statements() -> None:
+    """Calendars canonicalize span-free like machines (DL-36)."""
+    a = lower_source("calendar: hols\n01/01/2026 00:00\n")
+    b = lower_source("\n\n\ncalendar: hols\n01/01/2026 00:00\n")
+    assert catalog_hash(a) == catalog_hash(b)
+
+
+def test_tier_a_compares_calendar_and_cycle_definitions() -> None:
+    """The same run_calendar name over different dates is a different
+    schedule (M24/DL-36): tier (a) must not call such catalogs equivalent."""
+    job = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+    a = lower_source(job + "\ncalendar: hols\n01/01/2026 00:00\n")
+    b = lower_source(job + "\ncalendar: hols\n02/01/2026 00:00\n")
+    result = equivalent_tier_a(a, b)
+    assert not result.equivalent
+    assert result.detail["<calendars>"] == "calendar definitions differ"
+    c = lower_source(job + "\ncycle: q1\nstart_date: 01/01/2026\n")
+    d = lower_source(job + "\ncycle: q1\nstart_date: 02/01/2026\n")
+    result = equivalent_tier_a(c, d)
+    assert not result.equivalent
+    assert result.detail["<cycles>"] == "cycle definitions differ"
+    assert equivalent_tier_a(a, a).equivalent
+
+
 # ------------------------------------------------------------------------- 3. Tier a
 
 

@@ -1,0 +1,23 @@
+/* autocal_asc -E export shapes (DL-36, rule 11): a standard calendar with
+   bare date rows, a cycle, and an extended calendar referencing both --
+   holcal/cyccal resolve in-file, so L018 stays quiet on the corpus. */
+calendar: cal_exchange_holidays
+description: "exchange holidays"
+01/01/2026 00:00
+07/03/2026 00:00
+12/25/2026 00:00
+
+cycle: cyc_quarter_close
+description: "quarter close windows"
+start_date: 03/28/2026
+end_date: 04/02/2026
+
+extended_calendar: cal_last_workday
+description: "last workday of each quarter-close window"
+workday: mo,tu,we,th,fr
+non_workday: W
+holiday: W
+holcal: cal_exchange_holidays
+cyccal: cyc_quarter_close
+adjust: 0
+condition: CYCLE#L

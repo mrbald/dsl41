@@ -239,11 +239,20 @@ def canonical_catalog(
         name: xinst.model_copy(update={"span": None})
         for name, xinst in catalog.external_instances.items()
     }
+    calendars = {
+        name: calendar.model_copy(update={"span": None})
+        for name, calendar in catalog.calendars.items()
+    }
+    cycles = {
+        name: cycle.model_copy(update={"span": None}) for name, cycle in catalog.cycles.items()
+    }
     canonical = catalog.model_copy(
         update={
             "jobs": jobs,
             "machines": machines,
             "resources": resources,
+            "calendars": calendars,
+            "cycles": cycles,
             "external_instances": external_instances,
             "meta": type(catalog.meta)(),
         }
@@ -299,8 +308,26 @@ def equivalent_tier_a(
     }
     if not machines_equal:
         detail["<machines>"] = "machine definitions differ"
+    # Calendar/cycle definitions drive run-day semantics (M24): the same
+    # run_calendar name over different dates is a different schedule (DL-36).
+    calendars_equal = {c: (v.kind, v.attrs, v.dates) for c, v in a.calendars.items()} == {
+        c: (v.kind, v.attrs, v.dates) for c, v in b.calendars.items()
+    }
+    if not calendars_equal:
+        detail["<calendars>"] = "calendar definitions differ"
+    cycles_equal = {c: v.attrs for c, v in a.cycles.items()} == {
+        c: v.attrs for c, v in b.cycles.items()
+    }
+    if not cycles_equal:
+        detail["<cycles>"] = "cycle definitions differ"
     equivalent = (
-        not left_only and not right_only and not differing and globals_equal and machines_equal
+        not left_only
+        and not right_only
+        and not differing
+        and globals_equal
+        and machines_equal
+        and calendars_equal
+        and cycles_equal
     )
     return TierAResult(
         equivalent=equivalent,

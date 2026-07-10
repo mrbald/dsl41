@@ -36,7 +36,9 @@ runner = CliRunner()
 
 def roundtrip(catalog: CatalogIR) -> CatalogIR:
     source = decompile(catalog)
-    namespace: dict[str, object] = {}
+    # __name__ seeded so the module's `if __name__ == "__main__"` JIL-dump
+    # footer (DL-37) resolves without firing
+    namespace: dict[str, object] = {"__name__": "<decompiled>"}
     exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
     rebuilt = namespace["catalog"]
     assert isinstance(rebuilt, CatalogIR)
@@ -248,7 +250,7 @@ def test_cli_decompile_stdout_and_roundtrip(tmp_path: Path) -> None:
     result = runner.invoke(app, ["decompile", str(CORPUS_DIR / "sem10_box_basic.jil")])
     assert result.exit_code == 0
     assert result.stdout.startswith("# Decompiled by dsl41")
-    namespace: dict[str, object] = {}
+    namespace: dict[str, object] = {"__name__": "<cli>"}
     exec(compile(result.stdout, "<cli>", "exec"), namespace)  # noqa: S102
     rebuilt = namespace["catalog"]
     assert isinstance(rebuilt, CatalogIR)
@@ -483,6 +485,25 @@ def test_resource_builder_populates_resources() -> None:
     assert resource.res_type == "R"
     assert resource.attrs == {"amount": "2", "description": "serializer"}
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_calendar_builders_populate_catalog_and_roundtrip() -> None:
+    """DL-36: the three autocal-export builders feed CatalogIR and survive
+    the decompile round-trip hash-equal."""
+    c = CatalogBuilder()
+    c.calendar("hols", dates=["01/01/2026 00:00", "12/25/2026 00:00"], description="bank")
+    c.cycle("q1", start_date="03/28/2026", end_date="04/02/2026")
+    c.extended_calendar("eom", workday="mo,tu,we,th,fr", holcal="hols", cyccal="q1", adjust="0")
+    catalog = c.build()
+    assert catalog.calendars["hols"].dates == ["01/01/2026 00:00", "12/25/2026 00:00"]
+    assert catalog.calendars["eom"].kind == "extended"
+    assert catalog.cycles["q1"].attrs["start_date"] == "03/28/2026"
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_calendar_date_row_that_would_reparse_as_an_attribute_is_refused() -> None:
+    with pytest.raises(DslError, match="re-parse as an attribute"):
+        CatalogBuilder().calendar("hols", dates=["surprise: 01/01/2026"])
 
 
 def test_resources_kwarg_round_trips_typed() -> None:

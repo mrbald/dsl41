@@ -60,6 +60,7 @@ class JilStatement(BaseModel):
     subject: str               # the value after the subcommand key (job name, etc.)
     job_type_inline: str | None  # 'insert_job: X job_type: c' one-line form support
     attrs: list[RawAttr]       # ORDER PRESERVED — this is the fidelity guarantee
+    date_lines: list[str] = [] # autocal standard-calendar date rows, verbatim (rule 11/DL-36)
     comments: list[Comment] = []
     span: SourceSpan
 
@@ -181,6 +182,9 @@ class CatalogIR(BaseModel):              # the compilation unit
     globals_declared: dict[str, str]     # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
     machines: dict[str, MachineIR]
+    calendars: dict[str, CalendarIR]     # autocal exports, opaque; standard+extended share
+                                         # the run_calendar namespace (DL-36)
+    cycles: dict[str, CycleIR]           # referenced by extended calendars' cyccal (DL-36)
     meta: CatalogMeta                    # source files, parse timestamp, tool version
 ```
 
@@ -209,6 +213,8 @@ class DerivedEdge(BaseModel):
 
 class DerivedGraph(BaseModel):
     nodes: list[str]
+    node_meta: dict[str, NodeMeta]        # DL-35: kind + trigger digest + cmd/watch detail,
+                                          # verbatim from IR-F (no analysis) for viz/report
     edges: list[DerivedEdge]
     mutex_groups: list[list[str]]         # from n() detector (M07)
     or_shapes: list[OrShape]              # M12 classifier output, each with lowering choice
@@ -307,6 +313,7 @@ each traceable to a SEM/M row:
 | L015 | warn/info | lookback format pitfalls in raw — single-digit minutes (`2.5` = 2h05m) warn; bare-hours (`30` = 30h) info, valid + unambiguous, DL-24 — parse-time | SEM-04 |
 | L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
 | L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
+| L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
 
 ## 10. Open design decisions (deliberately deferred)
 

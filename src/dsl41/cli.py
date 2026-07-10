@@ -87,7 +87,9 @@ _PROPERTIES = typer.Option(
 
 @app.command()
 def lint(
-    files: list[Path] = typer.Argument(..., help="JIL files forming one catalog"),
+    files: list[Path] = typer.Argument(
+        ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
     strict: bool = typer.Option(False, "--strict", help="Warnings also fail the exit code."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -237,7 +239,9 @@ def equiv(
 
 @app.command()
 def report(
-    files: list[Path] = typer.Argument(..., help="JIL files forming one catalog"),
+    files: list[Path] = typer.Argument(
+        ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
     out: Path = typer.Option(
         None, "--out", "-o", help="Write the markdown report here instead of stdout."
     ),
@@ -263,9 +267,17 @@ def report(
 
 @app.command()
 def decompile(
-    files: list[Path] = typer.Argument(..., help="JIL files forming one catalog"),
+    files: list[Path] = typer.Argument(
+        ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
     out: Path = typer.Option(
         None, "--out", "-o", help="Write the Python module here instead of stdout."
+    ),
+    check: bool = typer.Option(
+        True,
+        "--check/--no-check",
+        help="Execute the emitted module and verify the rebuilt catalog's canonical"
+        " hash equals the source's; divergence still emits the module but exits 1.",
     ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -273,17 +285,39 @@ def decompile(
     """Emit the catalog as a runnable dsl41 builder module (phase-10 DSL).
 
     Executing the emitted module rebuilds a catalog whose canonical form
-    equals this one. Exit 2 when the input never reached the decompiler.
+    equals this one; --check (default on) proves that on THIS catalog before
+    you rely on it -- a failure is a decompiler gap, worth a bug report, and
+    exits 1 (the module is still emitted for inspection). Exit 2 when the
+    input never reached the decompiler.
     """
     from dsl41.dsl import decompile as decompile_catalog
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     source = decompile_catalog(catalog)
+    divergence: str | None = None
+    if check:
+        from dsl41.equiv import catalog_hash, equivalent_tier_a
+
+        namespace: dict[str, object] = {"__name__": "<decompiled>"}
+        exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
+        rebuilt = namespace["catalog"]
+        assert isinstance(rebuilt, CatalogIR)
+        if catalog_hash(rebuilt) != catalog_hash(catalog):
+            result = equivalent_tier_a(catalog, rebuilt)
+            divergence = "; ".join(f"{k}: {v}" for k, v in sorted(result.detail.items())) or (
+                "hash mismatch with no tier-a detail (softer-tier fields, e.g. annotations)"
+            )
     if out is None:
         typer.echo(source, nl=False)
     else:
         out.write_text(source, encoding="utf-8")
         typer.echo(f"wrote {out}")
+    if divergence is not None:
+        typer.echo(
+            f"round-trip check FAILED (a decompiler gap, not your input): {divergence}",
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -355,29 +389,54 @@ def resolve(
 
 @app.command()
 def viz(
-    files: list[Path] = typer.Argument(..., help="JIL files forming one catalog"),
+    files: list[Path] = typer.Argument(
+        ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
     collapse_threshold: int = typer.Option(
         None,
         "--collapse-threshold",
         help="Boxes with more direct members than this render as one node.",
         show_default="12",
     ),
-    direction: str = typer.Option("LR", "--direction", help="Mermaid flow direction: LR or TD."),
+    direction: str = typer.Option(
+        "auto",
+        "--direction",
+        help="Chart direction: auto (per-component heuristic), LR, or TD.",
+    ),
+    include_singletons: bool = typer.Option(
+        False,
+        "--include-singletons",
+        help="Also chart standalone jobs (they are always listed in Appendix A).",
+    ),
+    elk: bool = typer.Option(
+        False,
+        "--elk",
+        help="Prepend Mermaid ELK-layout frontmatter (VS Code/local; GitHub ignores it).",
+    ),
+    out: Path = typer.Option(None, "--out", "-o", help="Write the report here, not stdout."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
 ) -> None:
-    """Render FILES' derived dependency graph as Mermaid on stdout."""
+    """Render FILES' derived dependency graph as a Markdown report of
+    per-workflow Mermaid charts (DL-35)."""
     from dsl41.derive import derive_graph
-    from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_mermaid
+    from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown
 
-    if direction not in ("LR", "TD"):
-        typer.echo(f"--direction must be LR or TD, got {direction!r}", err=True)
+    if direction not in ("auto", "LR", "TD"):
+        typer.echo(f"--direction must be auto, LR, or TD, got {direction!r}", err=True)
         raise typer.Exit(2)
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
-    mermaid = to_mermaid(
+    report = to_markdown(
         derive_graph(catalog),
+        title=", ".join(f.name for f in files),
         collapse_threshold=threshold,
         direction=direction,  # type: ignore[arg-type]  # validated above
+        include_singletons=include_singletons,
+        elk=elk,
     )
-    typer.echo(mermaid, nl=False)
+    if out is None:
+        typer.echo(report, nl=False)
+    else:
+        out.write_bytes(report.encode("utf-8"))  # bytes: keep line endings exact
+        typer.echo(f"wrote {out}")

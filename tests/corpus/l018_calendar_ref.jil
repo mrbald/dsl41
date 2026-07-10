@@ -1,0 +1,17 @@
+/* L018 trigger: l18_missing_cal has no calendar definition anywhere in the
+   corpus; l18_eom_cal is the in-file non-trigger. The job stays wired
+   (schedule) and dated (date_conditions) so L005/L011 keep quiet. */
+extended_calendar: l18_eom_cal
+description: "last workday of month"
+workday: mo,tu,we,th,fr
+non_workday: W
+adjust: 0
+condition: MONTH#L
+
+insert_job: l18_reporter   job_type: cmd
+machine: m1
+command: /usr/bin/true
+date_conditions: 1
+run_calendar: l18_eom_cal
+exclude_calendar: l18_missing_cal
+start_times: "04:10"

@@ -47,6 +47,7 @@ from dsl41.lint import (
     rule_l015,
     rule_l016,
     rule_l017,
+    rule_l018,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -410,6 +411,52 @@ def test_l017_checks_comma_lists_per_name_and_accepts_defined() -> None:
     assert rule_l017(lower_source(clean)) == []
 
 
+def test_l018_fires_only_when_the_set_carries_calendar_definitions() -> None:
+    """DL-36, the L017 convention: a job-only slice (zero calendar/cycle
+    definitions) stays quiet; once the set carries any, an unresolved
+    run_calendar/exclude_calendar is a smell."""
+    jobs_only = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nrun_calendar: ghost_cal\nstart_times: "01:00"\n'
+    )
+    assert rule_l018(lower_source(jobs_only)) == []
+    with_calendars = jobs_only + "\nextended_calendar: real_cal\nadjust: 0\n"
+    (violation,) = rule_l018(lower_source(with_calendars))
+    assert violation.severity == "warn"
+    assert violation.jobs == ["j"]
+    assert violation.detail == "ghost_cal"
+
+
+def test_l018_corpus_fixture_fires_for_the_missing_exclude_calendar() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "l018_calendar_ref.jil")])
+    (violation,) = rule_l018(catalog)
+    assert violation.jobs == ["l18_reporter"]
+    assert violation.detail == "l18_missing_cal"
+    assert "autocal export" in violation.message
+
+
+def test_l018_quiet_when_every_calendar_is_defined() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "calendars_autocal.jil")])
+    assert rule_l018(catalog) == []
+
+
+def test_l018_checks_holcal_and_cyccal_inside_extended_definitions() -> None:
+    """An extended calendar's own references resolve against the set:
+    holcal against the calendar namespace, cyccal against cycles (DL-36)."""
+    text = "extended_calendar: eom\nholcal: ghost_hols\ncyccal: ghost_cycle\nadjust: 0\n"
+    violations = rule_l018(lower_source(text))
+    assert [(v.jobs, v.detail) for v in violations] == [
+        ([], "ghost_hols"),
+        ([], "ghost_cycle"),
+    ]
+    resolved = (
+        "calendar: real_hols\n01/01/2026 00:00\n\n"
+        "cycle: real_cycle\nstart_date: 01/01/2026\n\n"
+        "extended_calendar: eom\nholcal: real_hols\ncyccal: real_cycle\nadjust: 0\n"
+    )
+    assert rule_l018(lower_source(resolved)) == []
+
+
 def test_l002_v_read_of_undeclared_global_warns_but_declared_or_produced_stay_quiet() -> None:
     """DL-25: v() reads join L002 as WARN (an unset global can be an
     intended cross-system gate), unlike $$-substitution ERRORs."""
@@ -452,7 +499,9 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     m07_mutex.jil's n() mutex pair + self-exclusion -- the phase-5 fixtures
     added per CLAUDE.md's derive/lint test-suite task). L016 joined with
     l016_resource_ref.jil (DL-25); L017 is registered but quiet -- the
-    corpus defines every machine it references (machines_base.jil)."""
+    corpus defines every machine it references (machines_base.jil). L018
+    joined with l018_calendar_ref.jil (DL-36); calendars_autocal.jil arms
+    it corpus-wide and resolves its own holcal/cyccal refs in-file."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -465,6 +514,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L012",
         "L015",
         "L016",
+        "L018",
     }
 
 
@@ -484,7 +534,9 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     two dangling v() reads nothing checked (consumer_window's $REGION and
     gate_box's $ABORT_FLAG -- the latter IS sem12's intended external
     gate, which is exactly why v() reads are warn, not error). L016 x1 via
-    l016_resource_ref.jil's missing pool."""
+    l016_resource_ref.jil's missing pool. L018 x1 via l018_calendar_ref.jil's
+    deliberately missing exclude_calendar (DL-36; the calendar fixtures added
+    no other finding -- every other count is unchanged)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -499,6 +551,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L005": 2,
             "L009": 1,
             "L016": 1,
+            "L018": 1,
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))

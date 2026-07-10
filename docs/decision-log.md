@@ -432,3 +432,121 @@
   executed; pre-existing pattern shared by all three builders, no
   documented JIL attribute has that name, and the failure is a loud
   TypeError. Fix if it ever fires: dict-splat fallback in decompile.
+- DL-35 Viz emits a Markdown report, not a bare Mermaid body (2026-07-10;
+  UI/UX + graph-layout consult). Motivations: one monolithic dagre chart of
+  a whole estate is unreadable; triggers and locks were visually silent;
+  admin-wrapper singleton jobs are noise. Decisions, each pinned by a test:
+  (1) `dsl41 viz` renders per-component charts inside one Markdown document
+  (summary line, folded legend, appendices); `to_mermaid` stays the public
+  single-chart function. (2) Component connectivity = dependency edges
+  between catalog jobs + box co-membership; mutex links do NOT connect
+  (a shared lock would glue unrelated streams -- cross-component pairs get
+  a "Shared locks" section); pseudo-sources replicate per component.
+  (3) Standalone jobs (size-1 component, no edges, no mutex membership --
+  structural rule, no command-text sniffing) are dropped from charts but
+  enumerated in Appendix A with kind/schedule/command; reversible via
+  --include-singletons. Loud, enumerated loss per the DL-07/DL-12 spirit.
+  (4) Visual grammar: shape/line-style primary, color redundant (dark-mode
+  `color:` on every classDef), Unicode symbols not FontAwesome (hosts do
+  not ship FA CSS). FW jobs = stadium+page symbol; schedule digests as a
+  second label line (trigger fields only, mirroring _trigger_signature);
+  externals move [[..]] -> hexagon so the subroutine shape is exclusively
+  collapsed boxes; undefined producers gain a warning-sign prefix.
+  (5) Edge-label thinning: via letter only when != success, lookback raw
+  always, mapping row only on redesign edges (+ red linkStyle); assumed
+  rows/assumptions move to Appendix B. (6) Mutex: pairs stay pairwise
+  x-. lock .-x; a COMPLETE clique >= 3 renders as one shared lock hub
+  (completeness checked -- the hub never claims an unstated exclusion);
+  self-mutex is a label badge, not a self-loop. (7) DerivedGraph gains
+  node_meta (kind, trigger digest, command/watch detail) carried verbatim
+  from IR-F -- display facts, no analysis; ir-design ss5 sketch amended.
+  (8) ELK layout stays opt-in (--elk): GitHub/GitLab do not register
+  Mermaid's ELK package (2026-07 check); VS Code >= 1.121 renders it.
+  Graphviz/D2/hand-rolled SVG backends rejected for now: dot is the
+  fallback if a real estate defeats dagre after the split (revisit here).
+- DL-35a Adversarial-review addendum (2026-07-10). Findings from the Opus
+  review of the DL-35 landing, all fixed same-day: (1) BLOCKER -- a mutex
+  pair naming an undefined job (unqualified n(ghost); derive's M07 detector
+  has no catalog-membership check, and L001 owns the loud finding) crashed
+  to_markdown with a KeyError in the shared-locks table. Undefined lock
+  members now render as undefined pseudo-nodes in their partner's chart,
+  scoped like edge pseudo-sources. (2) MAJOR, silent loss -- a mutex pair
+  (or self-lock badge) wholly inside a collapsed box was drawn nowhere and
+  enumerated nowhere. The cross-component-only "Shared locks" section is
+  replaced by an unconditional "Locks" section listing EVERY mutex group
+  with kind and chart ids ("not in catalog" for dangling members), same
+  pattern as Appendix B for non-exact edges. (3) MINOR -- <br/> in subgraph
+  TITLES renders inconsistently across hosts; expanded-box titles are now
+  one-line with middle-dot separators (node labels keep <br/>).
+  (4) MINOR -- collapse hid FW/schedule facts with no fallback; collapsed
+  labels now count hidden scheduled jobs and watchers. (5) NIT -- viz --out
+  now write_bytes like render's -o (exact line endings). Accepted as-is:
+  markdown metacharacters other than pipes/backticks are not escaped in
+  table cells and headings (documented JIL name charset is markdown-safe);
+  _mutex_plan assumes derive's sorted/deduped pairs (sole producer).
+- DL-36 Calendar exports accepted; L018 dangling-calendar rule (2026-07-10;
+  field report: calendar definitions passed as a separate file exited 2
+  with "attribute line 'extended_calendar' before any statement", and
+  unknown calendars were never detected). Vendor verification (TechDocs
+  12.1): calendars are NOT jil subcommands -- DL-29's inventory was correct
+  -- they are managed by autocal_asc, whose -E/-I text format carries three
+  statement kinds: `calendar:` (bare date rows), `cycle:` (start_date/
+  end_date), `extended_calendar:` (rule attributes: workday, non_workday,
+  holiday, holcal, cyccal, adjust, condition). Decisions: (1) the scanner
+  accepts the three export verbs as statement boundaries (rule 11) rather
+  than growing a second scanner -- the format is JIL-shaped except
+  standard-calendar date rows, and a parallel scanner would duplicate the
+  trivia/fidelity machinery; F1/F2 hold over calendar exports. Date rows
+  are verbatim statement body; an attribute after a date row is a loud
+  error (re-render would reorder). No documented JIL attribute shares the
+  three names, so boundary recognition costs nothing on valid JIL (the
+  DL-18 argument). (2) CalendarIR/CycleIR carried opaquely (MachineIR
+  precedent, DL-18): generating dates from extended rules is autocal's
+  semantics (U6/M24 parity), not this compiler's; standard + extended
+  share one namespace (run_calendar cannot disambiguate), cycles get their
+  own. Names are unquoted at lowering so they compare equal to unquoted
+  run_calendar refs. (3) This retires DL-25's "unknown calendar is
+  undecidable" clause: once the set carries any calendar/cycle definition,
+  existence IS decidable -- L018 (warn) checks job run_calendar/
+  exclude_calendar plus extended-calendar holcal/cyccal, gated on >= 1
+  definition in the set exactly like L017's machine convention (job-only
+  slices stay quiet). DL-25's M24/M26 report rows are unchanged, and the
+  migration report's calendar inventory now states per row whether the set
+  carries a definition (kind, or NO DEFINITION). Follow-up candidate, not
+  done: validating date-row shapes against the -f date_format inventory
+  (formats vary; verbatim carry is the honest v1).
+- DL-37 Decompiler completeness + parallel() emission (2026-07-10; design
+  review before first estate use, plus a field requirement: parallel boxes
+  with >10 same-producer members exist at least twice in the target
+  estate). Findings and decisions: (1) BLOCKER, silent loss -- _job_kwargs
+  predated the DL-32/DL-33 doc sweep and dropped success_codes, fail_codes,
+  std_in_file, envvars on decompile; no corpus fixture carried them, so the
+  corpus-wide round-trip test was blind. Fixed; kitchen_sink.jil now
+  witnesses every decompiler-visible typed lane the corpus lacked, keeping
+  the round-trip guard honest against future model growth. (2) The
+  decompiler now emits parallel() (the module docstring promised it; DL-17
+  had recorded sequence()-only): fan-out = >= 2 jobs whose entire condition
+  is exactly s(p) for one in-catalog producer p, grouped by exact condition
+  shape rather than derive's (preds, succs) signatures -- extra outgoing
+  edges do not disqualify a member, and any looser incoming shape stays an
+  explicit job(condition=...); fan-in = the unique job whose condition is
+  exactly the conjunction of the members' plain successes (zero or
+  ambiguous candidates stay explicit). Disjointness with sequence() is
+  structural, not filtered: a fan-out member gives p >= 2 successors, so
+  derive's single-successor chain linkage can never claim it. (3) decompile
+  --check (default on): the CLI executes the emitted module and verifies
+  canonical-hash equality on the user's actual catalog, turning any
+  residual decompiler gap into exit 1 with tier-a detail instead of a
+  silently lossy module; the module is still emitted for inspection.
+  Annotations sit outside the hash (ss6 softer tier) and are the check's
+  documented blind spot. (4) The emitted module ends with an
+  `if __name__ == "__main__"` footer printing to_jil(), so
+  `python module.py > rebuilt.jil` + `dsl41 equiv` is the whole iterate-
+  and-diff loop; section comments (records/jobs/wiring) make regeneration
+  diffs readable. (5) Calendar names with spaces (TechDocs' own example)
+  are quoted on emission and the calendar builders accept them; record
+  builders take `name` positional-only and attr keys colliding with Python
+  keywords or `name` emit through a **{} splat, so opaque-record attrs can
+  never produce a module that fails to compile; a standard-calendar attr
+  literally named `dates` is refused loudly (would bind the builder
+  parameter; no such attr exists in the export format).

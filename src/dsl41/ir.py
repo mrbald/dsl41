@@ -23,9 +23,10 @@ relitigated -- see the docstrings of the individual models/handlers):
   exact rule on a live instance; broadcast is the reading that accepts the
   documented example.
 - Subcommand support v1: insert_job / insert_global / insert_machine /
-  insert_xinst / insert_resource (DL-18). update_/delete_/override_ forms are
-  loud lowering errors -- merging update semantics is real semantics, not
-  syntax, and guessing it would be silent loss.
+  insert_xinst / insert_resource (DL-18), plus the autocal_asc calendar-export
+  statements calendar / cycle / extended_calendar carried opaquely (DL-36).
+  update_/delete_/override_ forms are loud lowering errors -- merging update
+  semantics is real semantics, not syntax, and guessing it would be silent loss.
 - SEM-24 [A] (DL-18): `status:` on insert_job lowers to
   Semantics.initial_status, restricted to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC;
   run states would interact with the SEM-01 latch and are refused loudly.
@@ -452,6 +453,29 @@ class XinstIR(BaseModel):
     span: SourceSpan | None = None
 
 
+class CalendarIR(BaseModel):
+    """autocal_asc export record (DL-36): a standard `calendar:` (bare date
+    rows) or `extended_calendar:` (rule attributes) definition. Carried
+    opaquely like MachineIR (DL-18) -- generating dates from extended rules
+    is autocal's semantics, not this compiler's (U6/M24 parity); v1 needs
+    the NAMES for L018 existence checks and the definitions verbatim."""
+
+    name: str
+    kind: Literal["standard", "extended"]
+    attrs: dict[str, str] = {}
+    dates: list[str] = []  # standard calendars: date rows, stripped verbatim
+    span: SourceSpan | None = None
+
+
+class CycleIR(BaseModel):
+    """autocal_asc `cycle:` record (DL-36): a named date-range set that
+    extended calendars reference via cyccal. Opaque carry like CalendarIR."""
+
+    name: str
+    attrs: dict[str, str] = {}
+    span: SourceSpan | None = None
+
+
 class CatalogMeta(BaseModel):
     source_files: list[str] = []
     tool_version: str = ""
@@ -516,6 +540,8 @@ class CatalogIR(BaseModel):
     external_instances: dict[str, XinstIR] = {}  # insert_xinst (SEM-07), plumbing opaque (DL-28)
     machines: dict[str, MachineIR] = {}
     resources: dict[str, ResourceIR] = {}  # insert_resource, opaque v1 (DL-18)
+    calendars: dict[str, CalendarIR] = {}  # standard + extended share the run_calendar namespace
+    cycles: dict[str, CycleIR] = {}  # referenced by extended calendars' cyccal (DL-36)
     meta: CatalogMeta = CatalogMeta()
 
     @model_validator(mode="after")
@@ -576,6 +602,10 @@ _SUPPORTED_SUBCOMMANDS = {
     "insert_machine",
     "insert_xinst",
     "insert_resource",
+    # DL-36: autocal_asc calendar-export statements
+    "calendar",
+    "cycle",
+    "extended_calendar",
 }
 
 #: Exec-cluster attributes valid on both CMD and FW jobs (ExecSpecBase).
@@ -633,6 +663,8 @@ class _Lowerer:
         self.external_instances: dict[str, XinstIR] = {}
         self.machines: dict[str, MachineIR] = {}
         self.resources: dict[str, ResourceIR] = {}
+        self.calendars: dict[str, CalendarIR] = {}
+        self.cycles: dict[str, CycleIR] = {}
         self.source_files: list[str] = []
 
     def err(self, message: str, span: SourceSpan | None) -> None:
@@ -655,6 +687,12 @@ class _Lowerer:
                     self._lower_resource(stmt)
                 elif sub == "insert_xinst":
                     self._lower_xinst(stmt)
+                elif sub == "calendar":
+                    self._lower_calendar(stmt, kind="standard")
+                elif sub == "extended_calendar":
+                    self._lower_calendar(stmt, kind="extended")
+                elif sub == "cycle":
+                    self._lower_cycle(stmt)
                 else:
                     self.err(
                         f"subcommand {stmt.subcommand!r} is not supported by lowering v1"
@@ -674,6 +712,8 @@ class _Lowerer:
             external_instances=self.external_instances,
             machines=self.machines,
             resources=self.resources,
+            calendars=self.calendars,
+            cycles=self.cycles,
             meta=CatalogMeta(source_files=self.source_files, tool_version=tool_version()),
         )
 
@@ -1263,6 +1303,43 @@ class _Lowerer:
         self.external_instances[name] = XinstIR(
             name=name,
             xtype=_unquote(xtype.raw_value),
+            attrs={a.key: a.raw_value.strip() for a in attrs.values()},
+            span=stmt.span,
+        )
+
+    def _lower_calendar(self, stmt: JilStatement, *, kind: Literal["standard", "extended"]) -> None:
+        name = self._subject(stmt, "calendar")
+        attrs = self._collect_attrs(stmt)
+        if name is None or attrs is None:
+            return
+        # unquoted so it compares equal to unquoted run_calendar refs (L018)
+        name = _unquote(name)
+        if name in self.calendars:
+            self.err(
+                f"duplicate calendar {name!r} (standard and extended calendars share the"
+                " run_calendar namespace)",
+                stmt.span,
+            )
+            return
+        self.calendars[name] = CalendarIR(
+            name=name,
+            kind=kind,
+            attrs={a.key: a.raw_value.strip() for a in attrs.values()},
+            dates=[row.strip() for row in stmt.date_lines],
+            span=stmt.span,
+        )
+
+    def _lower_cycle(self, stmt: JilStatement) -> None:
+        name = self._subject(stmt, "cycle")
+        attrs = self._collect_attrs(stmt)
+        if name is None or attrs is None:
+            return
+        name = _unquote(name)
+        if name in self.cycles:
+            self.err(f"duplicate cycle {name!r}", stmt.span)
+            return
+        self.cycles[name] = CycleIR(
+            name=name,
             attrs={a.key: a.raw_value.strip() for a in attrs.values()},
             span=stmt.span,
         )

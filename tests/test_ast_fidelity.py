@@ -165,6 +165,68 @@ def test_subcommand_shaped_guard_fires_before_any_statement_too() -> None:
         parse("delete_frobnicator: f1\n")
 
 
+# --------------------------------------------- rule 11: calendar exports (DL-36)
+
+
+def test_calendar_export_statements_are_boundaries() -> None:
+    """Rule 11 (DL-36): the autocal_asc export verbs start statements -- the
+    field failure was `extended_calendar` at file start dying as an
+    'attribute line before any statement'."""
+    text = (
+        "extended_calendar: eom\nworkday: mo,tu,we,th,fr\nadjust: 0\n\n"
+        "cycle: q1\nstart_date: 03/28/2026\nend_date: 04/02/2026\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["extended_calendar", "cycle"]
+    assert render(jf) == text
+
+
+def test_standard_calendar_date_rows_are_verbatim_statement_body() -> None:
+    text = (
+        "calendar: hols\ndescription: x\n"
+        "01/01/2026 00:00\n12/25/2026 00:00\n\n"
+        "insert_job: j   job_type: c\ncommand: x\n"
+    )
+    jf = parse(text)
+    calendar, job = jf.statements
+    assert calendar.date_lines == ["01/01/2026 00:00", "12/25/2026 00:00"]
+    assert [a.key for a in calendar.attrs] == ["description"]
+    assert job.subcommand == "insert_job"
+    assert render(jf) == text
+
+
+def test_calendar_date_rows_allowed_without_attrs() -> None:
+    text = "calendar: hols\n01/01/2026 00:00\n"
+    jf = parse(text)
+    assert jf.statements[0].date_lines == ["01/01/2026 00:00"]
+    assert render(jf) == text
+
+
+def test_attribute_after_date_rows_is_a_loud_error() -> None:
+    """Rule 11 (DL-36): the export format puts attributes before the date
+    list; re-rendering an interleaved shape would silently reorder it."""
+    with pytest.raises(JilParseError, match="after the date rows"):
+        parse("calendar: hols\n01/01/2026 00:00\ndescription: x\n")
+
+
+def test_date_row_outside_a_calendar_statement_is_still_an_error() -> None:
+    with pytest.raises(JilParseError, match="unrecognized line"):
+        parse("insert_job: j   job_type: c\ncommand: x\n01/01/2026 00:00\n")
+    with pytest.raises(JilParseError, match="unrecognized line"):
+        parse("extended_calendar: eom\nadjust: 0\n01/01/2026 00:00\n")
+
+
+def test_date_rows_must_be_contiguous_with_their_statement() -> None:
+    with pytest.raises(JilParseError, match="unrecognized line"):
+        parse("calendar: hols\n01/01/2026 00:00\n\n12/25/2026 00:00\n")
+
+
+def test_canonical_keeps_date_rows_after_attrs() -> None:
+    canonical = render_canonical(parse("calendar: hols\ndescription: x\n  01/01/2026 00:00  \n"))
+    assert canonical == "calendar: hols\ndescription: x\n01/01/2026 00:00\n"
+    assert render_canonical(parse(canonical)) == canonical
+
+
 def test_rename_job_is_a_statement_boundary() -> None:
     """Rule 3 (amended 2026-07-10, DL-27): rename_job is a documented 12.x
     subcommand whose rename_ verb sat outside the DL-18 guard shape -- before

@@ -575,7 +575,12 @@ def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
         JobRef(name="also_missing", instance="PRD"),  # sem06_dangling.jil
         JobRef(name="DB_BACKUP", instance="PRD"),  # torture_colon.jil
     ]
-    assert [(f.job, f.mapping_row) for f in graph.redesign_flags] == [("quarter_past", "M27")]
+    # sink_cmd joined with kitchen_sink.jil (DL-37): its run_window is part
+    # of the every-typed-lane coverage and correctly draws the M27 flag.
+    assert [(f.job, f.mapping_row) for f in graph.redesign_flags] == [
+        ("sink_cmd", "M27"),
+        ("quarter_past", "M27"),
+    ]
     assert graph.cycles == []
 
 
@@ -940,3 +945,83 @@ def test_l011_empty_box_message_names_the_container() -> None:
     catalog = lower_source(text)
     (violation,) = rule_l011(catalog, derive_graph(catalog))
     assert "empty box never completes" in violation.message
+
+
+# ------------------------------------------------------------- 13. node_meta (DL-35)
+
+# DerivedGraph.node_meta carries per-node display facts verbatim from IR-F
+# (module docstring): kind is the normalized job_type, schedule is a human
+# digest over TRIGGER fields only (mirroring _trigger_signature -- run_window
+# and must_* are excluded), detail is the command for CMD / watched path for
+# FW / None for boxes. viz.py is the only consumer; the model itself is
+# tested here.
+
+
+def test_node_meta_kind_is_the_job_type_verbatim_for_cmd_box_and_fw() -> None:
+    text = (
+        "insert_job: boxj\njob_type: b\n\n"
+        "insert_job: cmdj\njob_type: c\ncommand: /opt/x.sh\nmachine: m1\nbox_name: boxj\n\n"
+        "insert_job: fwj\njob_type: f\nwatch_file: /tmp/watch\nmachine: m1\n"
+    )
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["boxj"].kind == "BOX"
+    assert meta["cmdj"].kind == "CMD"
+    assert meta["fwj"].kind == "FW"
+
+
+def test_node_meta_detail_is_command_for_cmd_watch_file_for_fw_none_for_box() -> None:
+    text = (
+        "insert_job: boxj\njob_type: b\n\n"
+        "insert_job: cmdj\njob_type: c\ncommand: /opt/x.sh\nmachine: m1\nbox_name: boxj\n\n"
+        "insert_job: fwj\njob_type: f\nwatch_file: /tmp/watch\nmachine: m1\n"
+    )
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["boxj"].detail is None
+    assert meta["cmdj"].detail == "/opt/x.sh"
+    assert meta["fwj"].detail == "/tmp/watch"
+
+
+def test_node_meta_schedule_is_none_when_the_job_is_unscheduled() -> None:
+    text = "insert_job: unsched\njob_type: c\ncommand: x\nmachine: m1\n"
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["unsched"].schedule is None
+
+
+def test_node_meta_schedule_digest_start_times_and_days_of_week() -> None:
+    text = (
+        "insert_job: sched_days\njob_type: c\ncommand: /opt/run.sh\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: mo,tu\nstart_times: "10:00"\n'
+    )
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["sched_days"].schedule == "10:00 mo,tu"
+
+
+def test_node_meta_schedule_digest_start_mins_and_calendars() -> None:
+    text = (
+        "insert_job: sched_mins\njob_type: c\ncommand: /opt/run.sh\nmachine: m1\n"
+        "date_conditions: 1\nrun_calendar: CAL1\nexclude_calendar: CAL2\nstart_mins: 15,45\n"
+    )
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["sched_mins"].schedule == ":15,:45 cal CAL1 excl CAL2"
+
+
+def test_node_meta_schedule_digest_includes_timezone() -> None:
+    text = (
+        "insert_job: sched_tz\njob_type: c\ncommand: /opt/run.sh\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: mo,tu\nstart_times: "06:00, 18:30"\n'
+        "timezone: Zurich\n"
+    )
+    meta = derive_graph(lower_source(text)).node_meta
+    assert meta["sched_tz"].schedule == "06:00,18:30 mo,tu Zurich"
+
+
+def test_node_meta_schedule_excludes_run_window_and_must_start_times() -> None:
+    """SEM-33 (run_window is a gate)/SEM-34 (must_* are alarms) both stay out
+    of the digest, mirroring _trigger_signature -- pinned against the real
+    corpus fixture rather than a synthetic re-derivation."""
+    catalog = lower_catalog([parse_file(SEM30_SCHEDULE)])
+    meta = derive_graph(catalog).node_meta
+    # test_must_start_complete has must_start_times/must_complete_times: absent from the digest
+    assert meta["test_must_start_complete"].schedule == "10:00,11:00,12:00 all"
+    # quarter_past has run_window: absent from the digest
+    assert meta["quarter_past"].schedule == ":15,:30 mo,tu,we,th,fr"

@@ -33,21 +33,27 @@ dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 ```
 
-Runs L001-L015 (IR-F rules, truth-table rules, graph rules over the derived
-graph). `--strict` is the migration gate: refuse to ship a catalog that lints
+Runs L001-L018 (IR-F rules, truth-table rules, graph rules over the derived
+graph, dangling-name checks). `--strict` is the migration gate: refuse to ship a catalog that lints
 dirty.
 
 ### Visualize the dependency graph
 
 ```sh
-dsl41 viz jobs.jil > graph.mmd             # Mermaid on stdout
+dsl41 viz jobs.jil -o graph.md             # Markdown report of Mermaid charts
 dsl41 viz --direction TD --collapse-threshold 20 jobs.jil
+dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores it)
 ```
 
-Boxes render as subgraphs, edges carry their E/A/R migration class, and boxes
-with more direct members than the collapse threshold (default 12) fold into a
-single node. Paste the output into any Mermaid renderer (GitHub, mermaid.live,
-IDE preview).
+The report renders each independent workflow as its own chart (largest first),
+with a legend and appendices for everything the charts thin out: standalone
+admin-wrapper jobs (charted again with `--include-singletons`), assumed-edge
+assumptions, redesign flags, OR shapes, and cycles. Within a chart: boxes are
+subgraphs, edges carry their E/A/R migration class (solid/dashed/thick-red),
+file watchers and schedules are marked as triggers, mutual exclusions render
+as lock links or a shared lock hub, and boxes with more direct members than
+the collapse threshold (default 12) fold into a single node. Any Mermaid
+renderer works (GitHub, mermaid.live, IDE preview).
 
 ### Migration report
 
@@ -133,13 +139,14 @@ the 15-file synthetic/doc-derived JIL corpus under `tests/corpus/`.
   condition/box_success/box_failure expressions; lookback + span retention
 - src/dsl41/ir.py — IR-F Pydantic entity models + AST->IR-F lowering; DL-07 firewall
   refuses unknown attributes unless `permit_unknown` is set
-- src/dsl41/lint.py — Violation model + rules L001-L015 (pure IR-F rules L001-L005/L015,
+- src/dsl41/lint.py — Violation model + rules L001-L018 (pure IR-F rules L001-L005/L015,
   truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 over the derived
-  graph)
+  graph, dangling-name rules L016-L018)
 - src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes producing edges, mutex
   pairs, box tree, same-cycle detection, M01-M36 mapping-row classification
-- src/dsl41/viz.py — IR-G -> Mermaid: boxes as subgraphs, E/A/R edge-class arrows,
-  pseudo-node shapes, collapse threshold
+- src/dsl41/viz.py — IR-G -> Markdown report of per-workflow Mermaid charts (DL-35):
+  component split, trigger/lock visual grammar, E/A/R edge-class arrows, collapse
+  threshold, appendices for everything the charts drop
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter; script-driven
   completion, edge-triggered re-evaluation, per-SEM-entry trace tests
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
@@ -167,7 +174,8 @@ the 15-file synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - tests/test_derive.py — the seven IR-G passes plus the graph-rule lint additions
   L008-L014
 - tests/test_viz.py — Mermaid render structure (balanced blocks, id-safety, one golden
-  render) plus the viz CLI
+  render), the DL-35 markdown report (components, appendices, mutex encodings) plus
+  the viz CLI
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries, citing
   dossier §8's sparse T-ID index (T01–T34 range, not contiguous; T03/precedence is
   pinned at parse time in test_condition_grammar.py, not here)

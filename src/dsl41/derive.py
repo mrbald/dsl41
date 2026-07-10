@@ -49,6 +49,9 @@ Decisions pinned here (each with a test):
   job->job edges of `condition` origin only: box-override edges describe
   completion folding, not flow, and would fabricate cycles out of normal
   box behavior.
+- node_meta (DL-35) carries per-node display facts verbatim from IR-F
+  (kind, trigger digest, command/watch path) so viz can distinguish
+  triggers without reaching back into the catalog; no analysis lives in it.
 """
 
 from __future__ import annotations
@@ -149,8 +152,23 @@ class RedesignFlag(BaseModel):
     span: SourceSpan | None = None
 
 
+class NodeMeta(BaseModel):
+    """Display metadata for one catalog node (DL-35: viz/report consumers).
+
+    Carried verbatim from IR-F, no analysis: `kind` is the normalized
+    job_type; `schedule` is a human digest of the TRIGGER fields only
+    (run_window is a gate per SEM-33, must_* are alarms per SEM-34 -- both
+    excluded, mirroring _trigger_signature); `detail` is the command for CMD
+    jobs and the watched path for FW jobs."""
+
+    kind: str  # 'CMD' | 'BOX' | 'FW' + extensible, as JobIR.job_type
+    schedule: str | None = None
+    detail: str | None = None
+
+
 class DerivedGraph(BaseModel):
     nodes: list[str] = []  # catalog job names, source order
+    node_meta: dict[str, NodeMeta] = {}  # per-node display metadata (DL-35)
     edges: list[DerivedEdge] = []
     mutex_groups: list[list[str]] = []  # n() detector pairs (M07)
     or_shapes: list[OrShape] = []  # M12 classifier output
@@ -228,6 +246,40 @@ def _trigger_signature(schedule: ScheduleBlock) -> str:
     gate per SEM-33; must_* are alarms per SEM-34; both excluded)."""
     dump = schedule.model_dump(mode="json")
     return "sched:" + json.dumps({k: dump[k] for k in _TRIGGER_FIELDS}, sort_keys=True)
+
+
+def _schedule_digest(schedule: ScheduleBlock) -> str:
+    """Human one-liner over the same trigger fields as _trigger_signature."""
+    parts: list[str] = []
+    if schedule.start_times is not None:
+        parts.append(",".join(f"{t.hour:02d}:{t.minute:02d}" for t in schedule.start_times))
+    if schedule.start_mins is not None:
+        parts.append(",".join(f":{m:02d}" for m in schedule.start_mins))
+    if schedule.days_of_week is not None:
+        parts.append(",".join(schedule.days_of_week))
+    if schedule.run_calendar is not None:
+        parts.append(f"cal {schedule.run_calendar}")
+    if schedule.exclude_calendar is not None:
+        parts.append(f"excl {schedule.exclude_calendar}")
+    if schedule.timezone is not None:
+        parts.append(schedule.timezone)
+    return " ".join(parts) if parts else "scheduled"
+
+
+def _node_meta(catalog: CatalogIR) -> dict[str, NodeMeta]:
+    meta: dict[str, NodeMeta] = {}
+    for name, job in catalog.jobs.items():
+        detail: str | None = None
+        if isinstance(job.exec_, FwSpec):
+            detail = job.exec_.watch_file
+        elif job.exec_ is not None:
+            detail = job.exec_.command
+        meta[name] = NodeMeta(
+            kind=job.job_type,
+            schedule=None if job.schedule is None else _schedule_digest(job.schedule),
+            detail=detail,
+        )
+    return meta
 
 
 def _condition_pred_map(catalog: CatalogIR, refs: list[_RawRef]) -> dict[str, set[str]]:
@@ -760,6 +812,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
     cycles = _cycles(nodes, succs)  # pass 7
     return DerivedGraph(
         nodes=nodes,
+        node_meta=_node_meta(catalog),
         edges=edges,
         mutex_groups=mutex_groups,
         or_shapes=or_shapes,

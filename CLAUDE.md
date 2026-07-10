@@ -42,8 +42,9 @@ map); this list stays as the normative order and scope of each unit.
 4. `lint`: Violation model (stable codes, `exit_code(strict)`) + L001–L005, L015
    first (pure IR-F rules); graph rules follow phase 5.
 5. `derive`: passes 1–7 from ir-design §5, including mutex/OR/same-cycle detectors.
-6. `viz`: Mermaid from IR-G (boxes → subgraph, predicate-labeled edges, collapse
-   threshold).
+6. `viz`: Markdown report of per-component Mermaid charts from IR-G (boxes →
+   subgraph, predicate-labeled edges, collapse threshold; visual grammar,
+   component split, and appendices per DL-35).
 7. `oracle`: event loop + status store + box fold; port dossier §8 trace tests.
 8. `equiv`: canonical form, tier a (structural), tier b (truth table w/ atom
    ceiling), tier c (oracle traces, hypothesis event scripts).

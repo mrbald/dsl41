@@ -377,11 +377,16 @@ CONDITION_ATTRS = {"condition", "box_success", "box_failure"}
 def test_every_corpus_condition_attr_parses() -> None:
     """The two layers compose: every condition-bearing RawAttr in the corpus
     (comments already stripped by the scanner) is a valid condition expression
-    under both candidate grammars."""
+    under both candidate grammars. Calendar-export statements are skipped:
+    their `condition:` is a date-condition keyword expression (a different
+    vendor language, TechDocs "Date Condition Keywords"), carried opaquely
+    (DL-36)."""
     checked = 0
     for path in CORPUS:
         jf = parse_file(path)
         for stmt in jf.statements:
+            if stmt.subcommand.lower() in {"calendar", "cycle", "extended_calendar"}:
+                continue
             for attr in stmt.attrs:
                 if attr.key.lower() in CONDITION_ATTRS:
                     for mode in ("flat", "prec"):

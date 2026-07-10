@@ -26,7 +26,9 @@ from dsl41.ast_jil import parse_file
 from dsl41.conditions import And, JobRef, StatusAtom, parse_condition
 from dsl41.ir import (
     BoxLinkage,
+    CalendarIR,
     CatalogIR,
+    CycleIR,
     ExecSpec,
     FwSpec,
     JobIR,
@@ -184,7 +186,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     L012 -- renamed from job_a/job_b/job_serial/feeder to avoid colliding
     with sem10_box_basic.jil's job_a/job_b in this combined catalog) and
     sem12_external_gate.jil's gate_box/gate_member_a/gate_member_b/
-    gate_outside_job (SEM-12 external gating, M16/L008)."""
+    gate_outside_job (SEM-12 external gating, M16/L008). l18_reporter joined
+    with l018_calendar_ref.jil (DL-36); sink_cmd/sink_fw with
+    kitchen_sink.jil (DL-37)."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -207,6 +211,7 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "job_a",
         "job_b",
         "l16_writer",
+        "l18_reporter",
         "long_lists",
         "mutex_a",
         "mutex_b",
@@ -216,6 +221,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "pitfall_bare_hours",
         "pitfall_single_digit",
         "quarter_past",
+        "sink_cmd",
+        "sink_fw",
         "template",
         "test_must_start_complete",
         "upstream_daily",
@@ -373,6 +380,54 @@ def test_update_resource_is_unsupported_by_lowering_v1() -> None:
     with pytest.raises(LoweringError) as exc_info:
         lower_source("update_resource: lock1\namount: 2\n")
     assert "not supported by lowering v1" in str(exc_info.value)
+
+
+# --------------------------------------------- 3c. calendars_autocal.jil (DL-36)
+
+
+def test_calendar_exports_lower_opaquely() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "calendars_autocal.jil")])
+    assert set(catalog.calendars) == {"cal_exchange_holidays", "cal_last_workday"}
+    standard = catalog.calendars["cal_exchange_holidays"]
+    assert isinstance(standard, CalendarIR)
+    assert standard.kind == "standard"
+    assert standard.dates == ["01/01/2026 00:00", "07/03/2026 00:00", "12/25/2026 00:00"]
+    assert standard.attrs == {"description": '"exchange holidays"'}
+    extended = catalog.calendars["cal_last_workday"]
+    assert extended.kind == "extended"
+    assert extended.dates == []
+    # opaque carry, MachineIR-style: date-generation rules stay verbatim
+    assert extended.attrs["cyccal"] == "cyc_quarter_close"
+    assert extended.attrs["condition"] == "CYCLE#L"
+    cycle = catalog.cycles["cyc_quarter_close"]
+    assert isinstance(cycle, CycleIR)
+    assert cycle.attrs == {
+        "description": '"quarter close windows"',
+        "start_date": "03/28/2026",
+        "end_date": "04/02/2026",
+    }
+
+
+def test_calendar_names_are_unquoted_at_lowering() -> None:
+    """Calendar names may carry spaces; run_calendar refs are unquoted at
+    lowering, so calendar subjects must unquote symmetrically (DL-36)."""
+    catalog = lower_source('calendar: "shopping days"\n01/01/2026 00:00\n')
+    assert set(catalog.calendars) == {"shopping days"}
+
+
+def test_duplicate_calendar_across_kinds_is_a_lowering_error() -> None:
+    """Standard and extended calendars share the run_calendar namespace."""
+    text = "calendar: eom\n01/01/2026 00:00\n\nextended_calendar: eom\nadjust: 0\n"
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(text)
+    assert "duplicate calendar" in str(exc_info.value)
+
+
+def test_duplicate_cycle_is_a_lowering_error() -> None:
+    text = "cycle: q1\nstart_date: 01/01/2026\n\ncycle: q1\nstart_date: 02/01/2026\n"
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(text)
+    assert "duplicate cycle" in str(exc_info.value)
 
 
 def test_sem24_status_lowers_to_initial_status() -> None:

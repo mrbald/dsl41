@@ -1,0 +1,43 @@
+/* Kitchen-sink estate shapes (DL-37): every decompiler-visible typed lane
+   the corpus did not already witness, on one CMD job and one FW job. The
+   DL-32/DL-33 attrs (success_codes, fail_codes, std_in_file, envvars) had
+   NO corpus witness, which let the decompiler silently drop them -- this
+   fixture keeps the whole-corpus round-trip test honest. Scheduled so
+   L005/L011 stay quiet; no conditions, so derive's edge pins are untouched. */
+insert_job: sink_cmd
+job_type: c
+machine: m1
+owner: batch@prod
+command: /opt/etl/run.sh EU
+std_in_file: /opt/etl/in.txt
+std_out_file: /var/log/sink.out
+std_err_file: /var/log/sink.err
+envvars: REGION=EU,MODE=full
+profile: /etc/profiles/etl
+date_conditions: 1
+days_of_week: mo,we,fr
+start_times: "03:30, 15:30"
+run_window: "02:00-06:00"
+must_start_times: +5
+must_complete_times: 04:40, 16:40
+timezone: Europe/London
+max_exit_success: 2
+success_codes: 0-2, 4
+fail_codes: 7, 9-12
+term_run_time: 90
+n_retrys: 3
+auto_hold: 1
+status: ON_HOLD
+description: "kitchen sink"
+alarm_if_fail: 1
+job_load: 10
+priority: 5
+
+insert_job: sink_fw
+job_type: f
+machine: m1
+watch_file: /data/inbox/trigger.done
+watch_interval: 60
+watch_file_min_size: 1024
+date_conditions: 1
+start_times: "06:00"

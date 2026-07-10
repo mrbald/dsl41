@@ -74,7 +74,7 @@ from pydantic import BaseModel
 from dsl41.ast_jil import SourceSpan
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
 from dsl41.derive import DerivedGraph, derive_graph
-from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec
+from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, _unquote
 
 Severity = Literal["error", "warn", "info"]
 
@@ -443,6 +443,67 @@ def rule_l017(catalog: CatalogIR) -> list[Violation]:
     return out
 
 
+def rule_l018(catalog: CatalogIR) -> list[Violation]:
+    """Dangling calendar reference (DL-36), fired ONLY when the compilation
+    set carries at least one calendar or cycle definition (the L017
+    convention: job-only slices keep autocal exports out of scope and stay
+    quiet; once the set claims calendar coverage, an unresolved name is a
+    typo or a forgotten export file). Checks job run_calendar /
+    exclude_calendar against the calendar namespace (standard + extended)
+    and, inside extended-calendar definitions, holcal (a calendar) and
+    cyccal (a cycle). warn, not error: AutoSys resolves calendars against
+    its database -- but the UC backend cannot reproduce the run days
+    without the definition (M24), so the migration set is incomplete."""
+    if not catalog.calendars and not catalog.cycles:
+        return []
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        schedule = job.schedule
+        if schedule is None:
+            continue
+        for attr in ("run_calendar", "exclude_calendar"):
+            ref = getattr(schedule, attr)
+            if ref and ref not in catalog.calendars:
+                out.append(
+                    Violation(
+                        code="L018",
+                        severity="warn",
+                        message=(
+                            f"{job.name!r} {attr} names calendar {ref!r} with no definition"
+                            f" in the compilation set (which defines"
+                            f" {len(catalog.calendars)} calendar(s)) -- typo, or a missing"
+                            f" autocal export? (M24)"
+                        ),
+                        jobs=[job.name],
+                        span=job.span,
+                        detail=ref,
+                    )
+                )
+    for calendar in catalog.calendars.values():
+        if calendar.kind != "extended":
+            continue
+        for attr, defined, what in (
+            ("holcal", catalog.calendars, "calendar"),
+            ("cyccal", catalog.cycles, "cycle"),
+        ):
+            ref = _unquote(calendar.attrs.get(attr, ""))
+            if ref and ref not in defined:
+                out.append(
+                    Violation(
+                        code="L018",
+                        severity="warn",
+                        message=(
+                            f"extended calendar {calendar.name!r} {attr} names {what}"
+                            f" {ref!r} with no definition in the compilation set -- its"
+                            f" generated dates cannot be reproduced (M24)"
+                        ),
+                        span=calendar.span,
+                        detail=ref,
+                    )
+                )
+    return out
+
+
 # ------------------------------------------------------ tier-b rules (phase 8, equiv)
 
 
@@ -794,6 +855,7 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L015", rule_l015),
     ("L016", rule_l016),
     ("L017", rule_l017),
+    ("L018", rule_l018),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (

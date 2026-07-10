@@ -34,18 +34,26 @@ Design decisions (each with a test; recorded as DL-17):
 - The decompiler emits sequence() only where the derived chain's followers
   each carry EXACTLY the single atom s(prev) (no lookback, no instance, no
   extra conjuncts -- derive's chains are adjacency-based and the corpus's
-  mutex_b chain shows adjacency alone is not enough); parallel() only where
-  every member's condition is exactly s(common producer). Everything else
-  stays an explicit job(condition=...) call. Decompile output is a runnable
-  Python module: executing it rebuilds a catalog whose canonical form
-  equals the original's (the round-trip property, tested corpus-wide).
+  mutex_b chain shows adjacency alone is not enough); parallel() (DL-37)
+  where >= 2 jobs' conditions are each exactly s(p) for one in-catalog
+  producer p (fan-out), plus the UNIQUE join whose condition is exactly the
+  conjunction of the members' plain successes (fan-in; zero or ambiguous
+  joins stay explicit). The two sugars are naturally disjoint: a fan-out
+  member has >= 2 sibling successors of p, so derive's single-successor
+  chain linkage can never claim it. Everything else stays an explicit
+  job(condition=...) call. Decompile output is a runnable Python module:
+  executing it rebuilds a catalog whose canonical form equals the
+  original's (the round-trip property, tested corpus-wide); run as a
+  script it prints the rebuilt JIL for diff loops.
 - FW jobs round-trip through job(watch_file=...) kwargs -- mirroring the
   existing IR model is mechanical, not combinator design.
 """
 
 from __future__ import annotations
 
+import keyword
 import re
+from collections.abc import Sequence
 
 from dsl41.conditions import (
     And,
@@ -60,6 +68,9 @@ from dsl41.derive import DerivedGraph, derive_graph
 from dsl41.ir import CatalogIR, JobIR, ScheduleBlock, SlaSpec, Time, lower_source
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+#: The scanner's rule-1 attribute-line shape (key prefix + unescaped colon);
+#: a calendar date row matching it would re-parse as an attribute (DL-36).
+_ATTR_LINE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:")
 _CTRL_RE = re.compile(r"[\r\n\x00]")
 
 _STATUS_LETTER = {
@@ -171,13 +182,13 @@ class CatalogBuilder:
 
     # ------------------------------------------------------------------ records
 
-    def global_(self, name: str, value: str) -> CatalogBuilder:
+    def global_(self, name: str, value: str, /) -> CatalogBuilder:
         _check_name("global", name)
         _check_value("global", value)
         self._statements.append(f"insert_global: {name}\nvalue: {value}\n")
         return self
 
-    def machine(self, name: str, *, type: str | None = None, **attrs: str) -> CatalogBuilder:
+    def machine(self, name: str, /, *, type: str | None = None, **attrs: str) -> CatalogBuilder:
         _check_name("machine", name)
         lines = [f"insert_machine: {name}"]
         if type is not None:
@@ -189,7 +200,9 @@ class CatalogBuilder:
         self._statements.append("\n".join(lines) + "\n")
         return self
 
-    def resource(self, name: str, *, res_type: str | None = None, **attrs: str) -> CatalogBuilder:
+    def resource(
+        self, name: str, /, *, res_type: str | None = None, **attrs: str
+    ) -> CatalogBuilder:
         _check_name("resource", name)
         lines = [f"insert_resource: {name}"]
         if res_type is not None:
@@ -201,7 +214,7 @@ class CatalogBuilder:
         self._statements.append("\n".join(lines) + "\n")
         return self
 
-    def xinst(self, name: str, *, xtype: str, **attrs: str) -> CatalogBuilder:
+    def xinst(self, name: str, /, *, xtype: str, **attrs: str) -> CatalogBuilder:
         _check_name("external instance", name)
         lines = [f"insert_xinst: {name}", f"xtype: {_check_value('xtype', xtype)}"]
         for key, value in attrs.items():
@@ -210,6 +223,45 @@ class CatalogBuilder:
             lines.append(f"{key}: {_check_value('xinst attribute', value)}")
         self._statements.append("\n".join(lines) + "\n")
         return self
+
+    def calendar(self, name: str, /, *, dates: Sequence[str] = (), **attrs: str) -> CatalogBuilder:
+        """Standard-calendar record (autocal_asc export shape, DL-36):
+        attributes first, then bare date rows."""
+        lines = self._calendar_lines("calendar", name, attrs)
+        for row in dates:
+            row = _check_value("calendar date row", row).strip()
+            if not row or _ATTR_LINE_RE.match(row):
+                raise DslError(f"calendar date row {row!r} would re-parse as an attribute line")
+            lines.append(row)
+        self._statements.append("\n".join(lines) + "\n")
+        return self
+
+    def cycle(self, name: str, /, **attrs: str) -> CatalogBuilder:
+        """Cycle record (autocal_asc export shape, DL-36)."""
+        self._statements.append("\n".join(self._calendar_lines("cycle", name, attrs)) + "\n")
+        return self
+
+    def extended_calendar(self, name: str, /, **attrs: str) -> CatalogBuilder:
+        """Extended-calendar record (autocal_asc export shape, DL-36)."""
+        lines = self._calendar_lines("extended_calendar", name, attrs)
+        self._statements.append("\n".join(lines) + "\n")
+        return self
+
+    def _calendar_lines(self, verb: str, name: str, attrs: dict[str, str]) -> list[str]:
+        # Calendar names may carry spaces (TechDocs' own example is
+        # "shopping days") -- quoted on emission, unquoted at lowering.
+        # Tabs, quotes, and outer whitespace would not survive that
+        # quote--unquote round trip and are refused.
+        _check_value(f"{verb} name", name)
+        if not name or name != name.strip() or "\t" in name or '"' in name:
+            raise DslError(f"{verb} name {name!r} is not calendar-name-shaped")
+        subject = f'"{name}"' if " " in name else name
+        lines = [f"{verb}: {subject}"]
+        for key, value in attrs.items():
+            if not _KEY_RE.match(key):
+                raise DslError(f"{verb} attribute key {key!r} is not JIL-key-shaped")
+            lines.append(f"{key}: {_check_value(f'{verb} attribute', value)}")
+        return lines
 
     # ----------------------------------------------------------------- the four
 
@@ -378,11 +430,34 @@ def _sla(spec: SlaSpec) -> str:
     return ", ".join(_time(t) for t in spec.times)
 
 
+def _code_ranges(ranges: list[tuple[int, int]]) -> str:
+    """SEM-09/DL-33 exit-code sets back to their surface form; lowering keeps
+    the author's partition sorted-not-merged, so render(parse(x)) is stable."""
+    return ", ".join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
+
+
+def _record_kwargs(attrs: dict[str, str]) -> list[str]:
+    """Opaque record attrs as builder kwargs. Keys are JIL-key-shaped
+    (scanner rule 1) but may collide with Python keywords or the builders'
+    positional-only `name`; those route through a **{} splat so the emitted
+    module always compiles."""
+    plain = [f"{k}={_py(v)}" for k, v in attrs.items() if not _needs_splat(k)]
+    splat = {k: v for k, v in attrs.items() if _needs_splat(k)}
+    if splat:
+        plain.append("**{" + ", ".join(f"{_py(k)}: {_py(v)}" for k, v in splat.items()) + "}")
+    return plain
+
+
+def _needs_splat(key: str) -> bool:
+    return keyword.iskeyword(key) or key == "name"
+
+
 def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
     out: list[str] = []
     exec_ = job.exec_
     if exec_ is not None:
-        for field in ("command", "watch_file"):
+        # std_in_file/envvars are the DL-32 CMD-only pair; absent on FwSpec.
+        for field in ("command", "watch_file", "std_in_file", "envvars"):
             value = getattr(exec_, field, None)
             if value is not None:
                 out.append(f"{field}={_py(value)}")
@@ -405,6 +480,10 @@ def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
         out.append(f"box_failure={_py(cond_to_source(sem.box_failure))}")
     if sem.max_exit_success:
         out.append(f"max_exit_success={sem.max_exit_success}")
+    if sem.success_codes is not None:
+        out.append(f"success_codes={_py(_code_ranges(sem.success_codes))}")
+    if sem.fail_codes is not None:
+        out.append(f"fail_codes={_py(_code_ranges(sem.fail_codes))}")
     if sem.term_run_time_min is not None:
         out.append(f"term_run_time={sem.term_run_time_min}")
     if sem.n_retrys:
@@ -443,6 +522,26 @@ def _plain_s_condition(job: JobIR, producer: str) -> bool:
     )
 
 
+def _conjunction_of_plain_successes(cond: Cond | None, members: set[str]) -> bool:
+    """True iff cond is exactly s(m1) & ... & s(mN) over exactly `members`
+    (plain atoms only: no lookback, no instance, no nesting). The fan-in
+    half of the DL-37 parallel() detection; anything looser stays an
+    explicit job(condition=...)."""
+    if not isinstance(cond, And) or len(cond.operands) != len(members):
+        return False
+    names: set[str] = set()
+    for op in cond.operands:
+        if not (
+            isinstance(op, StatusAtom)
+            and op.status == "SUCCESS"
+            and op.lookback is None
+            and op.job.instance is None
+        ):
+            return False
+        names.add(op.job.name)
+    return names == members
+
+
 def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
     """Emit a runnable Python module of builder calls; executing it rebuilds
     a catalog canonically equal to this one (the round-trip property)."""
@@ -454,20 +553,47 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
         "",
         "c = CatalogBuilder()",
     ]
+    has_records = any(
+        (
+            catalog.globals_declared,
+            catalog.machines,
+            catalog.resources,
+            catalog.external_instances,
+            catalog.calendars,
+            catalog.cycles,
+        )
+    )
+    if has_records:
+        lines += ["", "# --- records"]
     for name, value in catalog.globals_declared.items():
         lines.append(f"c.global_({_py(name)}, {_py(value)})")
     for name, machine in catalog.machines.items():
         kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type else []
-        kwargs += [f"{k}={_py(v)}" for k, v in machine.attrs.items()]
+        kwargs += _record_kwargs(machine.attrs)
         lines.append(f"c.machine({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
     for name, resource in catalog.resources.items():
         kwargs = [f"res_type={_py(resource.res_type)}"] if resource.res_type else []
-        kwargs += [f"{k}={_py(v)}" for k, v in resource.attrs.items()]
+        kwargs += _record_kwargs(resource.attrs)
         lines.append(f"c.resource({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
     for name, xinst in catalog.external_instances.items():
         kwargs = [f"xtype={_py(xinst.xtype)}"]
-        kwargs += [f"{k}={_py(v)}" for k, v in xinst.attrs.items()]
+        kwargs += _record_kwargs(xinst.attrs)
         lines.append(f"c.xinst({_py(name)}, {', '.join(kwargs)})")
+    for name, calendar in catalog.calendars.items():
+        call = "calendar" if calendar.kind == "standard" else "extended_calendar"
+        kwargs = []
+        if calendar.dates:
+            kwargs.append(f"dates=[{', '.join(_py(row) for row in calendar.dates)}]")
+        if calendar.kind == "standard" and "dates" in calendar.attrs:
+            # would bind the builder's dates= parameter; loud beats a
+            # silently mangled module (no such attr exists in the vendor
+            # export format)
+            raise DslError(f"calendar {name!r} carries an attribute named 'dates'")
+        kwargs += _record_kwargs(calendar.attrs)
+        lines.append(f"c.{call}({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
+    for name, cycle in catalog.cycles.items():
+        kwargs = _record_kwargs(cycle.attrs)
+        lines.append(f"c.cycle({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
 
     # sequence() candidates: derived chains whose followers carry EXACTLY
     # s(prev) -- adjacency alone is not enough (module docstring)
@@ -481,8 +607,42 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
             sequences.append(chain)
             sequenced.update(chain[1:])  # heads keep their own condition (if any)
 
+    # parallel() candidates (DL-37): fan-out groups -- >= 2 jobs whose entire
+    # condition is exactly s(p) for one in-catalog producer p -- plus the
+    # unique fan-in join, if any. Grouping is by exact condition shape, not
+    # derive's (preds, succs) signatures: a member with extra OUTGOING edges
+    # still fans out from p, while any looser incoming shape must stay
+    # explicit. Disjointness with sequence() is structural: a fan-out member
+    # gives p >= 2 successors, so no chain link through p exists.
+    fanout: dict[str, list[str]] = {}
+    for name, job in catalog.jobs.items():
+        cond = job.sem.condition
+        if (
+            isinstance(cond, StatusAtom)
+            and cond.job.name in catalog.jobs
+            and _plain_s_condition(job, cond.job.name)
+        ):
+            fanout.setdefault(cond.job.name, []).append(name)
+    parallels: list[tuple[list[str], str, str | None]] = []
+    paralleled: set[str] = set()
+    for producer, members in fanout.items():
+        if len(members) < 2:
+            continue
+        member_set = set(members)
+        joins = [
+            name
+            for name, job in catalog.jobs.items()
+            if _conjunction_of_plain_successes(job.sem.condition, member_set)
+        ]
+        then = joins[0] if len(joins) == 1 else None
+        parallels.append((members, producer, then))
+        paralleled.update(members)
+        if then is not None:
+            paralleled.add(then)
+    suppressed = sequenced | paralleled
+
     def emit_job(job: JobIR, indent: str, method: str = "job") -> None:
-        include_condition = job.name not in sequenced
+        include_condition = job.name not in suppressed
         kwargs = _job_kwargs(job, include_condition=include_condition)
         prefix = f"{indent}{'b' if indent else 'c'}.{method}({_py(job.name)}"
         if job.job_type == "FW":
@@ -493,7 +653,7 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
 
     def emit_box(box_name: str, indent: str) -> None:
         job = catalog.jobs[box_name]
-        kwargs = _job_kwargs(job, include_condition=box_name not in sequenced)
+        kwargs = _job_kwargs(job, include_condition=box_name not in suppressed)
         lines.append(
             f"{indent}with c.box({_py(box_name)}{', ' if kwargs else ''}{', '.join(kwargs)}) as b:"
         )
@@ -508,14 +668,31 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
                 emit_job(catalog.jobs[member], indent + "    ")
                 emitted.add(member)
 
+    if catalog.jobs:
+        lines += ["", "# --- jobs"]
     for root in graph.box_tree.roots:
         emit_box(root, "")
     for name, job in catalog.jobs.items():
         if name not in emitted:
             emit_job(job, "")
             emitted.add(name)
+    if sequences or parallels:
+        lines += ["", "# --- wiring (the suppressed conditions above live here)"]
     for chain in sequences:
         args = ", ".join(_py(name) for name in chain)
         lines.append(f"c.sequence({args})")
-    lines += ["", "catalog = c.build()", ""]
+    for members, producer, then in parallels:
+        args = "[" + ", ".join(_py(m) for m in members) + "]"
+        tail = f", then={_py(then)}" if then is not None else ""
+        lines.append(f"c.parallel({args}, after={_py(producer)}{tail})")
+    lines += [
+        "",
+        "catalog = c.build()",
+        "",
+        'if __name__ == "__main__":',
+        "    import sys",
+        "",
+        "    sys.stdout.write(c.to_jil())",
+        "",
+    ]
     return "\n".join(lines)

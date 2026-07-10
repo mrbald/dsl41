@@ -215,15 +215,19 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
     if calendars:
         lines += [
             "",
-            "## Calendars (M24 — external definitions, not in JIL)",
+            "## Calendars (M24 — autocal definitions)",
             "",
-            "Calendars live in autocal, not JIL; recreate each in UC and verify"
-            " parity per calendar (U6).",
+            "Calendars are autocal objects; recreate each in UC and verify parity"
+            " per calendar (U6). Definitions travel as autocal_asc exports (DL-36);"
+            " a referenced calendar without one in the compilation set is flagged"
+            " here (and by L018 once the set carries any calendar).",
             "",
         ]
         for calendar in sorted(calendars):
             jobs_list = ", ".join(f"`{j}`" for j in sorted(calendars[calendar]))
-            lines.append(f"- `{calendar}` — used by {jobs_list}")
+            defined = catalog.calendars.get(calendar)
+            status = f"{defined.kind}, defined in set" if defined else "NO DEFINITION in set"
+            lines.append(f"- `{calendar}` ({status}) — used by {jobs_list}")
     open_questions = [
         (question, dep_rows, why)
         for question, dep_rows, why in _U_QUESTIONS
