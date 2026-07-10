@@ -619,3 +619,33 @@
   unknown refused, exit 2), `dsl41 folds` lists the registry, fold
   inventory + diagnostics on stderr. Additions to the set require a DL
   entry; "basic-looking" estate-relative shapes do not qualify.
+- DL-38a Adversarial-review addendum (2026-07-10). The Opus review of the
+  DL-38 landing confirmed the fold machinery with NO defects found -- ~70
+  hand-built adversarial catalogs (composition collisions incl. joins that
+  are mutex partners, boxes as producers/partners/chain members, three-way
+  cliques, residual-enabled chains, ambiguous joins) plus 12,500+ fuzzed
+  catalogs, each checked for canonical-hash equality, module exec-ability,
+  and determinism under default + random --no-fold subsets, in both Q1
+  grammar modes. Two observations pinned here: (1) Paren-wrapped joins
+  never fold, BY DESIGN: _plain_success_combo requires a bare top-level
+  And/Or, so `(s(a) | s(b))` written with explicit outer parens stays an
+  explicit job(condition=...) even where the bare form would fold to
+  parallel(then_any=). Consequence of Paren-node fidelity retention, and
+  asymmetric under T-005 stripping (a stripped top-level And re-flattens
+  and can fold; a retained Paren(Or) residual cannot). Both directions
+  round-trip; the conservatism stands -- folding through Paren would trade
+  fidelity structure for sugar. (2) LATENT, PRE-EXISTING, outside DL-38
+  scope, confirmed and flagged for its own fix: escaped-colon job names
+  never participate in derive edges or fold detection, because the scanner
+  keeps the backslash in the catalog job KEY (`alpha\:one`) while
+  condition lowering unescapes atom names (`alpha:one`) -- key and atom
+  can never match. Not silent loss (everything stays explicit and
+  round-trips verbatim), but cross-references on colon-named jobs are
+  invisible to derive/lint/viz/folds until the name normalization is
+  unified in the ast_jil/conditions layer. Separately, the test-suite
+  landing added corpus witnesses for all seven folds (trigger +
+  non-trigger each) and closed two regression gaps the mutation check
+  exposed: _link_verdict's lookback disqualification and T-005's
+  lookback-n() exclusion had no failing test before; the new fixtures
+  legitimately grew the whole-corpus derive edge count (18 -> 36) and made
+  the U1 open-question ledger fire through a genuine M12 OR-join shape.
