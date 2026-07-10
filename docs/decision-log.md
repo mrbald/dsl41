@@ -579,3 +579,43 @@
   std_out_file/std_err_file and box_terminator/job_terminator -- all now
   witnessed in kitchen_sink.jil; the sweep's skip-list is expected to
   stay empty.
+- DL-38 Closed fold registry: T-001..T-007, opt-out, composition (2026-07-10;
+  design debate on decompiler transform scope before first estate use).
+  Every decompiler transform beyond verbatim emission is a CLOSED, coded
+  set (dsl.FOLDS), each derivable from graph shape or typed lanes alone --
+  no naming or domain knowledge. Estate idioms (a receive-file quintuple,
+  etc.) are NOT built-ins; they wait for the custom-pattern door
+  (recognizer + verify-by-expansion, designed in-session, unbuilt).
+  Decisions: (1) Fold detection runs on RESIDUAL conditions -- T-005 strips
+  symmetric top-level bare n() pairs first -- so folds COMPOSE: the
+  corpus's own mutex chain (`n(mutex_a) & s(mutex_feeder)`) now folds as
+  sequence() + mutex(). The emitted wiring order (sequences/parallels,
+  then mutex) re-conjoins; mutex() parenthesizes the existing condition so
+  both Q1 grammar modes preserve the tree, and canonical conjunct sorting
+  is what makes conjoin order irrelevant to the hash gate. Stripping never
+  invalidates derive's chains (bare n() contributes no edges, M07).
+  (2) T-002 splits chains into maximal same-letter runs; run heads keep
+  their own condition, so the emission model needed nothing new. NO length
+  threshold: sugar is hash-neutral and thresholds destabilize regeneration
+  diffs. Every disqualified link is reported with a reason (lookback/Q2,
+  cross-instance/M33, exit-code atom, compound) -- the explicit-links
+  worklist is the migration audit trail. (3) T-004 admits uniform f/d/t
+  links via sequence(link=)/parallel(on=); joins stay s-based. (4) T-005
+  decompile detection is STRICTER than derive's M07: top-level And
+  conjuncts only, symmetric only, non-self only; one-way, nested, or
+  self n() stays an explicit condition. mutex() composes with existing
+  conditions BY DESIGN (conjoining is its declared operation, not a silent
+  merge) and marks its jobs conditioned, so chain builders refuse them
+  afterward -- wire chains first. (5) T-006 folds only whole-lane-identical
+  single-group resources into contend() (partial merge would have to
+  reproduce group order -- exactly the ambiguity contend() refuses); it
+  makes contention VISIBLE with no mutex semantics claim (capacity lives
+  in opaque ResourceIR attrs; QUE_WAIT out of v1 scope, DL-21). (6) T-007
+  factors emission-identical schedule blocks into shared module-level
+  dicts with content-derived deterministic names -- pure Python factoring,
+  no new DSL surface. (7) T-003 mirrors DL-37's and-join as
+  parallel(then_any=): unique or-join over exactly the member set, zero
+  or ambiguous stays explicit. CLI: --no-fold (comma-separated codes,
+  unknown refused, exit 2), `dsl41 folds` lists the registry, fold
+  inventory + diagnostics on stderr. Additions to the set require a DL
+  entry; "basic-looking" estate-relative shapes do not qualify.

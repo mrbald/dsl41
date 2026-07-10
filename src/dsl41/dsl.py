@@ -47,13 +47,28 @@ Design decisions (each with a test; recorded as DL-17):
   script it prints the rebuilt JIL for diff loops.
 - FW jobs round-trip through job(watch_file=...) kwargs -- mirroring the
   existing IR model is mechanical, not combinator design.
+- Fold registry (DL-38): every decompiler transform beyond verbatim emission
+  is a CLOSED, coded set (FOLDS: T-001..T-007), each derivable from graph
+  shape / typed lanes alone (no naming or domain knowledge) and each
+  guaranteed by construction: detection is exact-shape (stricter than
+  derive's classifiers), reconstruction is canonical-hash-neutral (canonical
+  form sorts/dedups conjuncts, so mutex() conjoin order cannot matter), and
+  `decompile --check` is the backstop. Callers opt out per code via
+  decompile(disable=...) / CLI --no-fold. Detection runs on RESIDUAL
+  conditions (T-005 mutex atoms stripped first), so folds compose: a link
+  `n(m) & s(prev)` folds as sequence + mutex, and the emitted module's
+  wiring order (sequences/parallels, then mutex) re-conjoins them. Standing
+  exclusions, never folded: lookback-qualified atoms (Q2), cross-instance
+  refs (M33), exit-code atoms, box_success/box_failure overrides (SEM-12),
+  one-way or nested n(), run_window (M27). Estate-specific idioms are NOT
+  built-ins; they go through the custom-pattern door when it lands.
 """
 
 from __future__ import annotations
 
 import keyword
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 from dsl41.conditions import (
     And,
@@ -86,6 +101,22 @@ _BARE_GLOBAL_VALUE_RE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
 
 class DslError(ValueError):
     pass
+
+
+#: The closed fold registry (DL-38; module docstring). Codes are stable API:
+#: `decompile(disable=...)` and the CLI --no-fold validate against this set.
+#: Dependencies: disabling T-001 also stops T-002 s-runs and T-003 (both
+#: refine the sequence/parallel machinery); T-004 alone still folds f/d/t
+#: shapes.
+FOLDS: dict[str, str] = {
+    "T-001": "plain s() chains -> sequence(); same-producer fan-out/fan-in -> parallel()",
+    "T-002": "sub-chain splitting: fold maximal qualifying runs inside disqualified chains",
+    "T-003": "any-of fan-in: the unique OR-of-member-successes join -> parallel(then_any=)",
+    "T-004": "uniform f()/d()/t() links -> sequence(link=) / parallel(on=)",
+    "T-005": "symmetric bare top-level n() conjunct pairs -> mutex()",
+    "T-006": "identical single-group resources: attrs across jobs -> contend()",
+    "T-007": "identical schedule blocks factored into shared module-level dicts",
+}
 
 
 # ------------------------------------------------------------- condition rendering
@@ -179,6 +210,7 @@ class CatalogBuilder:
         self._statements: list[str] = []
         self._box_stack: list[str] = []
         self._declared: dict[str, bool] = {}  # job -> has explicit condition
+        self._resourced: set[str] = set()  # jobs carrying a resources: attribute
 
     # ------------------------------------------------------------------ records
 
@@ -298,6 +330,8 @@ class CatalogBuilder:
             lines.append(f"condition: {_check_value('condition', condition)}")
         self._statements.append("\n".join(lines) + "\n")
         self._declared[name] = condition is not None
+        if "resources" in attrs:
+            self._resourced.add(name)
         return self
 
     def box(
@@ -312,12 +346,16 @@ class CatalogBuilder:
         self.job(name, job_type="b", condition=condition, **attrs)
         return _BoxScope(self, name)
 
-    def sequence(self, *names: str) -> CatalogBuilder:
-        """Wire already-declared jobs into an s()-chain: each follower gets
-        condition s(previous). Followers must have been declared without a
-        condition -- merging would be silent loss (DL-17)."""
+    def sequence(self, *names: str, link: str = "s") -> CatalogBuilder:
+        """Wire already-declared jobs into a status-chain: each follower gets
+        condition link(previous) -- s() by default, f()/d()/t() for
+        escalation / always-advance / kill-cleanup chains (T-004). Followers
+        must have been declared without a condition -- merging would be
+        silent loss (DL-17)."""
         if len(names) < 2:
             raise DslError("sequence() needs at least two job names")
+        if link not in ("s", "f", "d", "t"):
+            raise DslError(f"sequence() link {link!r} is not one of s/f/d/t")
         for name in names:
             if name not in self._declared:
                 raise DslError(f"sequence() references undeclared job {name!r}")
@@ -327,19 +365,30 @@ class CatalogBuilder:
                     f"sequence() follower {follower!r} already has a condition;"
                     " refusing to merge (silent loss)"
                 )
-            self._amend_condition(follower, f"s({prev})")
+            self._amend_condition(follower, f"{link}({prev})")
             self._declared[follower] = True
         return self
 
     def parallel(
-        self, names: list[str], *, after: str | None = None, then: str | None = None
+        self,
+        names: list[str],
+        *,
+        after: str | None = None,
+        on: str = "s",
+        then: str | None = None,
+        then_any: str | None = None,
     ) -> CatalogBuilder:
         """Fan already-declared jobs out from a common producer (each member
-        gets s(after)) and optionally back in (`then` gets the conjunction
-        of member successes). Same no-merge rule as sequence()."""
+        gets on(after) -- s() by default, f()/d()/t() per T-004) and
+        optionally back in: `then` gets the conjunction of member successes,
+        `then_any` the disjunction (T-003). Same no-merge rule as
+        sequence()."""
         if len(names) < 2:
             raise DslError("parallel() needs at least two member names")
-        for name in [*names, *([after] if after else []), *([then] if then else [])]:
+        if on not in ("s", "f", "d", "t"):
+            raise DslError(f"parallel() on {on!r} is not one of s/f/d/t")
+        joins = [j for j in (then, then_any) if j is not None]
+        for name in [*names, *([after] if after else []), *joins]:
             if name not in self._declared:
                 raise DslError(f"parallel() references undeclared job {name!r}")
         if after is not None:
@@ -349,25 +398,104 @@ class CatalogBuilder:
                         f"parallel() member {member!r} already has a condition;"
                         " refusing to merge (silent loss)"
                     )
-                self._amend_condition(member, f"s({after})")
+                self._amend_condition(member, f"{on}({after})")
                 self._declared[member] = True
-        if then is not None:
-            if self._declared[then]:
+        for join, joiner in ((then, " & "), (then_any, " | ")):
+            if join is None:
+                continue
+            if self._declared[join]:
                 raise DslError(
-                    f"parallel() join {then!r} already has a condition;"
+                    f"parallel() join {join!r} already has a condition;"
                     " refusing to merge (silent loss)"
                 )
-            self._amend_condition(then, " & ".join(f"s({m})" for m in names))
-            self._declared[then] = True
+            self._amend_condition(join, joiner.join(f"s({m})" for m in names))
+            self._declared[join] = True
+        return self
+
+    def mutex(self, *names: str) -> CatalogBuilder:
+        """Pairwise mutual exclusion (T-005): every pair gets each other's
+        bare n() CONJOINED onto whatever condition each job already carries.
+        Unlike sequence()/parallel() this composes with existing conditions
+        by design -- conjoining is the declared operation, not a silent
+        merge. The existing condition is parenthesized so both grammar modes
+        (Q1) preserve the tree; canonical form sorts conjuncts, so conjoin
+        order cannot affect equivalence. Call AFTER sequence()/parallel()
+        wiring: mutex() marks its jobs conditioned, and the chain builders
+        refuse conditioned followers."""
+        if len(names) < 2:
+            raise DslError("mutex() needs at least two job names")
+        if len(set(names)) != len(names):
+            raise DslError("mutex() names must be distinct")
+        for name in names:
+            if name not in self._declared:
+                raise DslError(f"mutex() references undeclared job {name!r}")
+        for i, a in enumerate(names):
+            for b in names[i + 1 :]:
+                self._conjoin_condition(a, f"n({b})")
+                self._conjoin_condition(b, f"n({a})")
+        for name in names:
+            self._declared[name] = True
+        return self
+
+    def contend(
+        self,
+        jobs: Sequence[str],
+        *,
+        resource: str,
+        quantity: int = 1,
+        free: str | None = None,
+    ) -> CatalogBuilder:
+        """One shared `resources:` requirement declared across several jobs
+        (T-006): the scattered per-job attribute made visible as contention.
+        Refuses jobs that already carry a resources attribute (no-merge)."""
+        if len(jobs) < 2:
+            raise DslError("contend() needs at least two job names")
+        _check_name("resource", resource)
+        if any(ch in resource for ch in "(),"):
+            raise DslError(f"resource name {resource!r} is not resource-name-shaped")
+        if quantity < 1:
+            raise DslError("contend() quantity must be >= 1")
+        if free not in (None, "Y", "N", "A"):
+            raise DslError(f"contend() free {free!r} is not one of Y/N/A")
+        for name in jobs:
+            if name not in self._declared:
+                raise DslError(f"contend() references undeclared job {name!r}")
+            if name in self._resourced:
+                raise DslError(
+                    f"contend() job {name!r} already carries resources;"
+                    " refusing to merge (silent loss)"
+                )
+        group = f"({resource}, QUANTITY={quantity}" + (f", FREE={free}" if free else "") + ")"
+        for name in jobs:
+            self._append_attr_line(name, f"resources: {group}")
+            self._resourced.add(name)
         return self
 
     # ----------------------------------------------------------------- plumbing
 
     def _amend_condition(self, job: str, condition: str) -> None:
+        self._append_attr_line(job, f"condition: {condition}")
+
+    def _conjoin_condition(self, job: str, atom: str) -> None:
         needle = f"insert_job: {job}\n"
         for index, statement in enumerate(self._statements):
             if statement.startswith(needle):
-                self._statements[index] = statement + f"condition: {condition}\n"
+                lines = statement.splitlines()
+                for j, line in enumerate(lines):
+                    if line.startswith("condition: "):
+                        existing = line[len("condition: ") :]
+                        lines[j] = f"condition: ({existing}) & {atom}"
+                        self._statements[index] = "\n".join(lines) + "\n"
+                        return
+                self._statements[index] = statement + f"condition: {atom}\n"
+                return
+        raise DslError(f"internal: statement for {job!r} not found")  # pragma: no cover
+
+    def _append_attr_line(self, job: str, line: str) -> None:
+        needle = f"insert_job: {job}\n"
+        for index, statement in enumerate(self._statements):
+            if statement.startswith(needle):
+                self._statements[index] = statement + line + "\n"
                 return
         raise DslError(f"internal: statement for {job!r} not found")  # pragma: no cover
 
@@ -452,7 +580,36 @@ def _needs_splat(key: str) -> bool:
     return keyword.iskeyword(key) or key == "name"
 
 
-def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
+def _schedule_var_name(schedule: ScheduleBlock, used: set[str]) -> str:
+    """Deterministic, content-derived name for a shared schedule (T-007):
+    readable where the block has times/calendar, numeric suffix on
+    collision (first-seen order, so regeneration is stable)."""
+    parts: list[str] = []
+    if schedule.start_times:
+        parts.append("_".join(f"{t.hour:02d}{t.minute:02d}" for t in schedule.start_times))
+    elif schedule.start_mins:
+        parts.append("MINS_" + "_".join(str(m) for m in schedule.start_mins))
+    if schedule.run_calendar:
+        parts.append(schedule.run_calendar)
+    elif schedule.days_of_week:
+        parts.append("_".join(schedule.days_of_week))
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", "_".join(parts)).strip("_").upper() or "BLOCK"
+    stem = f"SCHED_{stem}"[:48].rstrip("_")
+    name, counter = stem, 1
+    while name in used:
+        counter += 1
+        name = f"{stem}_{counter}"
+    used.add(name)
+    return name
+
+
+def _job_kwargs(
+    job: JobIR,
+    *,
+    condition: Cond | None,
+    sched_var: str | None = None,
+    fold_resources: bool = False,
+) -> list[str]:
     out: list[str] = []
     exec_ = job.exec_
     if exec_ is not None:
@@ -470,10 +627,13 @@ def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
             if value is not None:
                 out.append(f"{field}={_py(value)}")
     if job.schedule is not None:
-        out.extend(_schedule_kwargs(job.schedule))
+        if sched_var is not None:
+            out.append(f"**{sched_var}")
+        else:
+            out.extend(_schedule_kwargs(job.schedule))
     sem = job.sem
-    if include_condition and sem.condition is not None:
-        out.append(f"condition={_py(cond_to_source(sem.condition))}")
+    if condition is not None:
+        out.append(f"condition={_py(cond_to_source(condition))}")
     if sem.box_success is not None:
         out.append(f"box_success={_py(cond_to_source(sem.box_success))}")
     if sem.box_failure is not None:
@@ -496,7 +656,7 @@ def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
         out.append("box_terminator=True")
     if job.box.job_terminator:
         out.append("job_terminator=True")
-    if job.resources:
+    if job.resources and not fold_resources:
         groups = " AND ".join(
             f"({r.name}, QUANTITY={r.quantity}" + (f", FREE={r.free}" if r.free else "") + ")"
             for r in job.resources
@@ -511,23 +671,60 @@ def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
     return out
 
 
-def _plain_s_condition(job: JobIR, producer: str) -> bool:
-    cond = job.sem.condition
-    return (
+#: Statuses a chain link / fan-out member may fold through. Bare NOTRUNNING
+#: is mutex-classified (M07, T-005), lookback-n() stays an explicit edge.
+_FOLDABLE_STATUS = {"SUCCESS": "s", "FAILURE": "f", "DONE": "d", "TERMINATED": "t"}
+
+
+def _plain_status_atom(cond: Cond | None) -> tuple[str, str] | None:
+    """(producer, letter) iff cond is exactly ONE plain foldable status atom
+    (no lookback, no instance, no conjuncts)."""
+    if (
         isinstance(cond, StatusAtom)
-        and cond.status == "SUCCESS"
         and cond.lookback is None
         and cond.job.instance is None
-        and cond.job.name == producer
-    )
+        and cond.status in _FOLDABLE_STATUS
+    ):
+        return cond.job.name, _FOLDABLE_STATUS[cond.status]
+    return None
 
 
-def _conjunction_of_plain_successes(cond: Cond | None, members: set[str]) -> bool:
-    """True iff cond is exactly s(m1) & ... & s(mN) over exactly `members`
-    (plain atoms only: no lookback, no instance, no nesting). The fan-in
-    half of the DL-37 parallel() detection; anything looser stays an
+def _link_verdict(cond: Cond | None, prev: str) -> tuple[str | None, str]:
+    """(letter, '') when a chain link folds; (None, reason) otherwise. The
+    reasons feed the decompile fold report -- the estate's explicit-link
+    worklist."""
+    if cond is None:
+        return None, "no condition"
+    if isinstance(cond, (And, Or, Paren)):
+        return None, "compound condition"
+    if isinstance(cond, ExitCodeAtom):
+        return None, "exit-code atom"
+    if isinstance(cond, StatusAtom):
+        if cond.job.instance is not None:
+            return None, "cross-instance reference (M33)"
+        if cond.job.name != prev:
+            return None, f"references {cond.job.name!r}, not the predecessor"
+        if cond.lookback is not None:
+            return None, "lookback-qualified (Q2)"
+        letter = _FOLDABLE_STATUS.get(cond.status)
+        if letter is None:
+            return None, f"{cond.status.lower()} atom"
+        return letter, ""
+    return None, "global-value atom"
+
+
+def _plain_success_combo(
+    cond: Cond | None, members: set[str], op_type: type[And] | type[Or]
+) -> bool:
+    """True iff cond is exactly op(s(m1), ..., s(mN)) over exactly `members`
+    (plain atoms only: no lookback, no instance, no nesting). And = the
+    DL-37 fan-in; Or = the T-003 any-of join. Anything looser stays an
     explicit job(condition=...)."""
-    if not isinstance(cond, And) or len(cond.operands) != len(members):
+    if (
+        not isinstance(cond, (And, Or))
+        or type(cond) is not op_type
+        or len(cond.operands) != len(members)
+    ):
         return False
     names: set[str] = set()
     for op in cond.operands:
@@ -542,9 +739,70 @@ def _conjunction_of_plain_successes(cond: Cond | None, members: set[str]) -> boo
     return names == members
 
 
-def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
+def _is_bare_local_n(op: Cond, targets: set[str]) -> bool:
+    return (
+        isinstance(op, StatusAtom)
+        and op.status == "NOTRUNNING"
+        and op.lookback is None
+        and op.job.instance is None
+        and op.job.name in targets
+    )
+
+
+def _top_level_bare_n_targets(cond: Cond | None, self_name: str, jobs: Collection[str]) -> set[str]:
+    """In-catalog jobs referenced by bare n() atoms sitting as top-level
+    conjuncts (or as the whole condition). STRICTER than derive's M07 pass
+    (which counts any bare n() occurrence): an n() nested under an Or or a
+    group cannot be reconstructed by mutex()'s conjoin, so it never folds."""
+    if cond is None:
+        return set()
+    ops = cond.operands if isinstance(cond, And) else [cond]
+    eligible = set(jobs) - {self_name}
+    out: set[str] = set()
+    for op in ops:
+        if _is_bare_local_n(op, eligible):
+            assert isinstance(op, StatusAtom)
+            out.add(op.job.name)
+    return out
+
+
+def _without_mutex_atoms(cond: Cond, partners: set[str]) -> Cond | None:
+    """The residual condition after removing the folded pairs' bare n()
+    conjuncts; None when nothing else remains. Only ever called with
+    partners that _top_level_bare_n_targets confirmed, so removal is exact."""
+    if isinstance(cond, And):
+        kept = [op for op in cond.operands if not _is_bare_local_n(op, partners)]
+        if len(kept) == len(cond.operands):
+            return cond
+        if not kept:
+            return None
+        if len(kept) == 1:
+            return kept[0]
+        return And(operands=kept, span=None)
+    return None if _is_bare_local_n(cond, partners) else cond
+
+
+def decompile(
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
+    *,
+    disable: Collection[str] = (),
+    report: list[str] | None = None,
+) -> str:
     """Emit a runnable Python module of builder calls; executing it rebuilds
-    a catalog canonically equal to this one (the round-trip property)."""
+    a catalog canonically equal to this one (the round-trip property).
+
+    `disable` opts out of individual folds by code (FOLDS registry, DL-38);
+    unknown codes are refused loudly. `report`, when given, collects the
+    fold inventory and the per-link explicit-stays diagnostics."""
+    disabled = {code.strip().upper() for code in disable if code.strip()}
+    unknown = disabled - FOLDS.keys()
+    if unknown:
+        raise DslError(
+            f"unknown fold code(s): {', '.join(sorted(unknown))}"
+            f" (known: {', '.join(FOLDS)})"
+        )
+    notes: list[str] = []
     if graph is None:
         graph = derive_graph(catalog)
     lines: list[str] = [
@@ -595,55 +853,176 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
         kwargs = _record_kwargs(cycle.attrs)
         lines.append(f"c.cycle({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
 
-    # sequence() candidates: derived chains whose followers carry EXACTLY
-    # s(prev) -- adjacency alone is not enough (module docstring)
+    # T-005 first: fold detection below runs on RESIDUAL conditions (mutex
+    # atoms stripped), so folds compose -- the emitted module re-conjoins
+    # via mutex() AFTER sequence()/parallel() wiring. Stripping can never
+    # invalidate derive's chains: bare n() atoms are mutex-classified and
+    # contribute no edges (M07).
+    residual: dict[str, Cond | None] = {n: j.sem.condition for n, j in catalog.jobs.items()}
+    mutex_pairs: list[tuple[str, str]] = []
+    if "T-005" not in disabled:
+        n_targets = {
+            name: _top_level_bare_n_targets(residual[name], name, catalog.jobs)
+            for name in catalog.jobs
+        }
+        mutex_pairs = sorted(
+            {
+                (a, b) if a < b else (b, a)
+                for a, targets in n_targets.items()
+                for b in targets
+                if a in n_targets[b]  # symmetric only; one-way n() stays explicit
+            }
+        )
+        partners: dict[str, set[str]] = {}
+        for a, b in mutex_pairs:
+            partners.setdefault(a, set()).add(b)
+            partners.setdefault(b, set()).add(a)
+        for name, parts in partners.items():
+            cond = residual[name]
+            assert cond is not None  # a folded pair implies an n() conjunct
+            residual[name] = _without_mutex_atoms(cond, parts)
+
+    # sequence() candidates: derived chains whose links each carry EXACTLY
+    # one plain status atom on the predecessor -- adjacency alone is not
+    # enough (module docstring). T-001 admits s-links, T-004 f/d/t-links;
+    # T-002 folds maximal same-letter runs inside chains that mix or break.
+    def _letter_active(letter: str) -> bool:
+        return ("T-001" if letter == "s" else "T-004") not in disabled
+
     sequenced: set[str] = set()
-    sequences: list[list[str]] = []
+    sequences: list[tuple[list[str], str]] = []
+    split_chains = 0
     for chain in graph.chains:
-        if all(
-            _plain_s_condition(catalog.jobs[follower], prev)
-            for prev, follower in zip(chain, chain[1:])
-        ):
-            sequences.append(chain)
-            sequenced.update(chain[1:])  # heads keep their own condition (if any)
+        links = list(zip(chain, chain[1:]))
+        verdicts = [_link_verdict(residual[follower], prev) for prev, follower in links]
+        for (letter, reason), (prev, follower) in zip(verdicts, links):
+            if letter is None:
+                cond = residual[follower]
+                rendered = f" ({cond_to_source(cond)})" if cond is not None else ""
+                notes.append(f"explicit: link {prev!r}->{follower!r} -- {reason}{rendered}")
+        runs: list[tuple[int, int, str]] = []  # [start, end) over links
+        i = 0
+        while i < len(verdicts):
+            letter = verdicts[i][0]
+            if letter is None or not _letter_active(letter):
+                i += 1
+                continue
+            j = i + 1
+            while j < len(verdicts) and verdicts[j][0] == letter:
+                j += 1
+            runs.append((i, j, letter))
+            i = j
+        whole = len(runs) == 1 and runs[0][:2] == (0, len(verdicts))
+        if not whole:
+            if "T-002" in disabled:
+                if runs:
+                    notes.append(
+                        f"explicit: chain {chain[0]!r}..{chain[-1]!r}"
+                        " left whole (T-002 disabled)"
+                    )
+                continue
+            if runs:
+                split_chains += 1
+        for start, end, letter in runs:
+            names = chain[start : end + 1]
+            sequences.append((names, letter))
+            sequenced.update(names[1:])  # run heads keep their own condition
 
     # parallel() candidates (DL-37): fan-out groups -- >= 2 jobs whose entire
-    # condition is exactly s(p) for one in-catalog producer p -- plus the
-    # unique fan-in join, if any. Grouping is by exact condition shape, not
-    # derive's (preds, succs) signatures: a member with extra OUTGOING edges
-    # still fans out from p, while any looser incoming shape must stay
-    # explicit. Disjointness with sequence() is structural: a fan-out member
-    # gives p >= 2 successors, so no chain link through p exists.
-    fanout: dict[str, list[str]] = {}
-    for name, job in catalog.jobs.items():
-        cond = job.sem.condition
-        if (
-            isinstance(cond, StatusAtom)
-            and cond.job.name in catalog.jobs
-            and _plain_s_condition(job, cond.job.name)
-        ):
-            fanout.setdefault(cond.job.name, []).append(name)
-    parallels: list[tuple[list[str], str, str | None]] = []
+    # (residual) condition is exactly letter(p) for one in-catalog producer p
+    # -- plus the unique fan-in joins, if any: `then` = conjunction of member
+    # successes, `then_any` = disjunction (T-003). Grouping is by exact
+    # condition shape, not derive's (preds, succs) signatures: a member with
+    # extra OUTGOING edges still fans out from p, while any looser incoming
+    # shape must stay explicit. Disjointness with sequence() is structural:
+    # a fan-out member gives p >= 2 successors (member status atoms are edges
+    # whatever the letter), so no chain link through p exists.
+    fanout: dict[tuple[str, str], list[str]] = {}
+    for name in catalog.jobs:
+        plain = _plain_status_atom(residual[name])
+        if plain is None:
+            continue
+        producer, letter = plain
+        if producer not in catalog.jobs or producer == name or not _letter_active(letter):
+            continue
+        fanout.setdefault((producer, letter), []).append(name)
+    parallels: list[tuple[list[str], str, str, str | None, str | None]] = []
     paralleled: set[str] = set()
-    for producer, members in fanout.items():
+    for (producer, letter), members in fanout.items():
         if len(members) < 2:
             continue
         member_set = set(members)
-        joins = [
-            name
-            for name, job in catalog.jobs.items()
-            if _conjunction_of_plain_successes(job.sem.condition, member_set)
-        ]
-        then = joins[0] if len(joins) == 1 else None
-        parallels.append((members, producer, then))
+        and_joins = [n for n in catalog.jobs if _plain_success_combo(residual[n], member_set, And)]
+        then = and_joins[0] if len(and_joins) == 1 else None
+        then_any: str | None = None
+        if "T-003" not in disabled:
+            or_joins = [
+                n for n in catalog.jobs if _plain_success_combo(residual[n], member_set, Or)
+            ]
+            then_any = or_joins[0] if len(or_joins) == 1 else None
+        parallels.append((members, producer, letter, then, then_any))
         paralleled.update(members)
-        if then is not None:
-            paralleled.add(then)
+        for join in (then, then_any):
+            if join is not None:
+                paralleled.add(join)
     suppressed = sequenced | paralleled
 
+    # T-007: identical schedule blocks factored into shared module-level
+    # dicts -- grouping is by EMISSION equality (the rendered kwargs), the
+    # exact thing being deduplicated. Pure Python factoring, no new surface.
+    sched_vars: dict[str, str] = {}  # job -> variable name
+    sched_defs: list[tuple[str, tuple[str, ...]]] = []
+    if "T-007" not in disabled:
+        sched_groups: dict[tuple[str, ...], list[str]] = {}
+        for name, job in catalog.jobs.items():
+            if job.schedule is not None:
+                sched_groups.setdefault(tuple(_schedule_kwargs(job.schedule)), []).append(name)
+        used_vars: set[str] = set()
+        for sched_key, group_jobs in sched_groups.items():
+            if len(group_jobs) < 2:
+                continue
+            schedule = catalog.jobs[group_jobs[0]].schedule
+            assert schedule is not None
+            var = _schedule_var_name(schedule, used_vars)
+            sched_defs.append((var, sched_key))
+            for name in group_jobs:
+                sched_vars[name] = var
+
+    # T-006: identical single-group resources: attrs across >= 2 jobs fold
+    # into one contend() declaration. Whole-lane equality only (name,
+    # quantity, free); multi-group jobs stay explicit -- reconstructing a
+    # partial list would have to reproduce group order, which is exactly the
+    # merge ambiguity contend() refuses.
+    contends: list[tuple[list[str], str, int, str | None]] = []
+    resource_folded: set[str] = set()
+    if "T-006" not in disabled:
+        res_groups: dict[tuple[str, int, str | None], list[str]] = {}
+        for name, job in catalog.jobs.items():
+            if len(job.resources) == 1:
+                ref = job.resources[0]
+                res_groups.setdefault((ref.name, ref.quantity, ref.free), []).append(name)
+        for (res_name, quantity, free), group_jobs in res_groups.items():
+            if len(group_jobs) < 2:
+                continue
+            if " " in res_name or "\t" in res_name or any(ch in res_name for ch in "(),"):
+                notes.append(
+                    f"explicit: resource {res_name!r} shared by {len(group_jobs)} jobs"
+                    " -- name is not resource-name-shaped for contend()"
+                )
+                continue
+            contends.append((group_jobs, res_name, quantity, free))
+            resource_folded.update(group_jobs)
+
+    def emit_condition(name: str) -> Cond | None:
+        return None if name in suppressed else residual[name]
+
     def emit_job(job: JobIR, indent: str, method: str = "job") -> None:
-        include_condition = job.name not in suppressed
-        kwargs = _job_kwargs(job, include_condition=include_condition)
+        kwargs = _job_kwargs(
+            job,
+            condition=emit_condition(job.name),
+            sched_var=sched_vars.get(job.name),
+            fold_resources=job.name in resource_folded,
+        )
         prefix = f"{indent}{'b' if indent else 'c'}.{method}({_py(job.name)}"
         if job.job_type == "FW":
             kwargs.insert(0, "job_type='f'")
@@ -653,7 +1032,12 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
 
     def emit_box(box_name: str, indent: str) -> None:
         job = catalog.jobs[box_name]
-        kwargs = _job_kwargs(job, include_condition=box_name not in suppressed)
+        kwargs = _job_kwargs(
+            job,
+            condition=emit_condition(box_name),
+            sched_var=sched_vars.get(box_name),
+            fold_resources=box_name in resource_folded,
+        )
         lines.append(
             f"{indent}with c.box({_py(box_name)}{', ' if kwargs else ''}{', '.join(kwargs)}) as b:"
         )
@@ -668,6 +1052,10 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
                 emit_job(catalog.jobs[member], indent + "    ")
                 emitted.add(member)
 
+    if sched_defs:
+        lines += ["", "# --- shared schedules (T-007)"]
+        for var, sched_key in sched_defs:
+            lines.append(f"{var} = dict({', '.join(sched_key)})")
     if catalog.jobs:
         lines += ["", "# --- jobs"]
     for root in graph.box_tree.roots:
@@ -676,15 +1064,55 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
         if name not in emitted:
             emit_job(job, "")
             emitted.add(name)
-    if sequences or parallels:
+    if sequences or parallels or mutex_pairs or contends:
         lines += ["", "# --- wiring (the suppressed conditions above live here)"]
-    for chain in sequences:
-        args = ", ".join(_py(name) for name in chain)
-        lines.append(f"c.sequence({args})")
-    for members, producer, then in parallels:
+    for names, letter in sequences:
+        args = ", ".join(_py(name) for name in names)
+        tail = f", link={_py(letter)}" if letter != "s" else ""
+        lines.append(f"c.sequence({args}{tail})")
+    for members, producer, letter, then, then_any in parallels:
         args = "[" + ", ".join(_py(m) for m in members) + "]"
-        tail = f", then={_py(then)}" if then is not None else ""
+        tail = f", on={_py(letter)}" if letter != "s" else ""
+        tail += f", then={_py(then)}" if then is not None else ""
+        tail += f", then_any={_py(then_any)}" if then_any is not None else ""
         lines.append(f"c.parallel({args}, after={_py(producer)}{tail})")
+    for a, b in mutex_pairs:
+        lines.append(f"c.mutex({_py(a)}, {_py(b)})")
+    for group_jobs, res_name, quantity, free in contends:
+        args = "[" + ", ".join(_py(n) for n in group_jobs) + "]"
+        tail = f", free={_py(free)}" if free else ""
+        lines.append(f"c.contend({args}, resource={_py(res_name)}, quantity={quantity}{tail})")
+
+    if report is not None:
+        s_seq = [s for s in sequences if s[1] == "s"]
+        x_seq = [s for s in sequences if s[1] != "s"]
+        s_par = [p for p in parallels if p[2] == "s"]
+        x_par = [p for p in parallels if p[2] != "s"]
+        any_joins = sum(1 for p in parallels if p[4] is not None)
+        if s_seq or s_par:
+            report.append(
+                f"T-001: {len(s_seq)} sequence(s) ({sum(len(s[0]) for s in s_seq)} jobs),"
+                f" {len(s_par)} parallel group(s)"
+                f" ({sum(len(p[0]) for p in s_par)} members)"
+            )
+        if split_chains:
+            report.append(f"T-002: {split_chains} chain(s) folded as sub-runs")
+        if any_joins:
+            report.append(f"T-003: {any_joins} any-of join(s)")
+        if x_seq or x_par:
+            report.append(
+                f"T-004: {len(x_seq)} non-s sequence(s), {len(x_par)} non-s parallel group(s)"
+            )
+        if mutex_pairs:
+            report.append(f"T-005: {len(mutex_pairs)} mutex pair(s)")
+        if contends:
+            report.append(
+                f"T-006: {len(contends)} contention group(s)"
+                f" ({sum(len(g[0]) for g in contends)} jobs)"
+            )
+        if sched_defs:
+            report.append(f"T-007: {len(sched_defs)} shared schedule(s) ({len(sched_vars)} jobs)")
+        report.extend(notes)
     lines += [
         "",
         "catalog = c.build()",

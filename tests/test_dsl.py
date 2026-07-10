@@ -230,14 +230,30 @@ def test_builder_goes_through_the_real_pipeline() -> None:
 # ----------------------------------------------------------- decompiler specifics
 
 
-def test_decompiler_emits_sequence_only_for_pure_s_chains() -> None:
-    """The corpus's mutex chain (compound condition) must stay an explicit
-    job(condition=...); the pure-s() chain becomes sequence() (DL-17)."""
+def test_decompiler_folds_compose_on_the_corpus_mutex_chain() -> None:
+    """DL-38: detection runs on mutex-stripped residuals, so the corpus's
+    mutex chain -- `n(mutex_a) & s(mutex_feeder)` on mutex_b -- folds as
+    sequence() + mutex(), and the emitted module re-conjoins them (wiring
+    order: sequences before mutex). The self-excluding mutex_serial stays
+    an explicit condition (one-way/self n() never folds)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     source = decompile(catalog)
     assert "c.sequence('upstream_daily', 'consumer_stale')" in source
+    assert "c.sequence('mutex_feeder', 'mutex_b')" in source
+    assert "c.mutex('mutex_a', 'mutex_b')" in source
+    assert "'n(mutex_a) & s(mutex_feeder)'" not in source  # folded, not verbatim
+    assert "condition='n(mutex_serial)'" in source  # self-mutex stays explicit
+    assert source.index("c.sequence('mutex_feeder'") < source.index("c.mutex(")
+
+
+def test_decompiler_keeps_mutex_chain_explicit_when_folds_disabled() -> None:
+    """--no-fold T-005 (and T-001) restores the DL-17 pinning: the compound
+    condition stays an explicit job(condition=...), never swallowed."""
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    source = decompile(catalog, disable=("T-005",))
     assert "'n(mutex_a) & s(mutex_feeder)'" in source  # NOT swallowed by sequence
     assert "c.sequence('mutex_feeder'" not in source
+    assert "c.mutex(" not in source
 
 
 def test_decompiler_emits_boxes_as_with_blocks() -> None:
@@ -602,7 +618,7 @@ def test_cli_decompile_check_failure_exits_1_but_still_writes_module(
         "c.job('only_one_job', command='x', machine='m1')\n"
         "catalog = c.build()\n"
     )
-    monkeypatch.setattr("dsl41.dsl.decompile", lambda catalog: broken_source)
+    monkeypatch.setattr("dsl41.dsl.decompile", lambda catalog, **kwargs: broken_source)
     target = tmp_path / "rebuilt.py"
     result = runner.invoke(
         app, ["decompile", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")]

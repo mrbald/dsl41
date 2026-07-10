@@ -279,6 +279,12 @@ def decompile(
         help="Execute the emitted module and verify the rebuilt catalog's canonical"
         " hash equals the source's; divergence still emits the module but exits 1.",
     ),
+    no_fold: str = typer.Option(
+        "",
+        "--no-fold",
+        help="Comma-separated fold codes to disable (DL-38 closed set;"
+        " `dsl41 folds` lists them), e.g. 'T-005,T-007'.",
+    ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
 ) -> None:
@@ -288,17 +294,22 @@ def decompile(
     equals this one; --check (default on) proves that on THIS catalog before
     you rely on it -- a failure is a decompiler gap, worth a bug report, and
     exits 1 (the module is still emitted for inspection). Exit 2 when the
-    input never reached the decompiler.
+    input never reached the decompiler. The fold inventory and the
+    stays-explicit diagnostics go to stderr.
     """
     from dsl41.dsl import DslError
     from dsl41.dsl import decompile as decompile_catalog
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    fold_report: list[str] = []
     try:
-        source = decompile_catalog(catalog)
+        source = decompile_catalog(
+            catalog, disable=no_fold.split(",") if no_fold else (), report=fold_report
+        )
     except DslError as exc:
-        # a decompiler refusal (nothing emittable) is the same class as a
-        # lowering refusal: the input never became output (DL-37a)
+        # a decompiler refusal (nothing emittable, unknown fold code) is the
+        # same class as a lowering refusal: the input never became output
+        # (DL-37a)
         typer.echo(f"decompile refused: {exc}", err=True)
         raise typer.Exit(2) from exc
     # Emit BEFORE checking (DL-37a): the module must survive for inspection
@@ -308,6 +319,8 @@ def decompile(
     else:
         out.write_text(source, encoding="utf-8")
         typer.echo(f"wrote {out}")
+    for line in fold_report:
+        typer.echo(f"fold: {line}", err=True)
     if check:
         from dsl41.equiv import catalog_hash, equivalent_tier_a
 
@@ -333,6 +346,15 @@ def decompile(
                 err=True,
             )
             raise typer.Exit(1)
+
+
+@app.command()
+def folds() -> None:
+    """List the decompiler's built-in fold registry (DL-38 closed set)."""
+    from dsl41.dsl import FOLDS
+
+    for code, description in FOLDS.items():
+        typer.echo(f"{code}  {description}")
 
 
 @app.command()
