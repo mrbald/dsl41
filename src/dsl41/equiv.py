@@ -231,8 +231,22 @@ def canonical_catalog(
         name: machine.model_copy(update={"span": None})
         for name, machine in catalog.machines.items()
     }
+    resources = {
+        name: resource.model_copy(update={"span": None})
+        for name, resource in catalog.resources.items()
+    }
+    external_instances = {
+        name: xinst.model_copy(update={"span": None})
+        for name, xinst in catalog.external_instances.items()
+    }
     canonical = catalog.model_copy(
-        update={"jobs": jobs, "machines": machines, "meta": type(catalog.meta)()}
+        update={
+            "jobs": jobs,
+            "machines": machines,
+            "resources": resources,
+            "external_instances": external_instances,
+            "meta": type(catalog.meta)(),
+        }
     )
     return canonical
 
@@ -560,8 +574,16 @@ def cond_truth_profile(
             continue
         skip = False
         for key, allowed in fixed_status.items():
+            if key not in state.job_status:
+                # DL-26: a pin on a job the condition never references is
+                # vacuous -- it cannot affect this condition's truth. The old
+                # `.get(key) not in allowed` treated it as unsatisfiable and
+                # skipped EVERY state, turning any box member whose condition
+                # ignores at least one sibling into a false L007 tautology
+                # (e.g. every vanilla s(prev) chain in a 3+-member box).
+                continue
             allowed_set = {allowed} if isinstance(allowed, str) else allowed
-            if state.job_status.get(key) not in allowed_set:
+            if state.job_status[key] not in allowed_set:
                 skip = True
                 break
         if skip:

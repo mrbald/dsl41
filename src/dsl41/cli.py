@@ -3,7 +3,15 @@
 Exit-code contract (shared by all catalog-consuming commands): 0 success
 (for lint: clean); 1 linter findings at or above the failing severity
 (errors, or warnings too with --strict); 2 the input never reached the
-tool (unreadable file, JIL parse error, or lowering refusal).
+tool (unreadable file, JIL parse error, placeholder-resolution failure,
+or lowering refusal).
+
+Templated estates (DL-19/DL-22): every catalog-consuming command accepts
+--properties/-p to resolve `~{$NAME}~` placeholders before parsing, so a
+bunch of templated JILs lints/reports/derives as one catalog in one step.
+Substitution is within-line, so diagnostics keep pointing at the real
+file and line. The typed lanes (start_times etc.) stay strict on
+unresolved tokens by design -- preprocessing IS the supported path.
 """
 
 from __future__ import annotations
@@ -14,9 +22,10 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from dsl41.ast_jil import JilParseError, parse_file
+from dsl41.ast_jil import JilFile, JilParseError, parse, parse_file
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.lint import lint_catalog
+from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
@@ -38,10 +47,23 @@ def _root() -> None:
     """
 
 
-def _load_catalog_or_exit_2(files: Iterable[Path], permit_unknown: bool) -> CatalogIR:
+def _load_catalog_or_exit_2(
+    files: Iterable[Path],
+    permit_unknown: bool,
+    properties: list[Path] | None = None,
+) -> CatalogIR:
     try:
-        return lower_catalog([parse_file(path) for path in files], permit_unknown=permit_unknown)
-    except (JilParseError, LoweringError, OSError, UnicodeDecodeError) as exc:
+        parsed: list[JilFile] = []
+        if properties:
+            bindings = load_properties(properties)
+            for path in files:
+                text = path.read_bytes().decode("utf-8")
+                resolved, _ = substitute(text, bindings, file=str(path))
+                parsed.append(parse(resolved, file=str(path)))
+        else:
+            parsed = [parse_file(path) for path in files]
+        return lower_catalog(parsed, permit_unknown=permit_unknown)
+    except (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
         # OSError/UnicodeDecodeError: unreadable input (missing file, directory,
         # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
         typer.echo(str(exc), err=True)
@@ -54,16 +76,44 @@ _PERMIT_UNKNOWN = typer.Option(
     help="Carry unknown attributes verbatim instead of refusing (DL-07 escape hatch).",
 )
 
+_PROPERTIES = typer.Option(
+    None,
+    "--properties",
+    "-p",
+    help="Resolve ~{$NAME}~ placeholders from these properties file(s) before parsing"
+    " (repeatable; later files override earlier, DL-19/DL-22).",
+)
+
 
 @app.command()
 def lint(
     files: list[Path] = typer.Argument(..., help="JIL files forming one catalog"),
     strict: bool = typer.Option(False, "--strict", help="Warnings also fail the exit code."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+    suppress: list[str] = typer.Option(
+        [],
+        "--suppress",
+        help="Rule code(s) to drop from the report and the exit code, e.g."
+        " --suppress L005 (repeatable; comma lists accepted; DL-23).",
+    ),
 ) -> None:
     """Parse + lower FILES into one catalog, then run the linter rules."""
-    catalog = _load_catalog_or_exit_2(files, permit_unknown)
-    report = lint_catalog(catalog)
+    from dsl41.lint import RULE_CODES
+
+    codes = {
+        code.strip().upper() for value in suppress for code in value.split(",") if code.strip()
+    }
+    unknown = sorted(codes - RULE_CODES)
+    if unknown:
+        typer.echo(
+            f"--suppress: unknown rule code(s) {', '.join(unknown)}"
+            f" (known: {', '.join(sorted(RULE_CODES))})",
+            err=True,
+        )
+        raise typer.Exit(2)
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    report = lint_catalog(catalog).suppress(codes)
     for violation in report.violations:
         typer.echo(violation.render())
     raise typer.Exit(report.exit_code(strict=strict))
@@ -122,8 +172,12 @@ def equiv(
         20, "--scripts", help="Tier-c event scripts to generate (seeded, deterministic)."
     ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Check FILES (catalog A) equivalent to --against (catalog B).
+
+    --properties applies the same bindings to BOTH catalogs (one
+    environment, two estates).
 
     Exit 0 when every requested tier reports equivalence, 1 on divergence,
     2 when either input never reached the comparison.
@@ -147,8 +201,8 @@ def equiv(
             typer.echo(f"--rename expects OLD=NEW, got {pair!r}", err=True)
             raise typer.Exit(2)
         rename_map[old] = new
-    catalog_a = _load_catalog_or_exit_2(files, permit_unknown)
-    catalog_b = _load_catalog_or_exit_2(against, permit_unknown)
+    catalog_a = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    catalog_b = _load_catalog_or_exit_2(against, permit_unknown, properties)
     try:
         if not rename_map and not case_fold and catalog_hash(catalog_a) == catalog_hash(catalog_b):
             typer.echo(
@@ -188,6 +242,7 @@ def report(
         None, "--out", "-o", help="Write the markdown report here instead of stdout."
     ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Emit the per-catalog migration report (markdown).
 
@@ -197,7 +252,7 @@ def report(
     """
     from dsl41.backend_uc import render_migration_report
 
-    catalog = _load_catalog_or_exit_2(files, permit_unknown)
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     markdown = render_migration_report(catalog)
     if out is None:
         typer.echo(markdown, nl=False)
@@ -213,6 +268,7 @@ def decompile(
         None, "--out", "-o", help="Write the Python module here instead of stdout."
     ),
     permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Emit the catalog as a runnable dsl41 builder module (phase-10 DSL).
 
@@ -221,12 +277,79 @@ def decompile(
     """
     from dsl41.dsl import decompile as decompile_catalog
 
-    catalog = _load_catalog_or_exit_2(files, permit_unknown)
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     source = decompile_catalog(catalog)
     if out is None:
         typer.echo(source, nl=False)
     else:
         out.write_text(source, encoding="utf-8")
+        typer.echo(f"wrote {out}")
+
+
+@app.command()
+def resolve(
+    files: list[Path] = typer.Argument(
+        ..., help="Templated JIL (or any text) file(s); several files merge in order."
+    ),
+    properties: list[Path] = typer.Option(
+        ...,
+        "--properties",
+        "-p",
+        help="Properties file(s) with KEY=VALUE lines; later files override earlier (repeatable).",
+    ),
+    out: Path = typer.Option(
+        None, "--out", "-o", help="Write the resolved text here instead of stdout."
+    ),
+    permit_unresolved: bool = typer.Option(
+        False,
+        "--permit-unresolved",
+        help="Leave unresolved/malformed ~{...}~ tokens verbatim (reported on stderr)"
+        " instead of failing.",
+    ),
+) -> None:
+    """Resolve estate `~{$NAME}~` placeholders in FILES from properties files.
+
+    Non-core preprocessor (DL-19/DL-22): reproduces the estate templating
+    step so resolved JIL flows through the ordinary pipeline. Several FILES
+    concatenate in argument order into one output (a missing final newline
+    between inputs is completed in that input's own style; merging LF and
+    CRLF inputs is refused -- statement-syntax rule 10 makes the merged
+    text unparseable). Exit 0 on success (including permitted leftovers,
+    which are reported on stderr); exit 2 when the properties or any input
+    cannot be resolved.
+    """
+    try:
+        bindings = load_properties(properties)
+        chunks: list[str] = []
+        reports: list[str] = []
+        for path in files:
+            text = path.read_bytes().decode("utf-8")
+            resolved, file_reports = substitute(
+                text, bindings, file=str(path), permit_unresolved=permit_unresolved
+            )
+            chunks.append(resolved)
+            reports.extend(file_reports)
+        if len({"\r\n" if "\r\n" in chunk else "\n" for chunk in chunks if chunk}) > 1:
+            raise PlaceholderError(
+                [
+                    "merging these inputs would mix LF and CRLF line endings"
+                    " (statement-syntax rule 10); normalize them first"
+                ]
+            )
+    except (PlaceholderError, OSError, UnicodeDecodeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    for report in reports:
+        typer.echo(report, err=True)
+    merged = ""
+    for chunk in chunks:
+        if merged and not merged.endswith("\n"):
+            merged += "\r\n" if "\r\n" in merged else "\n"
+        merged += chunk
+    if out is None:
+        typer.echo(merged, nl=False)
+    else:
+        out.write_bytes(merged.encode("utf-8"))  # bytes: keep line endings exact
         typer.echo(f"wrote {out}")
 
 
@@ -241,6 +364,7 @@ def viz(
     ),
     direction: str = typer.Option("LR", "--direction", help="Mermaid flow direction: LR or TD."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Render FILES' derived dependency graph as Mermaid on stdout."""
     from dsl41.derive import derive_graph
@@ -249,7 +373,7 @@ def viz(
     if direction not in ("LR", "TD"):
         typer.echo(f"--direction must be LR or TD, got {direction!r}", err=True)
         raise typer.Exit(2)
-    catalog = _load_catalog_or_exit_2(files, permit_unknown)
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
     mermaid = to_mermaid(
         derive_graph(catalog),

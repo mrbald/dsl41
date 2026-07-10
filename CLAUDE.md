@@ -23,9 +23,9 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 - **Pure compiler.** No runtime dependency in any emitted artifact.
 - **Corpus hygiene.** `tests/corpus/` is synthetic/doc-derived ONLY. Never accept
   production JIL from any employer estate into the repo, tests, or docs (LICENSING.md).
-- **Open questions stay open.** Q1–Q6 (autosys dossier §9), U1–U8 (stonebranch
-  Part III) are unresolved. Those with an implemented default (Q1–Q4, U1–U5, U8)
-  are marked in code with `# PENDING: Qn/Un`; the rest have no code switch —
+- **Open questions stay open.** Q1–Q7 (autosys dossier §9), U1–U8 (stonebranch
+  Part III) are unresolved. Those with an implemented default (Q1–Q4, Q7, U1–U5,
+  U8) are marked in code with `# PENDING: Qn/Un`; the rest have no code switch —
   Q5/Q6 live in the autosys dossier only (Q6-adjacent aside in oracle.py), U6/U7
   in backend_uc's `_U_QUESTIONS` report table. Do not guess-resolve any of them;
   implement the documented default and keep the switch (see condition.lark Q1 banner).

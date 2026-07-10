@@ -150,3 +150,285 @@
   else as explicit job(condition=...) calls. The round-trip property
   (decompile -> exec -> canonical-hash equality) holds corpus-wide and is
   the phase's mechanical adversarial check.
+- DL-18 Estate-shape hardening after the first real-sample dry run
+  (2026-07-09). The failing shapes and the decisions they forced:
+  (1) scanner -- insert_resource/update_resource/delete_resource are
+  statement boundaries (rule 3 amendment), and an attribute-position key
+  shaped like a subcommand ((insert|update|delete|override)_*) that is NOT
+  in the recognized set is a scanner ERROR: the observed failure was
+  insert_resource silently folding into the preceding insert_machine, and
+  statement-boundary loss is silent structural loss. (2) ir -- ResourceIR
+  carried opaquely (name + res_type + verbatim attrs), mirroring
+  MachineIR's documented opaque-v1 stance; UCS-09/M34 map resources to UC
+  Virtual Resources when the backend lands. `status:` on insert lowers to
+  Semantics.initial_status restricted to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
+  (SEM-24 [A]); anything else -- especially run states, which would
+  interact with the SEM-01 latch -- is a loud lowering error.
+  alarm_if_terminated joins the annotation class beside alarm_if_fail.
+  (3) oracle -- initial_status seeds the SEM-20/21/22 flags before the
+  first event, no trace entry (T24a/b). (4) backend_uc -- compile_twin
+  records definition-time state in the exclusion ledger rather than
+  modeling it v1 (UC "Hold on Start" / M20 is the eventual E-class
+  target); the AutoSys-vs-twin comparator therefore diverges on such
+  catalogs, which is the correct polarity (divergence surfaces, silent
+  agreement never fabricated). (5) dsl -- resource() builder + status=
+  kwarg emission keep the corpus-wide decompile round-trip property.
+- DL-19 `~{$NAME}~` placeholder resolver as a NON-CORE preprocessor
+  (placeholders.py + `dsl41 resolve`, 2026-07-09). Estate JIL is templated
+  by an external properties mechanism BEFORE `jil` sees it; we reproduce
+  that step standalone so the compiler core never models templating
+  (nothing in the core imports the module; the scanner keeps treating
+  unresolved tokens as opaque name characters per the DL-18 fixtures).
+  Pinned semantics (module docstring is normative detail): properties are
+  KEY=VALUE split on the first '=', '#'/'!' comments; references are legal
+  in both key and value; resolution is an order-independent fixpoint, so
+  use-before-define and nested tokens work; later files override earlier
+  by RAW key (layering is the point of 1+ files) while within-file
+  duplicates and same-resolved-key collisions are errors; anything still
+  `~{...}~`-shaped after substitution -- undefined name or malformed
+  lookalike -- is a loud error with file:line, escapable per DL-07
+  convention via --permit-unresolved (carried verbatim + reported).
+- DL-20 Estate-scale hardening (2026-07-09; root-caused from a field report
+  of `dsl41 lint` being OOM-killed). Three defects, one cause each:
+  (1) derive computed backward-reachability ancestor sets for EVERY catalog
+  job although only the Or-shape pass consumes them -- Theta(n^2) memory on
+  chain-shaped estates (741MB at 5k jobs, measured; OOM kill at real estate
+  sizes). Ancestors are now computed iteratively and only for Or-branch
+  producers: a catalog with no `|` pays nothing, and the iterative closure
+  is additionally COMPLETE on cyclic graphs where the old memoized
+  recursion returned order-dependent partial sets. (2) the same recursion
+  made success-vs-RecursionError depend on declaration order (reverse-
+  declared chains crashed) -- gone with the iterative walk. (3) the
+  condition Tree->Cond transformer recursed once per operator down the
+  LALR left spine, so ~1000-atom flat chains crashed with a RecursionError
+  traceback AND exit code 1, which the CLI contract reserves for lint
+  findings. The spine walk is iterative now (long flat chains are fine and
+  stay n-ary/shallow downstream); genuinely deep GROUPING beyond the
+  walker budget is refused as a loud ConditionParseError (exit-2 class)
+  because every downstream Cond walker recurses per nesting level --
+  admitting the parse would only move the crash.
+- DL-21 `resources:` job attribute -- the 11.3+ resource-object job side
+  (2026-07-09). Root cause of the gap: the dossier ss5 inventory was NOT
+  based on an old spec (it cites TechDocs 12.x) but had parked the whole
+  resource/placement class as opaque and only ENUMERATED the legacy
+  pre-11.3 load-balancing attributes (job_load/priority/QUE_WAIT), so the
+  DL-07 firewall refused `resources:` as unknown; DL-18 had added only the
+  definition side (insert_resource statements). Now, verified against
+  TechDocs 12.x/24.0: `resources: (name, QUANTITY=n[, FREE=Y|N|A]) AND
+  (...)` (FREE: Y=free on success, N=never, A=unconditional; res_type
+  D|R|T; amount required; optional agent-level machine). Decisions:
+  lowering types each group into JobIR.resources (ResourceRef), keywords
+  and the AND separator case-insensitive (estates write lowercase `and`);
+  malformed groups, unknown group keywords, non-integer/absent QUANTITY,
+  and FREE outside Y/N/A are loud lowering errors; FREE absent stays None
+  (the engine default is not guessed); no oracle gate semantics v1
+  (Resource Wait/QUE_WAIT out of interpreter scope, dossier ss5 row);
+  resource references are NOT validated against catalog.resources
+  (mirrors machine refs -- estates split definitions across files); the
+  compile twin records requirements in the exclusion ledger on the M34
+  row (its target column is already Virtual Resources / UCS-09) rather
+  than minting a new M row outside a Part II review; the decompiler
+  renders groups canonically so the corpus round-trip holds.
+- DL-22 Preprocessing as a first-class CLI step (2026-07-09). Field
+  finding: templated values in TYPED lanes (start_times etc.) correctly
+  refuse `~{$NAME}~` tokens at lowering -- and per DL-19 the core must
+  never learn templating -- so processing a templated estate needs the
+  resolve step fused into the workflow, not looser typing. Decisions:
+  (1) every catalog-consuming command (lint/equiv/report/decompile/viz)
+  accepts --properties/-p and resolves each input before parsing;
+  substitution is within-line, so diagnostics keep real file:line
+  positions; placeholder failures join the exit-2 class ("input never
+  reached the tool"); equiv applies one binding set to both catalogs.
+  (2) `dsl41 resolve` accepts several files and concatenates them in
+  argument order into one output -- a missing final newline between
+  inputs is completed in that input's own newline style, and merging LF
+  with CRLF inputs is refused loudly (rule 10 would make the merged text
+  unparseable anyway). Typed lanes stay strict on unresolved tokens:
+  preprocessing IS the supported path for templated estates.
+- DL-23 `dsl41 lint --suppress CODE` (2026-07-09). Field finding: estates
+  that carry `timezone:` on every job as a convention drown the report in
+  L005. Re-verified first that L005's premise holds for timezone: the
+  TechDocs date_conditions page itself lists timezone (plus run_window
+  and must_*_times) among the attributes it gates, and secondary sources
+  corroborate "date_conditions unset => Days/Time attributes ignored";
+  one Q2-adjacent corner (does per-job timezone re-base the lookback-0
+  midnight anchor?) is recorded as [?] on SEM-35, not guessed. Decisions:
+  suppression is per-CODE and CLI-level only (lint_catalog stays
+  complete -- suppression is a reporting choice, not a semantics one);
+  suppressed codes drop from both the output and the exit code; unknown
+  codes in --suppress are an exit-2 error, because a typo silently
+  suppressing nothing would be its own silent loss.
+- DL-24 L015 severity split (2026-07-09, field calibration). Estates use
+  bare-hours lookbacks (`s(job, 12)` = 12 hours) deliberately; the shape
+  is valid, Broadcom-documented, and unambiguous to the ENGINE -- the
+  only risk is an author who believed minutes. It is now INFO (printed,
+  never gates the exit code, --strict included; ir-design ss9 row
+  amended). Single-digit minutes (`2.5` = 2h05m, not two-and-a-half
+  hours) stays WARN -- that token genuinely reads as a decimal. Full
+  silence for either remains `--suppress L015` (DL-23).
+- DL-25 Dangling-name audit (2026-07-09; field report: unknown resource
+  references were silent). Every named cross-reference reviewed; the
+  catalog-assembly linter is the home for existence checks (lowering
+  stays per-file tolerant, DL-21). Already covered: condition job refs +
+  undeclared ^INSTANCE (L001 error), box_name (lowering hard error),
+  $$VAR substitution sites (L002 error). Gaps closed: (1) L016 warn --
+  `resources:` names a resource with no insert_resource in the set (warn
+  not error: AutoSys resolves against its DB, but the UC backend cannot
+  size the Virtual Resource, M34/UCS-09). (2) L017 warn -- `machine:`
+  outside the set's machine records, fired ONLY when the set defines at
+  least one machine (job-only slices keep machine defs out of scope by
+  convention and stay quiet); comma lists (legacy load-balancing) are
+  checked per name; boxes skipped (inert passthrough). The corpus now
+  models a complete estate (machines_base.jil). (3) L002 extended to
+  v(NAME) condition atoms at WARN, not error -- an unset global read can
+  be an INTENDED cross-system gate (sem12's external gate is exactly
+  that); the extension immediately surfaced two real dangling v() reads
+  the corpus already carried. (4) Calendars are autocal territory, not
+  definable in JIL, so "unknown calendar" is undecidable for the linter:
+  the migration report inventories referenced calendars per job and adds
+  M24 (and M26 for schedule timezones) to the used rows so the U6 parity
+  question finally surfaces when calendars are actually in play.
+  Documented out of scope: owner/profile (OS/machine-side names), the
+  machine-record `machine:` attr (opaque v1, DL-18), watch_file paths.
+- DL-26 L007 vacuous-pin false positive (2026-07-09; field report: L007
+  fired on a vanilla s(prev) chain inside a box). Root cause in
+  cond_truth_profile, not the box-start pinning: rule_l007 pins ALL
+  siblings, but a sibling the condition never references is not in the
+  condition's truth-table alphabet, so the fixed-status check read None,
+  failed the allowed-set test, and skipped EVERY state -- zero states
+  enumerated, falsifiable=False by vacuity, every conditioned member of
+  any 3+-member box reported as a tautology. The two-member quiet tests
+  never had an unreferenced sibling, which is how it survived phase 8's
+  review. Fix: a pin on an unreferenced job is vacuous (it cannot affect
+  that condition's truth) and is ignored; regression tests pin the chain
+  shape quiet and a genuine n(later) tautology still firing beside an
+  unreferenced bystander. Also corrected in the same session: the L007
+  message's justification -- member conditions ARE re-evaluated
+  event-driven during the box run (that is how in-box sequencing works);
+  first-evaluation pinning is sound because a member runs at most once
+  per box execution (SEM-10), so a condition that cannot be false at
+  first evaluation never gets a second evaluation at all.
+- DL-27 `rename_job` recognized at the statement layer (2026-07-10; found by
+  the Broadcom 12.x doc sweep, not a field report). TechDocs 12.0.01+
+  documents `rename_job` ("renames an existing job and updates
+  dependencies"); its `rename_` verb was outside the DL-18 guard shape, so
+  the scanner silently folded the statement -- and everything after it --
+  into the preceding statement: the exact failure class DL-18 exists to
+  stop, reintroduced by an incomplete verb list. Fix: `rename_job` added to
+  SUBCOMMANDS, `rename` added to the guard verbs, lowering keeps refusing
+  it loudly (rename is merge semantics like update/delete/override, out of
+  compile scope). Lesson recorded in the spec: the guard's verb list is
+  part of the subcommand inventory it protects; re-check it against the
+  vendor subcommand page whenever the recognized set changes. The
+  companion new-name attribute is carried generically (its exact name is
+  immaterial to scanning and unverified against the page body).
+- DL-28 insert_xinst plumbing carried opaquely (2026-07-10; 12.x doc sweep).
+  TechDocs 12.1 documents six insert_xinst attributes -- xtype, xmachine
+  (required in all cases), xport (required for xtype a/e), xmanager
+  (required for xtype e), optional xcrypt_type/xkey_to_manager. The v1
+  lowering refused everything except xtype, so no documented-valid
+  external-instance JIL could lower at all, blocking SEM-07 cross-instance
+  estates. Resolution: `XinstIR` (name, typed xtype, verbatim attrs, span),
+  the exact MachineIR/ResourceIR boundary-record stance -- xtype is the one
+  field conditions/L001 depend on; connection plumbing is the engine's
+  concern. Required-ness of xmachine/xport is NOT enforced (lowering stays
+  per-file tolerant, DL-21/DL-25 line); an L-rule can add that check if a
+  field report ever asks for it. DSL builder/decompiler grew **attrs
+  passthrough to match.
+- DL-29 Full 12.1 subcommand inventory at the statement layer (2026-07-10;
+  doc sweep). TechDocs 12.1 documents monbro (insert/update/delete),
+  job_type objects (insert/update/delete), delete_blob, insert/delete_glob,
+  and connectionprofile (insert/update/delete) subcommands the scanner did
+  not recognize. They match the DL-18 guard shape, so the failure was loud
+  -- but a loud stop on a VALID estate file means F1 fidelity is impossible
+  over input the engine accepts. Resolution: the scanner recognizes the
+  complete documented inventory (statement boundaries, byte-faithful
+  round-trip); lowering refuses the out-of-scope object classes with the
+  classified error. Scan-everything/lower-selectively is the layering DL-05
+  always intended.
+- DL-30 Rule 4b: one attribute pair per attribute line, loudly (2026-07-10;
+  doc sweep). Broadcom's JIL syntax rules permit several `attr: value`
+  statements on one line and require value colons to be escaped (`\:`) or
+  quoted. The scanner took everything after the first colon as value, so a
+  legal second pair was swallowed silently -- invisible to DL-07 because it
+  hides inside another attribute's value (e.g. `machine: prod priority: 5`
+  lowers as machine="prod priority: 5"). Resolution: the rule-4 inline-pair
+  detector now also runs over attribute values; a whitespace-preceded,
+  unescaped, unquoted `key:`-shaped token is a scanner error naming the fix
+  (split the line / escape / quote). On valid JIL this costs nothing (the
+  DL-18 argument): valid values never contain that shape. F4's
+  "key:-lookalikes are value text" pin narrows to non-pair shapes (path
+  colons, digit-led times, quoted/escaped text) -- fixtures kept proving
+  those; autorep -q emits one attribute per line, so estate exports are
+  unaffected.
+- DL-31 Mid-line `#` is value text (2026-07-10; doc sweep). Broadcom
+  defines `#` line comments "in the first column" and lists `#` among
+  valid name AND value characters; the scanner's whitespace-preceded
+  `#`-to-EOL trailing-comment strip therefore silently changed values
+  relative to the engine's parse (`command: run.sh # nightly` lowered as
+  "run.sh"). Resolution: `#` comments are full-line only (first
+  non-whitespace character; leading indentation accepted as harmless
+  leniency); a mid-line `#` stays in the value. Trailing comments remain
+  supported via `/* ... */` only. Preserve-mode rendering was never
+  affected (text kept verbatim); this changes the TYPED lane. Residual [?]
+  in rule 5: live-jil behavior for indented and mid-line `#` -- flip back
+  deliberately if a live check ever contradicts the doc.
+- DL-32 12.x attribute lanes completed for CMD/BOX/FW scope (2026-07-10;
+  doc sweep). Attributes TechDocs 12.x documents as valid on the three
+  in-scope job types were DL-07 hard errors. Routed by semantics class:
+  ANNOTATION (observability, no control flow): heartbeat_interval
+  (MISSING_HEARTBEAT alarm) + the notification-services family
+  (notification_alarm_types/_template/_emailaddress_on_*). PASSTHROUGH
+  (inert carry): machine_method (joins job_load/priority placement row),
+  job_class, avg_runtime, ulimit, elevated, interactive, and chk_files --
+  chk_files has teeth (unmet space -> alarm, no start) but is Resource-Wait
+  class like `resources` (DL-21): typed/oracle treatment deferred until a
+  consumer exists. TYPED (ExecSpec, CMD-only): std_in_file (stdin redirect,
+  may name a blob) and envvars (NAME=value list) -- verbatim values,
+  $$VAR-indexed (SEM-08); error on FW like command, inert on BOX like the
+  base exec cluster. Extended-job-type attribute families (ftp_*, i5_*,
+  hadoop_*, oracle_*, ps_*, j2ee_*, ...) stay out: those job_types are
+  refused at lowering, so their attributes are unreachable -- no allow-list
+  entries for unreachable semantics. SEM-24 upgraded [A]->[V] (existence)
+  in the same sweep: TechDocs 12.0.01 documents `status:` on insert with
+  the no-update/override constraint; full documented value set still [?].
+- DL-33 success_codes / fail_codes complete the SEM-09 boundary (2026-07-10;
+  doc sweep). TechDocs documents both on Command/i5/Micro Focus/z/OS jobs:
+  comma lists of codes and lo-hi ranges; absence-defaults "0 is success" /
+  "non-zero is failure". Both were DL-07 errors, and SEM-09 modeled the
+  boundary as max_exit_success alone -- the one true semantics gap the
+  sweep found. Resolution: typed Semantics fields (sorted ranges, never
+  merged; CMD-only via model validator -- a box's verdict is the SEM-11
+  fold); ONE verdict function `ir.exit_is_success` shared by the oracle
+  and the UC twin (M31's same-boundary assumption now holds by
+  construction, U4 unchanged); compile_twin exports the sets. The docs do
+  NOT state the composition -- that is the new Q7 (dossier ss9), pinned to
+  the conservative direction (never invent a SUCCESS): fail_codes wins;
+  a present success_codes replaces the success rule (unmatched -> FAILURE,
+  threshold ignored); fail_codes alone falls through to the threshold.
+  Trace tests T09b/c/d pin the corners; replace defaults only from a live
+  instance, per the Q-discipline.
+- DL-34 Accepted leniencies vs the 12.x syntax pages (2026-07-10; doc
+  sweep, deliberately NOT changed -- relitigate here, not in code review):
+  (1) grammar JOB_NAME/INSTANCE_NAME accept @/$ beyond the documented
+  object-name charset [a-zA-Z0-9._#-] -- superset reading of migration
+  input, harmless; (2) documented `\,` escaped commas in values are not
+  honored by list splitting -- only bites list attrs whose member names
+  contain commas (calendars), none observed; (3) the 4096-character
+  statement limit is unenforced -- matters only if canonical output is fed
+  back to a real jil binary, lint-candidate if that becomes a flow;
+  (4) `machine` is doc-required on FW jobs but lowering does not require
+  it -- requiredness is the engine's concern (DL-28 line), lint-candidate.
+  Also recorded: Broadcom's own lookback example writes the word `AND`
+  inside a condition, vindicating the grammar's word-operator support
+  (grammars/condition.lark already accepts and/or case-insensitively).
+- DL-34a Adversarial-review addendum (2026-07-10). Two findings from the
+  post-sweep Opus review: (1) FIXED -- rule 4b fired on a `key:` shape
+  inside a retained closed inline block comment (rule 5 keeps those as
+  opaque value text); the 4b scan now masks closed `/*...*/` spans first.
+  (2) ACCEPTED-LATENT -- the DSL decompiler emits record attrs as builder
+  kwargs, so a machine/resource/xinst attribute literally named `name`
+  would collide with the positional param when the decompiled module is
+  executed; pre-existing pattern shared by all three builders, no
+  documented JIL attribute has that name, and the failure is a loud
+  TypeError. Fix if it ever fires: dict-splat fallback in decompile.

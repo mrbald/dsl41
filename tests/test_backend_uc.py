@@ -19,6 +19,7 @@ from dsl41.backend_uc import (
     BlockedOnU3,
     classify_edges,
     compile_to_uc,
+    compile_twin,
     render_migration_report,
 )
 from dsl41.cli import app
@@ -38,6 +39,59 @@ def _corpus_catalog() -> CatalogIR:
 
 
 # ------------------------------------------------------------- edge classification
+
+
+def test_compile_twin_records_definition_time_status_in_exclusion_ledger() -> None:
+    """SEM-24/DL-18: the twin does not model definition-time state v1; a job
+    inserted ON_HOLD must land in the exclusion ledger (M20), never be
+    silently compiled as an ordinary task."""
+    catalog = lower_source(
+        "insert_job: seedx\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: heldx\njob_type: c\ncommand: y\nmachine: m1\n"
+        "status: ON_HOLD\ncondition: s(seedx)\n"
+    )
+    model = compile_twin(catalog)
+    (entry,) = [e for e in model.excluded if "heldx" in e]
+    assert entry.startswith("M20 heldx:")
+    assert "ON_HOLD" in entry
+    # INACTIVE is the implicit default: not ledger-worthy
+    inactive = lower_source(
+        "insert_job: quietx\njob_type: c\ncommand: x\nmachine: m1\nstatus: INACTIVE\n"
+    )
+    assert not [e for e in compile_twin(inactive).excluded if "quietx" in e]
+
+
+def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> None:
+    """DL-21: `resources:` requirements are not modeled in the twin v1; they
+    must land on the M34 ledger row (UC Virtual Resources), never vanish."""
+    catalog = lower_source(
+        "insert_job: resx\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (lock1, QUANTITY=2, FREE=A) and (pool1, QUANTITY=1)\n"
+    )
+    (entry,) = [e for e in compile_twin(catalog).excluded if "resx" in e]
+    assert entry.startswith("M34 resx:")
+    assert "lock1 x2 FREE=A" in entry and "pool1 x1" in entry
+
+
+def test_report_inventories_calendars_and_surfaces_u6() -> None:
+    """DL-25: calendars are autocal territory (not definable in JIL), so
+    "unknown calendar" is undecidable for the linter -- the report
+    inventories them per job and surfaces U6 via the M24 row instead."""
+    catalog = lower_source(
+        "insert_job: calj\njob_type: c\ncommand: x\nmachine: m1\n"
+        "date_conditions: 1\nrun_calendar: month_end\nexclude_calendar: holidays\n"
+        'start_times: "22:00"\n'
+    )
+    report = render_migration_report(catalog)
+    assert "## Calendars (M24" in report
+    assert "`month_end` — used by `calj`" in report
+    assert "`holidays` — used by `calj`" in report
+    assert "U6" in report  # calendar parity open question now listed
+    # dead-config calendars (no date_conditions) are L005's business, not the report's
+    dead = lower_source(
+        "insert_job: deadj\njob_type: c\ncommand: x\nmachine: m1\nrun_calendar: month_end\n"
+    )
+    assert "## Calendars" not in render_migration_report(dead)
 
 
 def test_classify_edges_partitions_by_cls_and_loses_nothing() -> None:
@@ -202,3 +256,16 @@ def test_cli_report_lowering_refusal_exits_2() -> None:
     result = runner.invoke(app, ["report", str(CORPUS_DIR / "sem31_xor.jil")])
     assert result.exit_code == 2
     assert "SEM-31" in result.stderr
+
+
+def test_compile_twin_exports_explicit_code_sets_for_m31() -> None:
+    """M31/DL-33: success_codes/fail_codes reach the twin model so the UC
+    interpreter judges with the same boundary as the AutoSys oracle."""
+    catalog = lower_source(
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n"
+        "max_exit_success: 2\nsuccess_codes: 20-30\nfail_codes: 5\n"
+    )
+    model = compile_twin(catalog)
+    assert model.max_exit_success == {"p": 2}
+    assert model.success_codes == {"p": [(20, 30)]}
+    assert model.fail_codes == {"p": [(5, 5)]}

@@ -12,3 +12,4 @@ job_type: c
 machine: m1
 command: cp /tmp/in/* /tmp/out/ /* stage to out */
 std_err_file: /tmp/log /*unclosed-glob-lookalike
+description: results #1 and #2 stay value

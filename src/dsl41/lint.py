@@ -66,7 +66,7 @@ Phase-5 graph-rule readings (each with a test):
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Literal
 
 from pydantic import BaseModel
@@ -107,6 +107,14 @@ class LintReport(BaseModel):
 
     def by_code(self, code: str) -> list[Violation]:
         return [v for v in self.violations if v.code == code]
+
+    def suppress(self, codes: Iterable[str]) -> LintReport:
+        """A copy without the given rule codes (DL-23: estate-wide accepted
+        findings, e.g. a timezone-on-every-job convention drowning L005).
+        Callers validate codes against RULE_CODES first -- a typo silently
+        suppressing nothing would be its own silent loss."""
+        dropped = set(codes)
+        return LintReport(violations=[v for v in self.violations if v.code not in dropped])
 
 
 # ------------------------------------------------------------------------- the rules
@@ -184,9 +192,14 @@ def _set_global_producers(catalog: CatalogIR) -> set[str]:
 
 
 def rule_l002(catalog: CatalogIR) -> list[Violation]:
-    """Unresolved `$$VAR` (SEM-08): no insert_global and no SET_GLOBAL
-    producer anywhere in the catalog. Substitution would yield an empty/
-    stale value at runtime."""
+    """Unresolved global references (SEM-08): no insert_global and no
+    SET_GLOBAL producer anywhere in the catalog. Two read sites, same
+    dangling-name class but different severities (DL-25): `$$VAR`
+    substitution sites are ERRORS (an empty/stale value lands in a command
+    line -- broken), while `v(NAME)` condition atoms are WARN -- a
+    comparison that stays false until something external sets the global
+    can be an INTENDED cross-system gate (sem12_external_gate models
+    exactly that), so it is surfaced for confirmation, not condemned."""
     producers = _set_global_producers(catalog)
     out: list[Violation] = []
     for job in catalog.jobs.values():
@@ -211,6 +224,32 @@ def rule_l002(catalog: CatalogIR) -> list[Violation]:
                     detail=name,
                 )
             )
+        seen_reads: set[tuple[str, str]] = set()
+        for attr_name, cond, span in job.iter_conditions():
+            for atom in iter_atoms(cond):
+                if not isinstance(atom, GlobalAtom):
+                    continue
+                if atom.name in catalog.globals_declared or atom.name in producers:
+                    continue
+                if (attr_name, atom.name) in seen_reads:
+                    continue
+                seen_reads.add((attr_name, atom.name))
+                out.append(
+                    Violation(
+                        code="L002",
+                        severity="warn",
+                        message=(
+                            f"{attr_name} of {job.name!r} reads global ${atom.name} (v())"
+                            f" but the catalog neither declares it (insert_global) nor"
+                            f" produces it (SET_GLOBAL) -- the comparison stays false"
+                            f" until something external sets it; confirm that is the"
+                            f" intended cross-system gate"
+                        ),
+                        jobs=[job.name],
+                        span=span,
+                        detail=atom.name,
+                    )
+                )
     return out
 
 
@@ -276,7 +315,10 @@ def rule_l004(catalog: CatalogIR) -> list[Violation]:
 def rule_l005(catalog: CatalogIR) -> list[Violation]:
     """Time attributes present while date_conditions is falsy/absent (SEM-30):
     AutoSys ignores them -- dead configuration. Lowering routes exactly this
-    shape into passthrough, which is where we look."""
+    shape into passthrough, which is where we look. Re-verified for timezone
+    against TechDocs 2026-07-09 (SEM-35 note; one Q2-adjacent [?] corner:
+    lookback-0 midnight anchoring). Estates that carry these attrs as a
+    convention can drop the code via `dsl41 lint --suppress L005` (DL-23)."""
     out: list[Violation] = []
     for job in catalog.jobs.values():
         dead = sorted(k for k in job.passthrough if k.lower() in TIME_CLUSTER)
@@ -299,9 +341,14 @@ def rule_l005(catalog: CatalogIR) -> list[Violation]:
 
 
 def rule_l015(catalog: CatalogIR) -> list[Violation]:
-    """Lookback raw-format pitfalls (SEM-04): valid-but-suspicious shapes,
-    e.g. bare `30` meaning 30 HOURS or single-digit minutes. The shape facts
-    come from conditions.lookback_pitfalls at parse time."""
+    """Lookback raw-format pitfalls (SEM-04): valid-but-suspicious shapes.
+    Severity is per shape (DL-24 field calibration): a bare-hours window
+    (`12` = 12 hours) is valid, documented, and unambiguous to AutoSys --
+    the only risk is an author who believed minutes -- so it is INFO
+    (visible, never gates the exit code, --strict included). Single-digit
+    minutes (`2.5` = 2h05m, NOT two-and-a-half hours) stays WARN: the token
+    genuinely reads as a decimal. The shape facts come from
+    conditions.lookback_pitfalls at parse time."""
     out: list[Violation] = []
     for job in catalog.jobs.values():
         for attr_name, cond, span in job.iter_conditions():
@@ -309,17 +356,90 @@ def rule_l015(catalog: CatalogIR) -> list[Violation]:
                 lookback = getattr(atom, "lookback", None)
                 if lookback is None:
                     continue
+                # a bare-digits window raw only ever yields the bare-hours
+                # pitfall, so the per-lookback severity split is exact
+                bare_hours = lookback.kind == "window" and (lookback.raw or "").isdigit()
                 for pitfall in lookback_pitfalls(lookback):
                     out.append(
                         Violation(
                             code="L015",
-                            severity="warn",
+                            severity="info" if bare_hours else "warn",
                             message=f"{attr_name} of {job.name!r}: {pitfall}",
                             jobs=[job.name],
                             span=span,
                             detail=lookback.raw,
                         )
                     )
+    return out
+
+
+def rule_l016(catalog: CatalogIR) -> list[Violation]:
+    """Dangling resource reference (DL-25): a `resources:` group names a
+    resource with no insert_resource in the compilation set. Lowering
+    deliberately does not enforce this (DL-21: definitions may live in a
+    file outside the set); the assembled catalog is where it is decidable.
+    warn, not error: AutoSys itself resolves against its database -- but
+    the UC backend cannot create or size the Virtual Resource (UCS-09/M34)
+    without the definition, so the migration set is incomplete."""
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        for ref in job.resources:
+            if ref.name not in catalog.resources:
+                out.append(
+                    Violation(
+                        code="L016",
+                        severity="warn",
+                        message=(
+                            f"{job.name!r} requires resource {ref.name!r}"
+                            f" (QUANTITY={ref.quantity}) but the compilation set has no"
+                            f" insert_resource for it -- the UC backend cannot create or"
+                            f" size the Virtual Resource (M34/UCS-09)"
+                        ),
+                        jobs=[job.name],
+                        span=job.span,
+                        detail=ref.name,
+                    )
+                )
+    return out
+
+
+def rule_l017(catalog: CatalogIR) -> list[Violation]:
+    """Dangling machine reference (DL-25), fired ONLY when the compilation
+    set defines at least one machine. Estates routinely lint job-only
+    slices with machine records deliberately out of scope, so zero
+    insert_machine keeps the rule quiet; once the set DOES carry machine
+    records, a `machine:` value outside them is a real smell (typo, or a
+    forgotten infra file). Comma lists (legacy load-balancing machine
+    lists, dossier ss5) are checked per name. Boxes are skipped: their
+    machine attr is inert passthrough (SEM-10)."""
+    if not catalog.machines:
+        return []
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        raw = job.exec_.machine if job.exec_ is not None else None
+        if not raw:
+            continue
+        missing = [
+            name
+            for name in (part.strip() for part in raw.split(","))
+            if name and name not in catalog.machines
+        ]
+        if missing:
+            out.append(
+                Violation(
+                    code="L017",
+                    severity="warn",
+                    message=(
+                        f"{job.name!r} targets machine(s) {', '.join(repr(m) for m in missing)}"
+                        f" not defined in the compilation set (which defines"
+                        f" {len(catalog.machines)} machine(s) -- typo, or a forgotten"
+                        f" infra file?)"
+                    ),
+                    jobs=[job.name],
+                    span=job.span,
+                    detail=",".join(missing),
+                )
+            )
     return out
 
 
@@ -363,11 +483,16 @@ def rule_l006(catalog: CatalogIR) -> list[Violation]:
 def rule_l007(catalog: CatalogIR) -> list[Violation]:
     """Tautology at box start (ss9): a box member whose condition is true in
     EVERY state reachable at the moment the box first evaluates it gates
-    nothing. The box-start model follows the oracle's catalog-order member
-    starts (DL-14 amendment): siblings declared EARLIER may already be
-    NEVER_RAN or RUNNING when this member is evaluated; siblings declared
-    LATER are certainly NEVER_RAN. Unpinned tautology is vacuous by
-    construction (every condition is falsifiable in the free model), so
+    nothing. Pinning only the FIRST evaluation is sufficient: member
+    conditions ARE re-evaluated event-driven during the box run (that is
+    how in-box sequencing works), but a member runs at most once per box
+    execution (SEM-10) -- a condition that cannot be false at first
+    evaluation starts the member right then, and no later evaluation ever
+    happens for it. The box-start model follows the oracle's catalog-order
+    member starts (DL-14 amendment): siblings declared EARLIER may already
+    be NEVER_RAN or RUNNING when this member is evaluated; siblings
+    declared LATER are certainly NEVER_RAN. Unpinned tautology is vacuous
+    by construction (every condition is falsifiable in the free model), so
     this rule only examines box members."""
     from dsl41.equiv import cond_truth_profile
 
@@ -392,15 +517,39 @@ def rule_l007(catalog: CatalogIR) -> list[Violation]:
             continue
         _, falsifiable = profile
         if not falsifiable:
+            message = (
+                f"condition of box member {job.name!r} can never be false when box"
+                f" {box!r} first evaluates it, so the member starts with the box"
+                f" right away -- and since a member runs at most once per box"
+                f" execution (SEM-10), the mid-run re-evaluation that serves"
+                f" conditions which START false never gets a turn for this one:"
+                f" the condition gates nothing"
+            )
+            # The classic cause: n() on a sibling that cannot have started yet.
+            n_never_ran = sorted(
+                {
+                    atom.job.name
+                    for atom in iter_atoms(cond)
+                    if not isinstance(atom, GlobalAtom)
+                    and getattr(atom, "status", None) == "NOTRUNNING"
+                    and atom.job.instance is None
+                    and fixed.get(atom.job.name) == "NEVER_RAN"
+                }
+            )
+            if n_never_ran:
+                gates = ", ".join(f"n({name})" for name in n_never_ran)
+                message += (
+                    f"; likely cause: {gates} -- that sibling cannot have started"
+                    " yet at first evaluation, and a condition only gates the"
+                    " START (nothing re-checks it once the member is running), so"
+                    " it is not an ongoing mutual exclusion (R6; use a"
+                    " mutex/resource construct instead, M07)"
+                )
             out.append(
                 Violation(
                     code="L007",
                     severity="warn",
-                    message=(
-                        f"condition of box member {job.name!r} is always true at box start"
-                        f" (every sibling state reachable at first evaluation satisfies"
-                        f" it) -- it gates nothing (tier-b)"
-                    ),
+                    message=message,
                     jobs=[job.name],
                     span=job.sem.condition_span,
                     detail=box,
@@ -643,6 +792,8 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L006", rule_l006),
     ("L007", rule_l007),
     ("L015", rule_l015),
+    ("L016", rule_l016),
+    ("L017", rule_l017),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
@@ -653,6 +804,13 @@ GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
     ("L012", rule_l012),
     ("L013", rule_l013),
     ("L014", rule_l014),
+)
+
+
+#: Every registered rule code (stable Lnnn identifiers, ir-design ss9);
+#: the CLI validates --suppress values against this set.
+RULE_CODES: frozenset[str] = frozenset(code for code, _ in RULES) | frozenset(
+    code for code, _ in GRAPH_RULES
 )
 
 

@@ -569,6 +569,17 @@ def test_truth_profile_fixed_status_pins_notrunning_to_a_tautology() -> None:
     assert pinned == (True, False)
 
 
+def test_truth_profile_pin_on_unreferenced_job_is_vacuous() -> None:
+    """DL-26: a fixed_status pin on a job the condition never mentions
+    cannot affect its truth. The old implementation skipped EVERY state on
+    such a pin (None never passes the allowed-set test), reporting
+    (False, False) -- a vacuous 'tautology' that made L007 fire on any box
+    member whose condition ignores at least one sibling."""
+    cond = parse_condition("s(a)")
+    with_pin = cond_truth_profile(cond, fixed_status={"unrelated": "NEVER_RAN"})
+    assert with_pin == cond_truth_profile(cond) == (True, True)
+
+
 def test_l006_fires_zero_times_on_the_whole_lowerable_corpus() -> None:
     """test_lint.py's whole-corpus per-code counts (untouched here) list no
     L006; this pins that emptiness directly against dsl41.lint.rule_l006."""
@@ -577,6 +588,35 @@ def test_l006_fires_zero_times_on_the_whole_lowerable_corpus() -> None:
 
 def test_l007_fires_zero_times_on_the_whole_lowerable_corpus() -> None:
     assert rule_l007(_corpus_catalog()) == []
+
+
+def test_l007_quiet_on_vanilla_sequential_chain_in_a_box() -> None:
+    """DL-26 regression (field report): a plain s(prev) chain inside a box
+    is the single most common estate shape and must never fire -- s() is
+    false for a NEVER_RAN/RUNNING sibling, so every chained condition is
+    falsifiable at box start. The pre-fix vacuous-pin bug fired on both
+    'b' and 'c' here because each condition ignores one sibling."""
+    text = (
+        "insert_job: bx\njob_type: b\n\n"
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx\n\n"
+        "insert_job: b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx\ncondition: s(a)\n\n"
+        "insert_job: c\njob_type: c\ncommand: z\nmachine: m1\nbox_name: bx\ncondition: s(b)\n"
+    )
+    assert rule_l007(lower_source(text)) == []
+
+
+def test_l007_still_fires_beside_an_unreferenced_bystander_sibling() -> None:
+    """DL-26: the fix must not over-correct -- a genuine tautology
+    (n(later-sibling)) keeps firing even when the box also contains a
+    sibling the condition never mentions."""
+    text = (
+        "insert_job: bx2\njob_type: b\n\n"
+        "insert_job: mem\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx2\ncondition: n(sib)\n\n"
+        "insert_job: sib\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx2\n\n"
+        "insert_job: bystander\njob_type: c\ncommand: z\nmachine: m1\nbox_name: bx2\n"
+    )
+    (violation,) = rule_l007(lower_source(text))
+    assert violation.jobs == ["mem"]
 
 
 def test_l006_fires_on_a_contradiction_condition_and_names_it() -> None:

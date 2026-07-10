@@ -101,6 +101,20 @@ A job with `max_exit_success: 2` records SUCCESS for exit codes ≤ 2. Therefore
 consumer is only meaningful relative to the producer's `max_exit_success`. IR: success predicate
 is per-job-configurable, not a constant. Equivalence checking must normalize this.
 
+*(Amended 2026-07-10, DL-33 / 12.x doc sweep.)* Two further attributes shape the boundary,
+valid on Command, i5/OS, Micro Focus, and z/OS jobs (of our scope: **CMD only** — a loud
+error on BOX/FW):
+- `success_codes` — explicit success codes: single code, `lo-hi` range, or comma list of
+  both (`1,3,20-30`). Absence-default: "exit code 0 is success". **[V]**
+- `fail_codes` — explicit failure codes, same format. Absence-default: "any non-zero exit
+  code is failure". **[V]**
+The verdict is therefore `f(exit_code; max_exit_success, success_codes, fail_codes)` —
+single source: `ir.exit_is_success`, shared with the UC twin (M31). The docs do NOT state
+the composition when several are present — that is **Q7** (§9); the implemented default is
+the conservative direction (never invent a SUCCESS): fail_codes wins; a present
+success_codes replaces the success rule entirely (unmatched code → FAILURE, threshold
+ignored); fail_codes alone falls through to the threshold for unmatched codes.
+
 ---
 
 ## 2. Boxes
@@ -186,6 +200,25 @@ STARTJOB honors nothing extra (it *is* the normal start event); FORCE_STARTJOB s
 regardless of conditions. Force-started runs still emit normal status events → downstream
 latching conditions get satisfied by forced runs. The oracle needs both as injectable events.
 
+### SEM-24 · `status:` at definition time **[V]** (existence) / **[?]** (full value set)
+Estate-shaped JIL carries `status: ON_HOLD` on `insert_job` (observed 2026-07-09 in
+migration-input samples, incl. on box jobs): the job is created already in an out-of-band
+state, equivalent to inserting it and immediately sendevent-ing the state.
+*(Upgraded 2026-07-10, 12.x doc sweep: TechDocs 12.0.01 documents "status Attribute — Set
+an Initial Status for a Job During Insertion", with the constraint that it cannot be used
+with update_job/override_job — existence is now **[V]**. The page's exact documented value
+list is still unretrieved **[?]**; the modeled set stays `INACTIVE` (the implicit default)
+plus the SEM-20/21/22 states `ON_HOLD` / `ON_ICE` / `ON_NOEXEC`, and anything else remains
+a loud lowering error — extend deliberately when the page or an estate shape shows more.)*
+- Lowering: `Semantics.initial_status`; any other value (in particular run states like
+  `SUCCESS`, which would interact with the SEM-01 latch) is a loud lowering error — extend
+  deliberately when an estate shape shows one, never guess.
+- Oracle: seeds the SEM-20/21/22 flags before the first event; no trace entry (definition
+  state, not a transition).
+- UC mapping: M20 (Hold, E-class) covers `ON_HOLD`; ice/noexec follow their SEM-20/22 rows.
+  The compile twin does not model definition-time state v1 and records it in the exclusion
+  ledger instead (DL-18).
+
 ---
 
 ## 4. Date/time scheduling
@@ -232,6 +265,14 @@ must_complete must precede the next start. IR: model as SLA annotations, not sem
 ### SEM-35 · timezone **[V]**
 Per-job `timezone:` re-bases all time attributes of that job. IR must carry tz per schedule
 block; equivalence of schedules is tz-aware.
+Scope re-verified 2026-07-09 (DL-23): TechDocs' own `date_conditions` page lists `timezone`
+(with `run_window` and `must_*_times`) among the attributes date_conditions gates, and the
+`timezone` page describes only "the job's time settings" — so timezone without truthy
+date_conditions is dead configuration (SEM-30/L005 stands). **[?]** One unverified corner:
+whether per-job timezone re-bases the zero-lookback "same day" midnight anchor (Q2-adjacent).
+If it does, `timezone` on a condition-only job whose conditions use lookback-0 would not be
+fully dead. Resolve together with Q2 on a live instance; until then L005 keeps firing and
+estates that carry timezone as convention can `dsl41 lint --suppress L005`.
 
 ---
 
@@ -247,8 +288,15 @@ block; equivalence of schedules is tz-aware.
 | `n_retrys` | auto-restart on *application-level* failure (exit-code), not on TERMINATED **[C/?]** — pin exact retry trigger set |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime — AST passthrough |
-| `job_load`/`priority`/QUE_WAIT, `machine` lists | resource/placement — IR carries opaquely v1, no oracle semantics |
-| `alarm_if_fail`, `min/max_run_alarm`, `notification`, `must_*_times` | observability annotations, no control flow |
+| `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]** existence / **[?]** full value set |
+| `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | LEGACY (pre-11.3) load-balancing model — IR carries opaquely v1, no oracle semantics |
+| `std_in_file`, `envvars` | CMD exec cluster (12.x sweep, DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08) |
+| `ulimit`, `elevated`, `interactive`, `job_class` | OS/agent-side exec tuning **[V]** (TechDocs 12.x) — inert carry (DL-32) |
+| `chk_files` | pre-start disk-space gate **[V]**: agent checks required space; unmet → alarm and the job does NOT start — Resource-Wait class, opaque carry v1 like `resources`, no oracle gate (DL-32) |
+| `heartbeat_interval` | MISSING_HEARTBEAT alarm only **[V]** — observability (DL-32) |
+| `avg_runtime` | statistics seed at insert **[V]** — inert carry (DL-32) |
+| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21), no oracle gate v1 (Resource Wait out of scope); UCS-09 → UC Virtual Resources |
+| `alarm_if_fail`, `alarm_if_terminated`, `min/max_run_alarm`, `send_notification` + `notification_*` family (msg, template, alarm_types, emailaddress[_on_alarm/_on_failure/_on_success/_on_terminated]), `must_*_times` | observability annotations, no control flow (family completed per 12.x notification services, DL-32) |
 | `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08) |
 | `watch_file`, `watch_interval`, `watch_file_min_size` (FW jobs) | file-watcher job type: terminal SUCCESS when file condition met — a *source* node in derived graphs |
 
@@ -291,13 +339,16 @@ block; equivalence of schedules is tz-aware.
 T01 latching across days (SEM-01) · T02 each atom type truth table (SEM-02) · T03 precedence
 pinning (SEM-03, after live verification) · T04a/b/c lookback window in/out/9999 (SEM-04) ·
 T05 iced predecessor in lookback (SEM-05) · T06 undefined job never fires (SEM-06) ·
-T08 SET_GLOBAL triggers re-eval (SEM-08) · T09 max_exit_success boundary (SEM-09) ·
+T08 SET_GLOBAL triggers re-eval (SEM-08) · T09 max_exit_success boundary, T09b fail_codes
+carve-out, T09c success_codes replacement, T09d fail-wins overlap (SEM-09/DL-33, Q7 corners) ·
 T10 unconditioned member starts with box (SEM-10) · T11 default box fold (SEM-11) ·
 T12a internal box_success early-exit, T12b external box_success hung-RUNNING (SEM-12) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
 T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass (SEM-22) ·
-T23 force start satisfies latch (SEM-23) · T32 time AND condition composition (SEM-32, after
+T23 force start satisfies latch (SEM-23) ·
+T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
+(SEM-24) · T32 time AND condition composition (SEM-32, after
 live verification) · T33a/b run_window closer-edge both sides + box variant (SEM-33) ·
 T34 must_* emit alarms only (SEM-34).
 
@@ -312,6 +363,13 @@ T34 must_* emit alarms only (SEM-34).
   settle it for the oracle's event queue model.
 - Q6 (SEM-12): box_success referencing a member that is ON_ICE — does "not scheduled" clause
   apply ("condition not met if the specified job is not scheduled")?
+- Q7 (SEM-09/DL-33): composition of `success_codes`/`fail_codes`/`max_exit_success`. The
+  docs give formats and each attribute's absence-default but no precedence. Implemented
+  default (`# PENDING: Q7` in `ir.exit_is_success`): fail_codes wins over success_codes;
+  under a present success_codes an unmatched code is FAILURE and the threshold is ignored;
+  fail_codes alone falls through to the threshold. Pin all four corners with tiny throwaway
+  jobs on a live instance (a code in both lists · in neither list with success_codes set ·
+  success_codes + max_exit_success both set · fail_codes alone with an unmatched code).
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 — JIL

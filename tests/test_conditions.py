@@ -320,6 +320,29 @@ def test_grammar_rejections_wrapped(src: str) -> None:
         parse_condition(src)
 
 
+def test_dl20_long_flat_chains_parse_iteratively() -> None:
+    """DL-20: a 3000-atom flat `&` chain used to blow the Python stack in the
+    left-spine descent (RecursionError leaking as a raw traceback). The spine
+    walk is iterative now and the result stays one n-ary And, so downstream
+    walkers see a shallow tree."""
+    cond = parse_condition(" & ".join(f"s(j{i})" for i in range(3000)))
+    assert isinstance(cond, And)
+    assert len(cond.operands) == 3000
+    # mixed operators: flat mode folds left-associatively (Q1), so only the
+    # atom count is mode-independent
+    mixed = parse_condition(" | ".join(f"s(j{i}) & f(k{i})" for i in range(1500)))
+    assert sum(1 for _ in iter_atoms(mixed)) == 3000
+
+
+def test_dl20_pathological_grouping_depth_is_a_loud_parse_error() -> None:
+    """Grouping depth beyond the v1 walker budget must surface as
+    ConditionParseError (lowering -> exit-2 class), never a RecursionError
+    traceback masquerading as lint findings."""
+    deep = "(" * 5000 + "s(q)" + ")" * 5000
+    with pytest.raises(ConditionParseError, match="walker budget"):
+        parse_condition(deep)
+
+
 # --------------------------------------------------------------------- properties
 
 

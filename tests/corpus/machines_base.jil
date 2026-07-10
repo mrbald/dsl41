@@ -1,0 +1,15 @@
+/* Machine records for the agents referenced across the job fixtures
+   (DL-25: L017 checks machine refs once the set defines any machine, so
+   the corpus models a complete estate). m\:01 pins the escaped-colon
+   name shape from torture_colon.jil. */
+insert_machine: m1
+type: a
+
+insert_machine: localhost
+type: a
+
+insert_machine: machine1
+type: a
+
+insert_machine: m\:01
+type: a

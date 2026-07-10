@@ -70,6 +70,7 @@ from pydantic import BaseModel
 
 from dsl41.backend_uc import UcEdge, UcModel, UcVarCondition
 from dsl41.conditions import CmpOp, compare_value
+from dsl41.ir import exit_is_success
 from dsl41.oracle import Event, TraceEntry
 
 UcTaskStatus = Literal[
@@ -316,8 +317,14 @@ class UcOracle:
         if status is None:
             if not isinstance(exit_code, int):
                 raise UcOracleError("STATUS requires payload.status or integer exit_code")
-            ceiling = self.model.max_exit_success.get(task, 0)
-            status = "SUCCESS" if exit_code <= ceiling else "FAILURE"
+            # M31/DL-33: same verdict function as the AutoSys side (U4).
+            is_success = exit_is_success(
+                exit_code,
+                max_exit_success=self.model.max_exit_success.get(task, 0),
+                success_codes=self.model.success_codes.get(task),
+                fail_codes=self.model.fail_codes.get(task),
+            )
+            status = "SUCCESS" if is_success else "FAILURE"
         uc_status = {"SUCCESS": "Success", "FAILURE": "Failed", "TERMINATED": "Cancelled"}.get(
             str(status)
         )

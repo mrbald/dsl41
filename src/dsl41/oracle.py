@@ -59,6 +59,9 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - ON_NOEXEC (SEM-22): when the job would start, it bypasses to SUCCESS
   (STARTING/RUNNING skipped) and downstream runs normally. Members of an
   ON_NOEXEC box bypass as their conditions are met.
+- initial_status (SEM-24, DL-18): definition-time ON_HOLD/ON_ICE/ON_NOEXEC
+  seeds the corresponding flag before the first event; no trace entry
+  (definition state, not a transition). INACTIVE is the default anyway.
 - Boxes: SEM-10 (members start when box RUNNING + own condition; at most
   once per box run), SEM-11 LITERAL (DL-13: the box cannot complete until
   every non-bypassed member has RUN to a terminal state -- a member whose
@@ -119,7 +122,7 @@ from dsl41.conditions import (
     compare_int,
     compare_value,
 )
-from dsl41.ir import CatalogIR, JobIR, Time
+from dsl41.ir import CatalogIR, JobIR, Semantics, Time
 
 #: PENDING: Q2 -- zero-lookback anchoring; see module docstring.
 ORACLE_ZERO_LOOKBACK_ANCHOR: Literal["midnight", "last_change"] = "midnight"
@@ -201,8 +204,14 @@ class Oracle:
     def __init__(self, catalog: CatalogIR) -> None:
         self.catalog = catalog
         self.store = StatusStore()
-        for name in catalog.jobs:
-            self.store.job[name] = JobRuntime()
+        for name, job_ir in catalog.jobs.items():
+            # SEM-24: definition-time state seeds the SEM-20/21/22 flags
+            initial = job_ir.sem.initial_status
+            self.store.job[name] = JobRuntime(
+                on_hold=initial == "ON_HOLD",
+                on_ice=initial == "ON_ICE",
+                on_noexec=initial == "ON_NOEXEC",
+            )
         for name, value in catalog.globals_declared.items():
             self.store.globals_[name] = value
         self._trace: list[TraceEntry] = []
@@ -352,9 +361,11 @@ class Oracle:
         if status is None:
             if not isinstance(exit_code, int):
                 raise OracleError("STATUS requires payload.status or integer payload.exit_code")
-            # SEM-09: the SUCCESS/FAILURE boundary is per-job max_exit_success
-            ceiling = job_ir.sem.max_exit_success if job_ir is not None else 0
-            status = "SUCCESS" if exit_code <= ceiling else "FAILURE"
+            # SEM-09 (DL-33): per-job boundary -- max_exit_success threshold
+            # plus the explicit success_codes/fail_codes sets (Q7 corners
+            # pinned in ir.exit_is_success).
+            sem = job_ir.sem if job_ir is not None else Semantics()
+            status = "SUCCESS" if sem.exit_is_success(exit_code) else "FAILURE"
         if status not in (
             "INACTIVE",
             "STARTING",

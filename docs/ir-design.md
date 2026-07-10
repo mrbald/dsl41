@@ -149,12 +149,16 @@ class ExecSpec(BaseModel):               # command jobs; FW/other types analogou
     machine: str | None                  #   substitution sites indexed separately (below)
     owner: str | None
     profile: str | None
+    std_in_file: str | None              # CMD-only; may name a blob (DL-32)
     std_out_file: str | None
     std_err_file: str | None
+    envvars: str | None                  # CMD-only; NAME=value list, verbatim (DL-32)
 
 class Semantics(BaseModel):              # attributes with control-flow teeth (§5 of dossier)
     condition: Cond | None
     max_exit_success: int = 0            # SEM-09
+    success_codes: list[tuple[int, int]] | None   # SEM-09/DL-33, CMD-only; verdict via
+    fail_codes: list[tuple[int, int]] | None      #   ir.exit_is_success (Q7 corners pinned)
     term_run_time_min: int | None
     n_retrys: int = 0
     box_success: Cond | None             # box jobs only; SEM-12
@@ -175,7 +179,7 @@ class JobIR(BaseModel):
 class CatalogIR(BaseModel):              # the compilation unit
     jobs: dict[str, JobIR]
     globals_declared: dict[str, str]     # insert_global
-    external_instances: dict[str, str]   # xtype declarations
+    external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
     machines: dict[str, MachineIR]
     meta: CatalogMeta                    # source files, parse timestamp, tool version
 ```
@@ -287,7 +291,7 @@ each traceable to a SEM/M row:
 | code | severity | rule | source |
 |---|---|---|---|
 | L001 | error | condition references undefined job | SEM-06 |
-| L002 | error | unresolved `$$VAR` (no insert_global, no SET_GLOBAL producer in catalog) | SEM-08 |
+| L002 | error | unresolved global reference: `$$VAR` sites and `v(NAME)` atoms (no insert_global, no SET_GLOBAL producer in catalog; DL-25) | SEM-08 |
 | L003 | error | lookback on `value()` atom | SEM-04 |
 | L004 | error | start_times+start_mins / days_of_week+run_calendar | SEM-31 |
 | L005 | warn | time attributes present, date_conditions falsy (dead config) | SEM-30 |
@@ -300,7 +304,9 @@ each traceable to a SEM/M row:
 | L012 | info | `n()` atoms → mutex candidates (suggest M07 modeling) | M07 |
 | L013 | warn | box member with own schedule (double-gate; often unintended) | SEM-31 note |
 | L014 | error | duplicate job name within compilation set / name collides per UC rules | UCS-12 |
-| L015 | warn | lookback format pitfalls in raw (e.g. bare `30` = 30h) — parse-time | SEM-04 |
+| L015 | warn/info | lookback format pitfalls in raw — single-digit minutes (`2.5` = 2h05m) warn; bare-hours (`30` = 30h) info, valid + unambiguous, DL-24 — parse-time | SEM-04 |
+| L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
+| L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 
 ## 10. Open design decisions (deliberately deferred)
 

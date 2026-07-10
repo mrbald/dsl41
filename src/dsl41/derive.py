@@ -54,6 +54,7 @@ Decisions pinned here (each with a test):
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, model_validator
@@ -501,67 +502,86 @@ def _branch_local_srcs(operand: Cond, catalog: CatalogIR) -> list[str]:
     return srcs
 
 
-def _ancestor_sets(nodes: list[str], preds: dict[str, set[str]]) -> dict[str, set[str]]:
-    """name -> {name} + everything reachable backwards over condition edges."""
-    ancestors: dict[str, set[str]] = {}
+def _ancestor_sets(roots: Iterable[str], preds: dict[str, set[str]]) -> dict[str, set[str]]:
+    """root -> {root} + everything reachable backwards over condition edges.
 
-    def visit(name: str) -> set[str]:
-        if name in ancestors:
-            return ancestors[name]
-        ancestors[name] = {name}  # cycle guard: self is always an ancestor
-        for p in preds.get(name, ()):  # missing (undefined) srcs have no preds
-            ancestors[name] |= visit(p) if p in preds else {p}
-        return ancestors[name]
+    Computed ONLY for the requested roots (the Or-branch producers _or_shapes
+    compares) and iteratively -- the previous version walked every catalog
+    job recursively, which was Theta(n^2) memory on chain-shaped estates
+    (the `dsl41 lint` OOM kill) and blew the Python stack when a long chain
+    was declared consumer-first (DL-20). Cycles are fine: each BFS visits a
+    node once, and unlike the old memoized recursion the closures it returns
+    are complete on cyclic graphs regardless of visit order."""
+    out: dict[str, set[str]] = {}
+    for root in roots:
+        seen = {root}
+        stack = [root]
+        while stack:
+            for p in preds.get(stack.pop(), ()):  # undefined srcs have no preds
+                if p not in seen:
+                    seen.add(p)
+                    stack.append(p)
+        out[root] = seen
+    return out
 
-    for n in nodes:
-        visit(n)
-    return ancestors
 
-
-def _or_shapes(
-    catalog: CatalogIR, preds: dict[str, set[str]], ancestors: dict[str, set[str]]
-) -> list[OrShape]:
+def _or_shapes(catalog: CatalogIR, preds: dict[str, set[str]]) -> list[OrShape]:
     # PENDING: U1 -- lowering texts assume no native OR-join (see OrShape).
-    shapes: list[OrShape] = []
+    # Two passes: collect every Or node's branches first, so ancestor sets
+    # are computed only for the branch producers that need them (DL-20 --
+    # a catalog with no `|` pays nothing here).
+    found: list[
+        tuple[
+            str,
+            Literal["condition", "box_success", "box_failure"],
+            SourceSpan | None,
+            list[list[str]],
+        ]
+    ] = []
+    roots: set[str] = set()
     for job in catalog.jobs.values():
         for attr, cond, span in job.iter_conditions():
             for or_node in _iter_or_nodes(cond):
                 branches = [_branch_local_srcs(op, catalog) for op in or_node.operands]
-                if any(not b for b in branches):
-                    kind: Literal["common_ancestor", "independent", "mixed"] = "mixed"
-                    lowering = (
-                        "per-case M12 decision: at least one branch has no local job"
-                        " producer (global/cross-instance atoms)"
-                    )
-                else:
-                    branch_ancestors = [
-                        set().union(*(ancestors.get(s, {s}) for s in b)) for b in branches
-                    ]
-                    # undefined names cannot anchor a restructure (L001 owns
-                    # the finding); a diamond over one is independent here
-                    common = set.intersection(*branch_ancestors) & set(catalog.jobs)
-                    if common:
-                        kind = "common_ancestor"
-                        lowering = (
-                            "restructure as conditional paths from common ancestor(s)"
-                            f" {sorted(common)} (UCS-03 pattern a)"
-                        )
-                    else:
-                        kind = "independent"
-                        lowering = (
-                            "Task Monitor OR-listener or duplicate the successor per"
-                            " branch (UCS-03 patterns b/c)"
-                        )
-                shapes.append(
-                    OrShape(
-                        job=job.name,
-                        attr=attr,
-                        kind=kind,
-                        branches=branches,
-                        lowering=lowering,
-                        span=span,
-                    )
+                found.append((job.name, attr, span, branches))
+                if all(branches):
+                    roots.update(src for branch in branches for src in branch)
+    ancestors = _ancestor_sets(roots, preds)
+    shapes: list[OrShape] = []
+    for job_name, attr, span, branches in found:
+        if any(not b for b in branches):
+            kind: Literal["common_ancestor", "independent", "mixed"] = "mixed"
+            lowering = (
+                "per-case M12 decision: at least one branch has no local job"
+                " producer (global/cross-instance atoms)"
+            )
+        else:
+            branch_ancestors = [set().union(*(ancestors.get(s, {s}) for s in b)) for b in branches]
+            # undefined names cannot anchor a restructure (L001 owns
+            # the finding); a diamond over one is independent here
+            common = set.intersection(*branch_ancestors) & set(catalog.jobs)
+            if common:
+                kind = "common_ancestor"
+                lowering = (
+                    "restructure as conditional paths from common ancestor(s)"
+                    f" {sorted(common)} (UCS-03 pattern a)"
                 )
+            else:
+                kind = "independent"
+                lowering = (
+                    "Task Monitor OR-listener or duplicate the successor per"
+                    " branch (UCS-03 patterns b/c)"
+                )
+        shapes.append(
+            OrShape(
+                job=job_name,
+                attr=attr,
+                kind=kind,
+                branches=branches,
+                lowering=lowering,
+                span=span,
+            )
+        )
     return shapes
 
 
@@ -716,8 +736,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
         for ref in refs
         if not _is_mutex_ref(ref)
     ]
-    ancestors = _ancestor_sets(list(catalog.jobs), cond_preds)
-    or_shapes = _or_shapes(catalog, cond_preds, ancestors)  # pass 4
+    or_shapes = _or_shapes(catalog, cond_preds)  # pass 4 (ancestors computed inside)
     redesign_flags = [
         RedesignFlag(
             job=job.name,

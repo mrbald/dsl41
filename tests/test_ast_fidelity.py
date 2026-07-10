@@ -116,14 +116,120 @@ def test_unknown_key_is_attribute_never_boundary() -> None:
     assert [a.key for a in jf.statements[0].attrs] == ["frobnicate_mode"]
 
 
-def test_trailing_hash_comment_split() -> None:
-    jf = parse("insert_job: j\ncommand: echo hi # note\n")
+def test_resource_subcommands_are_statement_boundaries() -> None:
+    """Rule 3 (amended 2026-07-09, DL-18): insert_resource must start a new
+    statement, never fold into the preceding insert_machine -- the exact
+    silent-loss failure the first estate-shaped dry run exposed."""
+    text = "insert_machine: m1\ntype: a\n\ninsert_resource: lock1\nres_type: R\namount: 1\n"
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_machine", "insert_resource"]
+    assert [a.key for a in jf.statements[1].attrs] == ["res_type", "amount"]
+    assert render(jf) == text
+
+
+def test_subcommand_shaped_unknown_key_is_a_loud_error() -> None:
+    """Rule 3 guard (DL-18): an attribute-position key shaped like a
+    subcommand but not in the recognized set is a scanner error, not an
+    attribute -- a missed statement boundary is silent structural loss.
+    (insert_monbro moved to the recognized set in DL-29; the guard example
+    is now a fictional object class.)"""
+    text = "insert_job: j   job_type: c\ncommand: x\ninsert_frobnicator: f1\ncurrency: y\n"
+    with pytest.raises(JilParseError, match="shaped like a subcommand"):
+        parse(text)
+
+
+def test_full_12x_subcommand_inventory_scans_as_boundaries() -> None:
+    """DL-29: every subcommand on the TechDocs 12.1 JIL Subcommands page is
+    a statement boundary, so F1 fidelity holds over any valid estate file;
+    lowering (not the scanner) refuses the out-of-scope object classes."""
+    text = (
+        "insert_monbro: mon1\nmode: b\n\n"
+        "delete_glob: g1\n\n"
+        "insert_job_type: mytype\n\n"
+        "update_connectionprofile: hadoop1\n\n"
+        "delete_blob: j1\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == [
+        "insert_monbro",
+        "delete_glob",
+        "insert_job_type",
+        "update_connectionprofile",
+        "delete_blob",
+    ]
+    assert render(jf) == text
+
+
+def test_subcommand_shaped_guard_fires_before_any_statement_too() -> None:
+    with pytest.raises(JilParseError, match="shaped like a subcommand"):
+        parse("delete_frobnicator: f1\n")
+
+
+def test_rename_job_is_a_statement_boundary() -> None:
+    """Rule 3 (amended 2026-07-10, DL-27): rename_job is a documented 12.x
+    subcommand whose rename_ verb sat outside the DL-18 guard shape -- before
+    the amendment it folded silently into the preceding statement, the exact
+    loss class the guard exists to stop."""
+    text = "insert_job: j   job_type: c\ncommand: x\n\nrename_job: j\nnew_name: k\n"
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_job", "rename_job"]
+    assert [a.key for a in jf.statements[1].attrs] == ["new_name"]
+    assert render(jf) == text
+
+
+def test_rename_shaped_unknown_key_is_a_loud_error() -> None:
+    """DL-27 extends the DL-18 guard verbs with rename_."""
+    with pytest.raises(JilParseError, match="shaped like a subcommand"):
+        parse("insert_job: j   job_type: c\nrename_frobnicator: f1\n")
+
+
+def test_second_attr_pair_on_attribute_line_is_a_loud_error() -> None:
+    """Rule 4b (DL-30): JIL permits several attribute statements per line;
+    swallowing the second pair into the first value is silent loss the
+    DL-07 firewall can never see."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\nmachine: prod priority: 5\n")
+
+
+@pytest.mark.parametrize(
+    ("label", "line"),
+    [
+        # No whitespace before the colon-bearing token: not a pair shape.
+        ("path-colon", "std_out_file: /tmp/out:file.err"),
+        # Escaped colon is never a delimiter (rule 2).
+        ("escaped-colon", "command: run C\\:\\\\TEMP now"),
+        # Quoted colons are shadowed (rule 7).
+        ("quoted-pair-lookalike", 'description: "see doc: here"'),
+        # Digit-led tokens are not key-shaped.
+        ("bare-time-list", "run_window: 02:00-04:00"),
+        # A key: shape inside a retained closed block comment is comment
+        # prose, not a pair (rule 5 opaque retention; adversarial-review
+        # finding on DL-30).
+        ("pair-inside-inline-comment", "command: run /* see key: x */ more"),
+    ],
+)
+def test_rule_4b_guard_leaves_valid_colon_values_alone(label: str, line: str) -> None:
+    jf = parse(f"insert_job: j\n{line}\n")
+    assert len(jf.statements[0].attrs) == 1, label
+
+
+def test_mid_line_hash_stays_in_value() -> None:
+    """Rule 5 (amended 2026-07-10, DL-31): Broadcom defines `#` comments in
+    the first column only and `#` is a legal name/value character, so a
+    whitespace-preceded `#`-tail is VALUE text, never a trailing comment --
+    stripping it silently changed the value vs. the engine's parse."""
+    text = "insert_job: j\ncommand: echo hi # note\n"
+    jf = parse(text)
     (attr,) = jf.statements[0].attrs
-    assert attr.raw_value == "echo hi"
-    (tc,) = attr.comments
-    assert tc.attachment == "trailing"
-    assert tc.text == "# note"
-    assert tc.indent == " "
+    assert attr.raw_value == "echo hi # note"
+    assert attr.comments == []
+    assert render(jf) == text
+
+
+def test_hash_full_line_comment_still_recognized() -> None:
+    jf = parse("# lead\ninsert_job: j\ncommand: x\n")
+    (stmt,) = jf.statements
+    assert [c.text for c in stmt.comments] == ["# lead"]
 
 
 def test_glob_is_not_a_comment() -> None:

@@ -5,9 +5,11 @@ front (DL-03: "do not design combinators speculatively"). The corpus shows:
 plain CMD jobs with exec/schedule/condition attributes, boxes with members
 (one level of the tree exercised; nesting supported because the IR does),
 string conditions in the existing condition language, globals, machines,
-external instances, pure-s() chains, and a same-producer parallel pair.
-That yields exactly the four builders ir-design D2 names -- job(), box(),
-sequence(), parallel() -- plus the record declarations. Nothing else.
+resources (opaque records, DL-18), external instances, pure-s() chains, and
+a same-producer parallel pair. That yields exactly the four builders
+ir-design D2 names -- job(), box(), sequence(), parallel() -- plus the
+record declarations. Nothing else. Definition-time `status:` (SEM-24)
+round-trips as a plain job kwarg -- attribute, not combinator.
 
 Design decisions (each with a test; recorded as DL-17):
 - The builder GENERATES JIL and reuses the tested pipeline (to_jil() ->
@@ -187,9 +189,26 @@ class CatalogBuilder:
         self._statements.append("\n".join(lines) + "\n")
         return self
 
-    def xinst(self, name: str, *, xtype: str) -> CatalogBuilder:
+    def resource(self, name: str, *, res_type: str | None = None, **attrs: str) -> CatalogBuilder:
+        _check_name("resource", name)
+        lines = [f"insert_resource: {name}"]
+        if res_type is not None:
+            lines.append(f"res_type: {_check_value('res_type', res_type)}")
+        for key, value in attrs.items():
+            if not _KEY_RE.match(key):
+                raise DslError(f"resource attribute key {key!r} is not JIL-key-shaped")
+            lines.append(f"{key}: {_check_value('resource attribute', value)}")
+        self._statements.append("\n".join(lines) + "\n")
+        return self
+
+    def xinst(self, name: str, *, xtype: str, **attrs: str) -> CatalogBuilder:
         _check_name("external instance", name)
-        self._statements.append(f"insert_xinst: {name}\nxtype: {_check_value('xtype', xtype)}\n")
+        lines = [f"insert_xinst: {name}", f"xtype: {_check_value('xtype', xtype)}"]
+        for key, value in attrs.items():
+            if not _KEY_RE.match(key):
+                raise DslError(f"xinst attribute key {key!r} is not JIL-key-shaped")
+            lines.append(f"{key}: {_check_value('xinst attribute', value)}")
+        self._statements.append("\n".join(lines) + "\n")
         return self
 
     # ----------------------------------------------------------------- the four
@@ -392,10 +411,18 @@ def _job_kwargs(job: JobIR, *, include_condition: bool) -> list[str]:
         out.append(f"n_retrys={sem.n_retrys}")
     if sem.auto_hold:
         out.append("auto_hold=True")
+    if sem.initial_status is not None:
+        out.append(f"status={_py(sem.initial_status)}")
     if job.box.box_terminator:
         out.append("box_terminator=True")
     if job.box.job_terminator:
         out.append("job_terminator=True")
+    if job.resources:
+        groups = " AND ".join(
+            f"({r.name}, QUANTITY={r.quantity}" + (f", FREE={r.free}" if r.free else "") + ")"
+            for r in job.resources
+        )
+        out.append(f"resources={_py(groups)}")
     if job.annotations:
         rendered = ", ".join(f"{_py(k)}: {_py(v)}" for k, v in job.annotations.items())
         out.append(f"annotations={{{rendered}}}")
@@ -433,8 +460,14 @@ def decompile(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
         kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type else []
         kwargs += [f"{k}={_py(v)}" for k, v in machine.attrs.items()]
         lines.append(f"c.machine({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
-    for name, xtype in catalog.external_instances.items():
-        lines.append(f"c.xinst({_py(name)}, xtype={_py(xtype)})")
+    for name, resource in catalog.resources.items():
+        kwargs = [f"res_type={_py(resource.res_type)}"] if resource.res_type else []
+        kwargs += [f"{k}={_py(v)}" for k, v in resource.attrs.items()]
+        lines.append(f"c.resource({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
+    for name, xinst in catalog.external_instances.items():
+        kwargs = [f"xtype={_py(xinst.xtype)}"]
+        kwargs += [f"{k}={_py(v)}" for k, v in xinst.attrs.items()]
+        lines.append(f"c.xinst({_py(name)}, {', '.join(kwargs)})")
 
     # sequence() candidates: derived chains whose followers carry EXACTLY
     # s(prev) -- adjacency alone is not enough (module docstring)

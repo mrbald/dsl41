@@ -1,0 +1,59 @@
+/* ---- machines: agent + virtual, template-interpolated names ---- */
+insert_machine: ~{$SITE}~_RM_CORE
+node_name: ~{$NODE}~
+type: a
+
+insert_machine: ~{$SITE}~_VM_ETL
+type: v
+machine: ~{$SITE}~_RM_CORE
+
+/* ---- resource records (DL-18: carried opaquely v1) ---- */
+insert_resource: ETL_~{$SITE}~_IMPORT_LOCK
+res_type: R
+amount: 1
+description: "Serializes import jobs."
+
+insert_resource: ETL_~{$SITE}~_SLOT_POOL
+res_type: T
+amount: 4
+
+/* ---- producer the top box gates on ---- */
+insert_job: ETL_~{$SITE}~_SEED_C   job_type: cmd
+machine: ~{$SITE}~_VM_ETL
+owner: opsbatch
+command: /usr/bin/env seed-cut nightly
+
+/* ---- top-level box: one-line form, SEM-24 status, unquoted description ---- */
+insert_job: ETL_~{$SITE}~_NIGHT_SB   job_type: box
+description: unquoted description, with commas and a period.
+status: ON_HOLD
+condition: s(ETL_~{$SITE}~_SEED_C)
+owner: opsbatch
+application: ~{$SITE}~_ETL
+
+/* ---- nested box; note missing space after colon ---- */
+insert_job: ETL_~{$SITE}~_NIGHT_B   job_type: box
+box_name:ETL_~{$SITE}~_NIGHT_SB
+status: ON_HOLD
+owner: opsbatch
+application: ~{$SITE}~_ETL
+max_run_alarm: 0
+alarm_if_fail: y
+alarm_if_terminated: y
+
+/* ---- cmd member: runtime vars in std files, dead-config timezone ---- */
+insert_job: ETL_~{$SITE}~_LOAD_C   job_type: cmd
+description: import for the nightly cut
+status: ON_HOLD
+machine: ~{$SITE}~_VM_ETL
+owner: opsbatch
+box_name: ETL_~{$SITE}~_NIGHT_B
+application: ~{$SITE}~_ETL
+max_run_alarm: 0
+alarm_if_fail: y
+alarm_if_terminated: y
+timezone: Zurich
+resources: (ETL_~{$SITE}~_IMPORT_LOCK, QUANTITY=1, FREE=A) and (ETL_~{$SITE}~_SLOT_POOL, QUANTITY=2)
+std_out_file: /var/log/etl/${AUTO_JOB_NAME}_${AUTORUN}.out
+std_err_file: /var/log/etl/${AUTO_JOB_NAME}_${AUTORUN}.err
+command: /usr/bin/env run-import --cut nightly

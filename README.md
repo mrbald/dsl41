@@ -205,3 +205,6 @@ dsl41 is dual-licensed:
 Copyright (C) 2026 dsl41 authors. External contributions require a signed CLA
 preserving the dual-licensing right; corpus hygiene rules also apply
 (see [LICENSING.md](LICENSING.md)).
+
+_Most of the code is written with the assistance of industrial coding agents —
+primarily Anthropic's Claude — while the original ideas and design are my own._

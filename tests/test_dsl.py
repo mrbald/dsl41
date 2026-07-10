@@ -475,11 +475,55 @@ def test_machine_with_no_attrs() -> None:
     assert catalog.machines["m_bare"].attrs == {}
 
 
+def test_resource_builder_populates_resources() -> None:
+    c = CatalogBuilder()
+    c.resource("lock1", res_type="R", amount="2", description="serializer")
+    catalog = c.build()
+    resource = catalog.resources["lock1"]
+    assert resource.res_type == "R"
+    assert resource.attrs == {"amount": "2", "description": "serializer"}
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_resources_kwarg_round_trips_typed() -> None:
+    """DL-21: the decompiler renders resources groups canonically; rebuilding
+    yields the same typed refs and an equal canonical hash."""
+    c = CatalogBuilder()
+    c.job(
+        "resj", command="x", machine="m1", resources="(r1, QUANTITY=2, FREE=A) and (r2, QUANTITY=1)"
+    )
+    catalog = c.build()
+    refs = catalog.jobs["resj"].resources
+    assert [(r.name, r.quantity, r.free) for r in refs] == [("r1", 2, "A"), ("r2", 1, None)]
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+def test_status_kwarg_round_trips_as_initial_status() -> None:
+    """SEM-24 (DL-18): definition-time status is a plain job kwarg."""
+    c = CatalogBuilder()
+    c.job("heldj", command="x", machine="m1", status="ON_HOLD")
+    catalog = c.build()
+    assert catalog.jobs["heldj"].sem.initial_status == "ON_HOLD"
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
 def test_xinst_alone_populates_external_instances() -> None:
     c = CatalogBuilder()
     c.xinst("PRD", xtype="a")
     catalog = c.build()
-    assert catalog.external_instances == {"PRD": "a"}
+    assert catalog.external_instances["PRD"].xtype == "a"
+    assert catalog.external_instances["PRD"].attrs == {}
+
+
+def test_xinst_carries_plumbing_attrs_and_decompiles() -> None:
+    """DL-28: builder kwargs -> JIL -> XinstIR.attrs, and the decompiler
+    reproduces the call."""
+    c = CatalogBuilder()
+    c.xinst("PRD", xtype="a", xmachine="prd.example.com", xport="9000")
+    catalog = c.build()
+    prd = catalog.external_instances["PRD"]
+    assert prd.attrs == {"xmachine": "prd.example.com", "xport": "9000"}
+    assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
 
 
 def test_global_refuses_control_char_value() -> None:

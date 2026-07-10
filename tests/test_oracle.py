@@ -447,6 +447,63 @@ def test_sem09_max_exit_success_shifts_the_success_failure_boundary(
     assert fired is should_fire
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "expected_status"),
+    [(1, "FAILURE"), (2, "SUCCESS"), (0, "SUCCESS")],
+    ids=["carved-out-below-threshold", "at-threshold", "zero"],
+)
+def test_sem09b_fail_codes_carve_failures_out_of_the_threshold(
+    exit_code: int, expected_status: str
+) -> None:
+    """T09b (SEM-09/DL-33): fail_codes marks explicit codes FAILURE even
+    below the max_exit_success threshold; unmatched codes fall through to
+    the threshold (Q7 default)."""
+    text = (
+        "insert_job: prod9b\njob_type: c\ncommand: x\nmachine: m1\n"
+        "max_exit_success: 2\nfail_codes: 1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 0, job="prod9b", exit_code=exit_code))
+    assert o.store.job["prod9b"].status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected_status"),
+    [(25, "SUCCESS"), (0, "FAILURE"), (31, "FAILURE")],
+    ids=["in-range", "zero-not-listed-q7", "outside-range"],
+)
+def test_sem09c_success_codes_replace_the_success_rule(
+    exit_code: int, expected_status: str
+) -> None:
+    """T09c (SEM-09/DL-33): a present success_codes REPLACES the default
+    success rule -- even exit 0 is FAILURE unless listed, and the
+    max_exit_success threshold is ignored (Q7 defaults, conservative
+    direction)."""
+    text = (
+        "insert_job: prod9c\njob_type: c\ncommand: x\nmachine: m1\n"
+        "success_codes: 20-30\nmax_exit_success: 2\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 0, job="prod9c", exit_code=exit_code))
+    assert o.store.job["prod9c"].status == expected_status
+
+
+def test_sem09d_fail_codes_win_over_success_codes() -> None:
+    """T09d (SEM-09/DL-33): a code in BOTH lists is FAILURE -- fail-wins is
+    the Q7 default (a false FAILURE is loud, a false SUCCESS silently
+    satisfies downstream latches)."""
+    text = (
+        "insert_job: prod9d\njob_type: c\ncommand: x\nmachine: m1\n"
+        "success_codes: 1-10\nfail_codes: 5\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 0, job="prod9d", exit_code=5))
+    assert o.store.job["prod9d"].status == "FAILURE"
+    o2 = oracle(text)
+    o2.feed(ev("STATUS", 0, job="prod9d", exit_code=6))
+    assert o2.store.job["prod9d"].status == "SUCCESS"
+
+
 # ------------------------------------------------------------------ 8. SEM-10 boxes
 
 
@@ -850,6 +907,47 @@ def test_sem21_held_member_prevents_box_completion() -> None:
         "STARTING->RUNNING",
         "RUNNING->SUCCESS",
     ]
+
+
+# -------------------------------------------- 14b. SEM-24 status: at definition time
+
+
+def test_sem24a_initial_on_hold_blocks_then_off_hold_releases() -> None:
+    """T24a (SEM-24): a job defined with `status: ON_HOLD` behaves exactly as
+    if it had been inserted and immediately held -- its condition satisfying
+    does not start it (and leaves no trace entry: definition state, not a
+    transition); OFF_HOLD with the condition already satisfied runs it
+    immediately (SEM-21 collapse-to-one)."""
+    text = (
+        "insert_job: seed24\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: held24\njob_type: c\ncommand: y\nmachine: m1\n"
+        "status: ON_HOLD\ncondition: s(seed24)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 0, job="seed24", status="SUCCESS"))
+    assert transitions(o, "held24") == []  # held at definition: no start, no trace
+    assert o.store.job["held24"].status == "INACTIVE"
+    o.feed(ev("OFF_HOLD", 5, job="held24"))
+    assert transitions(o, "held24") == [
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem24b_initial_on_ice_satisfies_downstream_and_never_starts() -> None:
+    """T24b (SEM-24/SEM-20): a job defined with `status: ON_ICE` is excised --
+    a downstream job conditioned on it starts as though the iced job
+    succeeded, and the iced job itself never starts."""
+    text = (
+        "insert_job: iced24\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: down24\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(iced24)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="down24"))
+    assert transitions(o, "down24") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STARTJOB", 1, job="iced24"))
+    assert transitions(o, "iced24") == []  # iced at definition: never starts
 
 
 # -------------------------------------------------------------------- 15. SEM-22 ON_NOEXEC

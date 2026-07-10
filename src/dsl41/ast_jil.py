@@ -25,6 +25,10 @@ jil-statement-syntax.md (each pinned by a fixture or unit test):
   opaque text.
 - A full-line block comment must close at end of line; non-whitespace content
   after `*/` on the closing line is an error.
+- Subcommand-shaped unknown keys (rule 3, amended 2026-07-09 / DL-18): an
+  attribute-position key matching (insert|update|delete|override)_* that is
+  not a recognized subcommand is a loud error, never an attribute -- a missed
+  statement boundary folding into the previous statement is structural loss.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ SUBCOMMANDS = frozenset(
         "insert_job",
         "update_job",
         "delete_job",
+        "rename_job",
         "delete_box",
         "insert_machine",
         "update_machine",
@@ -54,8 +59,34 @@ SUBCOMMANDS = frozenset(
         "update_xinst",
         "delete_xinst",
         "insert_blob",
+        "delete_blob",
+        "insert_glob",
+        "delete_glob",
+        "insert_resource",
+        "update_resource",
+        "delete_resource",
+        # DL-29: the full TechDocs 12.1 subcommand inventory scans (F1 holds
+        # over any valid file); lowering refuses the out-of-scope object
+        # classes loudly.
+        "insert_monbro",
+        "update_monbro",
+        "delete_monbro",
+        "insert_job_type",
+        "update_job_type",
+        "delete_job_type",
+        "insert_connectionprofile",
+        "update_connectionprofile",
+        "delete_connectionprofile",
     }
 )
+
+#: Rule 3 guard (amended 2026-07-09, DL-18; rename_ added 2026-07-10, DL-27):
+#: an attribute-position key shaped like a subcommand but not in SUBCOMMANDS
+#: is a scanner error -- folding a missed statement boundary into the previous
+#: statement is silent structural loss. No documented JIL attribute has this
+#: shape. `rename_job` (TechDocs 12.x) proved the guard's verb list is part of
+#: the inventory it protects: before DL-27 it matched nothing and folded.
+_SUBCOMMAND_SHAPE_RE = re.compile(r"(?:insert|update|delete|override|rename)_\w+", re.IGNORECASE)
 
 #: Continuation trigger set per jil-statement-syntax.md rule 6: a non-key-shaped
 #: line following one of these attributes continues that attribute's value.
@@ -160,9 +191,15 @@ def parse_file(path: str | Path) -> JilFile:
 def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
     """Split a value body into (value, gap, comment_text, post).
 
-    comment_text == "" means no trailing comment. Markers are recognized only
-    outside double quotes and only at the value start or after whitespace
-    (rule 5 + the block-comment decisions in the module docstring).
+    comment_text == "" means no trailing comment. Only `/* ... */` block
+    comments can trail a value; a mid-line `#` is VALUE text (amended
+    2026-07-10, DL-31: Broadcom's syntax rules define `#` comments in the
+    first column only, and `#` is a legal name/value character -- stripping
+    a whitespace-preceded `#`-tail silently changed the value vs. the
+    engine's parse). Hash comments are full-line only (scan loop). Markers
+    are recognized only outside double quotes and only at the value start
+    or after whitespace (rule 5 + the block-comment decisions in the module
+    docstring).
     """
     in_q = False
     i = 0
@@ -171,10 +208,6 @@ def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
         ch = body[i]
         if ch == '"':
             in_q = not in_q
-        elif not in_q and ch == "#" and (i == 0 or body[i - 1] in " \t"):
-            value_ws = body[:i]
-            value = value_ws.rstrip(" \t")
-            return value, value_ws[len(value) :], body[i:], ""
         elif not in_q and body.startswith("/*", i) and (i == 0 or body[i - 1] in " \t"):
             close = body.find("*/", i + 2)
             if close == -1:
@@ -197,6 +230,17 @@ def _find_inline_pair(value: str) -> re.Match[str] | None:
         if value.count('"', 0, m.start()) % 2 == 0:
             return m
     return None
+
+
+_CLOSED_BLOCK_RE = re.compile(r"/\*.*?\*/")
+
+
+def _mask_closed_blocks(value: str) -> str:
+    """Blank out closed `/*...*/` spans (space-for-space, offsets preserved)
+    before the rule-4b pair scan: rule 5 keeps a closed inline block comment
+    with trailing text as opaque VALUE text, so a `key:` shape inside one is
+    comment prose, not a second attribute pair."""
+    return _CLOSED_BLOCK_RE.sub(lambda m: " " * (m.end() - m.start()), value)
 
 
 class _Scanner:
@@ -300,9 +344,33 @@ class _Scanner:
                     stmts.append(cur)
                     cont = None
                 else:
+                    if _SUBCOMMAND_SHAPE_RE.fullmatch(key):
+                        raise JilParseError(
+                            f"{key!r} is shaped like a subcommand but is not a recognized"
+                            " statement boundary; folding it into the previous statement"
+                            " would be silent structural loss (rule 3, DL-18)",
+                            self.file,
+                            i + 1,
+                        )
                     if cur is None:
                         raise JilParseError(
                             f"attribute line {key!r} before any statement", self.file, i + 1
+                        )
+                    if (pair := _find_inline_pair(_mask_closed_blocks(value))) is not None:
+                        # Rule 4b (DL-30): JIL permits several `attr: value`
+                        # statements on one line; swallowing the second pair
+                        # into the first value would be silent loss the
+                        # DL-07 firewall can never see. Valid JIL escapes or
+                        # quotes value colons, so this costs nothing on
+                        # valid input (the DL-18 argument).
+                        raise JilParseError(
+                            f"value of {key!r} carries a second {pair.group(2)!r}:-shaped"
+                            " pair; JIL allows multiple attribute statements per line, so"
+                            " folding it into the value would be silent loss -- split the"
+                            " line, or escape the colon as \\: (or quote the value) if it"
+                            " is value text (rule 4b, DL-30)",
+                            self.file,
+                            i + 1,
                         )
                     if trailing is not None:
                         comments = [*comments, trailing]
@@ -489,6 +557,7 @@ _CANONICAL_KEY_ORDER: tuple[str, ...] = (
     "box_name",
     "command",
     "machine",
+    "machine_method",
     "owner",
     "permission",
     "date_conditions",
@@ -507,6 +576,8 @@ _CANONICAL_KEY_ORDER: tuple[str, ...] = (
     "box_terminator",
     "job_terminator",
     "max_exit_success",
+    "success_codes",
+    "fail_codes",
     "term_run_time",
     "n_retrys",
     "auto_hold",
@@ -516,9 +587,18 @@ _CANONICAL_KEY_ORDER: tuple[str, ...] = (
     "watch_file_min_size",
     "job_load",
     "priority",
+    "job_class",
+    "avg_runtime",
     "profile",
+    "envvars",
+    "ulimit",
+    "elevated",
+    "interactive",
+    "std_in_file",
     "std_out_file",
     "std_err_file",
+    "chk_files",
+    "heartbeat_interval",
     "alarm_if_fail",
     "description",
     "value",

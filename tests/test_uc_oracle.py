@@ -84,6 +84,8 @@ def make_model(
     edges: list[UcEdge] | None = None,
     mutex_groups: list[list[str]] | None = None,
     max_exit_success: dict[str, int] | None = None,
+    success_codes: dict[str, list[tuple[int, int]]] | None = None,
+    fail_codes: dict[str, list[tuple[int, int]]] | None = None,
     name: str = "wf",
 ) -> UcModel:
     """One-workflow UcModel builder for section-1 unit tests of the twin
@@ -93,6 +95,8 @@ def make_model(
         workflows=[UcWorkflow(name=name, tasks=list(tasks), edges=list(edges or []))],
         mutex_groups=[list(g) for g in (mutex_groups or [])],
         max_exit_success=dict(max_exit_success or {}),
+        success_codes=dict(success_codes or {}),
+        fail_codes=dict(fail_codes or {}),
     )
 
 
@@ -465,6 +469,28 @@ def test_m31_exit_code_boundary_via_max_exit_success(
     against max_exit_success (default 0 when the task has no entry) -- the
     same boundary reading as the AutoSys oracle."""
     model = make_model(["p"], max_exit_success=({"p": ceiling} if ceiling is not None else {}))
+    o = UcOracle(model)
+    o.feed(ev("STARTJOB", 0, job="p"))
+    o.feed(ev("STATUS", 1, job="p", exit_code=exit_code))
+    assert transitions(o.trace(), "p") == ["Waiting->Running", f"Running->{expected}"]
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [(5, "Failed"), (25, "Success"), (0, "Failed"), (31, "Failed")],
+    ids=["fail-code-wins", "in-success-range", "zero-not-listed", "outside-range"],
+)
+def test_m31_explicit_code_sets_share_the_autosys_verdict(exit_code: int, expected: str) -> None:
+    """M31/DL-33: success_codes/fail_codes ride the same same-boundary
+    assumption (U4) -- the twin judges through ir.exit_is_success, so the
+    Q7 corner defaults (fail-wins, replacement, threshold-ignored) match
+    the AutoSys oracle by construction."""
+    model = make_model(
+        ["p"],
+        max_exit_success={"p": 2},
+        success_codes={"p": [(20, 30)]},
+        fail_codes={"p": [(5, 5)]},
+    )
     o = UcOracle(model)
     o.feed(ev("STARTJOB", 0, job="p"))
     o.feed(ev("STATUS", 1, job="p", exit_code=exit_code))

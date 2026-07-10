@@ -45,6 +45,8 @@ from dsl41.lint import (
     rule_l004,
     rule_l005,
     rule_l015,
+    rule_l016,
+    rule_l017,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -347,7 +349,10 @@ def test_l015_pitfall_fixture_reports_bare_hours_and_single_digit_minutes() -> N
     assert len(violations) == 2
     by_detail = {v.detail: v for v in violations}
     assert set(by_detail) == {"30", "2.5"}
-    assert all(v.severity == "warn" for v in violations)
+    # DL-24 severity split: bare-hours is valid/unambiguous -> info;
+    # single-digit minutes genuinely reads as a decimal -> warn
+    assert by_detail["30"].severity == "info"
+    assert by_detail["2.5"].severity == "warn"
     bare_hours_span = by_detail["30"].span
     single_digit_span = by_detail["2.5"].span
     assert bare_hours_span is not None and bare_hours_span.line_start == 8
@@ -364,6 +369,61 @@ def test_l015_pitfall_fixture_has_no_l001_interference() -> None:
 def test_l015_quiet_on_all_clean_lookback_forms() -> None:
     catalog = lower_catalog([parse_file(SEM04_LOOKBACK)])
     assert rule_l015(catalog) == []
+
+
+# ------------------------------------------------- 6b. L016/L017 dangling names (DL-25)
+
+
+def test_l016_fires_for_undefined_resource_and_names_it() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "l016_resource_ref.jil")])
+    (violation,) = rule_l016(catalog)
+    assert violation.severity == "warn"
+    assert violation.jobs == ["l16_writer"]
+    assert violation.detail == "L16_MISSING_POOL"
+    assert "insert_resource" in violation.message
+
+
+def test_l016_quiet_when_every_resource_is_defined() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    assert rule_l016(catalog) == []
+
+
+def test_l017_fires_only_when_the_set_defines_machines() -> None:
+    """DL-25 heuristic: a job-only slice (zero insert_machine) stays quiet;
+    once machine records are in the set, a ref outside them is a smell."""
+    jobs_only = "insert_job: j\njob_type: c\ncommand: x\nmachine: ghost\n"
+    assert rule_l017(lower_source(jobs_only)) == []
+    with_machines = jobs_only + "\ninsert_machine: real1\ntype: a\n"
+    (violation,) = rule_l017(lower_source(with_machines))
+    assert violation.severity == "warn"
+    assert violation.detail == "ghost"
+
+
+def test_l017_checks_comma_lists_per_name_and_accepts_defined() -> None:
+    text = (
+        "insert_machine: real1\ntype: a\n\n"
+        "insert_job: lb\njob_type: c\ncommand: x\nmachine: real1, ghost2, ghost3\n"
+    )
+    (violation,) = rule_l017(lower_source(text))
+    assert violation.detail == "ghost2,ghost3"
+    clean = "insert_machine: real1\ntype: a\n\ninsert_job: ok\njob_type: c\ncommand: x\nmachine: real1\n"
+    assert rule_l017(lower_source(clean)) == []
+
+
+def test_l002_v_read_of_undeclared_global_warns_but_declared_or_produced_stay_quiet() -> None:
+    """DL-25: v() reads join L002 as WARN (an unset global can be an
+    intended cross-system gate), unlike $$-substitution ERRORs."""
+    dangling = "insert_job: g1\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(FLAG) = 1\n"
+    (violation,) = rule_l002(lower_source(dangling))
+    assert violation.severity == "warn"
+    assert violation.detail == "FLAG"
+    declared = dangling + "\ninsert_global: FLAG\nvalue: 0\n"
+    assert rule_l002(lower_source(declared)) == []
+    produced = (
+        "insert_job: setter\njob_type: c\nmachine: m1\n"
+        'command: sendevent -E SET_GLOBAL -G "FLAG=1"\n\n' + dangling
+    )
+    assert rule_l002(lower_source(produced)) == []
 
 
 # ------------------------------------------------------ 7. lint_catalog integration
@@ -390,7 +450,9 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     its designed purpose --, L011 via genuinely unwired fixture jobs, L008
     via sem12_external_gate.jil's SEM-12 external gate, and L012 via
     m07_mutex.jil's n() mutex pair + self-exclusion -- the phase-5 fixtures
-    added per CLAUDE.md's derive/lint test-suite task)."""
+    added per CLAUDE.md's derive/lint test-suite task). L016 joined with
+    l016_resource_ref.jil (DL-25); L017 is registered but quiet -- the
+    corpus defines every machine it references (machines_base.jil)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -402,6 +464,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L011",
         "L012",
         "L015",
+        "L016",
     }
 
 
@@ -414,12 +477,29 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     now fires twice (m07_mutex.jil's mutex pair + self-exclusion group).
     L001 dropped 7 -> 6 with the review fixes: upstream_daily is now defined
     in sem04_lookback.jil (on its own cadence) so consumer_stale's L009
-    trigger survives L009's new undefined-producer skip."""
+    trigger survives L009's new undefined-producer skip. L005 1 -> 2 with
+    sem24_status_resource.jil (DL-18): LOAD_C's timezone without
+    date_conditions is the estate shape's deliberate dead config.
+    L002 1 -> 3 with the DL-25 v() extension: the corpus already carried
+    two dangling v() reads nothing checked (consumer_window's $REGION and
+    gate_box's $ABORT_FLAG -- the latter IS sem12's intended external
+    gate, which is exactly why v() reads are warn, not error). L016 x1 via
+    l016_resource_ref.jil's missing pool."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
     assert counts == Counter(
-        {"L001": 6, "L011": 3, "L015": 2, "L008": 2, "L012": 2, "L002": 1, "L005": 1, "L009": 1}
+        {
+            "L001": 6,
+            "L011": 3,
+            "L015": 2,
+            "L008": 2,
+            "L012": 2,
+            "L002": 3,
+            "L005": 2,
+            "L009": 1,
+            "L016": 1,
+        }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))
     assert dangling == ["commented", "dead_scheduler", "glob_shell"]
@@ -430,6 +510,53 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
 # --------------------------------------------------------------------- 8. CLI
 
 runner = CliRunner()
+
+
+def test_report_suppress_drops_code_from_findings_and_exit() -> None:
+    """DL-23: suppression is a reporting choice on the complete report."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    report = lint_catalog(catalog)
+    assert report.by_code("L005")  # the fixture's deliberate dead-config timezone
+    slim = report.suppress({"L005"})
+    assert not slim.by_code("L005")
+    assert len(slim.violations) == len(report.violations) - len(report.by_code("L005"))
+    assert report.by_code("L005")  # original untouched (copy, not mutation)
+
+
+def test_cli_suppress_l005_flips_strict_exit(tmp_path: Path) -> None:
+    dead = tmp_path / "dead.jil"
+    dead.write_text(
+        "insert_job: tz_conv\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "10:00"\ntimezone: Zurich\n\n'
+        "insert_job: tz_dead\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(tz_conv)\ntimezone: Zurich\n",
+        encoding="utf-8",
+    )
+    strict = runner.invoke(app, ["lint", str(dead), "--strict"])
+    assert strict.exit_code == 1
+    assert "L005" in strict.stdout
+    suppressed = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "L005"])
+    assert suppressed.exit_code == 0
+    assert suppressed.stdout == ""
+
+
+def test_cli_suppress_accepts_comma_lists_and_case(tmp_path: Path) -> None:
+    dead = tmp_path / "dead.jil"
+    dead.write_text(
+        "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\ntimezone: Zurich\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "l005,L011"])
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_suppress_unknown_code_is_a_loud_exit_2(tmp_path: Path) -> None:
+    """DL-23: a typo silently suppressing nothing would be silent loss."""
+    clean = tmp_path / "clean.jil"
+    clean.write_text("insert_job: c1\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    result = runner.invoke(app, ["lint", str(clean), "--suppress", "L999"])
+    assert result.exit_code == 2
+    assert "unknown rule code" in result.output
 
 
 def test_cli_clean_file_exits_0_with_empty_stdout(tmp_path: Path) -> None:
@@ -456,15 +583,34 @@ def test_cli_bare_unwired_job_warns_l011(tmp_path: Path) -> None:
 def test_cli_lookback_pitfall_exits_0_with_two_l015_lines_on_stdout() -> None:
     result = runner.invoke(app, ["lint", str(SEM04_LOOKBACK_PITFALL)])
     assert result.exit_code == 0
-    assert result.stdout.count("L015 warn:") == 2
+    assert result.stdout.count("L015 info:") == 1  # bare hours (DL-24)
+    assert result.stdout.count("L015 warn:") == 1  # single-digit minutes
     assert f"{SEM04_LOOKBACK_PITFALL}:8:" in result.stdout
     assert f"{SEM04_LOOKBACK_PITFALL}:14:" in result.stdout
 
 
-def test_cli_lookback_pitfall_strict_exits_1() -> None:
+def test_cli_lookback_pitfall_strict_exits_1_only_for_the_warn_shape() -> None:
+    """DL-24: with --strict the single-digit-minutes WARN gates the exit;
+    the bare-hours INFO alone must not (see the info-only test below)."""
     result = runner.invoke(app, ["lint", "--strict", str(SEM04_LOOKBACK_PITFALL)])
     assert result.exit_code == 1
-    assert result.stdout.count("L015 warn:") == 2
+    assert result.stdout.count("L015 warn:") == 1
+
+
+def test_cli_bare_hours_alone_passes_strict(tmp_path: Path) -> None:
+    """DL-24: an estate that uses intended bare-hours lookbacks everywhere
+    is strict-clean without suppression."""
+    jil = tmp_path / "bare_hours.jil"
+    jil.write_text(
+        "insert_job: feed\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "10:00"\n\n'
+        "insert_job: consumer\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(feed, 12)\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["lint", "--strict", str(jil)])
+    assert result.exit_code == 0
+    assert result.stdout.count("L015 info:") == 1
 
 
 def test_cli_sem06_dangling_exits_1_with_l001_lines() -> None:

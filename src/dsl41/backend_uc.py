@@ -134,6 +134,23 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         used_rows.add("M07")
     if graph.or_shapes:
         used_rows.add("M12")
+    # DL-25: calendars are external named dependencies -- autocal territory,
+    # not definable in JIL, so "unknown calendar" is undecidable for the
+    # linter. The report inventories them instead (and surfaces U6 via the
+    # M24/M26 rows). Only LIVE schedules count; dead-config calendars are
+    # L005's business.
+    calendars: dict[str, list[str]] = {}
+    for name, job in catalog.jobs.items():
+        schedule = job.schedule
+        if schedule is None:
+            continue
+        for calendar in (schedule.run_calendar, schedule.exclude_calendar):
+            if calendar:
+                calendars.setdefault(calendar, []).append(name)
+        if schedule.timezone:
+            used_rows.add("M26")
+    if calendars:
+        used_rows.add("M24")
 
     lines: list[str] = [
         "# Migration report",
@@ -195,6 +212,18 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         lines += ["", "## External boundary (M33 — cross-instance producers)", ""]
         for ref in graph.external_boundary:
             lines.append(f"- `{ref.name}^{ref.instance}`")
+    if calendars:
+        lines += [
+            "",
+            "## Calendars (M24 — external definitions, not in JIL)",
+            "",
+            "Calendars live in autocal, not JIL; recreate each in UC and verify"
+            " parity per calendar (U6).",
+            "",
+        ]
+        for calendar in sorted(calendars):
+            jobs_list = ", ".join(f"`{j}`" for j in sorted(calendars[calendar]))
+            lines.append(f"- `{calendar}` — used by {jobs_list}")
     open_questions = [
         (question, dep_rows, why)
         for question, dep_rows, why in _U_QUESTIONS
@@ -267,6 +296,10 @@ class UcModel(BaseModel):
     workflows: list[UcWorkflow] = []
     mutex_groups: list[list[str]] = []  # UCS-09 Mutually Exclusive Tasks
     max_exit_success: dict[str, int] = {}  # M31 assumed: same boundary as AutoSys
+    #: M31/DL-33: explicit exit-code sets ride the same same-boundary
+    #: assumption (U4); verdict shared via ir.exit_is_success.
+    success_codes: dict[str, list[tuple[int, int]]] = {}
+    fail_codes: dict[str, list[tuple[int, int]]] = {}
     excluded: list[str] = []  # human-readable ledger of everything NOT compiled
 
 
@@ -445,6 +478,26 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             f"{e.mapping_row} edge {e.src} -> {e.dst} spans workflows"
             " (Task Monitor territory, M02/M03; not modeled v1)"
         )
+    # SEM-24/DL-18: definition-time state is not modeled in the twin v1; the
+    # eventual mapping is M20 Hold ("Hold on Start", E-class). Recorded, never
+    # silently dropped -- the AutoSys-vs-twin comparator diverging on such
+    # catalogs is the correct polarity.
+    for name, job in catalog.jobs.items():
+        initial = job.sem.initial_status
+        if initial is not None and initial != "INACTIVE":
+            excluded.append(
+                f"M20 {name}: definition-time status {initial} not modeled in the"
+                " twin v1 (map via UC Hold on Start at cutover, SEM-24)"
+            )
+        if job.resources:
+            groups = ", ".join(
+                f"{r.name} x{r.quantity}" + (f" FREE={r.free}" if r.free else "")
+                for r in job.resources
+            )
+            excluded.append(
+                f"M34 {name}: resource requirements ({groups}) not modeled in the"
+                " twin v1 (map to UC Virtual Resources, UCS-09; DL-21)"
+            )
     return UcModel(
         workflows=workflows,
         mutex_groups=[list(g) for g in graph.mutex_groups],
@@ -452,6 +505,16 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             name: job.sem.max_exit_success
             for name, job in catalog.jobs.items()
             if job.sem.max_exit_success
+        },
+        success_codes={
+            name: job.sem.success_codes
+            for name, job in catalog.jobs.items()
+            if job.sem.success_codes is not None
+        },
+        fail_codes={
+            name: job.sem.fail_codes
+            for name, job in catalog.jobs.items()
+            if job.sem.fail_codes is not None
         },
         excluded=excluded,
     )

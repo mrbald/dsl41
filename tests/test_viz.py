@@ -194,7 +194,8 @@ def test_threshold_boundary_is_strictly_greater() -> None:
 
 def test_default_threshold_keeps_corpus_boxes_expanded() -> None:
     mermaid = to_mermaid(derive_graph(corpus_catalog()))
-    assert mermaid.count("subgraph") == 2  # box_a + gate_box
+    # box_a + gate_box + sem24's NIGHT_SB/NIGHT_B nested pair (DL-18)
+    assert mermaid.count("subgraph") == 4
 
 
 def test_direction_td() -> None:

@@ -282,6 +282,7 @@ def parse_condition(text: str, precedence: Precedence | None = None) -> Cond:
     mode = CONDITION_PRECEDENCE if precedence is None else precedence
     try:
         tree = _parser(mode).parse(text)
+        return _build(cast("Tree[Token]", tree.children[0]))
     except UnexpectedInput as exc:
         first_line = str(exc).strip().splitlines()[0]
         raise ConditionParseError(
@@ -289,7 +290,18 @@ def parse_condition(text: str, precedence: Precedence | None = None) -> Cond:
             text=text,
             pos=getattr(exc, "pos_in_stream", None),
         ) from exc
-    return _build(cast("Tree[Token]", tree.children[0]))
+    except RecursionError as exc:
+        # DL-20: operator chains build iteratively (any realistic length is
+        # fine); only pathological grouping depth lands here. Refuse loudly
+        # (exit-2 class) instead of leaking a traceback masquerading as
+        # exit-1 lint findings -- downstream Cond walkers recurse per
+        # nesting level, so admitting the parse would only move the crash.
+        raise ConditionParseError(
+            "condition grouping is nested deeper than the v1 walker budget"
+            " (~1000 levels); flatten the grouping or split the condition",
+            text=text,
+            pos=None,
+        ) from exc
 
 
 # --------------------------------------------------------- Tree -> Cond transformer
@@ -341,16 +353,31 @@ def _lookback(tree: Tree[Token]) -> Lookback:
 def _build(node: Tree[Token]) -> Cond:
     data = node.data
     children = node.children
-    if data == "binop":  # flat mode: expr op operand
-        op_tok = cast("Tree[Token]", children[1]).children[0]
-        is_and = str(op_tok).lower() in ("&", "and")
-        left = _build(cast("Tree[Token]", children[0]))
-        right = _build(cast("Tree[Token]", children[2]))
-        return _combine(is_and, left, right, _span(node))
-    if data in ("or_", "and_"):  # prec mode: expr TOKEN expr
-        left = _build(cast("Tree[Token]", children[0]))
-        right = _build(cast("Tree[Token]", children[-1]))
-        return _combine(data == "and_", left, right, _span(node))
+    if data in ("binop", "or_", "and_"):
+        # The LALR tree is left-leaning: one nesting level per operator. Walk
+        # the left spine iteratively (DL-20: a 1000+-atom flat chain must not
+        # blow the Python stack), then fold back left-to-right so the result
+        # is identical to the old recursive descent -- _combine flattens
+        # same-op runs into one n-ary node either way. Right-hand operands
+        # and paren interiors still recurse: their depth is grouping depth,
+        # bounded by the parse_condition RecursionError guard.
+        spine: list[tuple[bool, Tree[Token], CondSpan | None]] = []
+        current = node
+        while True:
+            d = current.data
+            if d == "binop":  # flat mode: expr op operand
+                op_tok = cast("Tree[Token]", current.children[1]).children[0]
+                is_and = str(op_tok).lower() in ("&", "and")
+            elif d in ("or_", "and_"):  # prec mode: expr TOKEN expr
+                is_and = d == "and_"
+            else:
+                break
+            spine.append((is_and, cast("Tree[Token]", current.children[-1]), _span(current)))
+            current = cast("Tree[Token]", current.children[0])
+        result = _build(current)  # leftmost operand: an atom or a paren group
+        for is_and, right_node, span in reversed(spine):
+            result = _combine(is_and, result, _build(right_node), span)
+        return result
     if data == "paren":
         return Paren(inner=_build(cast("Tree[Token]", children[0])), span=_span(node))
     if data == "status_atom":

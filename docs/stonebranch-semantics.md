@@ -164,7 +164,7 @@ rule and a migration-report entry.
 | M28 | must_start/must_complete (SEM-34) | Late Start / Late Finish flags (UCS-10) | **E** | cleanest mapping in the whole table |
 | M29 | term_run_time (§5) | task Maximum Run Time with Cancel action | **A/?** | pin exact UC auto-cancel config |
 | M30 | n_retrys (§5) | task Retry options (max retries, interval, suppress intermediate failures) | **A** | retry trigger sets differ (Q4) |
-| M31 | max_exit_success (SEM-09) | task exit-code / output success criteria | **A/?** | per task type; pin |
+| M31 | max_exit_success + success_codes/fail_codes (SEM-09/DL-33) | task exit-code / output success criteria | **A/?** | per task type; pin — twin shares ir.exit_is_success on both sides, Q7 corners included |
 | M32 | FW jobs (watch_file) (§5) | Agent File Monitor task/trigger (UCS-07) | **A** | steady-state vs existence modes; trigger-disable gotchas **[V]** |
 | M33 | cross-instance `job^INST` (SEM-07) | Task Monitor across... or UC agent/remote — depends on target topology | **R** | consolidating instances is a migration design decision, not a translation |
 | M34 | job_load/priority/QUE_WAIT | Virtual Resources + Agent task limits | **A** | model mapping per machine definition |

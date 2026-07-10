@@ -14,11 +14,30 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
 2. **Escaped colon** `\:` inside a value is literal and does NOT start a new key. The scanner
    splits on the FIRST unescaped colon of a line whose prefix is a valid key shape.
 3. **Statement boundary**: a line whose key is a subcommand (`insert_job`, `update_job`,
-   `delete_job`, `delete_box`, `insert_machine`, `update_machine`, `delete_machine`,
-   `insert_global`, `delete_global`, `override_job`, `insert_xinst`, `update_xinst`,
-   `delete_xinst`, `insert_blob`, …) begins a new statement; all following attribute lines
-   belong to it until the next subcommand or EOF. Unknown keys are attributes, never
-   boundaries (forward compatibility).
+   `delete_job`, `rename_job`, `delete_box`, `insert_machine`, `update_machine`,
+   `delete_machine`, `insert_global`, `delete_global`, `override_job`, `insert_xinst`,
+   `update_xinst`, `delete_xinst`, `insert_blob`, `delete_blob`, `insert_glob`,
+   `delete_glob`, `insert_resource`, `update_resource`, `delete_resource`,
+   `insert_monbro`, `update_monbro`, `delete_monbro`, `insert_job_type`,
+   `update_job_type`, `delete_job_type`, `insert_connectionprofile`,
+   `update_connectionprofile`, `delete_connectionprofile` — the complete TechDocs 12.1
+   inventory, DL-29) begins a new statement; all following attribute lines belong to
+   it until the next subcommand or EOF. Unknown keys are attributes, never boundaries
+   (forward compatibility) — EXCEPT a key matching the subcommand shape
+   `/(insert|update|delete|override|rename)_\w+/i` that is not in the recognized set:
+   that is a scanner error. Folding a missed statement boundary into the previous
+   statement is silent *structural* loss, strictly worse than a loud stop; no documented
+   JIL *attribute* has this shape, so the guard costs nothing on valid input.
+   *(Amended 2026-07-09 / DL-18: the first estate-shaped dry run used `insert_resource`,
+   which the scanner silently folded into the preceding `insert_machine` — the exact
+   failure class this rule now makes impossible. Resource subcommands added to the
+   recognized set at the same time.)*
+   *(Amended 2026-07-10 / DL-27: the 12.x doc sweep found `rename_job`, a documented
+   subcommand whose `rename_` verb was outside the guard shape — it folded silently,
+   reproducing the DL-18 failure class the guard was built to stop. `rename_job` added
+   to the recognized set and `rename` to the guard verbs. The guard's verb list is part
+   of the subcommand inventory and must be re-checked against the vendor's subcommand
+   page whenever the recognized set changes.)*
 4. **One-line form**: `insert_job: name   job_type: c` — a subcommand line may carry a second
    `key: value` pair after the subject; the scanner detects a second unescaped
    ` key:`-shaped token on the subcommand line only. (Common in real estates and autorep -q
@@ -26,15 +45,30 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    any other second `key:`-shaped token on a subcommand line is a scanner error — loud,
    never silently folded into the subject. *(Amended 2026-07-03: generic wording narrowed
    to match the AST model's `job_type_inline` field.)*
-5. **Comments**: `/* ... */` (may span lines) and `#`-to-EOL outside quoted strings. Comments
-   attach to the nearest following statement/attr (leading) or same line (trailing); free
-   comments at EOF are `floating`. Verbatim text preserved. Disambiguation vs. values
-   (pinned by F4 fixtures, amended 2026-07-03): a trailing block comment starts at the
-   leftmost whitespace-preceded, unquoted `/*` whose first following `*/` ends the line;
-   a `/*` that never closes on the line (e.g. a shell glob after a space) is value text,
-   and a closed `/*...*/` with value text after it stays in the value as opaque text.
-   A full-line block comment must close at the end of its last line; non-whitespace
-   content after `*/` is a scanner error.
+4b. **Attribute lines carry ONE pair** *(added 2026-07-10, DL-30)*: Broadcom's syntax
+   rules permit several `attribute: value` statements on one line (whitespace-separated)
+   and require colons *inside* values to be escaped (`\:`) or quoted. A second unescaped,
+   unquoted, whitespace-preceded `key:`-shaped token in an attribute value is therefore
+   either a real second attribute (folding it into the value would be silent loss the
+   DL-07 firewall cannot see) or invalid JIL — both deserve a loud scanner error, same
+   detector as rule 4. Colons not in that shape (no leading whitespace, escaped, quoted,
+   digit-led as in `/tmp/out:file.err` or `02:00-04:00`) remain value text per rule 2/F4.
+5. **Comments**: `/* ... */` (may span lines) and full-line `#` comments. Comments
+   attach to the nearest following statement/attr (leading) or same line (trailing —
+   block comments only); free comments at EOF are `floating`. Verbatim text preserved.
+   Disambiguation vs. values (pinned by F4 fixtures, amended 2026-07-03): a trailing
+   block comment starts at the leftmost whitespace-preceded, unquoted `/*` whose first
+   following `*/` ends the line; a `/*` that never closes on the line (e.g. a shell glob
+   after a space) is value text, and a closed `/*...*/` with value text after it stays
+   in the value as opaque text. A full-line block comment must close at the end of its
+   last line; non-whitespace content after `*/` is a scanner error.
+   *(Amended 2026-07-10, DL-31: `#` starts a comment only as the line's first
+   non-whitespace character. Broadcom's syntax rules put `#` comments "in the first
+   column" and list `#` among valid name/value characters, so a mid-line
+   whitespace-preceded `#`-tail is VALUE text — the previous trailing-strip silently
+   changed the value relative to the engine's parse. Leading whitespace before a
+   full-line `#` is accepted as harmless leniency. [?] Verify against a live `jil`
+   binary whether it accepts indented `#` comments and how it treats mid-line `#`.)*
 6. **Continuation**: some list-valued attributes (`start_mins`, `start_times`,
    `must_*_times`, calendars) "can contain up to 255 characters and multiple lines without a
    continuation character" (Broadcom, start_mins page). Scanner rule: a line that does NOT

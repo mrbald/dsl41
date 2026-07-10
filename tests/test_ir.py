@@ -32,11 +32,13 @@ from dsl41.ir import (
     JobIR,
     LoweringError,
     MachineIR,
+    ResourceIR,
     ScheduleBlock,
     Semantics,
     SlaSpec,
     Time,
     dump_catalog,
+    exit_is_success,
     load_catalog,
     lower_catalog,
     lower_source,
@@ -186,6 +188,10 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
+        "ETL_~{$SITE}~_LOAD_C",
+        "ETL_~{$SITE}~_NIGHT_B",
+        "ETL_~{$SITE}~_NIGHT_SB",
+        "ETL_~{$SITE}~_SEED_C",
         "box_a",
         "colon_torture",
         "commented",
@@ -200,6 +206,7 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "glob_shell",
         "job_a",
         "job_b",
+        "l16_writer",
         "long_lists",
         "mutex_a",
         "mutex_b",
@@ -293,7 +300,110 @@ def test_machines_xinst_targeted() -> None:
         "factor": "1.0",
     }
     assert catalog.machines["virt_pool"].machine_type == "v"
-    assert catalog.external_instances == {"PRD": "a"}
+    prd = catalog.external_instances["PRD"]
+    assert prd.xtype == "a"
+    # DL-28: TechDocs-12.x connection plumbing (xmachine is doc-required)
+    # is carried verbatim, MachineIR-style, never refused.
+    assert prd.attrs == {"xmachine": "prdscheduler.example.com", "xport": "9000"}
+
+
+# ------------------------------------------- 3b. sem24_status_resource.jil (DL-18)
+
+
+def test_resource_lowers_opaquely() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    assert set(catalog.resources) == {"ETL_~{$SITE}~_IMPORT_LOCK", "ETL_~{$SITE}~_SLOT_POOL"}
+    resource = catalog.resources["ETL_~{$SITE}~_IMPORT_LOCK"]
+    assert isinstance(resource, ResourceIR)
+    assert resource.res_type == "R"
+    assert resource.attrs == {"amount": "1", "description": '"Serializes import jobs."'}
+    assert catalog.resources["ETL_~{$SITE}~_SLOT_POOL"].res_type == "T"
+
+
+def test_dl21_resources_attribute_lowers_typed() -> None:
+    """DL-21: `resources:` groups (TechDocs 12.x syntax, estate-cased `and`)
+    lower to typed ResourceRef entries."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    refs = catalog.jobs["ETL_~{$SITE}~_LOAD_C"].resources
+    assert [(r.name, r.quantity, r.free) for r in refs] == [
+        ("ETL_~{$SITE}~_IMPORT_LOCK", 1, "A"),
+        ("ETL_~{$SITE}~_SLOT_POOL", 2, None),
+    ]
+
+
+def test_dl21_resources_keywords_and_separator_are_case_insensitive() -> None:
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (r1, quantity=3, free=y) AND (r2, QUANTITY=1)\n"
+    )
+    refs = catalog.jobs["j"].resources
+    assert [(r.name, r.quantity, r.free) for r in refs] == [("r1", 3, "Y"), ("r2", 1, None)]
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("IMPORT_LOCK, QUANTITY=1", "no '(name, ...)' group"),
+        ("(r1, QUANTITY=1) (r2, QUANTITY=2)", "joined by AND"),
+        ("(r1, QUANTITY=1) or (r2, QUANTITY=2)", "joined by AND"),
+        ("(r1, QUANTITY=one)", "expects an integer"),
+        ("(r1, QUANTITY=0)", "must be >= 1"),
+        ("(r1)", "missing QUANTITY"),
+        ("(r1, FREE=A)", "missing QUANTITY"),
+        ("(r1, QUANTITY=1, FREE=X)", "FREE expects Y, N, or A"),
+        ("(r1, QUANTITY=1, PRIORITY=2)", "unknown keyword"),
+        ("(QUANTITY=1)", "must start with a resource name"),
+    ],
+)
+def test_dl21_malformed_resources_are_loud(value: str, why: str) -> None:
+    text = f"insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nresources: {value}\n"
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(text)
+    assert why in str(exc_info.value)
+
+
+def test_duplicate_resource_is_a_lowering_error() -> None:
+    text = "insert_resource: lock1\nres_type: R\n\ninsert_resource: lock1\nres_type: D\n"
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(text)
+    assert "duplicate insert_resource" in str(exc_info.value)
+
+
+def test_update_resource_is_unsupported_by_lowering_v1() -> None:
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source("update_resource: lock1\namount: 2\n")
+    assert "not supported by lowering v1" in str(exc_info.value)
+
+
+def test_sem24_status_lowers_to_initial_status() -> None:
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    for name in ("ETL_~{$SITE}~_NIGHT_SB", "ETL_~{$SITE}~_NIGHT_B", "ETL_~{$SITE}~_LOAD_C"):
+        assert catalog.jobs[name].sem.initial_status == "ON_HOLD"
+    assert catalog.jobs["ETL_~{$SITE}~_SEED_C"].sem.initial_status is None
+
+
+def test_sem24_status_is_case_insensitive_and_unquoted() -> None:
+    catalog = lower_source(
+        'insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nstatus: "on_ice"\n'
+    )
+    assert catalog.jobs["j"].sem.initial_status == "ON_ICE"
+
+
+def test_sem24_run_state_status_is_refused() -> None:
+    """SEM-24: run states would interact with the SEM-01 latch -- refused,
+    never guessed."""
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n")
+    message = str(exc_info.value)
+    assert "SEM-24" in message
+    assert "SUCCESS" in message
+
+
+def test_alarm_if_terminated_is_an_annotation() -> None:
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nalarm_if_terminated: y\n"
+    )
+    assert catalog.jobs["j"].annotations == {"alarm_if_terminated": "y"}
 
 
 # ------------------------------------------------------------ 3. sem31_xor.jil (SEM-31)
@@ -580,9 +690,30 @@ def test_duplicate_insert_global_is_a_lowering_error() -> None:
 _UNSUPPORTED_SUBCOMMAND_CASES = [
     ("update-job-unsupported", "update_job: j\ncommand: x\n", "not supported by lowering v1"),
     ("insert-global-missing-value", "insert_global: G\n", "missing value attribute"),
-    ("insert-xinst-extra-attr", "insert_xinst: PRD\nxtype: a\nextra: 1\n", "unexpected attribute"),
     ("insert-xinst-missing-xtype", "insert_xinst: PRD\n", "missing xtype attribute"),
 ]
+
+
+def test_xinst_full_12x_shape_lowers_with_opaque_plumbing() -> None:
+    """DL-28: every attribute TechDocs 12.1 documents on insert_xinst
+    (xmachine required, xport/xmanager per xtype, crypt options) lowers;
+    xtype stays typed, the rest is carried verbatim. The pre-DL-28
+    lowering refused all of them, so no real external-instance JIL could
+    compile."""
+    text = (
+        "insert_xinst: EEP\nxtype: e\nxmachine: eep.example.com\n"
+        "xport: 7500\nxmanager: EEPALIAS\nxcrypt_type: AES\nxkey_to_manager: 0xKEY\n"
+    )
+    catalog = lower_source(text)
+    eep = catalog.external_instances["EEP"]
+    assert eep.xtype == "e"
+    assert eep.attrs == {
+        "xmachine": "eep.example.com",
+        "xport": "7500",
+        "xmanager": "EEPALIAS",
+        "xcrypt_type": "AES",
+        "xkey_to_manager": "0xKEY",
+    }
 
 
 @pytest.mark.parametrize(
@@ -775,3 +906,140 @@ def test_duplicate_name_reported_even_with_duplicate_attr() -> None:
     with pytest.raises(LoweringError) as exc_info:
         lower_source(text)
     assert "duplicate job name 'j'" in str(exc_info.value)
+
+
+# ----------------------------------------------- 12.x attribute lanes (DL-32)
+
+_DL32_CMD = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+
+
+@pytest.mark.parametrize(
+    "attr_line",
+    [
+        "heartbeat_interval: 5",
+        "notification_alarm_types: JOBFAILURE",
+        "notification_template: templ.txt",
+        "notification_emailaddress_on_alarm: ops@example.com",
+        "notification_emailaddress_on_failure: ops@example.com",
+        "notification_emailaddress_on_success: ops@example.com",
+        "notification_emailaddress_on_terminated: ops@example.com",
+    ],
+)
+def test_dl32_observability_attrs_route_to_annotations(attr_line: str) -> None:
+    """12.x sweep: alarms/notification-services family -- annotation lane."""
+    catalog = lower_source(_DL32_CMD + attr_line + "\n")
+    key, _, value = attr_line.partition(": ")
+    assert catalog.jobs["j"].annotations[key] == value
+
+
+@pytest.mark.parametrize(
+    "attr_line",
+    [
+        "machine_method: load",
+        "job_class: night",
+        "avg_runtime: 42",
+        "ulimit: (-c 512)",
+        "elevated: 1",
+        "interactive: 0",
+        "chk_files: /tmp 2000",
+    ],
+)
+def test_dl32_inert_attrs_route_to_passthrough(attr_line: str) -> None:
+    """12.x sweep: placement/agent/OS tuning + chk_files -- inert carry."""
+    catalog = lower_source(_DL32_CMD + attr_line + "\n")
+    key, _, value = attr_line.partition(": ")
+    assert catalog.jobs["j"].passthrough[key] == value
+
+
+def test_dl32_std_in_file_and_envvars_typed_on_cmd() -> None:
+    """CMD-only exec pair: typed carry on ExecSpec, $$VAR sites indexed."""
+    catalog = lower_source(_DL32_CMD + "std_in_file: /tmp/in.dat\nenvvars: A=$$FLAG,B=2\n")
+    exec_ = catalog.jobs["j"].exec_
+    assert isinstance(exec_, ExecSpec)
+    assert exec_.std_in_file == "/tmp/in.dat"
+    assert exec_.envvars == "A=$$FLAG,B=2"
+    assert any(
+        site.attr == "envvars" and site.name == "FLAG" for site in catalog.jobs["j"].var_sites
+    )
+
+
+def test_dl32_cmd_only_exec_attrs_error_on_fw() -> None:
+    with pytest.raises(LoweringError, match="not valid on an FW job"):
+        lower_source("insert_job: f\njob_type: f\nwatch_file: /x\nstd_in_file: /y\n")
+
+
+def test_dl32_cmd_only_exec_attrs_inert_on_box() -> None:
+    """Boxes do not execute (SEM-10): the CMD-only pair joins the base exec
+    cluster as inert passthrough on a BOX."""
+    catalog = lower_source("insert_job: b\njob_type: b\nenvvars: A=1\nstd_in_file: /y\n")
+    assert catalog.jobs["b"].passthrough == {"envvars": "A=1", "std_in_file": "/y"}
+
+
+# --------------------------------------------- SEM-09/DL-33 exit-code sets
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("4", [(4, 4)]),
+        ("0-9999", [(0, 9999)]),
+        ("1,3,20-30", [(1, 1), (3, 3), (20, 30)]),
+        ("20-30, 1", [(1, 1), (20, 30)]),  # sorted, never merged
+    ],
+    ids=["single", "range", "mixed-list", "sorted"],
+)
+def test_dl33_code_set_formats(value: str, expected: list[tuple[int, int]]) -> None:
+    catalog = lower_source(_DL32_CMD + f"success_codes: {value}\n")
+    assert catalog.jobs["j"].sem.success_codes == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("abc", "expected an exit code"),
+        ("30-20", "empty range"),
+        ("", "empty value"),
+    ],
+    ids=["garbage", "inverted-range", "empty"],
+)
+def test_dl33_code_set_errors(value: str, match: str) -> None:
+    with pytest.raises(LoweringError, match=match):
+        lower_source(_DL32_CMD + f"fail_codes: {value}\n")
+
+
+def test_dl33_code_sets_refused_on_box_and_fw() -> None:
+    """SEM-09/DL-33: TechDocs lists Command/i5/Micro Focus/z/OS -- of our
+    scope, CMD only; a box's verdict is the SEM-11 fold."""
+    with pytest.raises(LoweringError, match="apply to command jobs"):
+        lower_source("insert_job: b\njob_type: b\nsuccess_codes: 1\n")
+    with pytest.raises(LoweringError, match="apply to command jobs"):
+        lower_source("insert_job: f\njob_type: f\nwatch_file: /x\nfail_codes: 1\n")
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (5, False),  # in both lists -> fail wins (Q7)
+        (25, True),  # in success range
+        (0, False),  # success_codes present replaces the default: 0 unlisted -> FAILURE (Q7)
+        (2, False),  # threshold ignored while success_codes present (Q7)
+    ],
+    ids=["fail-wins", "in-success", "zero-unlisted", "threshold-ignored"],
+)
+def test_dl33_exit_is_success_q7_corners(code: int, expected: bool) -> None:
+    assert (
+        exit_is_success(
+            code,
+            max_exit_success=2,
+            success_codes=[(20, 30), (25, 25)],
+            fail_codes=[(5, 5)],
+        )
+        is expected
+    )
+
+
+def test_dl33_exit_is_success_threshold_fallback_without_lists() -> None:
+    assert exit_is_success(2, max_exit_success=2) is True
+    assert exit_is_success(3, max_exit_success=2) is False
+    assert exit_is_success(0) is True
+    assert exit_is_success(1) is False

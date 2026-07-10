@@ -23,16 +23,25 @@ relitigated -- see the docstrings of the individual models/handlers):
   exact rule on a live instance; broadcast is the reading that accepts the
   documented example.
 - Subcommand support v1: insert_job / insert_global / insert_machine /
-  insert_xinst. update_/delete_/override_ forms are loud lowering errors --
-  merging update semantics is real semantics, not syntax, and guessing it
-  would be silent loss.
+  insert_xinst / insert_resource (DL-18). update_/delete_/override_ forms are
+  loud lowering errors -- merging update semantics is real semantics, not
+  syntax, and guessing it would be silent loss.
+- SEM-24 [A] (DL-18): `status:` on insert_job lowers to
+  Semantics.initial_status, restricted to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC;
+  run states would interact with the SEM-01 latch and are refused loudly.
+- DL-21: the `resources:` job attribute (11.3+ resource objects, TechDocs
+  12.x) lowers to typed JobIR.resources (name/QUANTITY/FREE per group, AND
+  separator); malformed groups are loud errors. QUANTITY is required (every
+  documented and estate example carries it); FREE absent stays None (the
+  engine default is not guessed). No oracle gate semantics v1.
 - job_type is required (no defaulting to CMD): autorep -q output always emits
   it; a missing one in hand-written JIL is more likely an error than an
   intentional default. [?] Relax if a real-estate fixture shape needs it.
-- Type-inapplicable exec attributes: command on BOX/FW and watch_* on CMD/BOX
-  are lowering errors (control-flow-shaped attrs on the wrong type = estate
-  smell); machine/owner/profile/std_* on a BOX are inert (boxes do not
-  execute, SEM-10) and go to passthrough verbatim.
+- Type-inapplicable exec attributes: command on BOX/FW, watch_* on CMD/BOX,
+  and std_in_file/envvars on FW are lowering errors (control-flow-shaped
+  attrs on the wrong type = estate smell); machine/owner/profile/std_*/
+  envvars on a BOX are inert (boxes do not execute, SEM-10) and go to
+  passthrough verbatim.
 - Duplicate attribute keys within a statement and duplicate job names within
   a catalog are lowering errors (real autorep output produces neither; last-
   wins would be silent loss). L014 (linter) additionally covers UC-side name
@@ -41,18 +50,18 @@ relitigated -- see the docstrings of the individual models/handlers):
   (command/exec strings, box_name, calendars, timezone, global values, machine
   type, xtype): exactly one wrapping quote pair, no interior quotes. The
   annotations/passthrough dicts are verbatim lanes per the ss4 sketch, and
-  MachineIR.attrs is the documented opaque-v1 stance for resource/placement
-  records (dossier ss5) -- the DL-07 firewall guards job semantics, not
-  machine records.
+  MachineIR.attrs / ResourceIR.attrs are the documented opaque-v1 stance for
+  resource/placement records (dossier ss5, DL-18) -- the DL-07 firewall
+  guards job semantics, not machine/resource records.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from importlib import metadata
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -67,16 +76,30 @@ ANNOTATION_ATTRS = frozenset(
     {
         "description",
         "alarm_if_fail",
+        "alarm_if_terminated",
         "min_run_alarm",
         "max_run_alarm",
         "send_notification",
         "notification_msg",
         "notification_emailaddress",
+        # 12.x sweep (DL-32): MISSING_HEARTBEAT alarm + the notification-
+        # services family -- alarms/emails only, no control flow.
+        "heartbeat_interval",
+        "notification_alarm_types",
+        "notification_template",
+        "notification_emailaddress_on_alarm",
+        "notification_emailaddress_on_failure",
+        "notification_emailaddress_on_success",
+        "notification_emailaddress_on_terminated",
     }
 )
 
 #: Known-inert / carried-opaquely-v1 attributes (dossier ss5) -> JobIR.passthrough.
-#: auto_delete: definition lifecycle. job_load/priority: resource/placement (M34).
+#: auto_delete: definition lifecycle. job_load/priority/machine_method:
+#: resource/placement (M34). ulimit/elevated/interactive/job_class: OS/agent-
+#: side exec tuning. avg_runtime: statistics seed. chk_files: pre-start
+#: disk-space gate -- teeth, but Resource-Wait class (dossier ss5 row), no
+#: oracle semantics v1. All added by the 12.x doc sweep (DL-32).
 PASSTHROUGH_ALLOWED = frozenset(
     {
         "auto_delete",
@@ -85,6 +108,13 @@ PASSTHROUGH_ALLOWED = frozenset(
         "application",
         "job_load",
         "priority",
+        "machine_method",
+        "job_class",
+        "avg_runtime",
+        "ulimit",
+        "elevated",
+        "interactive",
+        "chk_files",
     }
 )
 
@@ -104,6 +134,12 @@ TIME_CLUSTER = frozenset(
 )
 
 _JOB_TYPE_MAP = {"c": "CMD", "cmd": "CMD", "b": "BOX", "box": "BOX", "f": "FW", "fw": "FW"}
+
+#: SEM-24 [A]: `status:` at definition time. Only the implicit default and the
+#: SEM-20/21/22 out-of-band states are modeled; run states (SUCCESS, ...) would
+#: interact with the SEM-01 latch and are refused, never guessed.
+InitialStatus = Literal["INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC"]
+_INITIAL_STATUSES: frozenset[str] = frozenset(get_args(InitialStatus))
 _TRUTHY = frozenset({"1", "y", "yes", "true"})
 _FALSY = frozenset({"0", "n", "no", "false"})
 _DAY_TOKENS = frozenset({"su", "mo", "tu", "we", "th", "fr", "sa", "all"})
@@ -208,6 +244,10 @@ class ExecSpec(ExecSpecBase):
 
     kind: Literal["cmd"] = "cmd"
     command: str  # $$VAR sites kept verbatim; indexed in JobIR.var_sites
+    #: 12.x sweep (DL-32): stdin redirect (may name a blob) and the job's
+    #: NAME=value environment list -- CMD-only, verbatim, $$VAR-indexed.
+    std_in_file: str | None = None
+    envvars: str | None = None
 
 
 class FwSpec(ExecSpecBase):
@@ -222,16 +262,56 @@ class FwSpec(ExecSpecBase):
 ExecUnion = Annotated[ExecSpec | FwSpec, Field(discriminator="kind")]
 
 
+# PENDING: Q7 -- the docs give formats and single-attribute defaults but not
+# the composition; the corners are pinned to the conservative direction until
+# a live instance settles them (dossier ss9, DL-33).
+def exit_is_success(
+    exit_code: int,
+    *,
+    max_exit_success: int = 0,
+    success_codes: Sequence[tuple[int, int]] | None = None,
+    fail_codes: Sequence[tuple[int, int]] | None = None,
+) -> bool:
+    """SEM-09 (amended 2026-07-10, DL-33): the SUCCESS/FAILURE verdict for a
+    completion exit code -- the single source shared by the oracle and the
+    UC twin (M31: same boundary on both sides).
+
+    Documented parts (TechDocs 12.x/24.x): fail_codes names explicit
+    failure codes; success_codes, when present, REPLACES the default
+    success rule (its absence-default is "0 is success"); otherwise the
+    max_exit_success threshold decides (the original SEM-09).
+
+    Q7 corners (PENDING, see the module-level marker above), pinned to the
+    conservative direction (never invent a SUCCESS the engine might not
+    record): fail_codes wins over success_codes; under a present
+    success_codes an unmatched code is FAILURE and the threshold is
+    ignored; fail_codes alone falls through to the threshold for
+    unmatched codes.
+    """
+
+    def _in(ranges: Sequence[tuple[int, int]]) -> bool:
+        return any(lo <= exit_code <= hi for lo, hi in ranges)
+
+    if fail_codes and _in(fail_codes):
+        return False
+    if success_codes is not None:
+        return _in(success_codes)
+    return exit_code <= max_exit_success
+
+
 class Semantics(BaseModel):
     """Attributes with control-flow teeth (dossier ss5)."""
 
     condition: Cond | None = None
     max_exit_success: int = 0  # SEM-09
+    success_codes: list[tuple[int, int]] | None = None  # SEM-09/DL-33; CMD-only
+    fail_codes: list[tuple[int, int]] | None = None  # SEM-09/DL-33; CMD-only
     term_run_time_min: int | None = None
     n_retrys: int = 0
     box_success: Cond | None = None  # box jobs only; SEM-12
     box_failure: Cond | None = None
     auto_hold: bool = False
+    initial_status: InitialStatus | None = None  # SEM-24 [A]: `status:` on insert
     # Provenance (ir-design ss4: every Cond keeps a pointer to its AST span).
     # Cond-node CondSpans are char offsets into the parsed text, which is
     # raw_value.strip(); the scanner never leaves leading whitespace in
@@ -241,6 +321,15 @@ class Semantics(BaseModel):
     box_success_span: SourceSpan | None = None
     box_failure_span: SourceSpan | None = None
 
+    def exit_is_success(self, exit_code: int) -> bool:
+        """SEM-09 verdict with this job's configured boundary (DL-33)."""
+        return exit_is_success(
+            exit_code,
+            max_exit_success=self.max_exit_success,
+            success_codes=self.success_codes,
+            fail_codes=self.fail_codes,
+        )
+
 
 #: The three condition-bearing Semantics attrs, each paired with a
 #: `{attr_name}_span` field; shared by JobIR.iter_conditions below.
@@ -249,6 +338,19 @@ _CONDITION_ATTRS: tuple[Literal["condition", "box_success", "box_failure"], ...]
     "box_success",
     "box_failure",
 )
+
+
+class ResourceRef(BaseModel):
+    """One group of the `resources:` job attribute (DL-21; TechDocs 12.x:
+    `(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)`). Typed carry, no oracle
+    gate semantics v1 (Resource Wait / QUE_WAIT is out of interpreter
+    scope); UCS-09 maps these to UC Virtual Resource requirements."""
+
+    name: str
+    quantity: int = Field(ge=1)
+    #: Y = free units only on success, N = never freed, A = freed
+    #: unconditionally; None = attribute absent (engine default NOT guessed).
+    free: Literal["Y", "N", "A"] | None = None
 
 
 class VarSite(BaseModel):
@@ -274,6 +376,7 @@ class JobIR(BaseModel):
     sem: Semantics = Semantics()
     annotations: dict[str, str] = {}  # alarms, notifications -- no control flow
     passthrough: dict[str, str] = {}  # known-inert / permitted attrs, verbatim
+    resources: list[ResourceRef] = []  # `resources:` groups (DL-21), typed carry
     var_sites: list[VarSite] = []  # indexed $$VAR occurrences across string attrs
     span: SourceSpan | None = None
 
@@ -288,9 +391,22 @@ class JobIR(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _sem09_code_sets_only_on_cmd(self) -> JobIR:
+        if self.job_type != "CMD" and (
+            self.sem.success_codes is not None or self.sem.fail_codes is not None
+        ):
+            raise ValueError(
+                f"SEM-09/DL-33: success_codes/fail_codes apply to command jobs"
+                f" (TechDocs: Command/i5/Micro Focus/z/OS); {self.name!r} is {self.job_type}"
+            )
+        return self
+
     def iter_conditions(
         self,
-    ) -> Iterator[tuple[Literal["condition", "box_success", "box_failure"], Cond, SourceSpan | None]]:
+    ) -> Iterator[
+        tuple[Literal["condition", "box_success", "box_failure"], Cond, SourceSpan | None]
+    ]:
         """(attr_name, cond, attr_span) for every condition-bearing attr set on
         this job (condition/box_success/box_failure). Canonical walker shared
         by lint's L001-family rules and derive's pass-1 extraction -- both
@@ -307,6 +423,31 @@ class MachineIR(BaseModel):
 
     name: str
     machine_type: str | None = None  # JIL `type:` -- r(eal)/v(irtual)/a(gent), verbatim
+    attrs: dict[str, str] = {}
+    span: SourceSpan | None = None
+
+
+class ResourceIR(BaseModel):
+    """insert_resource record (virtual resources); carried opaquely v1 like
+    MachineIR (DL-18) -- UCS-09/M34 map these to UC Virtual Resources when the
+    backend lands, and typing amount/res_type before a consumer exists would
+    be speculation."""
+
+    name: str
+    res_type: str | None = None  # JIL `res_type:` -- verbatim
+    attrs: dict[str, str] = {}
+    span: SourceSpan | None = None
+
+
+class XinstIR(BaseModel):
+    """insert_xinst record (SEM-07 boundary marker). xtype stays typed -- it
+    selects the protocol family and is the one attribute conditions depend
+    on; the connection plumbing (xmachine -- required by TechDocs 12.x --
+    xport, xmanager, xcrypt_type, xkey_to_manager) is carried verbatim like
+    MachineIR: boundary records, not job semantics (DL-28)."""
+
+    name: str
+    xtype: str
     attrs: dict[str, str] = {}
     span: SourceSpan | None = None
 
@@ -372,8 +513,9 @@ class CatalogIR(BaseModel):
     ir_version: Literal["0.1"] = IR_VERSION
     jobs: dict[str, JobIR] = {}
     globals_declared: dict[str, str] = {}  # insert_global
-    external_instances: dict[str, str] = {}  # insert_xinst name -> xtype
+    external_instances: dict[str, XinstIR] = {}  # insert_xinst (SEM-07), plumbing opaque (DL-28)
     machines: dict[str, MachineIR] = {}
+    resources: dict[str, ResourceIR] = {}  # insert_resource, opaque v1 (DL-18)
     meta: CatalogMeta = CatalogMeta()
 
     @model_validator(mode="after")
@@ -428,10 +570,21 @@ class LoweringError(ValueError):
         self.findings = findings
 
 
-_SUPPORTED_SUBCOMMANDS = {"insert_job", "insert_global", "insert_machine", "insert_xinst"}
+_SUPPORTED_SUBCOMMANDS = {
+    "insert_job",
+    "insert_global",
+    "insert_machine",
+    "insert_xinst",
+    "insert_resource",
+}
 
 #: Exec-cluster attributes valid on both CMD and FW jobs (ExecSpecBase).
 _EXEC_BASE_ATTRS = ("machine", "owner", "profile", "std_out_file", "std_err_file")
+
+#: Exec-shaped attributes that are inert on a BOX (boxes do not execute,
+#: SEM-10) and route to passthrough verbatim; the CMD-only pair joins the
+#: base cluster here (DL-32).
+_BOX_INERT_ATTRS = frozenset(_EXEC_BASE_ATTRS) | {"std_in_file", "envvars"}
 
 
 _WRAPPED_QUOTES_RE = re.compile(r'"[^"]*"')
@@ -477,8 +630,9 @@ class _Lowerer:
         self.findings: list[LoweringFinding] = []
         self.jobs: dict[str, JobIR] = {}
         self.globals_declared: dict[str, str] = {}
-        self.external_instances: dict[str, str] = {}
+        self.external_instances: dict[str, XinstIR] = {}
         self.machines: dict[str, MachineIR] = {}
+        self.resources: dict[str, ResourceIR] = {}
         self.source_files: list[str] = []
 
     def err(self, message: str, span: SourceSpan | None) -> None:
@@ -497,13 +651,17 @@ class _Lowerer:
                     self._lower_global(stmt)
                 elif sub == "insert_machine":
                     self._lower_machine(stmt)
+                elif sub == "insert_resource":
+                    self._lower_resource(stmt)
                 elif sub == "insert_xinst":
                     self._lower_xinst(stmt)
                 else:
                     self.err(
                         f"subcommand {stmt.subcommand!r} is not supported by lowering v1"
                         " (supported: " + ", ".join(sorted(_SUPPORTED_SUBCOMMANDS)) + ");"
-                        " update/delete/override merging is semantics, not syntax",
+                        " update/delete/override/rename merging is semantics, not syntax,"
+                        " and monitor/report, job-type, blob/glob, and connection-profile"
+                        " objects are out of compile scope (DL-29)",
                         stmt.span,
                     )
         for name, message in _box_tree_problems(self.jobs):
@@ -515,6 +673,7 @@ class _Lowerer:
             globals_declared=self.globals_declared,
             external_instances=self.external_instances,
             machines=self.machines,
+            resources=self.resources,
             meta=CatalogMeta(source_files=self.source_files, tool_version=tool_version()),
         )
 
@@ -559,6 +718,33 @@ class _Lowerer:
         )
         return None
 
+    def _code_set_attr(self, attr: RawAttr) -> list[tuple[int, int]] | None:
+        """SEM-09/DL-33 exit-code sets: a comma list of single codes and
+        lo-hi ranges (TechDocs: '4', '0-9999', '1,3,20-30'). Sorted, never
+        merged -- the surface partition is the author's, only membership
+        is semantics."""
+        ranges: list[tuple[int, int]] = []
+        for token in _split_list(attr.raw_value):
+            lo_text, sep, hi_text = token.partition("-")
+            try:
+                lo = int(lo_text)
+                hi = int(hi_text) if sep else lo
+            except ValueError:
+                self.err(
+                    f"{attr.key}: expected an exit code or lo-hi range, got {token!r}"
+                    " (SEM-09/DL-33)",
+                    attr.span,
+                )
+                return None
+            if hi < lo:
+                self.err(f"{attr.key}: empty range {token!r} (lo > hi)", attr.span)
+                return None
+            ranges.append((lo, hi))
+        if not ranges:
+            self.err(f"{attr.key}: empty value", attr.span)
+            return None
+        return sorted(ranges)
+
     def _cond_attr(self, attr: RawAttr) -> Cond | None:
         try:
             return parse_condition(attr.raw_value.strip())
@@ -567,6 +753,74 @@ class _Lowerer:
             return None
 
     # ------------------------------------------------------------------ insert_job
+
+    _RESOURCE_GROUP_RE = re.compile(r"\(([^()]*)\)")
+
+    def _parse_resources(self, attr: RawAttr) -> list[ResourceRef]:
+        """`(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)` (DL-21; TechDocs 12.x
+        keywords, case-insensitive; estates also write lowercase `and`).
+        Anything else is a loud lowering error -- guessing a resource gate
+        would be silent loss."""
+
+        def bad(why: str) -> None:
+            self.err(
+                f"resources: {why} (expected '(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)'; DL-21)",
+                attr.span,
+            )
+
+        raw = attr.raw_value.strip()
+        groups = self._RESOURCE_GROUP_RE.findall(raw)
+        separators = [t for t in self._RESOURCE_GROUP_RE.sub(" ", raw).split() if t]
+        if not groups:
+            bad(f"no '(name, ...)' group in {raw!r}")
+            return []
+        if len(separators) != len(groups) - 1 or any(s.lower() != "and" for s in separators):
+            bad(f"groups must be joined by AND, got {raw!r}")
+            return []
+        refs: list[ResourceRef] = []
+        for group in groups:
+            parts = [p.strip() for p in group.split(",")]
+            name = parts[0]
+            if not name or "=" in name:
+                bad(f"group {group!r} must start with a resource name")
+                continue
+            quantity: int | None = None
+            free: Literal["Y", "N", "A"] | None = None
+            ok = True
+            for part in parts[1:]:
+                key, sep, value = part.partition("=")
+                key, value = key.strip().upper(), value.strip().upper()
+                if not sep:
+                    bad(f"expected KEY=VALUE, got {part!r}")
+                    ok = False
+                elif key == "QUANTITY":
+                    try:
+                        quantity = int(value)
+                    except ValueError:
+                        bad(f"QUANTITY expects an integer, got {value!r}")
+                        ok = False
+                elif key == "FREE":
+                    if value in ("Y", "N", "A"):
+                        free = cast(Literal["Y", "N", "A"], value)
+                    else:
+                        bad(f"FREE expects Y, N, or A, got {value!r}")
+                        ok = False
+                else:
+                    bad(f"unknown keyword {key!r} in group {group!r}")
+                    ok = False
+            if quantity is None:
+                # Broadcom's and the estate's examples always carry QUANTITY;
+                # defaulting would be a guess -- extend deliberately if a bare
+                # group ever shows up in a real export.
+                bad(f"group {group!r} is missing QUANTITY")
+                ok = False
+            elif quantity < 1:
+                bad(f"QUANTITY must be >= 1, got {quantity}")
+                ok = False
+            if ok:
+                assert quantity is not None
+                refs.append(ResourceRef(name=name, quantity=quantity, free=free))
+        return refs
 
     def _lower_job(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "job")
@@ -583,6 +837,9 @@ class _Lowerer:
         sem = self._semantics(attrs)
         schedule = self._schedule(attrs)
         exec_ = self._exec_spec(job_type, attrs)
+        resources: list[ResourceRef] = []
+        if (attr := attrs.pop("resources", None)) is not None:
+            resources = self._parse_resources(attr)
         annotations: dict[str, str] = {}
         passthrough: dict[str, str] = {}
         if schedule is None:
@@ -592,7 +849,7 @@ class _Lowerer:
             for key in sorted((TIME_CLUSTER | {"date_conditions"}) & attrs.keys()):
                 attr = attrs.pop(key)
                 passthrough[attr.key] = attr.raw_value.strip()
-        inert_for_type = frozenset(_EXEC_BASE_ATTRS) if job_type == "BOX" else frozenset()
+        inert_for_type = _BOX_INERT_ATTRS if job_type == "BOX" else frozenset()
         for key in sorted(attrs.keys()):
             attr = attrs[key]
             if key in ANNOTATION_ATTRS:
@@ -625,6 +882,7 @@ class _Lowerer:
                 sem=sem,
                 annotations=annotations,
                 passthrough=passthrough,
+                resources=resources,
                 var_sites=var_sites,
                 span=stmt.span,
             )
@@ -687,12 +945,27 @@ class _Lowerer:
             sem.box_failure_span = attr.span
         if (attr := attrs.pop("max_exit_success", None)) is not None:
             sem.max_exit_success = self._int_attr(attr) or 0
+        if (attr := attrs.pop("success_codes", None)) is not None:
+            sem.success_codes = self._code_set_attr(attr)
+        if (attr := attrs.pop("fail_codes", None)) is not None:
+            sem.fail_codes = self._code_set_attr(attr)
         if (attr := attrs.pop("term_run_time", None)) is not None:
             sem.term_run_time_min = self._int_attr(attr)
         if (attr := attrs.pop("n_retrys", None)) is not None:
             sem.n_retrys = self._int_attr(attr) or 0
         if (attr := attrs.pop("auto_hold", None)) is not None:
             sem.auto_hold = self._bool_attr(attr) or False
+        if (attr := attrs.pop("status", None)) is not None:
+            value = _unquote(attr.raw_value).upper()
+            if value in _INITIAL_STATUSES:
+                sem.initial_status = cast(InitialStatus, value)
+            else:
+                self.err(
+                    f"status: {attr.raw_value.strip()!r} is not a modeled definition-time"
+                    " status (SEM-24 models INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC; run states"
+                    " would interact with the SEM-01 latch -- refusing to guess)",
+                    attr.span,
+                )
         return sem
 
     # ------------------------------------------------------------------- schedule
@@ -887,9 +1160,21 @@ class _Lowerer:
             if command is None:
                 self.err("CMD job requires a command", None)
                 return None
-            return ExecSpec.model_validate({"command": _unquote(command.raw_value), **base})
+            std_in = attrs.pop("std_in_file", None)
+            envvars = attrs.pop("envvars", None)
+            return ExecSpec.model_validate(
+                {
+                    "command": _unquote(command.raw_value),
+                    "std_in_file": _unquote(std_in.raw_value) if std_in is not None else None,
+                    "envvars": _unquote(envvars.raw_value) if envvars is not None else None,
+                    **base,
+                }
+            )
         if command is not None:  # FW
             self.err("command: not valid on an FW job", command.span)
+        for cmd_only in ("std_in_file", "envvars"):  # DL-32: CMD-only exec attrs
+            if (wrong := attrs.pop(cmd_only, None)) is not None:
+                self.err(f"{wrong.key}: not valid on an FW job", wrong.span)
         if watch_file is None:
             self.err("FW job requires watch_file", None)
             return None
@@ -941,6 +1226,24 @@ class _Lowerer:
             span=stmt.span,
         )
 
+    def _lower_resource(self, stmt: JilStatement) -> None:
+        name = self._subject(stmt, "resource")
+        attrs = self._collect_attrs(stmt)
+        if name is None or attrs is None:
+            return
+        if name in self.resources:
+            self.err(f"duplicate insert_resource {name!r}", stmt.span)
+            return
+        res_type = None
+        if (attr := attrs.pop("res_type", None)) is not None:
+            res_type = _unquote(attr.raw_value)
+        self.resources[name] = ResourceIR(
+            name=name,
+            res_type=res_type,
+            attrs={a.key: a.raw_value.strip() for a in attrs.values()},
+            span=stmt.span,
+        )
+
     def _lower_xinst(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "external instance")
         attrs = self._collect_attrs(stmt)
@@ -950,12 +1253,19 @@ class _Lowerer:
             self.err(f"duplicate insert_xinst {name!r}", stmt.span)
             return
         xtype = attrs.pop("xtype", None)
-        for leftover in attrs.values():
-            self.err(f"insert_xinst: unexpected attribute {leftover.key!r}", leftover.span)
         if xtype is None:
             self.err(f"insert_xinst {name!r}: missing xtype attribute (SEM-07)", stmt.span)
             return
-        self.external_instances[name] = _unquote(xtype.raw_value)
+        # TechDocs 12.x also documents xmachine (required), xport, xmanager,
+        # xcrypt_type, xkey_to_manager -- connection plumbing, carried
+        # verbatim (DL-28); required-ness is the engine's to enforce, not
+        # this per-file-tolerant lowering's.
+        self.external_instances[name] = XinstIR(
+            name=name,
+            xtype=_unquote(xtype.raw_value),
+            attrs={a.key: a.raw_value.strip() for a in attrs.values()},
+            span=stmt.span,
+        )
 
 
 def lower_catalog(files: Iterable[JilFile], *, permit_unknown: bool = False) -> CatalogIR:

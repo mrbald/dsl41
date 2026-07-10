@@ -34,8 +34,8 @@ from pydantic import ValidationError
 
 from dsl41.ast_jil import parse_file
 from dsl41.conditions import JobRef, StatusAtom
-from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph
-from dsl41.ir import lower_catalog, lower_source
+from dsl41.derive import DerivedEdge, DerivedGraph, _ancestor_sets, derive_graph
+from dsl41.ir import CatalogIR, lower_catalog, lower_source
 from dsl41.lint import (
     GRAPH_RULES,
     lint_catalog,
@@ -555,12 +555,15 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     immediately. Recomputed empirically after adding m07_mutex.jil (1 new
     edge: mutex_feeder->mutex_b, M01) and sem12_external_gate.jil (2 new
     edges: the box_success/box_failure M16 pair) -- see the fixture-specific
-    tests above for the per-edge reasoning."""
+    tests above for the per-edge reasoning. sem24_status_resource.jil
+    (DL-18) adds 1 M02 edge: the plain s(SEED_C) gate on the top box --
+    producer and consumer are both unscheduled, so the same-cycle detector
+    conservatively classifies the latch as cross-stream (M02), not M01."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 17
+    assert len(graph.edges) == 18
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M02": 7, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M01": 1, "M15": 1}
+        {"M02": 8, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M01": 1, "M15": 1}
     )
 
 
@@ -574,6 +577,50 @@ def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
     ]
     assert [(f.job, f.mapping_row) for f in graph.redesign_flags] == [("quarter_past", "M27")]
     assert graph.cycles == []
+
+
+def _chain_catalog(n: int, *, reverse: bool = False) -> CatalogIR:
+    blocks = ["insert_job: c0\njob_type: c\ncommand: x\nmachine: m\n"]
+    blocks += [
+        f"insert_job: c{i}\njob_type: c\ncommand: x\nmachine: m\ncondition: s(c{i - 1})\n"
+        for i in range(1, n)
+    ]
+    if reverse:
+        blocks.reverse()
+    return lower_source("\n".join(blocks))
+
+
+def test_dl20_reverse_declared_chain_derives_without_recursion() -> None:
+    """DL-20: ancestor walks are iterative -- declaration order must never
+    decide between success and RecursionError (autorep exports order freely).
+    3000 exceeds the default Python recursion limit with margin."""
+    graph = derive_graph(_chain_catalog(3000, reverse=True))
+    assert len(graph.edges) == 2999
+
+
+def test_dl20_chain_catalog_memory_stays_linear() -> None:
+    """DL-20: the old whole-catalog ancestor sets were Theta(n^2) memory on
+    chains (the `dsl41 lint` OOM kill: 741MB peak at n=5000). With ancestors
+    computed only for Or-branch producers, a 2000-chain with no `|` must
+    derive well under the quadratic footprint; the bound is generous so the
+    test only fails if the quadratic pass comes back."""
+    import tracemalloc
+
+    catalog = _chain_catalog(2000)
+    tracemalloc.start()
+    derive_graph(catalog)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 60_000_000  # quadratic ancestors alone were ~200MB at n=2000
+
+
+def test_dl20_ancestor_sets_complete_on_cycles_and_only_for_roots() -> None:
+    """The iterative closure is complete on cyclic graphs regardless of visit
+    order (the old memoized recursion returned incomplete mid-cycle sets)
+    and computes nothing for nodes that were not requested."""
+    preds = {"a": {"c"}, "b": {"a"}, "c": {"b"}, "solo": set[str]()}
+    out = _ancestor_sets(["b"], preds)
+    assert out == {"b": {"a", "b", "c"}}
 
 
 def test_whole_corpus_derivation_is_deterministic() -> None:

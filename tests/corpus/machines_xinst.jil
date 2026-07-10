@@ -11,3 +11,5 @@ max_load: 200
 
 insert_xinst: PRD
 xtype: a
+xmachine: prdscheduler.example.com
+xport: 9000
