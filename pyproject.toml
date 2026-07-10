@@ -1,9 +1,34 @@
 [project]
 name = "dsl41"
-version = "0.0.1"
-description = "AutoSys->Stonebranch migration compiler: JIL frontend, semantic IR, linter, equivalence validator, UC backend. Internal codename; public name TBD."
+version = "0.1.0"
+description = "AutoSys->Stonebranch migration compiler: JIL frontend, semantic IR, linter, Mermaid visualizer, equivalence validator, UC backend, Python DSL."
+readme = "README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSING.md", "COMMERCIAL.md"]
+authors = [{ name = "dsl41 authors", email = "mail@bobah.net" }]
+keywords = [
+    "autosys",
+    "jil",
+    "stonebranch",
+    "universal-controller",
+    "workload-automation",
+    "scheduler",
+    "migration",
+    "compiler",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
     "lark>=1.3",
     "pydantic>=2.7",
@@ -13,11 +38,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "mypy>=1.10"]
 
+[project.urls]
+Repository = "https://github.com/mrbald/dsl41"
+Issues = "https://github.com/mrbald/dsl41/issues"
+
 [project.scripts]
 dsl41 = "dsl41.cli:app"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 # grammars/ lives at the repo root (docs reference it there); ship it inside the
