@@ -6,9 +6,9 @@ forks, which channels enterprise users to the commercial license.
 
 Operational requirements:
 1. Copyright unity. All contributors sign a CLA assigning (or broadly licensing)
-   copyright to the two founders' entity, preserving the right to dual-license.
+   copyright to the founder's entity, preserving the right to dual-license.
    No external PR is merged without a signed CLA. (Add CLA text before first
-   external contribution; not needed while contributors == founders.)
+   external contribution; not needed while the founder is the sole contributor.)
 2. Clean-room discipline. No production JIL, exports, names, or derived artifacts
    from any employer estate may enter this repository, its test corpus, docs, or
    issue tracker. tests/corpus/ is synthetic/doc-derived only.
@@ -22,7 +22,7 @@ Operational requirements:
    pydantic-core) are MIT; dev-only tools are MIT except hypothesis (MPL-2.0,
    not distributed with the compiler). All compatible with AGPL-3.0-only.
    Re-audit whenever a runtime dependency is added.
-5. Copyright notices currently read "dsl41 authors"; replace with the founders'
+5. Copyright notices currently read "dsl41 authors"; replace with the founder's
    entity name once it exists.
 6. Lifecycle-tier earmark (2026-07-11, DL-42): `runner_wrapper.py`, the
    future `runner_supervisor.py`, and `docs/supervisor-protocol.md` are
