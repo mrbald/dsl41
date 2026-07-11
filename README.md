@@ -13,16 +13,20 @@ Controller backend, and a Python DSL extracted from patterns observed in the
 synthetic test corpus.
 
 Start here, in order:
-1. docs/autosys-semantics.md   - what JIL actually means (SEM entries)
-2. docs/stonebranch-semantics.md - target model + AutoSys->UC mapping (UCS/M entries)
-3. docs/ir-design.md           - AST / IR-F / IR-G / oracle / equivalence design
-4. docs/jil-statement-syntax.md - statement scanner spec
-5. docs/decision-log.md        - why things are the way they are
-6. CLAUDE.md                   - working agreement + implementation order
+1. [docs/autosys-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/autosys-semantics.md) - what JIL actually means (SEM entries)
+2. [docs/stonebranch-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/stonebranch-semantics.md) - target model + AutoSys->UC mapping (UCS/M entries)
+3. [docs/ir-design.md](https://github.com/mrbald/dsl41/blob/main/docs/ir-design.md) - AST / IR-F / IR-G / oracle / equivalence design
+4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - statement scanner spec
+5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - why things are the way they are
+6. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - working agreement + implementation order
 
 Status: all ten compiler phases built and tested; the phase-11 runner
-(docs/runner-design.md) is in progress — 11a (engine core + bisimulation gate)
-is done. See the memo below for the source map and what remains open.
+([docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
+is in progress — 11a (engine core + bisimulation gate) and 11b (process
+lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
+resume; spool contract frozen in
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
+are done. See the memo below for the source map and what remains open.
 
 ## CLI
 
@@ -130,10 +134,15 @@ against the original.
 
 All ten phases from CLAUDE.md's implementation order are implemented and tested, in
 build order: ast_jil, conditions, ir, lint, derive, viz, oracle, equiv, backend_uc, dsl.
-Phase 11 (the runner, docs/runner-design.md) is underway: 11a — the sans-IO engine
-loop, VirtualClock, FakeAdapter, and the two oracle additions, gated by the ss13
-bisimulation suite — is built; 11b-11f follow the design's phasing. The suite spans
-14 test files (`pytest --collect-only -q` for the current count) plus the 15-file
+Phase 11 (the runner,
+[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
+is underway: 11a — the sans-IO engine loop, VirtualClock, FakeAdapter, and the two
+oracle additions, gated by the ss13 bisimulation suite — and 11b — the process
+lifecycle tier (per-run wrapper shim, LocalCommand/FileWatcher adapters, WAL journal,
+crash-recovery resume with the reconciliation ladder; spool contract frozen in
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
+— are built; 11c-11f follow the design's phasing. The suite spans 16 test files
+(`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
 ### Source map
@@ -168,11 +177,16 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   P-Mxx expected-divergence pairs against it, sharing Event/TraceEntry with oracle.py
 - src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
   extracted from corpus-observed patterns only (phase 10, last by design)
-- src/dsl41/runner.py — phase-11a engine: single-writer loop over the oracle
-  (dispatch table, time-ordered event queue, stale-completion gate), VirtualClock,
-  FakeAdapter; real adapters/WAL (11b), scheduler/control socket (11c), TUI (11d/e),
+- src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
+  (dispatch table, time-ordered event queue, stale-completion gate), VirtualClock +
+  RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
+  journal, resume/reconciliation ladder; scheduler/control socket (11c), TUI (11d/e),
   supervisor tier (11f) per docs/runner-design.md ss14
-- src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`
+- src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
+  (enforced DL-42 extraction boundary), records spawn.json/status.json durably, kills
+  and records on lifeline EOF; spool contract in docs/supervisor-protocol.md
+- src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`,
+  `journal` (render-by-replay of a run WAL)
   (exit 2 = catalog load/usage failure everywhere; exit 1 = findings, `lint`/`equiv`
   only — `report` always exits 0 once generated: the report itself is the loud channel)
 
@@ -200,6 +214,10 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   (next_timer_due/advance), VirtualClock, engine dispatch/cancellation/horizon
   discipline, the stale-completion gate, and the feed-only vs advance+feed and
   oracle-vs-engine hypothesis properties
+- tests/test_runner_lifecycle.py — phase-11b lifecycle tier: wrapper process matrix
+  (pgid separation, parent-loss kills, fd hygiene), the DL-42 phase-boundary kill
+  matrix, spoofed-record/boot-flip guards, and the engine-SIGKILL crash-recovery
+  integration test (tests/runner_crash_driver.py is its engine subprocess)
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the
@@ -213,13 +231,15 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
 UC record emission is blocked on U3 (pull /resources/openapi.json from a live
 controller, freeze docs/uc-edge-schema.md, generate client) — until then backend_uc
-emits only the migration report + edge classification. Open questions Q1-Q6 (autosys
-dossier §9) and U1-U8 (stonebranch Part III) are unresolved. Those with a behavior
-default in code (Q1-Q4, U1-U5, U8) run on a documented default behind a switch marked
-`# PENDING: Qn/Un`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
+emits only the migration report + edge classification. Open questions Q1-Q7 (autosys
+dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E7
+(runner-design ss15) are unresolved. Those with a behavior default in code
+(Q1-Q4, Q7, U1-U5, U8, E5-E7) run on a documented default marked
+`# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller.
+controller. Runner phases 11c-11f (scheduler + preflight + control socket, TUI,
+web serve, detached supervisor tier) follow per runner-design ss14.
 
 ## License
 
