@@ -37,10 +37,19 @@ dependencies = [
 
 [project.optional-dependencies]
 # ss11 TUI: the core package keeps its three runtime deps (runner-design ss11).
-# textual floor = the family the TUI is developed and tested against (DL-46):
-# claiming older floors without testing them is how UIs break at install time.
-ui = ["textual>=8"]
-dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "mypy>=1.10", "textual>=8"]
+# textual floor = the family the TUI is developed and tested against (DL-46);
+# textual-serve floor = the version paired with that textual and verified
+# against it (DL-47) -- claiming untested floors is how UIs break at install
+# time.
+ui = ["textual>=8", "textual-serve>=1.1"]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "textual>=8",
+    "textual-serve>=1.1",
+]
 
 [project.urls]
 Repository = "https://github.com/mrbald/dsl41"

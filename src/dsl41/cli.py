@@ -637,9 +637,7 @@ def _import_tui_or_exit_2():
     try:
         from dsl41 import runner_tui
     except ModuleNotFoundError as exc:
-        typer.echo(
-            "the TUI needs the optional [ui] extra: pip install 'dsl41[ui]'", err=True
-        )
+        typer.echo("the TUI needs the optional [ui] extra: pip install 'dsl41[ui]'", err=True)
         raise typer.Exit(2) from exc
     return runner_tui
 
@@ -928,6 +926,49 @@ def ui(socket_path: Path = _SOCKET_OPT) -> None:
         typer.echo(f"control socket {socket_path}: no such file", err=True)
         raise typer.Exit(2)
     runner_tui.RunnerApp(socket_path).run()
+
+
+def _import_textual_serve_or_exit_2():
+    """Guarded textual-serve import (runner-design ss11/ss14): the [ui]
+    extra's other half -- textual-serve spawns one app subprocess per
+    browser session, so it needs its own dependency, not just textual's."""
+    try:
+        from textual_serve.server import Server
+    except ModuleNotFoundError as exc:
+        typer.echo("`serve` needs the optional [ui] extra: pip install 'dsl41[ui]'", err=True)
+        raise typer.Exit(2) from exc
+    return Server
+
+
+@app.command()
+def serve(
+    socket_path: Path = _SOCKET_OPT,
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address (loopback default: textual-serve ships no"
+        " auth, ss11 -- put a proxy or tunnel in front for remote access).",
+    ),
+    port: int = typer.Option(8000, "--port", help="Bind port."),
+) -> None:
+    """Serve the ss11 TUI over the web via textual-serve: one app subprocess
+    per browser session, each `dsl41 ui --socket` against this same running
+    engine -- never in-process with the engine, so no viewer gets a private
+    universe (ss11). No auth of its own; see README's deployment notes
+    before exposing this beyond loopback."""
+    import shlex
+    import sys
+
+    server_cls = _import_textual_serve_or_exit_2()
+    if not socket_path.exists():
+        typer.echo(f"control socket {socket_path}: no such file", err=True)
+        raise typer.Exit(2)
+    command = f"{shlex.quote(sys.executable)} -m dsl41 ui --socket {shlex.quote(str(socket_path))}"
+    try:
+        server_cls(command, host=host, port=port).serve()
+    except OSError as exc:
+        typer.echo(f"serve {host}:{port}: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
 
 @app.command()

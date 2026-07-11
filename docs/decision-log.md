@@ -1262,3 +1262,52 @@
   std_out_file/std_err_file INDEPENDENTLY per stream -- setting only
   std_out_file leaves log_err on the computed default, vendor-parity with
   the wrapper's own spec resolution.
+- DL-47 Phase 11e landed: `serve` verb (2026-07-11; found and decided during
+  implementation, within DL-41's frame; cli.py's `serve`/
+  `_import_textual_serve_or_exit_2` are normative detail). Decisions:
+  (1) TEXTUAL-SERVE FLOOR VERIFIED, NOT ASSUMED: `[ui]` gains
+  `textual-serve>=1.1` (dev extra too) after installing textual-serve 1.1.3
+  alongside the already-pinned textual 8.2.8 and confirming
+  `import textual_serve.server` succeeds end to end (real `dsl41 run` +
+  `dsl41 serve`, `curl` against the served page returned 200 with the
+  expected HTML shell) -- textual-serve declares `textual>=0.66.0` with no
+  upper bound, so the pairing was never at risk, but DL-46's own house rule
+  (claiming untested floors is how UIs break at install time) applies here
+  too. (2) `python -m dsl41` NEEDED A `__main__.py`: none existed.
+  textual-serve's `Server(command=...)` runs one app subprocess per browser
+  session (ss11's forced thin-client split -- an in-process engine would
+  hand every viewer a private universe), and the only import-safe,
+  venv-portable way to name that subprocess is
+  `<sys.executable> -m dsl41 ui --socket <path>` (a `dsl41` script-entry
+  invocation would need the console script on PATH inside whatever
+  environment textual-serve itself launched from; `-m` needs only the same
+  interpreter). Added a two-line `__main__.py`; the constructed command is
+  shlex-quoted, verified against a socket path containing a space.
+  (3) IMPORT/REFUSAL ORDER MATCHES `ui`: guarded `textual_serve.server`
+  import first (missing extra -> exit 2, pip-install hint), then the
+  socket-exists check (missing socket -> exit 2) -- the same
+  "refuse before touching anything" shape as `_import_tui_or_exit_2`. A
+  bind failure from `Server.serve()` itself (port in use, etc.) is also
+  exit 2: cli.py's exit-code contract treats it as "never started," the
+  same class as the other two gates. (4) LOOPBACK DEFAULT, PROXY/TUNNEL
+  DOCUMENTED NOT BUILT (E3 CLOSED): `--host` defaults to `127.0.0.1` --
+  textual-serve ships no authentication of its own, so widening the bind
+  is an explicit operator choice, never the default. README gains one
+  section: an `ssh -L` tunnel and one nginx `location` block, plus the
+  reminder that the control socket's own 0600-from-birth (ss10/DL-45)
+  means `serve` cannot see anything its user couldn't already reach
+  directly -- it publishes reach, not access. E3 is closed exactly as
+  runner-design ss11 scoped it: documented, not built. (5) TESTS MOCK THE
+  SERVER, NOT THE VERIFICATION: the manual end-to-end pass in (1)
+  established the wiring works; `tests/test_runner_serve.py` (new, 5
+  tests) then unit-tests the CLI wrapper against a monkeypatched `Server`
+  (CLAUDE.md's "no runtime dependency in any emitted artifact" applied to
+  the tests too -- textual-serve's real `serve()` blocks on its own event
+  loop and has no place in a unit test): missing-socket exit 2,
+  missing-extra exit 2 with the pip hint (forced via
+  `sys.modules[...] = None` on both the package and submodule entries --
+  an already-imported submodule survives its parent alone being cleared,
+  so both need clearing), the quoted-command construction, the loopback
+  default, and the bind-failure exit 2. `runner.py`/`runner_wrapper.py`/
+  `runner_tui.py` untouched -- 11f (the supervisor tier) is a separate
+  unit landing after this one.

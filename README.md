@@ -26,9 +26,9 @@ is in progress — 11a (engine core + bisimulation gate), 11b (process
 lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
 resume; spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)),
-11c (calendar scheduler, preflight, control socket, headless CLI), and 11d
-(Textual TUI) are done. See the memo below for the source map and what
-remains open.
+11c (calendar scheduler, preflight, control socket, headless CLI), 11d
+(Textual TUI), and 11e (`serve` via textual-serve) are done. See the memo
+below for the source map and what remains open.
 
 ## CLI
 
@@ -141,12 +141,42 @@ dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log pa
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
 dsl41 rehearse jobs.jil --hours 24              # virtual clock: a day in seconds
+dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
 The TUI (jobs table with pending timers and alarms, explain pane with
 per-atom condition truth, log tail, sendevent console) is the optional
 `[ui]` extra: `pip install 'dsl41[ui]'`. It is a thin client of the run's
 control socket — the same protocol `sendevent`/`query` speak.
+
+### Serving the TUI over the web (phase 11e)
+
+`dsl41 serve -S ./run1/control.sock` wraps
+[textual-serve](https://github.com/Textualize/textual-serve) around the
+same app: every browser tab gets its own `dsl41 ui --socket` subprocess
+attached to the run (the ss11 one-instance-per-viewer split), rendered as a
+terminal in the page. textual-serve ships **no authentication**, so the
+default bind is loopback (`127.0.0.1:8000`) — reach it from elsewhere via a
+reverse proxy or an SSH tunnel, never by widening `--host`:
+
+```sh
+# tunnel: from the operator's machine
+ssh -L 8000:localhost:8000 runhost
+
+# or an nginx location block on the run host
+location /dsl41/ {
+    proxy_pass http://127.0.0.1:8000/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+Put auth (basic auth, an OIDC gate, client certs — whatever the estate
+already trusts) in that proxy layer; dsl41 has none of its own here. The
+control socket is 0600 from birth (ss10), so `serve` only ever sees what
+its own user could already reach directly — it does not widen access, it
+makes existing access reachable from a browser.
 
 ## Implementation memo
 
@@ -163,8 +193,10 @@ crash-recovery resume with the reconciliation ladder; spool contract frozen in
 (sendevent parity + queries + subscribe), and the headless
 `run`/`rehearse`/`sendevent`/`query` CLI verbs — and 11d — the ss11 Textual TUI
 (`dsl41 ui` against a running engine, or `dsl41 run --ui`; optional
-`dsl41[ui]` extra) — are built; 11e-11f follow the
-design's phasing. The suite spans 20 test files
+`dsl41[ui]` extra) — and 11e — `dsl41 serve` via
+[textual-serve](https://github.com/Textualize/textual-serve), same extra
+— are built; 11f follows the
+design's phasing. The suite spans 21 test files
 (`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
@@ -205,7 +237,7 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
   journal, resume/reconciliation ladder, calendar scheduler (ss5), preflight (ss8),
   control-socket server (ss10: sendevent parity, status/trace/explain/plan,
-  subscribe); web serve (11e), supervisor tier (11f) per docs/runner-design.md ss14
+  subscribe); supervisor tier (11f) per docs/runner-design.md ss14
 - src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
   client of the control socket only (jobs table with pending timers/alarms, explain
   pane with per-atom truth, log tail of the ss6 std files, sendevent console);
@@ -218,11 +250,15 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
   real processes, control socket; stop with SIGINT/SIGTERM), `rehearse` (virtual
   clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
-  and `query` (clients of a running engine's control socket), and `ui` (the ss11
-  Textual TUI attached to a running engine; `run --ui` starts both in one terminal)
+  and `query` (clients of a running engine's control socket), `ui` (the ss11
+  Textual TUI attached to a running engine; `run --ui` starts both in one terminal),
+  and `serve` (11e: wraps textual-serve around the same app, one `dsl41 ui`
+  subprocess per browser session; optional `dsl41[ui]` extra, loopback by default)
   (exit 2 = catalog load/usage failure everywhere, incl. preflight refusals; exit 1 =
   findings for `lint`/`equiv`, a mid-run engine failure for `run`/`rehearse` —
   `report` always exits 0 once generated: the report itself is the loud channel)
+- src/dsl41/__main__.py — `python -m dsl41`, needed because `serve` spawns each
+  session's app as `<sys.executable> -m dsl41 ui --socket <path>`
 
 ### Tests
 
@@ -271,6 +307,11 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   sendevent console parser, ControlClient against a real ControlServer (round trip,
   reconnect, subscribe), and the ss13.6 pilot smokes (table, explain atoms, pending
   timers, log tail, key-driven STARTJOB)
+- tests/test_runner_serve.py — phase-11e `serve` CLI: missing-socket and
+  missing-extra exit-2 paths, the constructed textual-serve command (quoting a
+  socket path with a space), default loopback bind, bind-failure exit 2 — the
+  real textual-serve Server is always monkeypatched (ss13.6 posture, thinner
+  still: a CLI wrapper, not a pilot)
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the
@@ -291,8 +332,8 @@ dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E10
 `# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller. Runner phases 11e-11f (web serve via textual-serve, detached
-supervisor tier) follow per runner-design ss14.
+controller. Runner phase 11f (the detached supervisor tier) follows per
+runner-design ss14.
 
 ## License
 
