@@ -81,13 +81,21 @@ Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
   The 11c scheduler converts per-job zoneinfo ticks to UTC instants.
 - Journal (ss7): inputs-only JSONL WAL, journal-first -- every injected
   event is WAL-appended (+fsync in the real domain) BEFORE feed(); emitted
-  events and the trace replay from oracle determinism, never stored. Timer
-  advances are NOT journaled: by the advance-parity bisimulation property,
-  replaying inputs alone converges to the same state once reconciliation
-  injections (>= max journal time) drain the due timers. Dispatch records
+  events and the trace replay from oracle determinism, never stored. The
+  input alphabet has TWO halves (DL-44 amendment, review B1): external
+  events (input records) and time observations (advance records, written
+  before every Oracle.advance the engine performs) -- without the latter,
+  an advance-fired term_run_time kill would vanish from replay and a late
+  natural-exit record could resurrect the job at resume. Dispatch records
   are audit/ordering only (DL-41a): spawn.json, written by the process
   that spawned, is the authoritative spawn record, so dispatch carries
   wrapper_pid + run_dir rather than a pgid the engine never observes.
+- Kill-wins gate ordering (DL-44 amendment, review B1): before gating a
+  completion, the engine fires the oracle timers due at or before the
+  completion's timestamp (feed() would fire exactly these anyway), so the
+  gate sees every kill decision first and drops the late natural exit --
+  a kill, once decided, is never overwritten by a completion the engine
+  made. Externally injected STATUS keeps CHANGE_STATUS overwrite parity.
 - LocalCommandAdapter runs every command under the ss6a Tier-0 wrapper
   (runner_wrapper.py, spawned BY FILE PATH -- see its docstring), and the
   wrapper's status.json is the sole outcome channel; the wrapper's exit
@@ -291,8 +299,8 @@ class Journal:
     emitted events and the trace are pure functions of the input sequence
     (oracle determinism), so only injected inputs are stored; `journal
     render` replays them through a fresh Oracle. Record kinds: header /
-    input / dispatch / drop (module docstring covers why dispatch is
-    audit-only and why timer advances are absent). fsync per record in the
+    input / advance / dispatch / drop (module docstring covers why dispatch
+    is audit-only and why advances are inputs). fsync per record in the
     real domain (write-ahead: append + fsync BEFORE feed); buffered in
     rehearse, fsync on close. macOS caveat, accepted: os.fsync does not
     force the drive cache (F_FULLFSYNC would, at a large cost)."""
@@ -332,6 +340,15 @@ class Journal:
                 "source": source,
             }
         )
+
+    def advance(self, at: datetime) -> None:
+        """A time observation the engine acted on (Oracle.advance): part of
+        the input alphabet (DL-44 amendment) -- the timer firings it causes
+        (term_run_time kills, alarms) must replay, or a crash after an
+        advance-fired kill would resurrect the job. Shares the input seq so
+        replay interleaves feeds and advances in the original order."""
+        self.seq += 1
+        self._write({"rec": "advance", "seq": self.seq, "at": at.isoformat()})
 
     def dispatch(
         self,
@@ -399,16 +416,24 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
 
 
 def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> None:
-    """Feed the journal's input records, in seq order, through `oracle`."""
-    inputs = sorted((r for r in records if r.get("rec") == "input"), key=lambda r: int(r["seq"]))
-    for record in inputs:
-        oracle.feed(
-            Event(
-                at=datetime.fromisoformat(record["at"]),
-                kind=record["kind"],
-                payload=record["payload"],
+    """Apply the journal's input AND advance records, in seq order, through
+    `oracle` (an advance is a time observation -- the other half of the
+    input alphabet; DL-44 amendment)."""
+    replayable = sorted(
+        (r for r in records if r.get("rec") in ("input", "advance")),
+        key=lambda r: int(r["seq"]),
+    )
+    for record in replayable:
+        if record["rec"] == "advance":
+            oracle.advance(datetime.fromisoformat(record["at"]))
+        else:
+            oracle.feed(
+                Event(
+                    at=datetime.fromisoformat(record["at"]),
+                    kind=record["kind"],
+                    payload=record["payload"],
+                )
             )
-        )
 
 
 def _last_journal_at(records: list[dict[str, Any]]) -> datetime:
@@ -516,12 +541,24 @@ def _naive_utc(iso: str) -> datetime:
 def _outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     """Map a wrapper status.json record (docs/supervisor-protocol.md ss3) to
     an adapter result. Shared by the live adapter path and reconciliation so
-    live and resumed runs can never diverge on the same record."""
+    live and resumed runs can never diverge on the same record. A malformed
+    record maps to FAILURE with a truthful cause -- never to anything that
+    could satisfy a success-dependent downstream."""
     outcome = status.get("outcome")
-    if outcome == "exited" and isinstance(status.get("exit_code"), int):
-        return status["exit_code"]
+    if outcome == "exited":
+        exit_code = status.get("exit_code")
+        if isinstance(exit_code, int):
+            return exit_code
+        return Failed(f"malformed status record: outcome 'exited' with exit_code={exit_code!r}")
     if outcome == "signaled":
-        return Terminated(f"killed by signal {status.get('signal')}")
+        sig = status.get("signal")
+        cause = (
+            f"killed by signal {sig}" if isinstance(sig, int) else "killed by signal (unrecorded)"
+        )
+        # PENDING: E8 -- an EXTERNAL signal death (engine alive, no oracle
+        # kill decision) maps to TERMINATED per the DL-41a recorded-signal
+        # reading; vendor parity unverified (real AutoSys may mark FAILURE)
+        return Terminated(cause)
     if outcome == "terminated":
         return Terminated(str(status.get("cause", "terminated")))
     if outcome == "spawn_failed":
@@ -593,6 +630,10 @@ class LocalCommandAdapter:
                     stdin=asyncio.subprocess.PIPE,
                     pass_fds=(lifeline_r,),
                 )
+            except OSError as exc:
+                # EMFILE/ENOMEM-class glitch: fail THIS job, not the engine
+                # (review M6; symmetric with the wrapper's own spawn_failed)
+                return Failed(f"wrapper spawn failed: {exc}")
             finally:
                 os.close(lifeline_r)  # our copy; the wrapper holds its own now
             try:
@@ -600,6 +641,12 @@ class LocalCommandAdapter:
                 proc.stdin.write(json.dumps(spec).encode("utf-8"))
                 await proc.stdin.drain()
                 proc.stdin.close()
+            except OSError as exc:
+                # the wrapper died while reading its spec (pre-spawn by
+                # construction: it spawns only after the full spec parses)
+                await proc.wait()
+                return Failed(f"wrapper spawn failed: {exc}")
+            try:
                 if ctx.journal is not None:
                     ctx.journal.dispatch(
                         job_ir.name,
@@ -818,8 +865,21 @@ class Engine:
             if take_event:
                 _, _, ev, is_completion, source = heapq.heappop(self._queue)
                 if is_completion:
-                    # gate BEFORE the clock moves: a dropped completion must
-                    # be fully inert -- no time advance, no sleeper wakes
+                    # kill-wins gate ordering (DL-44 amendment, review B1):
+                    # fire the oracle timers due at or before the completion's
+                    # instant FIRST -- feed() would fire exactly these anyway,
+                    # but the gate must SEE every kill decision they carry
+                    # (term_run_time TERMINATED) or a late natural exit would
+                    # overwrite a kill. The gate still precedes ENGINE clock
+                    # movement: a dropped completion moves no wall/virtual
+                    # time and wakes no sleeper (DL-43 item 11).
+                    timer_due = self.oracle.next_timer_due()
+                    if timer_due is not None and timer_due <= ev.at:
+                        if self.journal is not None:
+                            self.journal.advance(ev.at)
+                        out = self.oracle.advance(ev.at)
+                        emitted.extend(out)
+                        self._dispatch(out)
                     reason = self._stale_reason(ev)
                     if reason is not None:
                         self.drops.append((ev, reason))
@@ -834,6 +894,11 @@ class Engine:
                 self._dispatch(out)
             elif fire_timer:
                 assert eff_due is not None
+                if self.journal is not None:
+                    # a time observation is an input (DL-44 amendment): the
+                    # timer firings it causes must survive a crash, or resume
+                    # replay would resurrect a job the oracle already killed
+                    self.journal.advance(eff_due)
                 await self.clock.wait_until(eff_due)
                 out = self.oracle.advance(eff_due)
                 emitted.extend(out)
@@ -1015,6 +1080,7 @@ def start_run(
         clock_domain="virtual" if clock.virtual else "real",
         started_at=clock.now(),
     )
+    _fsync_dir(run_root)  # the journal's directory entry is a record too (review M5)
     return Engine(catalog, clock=clock, adapters=adapters, journal=journal, run_root=run_root)
 
 
@@ -1052,7 +1118,10 @@ async def resume_run(
     journal = Journal(
         run_root / "journal.jsonl",
         fsync_each=not clock.virtual,
-        start_seq=max((int(r["seq"]) for r in records if r.get("rec") == "input"), default=0),
+        start_seq=max(
+            (int(r["seq"]) for r in records if r.get("rec") in ("input", "advance")),
+            default=0,
+        ),
     )
     engine = Engine(catalog, clock=clock, adapters=adapters, journal=journal, run_root=run_root)
     replay_inputs(engine.oracle, records)
@@ -1116,8 +1185,12 @@ async def _reconcile(
             continue
         if job_ir.job_type == "FW":
             adapter = engine.adapters.get("FW")
-            if adapter is not None:
-                engine._launch(job_ir, run_number, adapter)  # idempotent read
+            if adapter is None:
+                raise EngineError(  # refuse loudly (review M4): never leave it hanging
+                    f"incomplete FW run {job}.{run_number}: no FW adapter registered"
+                    " to re-dispatch it"
+                )
+            engine._launch(job_ir, run_number, adapter)  # idempotent read
             continue
         result, ended_at = await _resolve_spool(
             job,
@@ -1144,11 +1217,19 @@ async def _reconcile(
         if rt.status not in ("STARTING", "RUNNING") or (job, rt.run_number) in candidates:
             continue
         job_ir = engine.oracle.catalog.jobs.get(job)
-        if job_ir is None or job_ir.job_type not in engine.adapters:
-            continue  # boxes and undispatchable types: no process to account for
+        if job_ir is None or job_ir.job_type == "BOX":
+            continue  # boxes fold from members; pseudo-entries have no dispatch
         if job_ir.job_type == "FW":
-            engine._launch(job_ir, rt.run_number, engine.adapters["FW"])
+            adapter = engine.adapters.get("FW")
+            if adapter is None:
+                raise EngineError(
+                    f"incomplete FW run {job}.{rt.run_number}: no FW adapter registered"
+                    " to re-dispatch it"
+                )
+            engine._launch(job_ir, rt.run_number, adapter)
             continue
+        if job_ir.job_type not in engine.adapters:
+            continue  # no dispatch row live either: parity with the running engine
         _inject(
             job,
             rt.run_number,

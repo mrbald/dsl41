@@ -141,7 +141,7 @@ oracle additions, gated by the ss13 bisimulation suite — and 11b — the proce
 lifecycle tier (per-run wrapper shim, LocalCommand/FileWatcher adapters, WAL journal,
 crash-recovery resume with the reconciliation ladder; spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
-— are built; 11c-11f follow the design's phasing. The suite spans 16 test files
+— are built; 11c-11f follow the design's phasing. The suite spans 17 test files
 (`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
@@ -216,8 +216,15 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   oracle-vs-engine hypothesis properties
 - tests/test_runner_lifecycle.py — phase-11b lifecycle tier: wrapper process matrix
   (pgid separation, parent-loss kills, fd hygiene), the DL-42 phase-boundary kill
-  matrix, spoofed-record/boot-flip guards, and the engine-SIGKILL crash-recovery
-  integration test (tests/runner_crash_driver.py is its engine subprocess)
+  matrix, spoofed-record/boot-flip guards, the engine-SIGKILL crash-recovery
+  integration test (tests/runner_crash_driver.py is its engine subprocess), and the
+  DL-44 review-finding regressions (kill-wins gate, advance-record replay)
+- tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
+  catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
+  `journal` CLI
+- tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
+  boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
+  steady-size polling under VirtualClock, and the AdapterResult mapping
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the

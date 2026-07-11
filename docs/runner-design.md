@@ -282,18 +282,24 @@ Append-only JSONL WAL, one file per run. Record kinds:
 - `header` — catalog content hash, dsl41 version, clock domain, started_at.
 - `input` — `{seq, at, kind, payload, source}`,
   source ∈ {scheduler, adapter, control, reconcile}.
-- `dispatch` — `{job, run_number, pgid, started_at}` (audit/ordering only:
-  the wrapper's `spawn.json` is the authoritative spawn record, written by
-  the process that did the spawning — which closes the crash window
-  between spawn and journal append).
+- `advance` — `{seq, at}`: a time observation the engine acted on
+  (`Oracle.advance`), written before the advance (DL-44 amendment). The
+  input alphabet has two halves — external events and time observations;
+  without the latter, an advance-fired term_run_time kill would vanish
+  from replay and a late natural-exit record could resurrect the job.
+- `dispatch` — `{job, run_number, wrapper_pid, run_dir, started_at}`
+  (audit/ordering only: the wrapper's `spawn.json` is the authoritative
+  spawn record, written by the process that did the spawning — which
+  closes the crash window between spawn and journal append; the pgid is
+  the wrapper's child's business, the engine never observes it — DL-44).
 - `drop` — stale completions discarded by the §4 gate.
 
 **Inputs-only principle**: emitted events and the trace are pure functions
-of the input sequence (oracle determinism), so they are never journaled;
-`dsl41 journal render` replays inputs through a fresh Oracle to reconstruct
-the full trace. One source of truth, no divergence possible. Write-ahead
-discipline: fdatasync per record before `feed()` in run mode; batched in
-rehearse.
+of the input sequence — external events plus time observations (oracle
+determinism) — so they are never journaled; `dsl41 journal` replays inputs
+and advances through a fresh Oracle to reconstruct the full trace. One
+source of truth, no divergence possible. Write-ahead discipline: fsync per
+record before `feed()`/`advance()` in run mode; batched in rehearse.
 
 **Resume** (`dsl41 run --resume <journal>`):
 
@@ -477,5 +483,12 @@ code; none is guess-resolved.
   with cause `exit_status_unobservable`; TERMINATED reserved for kills
   that actually happened. Revisit if an estate shows t()-conditioned
   recovery paths that should fire instead.
+- **E8** — verdict for an EXTERNAL signal death (wrapper records
+  `signaled`; engine alive, no oracle kill decision — segfault, OOM kill,
+  operator `kill -9` of the command). Default: TERMINATED, uniform with
+  the DL-41a recorded-signal reading; real AutoSys may instead mark
+  FAILURE (128+signum through the SEM-09 boundary), which would flip
+  t()/f() routing. Needs a live instance; opened by the 11b adversarial
+  review (DL-44 amendment).
 - Inherited pendings: Q3 (SEM-32 abandonment branch), Q4 (n_retrys) — the
   runner implements the documented oracle defaults and adds no new switch.

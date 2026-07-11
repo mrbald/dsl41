@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -647,3 +648,281 @@ def test_resume_refuses_clock_domain_flip(tmp_path: Path) -> None:
 
     message = asyncio.run(scenario())
     assert "clock-domain mismatch" in message
+
+
+# ------------------------- review-finding regressions (DL-44 amendments)
+
+T0 = datetime(2026, 7, 1, 8, 0)
+
+KILL_JIL = """\
+insert_job: x
+job_type: c
+command: sleep 300
+term_run_time: 1
+
+insert_job: y
+job_type: c
+command: true
+condition: s(x)
+"""
+
+
+def _fabricate_exit_record(run_root: Path, job: str, run_number: int, ended_at: datetime) -> None:
+    run_dir = run_root / "runs" / f"{job}.{run_number}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "fabricated",
+                "job": job,
+                "run_number": run_number,
+                "outcome": "exited",
+                "exit_code": 0,
+                "ended_at": ended_at.isoformat(),
+            }
+        )
+    )
+
+
+def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) -> None:
+    """Review B1, the un-fired-timer half (DL-44 item 11b): the engine
+    crashed BEFORE the term_run_time deadline ever fired, and the wrapper
+    recorded a natural exit 0 (a SIGTERM-trapping command). At resume the
+    replayed timer is still armed and due before the record's timestamp:
+    the kill-wins gate must fire it first, drop the late exit record
+    (journaled), and downstream s(x) must never run."""
+    from datetime import timedelta
+
+    from dsl41.runner import FakeAdapter, VirtualClock, start_run
+
+    catalog = lower_source(KILL_JIL)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> tuple[dict[str, str], list[dict]]:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        from dsl41.oracle import Event
+
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "x"}))
+        await engine.run_until_quiescent(T0)  # x RUNNING; deadline armed, unfired
+        assert engine.oracle.store.job["x"].status == "RUNNING"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()  # "crash": nothing after the STARTJOB is journaled
+
+        _fabricate_exit_record(run_root, "x", 1, T0 + timedelta(minutes=2))
+        resumed = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+        statuses: dict[str, str] = {job: rt.status for job, rt in resumed.oracle.store.job.items()}
+        return statuses, read_journal(run_root / "journal.jsonl")
+
+    statuses, records = asyncio.run(scenario())
+    assert statuses["x"] == "TERMINATED"  # the kill stands
+    assert statuses["y"] == "INACTIVE"  # s(x) never satisfied
+    drops = [r for r in records if r.get("rec") == "drop"]
+    assert len(drops) == 1 and drops[0]["payload"]["exit_code"] == 0  # loud, not silent
+    assert any(r.get("rec") == "advance" for r in records)  # the time observation
+
+
+def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
+    """Review B1, the fired-timer half (DL-44 item 11a): the engine fired
+    the deadline live (advance journaled WAL-first), then crashed. Replay
+    alone must reproduce TERMINATED, and the stale spool record is skipped
+    without any reconcile injection."""
+    from datetime import timedelta
+
+    from dsl41.oracle import Event, Oracle
+    from dsl41.runner import FakeAdapter, VirtualClock, replay_inputs, start_run
+
+    catalog = lower_source(KILL_JIL)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> tuple[dict[str, str], list[dict]]:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "x"}))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))  # deadline fires
+        assert engine.oracle.store.job["x"].status == "TERMINATED"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+        _fabricate_exit_record(run_root, "x", 1, T0 + timedelta(minutes=2))
+        resumed = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+        statuses: dict[str, str] = {job: rt.status for job, rt in resumed.oracle.store.job.items()}
+        return statuses, read_journal(run_root / "journal.jsonl")
+
+    statuses, records = asyncio.run(scenario())
+    assert statuses["x"] == "TERMINATED" and statuses["y"] == "INACTIVE"
+    # the spool record was superseded by replayed truth: no reconcile input
+    assert not [r for r in records if r.get("rec") == "input" and r.get("source") == "reconcile"]
+    # and replay alone (journal render's path) reproduces the kill
+    oracle = Oracle(lower_source(KILL_JIL))
+    replay_inputs(oracle, records)
+    assert oracle.store.job["x"].status == "TERMINATED"
+
+
+def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
+    """Review B1, the live white-box half: a completion stamped after a due
+    term_run_time deadline must lose to it -- the gate advances the oracle
+    to the completion's instant first and then drops it as terminal."""
+    from datetime import timedelta
+
+    from dsl41.oracle import Event
+    from dsl41.runner import Engine, FakeAdapter, VirtualClock
+
+    async def scenario() -> None:
+        engine = Engine(
+            lower_source(KILL_JIL),
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "x"}))
+        await engine.run_until_quiescent(T0)  # deadline armed, unfired
+        engine._enqueue(
+            Event(
+                at=T0 + timedelta(minutes=2),
+                kind="STATUS",
+                payload={"job": "x", "run_number": 1, "exit_code": 0},
+            ),
+            is_completion=True,
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        assert engine.oracle.store.job["x"].status == "TERMINATED"  # kill wins
+        assert engine.drops and "already terminal" in engine.drops[0][1]
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_m3_malformed_status_records_map_truthfully() -> None:
+    """Review M3: a lying or truncated record can only make things worse,
+    never better -- and the cause must say what was actually wrong."""
+    from dsl41.runner import _outcome_from_status
+
+    malformed_exit = _outcome_from_status({"outcome": "exited"})
+    assert isinstance(malformed_exit, Failed) and "malformed" in malformed_exit.cause
+    stringly = _outcome_from_status({"outcome": "exited", "exit_code": "7"})
+    assert isinstance(stringly, Failed) and "'7'" in stringly.cause
+    unsigned = _outcome_from_status({"outcome": "signaled"})
+    assert unsigned == Terminated("killed by signal (unrecorded)")
+    unknown = _outcome_from_status({"outcome": "gremlins"})
+    assert isinstance(unknown, Failed) and "unrecognized" in unknown.cause
+
+
+def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None:
+    """Review M4: an incomplete FW run whose re-dispatch adapter is missing
+    at resume must refuse loudly, never hang RUNNING forever."""
+    from dsl41.oracle import Event
+    from dsl41.runner import EngineError, FakeAdapter, FileWatcherAdapter, VirtualClock, start_run
+
+    fw_jil = "insert_job: w\njob_type: f\nwatch_file: /nonexistent/watched\n"
+    catalog = lower_source(fw_jil)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> str:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter()},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)  # watcher parked mid-poll
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        try:
+            await resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0),
+                adapters={"CMD": FakeAdapter()},  # FW adapter forgotten
+            )
+        except EngineError as exc:
+            return str(exc)
+        return ""
+
+    message = asyncio.run(scenario())
+    assert "no FW adapter registered" in message
+
+
+def test_m6_wrapper_spawn_failure_fails_job_not_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M6: an EMFILE-class glitch spawning the WRAPPER fails that
+    one job with a truthful FAILURE cause; the engine loop survives and
+    other jobs complete normally."""
+    from dsl41.oracle import Event
+    from dsl41.runner import start_run
+
+    jil = (
+        "insert_job: doomed\njob_type: c\ncommand: true\n\n"
+        "insert_job: fine\njob_type: c\ncommand: true\n"
+    )
+    catalog = lower_source(jil)
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def flaky_spawn(*args: object, **kwargs: object):
+        if any("runner_wrapper" in str(a) for a in args) and flaky_spawn.fail:  # type: ignore[attr-defined]
+            flaky_spawn.fail = False  # type: ignore[attr-defined]
+            raise OSError(24, "Too many open files")
+        return await real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    flaky_spawn.fail = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", flaky_spawn)
+
+    async def scenario() -> tuple[dict[str, str], list[dict]]:
+        clock = RealClock()
+        engine = start_run(
+            catalog,
+            tmp_path / "run",
+            clock=clock,
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+        )
+        # sequential so the single flaky spawn deterministically hits doomed
+        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "doomed"}))
+        await engine.run_until_quiescent(datetime.max)
+        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "fine"}))
+        await engine.run_until_quiescent(datetime.max)
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        statuses: dict[str, str] = {job: rt.status for job, rt in engine.oracle.store.job.items()}
+        return statuses, read_journal(tmp_path / "run" / "journal.jsonl")
+
+    statuses, records = asyncio.run(scenario())
+    assert statuses == {"doomed": "FAILURE", "fine": "SUCCESS"}
+    causes = [
+        r["payload"].get("cause")
+        for r in records
+        if r.get("rec") == "input" and r["payload"].get("job") == "doomed"
+    ]
+    assert any(c and "wrapper spawn failed" in str(c) for c in causes)

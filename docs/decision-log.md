@@ -1011,3 +1011,50 @@
   overwrite); resume refuses a clock-domain flip. CLI verb `journal`
   (render-by-replay) ships in 11b since the WAL does; run/sendevent stay
   11c per DL-41.
+  Post-review amendments (same day; Opus adversarial review, one confirmed
+  BLOCKER + five minors fixed, eleven hunt areas confirmed sound):
+  (11) BLOCKER B1: an advance()-fired term_run_time TERMINATED was
+  journaled nowhere, and a command that traps SIGTERM and exits 0 leaves
+  an exited/0 spool record; on resume, replay left the job RUNNING with
+  the timer merely re-armed, the stale gate passed at pop time, and
+  feed() fired the timer THEN applied the record -- CHANGE_STATUS-parity
+  overwrite resurrected a killed job as SUCCESS, cascading to downstream
+  s() jobs. Fixed with BOTH halves: (a) the input alphabet gains time
+  observations -- an `advance` journal record (shared seq, WAL-first)
+  written before every Oracle.advance, replayed by replay_inputs, so
+  advance-fired kills survive crashes; the ss7 inputs-only principle now
+  reads "external events plus time observations". (b) Kill-wins gate
+  ordering: before gating a completion the engine advances the oracle to
+  the completion's timestamp (firing exactly the timers feed() would fire
+  anyway), so the gate SEES every kill decision and drops-and-journals
+  the late natural exit; the DL-43 item 11 "gate precedes clock movement"
+  pin narrows to the ENGINE clock -- a dropped completion still moves no
+  wall/virtual time and wakes no sleeper. Bisim-invisible: the gate only
+  guards engine-made completions and the harness runs an inert adapter.
+  (12) NEW E8 (review M2): an EXTERNAL signal death (engine alive, no
+  oracle decision) maps to TERMINATED per DL-41a's recorded-signal
+  reading, but no SEM entry supports it and real AutoSys may mark
+  FAILURE; pinned as an open question (# PENDING: E8 in
+  _outcome_from_status), needs a live instance. (13) Review M3: malformed
+  status records (exited without integer exit_code; signaled without
+  signal) map to truthful causes -- FAILURE "malformed status record" /
+  TERMINATED "killed by signal (unrecorded)" -- never a false verdict.
+  (14) Review M4: an incomplete FW run at resume with no FW adapter
+  registered is a loud EngineError, not a silently-hanging RUNNING job;
+  non-FW types without an adapter row keep live-engine parity (no row =
+  nothing dispatches) and are left untouched. (15) Review M5: start_run
+  fsyncs run_root after creating the journal -- the WAL's directory entry
+  is a record too. (16) Review M6: an engine-side wrapper-spawn glitch
+  (EMFILE/ENOMEM, or the wrapper dying while reading its spec -- pre-spawn
+  by construction) fails THAT job with FAILURE "wrapper spawn failed",
+  symmetric with the wrapper's own spawn_failed outcome, instead of
+  crashing the whole engine loop. Review M1 (advance-fired alarms absent
+  from replay/render) is subsumed by (11a). Confirmed sound by the same
+  review: real-loop wakeup races (no await between queue read and
+  activity clear), double-cancel tether backstop, wrapper fd hazards,
+  superseded-run skip, dotted job names in the runs/ sweep, box-member
+  run_number reconciliation, resumed-journal seq/header handling, ghost
+  gate seeding, FW single-completion, (pid, start-time) token parsing on
+  both platforms, catalog-hash order sensitivity (a real oracle-cascade
+  tie-break, so reorder => re-baseline is correct), and the 11a
+  bisimulation surface.
