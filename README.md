@@ -22,11 +22,13 @@ Start here, in order:
 
 Status: all ten compiler phases built and tested; the phase-11 runner
 ([docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
-is in progress — 11a (engine core + bisimulation gate) and 11b (process
+is in progress — 11a (engine core + bisimulation gate), 11b (process
 lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
 resume; spool contract frozen in
-[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
-are done. See the memo below for the source map and what remains open.
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)),
+11c (calendar scheduler, preflight, control socket, headless CLI), and 11d
+(Textual TUI) are done. See the memo below for the source map and what
+remains open.
 
 ## CLI
 
@@ -130,6 +132,22 @@ builder generates JIL and reuses parse -> lower, so `lint`, `viz`, and
 `decompile` an estate to Python, edit it, run the module, `equiv` the result
 against the original.
 
+### Run an estate (phase 11)
+
+```sh
+dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
+dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
+dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
+dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
+dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
+dsl41 rehearse jobs.jil --hours 24              # virtual clock: a day in seconds
+```
+
+The TUI (jobs table with pending timers and alarms, explain pane with
+per-atom condition truth, log tail, sendevent console) is the optional
+`[ui]` extra: `pip install 'dsl41[ui]'`. It is a thin client of the run's
+control socket — the same protocol `sendevent`/`query` speak.
+
 ## Implementation memo
 
 All ten phases from CLAUDE.md's implementation order are implemented and tested, in
@@ -143,8 +161,10 @@ crash-recovery resume with the reconciliation ladder; spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
 — and 11c — the ss5 calendar scheduler, ss8 preflight, ss10 control socket
 (sendevent parity + queries + subscribe), and the headless
-`run`/`rehearse`/`sendevent`/`query` CLI verbs — are built; 11d-11f follow the
-design's phasing. The suite spans 19 test files
+`run`/`rehearse`/`sendevent`/`query` CLI verbs — and 11d — the ss11 Textual TUI
+(`dsl41 ui` against a running engine, or `dsl41 run --ui`; optional
+`dsl41[ui]` extra) — are built; 11e-11f follow the
+design's phasing. The suite spans 20 test files
 (`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
@@ -185,7 +205,12 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
   journal, resume/reconciliation ladder, calendar scheduler (ss5), preflight (ss8),
   control-socket server (ss10: sendevent parity, status/trace/explain/plan,
-  subscribe); TUI (11d/e), supervisor tier (11f) per docs/runner-design.md ss14
+  subscribe); web serve (11e), supervisor tier (11f) per docs/runner-design.md ss14
+- src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
+  client of the control socket only (jobs table with pending timers/alarms, explain
+  pane with per-atom truth, log tail of the ss6 std files, sendevent console);
+  subscribe is a wake-up signal, every rendered view comes from the idempotent
+  ss10 queries
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary), records spawn.json/status.json durably, kills
   and records on lifeline EOF; spool contract in docs/supervisor-protocol.md
@@ -193,7 +218,8 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
   real processes, control socket; stop with SIGINT/SIGTERM), `rehearse` (virtual
   clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
-  and `query` (clients of a running engine's control socket)
+  and `query` (clients of a running engine's control socket), and `ui` (the ss11
+  Textual TUI attached to a running engine; `run --ui` starts both in one terminal)
   (exit 2 = catalog load/usage failure everywhere, incl. preflight refusals; exit 1 =
   findings for `lint`/`equiv`, a mid-run engine failure for `run`/`rehearse` —
   `report` always exits 0 once generated: the report itself is the loud channel)
@@ -239,7 +265,12 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   preflight rule fixture pairs
 - tests/test_runner_control.py — phase-11c control socket (sendevent parity verbs,
   status/trace/explain/plan queries, subscribe backfill/live seam, socket hygiene),
-  the DL-45 commit-discipline regression, and the run/rehearse/sendevent/query CLI
+  the DL-45 commit-discipline regression, the run/rehearse/sendevent/query CLI, and
+  the DL-46 status-response fields (pending_timers, log paths)
+- tests/test_runner_tui.py — phase-11d TUI (skips without the [ui] extra): the
+  sendevent console parser, ControlClient against a real ControlServer (round trip,
+  reconnect, subscribe), and the ss13.6 pilot smokes (table, explain atoms, pending
+  timers, log tail, key-driven STARTJOB)
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the
@@ -260,8 +291,8 @@ dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E10
 `# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller. Runner phases 11d-11f (Textual TUI, web serve via textual-serve,
-detached supervisor tier) follow per runner-design ss14.
+controller. Runner phases 11e-11f (web serve via textual-serve, detached
+supervisor tier) follow per runner-design ss14.
 
 ## License
 

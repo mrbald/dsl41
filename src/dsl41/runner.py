@@ -157,6 +157,23 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
   dispatch/drop records during the backfill race; seq'd records exactly
   once). A stale socket file from a crashed run is detected by a probe
   connect and unlinked; a LIVE socket refuses the second engine.
+
+Phase 11d (ss11; DL-46 pins the decisions; runner_tui.py's docstring is the
+TUI-side normative detail):
+
+- The ss10 status response grows two read-only fields per job, both for the
+  ss11 views and useful to any headless `query status` consumer:
+  `pending_timers` -- (due, kind) pairs from Oracle.pending_timers(), whose
+  liveness filter mirrors the fire-time staleness rules (display truth is
+  the dispatch truth: a heap entry a fire would discard as stale is not
+  shown as pending) -- and `log_out`/`log_err`, the ss6 append targets of
+  the CURRENT run resolved by job_log_paths(), the one resolver the adapter
+  wrapper spec also uses (the log tail reads what the wrapper writes; the
+  two can never diverge). CMD-only; a never-started job reports only
+  explicit std files (nothing else exists to tail).
+- The protocol itself gains no verb: the TUI is `status` + `trace --since`
+  + `explain` + `sendevent` + `subscribe`-as-wake-up, exactly the headless
+  surface (DL-45: the TUI consumes the same ss10 protocol, idempotently).
 """
 
 from __future__ import annotations
@@ -679,6 +696,7 @@ class LocalCommandAdapter:
         logs_dir = ctx.run_root / "logs"
         logs_dir.mkdir(exist_ok=True)
 
+        stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
         lifeline_r, lifeline_w = os.pipe()
         try:
             spec = {
@@ -689,10 +707,8 @@ class LocalCommandAdapter:
                 "command": command,
                 "run_dir": str(run_dir),
                 "lifeline_fd": lifeline_r,
-                "stdout_path": spec_ir.std_out_file
-                or str(logs_dir / f"{job_ir.name}.{run_number}.out"),
-                "stderr_path": spec_ir.std_err_file
-                or str(logs_dir / f"{job_ir.name}.{run_number}.err"),
+                "stdout_path": stdout_path,
+                "stderr_path": stderr_path,
                 "stdin_path": spec_ir.std_in_file,
                 "grace_seconds": self.grace_seconds,
             }
@@ -788,6 +804,22 @@ def _killpg_quiet(pgid: int, sig: int) -> None:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass  # whole group already gone
+
+
+def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, str]:
+    """ss6 append targets for a CMD run: std_out_file/std_err_file when set
+    (vendor appends), else <run_root>/logs/<job>.<run_number>.{out,err}. One
+    resolver shared by the adapter's wrapper spec and the ss10 status
+    response (the ss11 log tail reads what the wrapper writes -- the two
+    must never diverge)."""
+    out = err = None
+    if isinstance(job_ir.exec_, ExecSpec):
+        out, err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
+    logs_dir = run_root / "logs"
+    return (
+        out or str(logs_dir / f"{job_ir.name}.{run_number}.out"),
+        err or str(logs_dir / f"{job_ir.name}.{run_number}.err"),
+    )
 
 
 class FileWatcherAdapter:
@@ -1979,9 +2011,23 @@ class ControlServer:
             names = [job]
         else:
             names = sorted(set(catalog.jobs) | set(store.job))
+        # ss11 additions (DL-46): pending timers from the oracle's own
+        # liveness rules, and the ss6 log paths the wrapper appends to --
+        # the TUI's jobs table and log tail read these, never a re-derivation
+        pending: dict[str, list[dict[str, str]]] = {}
+        for due, timer_job, kind in self.engine.oracle.pending_timers():
+            pending.setdefault(timer_job, []).append({"due": due.isoformat(), "kind": kind})
         jobs: dict[str, dict[str, Any]] = {}
         for name in names:
             rt = store.job.get(name) or JobRuntime()  # never insert from a query
+            log_out = log_err = None
+            job_ir = catalog.jobs.get(name)
+            if self.engine.run_root is not None and job_ir is not None and job_ir.job_type == "CMD":
+                if rt.run_number >= 1:
+                    log_out, log_err = job_log_paths(job_ir, rt.run_number, self.engine.run_root)
+                elif isinstance(job_ir.exec_, ExecSpec):
+                    # never ran: only explicit std files exist to tail
+                    log_out, log_err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
             jobs[name] = {
                 "status": rt.status,
                 "status_at": rt.status_at.isoformat() if rt.status_at else None,
@@ -1990,6 +2036,9 @@ class ControlServer:
                 "on_ice": rt.on_ice,
                 "on_hold": rt.on_hold,
                 "on_noexec": rt.on_noexec,
+                "pending_timers": pending.get(name, []),
+                "log_out": log_out,
+                "log_err": log_err,
             }
         return {"ok": True, "jobs": jobs}
 

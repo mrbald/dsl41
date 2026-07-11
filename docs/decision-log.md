@@ -1168,3 +1168,97 @@
   work); one test pins the no-raise reality (fails loudly the day
   construction refusals appear), another pins the plumbing by injection
   (a constructor refusal surfaces as a preflight ERROR, never a crash).
+- DL-46 Phase 11d landed: Textual TUI (2026-07-11; found and decided during
+  implementation, all within DL-41 item 8's frame; runner.py's 11d docstring
+  block and runner_tui.py's module docstring are normative detail).
+  Decisions: (1) NO NEW PROTOCOL VERB: the ss11 views are served by the
+  existing ss10 surface -- status, trace --since, explain, sendevent,
+  subscribe -- plus two read-only fields the status response grows per job:
+  `pending_timers` (from the new Oracle.pending_timers(), whose liveness
+  filter MIRRORS _dispatch_timer_check's fire-time staleness rules --
+  display truth is the dispatch truth: a heap entry a fire would discard
+  as stale is not shown as pending) and `log_out`/`log_err` (the ss6
+  append targets of the current run, resolved by job_log_paths(), the one
+  resolver the adapter's wrapper spec also uses -- the log tail reads what
+  the wrapper writes, the two can never diverge; CMD-only, and a
+  never-started job reports only explicit std files). Headless `query
+  status` consumers get both fields for free. (2) SUBSCRIBE IS A WAKE-UP
+  SIGNAL, NEVER A RENDER SOURCE: DL-45's at-least-once dispatch/drop
+  caveat is discharged by construction -- every record only schedules a
+  coalesced refresh, and everything the user sees comes from the
+  idempotent queries (jobs table from status; running commentary from
+  trace, cut by stable trace seqs; explain pane from the oracle's own
+  predicate truth). A 2s poll backstops a lost subscription; the
+  subscription reconnects while the socket is down; a journal-less run
+  drops to polling alone. (3) Alarm counts are TALLIED FROM TRACE
+  transitions (MUST_START_ALARM/MUST_COMPLETE_ALARM): the oracle's trace
+  is the only alarm authority, the TUI counts and never re-derives.
+  (4) LOG TAIL IS A LOCAL FILE READ, deliberately outside the protocol:
+  in both postures the app runs on the engine host (terminal;
+  textual-serve serves FROM the host, E3), so a log verb would duplicate
+  the filesystem for no reach. Byte tail (seed last 8 KiB, follow
+  appends, reset on truncation) -- smoke-grade by design. (5) CLI: new
+  `ui` verb (attach to a RUNNING engine; quitting detaches and leaves the
+  run alone) vs `run --ui` (the terminal owns the run; quitting the app
+  stops it -- tethered semantics made visible); guarded textual import
+  fails with exit 2 and the pip-install hint BEFORE the engine starts.
+  (6) Event console accepts exactly the sendevent verbs (omitted job =
+  selected row); the SERVER is the only validator (vendor parity: unknown
+  jobs/statuses are refused by ss10, the TUI never pre-judges) -- one
+  deliberate parser wrinkle: CHANGE_STATUS's status-first shorthand
+  means a catalog job named like a status (case-insensitively -- the
+  shorthand upper()s its candidate) must use the explicit
+  `CHANGE_STATUS <job> <STATUS>` form. (7) textual pinned >=8 as the
+  [ui] extra -- the floor is the family the TUI is developed and tested
+  against (8.2.8); textual also joins the dev extra so the ss13.6 pilot
+  smoke runs in CI; the core package keeps its three runtime deps.
+  Post-review amendments (same day; Opus adversarial review, one confirmed
+  BLOCKER + one major + six minors; the blocker and the desync fix were
+  independently reproduced and validated by the reviewer): (8) BLOCKER B1:
+  ControlClient.request caught only OSError, so a CANCELLED exchange (the
+  exclusive explain worker superseded by fast row navigation, cancelled
+  between write and readline) left the response unread on the live
+  connection -- the next request read the stale line and every reply after
+  it was offset by one (explain pane showing the wrong job; status/trace
+  reading explain-shaped payloads; table frozen). Fixed: any non-clean exit
+  of the write->read section drops the connection (BaseException guard);
+  _drop() itself detaches before its awaits so a re-delivered cancellation
+  cannot leave a half-dead connection looking attached. (9) MAJOR M1: the
+  [ui] floor said >=1.0 but add_columns' (label, key) tuple form only
+  exists since textual 6.2.0 -- a conforming older install crashed on the
+  second refresh (CellDoesNotExist). Fixed twice over: per-column
+  add_column(key=) (predates 1.0) AND the honest >=8 floor in item 7 --
+  unverified compatibility claims are how UIs break at install time.
+  (10) M2: run --ui swallowed a TUI crash as an operator stop (exit 0, no
+  traceback); the ui task's exception is now retrieved, reported as "TUI
+  failed", exit 1. (11) M3: a torn subscribe record raised JSONDecodeError
+  past both retry guards and permanently killed the change-feed worker
+  (silent drop to poll-only); malformed lines are now skipped -- the feed
+  is only a wake-up signal. (12) M4 REJECTED WITH REASON: pending
+  run_window timers are NOT filtered by current status -- unlike the
+  deadline checks, whose run-mismatch staleness is permanent, a deferred
+  STARTJOB is a real start attempt whose outcome depends on fire-time
+  state (a job RUNNING now may have completed by next_open and be legally
+  restarted); hiding it would suppress a timer that can still act.
+  Comment pinned at the oracle site. (13) M5/M6 documented, not coded:
+  relative std_* paths tail correctly only under run --ui (DL-39 verbatim
+  carry; `dsl41 ui` from another cwd resolves them against the viewer);
+  no client-side timeouts by design (a wedged engine parks the data
+  plane, quit stays live). (14) Viewer reattach across a re-baselined run
+  root (delete + fresh start on the same socket path): a trace shorter
+  than the cut resets the commentary cursor and the alarm tally instead
+  of suppressing output until the fresh trace outgrows the stale seq.
+  Test-suite amendments (same day; Sonnet test pass over the pre-fix code,
+  38 tests across test_runner_tui.py (new: parser, ControlClient against a
+  real server, five pilot smokes), test_runner_control.py (+5: the DL-46
+  status fields), test_runner.py (+6: pending_timers liveness; placed here
+  because test_oracle.py's bisim harness doesn't proxy the timer surface
+  and its meta-test forbids direct Oracle construction)): (15) the pilot
+  teardown race the pass surfaced -- a set_interval tick or a worker
+  resuming after an await can outlive the unmounting screen and crash on
+  query_one (NoMatches) -- is fixed with teardown guards on every
+  widget-touching timer/worker path (_tail_step, _refresh, console
+  writes). (16) Pinned by test, worth knowing: job_log_paths resolves
+  std_out_file/std_err_file INDEPENDENTLY per stream -- setting only
+  std_out_file leaves log_err on the computed default, vendor-parity with
+  the wrapper's own spec resolution.

@@ -268,6 +268,39 @@ class Oracle:
         advance(); a wall-clock shell uses this to know when to wake."""
         return self._timers[0][0] if self._timers else None
 
+    def pending_timers(self) -> list[tuple[datetime, str, str]]:
+        """Read-only snapshot of LIVE pending timers as (due, job, kind),
+        due-ordered; kind is the deadline-check name (`must_start`,
+        `must_complete`, `term_run_time`) or `run_window` for a SEM-33
+        deferred start. Liveness mirrors _dispatch_timer_check's fire-time
+        rules -- a heap entry a fire would discard as stale (run_number moved
+        on; deadline's run no longer RUNNING) is not pending, it is dead
+        weight awaiting its lazy pop. The ss10 status query renders this for
+        the ss11 jobs table; display truth must be the dispatch truth."""
+        live: list[tuple[datetime, str, str]] = []
+        for due, _, ev in self._timers:
+            job = ev.payload.get("job")
+            if not isinstance(job, str):
+                continue
+            check = ev.payload.get("check")
+            if check is None:
+                # SEM-33 deferred starts stay live UNCONDITIONALLY: unlike the
+                # deadline checks, whose run-mismatch staleness is permanent,
+                # a deferred STARTJOB is a real start attempt whose outcome
+                # depends on fire-time state -- a job RUNNING now may have
+                # completed by next_open, and the fire would legally start it
+                # again. Filtering on current status would hide a timer that
+                # can still act (DL-46 review, finding rejected with reason).
+                live.append((due, job, "run_window"))
+                continue
+            rt = self.store.job.get(job)
+            if rt is None or ev.payload.get("run") != rt.run_number:
+                continue  # stale: a later run superseded this deadline
+            if check in ("must_complete", "term_run_time") and rt.status != "RUNNING":
+                continue  # the run already ended; the check fires as a no-op
+            live.append((due, job, str(check)))
+        return sorted(live)
+
     def advance(self, now: datetime) -> list[Event]:
         """Fire timers due <= now without an external event (runner-design
         ss3): factored from feed()'s drain, same non-decreasing time

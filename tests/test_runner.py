@@ -95,6 +95,113 @@ def test_next_timer_due_none_then_start_deadline_then_earliest_of_two() -> None:
     assert o.next_timer_due() == T0 + timedelta(minutes=3)
 
 
+# ------------------------------------------------------------- 1b. pending_timers()
+
+
+def test_pending_timers_term_run_time_armed_and_visible_while_running() -> None:
+    """(runner-design ss3, DL-46): pending_timers() reports a live
+    term_run_time deadline as (due, job, "term_run_time") while the run is
+    still RUNNING -- the exact shape the ss10 status response and the ss11
+    jobs table render."""
+    text = "insert_job: pt_a\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n"
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="pt_a"))
+    assert o.pending_timers() == [(T0 + timedelta(minutes=10), "pt_a", "term_run_time")]
+
+
+def test_pending_timers_stale_by_run_hides_a_deadline_from_a_superseded_run() -> None:
+    """(oracle.py's own pending_timers docstring): a restart bumps
+    run_number, so a still-unfired deadline armed for an EARLIER run must be
+    hidden even while the job is genuinely RUNNING again -- proving the
+    run-mismatch check does real work independently of the status check
+    (which alone would call this RUNNING entry live)."""
+    text = "insert_job: pt_b\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n"
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="pt_b"))  # run=1, deadline at T0+10
+    o.feed(ev("STATUS", 2, job="pt_b", status="SUCCESS"))  # completes early; run stays 1
+    o.feed(ev("FORCE_STARTJOB", 3, job="pt_b"))  # run=2, a NEW deadline at T0+13
+    assert o.store.job["pt_b"].status == "RUNNING"
+    # the run=1 timer (due T0+10) is still heaped (unfired) but hidden; only
+    # the run=2 timer is live, even though status alone (RUNNING) would not
+    # have disqualified the stale one
+    assert o.pending_timers() == [(T0 + timedelta(minutes=13), "pt_b", "term_run_time")]
+
+
+def test_pending_timers_stale_by_status_hides_a_completed_jobs_deadline() -> None:
+    """(oracle.py's own pending_timers docstring): once the job leaves
+    RUNNING the still-heaped term_run_time deadline is dead weight -- the
+    fire-time check `_dispatch_timer_check` would treat it as a no-op, so
+    display truth must match and hide it too, even though run_number never
+    changed."""
+    text = "insert_job: pt_c\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n"
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="pt_c"))
+    assert o.pending_timers() == [(T0 + timedelta(minutes=10), "pt_c", "term_run_time")]
+    o.feed(ev("STATUS", 2, job="pt_c", status="SUCCESS"))  # run stays 1; status != RUNNING
+    assert o.pending_timers() == []
+
+
+def test_pending_timers_must_start_pending_until_the_run_actually_starts() -> None:
+    """(SEM-34, DL-46): a must_start deadline arms on the schedule tick
+    whether or not the start succeeds. A condition-gated scheduled job (the
+    SEM-30/31 double gate: an edge-triggered wake alone never starts a
+    date_conditions job, only its own next schedule tick does) stays
+    pending across the gate flipping true, and only clears once a SECOND
+    tick actually starts it (run_number moves off the armed value)."""
+    text = (
+        "insert_job: pt_gate\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: pt_ms\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_start_times: +5\ncondition: s(pt_gate)\n"
+    )
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="pt_ms"))  # tick 1: arms must_start, condition false
+    assert o.store.job["pt_ms"].status == "INACTIVE"
+    assert o.pending_timers() == [(T0 + timedelta(minutes=5), "pt_ms", "must_start")]
+
+    o.feed(ev("STATUS", 1, job="pt_gate", status="SUCCESS"))  # gate true, edge wake only
+    assert o.store.job["pt_ms"].status == "INACTIVE"  # double gate: still didn't start
+    assert o.pending_timers() == [(T0 + timedelta(minutes=5), "pt_ms", "must_start")]
+
+    o.feed(ev("STARTJOB", 2, job="pt_ms"))  # tick 2: gate now satisfied -> starts
+    assert o.store.job["pt_ms"].status == "RUNNING"
+    assert o.pending_timers() == []
+
+
+def test_pending_timers_run_window_defer_reports_kind_run_window() -> None:
+    """(SEM-33, DL-46): a run_window DEFER queues a check-less TIMER for the
+    next window opening; pending_timers() reports it with kind "run_window"
+    (the sentinel for a payload with no "check" key), distinct from the
+    deadline-check kinds."""
+    text = (
+        "insert_job: pt_rw\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        'run_window: "10:00-11:00"\n'
+    )
+    o = Oracle(lower_source(text))
+    o.feed(Event(at=datetime(2026, 7, 1, 9, 50), kind="STARTJOB", payload={"job": "pt_rw"}))
+    assert o.pending_timers() == [(datetime(2026, 7, 1, 10, 0), "pt_rw", "run_window")]
+
+
+def test_pending_timers_multiple_timers_are_due_ordered() -> None:
+    """(runner-design ss3): pending_timers() sorts by due time across
+    DIFFERENT jobs and kinds -- not insertion order, a genuine min-heap
+    drain mirrored as a snapshot (companion to the next_timer_due() test
+    above, which pins the same two-job catalog's single-earliest peek)."""
+    text = (
+        "insert_job: pt_x\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n\n"
+        "insert_job: pt_y\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\nmust_complete_times: +2\n'
+    )
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="pt_x"))
+    o.feed(ev("STARTJOB", 1, job="pt_y"))
+    assert o.pending_timers() == [
+        (T0 + timedelta(minutes=3), "pt_y", "must_complete"),
+        (T0 + timedelta(minutes=5), "pt_x", "term_run_time"),
+    ]
+
+
 # ---------------------------------------------------------------- 2. advance()
 
 

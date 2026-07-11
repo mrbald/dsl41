@@ -734,3 +734,181 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# --------------------------------------------------- 7. status query extensions (11d, DL-46)
+
+
+def test_status_pending_timers_visible_while_running_then_gone_after_completion(
+    short_root: Path,
+) -> None:
+    """(runner-design ss11, DL-46): the status response's `pending_timers`
+    field mirrors Oracle.pending_timers()'s own liveness rule -- a
+    term_run_time deadline shows up while the run is RUNNING (a slow
+    FakeAdapter script holds it there) and is gone once the run completes
+    naturally, well before the deadline itself would ever fire."""
+    text = "insert_job: pte_job\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter({("pte_job", 1): (0.3, 0)}, default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            resp = await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "pte_job"}
+            )
+            assert resp["ok"] is True
+
+            async def running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "pte_job"})
+                return r["jobs"]["pte_job"]["status"] == "RUNNING"
+
+            await _wait_for_async(running)
+            while_running = await _control_call(server.path, {"cmd": "status", "job": "pte_job"})
+            timers = while_running["jobs"]["pte_job"]["pending_timers"]
+            assert len(timers) == 1
+            assert timers[0]["kind"] == "term_run_time"
+
+            async def done() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "pte_job"})
+                return r["jobs"]["pte_job"]["status"] == "SUCCESS"
+
+            await _wait_for_async(done)
+            after = await _control_call(server.path, {"cmd": "status", "job": "pte_job"})
+            assert after["jobs"]["pte_job"]["pending_timers"] == []
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_log_paths_default_shape_for_a_ran_cmd_job(short_root: Path) -> None:
+    """(runner-design ss6/ss11, DL-46): with no std_out_file/std_err_file,
+    a ran CMD job's log_out/log_err resolve to
+    <run_root>/logs/<job>.<run_number>.{out,err} -- job_log_paths()'s
+    default shape, the same resolver the LocalCommandAdapter uses."""
+    run_root = short_root / "run"
+    text = "insert_job: ple_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter({("ple_job", 1): (0.05, 0)}, default=None)
+        engine, server, loop_task = await _serve(run_root, text, adapter=adapter)
+        try:
+            await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "ple_job"}
+            )
+
+            async def dispatched() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "ple_job"})
+                return r["jobs"]["ple_job"]["status"] in ("RUNNING", "SUCCESS")
+
+            await _wait_for_async(dispatched)
+            resp = await _control_call(server.path, {"cmd": "status", "job": "ple_job"})
+            jobs = resp["jobs"]["ple_job"]
+            assert jobs["log_out"] == str(run_root / "logs" / "ple_job.1.out")
+            assert jobs["log_err"] == str(run_root / "logs" / "ple_job.1.err")
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_log_paths_explicit_std_out_file_honored_per_stream(
+    short_root: Path, tmp_path: Path
+) -> None:
+    """(runner-design ss6/ss11, DL-46): an explicit std_out_file is honored
+    verbatim; job_log_paths() resolves EACH stream independently, so an
+    unset std_err_file still falls back to its own default path rather
+    than going along with the explicit std_out_file."""
+    run_root = short_root / "run"
+    out_file = tmp_path / "custom.out"
+    text = f"insert_job: pls_job\njob_type: c\ncommand: x\nmachine: m1\nstd_out_file: {out_file}\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter({("pls_job", 1): (0.05, 0)}, default=None)
+        engine, server, loop_task = await _serve(run_root, text, adapter=adapter)
+        try:
+            await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "pls_job"}
+            )
+
+            async def dispatched() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "pls_job"})
+                return r["jobs"]["pls_job"]["status"] in ("RUNNING", "SUCCESS")
+
+            await _wait_for_async(dispatched)
+            resp = await _control_call(server.path, {"cmd": "status", "job": "pls_job"})
+            jobs = resp["jobs"]["pls_job"]
+            assert jobs["log_out"] == str(out_file)
+            assert jobs["log_err"] == str(run_root / "logs" / "pls_job.1.err")
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_log_paths_never_ran_cmd_without_std_files_is_null(short_root: Path) -> None:
+    """(runner-design ss11, DL-46): a never-started CMD job with no explicit
+    std_out_file/std_err_file has nothing to tail -- both fields are null,
+    never a guessed run_number-1 path."""
+    text = "insert_job: plv_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "status", "job": "plv_job"})
+            jobs = resp["jobs"]["plv_job"]
+            assert jobs["log_out"] is None
+            assert jobs["log_err"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_log_paths_non_cmd_jobs_are_null(short_root: Path, tmp_path: Path) -> None:
+    """(runner-design ss11, DL-46): log_out/log_err are CMD-only -- a BOX
+    (no exec spec at all) and an FW job (its own watch_file, not a ss6
+    append target) both report null, running or not."""
+    box_root = short_root / "run_box"
+    box_text = (
+        "insert_job: plb_box\njob_type: b\n\n"
+        "insert_job: plb_mem\njob_type: c\ncommand: x\nmachine: m1\nbox_name: plb_box\n"
+    )
+
+    async def box_scenario() -> None:
+        adapter = FakeAdapter({("plb_mem", 1): (0.05, 0)}, default=None)
+        engine, server, loop_task = await _serve(box_root, box_text, adapter=adapter)
+        try:
+            await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "plb_box"}
+            )
+
+            async def box_running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "plb_box"})
+                return r["jobs"]["plb_box"]["status"] != "INACTIVE"
+
+            await _wait_for_async(box_running)
+            resp = await _control_call(server.path, {"cmd": "status", "job": "plb_box"})
+            jobs = resp["jobs"]["plb_box"]
+            assert jobs["log_out"] is None
+            assert jobs["log_err"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(box_scenario())
+
+    fw_root = short_root / "run_fw"
+    watch_file = tmp_path / "watched.txt"
+    fw_text = f"insert_job: plf_job\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+
+    async def fw_scenario() -> None:
+        engine, server, loop_task = await _serve(fw_root, fw_text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "status", "job": "plf_job"})
+            jobs = resp["jobs"]["plf_job"]
+            assert jobs["log_out"] is None
+            assert jobs["log_err"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(fw_scenario())

@@ -599,6 +599,9 @@ def run(
     resume: bool = typer.Option(
         False, "--resume", help="Resume the run_root's journal (replay + reconcile, ss7)."
     ),
+    ui: bool = typer.Option(
+        False, "--ui", help="Attach the ss11 Textual TUI in this terminal (quit stops the run)."
+    ),
     timezone: str = _TIMEZONE_OPT,
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -607,22 +610,38 @@ def run(
     processes, WAL journal, calendar scheduler, and the control socket
     (runner-design ss1/ss9/ss10). Runs until stopped (SIGINT/SIGTERM);
     engine death terminates all jobs, durably recorded (tethered, ss6a).
-    Drive it with `dsl41 sendevent` / `dsl41 query`.
+    Drive it with `dsl41 sendevent` / `dsl41 query`, or attach the TUI
+    (`--ui` here, or `dsl41 ui` from another terminal).
     """
     import asyncio
 
+    if ui:
+        _import_tui_or_exit_2()  # fail before the engine starts, not after
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     warns = _preflight_or_exit(catalog, execution=True)
     _check_base_tz(timezone)
     from dsl41.runner import EngineError
 
     try:
-        raise typer.Exit(asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns)))
+        raise typer.Exit(asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns, ui)))
     except EngineError as exc:
         # start/resume gates (existing journal, hash/domain mismatch, live
         # socket): the run never started
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
+
+
+def _import_tui_or_exit_2():
+    """Guarded textual import (runner-design ss14): the core package keeps
+    its three runtime deps; the TUI is the optional [ui] extra."""
+    try:
+        from dsl41 import runner_tui
+    except ModuleNotFoundError as exc:
+        typer.echo(
+            "the TUI needs the optional [ui] extra: pip install 'dsl41[ui]'", err=True
+        )
+        raise typer.Exit(2) from exc
+    return runner_tui
 
 
 async def _serve_run(
@@ -631,6 +650,7 @@ async def _serve_run(
     resume: bool,
     timezone: str | None,
     warns: list,
+    ui: bool = False,
 ) -> int:
     import asyncio
     import contextlib
@@ -686,14 +706,35 @@ async def _serve_run(
             # engine failure; the real CLI always has the main thread
             pass
     stop_task = asyncio.ensure_future(stop.wait())
-    done, _ = await asyncio.wait({loop_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    ui_task: asyncio.Task | None = None
+    tui = None
+    if ui:
+        from dsl41.runner_tui import RunnerApp
+
+        # same terminal, same loop, still a client of the socket ONLY (ss11)
+        tui = RunnerApp(server.path)
+        ui_task = asyncio.ensure_future(tui.run_async())
+    waiters = {loop_task, stop_task} | ({ui_task} if ui_task is not None else set())
+    done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    stop_task.cancel()
+    tui_exc: BaseException | None = None
+    if ui_task is not None and ui_task in done and not ui_task.cancelled():
+        tui_exc = ui_task.exception()  # a TUI crash is not an operator stop
+    if tui is not None and ui_task is not None and ui_task not in done:
+        tui.exit()  # engine crash or signal: detach the viewer first
+        with contextlib.suppress(Exception):
+            await ui_task
     code = 0
     if loop_task in done:  # hold_open never quiesces: this is a crash
-        stop_task.cancel()
-        exc2 = loop_task.exception()
-        typer.echo(f"engine failed: {exc2}", err=True)
+        typer.echo(f"engine failed: {loop_task.exception()}", err=True)
         code = 1
     else:
+        # operator stop: a signal, or quitting the attached TUI (ss11 --ui
+        # tethers the run to this terminal; viewers that must not stop the
+        # run attach with `dsl41 ui` instead)
+        if tui_exc is not None:
+            typer.echo(f"TUI failed: {tui_exc!r}", err=True)
+            code = 1
         typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -874,6 +915,19 @@ def sendevent(
     response = _control_roundtrip(socket_path, request)
     typer.echo(json_mod.dumps(response, sort_keys=True))
     raise typer.Exit(0 if response.get("ok") else 2)
+
+
+@app.command()
+def ui(socket_path: Path = _SOCKET_OPT) -> None:
+    """Attach the ss11 Textual TUI to a running engine: jobs table, explain
+    pane with per-atom truth, log tail, sendevent console. A thin client of
+    the control socket only -- quitting detaches the viewer and leaves the
+    run alone (unlike `run --ui`, whose terminal owns the run)."""
+    runner_tui = _import_tui_or_exit_2()
+    if not socket_path.exists():
+        typer.echo(f"control socket {socket_path}: no such file", err=True)
+        raise typer.Exit(2)
+    runner_tui.RunnerApp(socket_path).run()
 
 
 @app.command()
