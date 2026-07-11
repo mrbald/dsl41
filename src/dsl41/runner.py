@@ -188,6 +188,7 @@ import json
 import os
 import signal
 import socket as socket_mod
+import subprocess
 import sys
 import time
 import uuid
@@ -201,6 +202,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
+from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
 from dsl41.conditions import And, Cond, Paren, StatusAtom, iter_atoms
 from dsl41.ir import CatalogIR, ExecSpec, FwSpec, JobIR, ScheduleBlock
@@ -208,6 +210,8 @@ from dsl41.oracle import _TERMINAL, Event, EventKind, JobRuntime, JobStatus, Ora
 
 #: the ss6a Tier-0 shim, executed by file path (never -m; see its docstring)
 _WRAPPER_PATH = Path(_wrapper.__file__)
+#: the ss6a Tier-1 supervisor, likewise run by file path (stdlib-only boundary)
+_SUPERVISOR_PATH = Path(_supervisor.__file__)
 
 
 class EngineError(RuntimeError):
@@ -537,13 +541,27 @@ def _last_journal_at(records: list[dict[str, Any]]) -> datetime:
 
 
 @dataclass
+class DetachSignal:
+    """Set by the engine BEFORE it cancels adapter tasks for a detach-stop
+    (operator SIGINT/SIGTERM of a --detached run, or shutdown-for-resume).
+    The SupervisedCommandAdapter's CancelledError path branches on it: when
+    stopping, it abandons the await and signals NOTHING -- jobs keep running
+    under the supervisor (spec ss3 case b). Tethered adapters ignore it."""
+
+    stopping: bool = False
+
+
+@dataclass
 class AdapterContext:
     """What an adapter may touch (ss6): the clock, and in the real domain
-    the run-root layout (runs/, logs/) plus the WAL for dispatch records."""
+    the run-root layout (runs/, logs/) plus the WAL for dispatch records.
+    `detach` distinguishes a detach-stop from an oracle-decided kill in the
+    detached CMD path (ss3 case b vs a)."""
 
     clock: Clock
     run_root: Path | None = None
     journal: Journal | None = None
+    detach: DetachSignal | None = None
 
 
 @dataclass(frozen=True)
@@ -656,6 +674,46 @@ def _outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     return Failed(f"unrecognized status record outcome {outcome!r}")
 
 
+def _build_run_spec(
+    job_ir: JobIR, run_number: int, ctx: AdapterContext, *, grace_seconds: float
+) -> tuple[Path, dict[str, Any]]:
+    """The run_dir/log-path/wrapper-spec construction shared by the tethered
+    (LocalCommandAdapter) and detached (SupervisedCommandAdapter) CMD paths --
+    everything the wrapper input spec needs EXCEPT lifeline_fd, which each
+    caller fills from the end that owns the pipe's write side (engine tethered,
+    supervisor detached). Kept as one function so the two paths can never
+    diverge on run-dir layout, profile composition, or log targets (ss6a)."""
+    if ctx.run_root is None:
+        raise EngineError("command dispatch needs a run_root (real domain only)")
+    spec_ir = job_ir.exec_
+    if not isinstance(spec_ir, ExecSpec):
+        raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
+    if os.sep in job_ir.name or job_ir.name in (".", ".."):
+        raise EngineError(f"job name {job_ir.name!r} is not a safe run-directory name")
+    command = spec_ir.command
+    if spec_ir.profile:
+        command = f". {spec_ir.profile} && {command}"  # PENDING: E5
+    run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
+    run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
+    _fsync_dir(run_dir)
+    _fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
+    (ctx.run_root / "logs").mkdir(exist_ok=True)
+    stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
+    spec = {
+        "version": _wrapper.SPEC_VERSION,
+        "run_id": str(uuid.uuid4()),
+        "job": job_ir.name,
+        "run_number": run_number,
+        "command": command,
+        "run_dir": str(run_dir),
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+        "stdin_path": spec_ir.std_in_file,
+        "grace_seconds": grace_seconds,
+    }
+    return run_dir, spec
+
+
 class LocalCommandAdapter:
     """ss6 CMD adapter: spawn the ss6a Tier-0 wrapper, await it, read
     status.json -- the sole outcome channel. No retries (Q4 parity), no
@@ -678,40 +736,10 @@ class LocalCommandAdapter:
         self.grace_seconds = grace_seconds
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
-        if ctx.run_root is None:
-            raise EngineError("LocalCommandAdapter needs a run_root (real domain only)")
-        spec_ir = job_ir.exec_
-        if not isinstance(spec_ir, ExecSpec):
-            raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
-        if os.sep in job_ir.name or job_ir.name in (".", ".."):
-            raise EngineError(f"job name {job_ir.name!r} is not a safe run-directory name")
-
-        command = spec_ir.command
-        if spec_ir.profile:
-            command = f". {spec_ir.profile} && {command}"  # PENDING: E5
-        run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
-        run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
-        _fsync_dir(run_dir)
-        _fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
-        logs_dir = ctx.run_root / "logs"
-        logs_dir.mkdir(exist_ok=True)
-
-        stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
+        run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
         lifeline_r, lifeline_w = os.pipe()
         try:
-            spec = {
-                "version": _wrapper.SPEC_VERSION,
-                "run_id": str(uuid.uuid4()),
-                "job": job_ir.name,
-                "run_number": run_number,
-                "command": command,
-                "run_dir": str(run_dir),
-                "lifeline_fd": lifeline_r,
-                "stdout_path": stdout_path,
-                "stderr_path": stderr_path,
-                "stdin_path": spec_ir.std_in_file,
-                "grace_seconds": self.grace_seconds,
-            }
+            spec["lifeline_fd"] = lifeline_r  # tethered: the write end lives HERE
             try:
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable,
@@ -853,6 +881,471 @@ class FileWatcherAdapter:
             else:
                 previous = None
             await ctx.clock.sleep_until(ctx.clock.now() + timedelta(seconds=interval))
+
+
+class SupervisorUnavailable(RuntimeError):
+    """The supervisor socket is gone (never came up, refused, or died
+    mid-run). The engine survives it: pending runs resolve from the spool
+    ladder (spec ss3), the tethered fallback for the detached path."""
+
+
+class SupervisorClient:
+    """Engine-side client of the ss6a Tier-1 supervisor (this side may import
+    dsl41 freely). Ensures a supervisor is running (spawning one DETACHED if
+    the socket is dead/absent -- a live socket is reused, which is exactly
+    reattachment), holds the single-controller lease (ACQUIRE + a background
+    RENEW task), serializes one request/response at a time, and demuxes async
+    exit PUSHes into per-run_id futures. Socket loss sets `lost`; adapters
+    awaiting a run watch it, try `reconnect()` once, and only then fall back
+    to the spool (supervisor-protocol ss5: pushes are notifications, the
+    spool is the truth).
+
+    Cancellation POISONS the connection (review fix, DL-48): the frozen ss5
+    protocol has no correlation ids, so a request cancelled between write
+    and reply leaves the stream state unknowable -- the reply in flight
+    would be delivered to the NEXT request's future. On CancelledError
+    mid-request the client fails the pending future, closes the socket, and
+    re-raises; later calls lazily reconnect (connect-only, never spawning a
+    supervisor) and re-ACQUIRE with the stable controller_id, whose fresh
+    fencing token fences anything the poisoned connection had in flight."""
+
+    #: engine defaults (spec ss2): 60s lease, renewed every 20s
+    _TTL_S = 60.0
+    _RENEW_EVERY_S = 20.0
+
+    def __init__(self, run_root: Path) -> None:
+        self.run_root = run_root
+        self.sock_path = run_root / "supervisor.sock"
+        # STABLE per run_root, not per process: a crashed engine's lease is
+        # unexpired for up to ttl_s, and resume must re-ACQUIRE without waiting
+        # it out. Same controller_id => allowed, minting a fresh token that
+        # fences the dead engine's stale one (spec ss2). One run_root has one
+        # logical engine controller (the ss10 control-socket gate enforces it).
+        self.controller_id = f"engine:{run_root.resolve()}"
+        self.token: int | None = None
+        self.lost = asyncio.Event()
+        self._writer: asyncio.StreamWriter | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+        self._renew_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
+        self._closed = False
+        self._pending: asyncio.Future[dict[str, Any]] | None = None
+        self._exit_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
+    # -- connection ---------------------------------------------------------
+
+    async def ensure_running(self) -> None:
+        """Connect to a live supervisor, or spawn a fresh one DETACHED
+        (setsid, stdio to supervisor.log) and connect-with-retry. A live
+        socket is reused -- that reuse IS reattachment (spec ss1)."""
+        if await self._try_connect():
+            return
+        self._spawn_supervisor()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            if await self._try_connect():
+                return
+        raise SupervisorUnavailable("supervisor did not come up within 10s")
+
+    async def _try_connect(self) -> bool:
+        if not self.sock_path.exists():
+            return False
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(self.sock_path))
+        except ConnectionRefusedError:
+            with contextlib.suppress(OSError):
+                self.sock_path.unlink()  # stale: nobody is listening (parity with ss10)
+            return False
+        except OSError:
+            return False
+        # supersede any previous connection's remains BEFORE swapping identity:
+        # the epoch guard (each reader carries its own `lost` event) keeps a
+        # stale reader from poisoning or delivering into its successor
+        if self._writer is not None:
+            self._writer.close()
+        if self._reader_task is not None and not self._reader_task.done():
+            self._reader_task.cancel()
+        self._writer = writer
+        self.lost = asyncio.Event()
+        self._reader_task = asyncio.ensure_future(self._reader(reader, self.lost))
+        try:
+            resp = await self._request({"cmd": "PING"}, _connect=False)
+        except SupervisorUnavailable:
+            return False
+        return bool(resp.get("ok"))
+
+    def _spawn_supervisor(self) -> None:
+        logf = (self.run_root / "supervisor.log").open("ab")
+        try:
+            subprocess.Popen(
+                [sys.executable, str(_SUPERVISOR_PATH), "--run-root", str(self.run_root)],
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=logf,
+                start_new_session=True,  # detach job lifetime from this engine
+                close_fds=True,
+            )
+        finally:
+            logf.close()  # the child dup'd it; our copy is done
+
+    # -- request / response / push demux ------------------------------------
+
+    async def _ensure_connected(self) -> None:
+        """Lazy reconnect (review fix, DL-48): a poisoned or lost connection
+        heals on the next call rather than failing every caller until the
+        engine restarts."""
+        if self._closed:
+            raise SupervisorUnavailable("client closed")
+        if self._writer is not None and not self.lost.is_set():
+            return
+        if not await self.reconnect():
+            raise SupervisorUnavailable("not connected")
+
+    async def reconnect(self) -> bool:
+        """Re-entry after a lost or poisoned connection: connect-only (never
+        spawns a supervisor) + re-ACQUIRE when a lease was held -- the stable
+        controller_id mints a fresh fencing token, which fences anything the
+        old connection had in flight. False = the supervisor itself is
+        unreachable (callers fall back to the ss7 spool ladder). Everything
+        under the reconnect lock uses _connect=False: re-entering the lazy
+        path from inside it would deadlock on this non-reentrant lock."""
+        async with self._reconnect_lock:
+            if self._closed:
+                return False
+            if self._writer is not None and not self.lost.is_set():
+                return True  # another caller already reconnected
+            if not await self._try_connect():
+                return False
+            if self.token is not None:
+                try:
+                    resp = await self._request(
+                        {
+                            "cmd": "ACQUIRE",
+                            "controller_id": self.controller_id,
+                            "ttl_s": self._TTL_S,
+                        },
+                        _connect=False,
+                    )
+                except SupervisorUnavailable:
+                    return False
+                if not resp.get("ok"):
+                    return False  # fenced out: another controller holds the lease
+                self.token = int(resp["token"])
+            return True
+
+    async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+        if _connect:
+            await self._ensure_connected()
+        async with self._lock:
+            if self._writer is None or self.lost.is_set():
+                raise SupervisorUnavailable("not connected")
+            fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+            self._pending = fut
+            try:
+                self._writer.write(
+                    json.dumps({**obj, "v": 1}, sort_keys=True).encode("utf-8") + b"\n"
+                )
+                await self._writer.drain()
+                return await fut  # the reader resolves it, or _on_lost fails it
+            except OSError as exc:
+                self._pending = None
+                raise SupervisorUnavailable(str(exc)) from exc
+            except asyncio.CancelledError:
+                # poison-on-cancel (review MAJOR, DL-48): the reply may be in
+                # flight (or the request only partially written pre-drain);
+                # with no correlation ids the stream is unknowable, so tear
+                # the connection down -- the orphan reply can then never be
+                # delivered to the NEXT request -- and re-raise. Later calls
+                # heal via _ensure_connected.
+                self._poison()
+                raise
+
+    def _poison(self) -> None:
+        self.lost.set()
+        if self._pending is not None and not self._pending.done():
+            self._pending.set_exception(
+                SupervisorUnavailable("request cancelled; connection poisoned")
+            )
+        self._pending = None
+        if self._writer is not None:
+            self._writer.close()  # the reader sees EOF and exits via its epoch
+            self._writer = None
+
+    async def _reader(self, stream: asyncio.StreamReader, lost: asyncio.Event) -> None:
+        """One reader per connection; `lost` is that connection's epoch. A
+        reader superseded by a poison+reconnect must neither deliver into nor
+        poison its successor -- hence the `lost is self.lost` guards."""
+        try:
+            while True:
+                line = await stream.readline()
+                if not line or lost is not self.lost:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and obj.get("push") == "exit":
+                    self._deliver_push(obj)  # true exit facts: epoch-independent
+                elif self._pending is not None and not self._pending.done():
+                    pending, self._pending = self._pending, None
+                    pending.set_result(obj if isinstance(obj, dict) else {})
+        except (OSError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            self._on_lost(lost)
+
+    def _deliver_push(self, obj: dict[str, Any]) -> None:
+        run_id = obj.get("run_id")
+        fut = self._exit_futures.get(run_id) if isinstance(run_id, str) else None
+        if fut is not None and not fut.done():
+            fut.set_result(obj)
+
+    def _on_lost(self, lost: asyncio.Event) -> None:
+        if lost is not self.lost:
+            return  # a superseded connection's reader: the successor is fine
+        if lost.is_set():
+            return  # already poisoned; _poison cleaned the pending future
+        lost.set()
+        if self._pending is not None and not self._pending.done():
+            self._pending.set_exception(SupervisorUnavailable("connection lost"))
+        self._pending = None
+
+    def exit_future(self, run_id: str) -> asyncio.Future[dict[str, Any]]:
+        fut = self._exit_futures.get(run_id)
+        if fut is None:
+            fut = asyncio.get_running_loop().create_future()
+            self._exit_futures[run_id] = fut
+        return fut
+
+    def forget_exit(self, run_id: str) -> None:
+        self._exit_futures.pop(run_id, None)
+
+    # -- verbs --------------------------------------------------------------
+
+    async def acquire(self, *, ttl_s: float | None = None) -> int:
+        ttl = self._TTL_S if ttl_s is None else ttl_s
+        resp = await self._request(
+            {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl}
+        )
+        if not resp.get("ok"):
+            raise SupervisorUnavailable(f"lease acquire refused: {resp}")
+        self.token = int(resp["token"])
+        if self._renew_task is None:
+            self._renew_task = asyncio.ensure_future(self._renew_loop(ttl))
+        return self.token
+
+    async def _renew_loop(self, ttl_s: float) -> None:
+        """Keep the lease alive (spec ss2: renew every 20s). Review fix
+        (DL-48): a transient failure must not silently lapse a live engine's
+        lease -- pushes would stop with only the adapters' status.json
+        re-poll saving outcomes. Failed RENEWs retry on a short backoff; a
+        stale/lapsed token re-ACQUIREs with the stable controller_id (fresh
+        fencing token); connection loss heals via _request's lazy reconnect.
+        Only several consecutive failures give up -- loudly, once."""
+        failures = 0
+        try:
+            while True:
+                await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else 1.0)
+                try:
+                    resp = await self._request(
+                        {"cmd": "RENEW", "token": self.token, "ttl_s": ttl_s}
+                    )
+                    if not resp.get("ok"):
+                        # stale_token (fenced by a reconnect's own re-ACQUIRE,
+                        # or lapsed): same controller re-acquires, fresh token
+                        resp = await self._request(
+                            {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl_s}
+                        )
+                        if resp.get("ok"):
+                            self.token = int(resp["token"])
+                except SupervisorUnavailable:
+                    resp = {"ok": False}
+                if resp.get("ok"):
+                    failures = 0
+                    continue
+                failures += 1
+                if failures >= 5:
+                    print(
+                        "dsl41: supervisor lease renewal failed 5 times; giving up"
+                        " (job outcomes still resolve from the spool)",
+                        file=sys.stderr,
+                    )
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
+        resp = await self._request({"cmd": "SPAWN", "token": self.token, "spec": spec})
+        if not resp.get("ok"):
+            raise SupervisorUnavailable(f"SPAWN refused: {resp}")
+        return resp
+
+    async def signal(self, run_id: str, sig: str) -> dict[str, Any]:
+        return await self._request(
+            {"cmd": "SIGNAL", "token": self.token, "run_id": run_id, "sig": sig}
+        )
+
+    async def list_runs(self) -> dict[str, Any]:
+        return await self._request({"cmd": "LIST"})
+
+    async def shutdown(self) -> dict[str, Any]:
+        return await self._request({"cmd": "SHUTDOWN", "token": self.token})
+
+    async def release(self) -> None:
+        if self.token is not None:
+            with contextlib.suppress(SupervisorUnavailable):
+                await self._request({"cmd": "RELEASE", "token": self.token})
+
+    async def close(self) -> None:
+        self._closed = True  # no lazy reconnect may resurrect a closing client
+        for task in (self._renew_task, self._reader_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._renew_task = self._reader_task = None
+        if self._writer is not None:
+            self._writer.close()
+            with contextlib.suppress(Exception):
+                await self._writer.wait_closed()
+            self._writer = None
+
+
+class SupervisedCommandAdapter:
+    """ss6 CMD adapter, detached variant: SPAWN through the supervisor (which
+    owns the wrapper lifeline), await the exit push, read status.json --
+    the same outcome channel and `_outcome_from_status` mapping as
+    LocalCommandAdapter, so tethered and detached runs never diverge. Shares
+    run_dir/log/spec construction via `_build_run_spec` (no duplication).
+
+    Cancellation is the subtle part (spec ss3), two distinct cases:
+    (a) oracle-decided terminal (KILLJOB / term_run_time / run_window): SIGNAL
+        TERM via the supervisor, grace_seconds, SIGNAL KILL, await the exit
+        push -- identical outcome shape to the tethered kill.
+    (b) engine detach-stop (operator SIGINT/SIGTERM of a --detached run, or
+        shutdown for resume): abandon the await, signal NOTHING -- the jobs
+        keep running under the supervisor. Branches on ctx.detach.stopping."""
+
+    def __init__(
+        self,
+        client: SupervisorClient,
+        *,
+        grace_seconds: float = 10.0,
+        settle_seconds: float = 5.0,
+    ) -> None:
+        self.client = client
+        self.grace_seconds = grace_seconds
+        self.settle_seconds = settle_seconds
+        #: (job, run_number) -> run_id for runs to REATTACH at resume, not
+        #: respawn (spec ss3); populated by resume before _launch
+        self.reattach: dict[tuple[str, int], str] = {}
+
+    async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
+        if ctx.run_root is None:
+            raise EngineError("SupervisedCommandAdapter needs a run_root (real domain only)")
+        key = (job_ir.name, run_number)
+        reattach_id = self.reattach.pop(key, None)
+        if reattach_id is not None:
+            # the run never stopped (its parent is the supervisor); just await
+            # its outcome -- no reconciliation injection (E4 dissolved, ss3)
+            run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
+            return await self._await_outcome(reattach_id, run_dir, job_ir.name, run_number)
+        run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
+        run_id = spec["run_id"]
+        self.client.exit_future(run_id)  # register BEFORE spawn so no push is missed
+        try:
+            reply = await self.client.spawn(spec)
+        except SupervisorUnavailable as exc:
+            self.client.forget_exit(run_id)
+            return Failed(f"wrapper spawn failed: supervisor unavailable ({exc})")
+        if ctx.journal is not None:
+            ctx.journal.dispatch(
+                job_ir.name,
+                run_number,
+                wrapper_pid=reply.get("wrapper_pid"),
+                run_dir=str(run_dir),
+                started_at=ctx.clock.now(),
+            )
+        try:
+            return await self._await_outcome(run_id, run_dir, job_ir.name, run_number)
+        except asyncio.CancelledError:
+            if ctx.detach is not None and ctx.detach.stopping:
+                raise  # ss3 case b: the job continues under the supervisor
+            await self._kill(run_id)  # ss3 case a: the oracle decided terminal
+            raise
+
+    async def _await_outcome(
+        self, run_id: str, run_dir: Path, job: str, run_number: int
+    ) -> AdapterResult:
+        fut = self.client.exit_future(run_id)
+        status_path = run_dir / "status.json"
+        try:
+            while True:
+                # post-poison a lost connection no longer implies a dead
+                # supervisor (review fix, DL-48): try to reconnect first --
+                # falling straight to the spool ladder would kill a healthy
+                # detached run whose wrapper is simply still running
+                if self.client.lost.is_set() and not await self.client.reconnect():
+                    break  # the supervisor itself is unreachable -> spool below
+                status = _load_json(status_path)
+                if status is not None:
+                    return _outcome_from_status(status)
+                lost_wait = asyncio.ensure_future(self.client.lost.wait())
+                exit_wait = asyncio.ensure_future(asyncio.shield(fut))
+                try:
+                    await asyncio.wait(
+                        {exit_wait, lost_wait},
+                        timeout=1.0,  # re-poll status.json (a missed push at reattach)
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    lost_wait.cancel()
+                    exit_wait.cancel()  # cancels the shield, never fut
+                if fut.done() and not fut.cancelled():
+                    status = _load_json(status_path)
+                    if status is not None:
+                        return _outcome_from_status(status)
+                    rc = (fut.result() or {}).get("wrapper_rc")
+                    return Failed(  # PENDING: E7
+                        f"exit_status_unobservable (wrapper exited rc={rc} without a status record)"
+                    )
+        finally:
+            self.client.forget_exit(run_id)
+        # the supervisor connection was lost AND could not be re-established
+        # (kill -9 of the supervisor): the wrappers EOF'd and are killing+
+        # recording -- resolve via the ss7 spool ladder, the same reading the
+        # tethered resume path uses (spec ss3)
+        result, _ended = await _resolve_spool(
+            job,
+            run_number,
+            run_dir,
+            _wrapper.current_boot_id(),
+            settle_seconds=self.settle_seconds,
+            grace_seconds=self.grace_seconds,
+        )
+        return result
+
+    async def _kill(self, run_id: str) -> None:
+        """ss3 case a: the oracle said terminal. TERM the command group via the
+        supervisor, grace, KILL, await the exit push so the wrapper records --
+        the cancelled adapter itself never reports (the oracle already emitted
+        the terminal)."""
+        fut = self.client.exit_future(run_id)
+        try:
+            await self.client.signal(run_id, "TERM")
+        except SupervisorUnavailable:
+            return  # supervisor gone: the wrapper's own lifeline handles it
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
+        except (TimeoutError, asyncio.TimeoutError):
+            with contextlib.suppress(SupervisorUnavailable):
+                await self.client.signal(run_id, "KILL")
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
+        finally:
+            self.client.forget_exit(run_id)
 
 
 @dataclass
@@ -1024,6 +1517,9 @@ class Engine:
         self.run_root = run_root
         self.scheduler = scheduler
         self.hold_open = hold_open
+        #: flipped by the CLI before a detach-stop cancels adapter tasks (ss3
+        #: case b): the SupervisedCommandAdapter then abandons instead of killing
+        self.detach = DetachSignal()
         self.drops: list[tuple[Event, str]] = []  # gate rejections; also WAL drop records
         #: time-ordered event queue: (at, arrival seq, event, is_completion, source);
         #: see the module docstring for why FIFO alone is wrong here
@@ -1319,7 +1815,12 @@ class Engine:
                 raise result
 
     async def _run_adapter(self, job_ir: JobIR, run_number: int, adapter: JobAdapter) -> None:
-        ctx = AdapterContext(clock=self.clock, run_root=self.run_root, journal=self.journal)
+        ctx = AdapterContext(
+            clock=self.clock,
+            run_root=self.run_root,
+            journal=self.journal,
+            detach=self.detach,
+        )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate
         payload: dict[str, object] = {"job": job_ir.name, "run_number": run_number}
@@ -1390,6 +1891,7 @@ async def resume_run(
     hold_open: bool = False,
     settle_seconds: float = 5.0,
     grace_seconds: float = 10.0,
+    supervisor: SupervisorClient | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -1468,7 +1970,12 @@ async def resume_run(
             engine.drops.append((tick_ev, reason))  # PENDING: E9
             journal.drop(tick_ev, reason)
     await _reconcile(
-        engine, records, last_at, settle_seconds=settle_seconds, grace_seconds=grace_seconds
+        engine,
+        records,
+        last_at,
+        settle_seconds=settle_seconds,
+        grace_seconds=grace_seconds,
+        supervisor=supervisor,
     )
     return engine
 
@@ -1480,13 +1987,27 @@ async def _reconcile(
     *,
     settle_seconds: float,
     grace_seconds: float,
+    supervisor: SupervisorClient | None = None,
 ) -> None:
     """The ss6a/ss7 reconciliation ladder (module docstring). Tethered
     semantics did the killing already (wrappers EOF'd when the engine
     died), so this is mostly READING; signals are for the residual crash
-    matrix only, and only ever at a (pid, start-time)-verified target."""
+    matrix only, and only ever at a (pid, start-time)-verified target.
+
+    Detached resume (spec ss3): with a `supervisor`, an in-flight run the
+    supervisor still LISTs as wrapper_alive is REATTACHED -- the adapter task
+    just awaits its exit push, no reconciliation injection (the run never
+    stopped, E4 dissolved). Runs listed dead or unlisted fall through to the
+    spool ladder unchanged (the supervisor died, or the run predates it)."""
     assert engine.run_root is not None
     boot_now = _wrapper.current_boot_id()
+    supervised_live: dict[tuple[str, int], dict[str, Any]] = {}
+    if supervisor is not None:
+        with contextlib.suppress(SupervisorUnavailable):
+            listing = await supervisor.list_runs()
+            supervised_live = {
+                (str(r["job"]), int(r["run_number"])): r for r in listing.get("runs", [])
+            }
     # sweep = union(journal dispatch records, runs/ directory) (ss7)
     candidates: dict[tuple[str, int], Path | None] = {}
     for record in records:
@@ -1520,6 +2041,16 @@ async def _reconcile(
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:
             continue
+        reattach = supervised_live.get((job, run_number))
+        if reattach is not None and reattach.get("wrapper_alive"):
+            cmd_adapter = engine.adapters.get(job_ir.job_type)
+            if isinstance(cmd_adapter, SupervisedCommandAdapter):
+                # REATTACH: the run's parent (the supervisor) never died, so it
+                # never stopped -- the adapter task just awaits its exit push,
+                # NO reconciliation injection (spec ss3)
+                cmd_adapter.reattach[(job, run_number)] = str(reattach["run_id"])
+                engine._launch(job_ir, run_number, cmd_adapter)
+                continue
         if job_ir.job_type == "FW":
             adapter = engine.adapters.get("FW")
             if adapter is None:
@@ -1867,9 +2398,7 @@ class ControlServer:
             except OSError:
                 self.path.unlink()  # stale: nobody is listening
             else:
-                raise EngineError(
-                    f"{self.path} is live: another engine is serving this run root"
-                )
+                raise EngineError(f"{self.path} is live: another engine is serving this run root")
             finally:
                 probe.close()
         old_umask = os.umask(0o177)

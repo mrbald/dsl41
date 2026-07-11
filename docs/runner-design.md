@@ -2,7 +2,7 @@
 
 Status: design frozen 2026-07-11 (DL-41). Decisions E1 (prod grade),
 E2 (both time domains), E3 (web behind proxy/tunnel) resolved by the user.
-Implementation phases 11a–11e (§14). This document is normative for phase 11
+Implementation phases 11a–11f, all built (§14). This document is normative for phase 11
 the way ir-design.md is for phases 1–10.
 
 ## 1. Mission and scope
@@ -479,10 +479,11 @@ cli.py: `run`, `rehearse`, `sendevent`, `serve`, `journal`.
 House rule applies: implemented defaults are marked `# PENDING: En` in
 code; none is guess-resolved.
 
-- **E4** — jobs surviving engine restarts. RESOLVED in design by DL-41a:
-  never non-child adoption; the 11f supervisor keeps parenthood alive so
-  survival is reattachment. Until 11f lands, tethered semantics apply
-  (§1) and resume follows §7's reconciliation ladder.
+- **E4** — jobs surviving engine restarts. RESOLVED in design by DL-41a and
+  BUILT in 11f (DL-48): never non-child adoption; the supervisor keeps
+  parenthood alive so survival is reattachment (`run --detached`). The default
+  tethered path is unchanged — engine death terminates jobs, resume follows
+  §7's reconciliation ladder.
 - **E5** — profile sourcing failure semantics [?]. Default: job fails with
   sh's exit code (§6).
 - **E6** — FW steady-size semantics and default watch_interval [?].

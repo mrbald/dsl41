@@ -1311,3 +1311,111 @@
   default, and the bind-failure exit 2. `runner.py`/`runner_wrapper.py`/
   `runner_tui.py` untouched -- 11f (the supervisor tier) is a separate
   unit landing after this one.
+- DL-48 Phase 11f landed: supervisor tier + detached mode (2026-07-11; found
+  and decided during implementation, all within DL-41a/DL-42's frame;
+  runner_supervisor.py's docstring + docs/supervisor-protocol.md ss5 are
+  normative detail; the socket protocol is now FROZEN). The availability tier
+  (ss6a Tier 1): jobs SURVIVE engine restarts because their parent is the
+  supervisor, not the engine (E4 dissolved -- survival is reattachment, never
+  adoption). Decisions: (1) `runner_supervisor.py` is stdlib-only, run BY FILE
+  PATH like the wrapper, under the same enforced import boundary (AST test
+  extended). It copies -- never imports -- the wrapper's durability liturgy
+  and (pid, start-time) verify_alive: the stdlib-only boundary forbids the
+  dsl41 import, so the SIGNAL PID-reuse guard is reimplemented supervisor-side.
+  (2) Single-threaded selectors loop (SIGCHLD self-pipe + listen socket +
+  client sockets) -- the wrapper's select+self-pipe shape, no thread-safety
+  surface. Wrappers are spawned via os.posix_spawn (NOT subprocess.Popen) so
+  the global waitpid(-1) reaper never fights Popen's own bookkeeping; the
+  lifeline WRITE END lives in the supervisor only (the ss6a fd-hygiene
+  invariant, now anchored one tier up -- that single fact is what detaches job
+  lifetime from the engine). (3) Named socket protocol (spec ss5, frozen):
+  JSON lines, 0600 + same-uid peer-cred on every accept (Linux SO_PEERCRED,
+  macOS LOCAL_PEERCRED/xucred, stdlib struct parse); LIST/PING lease-free;
+  SPAWN/SIGNAL/SHUTDOWN carry a monotonic fencing token from ACQUIRE; RENEW/
+  RELEASE; async exit pushes to the lease-holding connection (notifications
+  only -- the spool is the data channel). Re-acquire by the SAME controller_id
+  mints a new token, which is why the engine's controller_id is STABLE per
+  run_root (a crashed engine's lease is unexpired for up to ttl_s; resume must
+  re-ACQUIRE without waiting it out, and the fresh token fences the dead one).
+  Idempotency: run_id is the SPAWN key (replay returns duplicate:true). Linux
+  PR_SET_CHILD_SUBREAPER, best-effort. (4) Two cancellation cases, the phase's
+  subtlest point (spec ss3): (a) oracle-decided terminal (KILLJOB/
+  term_run_time/run_window) -> SIGNAL TERM, grace, SIGNAL KILL, await the exit
+  push, identical outcome shape to the tethered kill; (b) engine detach-stop
+  (operator SIGINT/SIGTERM of a --detached run, or shutdown for resume) ->
+  abandon the await, signal NOTHING, jobs continue under the supervisor. The
+  engine flips a DetachSignal before cancelling adapter tasks; the
+  SupervisedCommandAdapter's CancelledError path branches on it. Tethered
+  adapters ignore it -- the LocalCommandAdapter path is UNCHANGED. (5) The
+  run_dir/log/spec construction is shared by both CMD adapters via
+  `_build_run_spec` (each fills lifeline_fd from the end that owns the pipe's
+  write side); status.json stays the sole outcome channel through one
+  `_outcome_from_status`, so tethered and detached, live and reattached, can
+  never diverge. (6) Detached resume (spec ss3): resume replays the journal as
+  today, then LISTs the supervisor -- a run still wrapper_alive is REATTACHED
+  (the adapter task just awaits its exit push, NO reconciliation injection,
+  the run never stopped); runs listed dead or unlisted fall through to the ss7
+  spool ladder unchanged. On supervisor death mid-run the client's connection
+  loss makes the adapter resolve via the SAME ss7 ladder (wrappers EOF'd on
+  the supervisor's -9 and record terminated/parent-lost -> TERMINATED). No new
+  WAL record kinds: reattachment produces no input (inputs-only holds).
+  (7) CLI: `dsl41 run --detached`; `dsl41 supervise list|shutdown` (read-only
+  by default per DL-42 item 4 -- shutdown ACQUIREs, failing loudly with holder
+  info while an engine holds the lease). The exit-code contract is preserved
+  (2 = never started, 1 = failed while running). (8) Kill matrix (spec ss5,
+  definition of done): protocol unit tests (unknown verb, bad version,
+  malformed line, lease held/expire/re-acquire fencing monotonicity, stale
+  token, SPAWN idempotency, SIGNAL pid-reuse refusal, peer-cred, stale-socket
+  reclaim) + integration (SIGKILL engine -> survive + reattach no-injection;
+  kill -9 supervisor -> spool-resolve TERMINATED, engine survives socket loss;
+  SHUTDOWN records signaled never parent-lost; detach-stop SIGINT -> reattach
+  SUCCESS; oracle KILLJOB detached -> TERMINATED) + the import-boundary AST
+  test + Linux-only subreaper (skipped on darwin, never faked). Bisimulation
+  untouched (the FakeAdapter path is unaffected). No new E-question opened --
+  the tier implements the DL-41a/DL-42 pins as documented; E4 stays resolved.
+  Post-review amendments (same day; adversarial review, verdict "landable
+  with named fixes"; the load-bearing guarantees -- lifeline fd hygiene,
+  reaper attribution, lease/fencing single-threadedness, the two-case
+  cancellation semantics -- confirmed CLEAN by execution):
+  (9) MAJOR, confirmed by execution: a SupervisorClient request cancelled
+  between write and reply left its pending future dangling, and with no
+  correlation ids in the frozen ss5 protocol the reader delivered the
+  still-in-flight reply to the NEXT request's future (reproduced: a
+  cancelled SPAWN's reply landing in a later ACQUIRE; the real trigger is
+  an adapter task cancelled mid-spawn()/signal() with the renew loop or
+  another spawn grabbing the orphan). Fixed by POISON-ON-CANCEL, not
+  correlation ids -- the frozen protocol stays untouched: on CancelledError
+  mid-request the stream state is unknowable (the request may be partially
+  written pre-drain), so the client fails the pending future, closes the
+  socket, and re-raises; readers are epoch-guarded by their connection's
+  own `lost` event, so a superseded reader can neither poison nor deliver
+  into its successor. Subsequent calls lazily reconnect -- connect-only,
+  never spawning a supervisor -- and re-ACQUIRE with the stable
+  controller_id, whose fresh token fences anything the poisoned connection
+  had in flight; if reconnect fails, the ss7 spool fallback applies. The
+  adapter's await path now tries reconnect() BEFORE falling to the spool:
+  post-poison a lost connection no longer implies a dead supervisor, and
+  the ladder would kill a healthy detached run. Regression-pinned
+  (test_cancelled_request_poisons_and_reconnects, adapted from the
+  reviewer's repro: the next request must get ITS OWN reply, via reconnect,
+  never the orphan). (10) SHUTDOWN racing a just-spawned wrapper recorded
+  "parent lost": _signal_command is a silent no-op while spawn.json has not
+  landed, so every signal missed and the wrapper died only by lifeline EOF
+  at supervisor exit. _orderly_shutdown now waits (bounded, 5s -- a wait,
+  not policy) for missing spawn records before signaling, and _h_shutdown
+  replies AFTER the wait-for-wrappers completes, matching the frozen ss5
+  order (the earlier reply-then-teardown also double-sent {ok});
+  discrimination-checked (the regression test fails against the unfixed
+  supervisor). (11) _renew_loop gave up permanently on the first failed
+  RENEW, silently lapsing a live engine's lease (pushes stop; only the
+  adapters' 1s status.json re-poll saved outcomes). It now retries on a
+  short backoff, re-ACQUIREs on a stale/lapsed token with the stable
+  controller_id, heals connection loss via the lazy reconnect, and gives
+  up -- loudly, once, on stderr -- only after five consecutive failures
+  (test_renew_loop_reacquires_after_lease_lapse). Accepted hardening debt,
+  recorded not fixed: a blocking sendall to a slow lease-holder can wedge
+  the supervisor loop only after thousands of unread pushes (wrappers, the
+  recorders, are unaffected; a non-blocking send queue is the named future
+  hardening); the unbounded request-line buffer and the blocking spec write
+  are same-uid-only surfaces, theoretical; the _refuse_if_live unlink race
+  is unreachable while the engine is the only spawner.

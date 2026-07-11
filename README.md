@@ -22,13 +22,13 @@ Start here, in order:
 
 Status: all ten compiler phases built and tested; the phase-11 runner
 ([docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
-is in progress — 11a (engine core + bisimulation gate), 11b (process
+is built — 11a (engine core + bisimulation gate), 11b (process
 lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
 resume; spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)),
 11c (calendar scheduler, preflight, control socket, headless CLI), 11d
-(Textual TUI), and 11e (`serve` via textual-serve) are done. See the memo
-below for the source map and what remains open.
+(Textual TUI), 11e (`serve` via textual-serve), and 11f (the detached
+supervisor tier) are all done. See the memo below for the source map.
 
 ## CLI
 
@@ -149,6 +149,30 @@ per-atom condition truth, log tail, sendevent console) is the optional
 `[ui]` extra: `pip install 'dsl41[ui]'`. It is a thin client of the run's
 control socket — the same protocol `sendevent`/`query` speak.
 
+### Detached mode (phase 11f)
+
+By default a run is **tethered**: killing the engine terminates its jobs
+(durably recorded even under `kill -9`, ss6a). For long-running estates that
+must survive an engine restart (an upgrade), add `--detached`:
+
+```sh
+dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervisor
+# ...stop the engine (SIGINT) -- jobs keep running under the supervisor...
+dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
+dsl41 supervise list --run-root ./run1            # what the supervisor is holding
+dsl41 supervise shutdown --run-root ./run1        # stop it (TERM->grace->KILL)
+```
+
+A per-run-root supervisor (`runner_supervisor.py`, stdlib-only, one process
+per run root) owns the wrappers' lifelines, so the jobs' parent is the
+supervisor rather than the engine. Stopping or crashing the engine leaves
+the jobs running; `--resume --detached` reconnects and **reattaches** to the
+still-alive runs (no reconciliation injection, no re-execution) and resolves
+any that finished meanwhile from the spool. The engine holds a single
+fencing lease; the supervisor's socket protocol is frozen in
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
+ss5. `supervise` is read-only by default (DL-42).
+
 ### Serving the TUI over the web (phase 11e)
 
 `dsl41 serve -S ./run1/control.sock` wraps
@@ -195,8 +219,10 @@ crash-recovery resume with the reconciliation ladder; spool contract frozen in
 (`dsl41 ui` against a running engine, or `dsl41 run --ui`; optional
 `dsl41[ui]` extra) — and 11e — `dsl41 serve` via
 [textual-serve](https://github.com/Textualize/textual-serve), same extra
-— are built; 11f follows the
-design's phasing. The suite spans 21 test files
+— and 11f — the ss6a Tier-1 supervisor (`dsl41 run --detached`,
+`dsl41 supervise`), a stdlib-only `runner_supervisor.py` speaking the frozen
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
+ss5 socket protocol — are all built. The suite spans 22 test files
 (`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
@@ -237,7 +263,14 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
   journal, resume/reconciliation ladder, calendar scheduler (ss5), preflight (ss8),
   control-socket server (ss10: sendevent parity, status/trace/explain/plan,
-  subscribe); supervisor tier (11f) per docs/runner-design.md ss14
+  subscribe); and the ss6a Tier-1 detached path (SupervisorClient +
+  SupervisedCommandAdapter: SPAWN through the supervisor, await the exit push,
+  detach-stop vs oracle-kill cancellation, resume-time reattachment)
+- src/dsl41/runner_supervisor.py — the ss6a Tier-1 supervisor (phase 11f): stdlib-only
+  (same enforced boundary as the wrapper), one per run_root, owns the wrapper lifelines
+  so an engine restart reattaches instead of killing jobs; the frozen
+  docs/supervisor-protocol.md ss5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING +
+  lease), same-uid peer-cred, Linux subreaper
 - src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
   client of the control socket only (jobs table with pending timers/alarms, explain
   pane with per-atom truth, log tail of the ss6 std files, sendevent console);
@@ -248,12 +281,15 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   and records on lifeline EOF; spool contract in docs/supervisor-protocol.md
 - src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`,
   `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
-  real processes, control socket; stop with SIGINT/SIGTERM), `rehearse` (virtual
+  real processes, control socket; stop with SIGINT/SIGTERM; `--detached` runs CMD
+  jobs under a supervisor that survives engine restarts), `rehearse` (virtual
   clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
-  and `query` (clients of a running engine's control socket), `ui` (the ss11
-  Textual TUI attached to a running engine; `run --ui` starts both in one terminal),
-  and `serve` (11e: wraps textual-serve around the same app, one `dsl41 ui`
-  subprocess per browser session; optional `dsl41[ui]` extra, loopback by default)
+  and `query` (clients of a running engine's control socket), `supervise`
+  (11f: `list`/`shutdown` a run-root's detached supervisor, read-only by default),
+  `ui` (the ss11 Textual TUI attached to a running engine; `run --ui` starts both
+  in one terminal), and `serve` (11e: wraps textual-serve around the same app, one
+  `dsl41 ui` subprocess per browser session; optional `dsl41[ui]` extra, loopback
+  by default)
   (exit 2 = catalog load/usage failure everywhere, incl. preflight refusals; exit 1 =
   findings for `lint`/`equiv`, a mid-run engine failure for `run`/`rehearse` —
   `report` always exits 0 once generated: the report itself is the loud channel)
@@ -312,6 +348,13 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   socket path with a space), default loopback bind, bind-failure exit 2 — the
   real textual-serve Server is always monkeypatched (ss13.6 posture, thinner
   still: a CLI wrapper, not a pilot)
+- tests/test_runner_supervisor.py — phase-11f supervisor tier: the frozen ss5
+  socket protocol (unknown verb / bad version / malformed line, lease held /
+  expire / re-acquire fencing monotonicity / stale token, SPAWN idempotency,
+  SIGNAL pid-reuse refusal, peer-cred, stale-socket reclaim), the import-boundary
+  AST test, Linux-only subreaper, and the detached kill matrix (SIGKILL engine →
+  survive + reattach; kill -9 supervisor → spool-resolve TERMINATED; orderly
+  SHUTDOWN; detach-stop SIGINT → reattach SUCCESS; oracle KILLJOB detached)
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the
@@ -332,8 +375,8 @@ dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E10
 `# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller. Runner phase 11f (the detached supervisor tier) follows per
-runner-design ss14.
+controller. The runner is complete through phase 11f (the detached supervisor
+tier); phase 10 (the DSL surface) remains the last design item.
 
 ## License
 

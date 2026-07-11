@@ -602,6 +602,13 @@ def run(
     ui: bool = typer.Option(
         False, "--ui", help="Attach the ss11 Textual TUI in this terminal (quit stops the run)."
     ),
+    detached: bool = typer.Option(
+        False,
+        "--detached",
+        help="Run CMD jobs under a per-run-root supervisor (ss6a Tier 1) so an"
+        " engine restart reattaches instead of killing them; stopping the engine"
+        " leaves jobs running -- resume with --resume --detached.",
+    ),
     timezone: str = _TIMEZONE_OPT,
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -609,9 +616,10 @@ def run(
     """Execute the estate headlessly on this machine: wall clock, real
     processes, WAL journal, calendar scheduler, and the control socket
     (runner-design ss1/ss9/ss10). Runs until stopped (SIGINT/SIGTERM);
-    engine death terminates all jobs, durably recorded (tethered, ss6a).
-    Drive it with `dsl41 sendevent` / `dsl41 query`, or attach the TUI
-    (`--ui` here, or `dsl41 ui` from another terminal).
+    tethered (default) engine death terminates all jobs, durably recorded
+    (ss6a); `--detached` keeps jobs alive under a supervisor across engine
+    restarts. Drive it with `dsl41 sendevent` / `dsl41 query`, or attach the
+    TUI (`--ui` here, or `dsl41 ui` from another terminal).
     """
     import asyncio
 
@@ -623,7 +631,9 @@ def run(
     from dsl41.runner import EngineError
 
     try:
-        raise typer.Exit(asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns, ui)))
+        raise typer.Exit(
+            asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns, ui, detached))
+        )
     except EngineError as exc:
         # start/resume gates (existing journal, hash/domain mismatch, live
         # socket): the run never started
@@ -649,6 +659,7 @@ async def _serve_run(
     timezone: str | None,
     warns: list,
     ui: bool = False,
+    detached: bool = False,
 ) -> int:
     import asyncio
     import contextlib
@@ -664,19 +675,43 @@ async def _serve_run(
         LocalCommandAdapter,
         RealClock,
         Scheduler,
+        SupervisedCommandAdapter,
+        SupervisorClient,
+        SupervisorUnavailable,
         start_run,
     )
     from dsl41.runner import resume_run as _resume_run
 
     clock = RealClock()
-    adapters: dict[str, JobAdapter] = {
-        "CMD": LocalCommandAdapter(),
-        "FW": FileWatcherAdapter(),
-    }
+    # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
+    # supervisor that owns the wrapper lifelines, so an engine restart does
+    # not kill the jobs. FW stays in-engine (no process to survive).
+    client: SupervisorClient | None = None
+    if detached:
+        run_root.mkdir(parents=True, exist_ok=True)  # the supervisor needs it first
+        client = SupervisorClient(run_root)
+        try:
+            await client.ensure_running()
+            await client.acquire()
+        except SupervisorUnavailable as exc:
+            typer.echo(f"supervisor unavailable: {exc}", err=True)
+            return 2
+        adapters: dict[str, JobAdapter] = {
+            "CMD": SupervisedCommandAdapter(client),
+            "FW": FileWatcherAdapter(),
+        }
+    else:
+        adapters = {"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()}
     scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone)
     if resume:
         engine = await _resume_run(
-            catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler, hold_open=True
+            catalog,
+            run_root,
+            clock=clock,
+            adapters=adapters,
+            scheduler=scheduler,
+            hold_open=True,
+            supervisor=client,
         )
     else:
         engine = start_run(
@@ -722,6 +757,12 @@ async def _serve_run(
         tui.exit()  # engine crash or signal: detach the viewer first
         with contextlib.suppress(Exception):
             await ui_task
+    # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the flag
+    # makes the SupervisedCommandAdapter abandon its await instead of signaling.
+    # Set before any adapter-task cancel; in-run oracle kills already happened
+    # while the loop ran (stopping was False then).
+    if detached:
+        engine.detach.stopping = True
     code = 0
     if loop_task in done:  # hold_open never quiesces: this is a crash
         typer.echo(f"engine failed: {loop_task.exception()}", err=True)
@@ -733,12 +774,21 @@ async def _serve_run(
         if tui_exc is not None:
             typer.echo(f"TUI failed: {tui_exc!r}", err=True)
             code = 1
-        typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
+        if detached:
+            typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")
+        else:
+            typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await loop_task
     await server.close()
     await engine.shutdown()
+    if detached and client is not None:
+        await client.release()
+        await client.close()
+        typer.echo(
+            f"detached: reattach with `dsl41 run --resume --detached --run-root {run_root} <files>`"
+        )
     if engine.journal is not None:
         engine.journal.close()
     return code
@@ -1009,3 +1059,87 @@ def query(
         raise typer.Exit(2) from exc
     except KeyboardInterrupt:
         pass
+
+
+class _SupervisorConn:
+    """One persistent connection to a supervisor socket, request/response with
+    async exit PUSHes skipped (the CLI is not a data-channel consumer)."""
+
+    def __init__(self, sock_path: Path) -> None:
+        import socket as socket_mod
+
+        self.conn = socket_mod.socket(socket_mod.AF_UNIX)
+        # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
+        # which spans the spawn-record wait plus per-run grace windows
+        self.conn.settimeout(60.0)
+        self.conn.connect(str(sock_path))
+        self.buf = b""
+
+    def send(self, request: dict) -> dict:
+        import json as json_mod
+
+        self.conn.sendall(json_mod.dumps({**request, "v": 1}).encode("utf-8") + b"\n")
+        while True:
+            while b"\n" not in self.buf:
+                chunk = self.conn.recv(65536)
+                if not chunk:
+                    raise OSError("supervisor closed the connection")
+                self.buf += chunk
+            line, self.buf = self.buf.split(b"\n", 1)
+            obj = json_mod.loads(line)
+            if isinstance(obj, dict) and obj.get("push"):
+                continue  # notifications are droppable (supervisor-protocol ss5)
+            return obj
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+@app.command()
+def supervise(
+    action: str = typer.Argument(..., help="list|shutdown"),
+    run_root: Path = typer.Option(
+        ..., "--run-root", help="Run directory holding supervisor.sock (ss6a Tier 1)."
+    ),
+) -> None:
+    """Observe or stop a run-root's supervisor (runner-design ss6a; DL-42 item
+    4 -- read-only by default). `list` prints its live runs and lease; `shutdown`
+    ACQUIREs the lease (failing loudly with holder info while an engine holds an
+    unexpired one), then SHUTDOWNs: TERM->grace->KILL each command, wrappers
+    record truthfully, socket + pidfile removed. Exit 2 when there is no
+    supervisor or the lease could not be taken; 0 on a clean shutdown."""
+    import json as json_mod
+    import os
+
+    verb = action.lower()
+    if verb not in ("list", "shutdown"):
+        typer.echo(f"unknown supervise action {action!r} (list|shutdown)", err=True)
+        raise typer.Exit(2)
+    sock_path = run_root / "supervisor.sock"
+    if not sock_path.exists():
+        typer.echo(f"no supervisor at {sock_path}", err=True)
+        raise typer.Exit(2)
+    try:
+        conn = _SupervisorConn(sock_path)
+    except OSError as exc:
+        typer.echo(f"supervisor {sock_path}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    try:
+        if verb == "list":
+            resp = conn.send({"cmd": "LIST"})
+            typer.echo(json_mod.dumps(resp, indent=2, sort_keys=True))
+            raise typer.Exit(0 if resp.get("ok") else 2)
+        acq = conn.send(
+            {"cmd": "ACQUIRE", "controller_id": f"supervise-cli-{os.getpid()}", "ttl_s": 60}
+        )
+        if not acq.get("ok"):
+            typer.echo(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}", err=True)
+            raise typer.Exit(2)
+        resp = conn.send({"cmd": "SHUTDOWN", "token": acq["token"]})
+        typer.echo(json_mod.dumps(resp, sort_keys=True))
+        raise typer.Exit(0 if resp.get("ok") else 2)
+    except OSError as exc:
+        typer.echo(f"supervisor {sock_path}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    finally:
+        conn.close()

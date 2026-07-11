@@ -1,11 +1,11 @@
 # Supervisor protocol — the lifecycle tier's public contract
 
 Status: spool format + wrapper input spec frozen 2026-07-11 (phase 11b,
-DL-42 item 3); the supervisor socket protocol section is a placeholder
-frozen when phase 11f lands. This document is the future extraction
-boundary: if the lifecycle tier (runner_wrapper.py + runner_supervisor.py)
-is ever spun off (DL-42 triggers), what is written here is its public API.
-Changing anything frozen here requires a decision-log entry.
+DL-42 item 3); supervisor socket protocol frozen 2026-07-11 (phase 11f,
+DL-48). This document is the future extraction boundary: if the lifecycle
+tier (runner_wrapper.py + runner_supervisor.py) is ever spun off (DL-42
+triggers), what is written here is its public API. Changing anything frozen
+here requires a decision-log entry.
 
 The tier is deliberately dumb: it records process lifecycle facts durably
 and does nothing else. No timers, no conditions, no retries, no policy.
@@ -19,7 +19,10 @@ of meaning live in the orchestrator's UI (DL-42 item 6).
   writes it durably. Parent-agnostic: engine (11b–11e) and supervisor (11f)
   spawn it identically. Stdlib-only — enforced by an import test.
 - **supervisor** (`runner_supervisor.py`, phase 11f): keeps parenthood
-  alive across engine restarts (SPAWN/SIGNAL/LIST/SHUTDOWN). Not built yet.
+  alive across engine restarts. Owns the wrapper lifelines, so an engine
+  restart REATTACHES rather than killing the jobs (E4 dissolved). Speaks the
+  §5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING + lease verbs).
+  Stdlib-only, run by file path — same enforced boundary as the wrapper.
 
 ## 2. Wrapper input spec (frozen)
 
@@ -144,16 +147,80 @@ KERN_PROCARGS2 omits env for restricted binaries (/bin/sh) and Linux
    2 = spec error, 3 = a record write failed, e.g. ENOSPC); status.json is
    the sole data channel.
 
-## 5. Supervisor socket protocol (11f — NOT YET FROZEN)
+## 5. Supervisor socket protocol (frozen — phase 11f, DL-48)
 
-Pinned by DL-42 for when 11f lands, recorded so the shape is not
-relitigated: a **versioned line protocol over a named unix socket**
-(0600 + same-uid peer-cred check), verbs SPAWN/SIGNAL/LIST/SHUTDOWN;
-unlimited read-only observers, exactly one controller holding a lease
-(controller_id, expiry, fencing token; mutations carry the token and an
-idempotency key). Linux hardening: PR_SET_CHILD_SUBREAPER. The engine's
-own control socket keeps no lease (sendevent is multi-writer by AutoSys
-nature; the single-writer engine loop serializes it).
+One supervisor per run_root. Named socket `<run_root>/supervisor.sock`, mode
+0600, **same-uid peer-cred check on every accept** (Linux SO_PEERCRED; macOS
+LOCAL_PEERCRED / struct xucred). The supervisor also writes
+`<run_root>/supervisor.pid` (JSON: pid, boot_id, started_at) and logs to
+`<run_root>/supervisor.log`; on start it refuses to run if a live supervisor
+already holds the socket (connect probe), and unlinks a stale one — parity
+with the engine's control-socket gate (runner-design §10). Linux hardening:
+`PR_SET_CHILD_SUBREAPER` (prctl 36) at startup, best-effort. The supervisor
+never restarts itself; surviving ITS death is Tier 2's job.
+
+**Framing.** JSON lines over `SOCK_STREAM`; one request line → one response
+line, except async pushes (below). Every request carries `"v": 1`. Responses
+are `{"ok": true, …}` or `{"ok": false, "error": "<code>", …}`. Unknown
+fields are ignored (forward compat); an unknown verb → `unknown_verb`; a
+missing/wrong `v` → `unsupported_version`; a malformed line → `malformed_json`
+(the stream is not desynced).
+
+**Read-only verbs** (any connection, no lease):
+
+- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, lease: {holder,
+  expires_at} | null, runs: [{run_id, job, run_number, run_dir, wrapper_pid,
+  wrapper_alive, spawned_at, wrapper_rc}]}` — everything spawned since THIS
+  supervisor started (a supervisor restart implies all prior wrappers EOF'd
+  and recorded; the spool is the cross-restart truth, LIST is live state
+  only). `wrapper_rc` is null while alive.
+- `PING` → `{ok, version: 1}`.
+
+**Lease verbs** (single controller; observers are unlimited):
+
+- `ACQUIRE {controller_id, ttl_s}` → `{ok, token, expires_at}`. Refused
+  `{ok: false, error: "lease_held", holder, expires_at}` while another
+  unexpired lease exists. `token` is a monotonically increasing fencing
+  integer (in-memory: supervisor death kills all wrappers by lifeline, so the
+  counter cannot regress while any spawned run is alive). Re-acquire by the
+  SAME controller_id is allowed and mints a NEW token (the old one dies) — so
+  a crashed engine's resume re-acquires without waiting out the TTL.
+- `RENEW {token, ttl_s}` → `{ok, expires_at}`; `RELEASE {token}` → `{ok}`.
+- Engine defaults: `ttl_s = 60`, renew every 20 s.
+
+**Mutating verbs** (require `token`; a stale/expired token → `{ok: false,
+error: "stale_token"}`):
+
+- `SPAWN {token, spec}` — `spec` is the §2 frozen wrapper input spec MINUS
+  `lifeline_fd`, which the supervisor owns and fills (the write end lives in
+  the supervisor ONLY — this is precisely what detaches job lifetime from the
+  engine). `run_id` doubles as the idempotency key: a replayed SPAWN with a
+  known run_id returns the original result plus `"duplicate": true`, spawning
+  nothing. → `{ok, run_id, wrapper_pid, spawned_at}`.
+- `SIGNAL {token, run_id, sig}` with `sig` ∈ {`TERM`, `KILL`} — verifies the
+  recorded command (pid, start-time) from `spawn.json` (the PID-reuse guard,
+  reimplemented stdlib-side), then signals the command PGID, never the
+  wrapper. Exactly one signal per call: TERM→grace→KILL escalation stays
+  engine-side (the oracle decides kills; the supervisor stays dumb). →
+  `{ok}`, or `{ok, "noop": true}` for an already-dead/unverifiable group.
+- `SHUTDOWN {token}` — orderly, the one exception to no-escalation (the engine
+  may be gone): TERM each live command PGID, per-run `grace_seconds`, KILL
+  survivors; **lifelines stay open until wrappers exit**, so wrappers observe
+  the command deaths and record `signaled`/`exited` truthfully (never
+  "parent lost"); wait for wrappers; reply `{ok}`; exit; unlink socket +
+  pidfile. Also triggered by SIGTERM/SIGINT (Tier 2 / `supervise shutdown`
+  fallback); only SIGKILL (unhandleable) leaves wrappers to their own EOF.
+
+**Pushes.** The connection holding the current lease receives async lines
+`{"push": "exit", run_id, wrapper_rc, at}` when a wrapper is reaped. Pushes
+are NOTIFICATIONS only — droppable, never the data channel; a disconnected
+controller loses them and recovers by LIST + status.json on reconnect (the
+spool is the truth, same philosophy as the wrapper exit code).
+
+The engine's OWN control socket (runner-design §10) deliberately keeps no
+lease: sendevent is multi-writer by AutoSys nature and the single-writer
+engine loop serializes it. The lease guards the tier that spawns without
+semantics.
 
 ## 6. License earmark
 
