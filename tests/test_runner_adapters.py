@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -222,19 +223,27 @@ def test_profile_sourced_before_the_command(tmp_path: Path) -> None:
 
 def test_failing_profile_fails_the_job_with_shs_exit_code(tmp_path: Path) -> None:
     """(runner-design ss6/ss15 E5, PENDING): a profile that cannot be sourced
-    fails the job with sh's own exit code for the failed `.` builtin, never a
-    guessed/synthesized code. Empirically confirmed 1 on this platform's
-    /bin/sh (bash 3.2 in POSIX mode on macOS) before this assertion was
-    written -- the command after `&&` never runs."""
+    fails the job with sh's OWN exit code for the failed `.` builtin, never a
+    guessed/synthesized code. That code is platform-sh-specific (bash 3.2 in
+    POSIX mode on macOS says 1; dash on Debian/Ubuntu says 2), so the
+    expectation is derived from /bin/sh itself with the exact construct the
+    adapter composes -- the pin is "whatever sh says", not a number."""
+
     missing = tmp_path / "does-not-exist.sh"
     text = (
         "insert_job: bpj\njob_type: c\ncommand: echo should-not-run\n"
         f"machine: m1\nprofile: {missing}\n"
     )
+    expected = subprocess.run(
+        ["/bin/sh", "-c", f". {missing} && echo should-not-run"],
+        capture_output=True,
+        check=False,
+    ).returncode
+    assert expected != 0  # sourcing a missing file must fail on any sane sh
     run_root = tmp_path / "run"
     engine = asyncio.run(_run_real(text, run_root, ["bpj"]))
     assert engine.oracle.store.job["bpj"].status == "FAILURE"
-    assert engine.oracle.store.job["bpj"].exit_code == 1  # PENDING: E5
+    assert engine.oracle.store.job["bpj"].exit_code == expected  # PENDING: E5
     assert (run_root / "logs" / "bpj.1.out").read_text() == ""
 
 
