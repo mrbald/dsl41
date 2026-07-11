@@ -1,0 +1,23 @@
+# The project's quality gates on every push/PR: pytest (the CLAUDE.md suite,
+# bisimulation gate included), ruff check, mypy. No `ruff format --check`:
+# three pre-phase-11 files never adopted formatter output, so the formatter
+# is local discipline for touched files only until a repo-wide format lands.
+# README's "tests" brick badges this workflow.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run mypy src
+      - run: uv run pytest -q
