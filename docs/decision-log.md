@@ -721,3 +721,119 @@
   built once. Test-suite gap closed: the U-question ledger regained its
   negative gate (a question whose M-rows the catalog never uses stays
   OUT of the report).
+- DL-41 Runner (phase 11): prod-grade single-node executor as a sans-IO
+  shell over the oracle (2026-07-11; design frozen in
+  docs/runner-design.md; user resolved E1=prod grade, E2=both clocks,
+  E3=web behind proxy/tunnel). Decisions: (1) The oracle is the ONLY
+  semantics authority. The runner adds effects, wall time, durability,
+  and a control surface -- never semantics. Emitted STATUS(STARTING) is
+  the dispatch instruction; completions are injected as STATUS with raw
+  exit_code only (SEM-09/DL-33 verdict stays oracle-side); KILLJOB and
+  term_run_time kills are the oracle's decisions, the shell's pgid
+  signal. Adapters implement NO retries (Q4 parity -- a shell-side retry
+  would fork semantics from the simulator) and NO timeouts. (2) Two
+  oracle additions only: next_timer_due() and advance(now), factored
+  from feed()'s lazy timer drain so a wall-clock shell can sleep until
+  the next due timer; bisimulation pins feed-only vs advance+feed
+  equivalence. (3) Prod grade (E1) = WAL journal: inputs-only JSONL
+  (emitted events/trace replay from oracle determinism -- one source of
+  truth) + dispatch records (pgid, run_number) + fsync-before-feed;
+  resume = catalog-hash gate (refuse silent semantic drift), replay,
+  then reconcile orphaned RUNNING jobs by killing recorded pgids and
+  injecting TERMINATED "orphaned by runner restart" (adoption = E4,
+  future). (4) Stale-completion gate lives in the SHELL: injected
+  STATUS may legally overwrite terminal statuses (CHANGE_STATUS
+  parity), so the engine drops-and-journals completions whose
+  run_number mismatches or whose job is already terminal -- closes the
+  natural-exit vs KILLJOB race. (5) The runner owns the calendar the
+  oracle deliberately lacks: a scheduler injects STARTJOB at
+  days_of_week + start_times/start_mins ticks (zoneinfo timezones),
+  firing unconditionally -- SEM-32 abandonment (Q3) and SEM-33
+  run_window stay oracle-side. run_calendar/exclude_calendar refused
+  (definitions unmodeled). (6) Preflight extends the backend_uc R/A
+  discipline to execution: ERROR on non-{CMD,BOX,FW} job_type,
+  non-local machine, foreign owner, custom calendars, unresolvable
+  timezone; WARN on n_retrys (runs without, Q4), job_load/priority
+  (no resource manager), and AND-success-skeleton cycles -- cycles are
+  LEGAL AutoSys (DL-13 edge-triggering, L010), so graphlib is bounded
+  to that warning plus the acyclic-only `plan` view, never the engine.
+  (7) Two time domains (E2), one engine path: run = RealClock + real
+  adapters + control socket; rehearse = VirtualClock + FakeAdapter +
+  scenario, exits at quiescence -- rehearsal is evidence because the
+  code path is identical. (8) UI split is FORCED, not stylistic:
+  textual-serve spawns one app instance per browser session, so the
+  engine is a daemon behind a unix-socket control plane (sendevent
+  parity verbs, explain-with-atom-truth, subscribe streaming journal
+  records) and the Textual app is a thin client -- same app in the
+  terminal and served to the web (E3: no auth in textual-serve; deploy
+  behind reverse proxy/SSH tunnel, documented not built). textual is an
+  optional [ui] extra; the engine stays on the existing three runtime
+  deps. (9) Acceptance gate = bisimulation: every SEM trace test
+  parametrized over Oracle-direct vs Engine(VirtualClock, FakeAdapter)
+  with identical traces -- equiv tier c between simulator and executor
+  over the whole existing corpus; that suite is 11a's definition of
+  done. (10) Flat house layout (runner.py + runner_tui.py), CLI verbs
+  run/rehearse/sendevent/serve/journal; phases 11a-11e (engine+bisim,
+  real adapters+journal+crash tests, scheduler+preflight+control,
+  TUI, serve). New open questions E4 (orphan adoption), E5 (profile
+  failure semantics [?]), E6 (FW steady-size + default interval [?]);
+  no new switches for inherited Q3/Q4.
+- DL-41a Lifecycle amendment: per-run wrapper shim + supervisor tier;
+  E4 dissolved, E7 opened (2026-07-11; user-driven design session on
+  orphan lifecycle; user proposed the env-tag identification trick and
+  the dumb-supervisor tier and asked for a codex (GPT-5.6) adversarial
+  consult, which found one real bug and several hardenings; two claims
+  settled empirically on the dev machine). Decisions: (1) The durability
+  primitive is a per-run WRAPPER shim (runner_wrapper.py, stdlib-only,
+  parent-agnostic; containerd-shim/slurmstepd/HTCondor-starter pattern):
+  wait() is Unix's single-shot status channel, so the one process that
+  cannot miss the observation writes status.json durably — exit status
+  now survives arbitrary engine downtime, the gap the env tag could
+  never close. spawn.json is likewise written by the process that
+  spawns, closing the spawn-vs-journal crash window; the engine's
+  dispatch journal record demotes to audit/ordering. (2) Codex-found
+  bug, fixed in design: the wrapper must sit OUTSIDE the pgid it
+  signals — kill(-pgid, SIGKILL) would kill the recorder before it
+  records. wrapper setsid(); command setpgid(0,0); signals target the
+  command pgid only. (3) Parent-death detection is the inherited
+  lifeline pipe (EOF fires even on -9; kernel closes fds), with a hard
+  fd-hygiene invariant — the write end lives in exactly ONE process,
+  leak test ships in 11b; PR_SET_PDEATHSIG is Linux-only belt-and-braces
+  (thread-tied, exec-cleared), never primary. On wakeup the wrapper
+  checks child-exit BEFORE lifeline EOF (a completion racing parent
+  death must record as completion); waitid(WNOWAIT) observes before
+  reaping so the observe-to-record hole shrinks to a few syscalls.
+  (4) Durability liturgy on every record: same-dir temp, fsync(file),
+  rename, fsync(dir); runs dir fsync'd at creation; run_dir must be a
+  local filesystem (NFS rename ambiguity). (5) PID-reuse guard pivots
+  from env-tag to (pid, start-time) verification: KERN_PROCARGS2 env is
+  unreadable for restricted binaries like /bin/sh on stock macOS
+  (empirical probe: 32-byte stub; XNU source confirms), /proc/environ is
+  ptrace-gated initial-env; ps -o lstart= works unprivileged for
+  arbitrary pids (verified, 1s resolution, +/-2s tolerance; Linux
+  starttime is tick-exact). DSL41_RUN env tag stays as forensics only;
+  encryption rejected (same-uid threat model: peers can already
+  ptrace/kill; uuid run_id covers collision). (6) Reconciliation is now
+  mostly READING: tethered engine death makes wrappers kill-and-record,
+  so resume follows a ladder — settle for live wrappers, inject real
+  completions from status.json (late injection at max(ended_at, last
+  journal at), true time in payload), kill verified survivors of a dead
+  wrapper (TERMINATED, truthful), else E7. (7) NEW E7: unobservable exit
+  status maps to FAILURE cause exit_status_unobservable, never
+  TERMINATED (reserved for kills that happened) and never anything
+  satisfying success-dependent downstreams; f()-recovery is the common
+  estate path. (8) E4 RESOLVED by architecture, not solved as posed:
+  non-child adoption never happens; the 11f supervisor (dumb
+  postmaster/s6-style, SPAWN/SIGNAL/LIST/SHUTDOWN over socketpair,
+  Linux subreaper hardening) keeps parenthood alive across engine
+  restarts so survival is reattachment. Tethered 11a-11e is a documented
+  semantic choice; per codex (and accepted): detached is table stakes
+  for long-running prod estates, so 11f is part of the prod-grade story,
+  not optional. (9) Containment honesty: pgid kill misses setsid/
+  double-fork escapees (vendor agents share this); documented Linux
+  hardening is per-run transient systemd scopes (cgroup kill), future
+  --scope option, not MVP. kqueue NOTE_EXIT/pidfd are live-monitoring
+  aids only — registration dies with the watcher; files are the truth
+  across restarts. Residual accepted matrix: -9 of a wrapper alone or
+  of a whole tree at once -> detected at resume, reported truthfully
+  (E7), never guessed.
