@@ -352,6 +352,50 @@ def decompile(
 
 
 @app.command()
+def journal(
+    journal_file: Path = typer.Argument(
+        ..., help="Run journal to replay (<run_root>/journal.jsonl)"
+    ),
+    files: list[Path] = typer.Argument(..., help="JIL files forming the catalog the run used"),
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Replay a run journal's inputs through a fresh Oracle and print the
+    reconstructed trace.
+
+    The WAL is inputs-only (runner-design ss7): emitted events and the trace
+    are pure functions of the input sequence, so they are derived here, never
+    stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
+    explicitly.
+    """
+    from dsl41.oracle import Oracle, OracleError
+    from dsl41.runner import EngineError, catalog_hash, read_journal, replay_inputs
+
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    try:
+        records = read_journal(journal_file)
+    except (OSError, EngineError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    header = records[0]
+    if header.get("catalog_hash") != catalog_hash(catalog):
+        typer.echo(
+            "catalog hash mismatch: the estate differs from the one this journal ran"
+            " (runner-design ss7: no silent semantic drift)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    oracle = Oracle(catalog)
+    try:
+        replay_inputs(oracle, records)
+    except OracleError as exc:
+        typer.echo(f"replay failed: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    for entry in oracle.trace():
+        typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+
+
+@app.command()
 def folds() -> None:
     """List the decompiler's built-in fold registry (DL-38 closed set)."""
     from dsl41.dsl import FOLDS

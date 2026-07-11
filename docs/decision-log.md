@@ -954,3 +954,60 @@
   example, teardown survives a failing close, and a meta-test enforces
   that every SEM test routes through the oracle() helper (the gate
   cannot silently shrink).
+- DL-44 Phase 11b landed: lifecycle tier + WAL + resume (2026-07-11; found
+  and decided during implementation, all within DL-41a/DL-42's frame;
+  runner.py's 11b docstring block and runner_wrapper.py's docstring are
+  normative detail; spool format frozen in docs/supervisor-protocol.md).
+  Decisions: (1) SIG_IGN INHERITS ACROSS EXEC -- found by the 11b smoke,
+  not review: the wrapper ignores TERM/INT/HUP/QUIT to protect the
+  recorder, and without a child-side pre-exec reset to SIG_DFL the
+  command (via non-interactive sh) silently ignores the graceful SIGTERM
+  and every kill escalates to SIGKILL; regression-pinned. (2) The wrapper
+  is spawned BY FILE PATH (sys.executable <runner_wrapper.py>), never
+  `-m`: -m imports the dsl41 package __init__ and drags pydantic into the
+  recorder's runtime, hollowing the DL-42 stdlib-only boundary; the
+  import test parses the AST against sys.stdlib_module_names. (3) Adapter
+  results widen from int to int | Terminated | Failed: a wrapper-observed
+  signal death or parent-loss kill maps to STATUS TERMINATED (DL-41a item
+  7 reserves it for kills that happened) IDENTICALLY live and at resume
+  -- one _outcome_from_status shared by both paths so they can never
+  diverge; spawn_failed and the E7 absence map to STATUS FAILURE with
+  cause. Raw exit codes stay ints (SEM-09 oracle-side). (4) New wrapper
+  status outcome spawn_failed(error): /bin/sh unspawnable is OBSERVED,
+  not unobservable, and must not masquerade as E7. On a spawn.json write
+  failure (ENOSPC) the wrapper kills what it started, still attempts a
+  status record, and exits 3 -- running unrecorded is refused. (5) Engine
+  real-domain time basis is NAIVE UTC (RealClock): DST must never run
+  feed()'s non-decreasing discipline backwards; wrapper records aware-UTC
+  ISO and the engine normalizes. Resume additionally refuses a journal
+  whose last timestamp exceeds wall-now (machine clock stepped back).
+  (6) Journal dispatch records carry wrapper_pid + run_dir, NOT the ss7
+  sketch's pgid: the engine never observes the pgid (the wrapper's child
+  sets it); spawn.json is the authoritative spawn record per DL-41a's
+  demotion. read_journal drops a torn FINAL line (write-ahead: the feed
+  it preceded never ran) and refuses interior corruption. Timer advances
+  are not journaled -- the DL-43 advance-parity property is what makes
+  inputs-only replay converge. (7) Resume never re-executes work: a start
+  with no spool trace (crash between feed and spawn) resolves FAILURE
+  "dispatch lost to engine crash", distinct cause from E7's
+  exit_status_unobservable -- both route f()-recovery, neither can
+  satisfy s(); re-dispatch was rejected (double-run risk on an invariant
+  we cannot re-verify at resume). EXCEPTION: FW watchers re-dispatch
+  (polling is an idempotent read). (8) Reconciliation completions pass
+  the ss4 stale gate like adapter completions: if replay already reached
+  a terminal state (term_run_time TERMINATED fired during replay), the
+  late real record is dropped AND journaled -- CHANGE_STATUS parity is
+  for operators, not for the ladder. (9) The kill matrix is realized via
+  a wrapper self-SIGSTOP test hook (DSL41_WRAPPER_TEST_PAUSE; inert in
+  production): before/after spawn.json, post-wait pre-status, post-status
+  pre-reap, settle-window release, spoofed spawn.json (innocent pid never
+  signaled), boot_id flip (liveness voided despite a matching token).
+  DL-42's "post-fork pre-exec" boundary is deliberately folded into
+  post_spawn_pre_record: recovery semantics depend only on "command pid
+  exists, spawn.json does not". The engine-SIGKILL integration test also
+  proves the lifeline fd-hygiene invariant through the real adapter path
+  (two concurrent wrappers both EOF). (10) start_run refuses a run_root
+  that already holds a journal (resume or re-baseline, never silently
+  overwrite); resume refuses a clock-domain flip. CLI verb `journal`
+  (render-by-replay) ships in 11b since the WAL does; run/sendevent stay
+  11c per DL-41.

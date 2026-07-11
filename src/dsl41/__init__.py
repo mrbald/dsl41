@@ -15,7 +15,10 @@ built, the phase-11 runner in progress per docs/runner-design.md ss14):
   uc_oracle  - minimal UC workflow interpreter + trace comparator
                (the P-Mxx expected-divergence pairs, stonebranch Part IV)
   dsl        - builder surface (job/box/sequence/parallel) + decompiler
-  cli        - typer entry points (lint/equiv/report/viz/decompile)
-  runner     - phase-11a engine loop + VirtualClock + FakeAdapter over the
-               oracle (docs/runner-design.md; 11b-11f pending)
+  cli        - typer entry points (lint/equiv/report/viz/decompile/journal)
+  runner     - phase-11 engine loop over the oracle: clocks (Virtual/Real),
+               adapters (Fake/LocalCommand/FileWatcher), WAL journal +
+               resume/reconciliation (docs/runner-design.md; 11c-11f pending)
+  runner_wrapper - per-run Tier-0 lifecycle recorder; STDLIB-ONLY, spawned
+               by file path (docs/supervisor-protocol.md, DL-42 boundary)
 """
