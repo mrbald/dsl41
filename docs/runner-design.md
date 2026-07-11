@@ -182,15 +182,33 @@ transient scopes (cgroup kill) are the only true containment — see below.
 **Tier 1 — supervisor** (phase 11f, the availability tier): engine →
 supervisor → wrappers. The supervisor exists for exactly one reason: jobs
 that must SURVIVE engine restarts (upgrades, crash isolation). It is
-deliberately dumb (postmaster / s6-supervise philosophy): a socketpair
-line protocol — SPAWN, SIGNAL, LIST, SHUTDOWN — fork wrappers, reap,
-forward completions. No timers, no conditions, no config reload; near-zero
-own-bug crash surface. Wrappers hold ITS lifeline (below), so even
-`kill -9` of the supervisor preserves "supervisor death ⇒ all jobs
-terminate and are recorded". On restart the engine reattaches and LISTs —
-the E4 "orphan adoption" problem dissolves: jobs never orphan because
-their parent never died. Linux hardening: `PR_SET_CHILD_SUBREAPER` so a
-killed wrapper's command reparents to the supervisor for reaping/killing.
+deliberately dumb (postmaster / s6-supervise philosophy): SPAWN, SIGNAL,
+LIST, SHUTDOWN, fork wrappers, reap, forward completions. No timers, no
+conditions, no config reload; near-zero own-bug crash surface. Wrappers
+hold ITS lifeline (below), so even `kill -9` of the supervisor preserves
+"supervisor death ⇒ all jobs terminate and are recorded". On restart the
+engine reattaches and LISTs — the E4 "orphan adoption" problem dissolves:
+jobs never orphan because their parent never died. Linux hardening:
+`PR_SET_CHILD_SUBREAPER` so a killed wrapper's command reparents to the
+supervisor for reaping/killing.
+
+The supervisor speaks a **versioned line protocol over a named unix
+socket** (0600 + same-uid peer-cred check) from day one — not an
+inherited socketpair — because the protocol plus the spool format
+(spawn.json/status.json) is the tier's public contract and future
+extraction boundary (DL-42). Clients split into **unlimited read-only
+observers** and **exactly one controller**: mutating verbs require a
+controller lease (controller_id, expiry, fencing token; mutations carry
+the token and an idempotency key). This is a v1 correctness feature, not
+ceremony — a TUI, a script, and the engine racing SPAWN/SIGNAL on the
+same job graph corrupts scheduler semantics long before it is a security
+problem. dsl41's own *engine* socket (§10) deliberately has no lease:
+sendevent is multi-writer by AutoSys nature and the single-writer engine
+loop serializes it; the lease guards the tier that spawns without
+semantics. The supervisor tier is earmarked for extraction as a
+standalone permissively-licensed package once its trigger fires (DL-42);
+until then it lives here under an enforced import boundary — wrapper and
+supervisor import nothing from dsl41, stdlib only, tested.
 
 **Tier 0 — per-run wrapper** (phase 11b, the correctness tier; always
 present). A dumb stdlib-only shim (`runner_wrapper.py`, run as
@@ -205,7 +223,11 @@ Tier 1 slot in later without touching it. Duties:
    wrapper stays outside the group it (or the engine) signals.
 2. Durably write `runs/<job>.<run_number>/spawn.json` — run_id, job,
    run_number, wrapper pid + start-time, command pid, command pgid,
-   started_at. Durability liturgy for every record: temp file in the same
+   started_at, and **boot_id** (`kern.bootsessionuuid` /
+   `/proc/sys/kernel/random/boot_id`): a reboot recycles the whole
+   (pid, start-time) identity space, so a boot_id mismatch both voids
+   liveness checks and *proves* nothing survived. Durability liturgy for
+   every record: temp file in the same
    directory, `fsync(file)`, `rename`, `fsync(directory)`; the runs dir
    itself fsync'd at creation. The run directory must be a **local**
    filesystem — rename-over-NFS has ambiguous crash semantics.
@@ -282,7 +304,10 @@ rehearse.
    `runs/` directory). In tethered mode the wrappers self-terminated their
    groups and recorded the fact when the engine died (lifeline EOF), so
    resume normally just *reads* outcomes; signals are for the residual
-   crash matrix only. Per incomplete run, in order:
+   crash matrix only. First the boot_id shortcut: a spawn record whose
+   boot_id differs from the current boot means the machine rebooted —
+   nothing survived, skip all liveness checks, resolve each run from
+   status.json or E7 directly. Otherwise, per incomplete run, in order:
    - Wrapper verified alive by (pid, start-time) → it is mid-grace; allow
      a short settle window for its `status.json` to land.
    - `status.json` present → inject the real completion (raw exit_code
@@ -372,6 +397,14 @@ log tail (the §6 std files), event console (sendevent verbs).
 posture (E3): textual-serve ships no auth — deploy behind a reverse proxy
 or SSH tunnel; documented in README deployment notes, not built.
 
+Scope fence (DL-42): the dashboard of *meaning* — conditions, boxes,
+explain, sendevent — is dsl41's and stays here. The §6a supervisor tier,
+extracted or not, ships at most a boring JSON CLI and an optional
+read-only top view; "free dashboard via textual-serve" is free as a demo
+only — production dashboard semantics (auth, audit of signals, history,
+log redaction, retention) are orchestrator concerns, never the
+supervisor's.
+
 ## 12. Non-goals
 
 HA/clustering, remote machines or agent fabric, RBAC, resource/load
@@ -392,6 +425,12 @@ Linux hardening path, §6a).
 3. **Journal**: replay reproduces the trace (property test). Crash-recovery
    integration test: real sleep jobs, SIGKILL the engine, resume, assert
    reconciliation records and terminal states.
+   The lifecycle tier lives or dies on its failure matrix, so 11b/11f
+   test kills at every phase boundary, not just mid-run: before/after
+   spawn.json, after fork before exec, after wait observation before
+   status write, after status write before reap — plus ENOSPC on the
+   runs dir, a stale control socket, pid reuse (spoofed spawn.json), and
+   a simulated reboot (boot_id flip).
 4. **Preflight**: trigger/non-trigger fixture pair per rule.
 5. **Adapters**: pgid kill, append semantics, profile sourcing; FW watcher
    over a tmpfile growing to stability.
@@ -416,8 +455,10 @@ cli.py: `run`, `rehearse`, `sendevent`, `serve`, `journal`.
 - **11d** — Textual TUI (terminal).
 - **11e** — `serve` via textual-serve + deployment notes.
 - **11f** — supervisor tier (§6a Tier 1): detached mode, engine
-  reattachment, SPAWN/SIGNAL/LIST/SHUTDOWN protocol, Linux subreaper.
-  Completes the prod-grade story for long-running estates (§1).
+  reattachment, versioned named-socket protocol + controller lease
+  (frozen in `docs/supervisor-protocol.md` — the future extraction
+  boundary, DL-42), import-boundary test, Linux subreaper. Completes the
+  prod-grade story for long-running estates (§1).
 
 ## 15. Open questions (E-series)
 

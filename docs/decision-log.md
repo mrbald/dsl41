@@ -837,3 +837,55 @@
   across restarts. Residual accepted matrix: -9 of a wrapper alone or
   of a whole tree at once -> detected at resume, reported truthfully
   (E7), never guessed.
+- DL-42 Lifecycle tier spin-off: extract-on-trigger, not now (2026-07-11;
+  user proposed repo+pipeline+package immediately and asked both
+  reviewers to push back; Claude and codex (GPT-5.6) independently
+  converged on the same verdict). Decisions: (1) The niche is REAL but
+  small: no existing package is an embeddable run-to-completion
+  process-lifecycle recorder for scheduler builders (supervisord/circus/
+  pm2 are service supervisors; pueue/tsp/nq are user-facing queues;
+  systemd-run transient units are the strongest competitor but
+  Linux-only; containerd-shim/slurmstepd/HTCondor starter are the
+  architectural comparables and are all embedded, not reusable; tini is
+  the adoption precedent for tiny-dumb-correct process tools). The
+  package's value would be the crash semantics, not the socket — and
+  publishing before the failure matrix is implemented and dogfooded
+  freezes API promises around the least-informed version of the design.
+  (2) Extraction TRIGGER (any of): a second real consumer appears; an
+  external adopter is ready to integrate against the protocol; the
+  executor has run real workloads through the tier for a while; or the
+  AGPL parent materially blocks adoption. Counter-fence: if the tier's
+  scope ever grows toward queueing/scheduling/web-UI/auth/policy, it
+  stops being extractable as "the lifecycle shim" — scope creep kills
+  the spin-off, not enables it. (3) Until the trigger: flat house
+  modules (runner_wrapper.py, runner_supervisor.py) under an ENFORCED
+  boundary — stdlib-only imports, nothing from dsl41, import-graph
+  test — with the socket protocol + spool format (spawn.json/
+  status.json) frozen in docs/supervisor-protocol.md as the future
+  public API. Deviation from codex's subdir-with-own-pyproject
+  recommendation, deliberately: pre-extraction the dsl41 wheel must
+  ship these modules, and a two-package monorepo buys packaging
+  friction without more isolation than the import test already proves.
+  (4) Supervisor socket is a NAMED unix socket (0600 + peer-cred) with
+  a versioned protocol and a single-controller LEASE (controller_id,
+  expiry, fencing token; mutations carry token + idempotency key;
+  observers unlimited; CLI read-only by default) — v1 correctness, not
+  ceremony: racing SPAWN/SIGNAL from engine+TUI+script corrupts
+  scheduler semantics before it is a security issue. The engine's OWN
+  socket keeps no lease: sendevent is multi-writer by AutoSys nature
+  and the single-writer engine loop serializes it. (5) spawn.json
+  gains boot_id (kern.bootsessionuuid / /proc/.../boot_id): reboot
+  recycles the (pid, start-time) identity space; mismatch voids
+  liveness AND proves nothing survived (reconciliation shortcut).
+  (6) Scope fence for UI: the dashboard of meaning (conditions, boxes,
+  explain) is dsl41's; the tier ships at most a JSON CLI + read-only
+  top; "free dashboard via textual-serve" is free as a demo only —
+  auth/audit/history/redaction are orchestrator concerns. (7) License
+  earmark recorded in LICENSING.md item 6: Apache-2.0 on extraction
+  (patent grant; GPLv3-family compatible; AGPL-depends-on-permissive is
+  the safe direction), no per-file headers meanwhile, no external
+  contributions to earmarked files before CLA + relicense disclosure.
+  (8) 11b/11f test plan expanded with the phase-boundary kill matrix
+  (before/after spawn.json, post-fork pre-exec, post-wait pre-write,
+  post-write pre-reap, ENOSPC, stale socket, spoofed spawn.json,
+  boot_id flip).

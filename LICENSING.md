@@ -24,3 +24,14 @@ Operational requirements:
    Re-audit whenever a runtime dependency is added.
 5. Copyright notices currently read "dsl41 authors"; replace with the founders'
    entity name once it exists.
+6. Lifecycle-tier earmark (2026-07-11, DL-42): `runner_wrapper.py`, the
+   future `runner_supervisor.py`, and `docs/supervisor-protocol.md` are
+   earmarked for extraction into a standalone Apache-2.0 package when the
+   DL-42 trigger fires. Until extraction they are AGPL like the rest of the
+   repo (no per-file headers, per item 3); the earmark's operational force:
+   (a) never copy other dsl41 code into these files, (b) they import stdlib
+   only (tested), (c) accept no external contributions touching them before
+   the CLA exists AND the contributor is told about the planned relicense —
+   only founder-authored code may be relicensed unilaterally. Apache-2.0
+   chosen over MIT for the patent grant; AGPL-parent-depends-on-permissive-
+   child is the safe dependency direction.
