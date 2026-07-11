@@ -292,7 +292,11 @@ Append-only JSONL WAL, one file per run. Record kinds:
   spawn record, written by the process that did the spawning — which
   closes the crash window between spawn and journal append; the pgid is
   the wrapper's child's business, the engine never observes it — DL-44).
-- `drop` — stale completions discarded by the §4 gate.
+- `drop` — stale completions discarded by the §4 gate; also scheduler
+  ticks missed across downtime, skipped-and-recorded at resume (E9,
+  DL-45).
+- `preflight` — the §8 WARN items the run started under (DL-45: "prints,
+  journals, and runs" made literal); not an input, ignored by replay.
 
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence — external events plus time observations (oracle
@@ -457,7 +461,11 @@ cli.py: `run`, `rehearse`, `sendevent`, `serve`, `journal`.
   Tests: crash-recovery (SIGKILL engine mid-run), lifeline fd-leak,
   wrapper pgid-separation, unobservable-status path.
 - **11c** — scheduler + preflight + headless `run`/`sendevent` CLI +
-  control socket.
+  control socket. Landed with two additions within the frame (DL-45):
+  the `rehearse` verb (its quiescence needs the scheduler, so it ships
+  here, not 11d/e) and a minimal `query` CLI client for the §10 query
+  verbs (the headless autorep analog; the 11d TUI consumes the same
+  protocol).
 - **11d** — Textual TUI (terminal).
 - **11e** — `serve` via textual-serve + deployment notes.
 - **11f** — supervisor tier (§6a Tier 1): detached mode, engine
@@ -490,5 +498,21 @@ code; none is guess-resolved.
   FAILURE (128+signum through the SEM-09 boundary), which would flip
   t()/f() routing. Needs a live instance; opened by the 11b adversarial
   review (DL-44 amendment).
+- **E9** — scheduler ticks missed across engine DOWNTIME (crash/stop →
+  resume). Default: skip-and-report — resume drops each missed tick AND
+  journals it (a WAL `drop` record), never fires it late; a
+  live-but-stalled engine by contrast fires its backlog, stamped at the
+  tick. The downtime/live boundary is pinned to the resume-sweep instant
+  (wall-now when `resume_run` re-anchors): ticks at or before it are
+  downtime (dropped), ticks after it are live backlog even if the loop
+  starts seconds later. Vendor behavior for an event-processor outage
+  spanning a start_times tick is unverified [?]; a live instance decides
+  fire-late vs skip. Opened by 11c (DL-45).
+- **E10** — schedule interpretation defaults [?]: absent `days_of_week`
+  = every day; jobs without a per-job `timezone` read their times in the
+  run-level `--timezone` base zone, defaulting to UTC — the vendor uses
+  the AutoSys server's zone, which a migrated estate must set explicitly.
+  DST corners pinned to PEP 495 fold=0 (ambiguous = first occurrence;
+  nonexistent maps past the gap). Opened by 11c (DL-45).
 - Inherited pendings: Q3 (SEM-32 abandonment branch), Q4 (n_retrys) — the
   runner implements the documented oracle defaults and adds no new switch.

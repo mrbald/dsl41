@@ -141,7 +141,10 @@ oracle additions, gated by the ss13 bisimulation suite — and 11b — the proce
 lifecycle tier (per-run wrapper shim, LocalCommand/FileWatcher adapters, WAL journal,
 crash-recovery resume with the reconciliation ladder; spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md))
-— are built; 11c-11f follow the design's phasing. The suite spans 17 test files
+— and 11c — the ss5 calendar scheduler, ss8 preflight, ss10 control socket
+(sendevent parity + queries + subscribe), and the headless
+`run`/`rehearse`/`sendevent`/`query` CLI verbs — are built; 11d-11f follow the
+design's phasing. The suite spans 19 test files
 (`pytest --collect-only -q` for the current count) plus the 15-file
 synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
@@ -180,15 +183,20 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
   (dispatch table, time-ordered event queue, stale-completion gate), VirtualClock +
   RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
-  journal, resume/reconciliation ladder; scheduler/control socket (11c), TUI (11d/e),
-  supervisor tier (11f) per docs/runner-design.md ss14
+  journal, resume/reconciliation ladder, calendar scheduler (ss5), preflight (ss8),
+  control-socket server (ss10: sendevent parity, status/trace/explain/plan,
+  subscribe); TUI (11d/e), supervisor tier (11f) per docs/runner-design.md ss14
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary), records spawn.json/status.json durably, kills
   and records on lifeline EOF; spool contract in docs/supervisor-protocol.md
 - src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`,
-  `journal` (render-by-replay of a run WAL)
-  (exit 2 = catalog load/usage failure everywhere; exit 1 = findings, `lint`/`equiv`
-  only — `report` always exits 0 once generated: the report itself is the loud channel)
+  `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
+  real processes, control socket; stop with SIGINT/SIGTERM), `rehearse` (virtual
+  clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
+  and `query` (clients of a running engine's control socket)
+  (exit 2 = catalog load/usage failure everywhere, incl. preflight refusals; exit 1 =
+  findings for `lint`/`equiv`, a mid-run engine failure for `run`/`rehearse` —
+  `report` always exits 0 once generated: the report itself is the loud channel)
 
 ### Tests
 
@@ -225,6 +233,13 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping
+- tests/test_runner_scheduler.py — phase-11c scheduler occurrence math (days/times/
+  start_mins, timezone + DST corners, E10 defaults), engine integration under the
+  virtual clock, resume re-anchoring + the E9 missed-tick drops, and the ss8
+  preflight rule fixture pairs
+- tests/test_runner_control.py — phase-11c control socket (sendevent parity verbs,
+  status/trace/explain/plan queries, subscribe backfill/live seam, socket hygiene),
+  the DL-45 commit-discipline regression, and the run/rehearse/sendevent/query CLI
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the
@@ -239,14 +254,14 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 UC record emission is blocked on U3 (pull /resources/openapi.json from a live
 controller, freeze docs/uc-edge-schema.md, generate client) — until then backend_uc
 emits only the migration report + edge classification. Open questions Q1-Q7 (autosys
-dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E7
+dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E10
 (runner-design ss15) are unresolved. Those with a behavior default in code
-(Q1-Q4, Q7, U1-U5, U8, E5-E7) run on a documented default marked
+(Q1-Q4, Q7, U1-U5, U8, E5-E10) run on a documented default marked
 `# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
 dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
 test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller. Runner phases 11c-11f (scheduler + preflight + control socket, TUI,
-web serve, detached supervisor tier) follow per runner-design ss14.
+controller. Runner phases 11d-11f (Textual TUI, web serve via textual-serve,
+detached supervisor tier) follow per runner-design ss14.
 
 ## License
 

@@ -28,6 +28,8 @@ from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
+    from datetime import datetime
+
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
 
 app = typer.Typer(
@@ -524,3 +526,391 @@ def viz(
     else:
         out.write_bytes(report.encode("utf-8"))  # bytes: keep line endings exact
         typer.echo(f"wrote {out}")
+
+
+# ------------------------------------------------------------------- runner (phase 11)
+#
+# Exit codes for the runner verbs: 0 clean (run: operator-stopped; rehearse:
+# quiescent; sendevent/query: ok response), 1 the engine/estate failed while
+# running (EngineError, oracle refusal mid-run), 2 the run never started
+# (preflight ERROR, resume gate, unreadable scenario, unreachable socket).
+
+
+def _preflight_or_exit(catalog: CatalogIR, *, execution: bool) -> list:
+    """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
+    journals them next to the run -- WARN prints, journals, and runs)."""
+    from dsl41.runner import preflight
+
+    items = preflight(catalog, execution=execution)
+    for item in items:
+        target = f" {item.job}" if item.job else ""
+        typer.echo(
+            f"preflight {item.severity} [{item.code}]{target}: {item.message}",
+            err=item.severity == "ERROR",
+        )
+    if any(item.severity == "ERROR" for item in items):
+        typer.echo("preflight: refusing to run (runner-design ss8)", err=True)
+        raise typer.Exit(2)
+    return items
+
+
+def _naive_utc_arg(text: str, option: str) -> "datetime":
+    from datetime import UTC, datetime
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        typer.echo(f"{option}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+_TIMEZONE_OPT = typer.Option(
+    None,
+    "--timezone",
+    help="Base zone for schedules without a per-job timezone (PENDING: E10;"
+    " default UTC -- vendor uses the server's zone).",
+)
+
+
+def _check_base_tz(timezone: str | None) -> None:
+    """Preflight the run-level base zone: per-job zones gate in ss8, but the
+    --timezone flag would otherwise surface as a raw ZoneInfo traceback from
+    the Scheduler with the wrong exit code (DL-45 review M3)."""
+    if timezone is None:
+        return
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(timezone)
+    except (KeyError, ValueError, OSError) as exc:
+        typer.echo(f"--timezone {timezone!r} is not resolvable in zoneinfo: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command()
+def run(
+    files: list[Path] = typer.Argument(..., help="JIL files forming the estate to execute"),
+    run_root: Path = typer.Option(
+        ..., "--run-root", help="Run directory (journal, runs/, logs/, control.sock)."
+    ),
+    resume: bool = typer.Option(
+        False, "--resume", help="Resume the run_root's journal (replay + reconcile, ss7)."
+    ),
+    timezone: str = _TIMEZONE_OPT,
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Execute the estate headlessly on this machine: wall clock, real
+    processes, WAL journal, calendar scheduler, and the control socket
+    (runner-design ss1/ss9/ss10). Runs until stopped (SIGINT/SIGTERM);
+    engine death terminates all jobs, durably recorded (tethered, ss6a).
+    Drive it with `dsl41 sendevent` / `dsl41 query`.
+    """
+    import asyncio
+
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    warns = _preflight_or_exit(catalog, execution=True)
+    _check_base_tz(timezone)
+    from dsl41.runner import EngineError
+
+    try:
+        raise typer.Exit(asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns)))
+    except EngineError as exc:
+        # start/resume gates (existing journal, hash/domain mismatch, live
+        # socket): the run never started
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+
+async def _serve_run(
+    catalog: CatalogIR,
+    run_root: Path,
+    resume: bool,
+    timezone: str | None,
+    warns: list,
+) -> int:
+    import asyncio
+    import contextlib
+    import signal as signal_mod
+
+    from datetime import datetime
+
+    from dsl41.runner import (
+        ControlServer,
+        EngineError,
+        FileWatcherAdapter,
+        JobAdapter,
+        LocalCommandAdapter,
+        RealClock,
+        Scheduler,
+        start_run,
+    )
+    from dsl41.runner import resume_run as _resume_run
+
+    clock = RealClock()
+    adapters: dict[str, JobAdapter] = {
+        "CMD": LocalCommandAdapter(),
+        "FW": FileWatcherAdapter(),
+    }
+    scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone)
+    if resume:
+        engine = await _resume_run(
+            catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler, hold_open=True
+        )
+    else:
+        engine = start_run(
+            catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler, hold_open=True
+        )
+    for ev, reason in engine.drops:  # resume's missed-tick sweep (PENDING: E9)
+        typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
+    if warns and engine.journal is not None:
+        engine.journal.preflight(warns)
+    server = ControlServer(engine, run_root / "control.sock")
+    try:
+        await server.start()
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        return 2
+    typer.echo(f"engine up; control socket: {server.path}")
+    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, ValueError):
+            # non-main-thread embedding (test harnesses): stoppable only by
+            # engine failure; the real CLI always has the main thread
+            pass
+    stop_task = asyncio.ensure_future(stop.wait())
+    done, _ = await asyncio.wait({loop_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    code = 0
+    if loop_task in done:  # hold_open never quiesces: this is a crash
+        stop_task.cancel()
+        exc2 = loop_task.exception()
+        typer.echo(f"engine failed: {exc2}", err=True)
+        code = 1
+    else:
+        typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
+        loop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop_task
+    await server.close()
+    await engine.shutdown()
+    if engine.journal is not None:
+        engine.journal.close()
+    return code
+
+
+@app.command()
+def rehearse(
+    files: list[Path] = typer.Argument(..., help="JIL files forming the estate to rehearse"),
+    scenario: Path = typer.Option(
+        None,
+        "--scenario",
+        help="JSON scenario: adapter script + events to inject (see command help).",
+    ),
+    start: str = typer.Option(
+        None, "--start", help="Virtual clock start, ISO datetime (default: wall now, UTC)."
+    ),
+    hours: float = typer.Option(
+        24.0, "--hours", help="Horizon: quiesce once no work remains within start + HOURS."
+    ),
+    timezone: str = _TIMEZONE_OPT,
+    run_root: Path = typer.Option(
+        None, "--run-root", help="Also persist a WAL journal under this directory."
+    ),
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Rehearse the estate under the virtual clock (runner-design ss9): the
+    same engine path as `run` with scripted adapters, so a 24h estate plays
+    in seconds and the printed trace is evidence about production behavior.
+
+    Scenario file shape (all keys optional):
+    {"adapter": {"default": [duration_s, exit_code] | null,
+                 "runs": [{"job": J, "run_number": N,
+                           "duration_s": S, "exit_code": C}, ...]},
+     "events": [{"at": ISO, "kind": KIND, "payload": {...}}, ...]}
+    -- events reuse the oracle trace tests' event shape; a null adapter
+    default parks unscripted runs (the script drives completions).
+    """
+    import asyncio
+    import json as json_mod
+
+    from datetime import UTC, datetime, timedelta
+
+    from dsl41.oracle import Event, OracleError
+    from dsl41.runner import Engine, EngineError, FakeAdapter, Scheduler, VirtualClock, start_run
+
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    warns = _preflight_or_exit(catalog, execution=False)
+    _check_base_tz(timezone)
+    start_dt = (
+        _naive_utc_arg(start, "--start")
+        if start
+        else datetime.now(UTC).replace(tzinfo=None, microsecond=0)
+    )
+    script: dict[tuple[str, int], tuple[float, int]] = {}
+    default: tuple[float, int] | None = (0.0, 0)
+    events: list[Event] = []
+    if scenario is not None:
+        try:
+            data = json_mod.loads(scenario.read_bytes())
+            adapter_spec = data.get("adapter", {})
+            if "default" in adapter_spec:
+                raw = adapter_spec["default"]
+                default = None if raw is None else (float(raw[0]), int(raw[1]))
+            for entry in adapter_spec.get("runs", []):
+                key = (str(entry["job"]), int(entry["run_number"]))
+                script[key] = (float(entry["duration_s"]), int(entry["exit_code"]))
+            events = [Event.model_validate(entry) for entry in data.get("events", [])]
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            typer.echo(f"scenario {scenario}: {exc}", err=True)
+            raise typer.Exit(2) from exc
+    clock = VirtualClock(start_dt)
+    adapter = FakeAdapter(script, default=default)
+    scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone)
+    adapters = {"CMD": adapter, "FW": adapter}
+    try:
+        if run_root is not None:
+            engine = start_run(
+                catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler
+            )
+        else:
+            engine = Engine(catalog, clock=clock, adapters=adapters, scheduler=scheduler)
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    if warns and engine.journal is not None:
+        engine.journal.preflight(warns)
+    for ev in events:
+        engine.inject(ev, source="control")
+    horizon = start_dt + timedelta(hours=hours)
+
+    async def _play() -> None:
+        try:
+            await engine.run_until_quiescent(horizon)
+        finally:
+            await engine.shutdown()
+
+    try:
+        asyncio.run(_play())
+    except (EngineError, OracleError) as exc:
+        typer.echo(f"rehearse failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if engine.journal is not None:
+            engine.journal.close()
+    for entry in engine.oracle.trace():
+        typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+
+
+def _control_roundtrip(socket_path: Path, request: dict) -> dict:
+    import json as json_mod
+    import socket as socket_mod
+
+    try:
+        conn = socket_mod.socket(socket_mod.AF_UNIX)
+        conn.settimeout(10.0)
+        conn.connect(str(socket_path))
+        conn.sendall(json_mod.dumps(request).encode("utf-8") + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        conn.close()
+        return json_mod.loads(buf)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"control socket {socket_path}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+_SOCKET_OPT = typer.Option(
+    ...,
+    "--socket",
+    "-S",
+    help="The engine's control socket (<run_root>/control.sock).",
+)
+
+
+@app.command()
+def sendevent(
+    event: str = typer.Argument(
+        ...,
+        help="STARTJOB|FORCE_STARTJOB|KILLJOB|ON_ICE|OFF_ICE|ON_HOLD|OFF_HOLD"
+        "|ON_NOEXEC|OFF_NOEXEC|SET_GLOBAL|CHANGE_STATUS",
+    ),
+    socket_path: Path = _SOCKET_OPT,
+    job: str = typer.Option(None, "--job", "-J", help="Target job (job verbs, CHANGE_STATUS)."),
+    status: str = typer.Option(None, "--status", "-s", help="CHANGE_STATUS: the new status."),
+    global_kv: str = typer.Option(None, "--global", "-G", help='SET_GLOBAL: "NAME=value".'),
+    exit_code: int = typer.Option(
+        None, "--exit-code", help="CHANGE_STATUS: optional exit code to record."
+    ),
+) -> None:
+    """Vendor-parity sendevent against a running engine (runner-design ss10).
+    Every accepted event is journaled by the engine (source=control)."""
+    import json as json_mod
+
+    request: dict = {"cmd": "sendevent", "event": event.upper()}
+    if job is not None:
+        request["job"] = job
+    if status is not None:
+        request["status"] = status.upper()
+    if global_kv is not None:
+        name, sep, value = global_kv.partition("=")
+        if not sep or not name:
+            typer.echo('--global expects "NAME=value"', err=True)
+            raise typer.Exit(2)
+        request["name"], request["value"] = name, value
+    if exit_code is not None:
+        request["exit_code"] = exit_code
+    response = _control_roundtrip(socket_path, request)
+    typer.echo(json_mod.dumps(response, sort_keys=True))
+    raise typer.Exit(0 if response.get("ok") else 2)
+
+
+@app.command()
+def query(
+    what: str = typer.Argument(..., help="status|trace|explain|plan|subscribe"),
+    socket_path: Path = _SOCKET_OPT,
+    job: str = typer.Option(None, "--job", "-J", help="status: filter; explain: the job."),
+    since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
+) -> None:
+    """Read-only control-plane queries (runner-design ss10); `subscribe`
+    streams journal records as JSON lines until interrupted. The headless
+    autorep analog -- the ss11 TUI consumes the same verbs."""
+    import json as json_mod
+    import socket as socket_mod
+
+    verb = what.lower()
+    if verb not in ("status", "trace", "explain", "plan", "subscribe"):
+        typer.echo(f"unknown query {what!r} (status|trace|explain|plan|subscribe)", err=True)
+        raise typer.Exit(2)
+    request: dict = {"cmd": verb}
+    if job is not None:
+        request["job"] = job
+    if since is not None:
+        request["since"] = since
+    if verb != "subscribe":
+        response = _control_roundtrip(socket_path, request)
+        typer.echo(json_mod.dumps(response, indent=2, sort_keys=True))
+        raise typer.Exit(0 if response.get("ok") else 2)
+    try:
+        conn = socket_mod.socket(socket_mod.AF_UNIX)
+        conn.connect(str(socket_path))
+        conn.sendall(json_mod.dumps(request).encode("utf-8") + b"\n")
+        with conn.makefile("rb") as stream:
+            for line in stream:
+                typer.echo(line.decode("utf-8").rstrip("\n"))
+    except OSError as exc:
+        typer.echo(f"control socket {socket_path}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    except KeyboardInterrupt:
+        pass

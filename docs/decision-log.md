@@ -1058,3 +1058,113 @@
   both platforms, catalog-hash order sensitivity (a real oracle-cascade
   tie-break, so reorder => re-baseline is correct), and the 11a
   bisimulation surface.
+- DL-45 Phase 11c landed: scheduler + preflight + control socket + headless
+  CLI (2026-07-11; found and decided during implementation, all within
+  DL-41's frame; runner.py's 11c docstring block is normative detail).
+  Decisions: (1) ENGINE COMMIT DISCIPLINE -- found by 11c design review,
+  latent since 11b: the real-domain loop journaled an advance record and
+  then slept UNINTERRUPTIBLY until the timer's instant, so an adapter
+  completion (or, now, a control injection) stamped inside that sleep fed
+  behind the already-advanced oracle clock and crashed the engine ("feed
+  time went backwards"). Fixed structurally: the real domain commits to
+  work -- advance journal, scheduler pop, event feed -- only once its
+  instant is due (<= now); future work routes to the interruptible wait
+  and re-plans on activity. Virtual jumps never yield mid-move, so every
+  11a determinism pin is byte-identical; regression-pinned with a
+  mid-wait completion + pending timer test. (2) Scheduler ticks are
+  INPUTS: STARTJOB stamped at the tick, enqueued like any external event
+  (journal-first at feed, source=scheduler); the tick pops before any
+  same-or-later-due timer/event commits, so heap order alone keeps feeds
+  non-decreasing -- no timestamp clamping, vendor-parity stamps. A
+  live-but-stalled engine fires its backlog late but truthfully stamped;
+  ticks missed across DOWNTIME are dropped-and-journaled at resume
+  (WAL drop records, Engine.drops), never fired late (NEW E9). Resume
+  re-anchors the scheduler strictly after the last journal instant --
+  replay already fed every journaled tick. (3) Schedule interpretation
+  defaults pinned (NEW E10): absent days_of_week = every day; per-job
+  timezone else run-level --timezone else UTC (vendor: server zone);
+  DST via PEP 495 fold=0, with calendar-date iteration (aware-datetime
+  arithmetic can skip a 25h local date) and per-day UTC sorting (a
+  fold-0 nonexistent time can land past a later tick inside a
+  spring-forward gap). SEM-33 run_window and SLA-only schedule blocks
+  trigger nothing; SEM-32/Q3 abandonment stays oracle-side (ss5 fires
+  unconditionally). (4) Preflight per ss8, codes stable kebab keys
+  (job-type/machine/owner/calendar/timezone/oracle ERROR;
+  n-retrys/resources/skeleton-cycle WARN); machine/owner identity rules
+  are EXECUTION-scoped and skipped for rehearse (FakeAdapter runs
+  nothing; calendars/timezone/oracle still gate -- the scheduler depends
+  on them). WARN journals as a new `preflight` record kind ("prints,
+  journals, and runs" made literal); replay ignores it. The AND-success
+  skeleton (s() atoms reachable through AND/Paren spines only -- an s()
+  under OR is an alternative, not a dependency; instance-qualified refs
+  skipped) is shared by the cycle WARN and `plan`, so they can never
+  disagree. (5) Control socket per ss10: 0600 from birth (umask at
+  bind), JSON lines; job arguments validated against the catalog (vendor
+  sendevent errors on unknown jobs); CHANGE_STATUS = STATUS injection
+  with overwrite parity; explain renders per-atom truth through the
+  ORACLE's own predicate evaluation (_cond_true: ice bypass, lookback,
+  instances -- never a reimplementation). Stale socket handling: a probe
+  connect that fails means a crashed run's leftover (unlink and claim);
+  one that succeeds means a live engine (refuse - the ss13 "stale control
+  socket" case). subscribe streams journal records via a post-write
+  fan-out on the Journal; seq'd records are exactly-once across the
+  backfill/live seam, unsequenced dispatch/drop at-least-once in the
+  race window (documented; the TUI consumes idempotently). (6) CLI verbs
+  run/rehearse/sendevent/query: rehearse ships in 11c, not 11d/e -- its
+  ss9 quiescence ("no occurrence within the horizon") needs the
+  scheduler; scenario files reuse the oracle event shape plus a
+  FakeAdapter script block. `query` is a small addition beyond DL-41's
+  verb list (the headless autorep analog); the 11d TUI consumes the same
+  ss10 protocol. hold_open keeps a real-domain run serving the socket at
+  quiescence instead of returning (run mode is stopped by signal, exit 0;
+  engine crash exits 1; preflight/gate refusals exit 2).
+  Post-review amendments (same day; Opus adversarial review, two confirmed
+  BLOCKERs + one major + six minors fixed, one minor pinned as doc; twelve
+  hunt areas confirmed sound incl. brute-forced DST math over 10 zones):
+  (7) BLOCKER B1: ControlServer.close() awaited Server.wait_closed()
+  BEFORE cancelling handler tasks; since 3.12 wait_closed blocks until
+  every handler finishes, and a subscribe handler parks on queue.get()
+  until cancelled -- any attached viewer deadlocked the engine's whole
+  shutdown path (SIGTERM hang, journal never closed). Fixed: close, cancel
+  handlers, gather, THEN wait_closed. (8) BLOCKER B2: resume re-anchored
+  the scheduler strictly after last_at, assuming "a tick exactly there was
+  replayed" -- false for several jobs sharing one tick instant: a crash
+  between the siblings' input appends left the unjournaled sibling
+  neither replayed, nor re-armed, nor E9-dropped (silent loss). Fixed:
+  re-anchor INCLUSIVE, dedup the sweep against the journal's own
+  (job, at) scheduler ticks, drop-and-journal the unjournaled remainder.
+  (9) Review M3: the run-level --timezone was validated only inside
+  Scheduler.__init__ (raw ZoneInfoNotFoundError traceback, wrong exit
+  class); run/rehearse now check it up front and exit 2. (10) Review M4:
+  subscribe sampled its live/backfill seam AFTER the ack write (a yield),
+  so a record landing mid-ack was skipped as covered -- sample before
+  sending. (11) Review M5: a query-handler exception killed the
+  connection with no response (client timeout); _respond is now shielded
+  and answers ok:false. Remaining minors: FQDN accepted as local
+  (getfqdn added, M6), empty days_of_week refused comprehensibly at
+  Scheduler construction (M7), signal-handler registration guarded for
+  non-main-thread embedding (M8), a bind race between two probing engines
+  now refuses as EngineError/exit-2 (M9), and the E9 downtime/live
+  boundary is pinned to the resume-sweep instant (M10, doc). Confirmed
+  sound: commit-discipline paths (no advance-then-yield, no backwards
+  feed), kill-wins gate with the new branches, take_sched non-spin,
+  quiescence/horizon edges, journal fan-out reentrancy, payload
+  aliasing, old-reader tolerance of preflight/drop records, protocol
+  validation, ghost-run gate with scheduler starts, plan/skeleton
+  determinism.
+  Test-suite amendments (same day; Sonnet test pass over the fixed code,
+  63 tests in test_runner_scheduler.py/test_runner_control.py, two
+  findings): (12) T2, real bug predating 11c: run_until_quiescent's
+  real-domain "target > horizon: return" shortcut abandoned LIVE adapter
+  tasks whose completions carry no due timestamp -- a fast completion
+  inside the horizon was never processed when the only KNOWN due instant
+  (a term_run_time timer) lay beyond it. Fixed: with live tasks the loop
+  waits out the horizon interruptibly and returns at the horizon;
+  regression-pinned together with the commit-discipline crash in one
+  test. (13) T1: the ss8 "oracle construction failure" ERROR rule is
+  currently ARMOR -- Oracle.__init__ has no raise site of its own, so no
+  catalog passing CatalogIR validation can trigger it. The rule stays
+  (ss8 mandates it; construction refusals may arrive with future SEM
+  work); one test pins the no-raise reality (fails loudly the day
+  construction refusals appear), another pins the plumbing by injection
+  (a constructor refusal surfaces as a preflight ERROR, never a crash).
