@@ -13,8 +13,9 @@ Start here, in order:
 5. docs/decision-log.md        - why things are the way they are
 6. CLAUDE.md                   - working agreement + implementation order
 
-Status: all ten implementation phases built and tested; see the memo below for
-the source map and what remains open.
+Status: all ten compiler phases built and tested; the phase-11 runner
+(docs/runner-design.md) is in progress — 11a (engine core + bisimulation gate)
+is done. See the memo below for the source map and what remains open.
 
 ## CLI
 
@@ -122,8 +123,11 @@ against the original.
 
 All ten phases from CLAUDE.md's implementation order are implemented and tested, in
 build order: ast_jil, conditions, ir, lint, derive, viz, oracle, equiv, backend_uc, dsl.
-The suite spans 12 test files (`pytest --collect-only -q` for the current count) plus
-the 15-file synthetic/doc-derived JIL corpus under `tests/corpus/`.
+Phase 11 (the runner, docs/runner-design.md) is underway: 11a — the sans-IO engine
+loop, VirtualClock, FakeAdapter, and the two oracle additions, gated by the ss13
+bisimulation suite — is built; 11b-11f follow the design's phasing. The suite spans
+14 test files (`pytest --collect-only -q` for the current count) plus the 15-file
+synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
 ### Source map
 
@@ -157,6 +161,10 @@ the 15-file synthetic/doc-derived JIL corpus under `tests/corpus/`.
   P-Mxx expected-divergence pairs against it, sharing Event/TraceEntry with oracle.py
 - src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
   extracted from corpus-observed patterns only (phase 10, last by design)
+- src/dsl41/runner.py — phase-11a engine: single-writer loop over the oracle
+  (dispatch table, time-ordered event queue, stale-completion gate), VirtualClock,
+  FakeAdapter; real adapters/WAL (11b), scheduler/control socket (11c), TUI (11d/e),
+  supervisor tier (11f) per docs/runner-design.md ss14
 - src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`
   (exit 2 = catalog load/usage failure everywhere; exit 1 = findings, `lint`/`equiv`
   only — `report` always exits 0 once generated: the report itself is the loud channel)
@@ -178,7 +186,13 @@ the 15-file synthetic/doc-derived JIL corpus under `tests/corpus/`.
   the viz CLI
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries, citing
   dossier §8's sparse T-ID index (T01–T34 range, not contiguous; T03/precedence is
-  pinned at parse time in test_condition_grammar.py, not here)
+  pinned at parse time in test_condition_grammar.py, not here); every test runs
+  twice — Oracle-direct and Engine(VirtualClock, inert FakeAdapter) via
+  tests/bisim_harness.py — the runner-design ss13 bisimulation gate
+- tests/test_runner.py — phase-11a runner suite: oracle additions
+  (next_timer_due/advance), VirtualClock, engine dispatch/cancellation/horizon
+  discipline, the stale-completion gate, and the feed-only vs advance+feed and
+  oracle-vs-engine hypothesis properties
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report CLI, the

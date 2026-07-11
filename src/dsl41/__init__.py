@@ -1,6 +1,7 @@
 """dsl41: AutoSys->Stonebranch migration compiler.
 
-Module map (implementation order per CLAUDE.md; all ten phases built):
+Module map (implementation order per CLAUDE.md; all ten compiler phases
+built, the phase-11 runner in progress per docs/runner-design.md ss14):
   ast_jil    - JIL statement scanner + AST + preserve/canonical renderers (docs/jil-statement-syntax.md)
   conditions - condition-expression parsing via grammars/condition.lark -> Cond models
   ir         - IR-F Pydantic models + AST->IR-F lowering (docs/ir-design.md ss3-4)
@@ -15,4 +16,6 @@ Module map (implementation order per CLAUDE.md; all ten phases built):
                (the P-Mxx expected-divergence pairs, stonebranch Part IV)
   dsl        - builder surface (job/box/sequence/parallel) + decompiler
   cli        - typer entry points (lint/equiv/report/viz/decompile)
+  runner     - phase-11a engine loop + VirtualClock + FakeAdapter over the
+               oracle (docs/runner-design.md; 11b-11f pending)
 """

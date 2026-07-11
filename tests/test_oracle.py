@@ -23,10 +23,12 @@ the interpreter, which only walks whatever Cond tree the parser produced.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 
 import pytest
-from hypothesis import given, settings
+from bisim_harness import EngineHarness
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from dsl41.ir import lower_source
@@ -34,17 +36,72 @@ from dsl41.oracle import Event, EventKind, Oracle, OracleError
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
+#: flipped by the autouse fixture below; oracle() consults it
+_ENGINE_PATH = False
+_HARNESSES: list[EngineHarness] = []
+
+
+@pytest.fixture(autouse=True, params=["direct", "engine"])
+def sem_path(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Bisimulation gate (runner-design ss13, DL-41 decision 9): every SEM
+    trace test in this module runs twice -- Oracle-direct and
+    Engine(VirtualClock, inert FakeAdapter) -- and must behave identically;
+    this is equivalence tier c between simulator and executor and phase
+    11a's definition of done. oracle() below builds whichever path the
+    param selects."""
+    global _ENGINE_PATH
+    _ENGINE_PATH = request.param == "engine"
+    yield request.param
+    _ENGINE_PATH = False
+    _close_harnesses()
+
+
+def _close_harnesses() -> None:
+    """Close every registered harness even if one close() raises: aborting
+    midway would leak the rest into the NEXT test's teardown, reporting the
+    error against the wrong test."""
+    errors: list[Exception] = []
+    while _HARNESSES:
+        try:
+            _HARNESSES.pop().close()
+        except Exception as exc:  # noqa: BLE001 -- collect, close the rest, re-raise
+            errors.append(exc)
+    if errors:
+        raise errors[0]
+
 
 def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload=payload)
 
 
-def oracle(jil_text: str) -> Oracle:
-    return Oracle(lower_source(jil_text))
+def oracle(jil_text: str) -> Oracle | EngineHarness:
+    catalog = lower_source(jil_text)
+    if _ENGINE_PATH:
+        harness = EngineHarness(catalog)
+        _HARNESSES.append(harness)
+        return harness
+    return Oracle(catalog)
 
 
-def transitions(o: Oracle, job: str) -> list[str]:
+def transitions(o: Oracle | EngineHarness, job: str) -> list[str]:
     return [t.transition for t in o.trace() if t.job == job]
+
+
+def test_bisim_gate_meta_all_tests_go_through_the_oracle_helper() -> None:
+    """Gate-honesty guard: the DL-43 claim 'every SEM trace test runs twice'
+    holds only if every test builds its interpreter through the oracle()
+    helper. A future test constructing an Oracle directly would pass green
+    under both params while never touching the engine -- silently shrinking
+    the gate. Exactly one direct construction is allowed: the helper."""
+    import pathlib
+    import re
+
+    source = pathlib.Path(__file__).read_text()
+    constructions = re.findall(r"\bOracle\(", source)
+    assert len(constructions) == 1, (
+        "a test constructs an Oracle directly; route it through oracle() so "
+        "the bisimulation gate covers it"
+    )
 
 
 # ------------------------------------------------------------ 1. SEM-01 latching
@@ -1479,7 +1536,15 @@ def _random_diamond_script(draw: st.DrawFn) -> list[Event]:
 
 
 @given(_random_diamond_script())
-@settings(max_examples=100, deadline=None)
+@settings(
+    max_examples=100,
+    deadline=None,
+    # the sem_path fixture's path flag is constant across examples, and the
+    # harnesses each example creates are closed IN the example body below
+    # (the try/finally), so no per-example state leaks to fixture teardown
+    # -- which is what makes suppressing the guard honest
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_hypothesis_oracle_determinism_legality_and_monotonicity(script: list[Event]) -> None:
     """Tier (c) fuzz (ir-design ss6): random small scripts of STATUS
     SUCCESS/FAILURE + SET_GLOBAL over a fixed 3-job catalog, monotone
@@ -1487,8 +1552,14 @@ def test_hypothesis_oracle_determinism_legality_and_monotonicity(script: list[Ev
     identical traces. (b) every traced transition is one of the edges
     actually reachable in oracle.py given this event vocabulary. (c) traces
     are time-monotone."""
-    trace1 = oracle(_DIAMOND3_JIL).run_script(script)
-    trace2 = oracle(_DIAMOND3_JIL).run_script(script)
+    try:
+        trace1 = oracle(_DIAMOND3_JIL).run_script(script)
+        trace2 = oracle(_DIAMOND3_JIL).run_script(script)
+    finally:
+        # per-example cleanup: on the engine param each example registers
+        # two live harnesses (parked adapter tasks on the shared loop);
+        # a 100-example run -- or a shrink phase -- must not accumulate them
+        _close_harnesses()
     assert [t.model_dump() for t in trace1] == [t.model_dump() for t in trace2]
 
     times = [t.at for t in trace1]

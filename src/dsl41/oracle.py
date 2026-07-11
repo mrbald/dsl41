@@ -23,7 +23,10 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   mixed-kind queue, so no kind-priority divergence is constructible). Timer
   events the oracle schedules for the future (run_window reschedules, SLA
   deadlines) fire inside the next feed() whose `at` reaches them -- feed
-  times must be non-decreasing.
+  times must be non-decreasing. Phase 11 (runner-design ss3) adds the only
+  two shell-facing extensions: next_timer_due() peeks the heap so a
+  wall-clock shell knows when to wake, and advance(now) fires due timers
+  with no external event; bisimulation pins feed-only == advance+feed.
 - Re-evaluation is EDGE-TRIGGERED (DL-13): a transition, SET_GLOBAL, or
   ON_ICE wakes exactly the jobs whose `condition` references the changed
   entity, so completed consumers re-run on each fresh satisfaction and a
@@ -251,18 +254,43 @@ class Oracle:
         if self._now is not None and ev.at < self._now:
             raise OracleError(f"feed time went backwards: {ev.at} < {self._now}")
         emitted_start = len(self._emitted)
-        # fire timers due strictly before this event first, in time order
-        while self._timers and self._timers[0][0] <= ev.at:
-            due, _, timer_ev = heapq.heappop(self._timers)
-            self._now = due
-            self._lazy_clock_checks()
-            self._queue.append(timer_ev)
-            self._drain()
+        # fire timers due at or before this event first, in time order
+        self._fire_timers_due(ev.at)
         self._now = ev.at
         self._lazy_clock_checks()
         self._queue.append(ev)
         self._drain()
         return self._emitted[emitted_start:]
+
+    def next_timer_due(self) -> datetime | None:
+        """Read-only peek at the timer heap (runner-design ss3): the earliest
+        scheduled TIMER's due time, or None. Timers fire lazily inside feed()/
+        advance(); a wall-clock shell uses this to know when to wake."""
+        return self._timers[0][0] if self._timers else None
+
+    def advance(self, now: datetime) -> list[Event]:
+        """Fire timers due <= now without an external event (runner-design
+        ss3): factored from feed()'s drain, same non-decreasing time
+        discipline. The clock is considered to have reached `now`, so a later
+        feed()/advance() before `now` errors. Bisimulation (runner-design
+        ss13) pins that feed-only and advance+feed schedules trace
+        identically."""
+        if self._now is not None and now < self._now:
+            raise OracleError(f"advance time went backwards: {now} < {self._now}")
+        emitted_start = len(self._emitted)
+        self._fire_timers_due(now)
+        self._now = now
+        self._lazy_clock_checks()
+        self._drain()  # checks-then-drain adjacency, same as feed()
+        return self._emitted[emitted_start:]
+
+    def _fire_timers_due(self, at: datetime) -> None:
+        while self._timers and self._timers[0][0] <= at:
+            due, _, timer_ev = heapq.heappop(self._timers)
+            self._now = due
+            self._lazy_clock_checks()
+            self._queue.append(timer_ev)
+            self._drain()
 
     def run_script(self, events: list[Event]) -> list[TraceEntry]:
         for ev in events:

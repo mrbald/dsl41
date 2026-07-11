@@ -889,3 +889,68 @@
   (before/after spawn.json, post-fork pre-exec, post-wait pre-write,
   post-write pre-reap, ENOSPC, stale socket, spoofed spawn.json,
   boot_id flip).
+- DL-43 Phase 11a landed: engine determinism pins (2026-07-11; found and
+  decided during implementation, all within DL-41's frame; runner.py's
+  module docstring is normative detail). Decisions: (1) The engine's event
+  queue is TIME-ORDERED -- (at, arrival seq) heap, not FIFO. Found as a
+  bug: pre-injected script events carry future timestamps while adapter
+  completions enqueue at the processed frontier, so FIFO feeds a
+  later-stamped external ahead of an earlier completion and trips the
+  oracle's non-decreasing-feed guard. Arrival seq keeps same-instant
+  ordering deterministic: an injected event beats the completion that
+  enqueues after it. (2) Oracle.advance(now) adopts "the clock reached
+  now": _now advances to `now` even when no timer fires, so a later
+  feed/advance before it errors -- the same discipline feed() applies,
+  extended to idle time. (3) Under VirtualClock the natural-exit vs kill
+  race always resolves to the kill (a terminal decision cancels the
+  adapter task in the gap between sleep resolution and completion
+  enqueue), so the DL-41 stale-completion gate is structurally
+  unreachable through honest virtual flows; it guards the real time
+  domain (11b) and is white-box tested in 11a. (4) FakeAdapter grows an
+  INERT mode (default=None: park forever on a datetime.max sleep) --
+  the bisimulation suite runs it so the SEM scripts keep driving
+  completions themselves, exactly as oracle-direct; instant-success
+  stays the constructor default per the design. (5) Quiescence is
+  decidable via a settle contract: under VirtualClock adapters may block
+  only through ctx.clock.sleep_until, so "every live task is done or
+  holds a pending sleep" (live == pending) means nothing can move
+  without the clock; RealClock (11b) sidesteps settling by blocking on
+  real IO. (6) The ss13 bisimulation gate is realized as an autouse
+  parametrized fixture in test_oracle.py: all SEM trace tests run twice
+  (Oracle-direct vs Engine via tests/bisim_harness.py) with zero test
+  rewrites; the harness caps the virtual clock at each event's timestamp
+  (horizon = ev.at) so the engine never runs ahead of the script --
+  matching the oracle's lazy timer discipline by construction.
+  Post-review amendments (same day; xhigh adversarial review confirmed
+  four bisimulation breaks + one fail-loud violation, all fixed and
+  regression-pinned in test_runner.py ss5): (7) GHOST-RUN GATE: dispatch
+  spawns only on an oracle-DECIDED start, recognized by the run_number
+  bump every real start performs -- an injected CHANGE_STATUS-parity
+  STARTING overwrite re-emits STARTING without bumping and launches
+  nothing (vendor parity: sendevent CHANGE_STATUS rewrites the DB
+  status, no process). (8) FRONTIER RULE: a timer due at or before the
+  already-processed instant stays lazy until the horizon moves time
+  past that instant, then fires back-dated to its due time via
+  advance(frontier) -- zero-delta deadlines (term_run_time 0) match the
+  oracle's post-feed state, and past-due timers (negative offsets lower
+  fine today; possible future lint) no longer trip advance()'s
+  backwards-time check. (9) ZENO GUARD: a condition cycle over instant
+  completions generates unbounded work at one frozen virtual instant
+  (the L010 tight-loop compressed to zero duration); the engine refuses
+  with EngineError after a catalog-scaled same-instant event budget
+  instead of hanging -- a shell-level refusal, never a semantics
+  verdict. (10) FAIL-LOUD CANCELLATION: cancelled adapter tasks move to
+  a reaping list _settle collects; anything a task dies with other than
+  the cancellation itself re-raises (shutdown inspects its gather
+  results the same way) -- no silent loss on teardown paths. (11) The
+  stale gate checks precede clock movement, so a dropped completion is
+  fully inert (no time advance, no sleeper wakes; in the 11b real
+  domain the single-writer loop must not sleep toward a bogus timestamp
+  it will discard). Test-gate hardening from the same review: the
+  feed-only arm of the advance-parity property flushes tail timers by
+  FEEDING (not advancing), emitted-event parity compares the full
+  model_dump including `at`, the engine-bisim vocabulary covers
+  non-terminal injected statuses, harnesses close per hypothesis
+  example, teardown survives a failing close, and a meta-test enforces
+  that every SEM test routes through the oracle() helper (the gate
+  cannot silently shrink).
