@@ -454,25 +454,33 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             nonlocal hold_next_list, next_token
-            while True:
-                line = await reader.readline()
-                if not line:
-                    break
-                req = json.loads(line)
-                cmd = req.get("cmd")
-                if cmd == "ACQUIRE":
-                    resp = {"ok": True, "token": next_token, "expires_at": "t"}
-                    next_token += 1
-                elif cmd == "LIST":
-                    if hold_next_list:
-                        hold_next_list = False
-                        held.append(writer)  # hold the reply: the client parks
-                        continue
-                    resp = {"ok": True, "version": 1, "runs": [], "which": "fresh"}
-                else:
-                    resp = {"ok": True, "version": 1}
-                writer.write(json.dumps(resp).encode("utf-8") + b"\n")
-                await writer.drain()
+            try:
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    req = json.loads(line)
+                    cmd = req.get("cmd")
+                    if cmd == "ACQUIRE":
+                        resp = {"ok": True, "token": next_token, "expires_at": "t"}
+                        next_token += 1
+                    elif cmd == "LIST":
+                        if hold_next_list:
+                            hold_next_list = False
+                            held.append(writer)  # hold the reply: the client parks
+                            continue
+                        resp = {"ok": True, "version": 1, "runs": [], "which": "fresh"}
+                    else:
+                        resp = {"ok": True, "version": 1}
+                    writer.write(json.dumps(resp).encode("utf-8") + b"\n")
+                    await writer.drain()
+            except OSError:
+                pass  # the poisoned peer vanished mid-exchange (EPIPE via the orphan write)
+            finally:
+                # a handler that exits on EOF leaves the connection half-open;
+                # 3.12's Server.wait_closed() then waits for it FOREVER (the
+                # engine's ControlServer learned this as DL-45 review B1)
+                writer.close()
 
         server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
         client = SupervisorClient(short_root)
@@ -689,7 +697,9 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
 
     status, spawn = asyncio.run(scenario())
     assert status == "TERMINATED"  # spool ladder read terminated/parent-lost
-    assert not pid_alive(spawn["command_pid"])  # the wrapper killed it on EOF
+    # status.json is written BEFORE the wrapper reaps, so the command may
+    # still be a zombie (kill(pid, 0) succeeds) for an instant on a slow box
+    wait_for(lambda: not pid_alive(spawn["command_pid"]))  # the wrapper killed it on EOF
 
 
 def test_oracle_kill_detached_terminates(short_root: Path) -> None:
@@ -735,7 +745,7 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
 
     status, spawn = asyncio.run(scenario())
     assert status == "TERMINATED"
-    assert not pid_alive(spawn["command_pid"])
+    wait_for(lambda: not pid_alive(spawn["command_pid"]))  # zombie until the wrapper reaps
 
 
 def _kill_group(run_root: Path) -> None:

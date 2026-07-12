@@ -72,3 +72,6 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# a wedged test dumps every thread's stack instead of hanging silently (the
+# whole suite runs in ~30s; the v0.2.0 release hang burned a 6h CI slot mute)
+faulthandler_timeout = 120

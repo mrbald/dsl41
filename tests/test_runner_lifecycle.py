@@ -237,7 +237,9 @@ def test_wrapper_graceful_sigterm_reaches_command_on_parent_loss(tmp_path: Path)
     assert status["cause"] == "parent lost"
     assert status["observed"] == {"outcome": "signaled", "signal": signal.SIGTERM}
     spawn = read_json(run_dir / "spawn.json")
-    assert not pid_alive(spawn["command_pid"])
+    # status.json lands BEFORE the wrapper reaps: the command may still be a
+    # zombie (kill(pid, 0) succeeds) for an instant on a slow box
+    wait_for(lambda: not pid_alive(spawn["command_pid"]))
 
 
 def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
@@ -545,7 +547,7 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
         assert status["outcome"] == "terminated"
         assert status["cause"] == "parent lost"
         spawn = read_json(run_root / "runs" / f"{job}.1" / "spawn.json")
-        assert not pid_alive(spawn["command_pid"])
+        wait_for(lambda: not pid_alive(spawn["command_pid"]))  # zombie until the wrapper reaps
 
     from runner_crash_driver import CRASH_JIL
 

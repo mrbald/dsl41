@@ -3,6 +3,10 @@
 # three pre-phase-11 files never adopted formatter output, so the formatter
 # is local discipline for touched files only until a repo-wide format lands.
 # README's "tests" brick badges this workflow.
+#
+# The python matrix is deliberate, not ceremony: the v0.2.0 release hang was a
+# 3.12-only asyncio Server.wait_closed() behavior that 3.14 dev boxes never see.
+# timeout-minutes converts any future hang into a fast red X instead of a 6h burn.
 
 name: tests
 
@@ -14,9 +18,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
       - run: uv run mypy src
