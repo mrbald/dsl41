@@ -346,7 +346,15 @@ WARN prints, journals, and runs. Every rule ships the house fixture pair.
 
 ERROR:
 - `job_type` outside {CMD, BOX, FW}.
-- `machine` set and not local (None, `localhost`, or the local hostname).
+- `machine` set and not local. The name is resolved through `insert_machine`
+  first (DL-49): an agent's `node_name`, a real machine's `node_name`/name, or
+  a virtual pool's members (local iff ALL members are local; a split pool is
+  ERROR under `--machine-policy strict`, a WARN under `local-eligible`). An
+  undefined name compares literally (None/`localhost`/hostname/FQDN, as before).
+  A bad definition (missing `node_name`, empty pool, undefined/nested member,
+  unknown/missing type) is ERROR — never guessed. Resolution is preflight-only
+  and shell-side; the bisimulation gate is untouched. Remote dispatch (routing
+  a foreign machine to another box) stays a §12 non-goal.
 - `owner` set and not the invoking user.
 - `run_calendar` / `exclude_calendar` present (definitions unmodeled).
 - `timezone` not resolvable in `zoneinfo`.

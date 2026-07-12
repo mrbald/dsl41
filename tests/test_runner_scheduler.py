@@ -29,9 +29,11 @@ from dsl41.runner import (
     RealClock,
     Scheduler,
     VirtualClock,
+    _local_names,
     and_success_skeleton,
     preflight,
     read_journal,
+    resolve_machine,
     resume_run,
     start_run,
 )
@@ -526,6 +528,126 @@ def test_preflight_machine_accepts_none_localhost_and_local_hostname() -> None:
     )
     items = preflight(lower_source(text))
     assert not any(i.code == "machine" for i in items)
+
+
+def _one_local_name() -> str:
+    """A hostname the runner accepts as this host, for building fixtures
+    whose machines deterministically resolve local (DL-49)."""
+    return socket_mod.gethostname()
+
+
+def test_preflight_machine_resolves_agent_node_name_to_local() -> None:
+    # A job pinned to an agent whose node_name IS this host must run, even
+    # though the agent's logical name is not a hostname (DL-49).
+    host = _one_local_name()
+    text = (
+        f"insert_machine: unixagent\ntype: a\nnode_name: {host}\n\n"
+        "insert_job: m_job\njob_type: c\ncommand: x\nmachine: unixagent\n"
+    )
+    items = preflight(lower_source(text))
+    assert not any(i.code == "machine" for i in items)
+
+
+def test_preflight_machine_rejects_agent_whose_node_name_is_foreign() -> None:
+    text = (
+        "insert_machine: unixagent\ntype: a\nnode_name: some-other-host.example.com\n\n"
+        "insert_job: m_job\njob_type: c\ncommand: x\nmachine: unixagent\n"
+    )
+    items = preflight(lower_source(text))
+    assert any(i.code == "machine" and i.severity == "ERROR" and i.job == "m_job" for i in items)
+
+
+def test_preflight_machine_accepts_all_local_virtual_pool() -> None:
+    # The reported bug: a job on a `type: v` pool whose members all resolve
+    # to this host was refused ("machine X is not this host"). It must run.
+    host = _one_local_name()
+    text = (
+        f"insert_machine: a1\ntype: a\nnode_name: {host}\n\n"
+        f"insert_machine: a2\ntype: a\nnode_name: {host}\n\n"
+        "insert_machine: pool\ntype: v\nmachine: a1\nmachine: a2\n\n"
+        "insert_job: m_job\njob_type: c\ncommand: x\nmachine: pool\n"
+    )
+    items = preflight(lower_source(text))
+    assert not any(i.code == "machine" for i in items)
+
+
+def test_preflight_machine_mixed_pool_strict_refuses_local_eligible_warns() -> None:
+    host = _one_local_name()
+    text = (
+        f"insert_machine: here\ntype: a\nnode_name: {host}\n\n"
+        "insert_machine: there\ntype: a\nnode_name: elsewhere.example.com\n\n"
+        "insert_machine: pool\ntype: v\nmachine: here\nmachine: there\n\n"
+        "insert_job: m_job\njob_type: c\ncommand: x\nmachine: pool\n"
+    )
+    catalog = lower_source(text)
+    strict = preflight(catalog)  # default machine_policy="strict"
+    assert any(i.code == "machine" and i.severity == "ERROR" for i in strict)
+    lenient = preflight(catalog, machine_policy="local-eligible")
+    assert not any(i.severity == "ERROR" for i in lenient)
+    assert any(i.code == "machine-mixed" and i.severity == "WARN" for i in lenient)
+
+
+def test_preflight_machine_errors_on_malformed_definitions() -> None:
+    cases = {
+        "no_node": "insert_machine: no_node\ntype: a\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: no_node\n",
+        "empty_pool": "insert_machine: p\ntype: v\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: p\n",
+        "undefined_member": "insert_machine: p\ntype: v\nmachine: ghost\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: p\n",
+        "no_type": "insert_machine: m\nnode_name: whatever\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m\n",
+    }
+    for label, text in cases.items():
+        items = preflight(lower_source(text))
+        assert any(i.code == "machine" and i.severity == "ERROR" for i in items), label
+
+
+def test_resolve_machine_verdicts_direct() -> None:
+    local = frozenset({"localhost", "thisbox", "thisbox.example.com"})
+    text = (
+        "insert_machine: here\ntype: a\nnode_name: thisbox.example.com\n\n"
+        "insert_machine: there\ntype: a\nnode_name: otherbox.example.com\n\n"
+        "insert_machine: all_local\ntype: v\nmachine: here\n\n"
+        "insert_machine: mixed\ntype: v\nmachine: here\nmachine: there\n\n"
+        "insert_machine: nested\ntype: v\nmachine: all_local\n"
+    )
+    machines = lower_source(text).machines
+    assert resolve_machine("here", machines, local).verdict == "local"
+    assert resolve_machine("there", machines, local).verdict == "foreign"
+    assert resolve_machine("all_local", machines, local).verdict == "local"
+    assert resolve_machine("mixed", machines, local).verdict == "mixed"
+    assert resolve_machine("nested", machines, local).verdict == "error"  # no v-in-v
+    # undefined name falls back to a literal host comparison (back-compat)
+    assert resolve_machine("thisbox", machines, local).verdict == "local"
+    assert resolve_machine("nope.example.com", machines, local).verdict == "foreign"
+
+
+def test_local_names_includes_hostname_and_localhost() -> None:
+    names = _local_names()
+    assert "localhost" in names
+    assert socket_mod.gethostname().lower() in names
+
+
+def test_resolve_machine_unquotes_node_name() -> None:
+    # review: a quoted node_name is a hostname, not opaque text -- it must
+    # resolve, not be compared with the quotes still on.
+    local = frozenset({"localhost", "thisbox"})
+    machines = lower_source('insert_machine: m\ntype: a\nnode_name: "thisbox"\n').machines
+    assert resolve_machine("m", machines, local).verdict == "local"
+
+
+def test_resolve_machine_uppercase_node_name_key_resolves() -> None:
+    # review: NODE_NAME (any case) must resolve, not read as a missing node.
+    local = frozenset({"localhost", "thisbox"})
+    machines = lower_source("insert_machine: m\ntype: a\nNODE_NAME: thisbox\n").machines
+    assert resolve_machine("m", machines, local).verdict == "local"
+
+
+def test_resolve_machine_empty_node_name_is_error_not_foreign() -> None:
+    local = frozenset({"localhost", "thisbox"})
+    machines = lower_source('insert_machine: m\ntype: a\nnode_name: ""\n').machines
+    assert resolve_machine("m", machines, local).verdict == "error"
 
 
 def test_preflight_owner_rejects_a_different_user() -> None:

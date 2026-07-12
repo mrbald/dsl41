@@ -34,6 +34,7 @@ from dsl41.ir import (
     JobIR,
     LoweringError,
     MachineIR,
+    MachineMember,
     ResourceIR,
     ScheduleBlock,
     Semantics,
@@ -350,6 +351,59 @@ def test_machines_xinst_targeted() -> None:
     # DL-28: TechDocs-12.x connection plumbing (xmachine is doc-required)
     # is carried verbatim, MachineIR-style, never refused.
     assert prd.attrs == {"xmachine": "prdscheduler.example.com", "xport": "9000"}
+
+
+def test_machine_virtual_pool_members_are_captured() -> None:
+    # DL-49: repeated machine: lines (a virtual pool / real pool) survive
+    # lowering as ordered members, each carrying its own factor/max_load;
+    # machine-level attrs stay in .attrs.
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "machines_virtual_pool.jil")])
+    pool = catalog.machines["batch_pool"]
+    assert pool.machine_type == "v"
+    assert pool.attrs == {}
+    assert pool.members == [
+        MachineMember(name="agent_a", attrs={"factor": "1.0", "max_load": "100"}),
+        MachineMember(name="agent_b", attrs={"factor": "2.0", "max_load": "200"}),
+    ]
+    # a plain agent has no members; its own factor/max_load stay machine-level
+    assert catalog.machines["agent_a"].members == []
+    assert catalog.machines["agent_a"].attrs == {"node_name": "boxa.example.com"}
+
+
+def test_machine_comma_separated_members() -> None:
+    catalog = lower_source("insert_machine: p\ntype: v\nmachine: a, b\n")
+    assert [m.name for m in catalog.machines["p"].members] == ["a", "b"]
+
+
+def test_machine_rejects_duplicate_non_pool_attribute() -> None:
+    # Only the pool member lines repeat; a duplicated machine-level attribute
+    # is still a lowering error (DL-49 keeps _collect_attrs's guard for these).
+    with pytest.raises(LoweringError):
+        lower_source("insert_machine: m\ntype: a\nnode_name: h1\nnode_name: h2\n")
+
+
+def test_machine_rejects_duplicate_type() -> None:
+    with pytest.raises(LoweringError):
+        lower_source("insert_machine: m\ntype: a\ntype: v\n")
+
+
+def test_machine_duplicate_attr_is_case_insensitive() -> None:
+    # review MAJOR: NODE_NAME + node_name must not both survive (silent last-
+    # wins loss + a resolver false-accept path). Keys lower-fold for the guard.
+    with pytest.raises(LoweringError):
+        lower_source("insert_machine: m\ntype: a\nNODE_NAME: h1\nnode_name: h2\n")
+
+
+def test_machine_attr_keys_are_lowercased() -> None:
+    catalog = lower_source("insert_machine: m\ntype: a\nNODE_NAME: host.example.com\n")
+    assert catalog.machines["m"].attrs == {"node_name": "host.example.com"}
+
+
+def test_machine_empty_member_line_is_an_error() -> None:
+    # review: an empty `machine:` must not vanish (silent loss / hash-equal to
+    # absence).
+    with pytest.raises(LoweringError):
+        lower_source("insert_machine: p\ntype: v\nmachine:\n")
 
 
 # ------------------------------------------- 3b. sem24_status_resource.jil (DL-18)

@@ -205,7 +205,7 @@ from pydantic import BaseModel
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
 from dsl41.conditions import And, Cond, Paren, StatusAtom, iter_atoms
-from dsl41.ir import CatalogIR, ExecSpec, FwSpec, JobIR, ScheduleBlock
+from dsl41.ir import CatalogIR, ExecSpec, FwSpec, JobIR, MachineIR, ScheduleBlock, _unquote
 from dsl41.oracle import _TERMINAL, Event, EventKind, JobRuntime, JobStatus, Oracle, OracleError
 
 #: the ss6a Tier-0 shim, executed by file path (never -m; see its docstring)
@@ -2198,6 +2198,99 @@ def _local_names() -> frozenset[str]:
     return frozenset({"localhost", hostname, hostname.split(".")[0], fqdn})
 
 
+#: Machine `type:` values the resolver understands (DL-49). Anything else --
+#: including a missing type -- is refused, never guessed (Goal-1 plan, codex).
+_KNOWN_MACHINE_TYPES = frozenset({"a", "r", "n", "v"})
+
+MachineVerdict = Literal["local", "foreign", "mixed", "error"]
+
+MachinePolicy = Literal["strict", "local-eligible"]
+
+
+@dataclass(frozen=True)
+class MachineResolution:
+    """Outcome of resolving a job's `machine:` through `insert_machine`
+    (DL-49). `detail` carries the resolved host (local/foreign), a human
+    reason (error), or the pool summary (mixed) -- straight into the
+    preflight message and, later, the run journal / dispatch router."""
+
+    verdict: MachineVerdict
+    detail: str
+
+
+def _node_name(machine: MachineIR) -> str | None:
+    """The machine's node_name, semantically unquoted (a hostname never
+    carries quotes) -- node_name feeds host resolution, so it must not be
+    read as the raw opaque carry (review: quoted node_name false-refused)."""
+    raw = machine.attrs.get("node_name")
+    return _unquote(raw) if raw else None
+
+
+def _leaf_host(machine: MachineIR) -> tuple[str | None, str | None]:
+    """Effective host of a NON-virtual machine: (host, error). Agents must
+    carry node_name (no guessing); real machines fall back to the record
+    name. A missing/unknown type is a refusal, not a default."""
+    kind = (machine.machine_type or "").lower()
+    if kind == "a":
+        node = _node_name(machine)
+        if not node:
+            return None, f"agent machine {machine.name!r} has no node_name to resolve its host"
+        return node, None
+    if kind in ("r", "n"):
+        return (_node_name(machine) or machine.name), None
+    if kind == "":
+        return None, f"machine {machine.name!r} has no type (add type: a|r|n|v)"
+    return None, f"machine {machine.name!r} has unsupported type {machine.machine_type!r}"
+
+
+def resolve_machine(
+    name: str, machines: Mapping[str, MachineIR], local: frozenset[str]
+) -> MachineResolution:
+    """Resolve a job's `machine:` name to a placement verdict against the
+    local host, honouring `insert_machine` (DL-49). Undefined names compare
+    literally (back-compat); agents/real machines resolve through
+    node_name; a virtual machine is local iff ALL members are local, foreign
+    iff none are, else mixed. Bad definitions (missing type, undefined /
+    nested / typeless member, empty pool) are `error`, never guessed."""
+    machine = machines.get(name)
+    if machine is None:
+        return MachineResolution("local" if name.lower() in local else "foreign", name)
+    kind = (machine.machine_type or "").lower()
+    if kind and kind not in _KNOWN_MACHINE_TYPES:
+        return MachineResolution("error", f"machine {name!r} has unsupported type {machine.machine_type!r}")
+    if kind != "v":
+        host, err = _leaf_host(machine)
+        if err is not None:
+            return MachineResolution("error", err)
+        assert host is not None
+        return MachineResolution("local" if host.lower() in local else "foreign", host)
+    # virtual machine: resolve every member leaf, then fold (any-of).
+    if not machine.members:
+        return MachineResolution("error", f"virtual machine {name!r} has no member machines")
+    members_local: list[bool] = []
+    for member in machine.members:
+        leaf = machines.get(member.name)
+        if leaf is None:
+            return MachineResolution(
+                "error", f"virtual machine {name!r} member {member.name!r} is not defined"
+            )
+        if (leaf.machine_type or "").lower() == "v":
+            return MachineResolution(
+                "error", f"virtual machine {name!r} member {member.name!r} is itself virtual (no nesting)"
+            )
+        host, err = _leaf_host(leaf)
+        if err is not None:
+            return MachineResolution("error", f"virtual machine {name!r}: {err}")
+        assert host is not None
+        members_local.append(host.lower() in local)
+    count = len(machine.members)
+    if all(members_local):
+        return MachineResolution("local", f"virtual pool {name!r} ({count} member(s), all local)")
+    if not any(members_local):
+        return MachineResolution("foreign", f"virtual pool {name!r} ({count} member(s), none local)")
+    return MachineResolution("mixed", f"virtual pool {name!r} ({count} member(s), some remote)")
+
+
 def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
     """job -> success-predecessors reachable through AND/Paren spines only
     (an s() atom under an OR is an alternative, not a hard dependency).
@@ -2228,11 +2321,23 @@ def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
     return skeleton
 
 
-def preflight(catalog: CatalogIR, *, execution: bool = True) -> list[PreflightItem]:
+def preflight(
+    catalog: CatalogIR,
+    *,
+    execution: bool = True,
+    machine_policy: MachinePolicy = "strict",
+) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
     the machine/owner identity rules -- they guard real processes, and the
     FakeAdapter runs none -- while everything the scheduler and oracle
-    depend on (calendars, timezones, construction) still gates."""
+    depend on (calendars, timezones, construction) still gates.
+
+    `machine_policy` (DL-49) governs the one ambiguous machine verdict: a
+    virtual pool with SOME members on this host and some elsewhere. `strict`
+    (default) refuses it -- placement among members is unmodelled;
+    `local-eligible` runs it here with a WARN that pool placement was
+    ignored. Unambiguous verdicts (all-local, none-local, bad definition)
+    ignore the policy."""
     items: list[PreflightItem] = []
     local = _local_names()
     user = getpass.getuser()
@@ -2249,16 +2354,43 @@ def preflight(catalog: CatalogIR, *, execution: bool = True) -> list[PreflightIt
             )
         spec = job.exec_
         if execution and spec is not None and spec.machine is not None:
-            if spec.machine.lower() not in local:
+            resolution = resolve_machine(spec.machine, catalog.machines, local)
+            if resolution.verdict == "foreign":
                 items.append(
                     PreflightItem(
                         severity="ERROR",
                         code="machine",
                         job=name,
-                        message=f"machine {spec.machine!r} is not this host"
-                        f" (accepted: {', '.join(sorted(local))}); no remote fabric (ss12)",
+                        message=f"machine {spec.machine!r} resolves to {resolution.detail},"
+                        f" not this host (accepted: {', '.join(sorted(local))});"
+                        " no remote fabric (ss12)",
                     )
                 )
+            elif resolution.verdict == "error":
+                items.append(
+                    PreflightItem(severity="ERROR", code="machine", job=name, message=resolution.detail)
+                )
+            elif resolution.verdict == "mixed":
+                if machine_policy == "local-eligible":
+                    items.append(
+                        PreflightItem(
+                            severity="WARN",
+                            code="machine-mixed",
+                            job=name,
+                            message=f"{resolution.detail}: running here"
+                            " (--machine-policy local-eligible); pool placement ignored",
+                        )
+                    )
+                else:
+                    items.append(
+                        PreflightItem(
+                            severity="ERROR",
+                            code="machine",
+                            job=name,
+                            message=f"{resolution.detail}; refusing"
+                            " (--machine-policy local-eligible to run it here)",
+                        )
+                    )
         if execution and spec is not None and spec.owner is not None and spec.owner != user:
             items.append(
                 PreflightItem(

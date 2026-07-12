@@ -215,6 +215,22 @@ def test_hash_is_stable_across_identical_parses() -> None:
     assert catalog_hash(lower_source(text)) == catalog_hash(lower_source(text))
 
 
+def test_virtual_pool_membership_is_not_false_equal() -> None:
+    # DL-49: two catalogs differing only in a virtual pool's members must not
+    # hash-equal (machine defs feed catalog_hash and tier a) -- silent loss
+    # of a component would otherwise read as "equivalent".
+    a = lower_source(
+        "insert_machine: h1\ntype: a\nnode_name: n1\n\n"
+        "insert_machine: pool\ntype: v\nmachine: h1\n"
+    )
+    b = lower_source(
+        "insert_machine: h1\ntype: a\nnode_name: n1\n\n"
+        "insert_machine: h2\ntype: a\nnode_name: n2\n\n"
+        "insert_machine: pool\ntype: v\nmachine: h1\nmachine: h2\n"
+    )
+    assert catalog_hash(a) != catalog_hash(b)
+
+
 def test_hash_ignores_an_annotation_difference() -> None:
     a = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndescription: foo\n")
     b = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndescription: bar\n")

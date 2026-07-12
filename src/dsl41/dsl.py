@@ -246,7 +246,17 @@ class CatalogBuilder:
         self._statements.append(f"insert_global: {name}\nvalue: {value}\n")
         return self
 
-    def machine(self, name: str, /, *, type: str | None = None, **attrs: str) -> CatalogBuilder:
+    def machine(
+        self,
+        name: str,
+        members: list[tuple[str, dict[str, str]]] | None = None,
+        /,
+        *,
+        type: str | None = None,
+        **attrs: str,
+    ) -> CatalogBuilder:
+        # `members` is positional-only so an opaque machine attr literally named
+        # `members` routes to **attrs instead of colliding (DL-49, review).
         _check_name("machine", name)
         lines = [f"insert_machine: {name}"]
         if type is not None:
@@ -255,6 +265,15 @@ class CatalogBuilder:
             if not _KEY_RE.match(key):
                 raise DslError(f"machine attribute key {key!r} is not JIL-key-shaped")
             lines.append(f"{key}: {_check_value('machine attribute', value)}")
+        # Virtual pool / real pool members: each `machine:` line plus its own
+        # factor/max_load, in order (DL-49). Emitted after machine-level attrs
+        # so re-lowering re-attaches per-member attrs to their member.
+        for member_name, member_attrs in members or []:
+            lines.append(f"machine: {_check_value('machine member', member_name)}")
+            for key, value in member_attrs.items():
+                if not _KEY_RE.match(key):
+                    raise DslError(f"machine member attribute key {key!r} is not JIL-key-shaped")
+                lines.append(f"{key}: {_check_value('machine member attribute', value)}")
         self._statements.append("\n".join(lines) + "\n")
         return self
 
@@ -1137,7 +1156,19 @@ def decompile(
     for name, machine in catalog.machines.items():
         kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type is not None else []
         kwargs += _record_kwargs(machine.attrs)
-        lines.append(f"c.machine({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
+        # Pool members (DL-49) pass as the positional-only 2nd arg -- so an
+        # opaque attr named `members` (routed above as a kwarg) never collides.
+        pos = ""
+        if machine.members:
+            member_lits = ", ".join(
+                f"({_py(m.name)}, {{"
+                + ", ".join(f"{_py(k)}: {_py(v)}" for k, v in m.attrs.items())
+                + "})"
+                for m in machine.members
+            )
+            pos = f", [{member_lits}]"
+        tail = (", " + ", ".join(kwargs)) if kwargs else ""
+        lines.append(f"c.machine({_py(name)}{pos}{tail})")
     for name, resource in catalog.resources.items():
         kwargs = [f"res_type={_py(resource.res_type)}"] if resource.res_type is not None else []
         kwargs += _record_kwargs(resource.attrs)

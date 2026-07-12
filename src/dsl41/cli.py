@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import typer
 
@@ -536,12 +536,19 @@ def viz(
 # (preflight ERROR, resume gate, unreadable scenario, unreachable socket).
 
 
-def _preflight_or_exit(catalog: CatalogIR, *, execution: bool) -> list:
+def _preflight_or_exit(
+    catalog: CatalogIR, *, execution: bool, machine_policy: str = "strict"
+) -> list:
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
     journals them next to the run -- WARN prints, journals, and runs)."""
-    from dsl41.runner import preflight
+    from dsl41.runner import MachinePolicy, preflight
 
-    items = preflight(catalog, execution=execution)
+    if machine_policy not in ("strict", "local-eligible"):
+        typer.echo(f"--machine-policy {machine_policy!r}: expected strict|local-eligible", err=True)
+        raise typer.Exit(2)
+    items = preflight(
+        catalog, execution=execution, machine_policy=cast("MachinePolicy", machine_policy)
+    )
     for item in items:
         target = f" {item.job}" if item.job else ""
         typer.echo(
@@ -609,6 +616,15 @@ def run(
         " engine restart reattaches instead of killing them; stopping the engine"
         " leaves jobs running -- resume with --resume --detached.",
     ),
+    machine_policy: str = typer.Option(
+        "strict",
+        "--machine-policy",
+        help="How to treat a job on a virtual pool split across this host and"
+        " others: 'strict' (default) refuses it; 'local-eligible' runs it here"
+        " with a WARN (pool placement ignored). Machines are resolved through"
+        " insert_machine (node_name / members); a job pinned to another host is"
+        " always refused (DL-49).",
+    ),
     timezone: str = _TIMEZONE_OPT,
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
@@ -626,7 +642,7 @@ def run(
     if ui:
         _import_tui_or_exit_2()  # fail before the engine starts, not after
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
-    warns = _preflight_or_exit(catalog, execution=True)
+    warns = _preflight_or_exit(catalog, execution=True, machine_policy=machine_policy)
     _check_base_tz(timezone)
     from dsl41.runner import EngineError
 

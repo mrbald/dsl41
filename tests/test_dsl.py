@@ -143,6 +143,27 @@ def test_cond_to_source_preserves_exact_structure_not_just_semantics() -> None:
 # ------------------------------------------------------------------------- builder
 
 
+def test_decompile_roundtrips_a_virtual_pool_machine() -> None:
+    # DL-49: c.machine(members=[...]) expresses the repeated member lines, so
+    # a virtual pool survives the decompile -> exec -> rebuild round-trip.
+    catalog = lower_source(
+        "insert_machine: a1\ntype: a\nnode_name: n1\n\n"
+        "insert_machine: pool\ntype: v\nmachine: a1\nfactor: 1.0\nmax_load: 100\n"
+    )
+    rebuilt = roundtrip(catalog)
+    assert rebuilt.machines["pool"].members == catalog.machines["pool"].members
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+def test_decompile_roundtrips_an_opaque_members_attribute() -> None:
+    # review: an opaque attr literally named `members` must not collide with
+    # the pool-member builder param -- it routes through the **{} splat.
+    catalog = lower_source("insert_machine: m\ntype: a\nmembers: opaque\n")
+    rebuilt = roundtrip(catalog)
+    assert rebuilt.machines["m"].attrs == {"members": "opaque"}
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
 def test_builder_four_combinators_end_to_end() -> None:
     c = CatalogBuilder()
     c.global_("FLAG", "go")

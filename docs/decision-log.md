@@ -1419,3 +1419,37 @@
   hardening); the unbounded request-line buffer and the blocking spec write
   are same-uid-only surfaces, theoretical; the _refuse_if_live unlink race
   is unreachable while the engine is the only spawner.
+- DL-49 insert_machine virtual/real pools + runner machine resolution
+  (2026-07-12; codex gpt-5.6-sol consulted, plan agreed before build).
+  Two coupled fixes for a `dsl41 run` refusal ("machine X is not this
+  host") on a job pinned to a `type: v` pool:
+  (1) Lowering: a virtual machine / real pool lists members on repeated
+  `machine:` lines, each with its own `factor:`/`max_load:`. `_collect_attrs`
+  rejected the repeats. `_lower_machine` now walks attrs in source order --
+  `type` stays singular; each `machine:` opens a `MachineMember` (comma-lists
+  split); `factor`/`max_load` bind to the most recent member, or are
+  machine-level when no member has opened yet (a lone agent's own values);
+  every OTHER key stays single (a duplicate is still a lowering error). So
+  machines cease to be FULLY opaque (amends DL-18/28): `members` is typed and
+  ordered, the rest stays verbatim. equiv compares members order-sensitively
+  (a reorder / dropped component is a real difference, never false-equal);
+  catalog_hash covers them. The DSL builder gained `machine(members=[...])`
+  and the decompiler emits it, so pools round-trip (no DL-40 refusal needed).
+  (2) Resolver (runner.resolve_machine, DL-49): before the local-host check,
+  a job's `machine:` resolves through insert_machine. Undefined name ->
+  literal compare (back-compat). Agent (type a) -> node_name (MISSING
+  node_name is an ERROR, never guessed). Real (r/n) -> node_name else the
+  record name. Virtual (v) -> resolve every member leaf: ALL local -> run,
+  NONE -> refuse (foreign), MIX -> refuse under `--machine-policy strict`
+  (default) or run+WARN under `local-eligible` (pool placement is unmodelled
+  -- codex: resolution/placement/routing/lifecycle are four layers, don't
+  collapse them). Bad defs (empty pool, undefined/nested/typeless member,
+  unknown/missing type) are ERROR. Resolution is preflight-only and shell-
+  side, so the bisimulation gate is untouched (FakeAdapter still emits the
+  same completions; rehearse skips machine rules). Dispatch routing +
+  journaling the chosen leaf are Goal-2 (distributed) concerns, deferred.
+  Distributed engine/agents (a `dsl41 run` on separate boxes) was scoped as
+  a FUTURE track: keep the frozen ss5 supervisor as the LOCAL substrate,
+  add a new network agent in front of it (do not network-expose ss5 -- its
+  spool-as-truth/in-memory-fence/same-uid assumptions are local); machine ->
+  endpoint routing lives in operator config, not JIL. No code v1.

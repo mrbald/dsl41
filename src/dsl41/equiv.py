@@ -75,7 +75,7 @@ from dsl41.conditions import (
     iter_atoms,
 )
 from dsl41.derive import derive_graph
-from dsl41.ir import CatalogIR, JobIR, Time
+from dsl41.ir import CatalogIR, JobIR, MachineIR, Time
 from dsl41.oracle import Event, Oracle, TraceEntry
 
 STATE_CEILING = 2**18
@@ -303,8 +303,13 @@ def equivalent_tier_a(
     globals_equal = a.globals_declared == b.globals_declared
     if not globals_equal:
         detail["<globals>"] = "globals_declared differ"
-    machines_equal = {m: (v.machine_type, v.attrs) for m, v in a.machines.items()} == {
-        m: (v.machine_type, v.attrs) for m, v in b.machines.items()
+    def _machine_key(v: MachineIR) -> tuple:
+        # members are ordered (DL-49); compare order-sensitively -- a reorder
+        # or a dropped component is a real difference, never false-equal.
+        return (v.machine_type, v.attrs, [(mm.name, mm.attrs) for mm in v.members])
+
+    machines_equal = {m: _machine_key(v) for m, v in a.machines.items()} == {
+        m: _machine_key(v) for m, v in b.machines.items()
     }
     if not machines_equal:
         detail["<machines>"] = "machine definitions differ"

@@ -1,0 +1,21 @@
+/* Virtual machine pool (type v) with repeated machine: members, each with
+   its own factor/max_load (DL-49; Broadcom AE 12.x insert_machine syntax).
+   The repeated member lines are the shape that used to fail AST->IR-F
+   lowering. One attribute per line: the one-line multi-pair form is a
+   deliberate rule-4b refusal (DL-30). */
+insert_machine: agent_a
+type: a
+node_name: boxa.example.com
+
+insert_machine: agent_b
+type: a
+node_name: boxb.example.com
+
+insert_machine: batch_pool
+type: v
+machine: agent_a
+factor: 1.0
+max_load: 100
+machine: agent_b
+factor: 2.0
+max_load: 200

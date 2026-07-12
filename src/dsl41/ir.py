@@ -418,12 +418,26 @@ class JobIR(BaseModel):
                 yield attr_name, cond, getattr(self.sem, f"{attr_name}_span")
 
 
+class MachineMember(BaseModel):
+    """One component machine of a virtual machine (type v) or real-machine
+    pool: a `machine:` line plus its trailing per-member `factor:`/`max_load:`
+    (DL-49). Placement/load semantics stay opaque v1 -- the runner's machine
+    resolver reads `name` only (factor/max_load carried, not interpreted)."""
+
+    name: str
+    attrs: dict[str, str] = {}  # per-member factor/max_load, verbatim
+
+
 class MachineIR(BaseModel):
     """insert_machine record; resource/placement semantics are opaque v1
-    (dossier ss5), so everything beyond the name/type is carried verbatim."""
+    (dossier ss5), so everything beyond the name/type/members is carried
+    verbatim. `members` holds the repeated `machine:` component lines a
+    virtual machine / real pool declares (DL-49); machine-level attributes
+    (node_name, ...) stay in `attrs`. Non-pool machines have members=[]."""
 
     name: str
     machine_type: str | None = None  # JIL `type:` -- r(eal)/v(irtual)/a(gent), verbatim
+    members: list[MachineMember] = []
     attrs: dict[str, str] = {}
     span: SourceSpan | None = None
 
@@ -1254,21 +1268,71 @@ class _Lowerer:
         # unquoted so it compares equal to unquoted value() condition comparands
         self.globals_declared[name] = _unquote(value.raw_value)
 
+    #: Per-member pool attributes that legitimately repeat inside one
+    #: insert_machine (once per component machine, DL-49). Every other
+    #: attribute key stays single -- a duplicate is a lowering error.
+    _MACHINE_MEMBER_ATTRS = frozenset({"factor", "max_load"})
+
     def _lower_machine(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "machine")
-        attrs = self._collect_attrs(stmt)
-        if name is None or attrs is None:
+        if name is None:
             return
         if name in self.machines:
             self.err(f"duplicate insert_machine {name!r}", stmt.span)
             return
-        machine_type = None
-        if (attr := attrs.pop("type", None)) is not None:
-            machine_type = _unquote(attr.raw_value)
+        # Walk attributes in source order (NOT _collect_attrs -- a virtual
+        # machine / real pool repeats `machine:` and its per-member
+        # factor/max_load, DL-49). `type` is singular; each `machine:` line
+        # opens a component; factor/max_load bind to the most recent
+        # component, or are machine-level when no component has opened yet
+        # (a single agent's own factor/max_load).
+        machine_type: str | None = None
+        members: list[MachineMember] = []
+        level_attrs: dict[str, str] = {}
+        current: MachineMember | None = None
+        ok = True
+        for attr in stmt.attrs:
+            key = attr.key.lower()
+            value = attr.raw_value.strip()
+            if key == "type":
+                if machine_type is not None:
+                    self.err("duplicate attribute 'type' in one insert_machine", attr.span)
+                    ok = False
+                    continue
+                machine_type = _unquote(attr.raw_value)
+            elif key == "machine":
+                opened = len(members)
+                for member in (m.strip() for m in value.split(",")):
+                    if member:
+                        members.append(MachineMember(name=member))
+                if len(members) == opened:  # empty `machine:` line -- no member, no silent loss
+                    self.err("empty 'machine:' pool-member line", attr.span)
+                    ok = False
+                    continue
+                current = members[-1]
+            elif key in self._MACHINE_MEMBER_ATTRS and current is not None:
+                if key in current.attrs:
+                    self.err(f"duplicate {attr.key!r} for pool member {current.name!r}", attr.span)
+                    ok = False
+                    continue
+                current.attrs[key] = value
+            else:
+                # Key stored lowercased (like _collect_attrs) so the duplicate
+                # guard is case-insensitive and the resolver's node_name lookup
+                # cannot miss an upper/mixed-case spelling (review: no silent
+                # dup, no false accept).
+                if key in level_attrs:
+                    self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+                    ok = False
+                    continue
+                level_attrs[key] = value
+        if not ok:
+            return
         self.machines[name] = MachineIR(
             name=name,
             machine_type=machine_type,
-            attrs={a.key: a.raw_value.strip() for a in attrs.values()},
+            members=members,
+            attrs=level_attrs,
             span=stmt.span,
         )
 
