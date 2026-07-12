@@ -318,6 +318,30 @@ def _mutex_plan(
 # ---------------------------------------------------------------- chart render
 
 
+#: deliberate label-line budget: Mermaid auto-wraps HTML labels at ~200px and
+#: the wrapped text overflows stadium/trigger shapes (GitHub renderer), so the
+#: label owns its line breaks and forbids all others via no-break spaces
+_SCHEDULE_LINE_BUDGET = 28
+
+_NBSP = "\N{NO-BREAK SPACE}"  # survives htmlLabels; degrades to a space in SVG text
+
+
+def _schedule_label_lines(digest: str) -> list[str]:
+    """Non-breaking label lines from a schedule digest: parts (times, days,
+    calendars, timezone) pack left-to-right under the budget, breaking only
+    at part boundaries. A single oversized part stays whole -- a wide node
+    beats a mid-token wrap."""
+    fused = _esc(digest).replace("cal ", f"cal{_NBSP}").replace("excl ", f"excl{_NBSP}")
+    lines: list[str] = []
+    for part in fused.split(" "):
+        packed = f"{lines[-1]} {part}" if lines else part
+        if lines and len(packed.replace(_NBSP, " ")) <= _SCHEDULE_LINE_BUDGET:
+            lines[-1] += f"{_NBSP}{part}"
+        else:
+            lines.append(part)
+    return lines
+
+
 def _node_label(
     name: str,
     graph: DerivedGraph,
@@ -333,11 +357,14 @@ def _node_label(
     display = name[len(strip) :] if strip and name.startswith(strip) else name
     label = _esc(display)
     if meta is not None and meta.kind == "FW":
-        label = f"\N{PAGE FACING UP} {label}"
+        label = f"\N{PAGE FACING UP}{_NBSP}{label}"
     if meta is not None and meta.schedule is not None:
-        label += f"{sep}\N{ALARM CLOCK} {_esc(meta.schedule)}"
+        first, *rest = _schedule_label_lines(meta.schedule)
+        label += f"{sep}\N{ALARM CLOCK}{_NBSP}{first}"
+        for line in rest:
+            label += f"{sep}{line}"
     if name in self_locked:
-        label += f"{sep}\N{LOCK} single-instance"
+        label += f"{sep}\N{LOCK}{_NBSP}single-instance"
     return label
 
 

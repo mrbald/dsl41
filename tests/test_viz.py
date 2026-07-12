@@ -208,7 +208,7 @@ def test_pseudo_node_shapes_and_classes() -> None:
 def test_fw_job_renders_as_stadium_with_trigger_class() -> None:
     text = "insert_job: fwj\njob_type: f\nwatch_file: /tmp/f\nmachine: m1\n"
     mermaid = to_mermaid(graph_of(text))
-    assert 'n0(["\N{PAGE FACING UP} fwj"])' in mermaid
+    assert 'n0(["\N{PAGE FACING UP}\N{NO-BREAK SPACE}fwj"])' in mermaid
     assert "classDef trigger fill:#def7ec,stroke:#046c4e,color:#111" in mermaid
     assert "class n0 trigger" in mermaid
 
@@ -219,7 +219,8 @@ def test_scheduled_job_gets_a_second_label_line() -> None:
         'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
     )
     mermaid = to_mermaid(graph_of(text))
-    assert 'n0["sched<br/>\N{ALARM CLOCK} 10:00 all"]' in mermaid  # plain rect, not a stadium
+    label = 'n0["sched<br/>\N{ALARM CLOCK}\N{NO-BREAK SPACE}10:00\N{NO-BREAK SPACE}all"]'
+    assert label in mermaid  # plain rect, not a stadium
 
 
 def test_fw_job_with_a_schedule_gets_both_stadium_and_second_line() -> None:
@@ -228,7 +229,33 @@ def test_fw_job_with_a_schedule_gets_both_stadium_and_second_line() -> None:
         'date_conditions: 1\ndays_of_week: mo,tu\nstart_times: "06:00"\n'
     )
     mermaid = to_mermaid(graph_of(text))
-    assert 'n0(["\N{PAGE FACING UP} fwj<br/>\N{ALARM CLOCK} 06:00 mo,tu"])' in mermaid
+    label = (
+        'n0(["\N{PAGE FACING UP}\N{NO-BREAK SPACE}fwj<br/>'
+        '\N{ALARM CLOCK}\N{NO-BREAK SPACE}06:00\N{NO-BREAK SPACE}mo,tu"])'
+    )
+    assert label in mermaid
+
+
+def test_long_schedule_digest_breaks_at_part_boundaries_never_mid_token() -> None:
+    """Mermaid auto-wraps HTML labels at ~200px and the wrapped text overflows
+    the node shape (GitHub renderer), so the label owns its breaks: no-break
+    spaces inside each line, <br/> only between schedule parts."""
+    text = (
+        "insert_job: sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: mo,tu,we,th,fr\nstart_times: "06:00, 18:30"\n'
+        "timezone: US/Eastern\n"
+    )
+    mermaid = to_mermaid(graph_of(text))
+    nbsp = "\N{NO-BREAK SPACE}"
+    line = next(ln for ln in mermaid.splitlines() if "\N{ALARM CLOCK}" in ln)
+    label = line.split('"')[1]
+    _, *schedule_lines = label.split("<br/>")
+    assert schedule_lines  # the digest is present
+    for part in schedule_lines:
+        assert " " not in part  # nothing the renderer could re-wrap
+        assert len(part.replace(nbsp, " ")) <= 30  # budget (+ clock prefix) holds
+    assert f"18:30{nbsp}mo,tu,we,th,fr" in label  # times+days pack onto one line
+    assert "US/Eastern" in label  # the overflow part moved to its own line, whole
 
 
 def test_scheduled_box_subgraph_title_stays_single_line() -> None:
@@ -243,8 +270,8 @@ def test_scheduled_box_subgraph_title_stays_single_line() -> None:
     mermaid = to_mermaid(graph_of(text))
     title = next(ln for ln in mermaid.splitlines() if ln.strip().startswith("subgraph"))
     assert "<br/>" not in title
-    assert 'subgraph n0["bx \N{MIDDLE DOT} \N{ALARM CLOCK} 06:00 all"]' in title
-    assert 'n1["m1<br/>\N{ALARM CLOCK} 07:00 all"]' in mermaid
+    assert 'subgraph n0["bx \N{MIDDLE DOT} \N{ALARM CLOCK}\N{NO-BREAK SPACE}06:00\N{NO-BREAK SPACE}all"]' in title
+    assert 'n1["m1<br/>\N{ALARM CLOCK}\N{NO-BREAK SPACE}07:00\N{NO-BREAK SPACE}all"]' in mermaid
 
 
 # --------------------------------------------------------------------------- mutex
@@ -263,7 +290,7 @@ def test_mutex_pair_renders_dotted_lock_link() -> None:
 def test_self_mutex_renders_as_a_badge_not_a_self_link() -> None:
     text = "insert_job: s1\njob_type: c\ncommand: x\nmachine: m1\ncondition: n(s1)\n"
     mermaid = to_mermaid(graph_of(text))
-    assert 'n0["s1<br/>\N{LOCK} single-instance"]' in mermaid
+    assert 'n0["s1<br/>\N{LOCK}\N{NO-BREAK SPACE}single-instance"]' in mermaid
     assert "x-. lock .-x" not in mermaid
     assert "-.->" not in mermaid  # n(self) never becomes an edge either
 
