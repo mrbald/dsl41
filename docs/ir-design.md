@@ -276,8 +276,11 @@ class Oracle(Protocol):
 - Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)` — pytest
   parametrized; hypothesis generates event scripts for tier (c) and the expected-divergence
   pairs (P-Mxx) against the minimal UC interpreter.
-- The oracle deliberately does NOT model: machines/load (QUE_WAIT collapses to immediate),
-  definition-time mutations (SEM-16), agent failures. Documented non-goals v1.
+- The oracle DOES model machines/load and `resources:` as capacity buckets (DL-50): a job
+  acquires an atomic demand vector (job_load vs machine max_load; QUANTITY vs insert_resource
+  `amount`) before RUNNING, else QUE_WAIT (a real status), admitted later in deterministic
+  order on a holder's terminal release. Still non-goals v1: definition-time mutations (SEM-16;
+  incl. mid-run resource replenishment), agent failures.
 
 ## 8. Serialization & identity
 

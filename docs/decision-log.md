@@ -1453,3 +1453,163 @@
   add a new network agent in front of it (do not network-expose ss5 -- its
   spool-as-truth/in-memory-fence/same-uid assumptions are local); machine ->
   endpoint routing lives in operator config, not JIL. No code v1.
+- DL-50 Resource/load manager: the oracle HONORS resources; preflight refuses
+  the unmodelable (2026-07-13; codex-refined fidelity doctrine; user goal:
+  existing prod JIL runs UNMODIFIED, Akin's Law 39 -- change the rider or the
+  horse, not both). Un-collapses the oracle's QUE_WAIT non-goal (oracle.py
+  docstring + ir-design ss7): a WARN-and-run-unthrottled default silently
+  dropped throttling the estate relies on (ss8 "no silent loss"), the one
+  outcome worse than refusal. "Phase 2 in phase 1": the honoring manager IS the
+  deliverable (a refuse-only increment is useless -- the prod estate HAS locks),
+  plus loud refusal for what cannot be modelled faithfully. Decisions
+  (oracle.py/ir.py/runner.py docstrings are normative detail):
+  (1) CAPACITY-BUCKET MODEL. One bucket per contended entity: `m:<machine>`
+  (capacity = machine max_load, demand = job job_load) and `r:<name>` (capacity
+  = insert_resource `amount`, demand = `resources:` QUANTITY). A job clearing
+  its start gate acquires its ATOMIC FULL demand vector before RUNNING; short on
+  any bucket -> QUE_WAIT (a new JobStatus). All-or-nothing acquire => no hold-
+  and-wait => deadlock-free BY CONSTRUCTION (Hypothesis-certified across permuted
+  admission orders: no over-commit, no deadlock, no leak); QUANTITY=1 shared ==
+  mutex for free. Empty demand -> straight to RUNNING, BYTE-IDENTICAL to the
+  pre-resource oracle: the whole existing corpus and the ss13 bisimulation gate
+  are untouched (semantics live in the oracle, so both bisim arms see resources
+  identically -- the 20 DL-50 traces run twice, green). (2) QUE_WAIT is NOT in
+  _N_FALSE_STATUSES: a queued job is not running, so n() is TRUE and every
+  status/exitcode atom reads false (it never ran). It emits no STARTING and
+  bumps no run_number, so the engine's dispatch + ghost gate (DL-43) need NO new
+  logic; a queued box member is not in _box_ran, so the SEM-11 literal fold gate
+  already keeps the box RUNNING. (3) res_type sets the default release, per-
+  request FREE overrides it: R/absent free-on-completion, D never (depletable
+  drains -- replenishment is update_resource = SEM-16 non-goal), T is a LEVEL
+  GATE that checks free>=q but never acquires/holds/releases; FREE=Y success-
+  only, N never, A unconditional. (4) Release + wake on a holder's terminal
+  transition, AFTER condition referencers, a fixed deterministic order the
+  cross-order property certifies as outcome-invariant. Waiters admit greedily in
+  (priority, enqueue-seq, name) order, re-validating box-RUNNING/ice/hold (a
+  queued member whose box ended is cancelled to INACTIVE; conditions are NOT
+  re-checked). (5) ENFORCEMENT IS PREFLIGHT, MODELLING IS THE ORACLE: the oracle
+  builds buckets only for sizeable entities, so oracle-direct over an unrefused
+  bad catalog runs it unthrottled; the runner's preflight is the execution gate.
+  It ERRORs (fail-closed, both run and rehearse) on an unsized resource (no
+  insert_resource / no `amount` -- stricter than L016's warn; a
+  `--resource-capacity name=N` override is a documented future escape hatch),
+  an unknown res_type (not R/D/T), and a malformed job_load/priority/max_load;
+  it WARNs a job_load on a pool machine (throttle unmodelled, Qr3). The old
+  WARN-and-run is deleted. Cross-machine shared locks need NO separate refusal:
+  the DL-49 foreign-machine ERROR already makes every runnable job local, so
+  every honored resource is contended on this one host (revisit when distributed
+  execution lands, DL-49 future track). (6) IR carries the numbers as ACCESSORS
+  (JobIR.job_load_units/priority_value, MachineIR.max_load_units,
+  ResourceIR.capacity_units) over the existing opaque passthrough/attrs -- ZERO
+  persisted-field churn, so decompile/equiv/round-trip are untouched; malformed
+  values raise ValueError that preflight surfaces (the oracle skips them). Pools
+  return no max_load (per-member placement unmodelled, DL-49). (7) FIDELITY
+  DOCTRINE (codex-refined): fidelity to AutoSys DOCUMENTED semantics where
+  specified, else to explicitly CHARACTERIZED behavior, ambiguity recorded as a
+  modeling choice; the deterministic oracle picks ONE representative trace and
+  the cross-order property certifies (or, on failure, surfaces as a race) that
+  business outcomes are order-invariant; AutoSys quirks are CLASSIFIED (harmless
+  / relied-upon / real defect) -- a relied-upon quirk silently "cleaned" is
+  silent divergence, so it is surfaced, never auto-cleaned; semantic fidelity
+  maximized, runtime/effect fidelity bounded by single-node non-goals.
+  (8) AMBIGUITY LEDGER (first-class; owner = founder, resolve via a throwaway
+  job on a live instance, per CLAUDE.md): Qr1 FREE-absent renewable release
+  (default free-on-completion; risk: masks a hold-on-failure intent; evidence:
+  test_dl50_renewable_default_releases_on_failure; switch kept). Qr2 priority
+  direction (lower-number-higher assumed; unset sorts last; evidence:
+  test_dl50_waiters_admit_in_priority_order). Qr3 pool machine-load throttle
+  unmodelled (WARN, not refuse -- resource semaphores still apply). Qr4 absent
+  job_load = demand 0 (the attribute opts you in). Qr5 KILLJOB on a QUE_WAIT job
+  dequeues + TERMINATEs it (a kill happened -- see amendment 2); ICE on a queued
+  job dequeues + INACTIVEs it (an iced job never runs). Qr6 conditions are
+  NOT re-checked at admission (a queued job already qualified; a global flipping
+  while queued is the corner). Threshold mixed-use (R/D acquirers on a T
+  resource reduce the level a gate sees) and the release-vs-referencer cascade
+  order are documented deterministic choices. NONE guess-resolved: documented
+  default + kept switch + trace evidence, the Q-discipline. (9) Trace tests:
+  10 core admission traces in test_oracle.py (mutex, pool, threshold, machine-
+  load, box-member-queued, priority order, kill-releases, FREE Y/A/renewable-
+  default) run under BOTH bisim arms; test_resources.py adds the cross-order
+  safety+liveness property, depletable drain, FREE=N, and the unsized-is-
+  unmodelled boundary; preflight negative-conformance in test_runner_scheduler.
+  Post-review amendments (2026-07-13; Opus adversarial review, one BLOCKER + one
+  MAJOR + two MINORs + one NIT, all CONFIRMED against the code -- the review also
+  confirmed the bisimulation gate could NOT catch the BLOCKER, both arms wedged
+  identically): (1) BLOCKER, silent-wrong in the dangerous direction: a resource
+  holder that RE-TRIGGERS itself inside its own completion cascade (the L010
+  tight-loop) stranded a semaphore unit forever -- `_after_transition` woke
+  condition-referencers BEFORE releasing the holder's units, so the re-run's
+  `_acquire` overwrote `_held[job]` while the prior run's units were still
+  charged, and the later `_release` popped the overwritten record, leaking the
+  original unit; downstream jobs then wedged in QUE_WAIT forever. Fixed by
+  releasing BEFORE `_wake_referencers` (the re-trigger re-acquires against freed
+  capacity) and making `_acquire` EXTEND, never overwrite, `_held` (a missed
+  release becomes a recoverable over-hold, never a strand). Regression-pinned
+  behaviorally under both bisim arms and by a direct used==held invariant.
+  (2) MAJOR, fail-open control-loss: KILLJOB on a STANDALONE QUE_WAIT job was
+  silently ignored then admitted on the next release -- it RAN despite the
+  operator's kill (Qr5's "box-end cancels it" only covered box members). KILLJOB
+  now dequeues + TERMINATEs a queued job. (3) MINOR: duplicate `resources:` refs
+  over-committed (`_can_admit` per-entry vs `_acquire` summed) and, with
+  asymmetric FREE, leaked -- `_demand_vector` now COALESCES duplicate bucket keys
+  (summed demand, most-restrictive release) and preflight refuses a repeated
+  name. (4) MINOR: a statically unsatisfiable QUANTITY > amount hung forever --
+  preflight now refuses it. (5) NIT: ICE on a queued job lingered QUE_WAIT; it
+  now dequeues + INACTIVEs immediately. Confirmed CLEAN by the review: cross-job
+  over-commit (atomic vector), no negative `used`, no nondeterminism, `_in_wake`
+  fixpoint safety, the empty-demand `_start` path byte-identical, depletable/
+  FREE=N never releasing, kill/terminate releasing, preflight gating run AND
+  rehearse. Deferred (Qr7, NIT): a box that RESTARTS while a member is still
+  QUE_WAIT (only reachable via a killed box with no intervening release) adopts
+  the member with a stale enqueue-seq -- it still runs, so the impact is
+  mispriced waiter ordering only.
+- DL-51 Reference-of-record: legacy JIL is the input of record, evolved via the
+  Python master, never silently diverged (2026-07-13; the doctrine behind
+  DL-50's "run unmodified" goal, softened from an earlier "immutable" framing).
+  The client's prod JIL is what runs in prod; dsl41's job is to run it FAITHFULLY
+  or REFUSE loudly -- both leave the JIL bytes untouched, so neither honor nor
+  refuse violates the run-unmodified goal (Law 39: refuse != a forced edit).
+  Rules: (1) NO SILENT DIVERGENCE -- an unmodelable shape refuses (DL-50 fail-
+  closed), it never runs approximately. (2) TRANSFORMS ARE PROVEN-EQUIVALENT --
+  field reordering for diffing, canonical form, folds must pass the equiv tiers /
+  F2 canonical fixpoint / decompile round-trip; equivalence is of good quality,
+  not opportunistic. (3) A REAL DEFECT IS A WIN -- detecting a genuine deficiency
+  in unchanged prod JIL is a good thing to spot, fix, test, and release to prod
+  quickly; it is a finding, not something to preserve. The modification PATH is
+  decompile JIL -> runnable Python DSL (the master source), edit there, equiv-
+  prove the result (README/DL-17/DL-37); the closer the simulator + runtime are
+  to AutoSys, the more testing confidence the round trip buys. Fable's proposal
+  attribution is unconfirmed and not recorded.
+- DL-52 Explicit machine identity: the runner is TOLD what machine it is; FQDN
+  matching is retired (2026-07-13; user-proposed after DL-50 flagged a 30s
+  `getfqdn()` startup stall). Rationale: FQDN matching (DL-45 M6) asked the wrong
+  question -- "does the OS's reverse-DNS name for this box happen to equal the
+  estate's machine name?" -- joining two unrelated namespaces (a cloud hostname
+  `ip-10-0-3-42` vs an estate machine `greezy_spoon`) through a reverse-DNS
+  lookup that also stalls for tens of seconds on slow resolvers. Placement should
+  not be a dispatch decision based on FQDN "even if AutoSys is married into it"
+  (user). Decisions: (1) `_local_identity(declared)` REPLACES `_local_names`:
+  `getfqdn()` is DELETED (no reverse-DNS anywhere -- this also cures the `dsl41
+  run` / rehearse startup stall, the DL-50 review's lone red test). Declared
+  non-empty (`--as-machine`) => identity is EXACTLY those names + localhost, pure
+  and explicit, no hostname guessing; declared empty => the forward hostname
+  (short + full) + localhost, zero-config for estates where machine == hostname.
+  So declaring opts into pure-explicit and omitting stays friendly, with no
+  second mode flag. (2) `resolve_machine` gains a DIRECT NAME MATCH first: a job
+  whose `machine:` IS an identity name runs here without consulting
+  insert_machine -- "this runner IS greezy_spoon" is authoritative over whatever
+  node_name the record carries. Otherwise the DL-49 resolution is unchanged
+  (agent/real -> node_name; virtual -> members; `--machine-policy` for split
+  pools), now comparing resolved nodes against the declared identity, so
+  declaring by node ALSO works. Undefined-and-not-ours is foreign. (3) CLI:
+  `dsl41 run --as-machine NAME` (repeatable), threaded through
+  `_preflight_or_exit` -> `preflight(as_machine=...)`. rehearse skips machine
+  rules (execution=False), so it needs no flag. (4) Deliberate behavior change,
+  user-endorsed: an estate that relied on FQDN auto-matching (a job pinned to the
+  full FQDN, matched via getfqdn when gethostname returns the short name) now
+  needs `--as-machine <fqdn>` -- explicit over magic. (5) Distributed alignment
+  (DL-49 future track): each network agent declares its own `--as-machine`; the
+  identity model extends without an OS-identity oracle. Tests: resolve_machine
+  direct-match / declared-node / foreign; `_local_identity` default-vs-declared
+  with getfqdn asserted UNCALLED; the previously-hanging subprocess `dsl41 run`
+  integration test now passes unpatched.

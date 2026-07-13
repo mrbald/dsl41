@@ -1746,3 +1746,247 @@ def test_trace_returns_copies_not_aliases() -> None:
     first = o.trace()
     first[0].job = "vandalized"
     assert o.trace()[0].job == "tc_j"
+
+
+# ------------------------------------------------- DL-50 resources / load / QUE_WAIT
+#
+# Every test here builds through oracle(), so the autouse fixture runs it under
+# BOTH the direct Oracle and Engine(VirtualClock, inert FakeAdapter) -- the
+# bisimulation gate covers resource admission for free. Statuses are read via
+# .store (proxied by the harness); bucket internals are never poked.
+
+
+def _statuses(o, *jobs: str) -> dict[str, str]:
+    return {j: o.store.job[j].status for j in jobs}
+
+
+def test_dl50_mutex_second_requester_queues_then_admits_on_release() -> None:
+    """A QUANTITY=1 shared resource is a mutex: the second requester enters
+    QUE_WAIT and is admitted the instant the holder reaches a terminal state."""
+    text = (
+        "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: mx1\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n\n"
+        "insert_job: mx2\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="mx1"))
+    o.feed(ev("STARTJOB", 0, job="mx2"))
+    assert _statuses(o, "mx1", "mx2") == {"mx1": "RUNNING", "mx2": "QUE_WAIT"}
+    assert transitions(o, "mx2") == ["INACTIVE->QUE_WAIT"]
+    o.feed(ev("STATUS", 1, job="mx1", status="SUCCESS"))
+    assert _statuses(o, "mx1", "mx2") == {"mx1": "SUCCESS", "mx2": "RUNNING"}
+    assert transitions(o, "mx2") == [
+        "INACTIVE->QUE_WAIT",
+        "QUE_WAIT->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_dl50_counting_pool_admits_up_to_capacity_then_queues() -> None:
+    """A pool of amount=2 admits two concurrent QUANTITY=1 holders; the third
+    queues and is admitted when one of the two completes."""
+    text = (
+        "insert_resource: POOL\nres_type: R\namount: 2\n\n"
+        "insert_job: p1\njob_type: c\ncommand: x\nmachine: m1\nresources: (POOL, QUANTITY=1)\n\n"
+        "insert_job: p2\njob_type: c\ncommand: x\nmachine: m1\nresources: (POOL, QUANTITY=1)\n\n"
+        "insert_job: p3\njob_type: c\ncommand: x\nmachine: m1\nresources: (POOL, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    for j in ("p1", "p2", "p3"):
+        o.feed(ev("STARTJOB", 0, job=j))
+    assert _statuses(o, "p1", "p2", "p3") == {"p1": "RUNNING", "p2": "RUNNING", "p3": "QUE_WAIT"}
+    o.feed(ev("STATUS", 1, job="p1", status="SUCCESS"))
+    assert o.store.job["p3"].status == "RUNNING"
+
+
+def test_dl50_renewable_default_releases_on_failure() -> None:
+    """FREE absent on a renewable resource frees units on ANY completion, so a
+    FAILED holder still releases -- a waiter admits (# PENDING: Qr1 default)."""
+    text = (
+        "insert_resource: RLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: rf1\njob_type: c\ncommand: x\nmachine: m1\nresources: (RLOCK, QUANTITY=1)\n\n"
+        "insert_job: rf2\njob_type: c\ncommand: y\nmachine: m1\nresources: (RLOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="rf1"))
+    o.feed(ev("STARTJOB", 0, job="rf2"))
+    o.feed(ev("STATUS", 1, job="rf1", status="FAILURE"))
+    assert o.store.job["rf2"].status == "RUNNING"
+
+
+def test_dl50_free_y_holds_the_lock_on_failure() -> None:
+    """FREE=Y frees only on SUCCESS: a FAILED holder keeps the units, so the
+    waiter stays QUE_WAIT (faithful hold-on-failure, not a release)."""
+    text = (
+        "insert_resource: YLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: fy1\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (YLOCK, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: fy2\njob_type: c\ncommand: y\nmachine: m1\nresources: (YLOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="fy1"))
+    o.feed(ev("STARTJOB", 0, job="fy2"))
+    o.feed(ev("STATUS", 1, job="fy1", status="FAILURE"))
+    assert o.store.job["fy2"].status == "QUE_WAIT"  # held on failure
+
+
+def test_dl50_free_a_releases_on_failure_unlike_free_y() -> None:
+    """FREE=A frees unconditionally: a FAILED holder releases and the waiter
+    admits -- the contrast case to FREE=Y above."""
+    text = (
+        "insert_resource: ALOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: fa1\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (ALOCK, QUANTITY=1, FREE=A)\n\n"
+        "insert_job: fa2\njob_type: c\ncommand: y\nmachine: m1\nresources: (ALOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="fa1"))
+    o.feed(ev("STARTJOB", 0, job="fa2"))
+    o.feed(ev("STATUS", 1, job="fa1", status="FAILURE"))
+    assert o.store.job["fa2"].status == "RUNNING"
+
+
+def test_dl50_threshold_resource_is_a_gate_not_a_consumable() -> None:
+    """res_type T is a LEVEL gate that never acquires: three QUANTITY=1 jobs
+    against an amount=2 threshold ALL run (nothing is consumed), where the same
+    shape as renewable would queue the third."""
+    text = (
+        "insert_resource: THR\nres_type: T\namount: 2\n\n"
+        "insert_job: t1\njob_type: c\ncommand: x\nmachine: m1\nresources: (THR, QUANTITY=1)\n\n"
+        "insert_job: t2\njob_type: c\ncommand: x\nmachine: m1\nresources: (THR, QUANTITY=1)\n\n"
+        "insert_job: t3\njob_type: c\ncommand: x\nmachine: m1\nresources: (THR, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    for j in ("t1", "t2", "t3"):
+        o.feed(ev("STARTJOB", 0, job=j))
+    assert _statuses(o, "t1", "t2", "t3") == {"t1": "RUNNING", "t2": "RUNNING", "t3": "RUNNING"}
+
+
+def test_dl50_machine_load_throttles_by_job_load_vs_max_load() -> None:
+    """A machine max_load caps concurrent job_load: two job_load=1 jobs run on a
+    max_load=2 machine, the third queues, and admits on a release."""
+    text = (
+        "insert_machine: box1\ntype: a\nnode_name: box1\nmax_load: 2\n\n"
+        "insert_job: ml1\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n\n"
+        "insert_job: ml2\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n\n"
+        "insert_job: ml3\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n"
+    )
+    o = oracle(text)
+    for j in ("ml1", "ml2", "ml3"):
+        o.feed(ev("STARTJOB", 0, job=j))
+    assert _statuses(o, "ml1", "ml2", "ml3") == {"ml1": "RUNNING", "ml2": "RUNNING", "ml3": "QUE_WAIT"}
+    o.feed(ev("STATUS", 1, job="ml1", status="SUCCESS"))
+    assert o.store.job["ml3"].status == "RUNNING"
+
+
+def test_dl50_queued_box_member_keeps_the_box_running_until_admitted() -> None:
+    """A box member that queues for a resource holds the box in RUNNING (the
+    SEM-11 literal fold gate: an un-run member blocks completion). The box folds
+    only once the member is admitted, runs, and reaches terminal."""
+    text = (
+        "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: hog\njob_type: c\ncommand: x\nmachine: m1\nresources: (BLOCK, QUANTITY=1)\n\n"
+        "insert_job: bx\njob_type: b\n\n"
+        "insert_job: mem\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx\n"
+        "resources: (BLOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="hog"))
+    o.feed(ev("STARTJOB", 0, job="bx"))
+    assert _statuses(o, "bx", "mem") == {"bx": "RUNNING", "mem": "QUE_WAIT"}
+    o.feed(ev("STATUS", 1, job="hog", status="SUCCESS"))  # frees BLOCK -> mem admits
+    assert o.store.job["mem"].status == "RUNNING"
+    assert o.store.job["bx"].status == "RUNNING"  # member RUNNING, box not folded yet
+    o.feed(ev("STATUS", 2, job="mem", status="SUCCESS"))
+    assert o.store.job["bx"].status == "SUCCESS"  # now folds
+
+
+def test_dl50_waiters_admit_in_priority_order() -> None:
+    """When one slot frees, the higher-priority waiter (lower number, # PENDING
+    Qr2) admits and the lower-priority one stays queued."""
+    text = (
+        "insert_resource: ONE\nres_type: R\namount: 1\n\n"
+        "insert_job: holder\njob_type: c\ncommand: x\nmachine: m1\nresources: (ONE, QUANTITY=1)\n\n"
+        "insert_job: w_lo\njob_type: c\ncommand: x\nmachine: m1\npriority: 9\n"
+        "resources: (ONE, QUANTITY=1)\n\n"
+        "insert_job: w_hi\njob_type: c\ncommand: x\nmachine: m1\npriority: 1\n"
+        "resources: (ONE, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="holder"))
+    o.feed(ev("STARTJOB", 0, job="w_lo"))  # enqueued first...
+    o.feed(ev("STARTJOB", 0, job="w_hi"))  # ...but higher priority
+    o.feed(ev("STATUS", 1, job="holder", status="SUCCESS"))  # one slot frees
+    assert _statuses(o, "w_hi", "w_lo") == {"w_hi": "RUNNING", "w_lo": "QUE_WAIT"}
+
+
+def test_dl50_killing_a_holder_releases_its_units() -> None:
+    """KILLJOB on a RUNNING holder terminates it, and TERMINATED frees units
+    under the default policy, so the waiter admits."""
+    text = (
+        "insert_resource: KLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: kh\njob_type: c\ncommand: x\nmachine: m1\nresources: (KLOCK, QUANTITY=1)\n\n"
+        "insert_job: kw\njob_type: c\ncommand: y\nmachine: m1\nresources: (KLOCK, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="kh"))
+    o.feed(ev("STARTJOB", 0, job="kw"))
+    o.feed(ev("KILLJOB", 1, job="kh"))
+    assert o.store.job["kh"].status == "TERMINATED"
+    assert o.store.job["kw"].status == "RUNNING"
+
+
+def test_dl50_self_retriggering_holder_does_not_leak_its_semaphore() -> None:
+    """Adversarial-review BLOCKER: a resource holder that re-triggers itself
+    inside its own completion cascade (the L010 tight-loop) must release run N
+    BEFORE run N+1 re-acquires, or a unit is stranded forever. `sl` self-loops
+    via `condition: s(sl)`; after it finally FAILs (breaking s(sl)) the pool is
+    fully free, so `big` (needs the whole amount=2) MUST run -- it wedges in
+    QUE_WAIT under the leak bug."""
+    text = (
+        "insert_resource: R\nres_type: R\namount: 2\n\n"
+        "insert_job: sl\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (R, QUANTITY=1)\ncondition: s(sl)\n\n"
+        "insert_job: big\njob_type: c\ncommand: b\nmachine: m1\nresources: (R, QUANTITY=2)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("FORCE_STARTJOB", 0, job="sl"))  # seed run 1 (s(sl) false at first)
+    o.feed(ev("STATUS", 1, job="sl", status="SUCCESS"))  # completes r1, s(sl) -> re-runs r2
+    o.feed(ev("STATUS", 2, job="sl", status="FAILURE"))  # r2 fails, s(sl) false -> stops
+    o.feed(ev("STARTJOB", 3, job="big"))
+    assert o.store.job["big"].status == "RUNNING"  # pool fully freed; no strand
+
+
+def test_dl50_killing_a_queued_job_removes_it_and_it_never_runs() -> None:
+    """Adversarial-review MAJOR: KILLJOB on a QUE_WAIT (standalone) job must
+    dequeue and TERMINATE it -- not be silently ignored and then admitted on
+    the next release, running despite the operator's kill."""
+    text = (
+        "insert_resource: K\nres_type: R\namount: 1\n\n"
+        "insert_job: ka\njob_type: c\ncommand: x\nmachine: m1\nresources: (K, QUANTITY=1)\n\n"
+        "insert_job: kb\njob_type: c\ncommand: y\nmachine: m1\nresources: (K, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="ka"))
+    o.feed(ev("STARTJOB", 0, job="kb"))
+    o.feed(ev("KILLJOB", 1, job="kb"))
+    assert o.store.job["kb"].status == "TERMINATED"
+    o.feed(ev("STATUS", 2, job="ka", status="SUCCESS"))  # frees K
+    assert o.store.job["kb"].status == "TERMINATED"  # stayed dead, did NOT run
+
+
+def test_dl50_icing_a_queued_job_dequeues_it_immediately() -> None:
+    """Adversarial-review NIT: ON_ICE on a QUE_WAIT job settles it to INACTIVE
+    now (an iced job never runs), not lingering QUE_WAIT until a later release."""
+    text = (
+        "insert_resource: I\nres_type: R\namount: 1\n\n"
+        "insert_job: ia\njob_type: c\ncommand: x\nmachine: m1\nresources: (I, QUANTITY=1)\n\n"
+        "insert_job: ib\njob_type: c\ncommand: y\nmachine: m1\nresources: (I, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="ia"))
+    o.feed(ev("STARTJOB", 0, job="ib"))
+    o.feed(ev("ON_ICE", 1, job="ib"))
+    assert o.store.job["ib"].status == "INACTIVE"  # not lingering QUE_WAIT
+    o.feed(ev("STATUS", 2, job="ia", status="SUCCESS"))  # frees I
+    assert o.store.job["ib"].status == "INACTIVE"  # iced, did NOT run

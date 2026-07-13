@@ -100,8 +100,22 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   instance atoms (SEM-07) evaluate against instance-qualified pseudo-job
   entries in the status store, settable only by injected STATUS events with
   job "name^INST" -- the boundary is script-controlled.
-- Non-goals v1 (ir-design ss7): machines/load (QUE_WAIT collapses to
-  immediate RUNNING), definition-time mutations (SEM-16), agent failures.
+- Resources/load (DL-50): a job that clears its start gate acquires an ATOMIC
+  full demand vector -- machine-load slots (job_load vs machine max_load) and
+  `resources:` semaphore units (QUANTITY vs insert_resource `amount`) -- before
+  RUNNING. If any bucket is short it enters QUE_WAIT and is admitted later, in
+  deterministic (priority, enqueue-seq, name) order, when a holder's terminal
+  release frees room. All-or-nothing acquire => no hold-and-wait => deadlock-
+  free by construction; QUANTITY=1 shared == mutex. res_type sets the default
+  release (R/absent free-on-completion, D never, T is a level GATE that never
+  acquires); per-request FREE overrides it (Y success-only, N never, A
+  unconditional). A queued job re-validates box-RUNNING/ice/hold at admission
+  (# PENDING: Qr6 conditions are NOT re-checked). Enforcement of unsized/
+  unknown-res_type/malformed shapes is the runner's preflight (DL-50): the
+  oracle models only sizeable buckets, so oracle-direct over an unrefused bad
+  catalog runs it unthrottled -- the execution gate is preflight, by design.
+- Still non-goals v1: definition-time mutations (SEM-16; incl. mid-run
+  update_resource replenishment of depletables), agent failures.
 """
 
 from __future__ import annotations
@@ -132,6 +146,7 @@ ORACLE_ZERO_LOOKBACK_ANCHOR: Literal["midnight", "last_change"] = "midnight"
 
 JobStatus = Literal[
     "INACTIVE",
+    "QUE_WAIT",
     "STARTING",
     "RUNNING",
     "SUCCESS",
@@ -140,7 +155,9 @@ JobStatus = Literal[
 ]
 
 #: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
-#: SUSPENDED are out-of-scope states the oracle never produces).
+#: SUSPENDED are out-of-scope states the oracle never produces). QUE_WAIT is
+#: DELIBERATELY absent (DL-50): a resource-queued job is not running, so n() is
+#: TRUE for it -- and every status/exitcode atom reads false (it never ran).
 _N_FALSE_STATUSES: frozenset[str] = frozenset({"STARTING", "RUNNING"})
 
 _TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
@@ -236,6 +253,27 @@ class Oracle:
                 continue
             for key in _entity_keys(cond):
                 self._referencers.setdefault(key, []).append(name)
+        # DL-50 resource/load buckets: capacity per contended entity, seeded
+        # from the catalog (malformed -> skipped; preflight refuses the run).
+        #: bucket key -> capacity. `m:<machine>` = max_load, `r:<name>` = amount.
+        self._bucket_cap: dict[str, int] = {}
+        #: bucket key -> units currently held by RUNNING acquirers.
+        self._bucket_used: dict[str, int] = {}
+        for mname, machine in catalog.machines.items():
+            cap = _safe_units(machine.max_load_units)
+            if cap is not None:
+                self._bucket_cap[f"m:{mname}"] = cap
+        for rname, resource in catalog.resources.items():
+            cap = _safe_units(resource.capacity_units)
+            if cap is not None:
+                self._bucket_cap[f"r:{rname}"] = cap
+        #: job -> [(bucket_key, units, release_policy)] it holds while RUNNING.
+        self._held: dict[str, list[tuple[str, int, str]]] = {}
+        #: QUE_WAIT jobs and their enqueue sequence (deterministic ordering).
+        self._waiters: list[str] = []
+        self._waiter_seq: dict[str, int] = {}
+        self._enqueue_counter = 0
+        self._in_wake = False
 
     # ------------------------------------------------------------------ plumbing
 
@@ -372,9 +410,20 @@ class Oracle:
             box = job_ir.box.box_name
             if box is not None:
                 self._on_member_transition(box, job, old, new)
+        # DL-50: RELEASE a completed holder's units BEFORE waking anything. A
+        # self-referencing re-trigger (the L010 tight-loop -- _wake_referencers
+        # may re-start the very job that just completed) must re-acquire against
+        # the FREED capacity, not overwrite its own still-held record and strand
+        # a unit (adversarial review BLOCKER). Waiters then wake after condition
+        # referencers -- the documented deterministic order.
+        released = new in _TERMINAL and job in self._held
+        if released:
+            self._release(job, new)
         # SEM-01/dossier ss0: the transition wakes exactly the jobs whose
         # condition references this one (edge-triggered, DL-13)
         self._wake_referencers(job, cause=f"status of {job!r} changed to {new}")
+        if released:
+            self._wake_waiters()
 
     # ------------------------------------------------------------ event dispatch
 
@@ -401,8 +450,16 @@ class Oracle:
             self._wake_referencers(f"g:{name}", cause=f"SET_GLOBAL {name}")
         elif kind == "KILLJOB":
             job = self._required_job(ev)
-            if self._runtime(job).status in ("STARTING", "RUNNING"):
+            status = self._runtime(job).status
+            if status in ("STARTING", "RUNNING"):
                 self._terminate(job, cause="KILLJOB")
+            elif status == "QUE_WAIT":
+                # DL-50 (review MAJOR): a kill on a QUEUED job must not be
+                # silently dropped and then admitted on the next release -- a
+                # standalone queued job has no box-end to cancel it. It holds
+                # nothing; dequeue and TERMINATE (the kill happened).
+                self._dequeue(job)
+                self._set_status(job, "TERMINATED", cause="KILLJOB (dequeued from QUE_WAIT, DL-50)")
         elif kind in ("ON_ICE", "OFF_ICE", "ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "OFF_NOEXEC"):
             self._handle_oob(kind, self._required_job(ev))
         else:
@@ -444,8 +501,16 @@ class Oracle:
         if kind == "ON_ICE":
             rt.on_ice = True
             self._record(job, "ON_ICE", "sendevent ON_ICE")
-            # SEM-20: downstream conditions now treat this job as satisfied
-            self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
+            if rt.status == "QUE_WAIT":
+                # DL-50 (review NIT): an iced job never runs -- drop it from the
+                # queue and settle its status now, instead of lingering QUE_WAIT
+                # until a later release cancels it. _set_status wakes referencers,
+                # so on_ice-satisfaction (SEM-20) still propagates.
+                self._dequeue(job)
+                self._set_status(job, "INACTIVE", cause="iced while queued (DL-50)")
+            else:
+                # SEM-20: downstream conditions now treat this job as satisfied
+                self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
             rt.on_ice = False
             self._record(job, "OFF_ICE", "sendevent OFF_ICE")
@@ -456,8 +521,11 @@ class Oracle:
         elif kind == "OFF_HOLD":
             rt.on_hold = False
             self._record(job, "OFF_HOLD", "sendevent OFF_HOLD")
-            # SEM-21: if conditions are already satisfied, run immediately
-            self._attempt_start(job, force=False, scheduled=False, cause="OFF_HOLD")
+            if rt.status == "QUE_WAIT":
+                self._wake_waiters()  # DL-50: a held-while-queued job re-attempts
+            else:
+                # SEM-21: if conditions are already satisfied, run immediately
+                self._attempt_start(job, force=False, scheduled=False, cause="OFF_HOLD")
         elif kind == "ON_NOEXEC":
             rt.on_noexec = True
             self._record(job, "ON_NOEXEC", "sendevent ON_NOEXEC")
@@ -532,8 +600,8 @@ class Oracle:
         if job_ir is None:
             return  # starting an undefined job is a no-op for the oracle
         rt = self._runtime(job)
-        if rt.status in ("STARTING", "RUNNING"):
-            return
+        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
+            return  # already starting/running, or queued for resources (DL-50)
         if rt.on_ice:
             return  # SEM-20: iced jobs never run (FORCE included -- DL-13)
         if rt.on_hold and not force:
@@ -600,9 +668,25 @@ class Oracle:
         job_ir = self.catalog.jobs[job]
         rt = self._runtime(job)
         if rt.on_noexec:
-            # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal
+            # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
+            # A bypassed job never runs, so it acquires no resources (DL-50).
             self._set_status(job, "SUCCESS", cause=f"ON_NOEXEC bypass ({cause})")
             return
+        # DL-50: atomic admission before RUNNING. Empty demand -> straight to
+        # RUNNING, byte-identical to the pre-resource oracle (bisim + the whole
+        # existing corpus are untouched: no buckets, no waiters, same cause).
+        vector = self._demand_vector(job_ir)
+        if vector and not self._can_admit(vector):
+            self._enqueue_waiter(job, cause)
+            return
+        self._acquire(job, vector)
+        self._run(job_ir, cause, had_demand=bool(vector))
+
+    def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
+        """Start tail once admission has passed: run_number bump, box
+        bookkeeping, STARTING -> RUNNING, box member launch (SEM-10)."""
+        job = job_ir.name
+        rt = self._runtime(job)
         self._arm_sla_and_term(job_ir)  # reads run_number before the bump
         rt.run_number += 1
         box = job_ir.box.box_name
@@ -616,9 +700,143 @@ class Oracle:
         assert self._now is not None
         self._run_started_at[job] = self._now
         self._set_status(job, "STARTING", cause=cause)
-        self._set_status(job, "RUNNING", cause="QUE_WAIT collapses to immediate (ss7 non-goal)")
+        running_cause = (
+            "admitted: resources acquired (DL-50)"
+            if had_demand
+            else "QUE_WAIT collapses to immediate (ss7 non-goal)"
+        )
+        self._set_status(job, "RUNNING", cause=running_cause)
         if job_ir.job_type == "BOX":
             self._on_box_started(job)
+
+    # ---------------------------------------------------------- resources (DL-50)
+
+    def _demand_vector(self, job_ir: JobIR) -> list[tuple[str, int, str, str | None]]:
+        """The full (bucket_key, units, mode, release_policy) demand of a start.
+        mode is 'acquire' (holds units) or 'gate' (threshold: check-only, never
+        holds). Only buckets the oracle can size appear -- an unsized resource
+        or an absent max_load contributes nothing here (preflight refuses the
+        former for execution; the latter is AutoSys's unlimited-load default)."""
+        raw: list[tuple[str, int, str, str | None]] = []
+        spec = job_ir.exec_
+        if spec is not None and spec.machine is not None:
+            key = f"m:{spec.machine}"
+            if key in self._bucket_cap:
+                load = _safe_units(job_ir.job_load_units) or 0  # Qr4: absent -> 0
+                if load > 0:
+                    raw.append((key, load, "acquire", "completion"))
+        for ref in job_ir.resources:
+            key = f"r:{ref.name}"
+            if key not in self._bucket_cap:
+                continue  # unsized -> not modelled here (preflight refuses run)
+            resource = self.catalog.resources.get(ref.name)
+            res_type = (resource.res_type or "").strip().upper() if resource else ""
+            if res_type == "T":
+                raw.append((key, ref.quantity, "gate", None))
+            else:
+                raw.append((key, ref.quantity, "acquire", _release_policy(res_type, ref.free)))
+        # Coalesce duplicate bucket keys (a job listing one resource twice):
+        # SUM the demand so _can_admit's per-entry test and _acquire's sum agree
+        # -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while the
+        # acquire over-commits to 4 (review MINOR). Release policy merges to the
+        # most restrictive so asymmetric FREE never frees early.
+        merged: dict[str, tuple[int, str, str | None]] = {}
+        for key, units, mode, policy in raw:
+            if key in merged:
+                u0, m0, p0 = merged[key]
+                mode = "acquire" if "acquire" in (m0, mode) else "gate"
+                merged[key] = (u0 + units, mode, _merge_policy(p0, policy))
+            else:
+                merged[key] = (units, mode, policy)
+        return [(key, units, mode, policy) for key, (units, mode, policy) in merged.items()]
+
+    def _can_admit(self, vector: list[tuple[str, int, str, str | None]]) -> bool:
+        """True iff every bucket has room for its demand (gate and acquire share
+        the same free>=units test; keys are guaranteed sized)."""
+        return all(self._bucket_used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
+
+    def _acquire(self, job: str, vector: list[tuple[str, int, str, str | None]]) -> None:
+        held: list[tuple[str, int, str]] = []
+        for key, units, mode, policy in vector:
+            if mode == "acquire":
+                self._bucket_used[key] = self._bucket_used.get(key, 0) + units
+                assert policy is not None
+                held.append((key, units, policy))
+        if held:
+            # extend, never overwrite: with release-before-wake the job's prior
+            # record is already released, so this is empty -> assignment; the
+            # extend is the belt-and-braces that turns any missed release into a
+            # recoverable over-hold, never a permanent strand (review BLOCKER).
+            self._held.setdefault(job, []).extend(held)
+
+    def _release(self, job: str, terminal_status: str) -> None:
+        """Return a completed holder's units per each request's release policy;
+        'never' / unmet 'success' units stay consumed (depletable / hold-on-
+        failure) -- and the job is terminal, so they never come back."""
+        for key, units, policy in self._held.pop(job, []):
+            if policy == "completion" or (policy == "success" and terminal_status == "SUCCESS"):
+                self._bucket_used[key] = self._bucket_used.get(key, 0) - units
+
+    def _enqueue_waiter(self, job: str, cause: str) -> None:
+        self._enqueue_counter += 1
+        self._waiter_seq[job] = self._enqueue_counter
+        if job not in self._waiters:
+            self._waiters.append(job)
+        self._set_status(job, "QUE_WAIT", cause=f"waiting for resources ({cause})")
+
+    def _sorted_waiters(self) -> list[str]:
+        def key(j: str) -> tuple[int, int, str]:
+            # PENDING: Qr2 -- lower priority number == higher priority assumed;
+            # unset sorts last. enqueue-seq then name make the order total.
+            prio = _safe_units(self.catalog.jobs[j].priority_value)
+            return (prio if prio is not None else 1 << 31, self._waiter_seq.get(j, 0), j)
+
+        return sorted(self._waiters, key=key)
+
+    def _wake_waiters(self) -> None:
+        """Admit queued jobs whose full vector now fits, in deterministic order,
+        to a fixpoint. Re-entrancy-guarded: a nested call (a release inside an
+        admitted job's cascade) defers to the outer loop's next scan."""
+        if self._in_wake:
+            return
+        self._in_wake = True
+        try:
+            while any(self._readmit(job) in ("admitted", "cancelled") for job in self._sorted_waiters()):
+                pass  # queue changed; _sorted_waiters is re-read each scan
+        finally:
+            self._in_wake = False
+
+    def _readmit(self, job: str) -> str:
+        """One admission attempt for a queued job. Re-validates the guards that
+        can change while queued (ice, box-RUNNING, hold) before the capacity
+        check; conditions are NOT re-checked (# PENDING: Qr6)."""
+        rt = self._runtime(job)
+        job_ir = self.catalog.jobs[job]
+        if rt.on_ice:
+            return self._cancel_waiter(job, "iced while queued")
+        box = job_ir.box.box_name
+        if box is not None and self._runtime(box).status != "RUNNING":
+            return self._cancel_waiter(job, f"box {box!r} no longer RUNNING")
+        if rt.on_hold:
+            return "held"  # stays queued; OFF_HOLD re-scans
+        vector = self._demand_vector(job_ir)
+        if not self._can_admit(vector):
+            return "waiting"
+        self._waiters.remove(job)
+        self._waiter_seq.pop(job, None)
+        self._acquire(job, vector)
+        self._run(job_ir, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True)
+        return "admitted"
+
+    def _dequeue(self, job: str) -> None:
+        if job in self._waiters:
+            self._waiters.remove(job)
+        self._waiter_seq.pop(job, None)
+
+    def _cancel_waiter(self, job: str, why: str) -> str:
+        self._dequeue(job)
+        self._set_status(job, "INACTIVE", cause=f"QUE_WAIT cancelled: {why} (DL-50)")
+        return "cancelled"
 
     def _on_box_started(self, box: str) -> None:
         for member in self._members(box):
@@ -850,6 +1068,44 @@ class Oracle:
             if rt.status == "RUNNING":
                 self._terminate(job, cause="term_run_time exceeded (dossier ss5)")
         return True
+
+
+def _safe_units(accessor: object) -> int | None:
+    """Call a typed-int IR accessor (job_load_units/max_load_units/...),
+    swallowing a malformed-value ValueError to None. The oracle models only
+    what parses; a malformed value is preflight's loud refusal (DL-50), not the
+    oracle's crash -- oracle-direct over an unrefused catalog simply skips it."""
+    assert callable(accessor)
+    try:
+        value = accessor()
+    except ValueError:
+        return None
+    assert value is None or isinstance(value, int)
+    return value
+
+
+def _release_policy(res_type: str, free: str | None) -> str:
+    """DL-50: per-request release policy. FREE overrides the res_type default.
+    Returns 'completion' (release on any terminal), 'success' (only on SUCCESS),
+    or 'never'. res_type is upper-cased; '' (absent) reads as renewable."""
+    if free == "Y":
+        return "success"
+    if free == "N":
+        return "never"
+    if free == "A":
+        return "completion"
+    return "never" if res_type == "D" else "completion"  # FREE absent -> res_type default
+
+
+def _merge_policy(a: str | None, b: str | None) -> str | None:
+    """Coalesce two release policies for one bucket (duplicate resource refs) to
+    the MOST RESTRICTIVE, so asymmetric FREE never frees early (DL-50 review)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    rank = {"never": 0, "success": 1, "completion": 2}
+    return a if rank[a] <= rank[b] else b
 
 
 def _cond_job_names(cond: Cond) -> set[str]:
