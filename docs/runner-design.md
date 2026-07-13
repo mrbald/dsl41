@@ -16,9 +16,12 @@ semantics (E1). Two duties, one engine:
   estate's behavior (a 24h estate in seconds) with the *same engine code
   path*, so rehearsal results are evidence about production behavior.
 
-Explicitly not (§12): an HA/clustered scheduler, a multi-node agent fabric, a
-resource manager, an RBAC system. Prod grade here means durable, resumable,
-auditable, and loud about everything it does not do — not highly available.
+Explicitly not (§12): an HA/clustered scheduler, a multi-node agent fabric, an
+RBAC system. (A single-node resource/load manager DID land — DL-50 — since the
+prod estate carries locks the estate relies on for correctness; the oracle
+honors them as capacity buckets and preflight refuses the unmodelable.) Prod
+grade here means durable, resumable, auditable, and loud about everything it
+does not do — not highly available.
 
 Lifecycle stance (DL-41a): phases 11a–11e are **tethered** — engine death
 terminates all jobs, recorded durably even under `kill -9` (§6a). That is a
@@ -346,11 +349,15 @@ WARN prints, journals, and runs. Every rule ships the house fixture pair.
 
 ERROR:
 - `job_type` outside {CMD, BOX, FW}.
-- `machine` set and not local. The name is resolved through `insert_machine`
-  first (DL-49): an agent's `node_name`, a real machine's `node_name`/name, or
-  a virtual pool's members (local iff ALL members are local; a split pool is
-  ERROR under `--machine-policy strict`, a WARN under `local-eligible`). An
-  undefined name compares literally (None/`localhost`/hostname/FQDN, as before).
+- `machine` set and not local. Locality is decided against this runner's
+  DECLARED IDENTITY (`--as-machine NAME`, repeatable; DL-52) -- the runner is
+  TOLD what machine it is, no FQDN/reverse-DNS guessing. A job whose `machine:`
+  IS an identity name runs here directly; otherwise the name resolves through
+  `insert_machine` (DL-49): an agent's `node_name`, a real machine's
+  `node_name`/name, or a virtual pool's members (local iff ALL members resolve
+  to the identity; a split pool is ERROR under `--machine-policy strict`, a WARN
+  under `local-eligible`). Identity omitted => the forward hostname + localhost
+  (zero-config, no reverse-DNS). An undefined-and-not-ours name is foreign.
   A bad definition (missing `node_name`, empty pool, undefined/nested member,
   unknown/missing type) is ERROR — never guessed. Resolution is preflight-only
   and shell-side; the bisimulation gate is untouched. Remote dispatch (routing
@@ -358,11 +365,20 @@ ERROR:
 - `owner` set and not the invoking user.
 - `run_calendar` / `exclude_calendar` present (definitions unmodeled).
 - `timezone` not resolvable in `zoneinfo`.
+- `resources:` requires a resource with no `insert_resource` in the set, or no
+  parseable `amount` — an unsized semaphore cannot be honored (DL-50; fail-
+  closed, stricter than L016's warn; a `--resource-capacity` override is a
+  documented future escape hatch). Unknown `res_type` (not R/D/T). Malformed
+  (non-integer) `job_load` / `priority` / machine `max_load`. Refused in BOTH
+  run and rehearse (resource semantics gate the oracle in either clock domain).
 - Oracle construction failure (surfaces IR-level refusals unchanged).
 
 WARN:
 - `n_retrys > 0` — runs WITHOUT retries (PENDING: Q4).
-- `job_load` / `priority` / resource references — no resource manager.
+- `job_load` on a **pool** machine — machine-load throttle unmodelled for pools
+  (DL-50, PENDING Qr3); resource semaphores on such a job still apply. (Plain
+  `job_load`/`priority`/`resources:` are now HONORED — DL-50 — not warned; an
+  unsized/unknown-res_type/malformed resource is an ERROR below, not a WARN.)
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13; L010's territory), so this
   warns and disables `plan` rather than refusing.
@@ -425,12 +441,16 @@ supervisor's.
 
 ## 12. Non-goals
 
-HA/clustering, remote machines or agent fabric, RBAC, resource/load
-management, custom calendars, retry semantics (Q4), non-child orphan
-adoption (dissolved by design: the 11f supervisor makes survival a
-*reattachment*, never an adoption — E4), alarm delivery beyond journal +
-UI (no mail/pager integrations), cgroup/scope containment (documented
-Linux hardening path, §6a).
+HA/clustering, remote machines or agent fabric, RBAC, custom calendars,
+retry semantics (Q4), non-child orphan adoption (dissolved by design: the
+11f supervisor makes survival a *reattachment*, never an adoption — E4),
+alarm delivery beyond journal + UI (no mail/pager integrations), cgroup/
+scope containment (documented Linux hardening path, §6a). Resource/load
+management LANDED single-node (DL-50): the oracle honors it as capacity
+buckets, preflight refuses the unmodelable. Still out: DEPLETABLE
+replenishment (mid-run `update_resource` = SEM-16), and cross-node resource
+coordination (subsumed today by the foreign-machine refusal; a distributed
+concern, DL-49 future track).
 
 ## 13. Testing — bisimulation is the acceptance gate
 

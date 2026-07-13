@@ -29,7 +29,7 @@ from dsl41.runner import (
     RealClock,
     Scheduler,
     VirtualClock,
-    _local_names,
+    _local_identity,
     and_success_skeleton,
     preflight,
     read_journal,
@@ -39,6 +39,10 @@ from dsl41.runner import (
 )
 
 # 2026-07-01 is a Wednesday; 07-03 Fri, 07-04 Sat, 07-05 Sun, 07-06 Mon.
+
+
+def _boom(*_a: object) -> str:
+    raise AssertionError("getfqdn must not be called (DL-52 drops reverse-DNS)")
 
 
 # ------------------------------------------------------------ 1. occurrence math
@@ -623,10 +627,49 @@ def test_resolve_machine_verdicts_direct() -> None:
     assert resolve_machine("nope.example.com", machines, local).verdict == "foreign"
 
 
-def test_local_names_includes_hostname_and_localhost() -> None:
-    names = _local_names()
+def test_resolve_machine_declared_name_wins_over_node_name() -> None:
+    """DL-52 (the user's case): the runner declares it IS 'greezy_spoon'. A job
+    on greezy_spoon runs here even though insert_machine maps it to a foreign-
+    looking node -- the declared identity is authoritative over node_name."""
+    identity = frozenset({"localhost", "greezy_spoon"})
+    machines = lower_source(
+        "insert_machine: greezy_spoon\ntype: a\nnode_name: ip-10-0-3-42\n"
+    ).machines
+    assert resolve_machine("greezy_spoon", machines, identity).verdict == "local"
+
+
+def test_resolve_machine_declared_node_also_matches_via_resolution() -> None:
+    """DL-52: declaring the NODE instead of the record name also works -- the
+    job's machine resolves through insert_machine to a node in the identity."""
+    identity = frozenset({"localhost", "ip-10-0-3-42"})
+    machines = lower_source(
+        "insert_machine: greezy_spoon\ntype: a\nnode_name: ip-10-0-3-42\n"
+    ).machines
+    assert resolve_machine("greezy_spoon", machines, identity).verdict == "local"
+
+
+def test_resolve_machine_foreign_when_neither_name_nor_node_declared() -> None:
+    """DL-52: a job on a machine this runner does not answer to -- by name or
+    resolved node -- is refused foreign, with no hostname fallback."""
+    identity = frozenset({"localhost", "greezy_spoon"})
+    machines = lower_source("insert_machine: other_box\ntype: a\nnode_name: prod-7\n").machines
+    assert resolve_machine("other_box", machines, identity).verdict == "foreign"
+
+
+def test_local_identity_default_is_hostname_no_reverse_dns(monkeypatch) -> None:
+    """DL-52: the omitted-identity default is the FORWARD hostname + localhost,
+    and getfqdn() is never called (no reverse-DNS stall / namespace guess)."""
+    monkeypatch.setattr(socket_mod, "getfqdn", _boom)  # must not be called
+    names = _local_identity()
     assert "localhost" in names
     assert socket_mod.gethostname().lower() in names
+
+
+def test_local_identity_declared_is_explicit_no_hostname() -> None:
+    """DL-52: declaring `--as-machine` makes identity EXACTLY those names plus
+    localhost -- no hostname guessing (pure explicit)."""
+    names = _local_identity(frozenset({"Greezy_Spoon"}))
+    assert names == frozenset({"localhost", "greezy_spoon"})
 
 
 def test_resolve_machine_unquotes_node_name() -> None:
@@ -723,16 +766,48 @@ def test_preflight_n_retrys_clean_when_unset() -> None:
     assert not any(i.code == "n-retrys" for i in items)
 
 
-def test_preflight_resources_warns_on_job_load_and_typed_resources() -> None:
+def test_preflight_resources_refuses_unsized_and_malformed(monkeypatch) -> None:
+    """DL-50: resources are honored, so preflight refuses (fail-closed) only
+    the unmodelable shapes -- an unsized semaphore and a non-integer load."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")  # dodge slow reverse-DNS
     text = (
-        "insert_job: rl1\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 50\n\n"
-        "insert_job: rl2\njob_type: c\ncommand: y\nmachine: localhost\n"
-        "resources: (r1, quantity=2, free=y)\n"
+        "insert_job: rl1\njob_type: c\ncommand: y\nmachine: localhost\n"
+        "resources: (r_unsized, quantity=2, free=y)\n\n"  # no insert_resource -> unsized
+        "insert_job: rl2\njob_type: c\ncommand: x\nmachine: localhost\njob_load: heavy\n"  # malformed
     )
     items = preflight(lower_source(text))
-    codes = {(i.code, i.job) for i in items if i.code == "resources"}
-    assert ("resources", "rl1") in codes
-    assert ("resources", "rl2") in codes
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"rl1", "rl2"}
+
+
+def test_preflight_resources_honored_when_sized_is_clean(monkeypatch) -> None:
+    """A sized renewable semaphore + a job_load with no throttling machine are
+    both HONORED (not refused): no `resources` preflight item at all (DL-50)."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")  # dodge slow reverse-DNS
+    text = (
+        "insert_resource: SIZED_LOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: rl_ok\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 50\n"
+        "resources: (SIZED_LOCK, QUANTITY=1)\n"
+    )
+    items = preflight(lower_source(text))
+    assert not any(i.code == "resources" for i in items)
+
+
+def test_preflight_resources_refuses_duplicate_and_unsatisfiable(monkeypatch) -> None:
+    """DL-50 (adversarial review): preflight refuses a resource requested twice
+    (ambiguous demand, would over-commit the bucket) and a QUANTITY that exceeds
+    the resource's amount (statically unsatisfiable -- would hang forever)."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_resource: DUPR\nres_type: R\namount: 3\n\n"
+        "insert_resource: TINY\nres_type: R\namount: 1\n\n"
+        "insert_job: dup\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (DUPR, QUANTITY=1) AND (DUPR, QUANTITY=1)\n\n"
+        "insert_job: big\njob_type: c\ncommand: y\nmachine: localhost\nresources: (TINY, QUANTITY=5)\n"
+    )
+    items = preflight(lower_source(text))
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"dup", "big"}
 
 
 def test_preflight_resources_clean_without_load_priority_or_resources() -> None:

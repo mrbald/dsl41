@@ -341,6 +341,35 @@ _CONDITION_ATTRS: tuple[Literal["condition", "box_success", "box_failure"], ...]
 )
 
 
+def _lookup_ci(mapping: dict[str, str], key: str) -> str | None:
+    """Case-insensitive lookup: job passthrough is keyed by the raw attribute
+    case (`attr.key`), so `job_load`/`Job_Load` must both resolve (DL-49's
+    machine lowering settled on lowercased keys; job passthrough did not)."""
+    if key in mapping:
+        return mapping[key]
+    lowered = key.lower()
+    for k, v in mapping.items():
+        if k.lower() == lowered:
+            return v
+    return None
+
+
+def _int_attr(mapping: dict[str, str], key: str, *, label: str) -> int | None:
+    """Typed read of an opaque-carry integer attribute (job_load, priority,
+    max_load, amount). None when absent; ValueError (with the offending text)
+    when present-but-not-an-integer. Enforcement of that error is the runner's
+    preflight (DL-50): the oracle models only what parses, and preflight is the
+    execution gate -- a malformed value refuses the run, never runs it wrong."""
+    raw = _lookup_ci(mapping, key)
+    if raw is None:
+        return None
+    text = raw.strip()
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"{label} expects an integer, got {text!r}") from None
+
+
 class ResourceRef(BaseModel):
     """One group of the `resources:` job attribute (DL-21; TechDocs 12.x:
     `(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)`). Typed carry, no oracle
@@ -417,6 +446,16 @@ class JobIR(BaseModel):
             if cond is not None:
                 yield attr_name, cond, getattr(self.sem, f"{attr_name}_span")
 
+    def job_load_units(self) -> int | None:
+        """DL-50: `job_load` as the machine-load demand this job places on its
+        machine bucket. None = attribute absent (demand 0; # PENDING: Qr4)."""
+        return _int_attr(self.passthrough, "job_load", label="job_load")
+
+    def priority_value(self) -> int | None:
+        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering
+        (# PENDING: Qr2 -- lower-number-higher assumed). None = unset."""
+        return _int_attr(self.passthrough, "priority", label="priority")
+
 
 class MachineMember(BaseModel):
     """One component machine of a virtual machine (type v) or real-machine
@@ -441,6 +480,16 @@ class MachineIR(BaseModel):
     attrs: dict[str, str] = {}
     span: SourceSpan | None = None
 
+    def max_load_units(self) -> int | None:
+        """DL-50: machine-level `max_load` = the machine-load bucket capacity.
+        None = unset (no throttle -- unlimited concurrency, AutoSys default) OR
+        a pool (type v / real pool): per-member load placement is unmodelled v1
+        (DL-49), so pools carry NO machine-load throttle (# PENDING: Qr3);
+        resource semaphores still apply to jobs pinned to them."""
+        if self.members:
+            return None
+        return _int_attr(self.attrs, "max_load", label="max_load")
+
 
 class ResourceIR(BaseModel):
     """insert_resource record (virtual resources); carried opaquely v1 like
@@ -452,6 +501,13 @@ class ResourceIR(BaseModel):
     res_type: str | None = None  # JIL `res_type:` -- verbatim
     attrs: dict[str, str] = {}
     span: SourceSpan | None = None
+
+    def capacity_units(self) -> int | None:
+        """DL-50: `amount` = the resource bucket's total capacity (units a
+        `resources:` requirement draws QUANTITY from). None = no `amount`
+        declared -- preflight refuses a job that requests such a resource (an
+        unsized semaphore cannot be honored; fail-closed, stricter than L016)."""
+        return _int_attr(self.attrs, "amount", label="amount")
 
 
 class XinstIR(BaseModel):

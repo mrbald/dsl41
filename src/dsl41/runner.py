@@ -2192,10 +2192,23 @@ class PreflightItem(BaseModel):
     message: str
 
 
-def _local_names() -> frozenset[str]:
+def _local_identity(declared: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The machine names this runner answers to (DL-52). `localhost` always
+    counts. When the operator DECLARES identities (`--as-machine greezy_spoon`),
+    THOSE are the identity -- pure and explicit, no hostname/FQDN guessing: the
+    runner knows which estate machine it is, and a job pinned to that name (or
+    resolving to it through insert_machine) runs here. Omitted, we fall back to
+    the forward hostname (short + full) for zero-config, but NEVER reverse-DNS:
+    `getfqdn()` can stall for tens of seconds and, worse, decides placement from
+    what the OS resolver thinks this box is called -- a different namespace from
+    the estate's machine names (DL-52 replaces DL-45 M6's FQDN matching)."""
+    identity = {"localhost"}
+    if declared:
+        identity |= {d.strip().lower() for d in declared if d.strip()}
+        return frozenset(identity)
     hostname = socket_mod.gethostname().lower()
-    fqdn = socket_mod.getfqdn().lower()  # estates often carry the FQDN (review M6)
-    return frozenset({"localhost", hostname, hostname.split(".")[0], fqdn})
+    identity |= {hostname, hostname.split(".")[0]}
+    return frozenset(identity)
 
 
 #: Machine `type:` values the resolver understands (DL-49). Anything else --
@@ -2246,15 +2259,20 @@ def _leaf_host(machine: MachineIR) -> tuple[str | None, str | None]:
 def resolve_machine(
     name: str, machines: Mapping[str, MachineIR], local: frozenset[str]
 ) -> MachineResolution:
-    """Resolve a job's `machine:` name to a placement verdict against the
-    local host, honouring `insert_machine` (DL-49). Undefined names compare
-    literally (back-compat); agents/real machines resolve through
-    node_name; a virtual machine is local iff ALL members are local, foreign
-    iff none are, else mixed. Bad definitions (missing type, undefined /
-    nested / typeless member, empty pool) are `error`, never guessed."""
+    """Resolve a job's `machine:` name to a placement verdict against this
+    runner's declared identity (DL-52 `local`), honouring `insert_machine`
+    (DL-49). A DIRECT name match wins first: if the job names a machine this
+    runner answers to, run here -- the operator's "this runner IS greezy_spoon"
+    is authoritative over whatever node_name the record carries. Otherwise
+    agents/real machines resolve through node_name; a virtual machine is local
+    iff ALL members resolve local, foreign iff none, else mixed. Undefined and
+    not-our-name is foreign. Bad definitions (missing type, undefined / nested /
+    typeless member, empty pool) are `error`, never guessed."""
+    if name.lower() in local:
+        return MachineResolution("local", name)  # DL-52: named identity match
     machine = machines.get(name)
     if machine is None:
-        return MachineResolution("local" if name.lower() in local else "foreign", name)
+        return MachineResolution("foreign", name)  # undefined and not our name
     kind = (machine.machine_type or "").lower()
     if kind and kind not in _KNOWN_MACHINE_TYPES:
         return MachineResolution("error", f"machine {name!r} has unsupported type {machine.machine_type!r}")
@@ -2321,16 +2339,108 @@ def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
     return skeleton
 
 
+def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[PreflightItem]:
+    """DL-50: resource/load attributes are HONORED by the oracle (capacity
+    buckets, QUE_WAIT, deterministic admission). Preflight refuses -- fail-
+    closed -- only the shapes the oracle cannot model faithfully, in BOTH run
+    and rehearse (resource semantics gate the oracle in either clock domain):
+      * a `resources:` requirement whose resource is unsized (no insert_resource
+        in the set, or no parseable `amount`) -- an unsized semaphore cannot be
+        honored (stricter than L016's warn; a `--resource-capacity` override is
+        a documented future escape hatch, not v1);
+      * an unknown res_type (not R/D/T) -- unknown release semantics;
+      * a malformed job_load/priority/max_load -- a non-integer load.
+    It WARNs (does not refuse) a job_load on a pool machine, where per-member
+    load placement is unmodelled (# PENDING: Qr3) -- resource semaphores on
+    such a job still apply. Cross-machine shared locks need no separate refusal:
+    the DL-49 foreign-machine ERROR already makes every runnable job local, so
+    every honored resource is contended on this one host (revisit if distributed
+    execution lands, DL-49 future track)."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="resources", job=name, message=message))
+
+    for accessor in (job.job_load_units, job.priority_value):
+        try:
+            accessor()  # the accessor's ValueError names the offending attribute
+        except ValueError as exc:
+            err(str(exc))
+    spec = job.exec_
+    if spec is not None and spec.machine is not None:
+        machine = catalog.machines.get(spec.machine)
+        if machine is not None:
+            try:
+                machine.max_load_units()
+            except ValueError as exc:
+                err(f"machine {spec.machine!r}: {exc}")
+            try:
+                load = job.job_load_units()
+            except ValueError:
+                load = None  # already reported above
+            if machine.members and load:
+                items.append(
+                    PreflightItem(
+                        severity="WARN",
+                        code="resources",
+                        job=name,
+                        message=f"job_load={load} on pool machine {spec.machine!r}:"
+                        " machine-load throttle unmodelled (PENDING Qr3);"
+                        " resource semaphores still apply",
+                    )
+                )
+    seen: set[str] = set()
+    for ref in job.resources:
+        if ref.name in seen:
+            err(f"resources: {ref.name!r} requested more than once -- ambiguous demand (DL-50)")
+        seen.add(ref.name)
+        resource = catalog.resources.get(ref.name)
+        if resource is None:
+            err(
+                f"resources: {ref.name!r} has no insert_resource in the set --"
+                " cannot size the semaphore (DL-50; supply the definition"
+                " or drop the requirement)"
+            )
+            continue
+        try:
+            capacity = resource.capacity_units()
+        except ValueError as exc:
+            err(f"resource {ref.name!r}: {exc}")
+            continue
+        if capacity is None:
+            err(f"resource {ref.name!r} has no `amount` -- cannot size the semaphore (DL-50)")
+            continue
+        if ref.quantity > capacity:
+            err(
+                f"resources: {ref.name!r} QUANTITY={ref.quantity} exceeds its amount={capacity}"
+                " -- can never be satisfied, the job would hang in QUE_WAIT forever (DL-50)"
+            )
+        res_type = (resource.res_type or "").strip().upper()
+        if res_type not in ("", "R", "D", "T"):
+            err(
+                f"resource {ref.name!r} res_type {resource.res_type!r} is not R/D/T --"
+                " unknown release semantics (DL-50)"
+            )
+    return items
+
+
 def preflight(
     catalog: CatalogIR,
     *,
     execution: bool = True,
     machine_policy: MachinePolicy = "strict",
+    as_machine: frozenset[str] = frozenset(),
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
     the machine/owner identity rules -- they guard real processes, and the
     FakeAdapter runs none -- while everything the scheduler and oracle
     depend on (calendars, timezones, construction) still gates.
+
+    `as_machine` (DL-52) is the identity this runner answers to. Empty = the
+    forward hostname (zero-config, no reverse-DNS); non-empty = EXACTLY those
+    names plus localhost (the operator declared it -- no hostname guessing). A
+    job whose `machine:` is (or resolves through insert_machine to) an identity
+    name runs here; anything else is refused foreign.
 
     `machine_policy` (DL-49) governs the one ambiguous machine verdict: a
     virtual pool with SOME members on this host and some elsewhere. `strict`
@@ -2339,7 +2449,7 @@ def preflight(
     ignored. Unambiguous verdicts (all-local, none-local, bad definition)
     ignore the policy."""
     items: list[PreflightItem] = []
-    local = _local_names()
+    local = _local_identity(as_machine)
     user = getpass.getuser()
     for name, job in sorted(catalog.jobs.items()):
         if job.job_type not in _RUNNABLE_TYPES:
@@ -2434,18 +2544,7 @@ def preflight(
                     " a shell-side retry would fork semantics from the oracle)",
                 )
             )
-        resource_keys = [k for k in ("job_load", "priority") if k in job.passthrough]
-        if resource_keys or job.resources:
-            items.append(
-                PreflightItem(
-                    severity="WARN",
-                    code="resources",
-                    job=name,
-                    message="resource/load attributes"
-                    f" ({', '.join(resource_keys + [r.name for r in job.resources])}):"
-                    " no resource manager (ss12); runs unthrottled",
-                )
-            )
+        items.extend(_resource_preflight(name, job, catalog))
     try:
         Oracle(catalog)
     except OracleError as exc:
