@@ -73,11 +73,12 @@ def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> Non
     assert "lock1 x2 FREE=A" in entry and "pool1 x1" in entry
 
 
-def test_report_inventories_calendars_and_surfaces_u6() -> None:
+def test_report_inventories_calendars_and_surfaces_u6b() -> None:
     """DL-25: the report inventories referenced calendars per job and
-    surfaces U6 via the M24 row. DL-36 refinement: definitions can now
-    travel as autocal_asc exports, so each row states whether the set
-    carries one."""
+    surfaces U6b via the M24 row (DL-53: per-trigger timezone U6a resolved;
+    calendar-algebra parity with AutoSys extended calendars stays open as
+    U6b). DL-36 refinement: definitions can now travel as autocal_asc
+    exports, so each row states whether the set carries one."""
     catalog = lower_source(
         "insert_job: calj\njob_type: c\ncommand: x\nmachine: m1\n"
         "date_conditions: 1\nrun_calendar: month_end\nexclude_calendar: holidays\n"
@@ -88,12 +89,18 @@ def test_report_inventories_calendars_and_surfaces_u6() -> None:
     assert "## Calendars (M24" in report
     assert "`month_end` (extended, defined in set) — used by `calj`" in report
     assert "`holidays` (NO DEFINITION in set) — used by `calj`" in report
-    assert "U6" in report  # calendar parity open question now listed
+    assert "**U6b**" in report  # calendar parity open question now listed
     # dead-config calendars (no date_conditions) are L005's business, not the report's
     dead = lower_source(
         "insert_job: deadj\njob_type: c\ncommand: x\nmachine: m1\nrun_calendar: month_end\n"
     )
     assert "## Calendars" not in render_migration_report(dead)
+    # U6a resolved (DL-53): timezone alone (M26) no longer surfaces a question
+    tz_only = lower_source(
+        "insert_job: tzj\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "22:00"\ntimezone: US/Eastern\n'
+    )
+    assert "## Open questions" not in render_migration_report(tz_only)
 
 
 def test_classify_edges_partitions_by_cls_and_loses_nothing() -> None:
@@ -184,28 +191,45 @@ def test_report_carries_m27_flags_mutex_or_shapes_and_boundary() -> None:
 
 
 def test_report_open_question_ledger_tracks_used_rows_only() -> None:
-    """The U-question section lists a question iff the catalog uses one of
-    its M-rows: the corpus uses M02/M03 (U5), M09 (U8), M15 (U2), and now
-    (DL-38's fold_t003_or_join.jil, an M12 OR shape over fold_or_m1/
-    fold_or_m2's plain successes) M12 too, so U1 must be present."""
+    """DL-53 closed U2/U4/U5/U7/U8 from public vendor docs: their content now
+    lives in per-edge assumption strings (derive.py), not the open-question
+    ledger. The corpus uses M02/M03 (U5's old rows), M09 (U8's), and M15
+    (U2's), so those three would have listed pre-DL-53 and must not now.
+    U4/U7's rows (M08/M31, M29/M30) are corpus-unused either way -- their
+    removal gate is test_report_no_questions_for_exitcode_only_catalog.
+    What remains: U1 (corpus M12 OR shape, DL-38's fold_t003_or_join.jil)
+    and U6b (corpus M24 calendars)."""
     report = render_migration_report(_corpus_catalog())
-    assert "**U5**" in report
-    assert "**U8**" in report
-    assert "**U2**" in report
     assert "**U1**" in report
+    assert "**U6b**" in report
+    assert "**U2**" not in report
+    assert "**U4**" not in report
+    assert "**U5**" not in report
+    assert "**U7**" not in report
+    assert "**U8**" not in report
 
 
-def test_report_u1_absent_without_or_shapes_while_u5_listed() -> None:
-    """Negative gate on the U-question ledger (DL-40): a question whose
-    M-rows the catalog never uses must stay OUT while used-row questions
-    appear. Without this, a regression that lists the whole _U_QUESTIONS
-    table whenever any row applies passes every positive assertion above."""
+def test_report_no_questions_for_exitcode_only_catalog() -> None:
+    """DL-53: U4 (exit-code mechanism) is resolved and M08 no longer keys the
+    ledger -- the pre-DL-53 table would have listed U4 for this catalog."""
+    catalog = lower_source(
+        "insert_job: p\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: j\njob_type: c\ncommand: b\nmachine: m1\ncondition: e(p) = 0\n"
+    )
+    assert "## Open questions" not in render_migration_report(catalog)
+
+
+def test_report_resolved_questions_not_listed_for_lookback_only_catalog() -> None:
+    """DL-53: U5 (Time Scope bounds) is resolved and no longer keys the
+    open-question ledger, so a catalog whose only A-row is an M03 lookback
+    edge surfaces NO open-questions section at all -- not even with U1
+    absent-but-listed-as-empty; the section itself must not render."""
     catalog = lower_source(
         "insert_job: p\njob_type: c\ncommand: a\nmachine: m1\n\n"
         "insert_job: j\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(p, 12.00)\n"
     )
     report = render_migration_report(catalog)
-    assert "**U5**" in report  # the lookback edge uses M02/M03
+    assert "## Open questions" not in report
     assert "**U1**" not in report  # no M12 OR shape anywhere in the catalog
 
 

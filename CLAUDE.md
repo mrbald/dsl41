@@ -24,18 +24,24 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 - **Corpus hygiene.** `tests/corpus/` is synthetic/doc-derived ONLY. Never accept
   production JIL from any employer estate into the repo, tests, or docs (LICENSING.md).
 - **Open questions stay open.** Q1–Q7 (autosys dossier §9), U1–U8 (stonebranch
-  Part III) are unresolved. Those with an implemented default (Q1–Q4, Q7, U1–U5,
-  U8) are marked in code with `# PENDING: Qn/Un`; the rest have no code switch —
-  Q5/Q6 live in the autosys dossier only (Q6-adjacent aside in oracle.py), U6/U7
-  in backend_uc's `_U_QUESTIONS` report table. Do not guess-resolve any of them;
-  implement the documented default and keep the switch (see condition.lark Q1 banner).
+  Part III). DL-53 (2026-07-28) closed nine — Q1, Q4, Q5, U2, U4, U5, U6a, U7,
+  U8 — each pinned to a dossier citation; do not relitigate them. Still open,
+  with a live `# PENDING: Qn/Un` code marker: Q2, Q3, Q7, U1, U3 (Q1's switch
+  and Q4's marker were deleted per DL-53). Q6 has no code switch, dossier-only
+  (Q6-adjacent aside in oracle.py); U6b lives in backend_uc's `_U_QUESTIONS`
+  table, pruned to exactly U1+U6b. A separate `# PENDING: Qr*`
+  series in ir.py/oracle.py/runner.py is unrelated — resource-manager
+  questions (DL-49/50), no dossier, outside this ledger. Do not guess-resolve
+  any open question; implement the documented default and keep the switch
+  where one exists.
 
 ## Implementation order (DL-03) — one phase per PR-sized unit
 All ten phases are built and tested (README's implementation memo has the source
 map); this list stays as the normative order and scope of each unit.
 1. `ast_jil`: scanner per spec + preserve/canonical renderers + F1–F4 tests.
    Definition of done: all corpus files round-trip byte-identical; fuzz test green.
-2. `conditions`: lark loader (both start rules, `CONDITION_PRECEDENCE` setting),
+2. `conditions`: lark loader (historically both start rules + the
+   `CONDITION_PRECEDENCE` switch; retired by DL-53 — single flat rule now),
    Tree→Cond transformer, lookback token validation (L015 shapes), span retention.
 3. `ir`: Pydantic models exactly as ir-design §3–4 + lowering + model validators
    (XOR rules SEM-31, lookback-on-global ban SEM-04).
@@ -58,9 +64,11 @@ map); this list stays as the normative order and scope of each unit.
 - pytest + hypothesis; trace tests named `test_semXX_*` / pairs `test_pMxx_*`.
 - Every linter rule ships with a corpus fixture that triggers it and one that
   doesn't.
-- The Q1 sentinel test (`test_precedence_modes_differ_where_expected`) must keep
-  passing until Q1 resolves; then replace it with the pinning trace test and
-  delete the losing grammar rule.
+- Q1 is resolved (DL-53): `test_sem03_flat_left_to_right_precedence_pinned`
+  (grammar, tests/test_condition_grammar.py) and
+  `test_sem03_precedence_pinned_model_level` (Cond model,
+  tests/test_conditions.py) pin flat left-to-right precedence. The old
+  sentinel-test-and-switch protocol (DL-06) is retired.
 
 ## Style
 - Python ≥3.12, Pydantic V2, typer CLI, ruff line length 100, mypy clean.
@@ -68,8 +76,8 @@ map); this list stays as the normative order and scope of each unit.
   metaprogramming in the IR.
 
 ## When live-instance access is available (ask the user, don't assume)
-- Resolve Q1 (precedence), Q2 (lookback-0 anchor), Q3 (time+condition composition)
-  with tiny throwaway jobs; record answers as SEM amendments + trace tests.
+- Resolve Q2 (lookback-0 anchor), Q3 (time+condition composition) with tiny
+  throwaway jobs; record answers as SEM amendments + trace tests.
 - Pull OpenAPI (U3), pin UC version, freeze edge schema.
 - `autorep -q` samples may be INSPECTED by the user to inform synthetic fixture
   shapes but never committed (corpus hygiene).

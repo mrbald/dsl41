@@ -427,7 +427,9 @@ def test_second_startjob_while_instance_open_is_ignored() -> None:
 def test_workflow_instance_success_and_failed_trace_entries() -> None:
     """UCS-04 approximation (DL-16): the workflow itself gets exactly one
     trace entry once every task is terminal -- Success iff none
-    Failed/Cancelled, else Failed."""
+    Failed/Cancelled, else Failed. Known-divergent since DL-53 resolved U2
+    (a real UC workflow goes Running/Problems and is never Failed); the pin
+    stays until the twin models Running/Problems (deferred by DL-53)."""
     ok_model = make_model(
         ["p", "c"],
         [UcEdge(src="p", dst="c", condition="success", mapping_row="TEST")],
@@ -467,7 +469,9 @@ def test_m31_exit_code_boundary_via_max_exit_success(
 ) -> None:
     """M31/U4 default: an integer exit_code (no explicit status) is judged
     against max_exit_success (default 0 when the task has no entry) -- the
-    same boundary reading as the AutoSys oracle."""
+    same boundary reading as the AutoSys oracle. U4 mechanism resolved
+    DL-53 (per-task Exit Code Processing field); the per-task range value
+    stays estate data this test doesn't model."""
     model = make_model(["p"], max_exit_success=({"p": ceiling} if ceiling is not None else {}))
     o = UcOracle(model)
     o.feed(ev("STARTJOB", 0, job="p"))
@@ -482,9 +486,10 @@ def test_m31_exit_code_boundary_via_max_exit_success(
 )
 def test_m31_explicit_code_sets_share_the_autosys_verdict(exit_code: int, expected: str) -> None:
     """M31/DL-33: success_codes/fail_codes ride the same same-boundary
-    assumption (U4) -- the twin judges through ir.exit_is_success, so the
-    Q7 corner defaults (fail-wins, replacement, threshold-ignored) match
-    the AutoSys oracle by construction."""
+    assumption (U4 mechanism resolved DL-53; per-task range stays estate
+    data) -- the twin judges through ir.exit_is_success, so the Q7 corner
+    defaults (fail-wins, replacement, threshold-ignored) match the AutoSys
+    oracle by construction."""
     model = make_model(
         ["p"],
         max_exit_success={"p": 2},
@@ -628,7 +633,8 @@ def test_terminated_via_folds_to_a_cancelled_condition_edge() -> None:
 
 def test_exitcode_atom_becomes_a_var_condition_on_exit_pseudo_variable() -> None:
     """M08/U4 default: e(prod) op k becomes a 'done' edge carrying a
-    var_condition on the 'exit:<task>' pseudo-variable."""
+    var_condition on the 'exit:<task>' pseudo-variable. U4 mechanism
+    resolved DL-53; the per-task range stays estate data."""
     text = (
         "insert_job: e_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: e_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: e(e_prod) = 5\n"

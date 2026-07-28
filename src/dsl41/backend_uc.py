@@ -93,15 +93,17 @@ def compile_to_uc(catalog: CatalogIR) -> None:
 
 #: Open questions whose resolution changes a mapping, keyed by the M-rows
 #: that depend on them (stonebranch-semantics Part III). The report lists a
-#: question iff the catalog uses one of its rows.
+#: question iff the catalog uses one of its rows. DL-53 (2026-07-28) closed
+#: U2/U4/U5/U7/U8 (and split U6 -- per-trigger timezone U6a resolved, calendar
+#: parity U6b stays open): resolved questions leave this ledger and their
+#: content lives in the per-edge assumption strings instead (derive.py).
 _U_QUESTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("U1", ("M12",), "native OR-join / 'Any' completion criteria decide the M12 lowering"),
-    ("U2", ("M15",), "exact workflow-status derivation rules (box_success restructuring)"),
-    ("U4", ("M08", "M31"), "per-task-type exit-code -> status configuration"),
-    ("U5", ("M02", "M03"), "Time Scope bounds on Task Monitors (max lookback window)"),
-    ("U6", ("M24", "M26"), "trigger timezone + calendar parity with AutoSys calendars"),
-    ("U7", ("M29", "M30"), "Maximum Run Time auto-cancel config; retry trigger set"),
-    ("U8", ("M09", "M10"), "Set Variable Actions ordering property default (UCS-08)"),
+    (
+        "U6b",
+        ("M24",),
+        "calendar parity with AutoSys extended calendars (per-trigger timezone U6a resolved, DL-53)",
+    ),
 )
 
 
@@ -136,9 +138,9 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         used_rows.add("M12")
     # DL-25: calendars are external named dependencies -- autocal territory,
     # not definable in JIL, so "unknown calendar" is undecidable for the
-    # linter. The report inventories them instead (and surfaces U6 via the
-    # M24/M26 rows). Only LIVE schedules count; dead-config calendars are
-    # L005's business.
+    # linter. The report inventories them instead (and surfaces U6b via the
+    # M24 row; per-trigger timezone U6a is resolved, DL-53). Only LIVE
+    # schedules count; dead-config calendars are L005's business.
     calendars: dict[str, list[str]] = {}
     for name, job in catalog.jobs.items():
         schedule = job.schedule
@@ -218,7 +220,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
             "## Calendars (M24 — autocal definitions)",
             "",
             "Calendars are autocal objects; recreate each in UC and verify parity"
-            " per calendar (U6). Definitions travel as autocal_asc exports (DL-36);"
+            " per calendar (U6b). Definitions travel as autocal_asc exports (DL-36);"
             " a referenced calendar without one in the compilation set is flagged"
             " here (and by L018 once the set carries any calendar).",
             "",

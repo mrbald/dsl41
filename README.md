@@ -233,9 +233,9 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - src/dsl41/ast_jil.py — JIL statement-level scanner + AST + preserve/canonical
   renderers; fidelity contract F1-F4: byte-exact `render(parse(x)) == x` (F1, fuzzed
   by F3), canonical-mode fixpoint (F2), escaped-colon torture (F4)
-- grammars/condition.lark — condition-expression grammar (lark, LALR); carries the Q1
-  precedence switch as two start rules, `start_flat` (default, flat & / |) and
-  `start_prec` (C-style, & binds tighter)
+- grammars/condition.lark — condition-expression grammar (lark, LALR); single flat
+  `start` rule, & and | at equal precedence, strictly left-associative (Q1
+  resolved, DL-53 — the earlier C-style candidate rule is deleted)
 - src/dsl41/conditions.py — lark loader + Tree->Cond transformer for
   condition/box_success/box_failure expressions; lookback + span retention
 - src/dsl41/ir.py — IR-F Pydantic entity models + AST->IR-F lowering; DL-07 firewall
@@ -301,8 +301,8 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - tests/test_ast_fidelity.py — F1-F4 round-trip fidelity, scanner structure and error
   paths, whitespace-sensitive edge cases
 - tests/test_condition_grammar.py — grammar-level accept/reject cases, doc-derived only
-- tests/test_conditions.py — Cond model shapes, lookback semantics, span retention, Q1
-  precedence switch
+- tests/test_conditions.py — Cond model shapes, lookback semantics, span retention,
+  the `test_sem03_precedence_pinned_model_level` precedence-pinning test (DL-53)
 - tests/test_ir.py — IR-F lowering decisions: SEM-30/31/32/33/34, subcommand support
   v1, type-inapplicable attributes
 - tests/test_lint.py — L001-L005/L015 rules plus the lint CLI exit-code contract
@@ -368,15 +368,18 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
 UC record emission is blocked on U3 (pull /resources/openapi.json from a live
 controller, freeze docs/uc-edge-schema.md, generate client) — until then backend_uc
-emits only the migration report + edge classification. Open questions Q1-Q7 (autosys
-dossier §9), U1-U8 (stonebranch Part III), and the runner's E5-E10
-(runner-design ss15) are unresolved. Those with a behavior default in code
-(Q1-Q4, Q7, U1-U5, U8, E5-E10) run on a documented default marked
-`# PENDING: Qn/Un/En`; Q5, Q6, U6, and U7 have no code switch yet — they live in the
-dossiers and in backend_uc's migration-report question table. The Q1 precedence sentinel
-test stays until Q1 resolves. Q1-Q3 need a live AutoSys instance; U3 needs a live UC
-controller. The runner is complete through phase 11f (the detached supervisor
-tier); phase 10 (the DSL surface) remains the last design item.
+emits only the migration report + edge classification. A 2026-07-28 public-doc
+sweep (DL-53) closed Q1, Q4, Q5 (autosys dossier §9) and U2, U4, U5, U6a, U7, U8
+(stonebranch Part III), each pinned to a dossier citation. Still open: Q2, Q3, Q6,
+Q7 (autosys dossier §9), U1, U3, U6b (stonebranch Part III), and the runner's
+E5-E10 (runner-design ss15; E8 was swept too and stays open — publicly
+undocumented, needs a live instance). Those with a behavior default in code
+(Q2, Q3, Q7, U1, E5-E10) run on a documented default marked
+`# PENDING: Qn/Un/En`; Q6 is dossier-only (no code switch) and U6b lives in
+backend_uc's migration-report question table. Q2, Q3, Q6, Q7 need
+a live AutoSys instance; U3 needs a live UC controller. The runner is complete
+through phase 11f (the detached supervisor tier); phase 10 (the DSL surface)
+remains the last design item.
 
 ## License
 

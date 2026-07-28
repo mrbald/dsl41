@@ -31,7 +31,6 @@ Decisions pinned here (each with a test):
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterator
 from functools import cache
@@ -242,22 +241,7 @@ def lookback_pitfalls(lb: Lookback) -> list[str]:
     return pitfalls
 
 
-# ------------------------------------------------- grammar loader (Q1 switch, DL-06)
-
-Precedence = Literal["flat", "prec"]
-
-_env_precedence = os.environ.get("CONDITION_PRECEDENCE", "flat")
-if _env_precedence not in ("flat", "prec"):
-    raise ValueError(
-        f"CONDITION_PRECEDENCE env var must be 'flat' or 'prec', got {_env_precedence!r}"
-    )
-
-#: PENDING: Q1 (SEM-03) -- operator precedence of & vs | without parentheses.
-#: Broadcom's wording is left-to-right with parentheses forcing precedence, so
-#: "flat" is the documented default (condition.lark Q1 banner, DL-06). Both
-#: grammars ship; after live verification delete the losing start rule, the
-#: sentinel tests, and this switch.
-CONDITION_PRECEDENCE: Precedence = cast(Precedence, _env_precedence)
+# --------------------------------------------- grammar loader (Q1 resolved: DL-53)
 
 
 def _grammar_text() -> str:
@@ -269,23 +253,23 @@ def _grammar_text() -> str:
 
 
 @cache
-def _parser(precedence: Precedence) -> Lark:
+def _parser() -> Lark:
     return Lark(
         _grammar_text(),
-        start=f"start_{precedence}",
+        start="start",
         parser="lalr",
         propagate_positions=True,
     )
 
 
-def parse_condition(text: str, precedence: Precedence | None = None) -> Cond:
+def parse_condition(text: str) -> Cond:
     """Parse a condition/box_success/box_failure expression into a Cond tree.
 
-    `precedence` defaults to the module-level CONDITION_PRECEDENCE setting.
+    Operator precedence is flat left-to-right -- & and | at equal precedence,
+    parentheses force grouping (SEM-03 [V], DL-53).
     """
-    mode = CONDITION_PRECEDENCE if precedence is None else precedence
     try:
-        tree = _parser(mode).parse(text)
+        tree = _parser().parse(text)
         return _build(cast("Tree[Token]", tree.children[0]))
     except UnexpectedInput as exc:
         first_line = str(exc).strip().splitlines()[0]
@@ -372,7 +356,7 @@ def _lookback(tree: Tree[Token]) -> Lookback:
 def _build(node: Tree[Token]) -> Cond:
     data = node.data
     children = node.children
-    if data in ("binop", "or_", "and_"):
+    if data == "binop":
         # The LALR tree is left-leaning: one nesting level per operator. Walk
         # the left spine iteratively (DL-20: a 1000+-atom flat chain must not
         # blow the Python stack), then fold back left-to-right so the result
@@ -382,15 +366,9 @@ def _build(node: Tree[Token]) -> Cond:
         # bounded by the parse_condition RecursionError guard.
         spine: list[tuple[bool, Tree[Token], CondSpan | None]] = []
         current = node
-        while True:
-            d = current.data
-            if d == "binop":  # flat mode: expr op operand
-                op_tok = cast("Tree[Token]", current.children[1]).children[0]
-                is_and = str(op_tok).lower() in ("&", "and")
-            elif d in ("or_", "and_"):  # prec mode: expr TOKEN expr
-                is_and = d == "and_"
-            else:
-                break
+        while current.data == "binop":  # expr op operand
+            op_tok = cast("Tree[Token]", current.children[1]).children[0]
+            is_and = str(op_tok).lower() in ("&", "and")
             spine.append((is_and, cast("Tree[Token]", current.children[-1]), _span(current)))
             current = cast("Tree[Token]", current.children[0])
         result = _build(current)  # leftmost operand: an atom or a paren group

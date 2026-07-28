@@ -382,13 +382,12 @@ def _classify_condition_edge(
         )
     if lookback is not None:
         assumption = (
-            "lookback window compiles to a Task Monitor Time Scope; window anchoring"
-            " differs per case (SEM-04)"
+            "lookback window compiles to a Task Monitor Time Scope (no documented"
+            " max -- U5 resolved, DL-53); window anchoring differs per case (SEM-04)"
         )
         if lookback.kind == "zero":
             # PENDING: Q2 -- zero-lookback anchoring unresolved; flag every use.
             assumption += "; zero-lookback anchoring is unresolved (Q2)"
-        # PENDING: U5 -- Time Scope bounds on Task Monitors not yet pinned.
         return edge("assumed", "M03", assumption)
     if via == "success":
         if _same_cycle(src, ref.dst, tree, cadence):
@@ -416,12 +415,16 @@ def _classify_condition_edge(
             "inclusive reading -- document the choice per estate",
         )
     if via == "exitcode":
-        # PENDING: U4 -- per-task-type exit-code -> status mechanism not pinned.
+        # U4 resolved (DL-53): per-task Exit Code Processing field, default
+        # Success Exitcode Range; the configured range is estate data the
+        # report records.
         return edge(
             "assumed",
             "M08",
-            "exit-code comparison compiles to an edge variable condition or a"
-            " task-level exit-code mapping; exact mechanism per task type (U4)",
+            "exit-code comparison compiles to the per-task Exit Code Processing"
+            " field (default Success Exitcode Range; mechanism resolved,"
+            " U4/DL-53) -- the configured range is estate data, not recoverable"
+            " from JIL alone",
         )
     if via == "notrunning":
         # Reachable only with a lookback (bare local n() is mutex-classified
@@ -453,7 +456,8 @@ def _edge_for_ref(
                 ),
                 source_atom=ref.span,
             )
-        # PENDING: U8 -- Set Variable Actions ordering property not recorded yet.
+        # U8 resolved (DL-53): uc.perform_actions.before_wf_dependency_evaluation
+        # defaults true; the assumption string records it.
         return DerivedEdge(
             src=atom.name,
             dst=ref.dst,
@@ -462,8 +466,10 @@ def _edge_for_ref(
             mapping_row="M09",
             assumption=(
                 "AutoSys re-evaluates on SET_GLOBAL events; UC edge variable"
-                " conditions evaluate at predecessor completion -- redesign if the"
-                " global is used as an async gate (UCS-08)"
+                " conditions evaluate at predecessor completion by default"
+                " (uc.perform_actions.before_wf_dependency_evaluation=true,"
+                " U8/DL-53) -- redesign if the global is used as an async gate"
+                " (UCS-08)"
             ),
             source_atom=ref.span,
         )
@@ -496,7 +502,8 @@ def _edge_for_ref(
         via = "exitcode" if isinstance(atom, ExitCodeAtom) else _STATUS_TO_VIA[atom.status]
         src = atom.job.name
         if _is_inside(tree, src, ref.dst):
-            # PENDING: U2 -- exact workflow-status derivation rules not pinned.
+            # U2 resolved (DL-53): Running/Problems on member failure; Success
+            # iff all members Success/Finished/Skipped; never Failed (UCS-04).
             return DerivedEdge(
                 src=src,
                 dst=ref.dst,
@@ -506,7 +513,9 @@ def _edge_for_ref(
                 mapping_row="M15",
                 assumption=(
                     f"{ref.origin} references member {src!r}: early-exit completion"
-                    " override needs explicit Skip-path restructuring (UCS-04/U2)"
+                    " override needs explicit Skip-path restructuring (UCS-04: a"
+                    " workflow goes Running/Problems on member failure, never Failed"
+                    " -- U2 resolved, DL-53)"
                 ),
                 source_atom=ref.span,
             )

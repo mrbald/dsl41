@@ -17,8 +17,9 @@ xfail(strict=True) with the repro and citation in its docstring -- see the
 final report for the SUSPECTED SRC BUG writeup.
 
 T03 (SEM-03, precedence) is out of scope for the oracle: precedence is
-pinned at parse time (condition.lark / CONDITION_PRECEDENCE), never seen by
-the interpreter, which only walks whatever Cond tree the parser produced.
+pinned at parse time (condition.lark, flat left-to-right per Q1/DL-53),
+never seen by the interpreter, which only walks whatever Cond tree the
+parser produced.
 """
 
 from __future__ import annotations
@@ -1473,12 +1474,11 @@ def test_error_uninjectable_event_kind_raises() -> None:
 
 @pytest.mark.skip(
     reason=(
-        "T03/SEM-03 operator precedence (Q1 pending) is resolved entirely at"
-        " parse time by condition.lark / CONDITION_PRECEDENCE; the oracle"
-        " only ever sees the already-built Cond tree and has no precedence"
-        " concept of its own to trace-test. See"
-        " test_condition_grammar.py::test_precedence_modes_differ_where_expected"
-        " for the live Q1 sentinel."
+        "T03/SEM-03 operator precedence (Q1 resolved: DL-53) is pinned entirely"
+        " at parse time by condition.lark (flat left-to-right); the oracle only"
+        " ever sees the already-built Cond tree and has no precedence concept"
+        " of its own to trace-test. See test_condition_grammar.py::"
+        "test_sem03_flat_left_to_right_precedence_pinned for the pinning test."
     )
 )
 def test_sem03_precedence_is_not_applicable_at_the_oracle_layer() -> None:

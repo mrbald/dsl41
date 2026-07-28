@@ -55,10 +55,13 @@ FORCE-triggered evaluation at T0+72h → JobB starts.
 Identifiers are case-insensitive; one-letter abbreviations are canonical short forms.
 
 ### SEM-03 · Operators and grouping **[V]**
-`AND`/`&`, `OR`/`|`, parentheses for precedence; evaluation is left-to-right with parentheses
-forcing precedence (per Broadcom wording). **[?]** Verify whether `&` binds tighter than `|`
-without parentheses or whether it is strictly left-associative flat evaluation — encode the
-answer as a trace test; the parser must reproduce AutoSys's actual precedence, not C's.
+`AND`/`&`, `OR`/`|`, parentheses for precedence; evaluation is strictly left-associative flat
+— `&` does **not** bind tighter than `|`; C-style precedence is wrong for JIL. *(Resolved
+2026-07-28, Q1 close, DL-53: TechDocs 12.1 "condition Attribute — Define Starting Conditions
+for a Job" states "The parentheses force precedence, and the equation is evaluated from left
+to right." Encoded as pinning tests `test_sem03_flat_left_to_right_precedence_pinned`
+(grammar shape) and `test_sem03_precedence_pinned_model_level` (Cond model); the C-style
+candidate grammar rule is deleted.)*
 `NOT` does not exist as an operator; negation is expressed via status atoms (`n()`, `f()` etc.).
 
 ### SEM-04 · Lookback qualifiers **[V]**
@@ -285,7 +288,7 @@ estates that carry timezone as convention can `dsl41 lint --suppress L005`.
 | `date_conditions` + time cluster | scheduling (§4) |
 | `max_exit_success` | success-boundary shift (SEM-09) |
 | `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]** |
-| `n_retrys` | auto-restart on *application-level* failure (exit-code), not on TERMINATED **[C/?]** — pin exact retry trigger set |
+| `n_retrys` | auto-restart on FAILURE only: application failures (vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart"; system/network failures restart via the scheduler's `MaxRestartTrys` config parameter instead **[V]** (Q4 resolved, DL-53) |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime — AST passthrough |
 | `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]** existence / **[?]** full value set |
@@ -337,7 +340,8 @@ estates that carry timezone as convention can `dsl41 lint --suppress L005`.
 ## 8. Trace test index (oracle regression set, one per SEM unless noted)
 
 T01 latching across days (SEM-01) · T02 each atom type truth table (SEM-02) · T03 precedence
-pinning (SEM-03, after live verification) · T04a/b/c lookback window in/out/9999 (SEM-04) ·
+pinning (SEM-03: pinned at parse time by the `test_sem03_*` tests, DL-53 — the oracle layer
+has no precedence concept of its own) · T04a/b/c lookback window in/out/9999 (SEM-04) ·
 T05 iced predecessor in lookback (SEM-05) · T06 undefined job never fires (SEM-06) ·
 T08 SET_GLOBAL triggers re-eval (SEM-08) · T09 max_exit_success boundary, T09b fail_codes
 carve-out, T09c success_codes replacement, T09d fail-wins overlap (SEM-09/DL-33, Q7 corners) ·
@@ -354,13 +358,30 @@ T34 must_* emit alarms only (SEM-34).
 
 ## 9. Open questions — resolve against a live instance or deeper doc dive before oracle v1
 
-- Q1 (SEM-03): exact operator precedence of `&` vs `|` without parentheses.
+- Q1 (SEM-03): RESOLVED 2026-07-28 (DL-53, doc sweep) — flat left-to-right, no `&`-over-`|`
+  precedence: "The parentheses force precedence, and the equation is evaluated from left to
+  right" (TechDocs 12.1, condition attribute page). Pinned by the `test_sem03_*` pinning
+  tests; the C-precedence candidate grammar is deleted.
 - Q2 (SEM-04): precise anchoring of lookback `0`.
 - Q3 (SEM-32): time-trigger firing with currently-false conditions — abandon vs. arm-and-wait.
-- Q4 (§5): exact trigger set for `n_retrys` (FAILURE only? TERMINATED? STARTJOB failures?).
-- Q5: event-processor restart: are in-flight timer events (run_window STARTJOBs, must_* checks)
-  persisted in the event table (expected: yes, they are DB rows) — affects nothing in the IR but
-  settle it for the oracle's event queue model.
+- Q4 (§5): RESOLVED 2026-07-28 (DL-53, doc sweep) — FAILURE only. TechDocs 12.0.01 n_retrys:
+  "specifies how many times to attempt to restart the job after it exits with a FAILURE
+  status. If a job exits with a TERMINATED status, it does not restart."; "This attribute
+  applies to application failures (for example, AutoSys Workload Automation cannot find a
+  file or a command, permissions are not properly set, and so on). It does not apply to
+  system or network failures", which restart under the scheduler's `MaxRestartTrys` config
+  parameter (cross-confirmed on the 12.1 MaxRestartTrys page: "governs retries due to system
+  or network problems ... different from the n_retrys job definition attribute"). Modeling
+  retries in the oracle/runner remains deliberately out of scope for v1 (DL-53 scope note;
+  the runner preflight still WARNs on `n_retrys > 0`).
+- Q5: RESOLVED 2026-07-28 (DL-53, doc sweep) — yes, by architectural entailment (no single
+  explicit "survives restart" sentence exists in TechDocs; the inference step is deliberate):
+  `ujo_event` "Records events that the scheduler has not yet processed" (Events reference,
+  12.1); "The event server (database) stores all the objects" and on start the scheduler
+  "continually scans the database for events to process" (Architecture, 12.1). There is no
+  in-memory-only event queue to lose; Broadcom KB 11013 corroborates operationally (queued
+  events execute after a multi-hour outage on plain restart). The oracle's event-queue model
+  needs no change.
 - Q6 (SEM-12): box_success referencing a member that is ON_ICE — does "not scheduled" clause
   apply ("condition not met if the specified job is not scheduled")?
 - Q7 (SEM-09/DL-33): composition of `success_codes`/`fail_codes`/`max_exit_success`. The
@@ -374,7 +395,10 @@ T34 must_* emit alarms only (SEM-34).
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 — JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
-`must_complete_times`, `date_conditions`), Scheduling guides (Basic Box Job Concepts, Box Job
-Completion State, Must Start/Complete Times, Manage Common Job Properties), Broadcom KB 186248
-(global variables). Secondary corroboration: legacy CA User Guide excerpts and practitioner
-references (on_hold/on_ice operational behavior, state definitions).
+`must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
+Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties),
+administration pages (`MaxRestartTrys`, `KillSignals`), system-states reference (Events),
+Getting Started (AutoSys Architecture), Broadcom KB 186248 (global variables), KB 11013
+(scheduler-outage event recovery, Q5 corroboration). Secondary corroboration: legacy CA User
+Guide excerpts and practitioner references (on_hold/on_ice operational behavior, state
+definitions).

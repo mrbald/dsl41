@@ -1613,3 +1613,61 @@
   direct-match / declared-node / foreign; `_local_identity` default-vs-declared
   with getfqdn asserted UNCALLED; the previously-hanging subprocess `dsl41 run`
   integration test now passes unpatched.
+- DL-53 Open-questions doc sweep: nine of the fifteen parked questions close from
+  public vendor docs (2026-07-28; executes the 2026-07-12 audit, which had never
+  been applied to the repo. Method: parallel web-verification agents re-confirmed
+  every claimed citation verbatim BEFORE any edit; a claim that failed verification
+  did not close -- no close without a surviving quote). CLOSED [?]->[V]:
+  (1) Q1 precedence -- "The parentheses force precedence, and the equation is
+  evaluated from left to right" (TechDocs 12.1, condition attribute page): flat
+  left-associative wins. Per DL-06's own protocol the C-style candidate grammar,
+  the CONDITION_PRECEDENCE env/module switch, and the sentinel tests are DELETED;
+  `parse_condition()` loses its precedence parameter; pinning tests
+  test_sem03_flat_left_to_right_precedence_pinned (grammar shape) +
+  test_sem03_precedence_pinned_model_level (Cond model). Resolves DL-06.
+  (2) Q4 n_retrys -- FAILURE-only, application-level: "how many times to attempt
+  to restart the job after it exits with a FAILURE status. If a job exits with a
+  TERMINATED status, it does not restart"; system/network failures restart via the
+  MaxRestartTrys scheduler config instead (cross-confirmed on both TechDocs pages).
+  Retry modeling in oracle/runner stays out of scope v1 -- now a recorded SCOPE
+  decision, no longer an unknown: the oracle keeps not modeling it, preflight keeps
+  its WARN; implementing retries is a future work item unblocked by this entry.
+  (3) Q5 event persistence -- yes, by architectural entailment with the inference
+  step stated in the dossier: ujo_event "records events that the scheduler has not
+  yet processed", the event server (DB) stores all objects, the scheduler scans the
+  DB on start; no in-memory-only queue exists to lose. KB 11013 corroborates.
+  (4) U2 workflow status -- member failure => Running/Problems (workflow keeps
+  running); Success iff all members Success/Finished/Skipped; a workflow instance
+  is never Failed (UC 7.4 status table, Failed row = "All (except Workflow)").
+  (5) U4 exit codes -- mechanism pinned: per-task "Exit Code Processing" field,
+  default Success Exitcode Range. The audit's second sub-claim ("default success
+  exit code 0") FAILED verification (exitCodes is a required field with no
+  documented default) and is dropped.
+  (6) U5 Time Scope -- no documented maximum: hours "must be a positive integer",
+  uncapped, +/-124:00 worked example; retention-bound in practice.
+  (7) U6 SPLIT: U6a per-trigger Time Zone field RESOLVED ("Triggering by Date and
+  Time"); U6b calendar-algebra parity with AutoSys extended calendars stays OPEN.
+  (8) U7 -- overrun mechanism is Late Finish + Abort Action (a composite WE label
+  "max-run equivalent"; the vendor does not); auto-retry applies to Failed status
+  only; "Suppress Intermediate Failures" is a Re-run command modifier suppressing
+  failure propagation, NOT a Retry option -- M30's conflating note is corrected.
+  (9) U8 -- uc.perform_actions.before_wf_dependency_evaluation defaults to true
+  (System Properties); per-controller configurable, so the migration report pins
+  the assumed value instead of listing an open question.
+  Consequences: backend_uc._U_QUESTIONS shrinks to U1 + U6b (resolved questions
+  downgrade into per-edge assumption strings; report-content test pins re-pinned
+  deliberately); M02/M08/M26/M29/M30/M31 reclassified or reworded; SEM-03's
+  embedded [?] removed, UCS-04/UCS-06/UCS-08 upgraded to [V]. DEFERRED, not an
+  oversight: the uc_oracle twin's workflow rollup (Failed if any member
+  Failed/Cancelled) is now KNOWN-divergent from resolved U2 (a real UC workflow
+  goes Running/Problems, never Failed) -- kept as a labeled approximation until
+  the twin models Running/Problems, its own future unit; the trace reason string
+  and test docstring say so. E8 (external-signal death) was ALSO swept and is
+  genuinely undocumented publicly (TERMINATED is defined mechanism-agnostically as
+  "the job was killed"; KillSignals shows exit-code-driven status resolution in
+  kill scenarios) -- E8 stays open with its marker upgraded to "swept 2026-07-28,
+  needs live instance". NOT touched here: Q2/Q3 (the same sweep found docs
+  CONTRADICTING the implemented defaults -- a behavioral change needing its own
+  design pass, next unit), Q6/Q7 (genuinely need a live instance), U1
+  (version-cutover residue), U3 (the base-serializer downgrade is its own unit;
+  DL-08/DL-15 still stand).

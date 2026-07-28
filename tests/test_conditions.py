@@ -2,12 +2,9 @@
 
 Grammar-level acceptance/rejection lives in tests/test_condition_grammar.py;
 here we pin model shapes, lookback semantics (SEM-04), L015 pitfall shapes,
-span retention, and the Q1 precedence switch.
+span retention, and the model-level Q1 precedence pin (DL-53).
 """
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +12,6 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import TypeAdapter
 
-import dsl41.conditions as conditions
 from dsl41.ast_jil import parse_file
 from dsl41.conditions import (
     And,
@@ -28,7 +24,6 @@ from dsl41.conditions import (
     Lookback,
     Or,
     Paren,
-    Precedence,
     StatusAtom,
     iter_atoms,
     lookback_pitfalls,
@@ -194,45 +189,31 @@ def test_cond_discriminated_union_round_trips() -> None:
     assert COND_ADAPTER.validate_python(cond.model_dump()) == cond
 
 
-# ------------------------------------------- structure, precedence (Q1), flattening
+# --------------------------- structure, precedence (Q1 resolved: DL-53), flattening
 
 
-def test_q1_precedence_modes_differ_model_level() -> None:
-    """Model-level mirror of the grammar Q1 sentinel (PENDING: Q1). When Q1
-    resolves, this becomes the pinning test for the surviving interpretation."""
-    src = "s(A) | s(B) & s(C)"
-    flat = parse_condition(src, "flat")
-    assert isinstance(flat, And)  # ((A|B) & C): left-assoc, equal precedence
-    assert isinstance(flat.operands[0], Or)
-    prec = parse_condition(src, "prec")
-    assert isinstance(prec, Or)  # (A | (B&C)): C-style
-    assert isinstance(prec.operands[1], And)
+def test_sem03_precedence_pinned_model_level() -> None:
+    """Q1 resolved (SEM-03 [V], DL-53): flat left-to-right — "The parentheses
+    force precedence, and the equation is evaluated from left to right"
+    (TechDocs 12.1, condition attribute page). `s(A) | s(B) & s(C)` is
+    ((A|B) & C), never the C-style (A | (B&C))."""
+    cond = parse_condition("s(A) | s(B) & s(C)")
+    assert isinstance(cond, And)  # ((A|B) & C): left-assoc, equal precedence
+    assert isinstance(cond.operands[0], Or)
 
 
-def test_default_precedence_is_flat() -> None:
-    assert conditions.CONDITION_PRECEDENCE == "flat"
-    assert parse_condition("s(A) | s(B) & s(C)") == parse_condition("s(A) | s(B) & s(C)", "flat")
-
-
-def test_module_setting_switches_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(conditions, "CONDITION_PRECEDENCE", "prec")
-    assert isinstance(parse_condition("s(A) | s(B) & s(C)"), Or)
-
-
-@pytest.mark.parametrize("mode", ["flat", "prec"])
-def test_same_op_runs_flatten_nary(mode: Precedence) -> None:
-    cond = parse_condition("s(a)&s(b)&s(c)", mode)
+def test_same_op_runs_flatten_nary() -> None:
+    cond = parse_condition("s(a)&s(b)&s(c)")
     assert isinstance(cond, And)
     names = [o.job.name for o in cond.operands if isinstance(o, StatusAtom)]
     assert names == ["a", "b", "c"]
-    cond = parse_condition("done(job) | terminated(job) | s(x)", mode)
+    cond = parse_condition("done(job) | terminated(job) | s(x)")
     assert isinstance(cond, Or)
     assert len(cond.operands) == 3
 
 
-@pytest.mark.parametrize("mode", ["flat", "prec"])
-def test_paren_survives_and_blocks_flattening(mode: Precedence) -> None:
-    cond = parse_condition("(s(A) | s(B)) & s(C)", mode)
+def test_paren_survives_and_blocks_flattening() -> None:
+    cond = parse_condition("(s(A) | s(B)) & s(C)")
     assert isinstance(cond, And)
     grouped, tail = cond.operands
     assert isinstance(grouped, Paren)
@@ -360,10 +341,9 @@ def test_job_ref_property(name: str, instance: str | None) -> None:
 @given(
     atoms=st.lists(st.sampled_from(["s(a)", "f(b)", "d(c)", "e(x) = 1"]), min_size=2, max_size=6),
     op=st.sampled_from(["&", "|"]),
-    mode=st.sampled_from(["flat", "prec"]),
 )
-def test_chain_flattening_property(atoms: list[str], op: str, mode: Precedence) -> None:
-    cond = parse_condition(f" {op} ".join(atoms), mode)
+def test_chain_flattening_property(atoms: list[str], op: str) -> None:
+    cond = parse_condition(f" {op} ".join(atoms))
     assert isinstance(cond, And if op == "&" else Or)
     assert len(cond.operands) == len(atoms)
 
@@ -376,8 +356,8 @@ CONDITION_ATTRS = {"condition", "box_success", "box_failure"}
 
 def test_every_corpus_condition_attr_parses() -> None:
     """The two layers compose: every condition-bearing RawAttr in the corpus
-    (comments already stripped by the scanner) is a valid condition expression
-    under both candidate grammars. Calendar-export statements are skipped:
+    (comments already stripped by the scanner) is a valid condition expression.
+    Calendar-export statements are skipped:
     their `condition:` is a date-condition keyword expression (a different
     vendor language, TechDocs "Date Condition Keywords"), carried opaquely
     (DL-36)."""
@@ -389,36 +369,8 @@ def test_every_corpus_condition_attr_parses() -> None:
                 continue
             for attr in stmt.attrs:
                 if attr.key.lower() in CONDITION_ATTRS:
-                    for mode in ("flat", "prec"):
-                        parse_condition(attr.raw_value, mode)
+                    parse_condition(attr.raw_value)
                     checked += 1
     assert checked >= 8  # grows with the corpus; keep >= current count
 
 
-# ----------------------------------------------------- CONDITION_PRECEDENCE env switch
-
-
-def test_env_var_selects_default_precedence() -> None:
-    code = (
-        "from dsl41.conditions import CONDITION_PRECEDENCE, Or, parse_condition\n"
-        "assert CONDITION_PRECEDENCE == 'prec'\n"
-        "assert isinstance(parse_condition('s(A) | s(B) & s(C)'), Or)\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env={**os.environ, "CONDITION_PRECEDENCE": "prec"},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_env_var_invalid_value_fails_import_loudly() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", "import dsl41.conditions"],
-        env={**os.environ, "CONDITION_PRECEDENCE": "bogus"},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode != 0
-    assert "CONDITION_PRECEDENCE" in result.stderr

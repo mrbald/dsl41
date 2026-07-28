@@ -38,7 +38,7 @@ from typer.testing import CliRunner
 
 from dsl41.ast_jil import parse, parse_file, render_canonical
 from dsl41.cli import app
-from dsl41.conditions import And, Or, Precedence, StatusAtom, iter_atoms, parse_condition
+from dsl41.conditions import And, Or, StatusAtom, iter_atoms, parse_condition
 from dsl41.equiv import (
     STATE_CEILING,
     RenameError,
@@ -196,13 +196,12 @@ _ATOM_STRS = [
         max_size=6,
     ),
     last=st.sampled_from(_ATOM_STRS),
-    mode=st.sampled_from(["flat", "prec"]),
 )
 def test_canonical_cond_is_idempotent_property(
-    parts: list[tuple[str, str]], last: str, mode: Precedence
+    parts: list[tuple[str, str]], last: str
 ) -> None:
     expr = "".join(f"{atom} {op} " for atom, op in parts) + last
-    cond = parse_condition(expr, mode)
+    cond = parse_condition(expr)
     once = canonical_cond(cond)
     assert canonical_cond(once) == once
 

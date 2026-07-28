@@ -47,9 +47,12 @@ Interpreter decisions (each with a test; recorded as DL-16):
   regardless of edges (M22: forced runs feed no latches -- there are none).
 - Workflow completion: every task terminal (Success/Failed/Skipped/
   Cancelled) -> instance closes; the workflow itself gets a trace entry,
-  Failed if any task Failed/Cancelled else Success (UCS-04 approximation;
-  U2 keeps the exact derivation open). Synthetic wf_* workflows emit trace
-  entries too; the comparator ignores names absent from the AutoSys side.
+  Failed if any task Failed/Cancelled else Success. U2 is resolved (DL-53):
+  a real UC workflow goes Running/Problems on member failure and is never
+  Failed -- this Failed rollup is a deliberate, now-known-divergent
+  approximation, kept until the twin models Running/Problems (its own
+  unit; DL-53 defers it). Synthetic wf_* workflows emit trace entries too;
+  the comparator ignores names absent from the AutoSys side.
 - No run_window analog exists (M27 is refused by compile_twin) -- the
   P-M27 pair shows the divergence that absence causes.
 
@@ -424,7 +427,7 @@ class UcOracle:
             self._record(
                 instance.workflow,
                 f"INSTANCE->{outcome}",
-                "all tasks terminal (UCS-04 approximation; U2 open)",
+                "all tasks terminal (UCS-04 approximation, known-divergent: U2 resolved DL-53)",
             )
 
 
