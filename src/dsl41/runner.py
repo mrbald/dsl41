@@ -129,8 +129,8 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
   zoneinfo timezone, else the run-level base zone, else UTC -- both
   defaults PENDING: E10) and hands the engine STARTJOB events at the tick,
   timestamped at the tick and journaled like any input (source=scheduler).
-  It fires UNCONDITIONALLY: SEM-32 abandonment (Q3) and SEM-33 run_window
-  stay oracle-side. While the engine is up a late tick still fires (event
+  It fires UNCONDITIONALLY: SEM-32 arm-vs-abandon (Q3, DL-54) and SEM-33
+  run_window stay oracle-side. While the engine is up a late tick still fires (event
   stamped at the tick); across downtime missed ticks are dropped AND
   journaled at resume, never fired late (PENDING: E9).
 - Engine loop commit discipline (DL-45): in the real domain the loop
@@ -1401,8 +1401,8 @@ class _SchedulePlan:
 class Scheduler:
     """ss5: the calendar the oracle deliberately lacks. Computes per-job next
     occurrences from the ScheduleBlock and yields STARTJOB events at the
-    tick; it fires unconditionally (SEM-32 abandonment and SEM-33 run_window
-    stay oracle-side, exactly as in simulation). Ticks are naive-UTC instants
+    tick; it fires unconditionally (SEM-32 arm-vs-abandon and SEM-33
+    run_window stay oracle-side, exactly as in simulation). Ticks are naive-UTC instants
     (the engine's time basis): per-job `timezone` -- else `default_tz`, else
     UTC -- is applied via zoneinfo, so rehearse under the virtual clock
     exercises real calendar arithmetic (ss5).
@@ -2801,6 +2801,10 @@ class ControlServer:
                 "on_ice": rt.on_ice,
                 "on_hold": rt.on_hold,
                 "on_noexec": rt.on_noexec,
+                # DL-54 (DL-46's display-truth rule): an armed job looks
+                # INACTIVE but the next condition edge starts it -- operators
+                # must see the latch, not tail the trace for SCHED_ARM
+                "armed": rt.armed,
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,
                 "log_err": log_err,
@@ -2845,9 +2849,9 @@ class ControlServer:
             "ok": True,
             "job": job,
             "condition": cond_to_source(cond),
-            "satisfied": oracle._cond_true(cond),
+            "satisfied": oracle._cond_true(cond, job),
             "atoms": [
-                {"atom": cond_to_source(atom), "true": oracle._cond_true(atom)}
+                {"atom": cond_to_source(atom), "true": oracle._cond_true(atom, job)}
                 for atom in iter_atoms(cond)
             ],
         }

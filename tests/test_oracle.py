@@ -32,6 +32,7 @@ from bisim_harness import EngineHarness
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from dsl41 import oracle as oracle_module
 from dsl41.ir import lower_source
 from dsl41.oracle import Event, EventKind, Oracle, OracleError
 
@@ -332,41 +333,107 @@ def test_sem04c_lookback_9999_is_indefinite_ignores_the_window() -> None:
     ]
 
 
-def test_sem04_zero_lookback_midnight_anchor_pins_q2_default() -> None:
-    """T04 (SEM-04) + PENDING Q2: this pins ORACLE_ZERO_LOOKBACK_ANCHOR ==
-    "midnight" (oracle.py's documented default reading, not verified against
-    a live instance -- Q2 is still open per dossier ss9). Success at 23:50,
-    evaluated at 00:10 the next calendar day -> s(job, 0) does NOT fire
-    (different .date()). Contrast: success and evaluation on the same
-    calendar day -> fires. Both sides use the ON_HOLD/OFF_HOLD pattern so
-    the trivial same-instant true (elapsed==0 always satisfies any lookback)
-    does not mask the cross-midnight check."""
+def test_sem04_zero_lookback_since_last_end_anchor_pinned() -> None:
+    """T04 (SEM-04), Q2a RESOLVED (DL-54): s(prod, 0) is satisfied iff prod
+    ended at-or-after the CONSUMER'S OWN last end -- "examines the last end
+    time of the job first. It then examines the last end time of the
+    condition job" (TechDocs 12.0.01, condition attribute page). This is a
+    pinning test in the test_sem03_* mold: the superseded midnight reading
+    is discriminated below, not kept behind a switch. Script: prod succeeds
+    08:00 -> consumer runs (first-run: no anchor yet) and completes 09:00.
+    Now prod's 08:00 latch is STALE (before the consumer's own end) --
+    held/off-held at 10:00/10:30 SAME DAY, the consumer does not restart
+    (midnight would have fired here: same calendar day). prod succeeding
+    again at 11:00 is fresh -- the consumer re-runs on the edge."""
     text = (
         "insert_job: prod_zero\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: cons_zero\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod_zero, 0)\n"
     )
-    cross_midnight = oracle(text)
-    day1_2350 = datetime(2026, 6, 30, 23, 50)
-    day2_0010 = datetime(2026, 7, 1, 0, 10)
-    cross_midnight.feed(Event(at=day1_2350, kind="ON_HOLD", payload={"job": "cons_zero"}))
-    cross_midnight.feed(
-        Event(at=day1_2350, kind="STATUS", payload={"job": "prod_zero", "status": "SUCCESS"})
-    )
-    cross_midnight.feed(Event(at=day2_0010, kind="OFF_HOLD", payload={"job": "cons_zero"}))
-    assert transitions(cross_midnight, "cons_zero") == ["ON_HOLD", "OFF_HOLD"]
+    o = oracle(text)
+    day = datetime(2026, 7, 1, 8, 0)
 
-    same_day = oracle(text)
-    success_at = datetime(2026, 7, 1, 8, 0)
-    eval_at = datetime(2026, 7, 1, 9, 0)
-    same_day.feed(Event(at=success_at, kind="ON_HOLD", payload={"job": "cons_zero"}))
-    same_day.feed(
-        Event(at=success_at, kind="STATUS", payload={"job": "prod_zero", "status": "SUCCESS"})
+    def at(hour: int, minute: int = 0) -> datetime:
+        return day.replace(hour=hour, minute=minute)
+
+    o.feed(Event(at=at(8), kind="STATUS", payload={"job": "prod_zero", "status": "SUCCESS"}))
+    o.feed(Event(at=at(9), kind="STATUS", payload={"job": "cons_zero", "status": "SUCCESS"}))
+    o.feed(Event(at=at(10), kind="ON_HOLD", payload={"job": "cons_zero"}))
+    o.feed(Event(at=at(10, 30), kind="OFF_HOLD", payload={"job": "cons_zero"}))
+    assert transitions(o, "cons_zero") == [
+        "INACTIVE->STARTING",  # 08:00 first-run: consumer never ended, unbounded
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",  # 09:00 -- this end is the anchor from here on
+        "ON_HOLD",
+        "OFF_HOLD",  # 10:30: prod's 08:00 latch predates the anchor -> stale, no start
+    ]
+    o.feed(Event(at=at(11), kind="STATUS", payload={"job": "prod_zero", "status": "SUCCESS"}))
+    assert transitions(o, "cons_zero")[-2:] == [
+        "SUCCESS->STARTING",  # 11:00 edge: fresh (at-or-after the 09:00 anchor)
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem04_zero_lookback_first_run_corner_is_unbounded() -> None:
+    """T04 (SEM-04) + PENDING Q2b first-run corner: a consumer that never
+    ended has no anchor -- pinned as UNBOUNDED (satisfied), however old the
+    predecessor's latch is. Cross-midnight, >24h stale: the superseded
+    midnight reading pinned this exact script to no-start."""
+    text = (
+        "insert_job: prod_fr\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_fr\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod_fr, 0)\n"
     )
-    same_day.feed(Event(at=eval_at, kind="OFF_HOLD", payload={"job": "cons_zero"}))
-    assert transitions(same_day, "cons_zero") == [
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 6, 30, 23, 50), kind="ON_HOLD", payload={"job": "cons_fr"}))
+    o.feed(
+        Event(
+            at=datetime(2026, 6, 30, 23, 50),
+            kind="STATUS",
+            payload={"job": "prod_fr", "status": "SUCCESS"},
+        )
+    )
+    o.feed(Event(at=datetime(2026, 7, 2, 0, 10), kind="OFF_HOLD", payload={"job": "cons_fr"}))
+    assert transitions(o, "cons_fr") == [
         "ON_HOLD",
         "OFF_HOLD",
         "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem04_zero_lookback_cross_midnight_fresh_predecessor_fires() -> None:
+    """T04 (SEM-04), Q2a discrimination vs the superseded midnight reading,
+    other direction: the consumer ended day 1, the predecessor succeeds at
+    23:50 day 1, evaluation at 00:10 day 2. since-last-end: fresh (prod
+    ended after the consumer's end) -> fires. midnight would have read the
+    23:50 latch as a different calendar day -> stale. Together with the
+    same-day-stale case above, the two pins separate the readings in both
+    directions."""
+    text = (
+        "insert_job: prod_xm\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_xm\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod_xm, 0)\n"
+    )
+    o = oracle(text)
+    o.feed(
+        Event(
+            at=datetime(2026, 6, 30, 20, 0),
+            kind="STATUS",
+            payload={"job": "cons_xm", "status": "SUCCESS"},
+        )
+    )
+    o.feed(Event(at=datetime(2026, 6, 30, 23, 40), kind="ON_HOLD", payload={"job": "cons_xm"}))
+    o.feed(
+        Event(
+            at=datetime(2026, 6, 30, 23, 50),
+            kind="STATUS",
+            payload={"job": "prod_xm", "status": "SUCCESS"},
+        )
+    )
+    o.feed(Event(at=datetime(2026, 7, 1, 0, 10), kind="OFF_HOLD", payload={"job": "cons_xm"}))
+    assert transitions(o, "cons_xm") == [
+        "INACTIVE->SUCCESS",  # 20:00 day 1: the consumer's anchor-setting end
+        "ON_HOLD",
+        "OFF_HOLD",
+        "SUCCESS->STARTING",  # 00:10 day 2: 23:50 latch >= 20:00 anchor -> fresh
         "STARTING->RUNNING",
     ]
 
@@ -1069,23 +1136,51 @@ def test_sem23_force_startjob_ignores_condition_and_hold_and_satisfies_downstrea
 # --------------------------------------------------------- 17. SEM-32 (Q3 pending default)
 
 
-def test_sem32_scheduled_startjob_with_false_condition_is_abandoned() -> None:
-    """T32 (SEM-32), PENDING Q3: a scheduled STARTJOB (script-injected at the
-    moment start_times/start_mins would fire) whose condition is currently
-    false is ABANDONED -- the oracle's documented default reading -- not
-    queued to arm-and-wait for the condition to later become true. Q3 is
-    still open (dossier ss9); if AutoSys's live behavior turns out to be
-    arm-and-wait, this branch (and this test) changes."""
+def test_sem32_scheduled_startjob_with_false_condition_arms_and_waits() -> None:
+    """T32 (SEM-32), PENDING Q3: a scheduled STARTJOB whose condition is
+    currently false ARMS the job (DL-54, the doc-leaning arm-and-wait
+    reading): the tick latches, and the condition edge later starts the job
+    through the schedule gate. The start consumes the arm -- a second
+    satisfaction of the condition does not re-run the job without a new
+    tick. Q3 stays open (standalone-job confirmation + disarm boundary)."""
     text = (
         "insert_job: job32\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
-        "condition: s(never_true32)\n\n"
-        "insert_job: never_true32\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(gate32)\n\n"
+        "insert_job: gate32\njob_type: c\ncommand: y\nmachine: m1\n"
     )
     o = oracle(text)
     o.feed(ev("STARTJOB", 0, job="job32"))  # the scheduler's tick, condition false
-    assert transitions(o, "job32") == []
-    assert o.store.job["job32"].status == "INACTIVE"
+    assert transitions(o, "job32") == ["SCHED_ARM"]
+    assert o.store.job["job32"].status == "INACTIVE"  # armed is not a status
+    assert o.store.job["job32"].armed
+    o.feed(ev("STATUS", 5, job="gate32", status="SUCCESS"))  # the condition edge
+    assert transitions(o, "job32") == ["SCHED_ARM", "INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert not o.store.job["job32"].armed  # the start consumed the arm
+    o.feed(ev("STATUS", 6, job="job32", status="SUCCESS"))
+    o.feed(ev("STATUS", 7, job="gate32", status="SUCCESS"))  # fresh edge, no tick
+    assert o.store.job["job32"].status == "SUCCESS"  # unarmed: schedule gate holds
+
+
+def test_sem32_abandon_switch_keeps_superseded_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PENDING Q3: ORACLE_SCHEDULED_FALSE_CONDITION == "abandon" preserves
+    the pre-DL-54 reading -- the tick with a false condition is dropped
+    outright, and the later condition edge cannot pass the schedule gate."""
+    monkeypatch.setattr(oracle_module, "ORACLE_SCHEDULED_FALSE_CONDITION", "abandon")
+    text = (
+        "insert_job: job32a\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(gate32a)\n\n"
+        "insert_job: gate32a\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="job32a"))
+    assert transitions(o, "job32a") == []
+    assert not o.store.job["job32a"].armed
+    o.feed(ev("STATUS", 5, job="gate32a", status="SUCCESS"))
+    assert o.store.job["job32a"].status == "INACTIVE"  # edge blocked: not armed
 
 
 # ------------------------------------------------------------------ 18. SEM-33 run_window
@@ -1657,9 +1752,9 @@ def test_scheduled_member_waits_for_its_own_tick_l013_double_gate() -> None:
 
 def test_must_start_alarm_fires_when_no_run_began_by_deadline() -> None:
     """Review MINOR (SEM-34): must_start_times arms on the STARTJOB tick;
-    the alarm fires iff no new run began by tick+offset -- here the start
-    was abandoned (false condition), which is exactly the alarm's point --
-    and never affects control flow."""
+    the alarm fires iff no new run began by tick+offset -- here the tick
+    only ARMED the job (false condition, Q3/DL-54), no run began, which is
+    exactly the alarm's point -- and never affects control flow."""
     text = (
         "insert_job: ms_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
@@ -1668,7 +1763,7 @@ def test_must_start_alarm_fires_when_no_run_began_by_deadline() -> None:
         "insert_job: ms_dummy\njob_type: c\ncommand: z\nmachine: m1\n"
     )
     o = oracle(text)
-    o.feed(ev("STARTJOB", 0, job="ms_job"))  # condition false -> abandoned (Q3)
+    o.feed(ev("STARTJOB", 0, job="ms_job"))  # condition false -> armed, no run (Q3, DL-54)
     emitted = o.feed(ev("STATUS", 10, job="ms_dummy", status="SUCCESS"))
     assert any(e.kind == "MUST_START_ALARM" and e.job() == "ms_job" for e in emitted)
     assert o.store.job["ms_job"].status == "INACTIVE"  # alarm, no control flow
@@ -1990,3 +2085,457 @@ def test_dl50_icing_a_queued_job_dequeues_it_immediately() -> None:
     assert o.store.job["ib"].status == "INACTIVE"  # not lingering QUE_WAIT
     o.feed(ev("STATUS", 2, job="ia", status="SUCCESS"))  # frees I
     assert o.store.job["ib"].status == "INACTIVE"  # iced, did NOT run
+
+
+# ------------------------------------------------ DL-54 Q2/Q3 additional trace tests
+
+
+def test_sem21_scheduled_hold_arm_off_hold_starts_only_if_ticked() -> None:
+    """T21/T32 (SEM-21/Q3, DL-54): a scheduled job's tick landing while it is
+    ON_HOLD latches (SCHED_ARM), and OFF_HOLD starts it immediately through
+    the still-armed schedule gate -- SEM-21's verbatim-pinned "start
+    immediately after they are taken off hold" reading. A sibling held the
+    whole time with NO tick ever arriving stays blocked at OFF_HOLD: the
+    schedule gate still needs either a tick or a latched arm."""
+    text = (
+        "insert_job: hold_ticked\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
+        "insert_job: hold_unticked\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="hold_ticked"))
+    o.feed(ev("STARTJOB", 1, job="hold_ticked"))
+    assert transitions(o, "hold_ticked") == ["ON_HOLD", "SCHED_ARM"]
+    assert o.store.job["hold_ticked"].armed
+    o.feed(ev("OFF_HOLD", 2, job="hold_ticked"))
+    assert transitions(o, "hold_ticked") == [
+        "ON_HOLD",
+        "SCHED_ARM",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+    o.feed(ev("ON_HOLD", 3, job="hold_unticked"))
+    o.feed(ev("OFF_HOLD", 4, job="hold_unticked"))
+    assert transitions(o, "hold_unticked") == ["ON_HOLD", "OFF_HOLD"]
+    assert o.store.job["hold_unticked"].status == "INACTIVE"
+
+
+def test_sem20_scheduled_ice_never_arms_and_off_ice_condition_edge_does_not_start() -> None:
+    """T20/T32 (SEM-20/Q3, DL-54): a scheduled tick blocked at ON_ICE is a
+    PINNED non-arming gate -- no SCHED_ARM, no start. OFF_ICE does not
+    re-evaluate on its own (SEM-20: conditions must reoccur); the fresh
+    condition edge that follows still cannot start it, because it was never
+    armed and it is not itself a scheduler tick."""
+    text = (
+        "insert_job: iced_sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(gate20q)\n\n"
+        "insert_job: gate20q\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_ICE", 0, job="iced_sched"))
+    o.feed(ev("STARTJOB", 1, job="iced_sched"))
+    assert transitions(o, "iced_sched") == ["ON_ICE"]  # no SCHED_ARM at all
+    assert not o.store.job["iced_sched"].armed
+    o.feed(ev("OFF_ICE", 2, job="iced_sched"))
+    o.feed(ev("STATUS", 3, job="gate20q", status="SUCCESS"))
+    assert transitions(o, "iced_sched") == ["ON_ICE", "OFF_ICE"]
+    assert o.store.job["iced_sched"].status == "INACTIVE"
+
+
+def test_sem32_box_member_tick_while_box_not_running_does_not_arm() -> None:
+    """T10/T32 (SEM-10/31 double gate + Q3, DL-54): a scheduled box member's
+    tick while its box is not yet RUNNING is a PINNED non-arming gate -- the
+    box-not-RUNNING check is reached and returns before the arm call, so the
+    tick leaves no trace at all. When the box later starts, the member does
+    not start from that dead tick (only a fresh tick or a latched arm would
+    let it in)."""
+    text = (
+        "insert_job: box_ng\njob_type: b\n\n"
+        "insert_job: mem_ng\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_ng\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="mem_ng"))
+    assert transitions(o, "mem_ng") == []
+    assert not o.store.job["mem_ng"].armed
+    o.feed(ev("STARTJOB", 1, job="box_ng"))
+    assert transitions(o, "mem_ng") == []
+    assert o.store.job["mem_ng"].status == "INACTIVE"
+    assert o.store.job["box_ng"].status == "RUNNING"  # hung: sole member never ran
+
+
+def test_sem32_force_startjob_consumes_the_arm_blocking_a_later_condition_restart() -> None:
+    """T32 (SEM-32/Q3, DL-54): a scheduled tick with a false condition arms
+    the job; FORCE_STARTJOB then runs it regardless of the still-false
+    condition (SEM-23) and consumes the arm just like any other start
+    ("FORCE included"). After it completes, a fresh condition edge cannot
+    restart it -- the schedule gate is closed again."""
+    text = (
+        "insert_job: force_arm\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(gate_fa)\n\n"
+        "insert_job: gate_fa\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="force_arm"))  # condition false: arms
+    assert transitions(o, "force_arm") == ["SCHED_ARM"]
+    o.feed(ev("FORCE_STARTJOB", 1, job="force_arm"))
+    assert transitions(o, "force_arm") == ["SCHED_ARM", "INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert not o.store.job["force_arm"].armed  # forced start consumed it
+    o.feed(ev("STATUS", 2, job="force_arm", status="SUCCESS"))
+    o.feed(ev("STATUS", 3, job="gate_fa", status="SUCCESS"))  # fresh condition edge
+    assert transitions(o, "force_arm")[-1] == "RUNNING->SUCCESS"  # unchanged: no restart
+
+
+def test_sem32_repeated_false_condition_ticks_arm_exactly_once() -> None:
+    """T32 (SEM-32/Q3, DL-54): a second scheduled tick while the condition is
+    still false does not re-arm or double-record -- `_arm` is a no-op once
+    `armed` is already set. Exactly one SCHED_ARM trace entry survives two
+    ticks, and the eventual condition edge still produces exactly one start."""
+    text = (
+        "insert_job: idem_arm\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(gate_idem)\n\n"
+        "insert_job: gate_idem\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="idem_arm"))
+    o.feed(ev("STARTJOB", 1, job="idem_arm"))
+    assert transitions(o, "idem_arm") == ["SCHED_ARM"]  # not two, despite two ticks
+    o.feed(ev("STATUS", 2, job="gate_idem", status="SUCCESS"))
+    assert transitions(o, "idem_arm") == [
+        "SCHED_ARM",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem33_run_window_defer_after_arm_starts_at_window_open() -> None:
+    """T32/T33 (SEM-32/33, DL-54): a scheduled tick lands INSIDE the
+    run_window with the condition still false -- it arms before run_window is
+    even reached (the condition-false branch returns first). The armed job's
+    later condition edge, arriving OUTSIDE the window and closer to the next
+    opening than the previous close, passes the schedule gate on the arm and
+    then hits SEM-33's closer-edge rule: RUN_WINDOW_DEFER, a TIMER queued for
+    window open, and the actual start happens there -- run_window gates the
+    armed start exactly like an unarmed one."""
+    text = (
+        "insert_job: job_rw_arm\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        'run_window: "10:00-11:00"\n'
+        "condition: s(gate_rw_arm)\n\n"
+        "insert_job: gate_rw_arm\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: dummy_rw_arm\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 10, 5), kind="STARTJOB", payload={"job": "job_rw_arm"}))
+    assert transitions(o, "job_rw_arm") == ["SCHED_ARM"]
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 2, 9, 50),
+            kind="STATUS",
+            payload={"job": "gate_rw_arm", "status": "SUCCESS"},
+        )
+    )
+    assert transitions(o, "job_rw_arm") == ["SCHED_ARM", "RUN_WINDOW_DEFER"]
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 2, 10, 1),
+            kind="STATUS",
+            payload={"job": "dummy_rw_arm", "status": "SUCCESS"},
+        )
+    )
+    assert transitions(o, "job_rw_arm") == [
+        "SCHED_ARM",
+        "RUN_WINDOW_DEFER",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    start_entry = next(
+        t for t in o.trace() if t.job == "job_rw_arm" and t.transition.endswith("STARTING")
+    )
+    assert start_entry.at == datetime(2026, 7, 2, 10, 0)  # window-open time, run_window applied
+
+
+def test_sem04_zero_lookback_box_anchor_is_the_box_own_last_end() -> None:
+    """T04/T12 (SEM-04/SEM-12, DL-54): for a box override the zero-lookback
+    evaluator is the BOX itself, not the member that completes -- "for box
+    overrides the box itself is the evaluator/anchor." Run 1: ext7 succeeds
+    while the box has never completed (Q2b unbounded) -> box_success fires
+    on the run's last member transition, setting the box's OWN last_end_at.
+    Run 2: that same ext7 latch is now STALE relative to the box's own
+    last_end_at from run 1 -- the override does NOT fire on mem7a's
+    completion. A fresh ext7 success (after the box's last_end_at) DOES fire
+    it on mem7b's completion, proving the anchor tracks the box, not either
+    member."""
+    text = (
+        "insert_job: box7\njob_type: b\nbox_success: s(ext7, 0)\n\n"
+        "insert_job: mem7a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box7\n\n"
+        "insert_job: mem7b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box7\n\n"
+        "insert_job: ext7\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="box7"))
+    o.feed(ev("STATUS", 5, job="mem7a", status="SUCCESS"))
+    assert transitions(o, "box7") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 7, job="ext7", status="SUCCESS"))  # the latch that becomes stale
+    o.feed(ev("STATUS", 10, job="mem7b", status="SUCCESS"))
+    assert transitions(o, "box7") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",  # Q2b unbounded: the box never ended before this
+    ]
+    box_entries = [t for t in o.trace() if t.job == "box7"]
+    assert "box_success" in box_entries[-1].cause
+
+    o.feed(ev("STARTJOB", 15, job="box7"))
+    assert transitions(o, "box7")[-2:] == ["SUCCESS->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 20, job="mem7a", status="FAILURE"))
+    assert transitions(o, "box7")[-2:] == [
+        "SUCCESS->STARTING",
+        "STARTING->RUNNING",
+    ]  # stale: no fire
+    o.feed(ev("STATUS", 25, job="ext7", status="SUCCESS"))  # fresh: after the box's last_end_at
+    o.feed(ev("STATUS", 30, job="mem7b", status="SUCCESS"))
+    assert transitions(o, "box7")[-1] == "RUNNING->SUCCESS"
+    assert len(transitions(o, "box7")) == 6
+
+
+def test_sem04_zero_lookback_exact_tie_at_the_anchor_instant_is_satisfied() -> None:
+    """T04 (SEM-04), Q2a: `>=` is inclusive at the exact instant. cons8's OWN
+    prior completion and pred8's success are engineered onto the identical
+    datetime (an ON_NOEXEC bypass gives cons8 an instant first-run completion,
+    then a separately-timed producer success lands on that exact same
+    instant): pred8.status_at == cons8.last_end_at, not merely close, and the
+    zero-lookback atom still fires."""
+    text = (
+        "insert_job: pred8\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons8\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(pred8, 0)\n"
+    )
+    o = oracle(text)
+    tie = datetime(2026, 7, 1, 9, 0)
+    o.feed(Event(at=tie, kind="ON_NOEXEC", payload={"job": "cons8"}))
+    o.feed(Event(at=tie, kind="FORCE_STARTJOB", payload={"job": "cons8"}))
+    assert transitions(o, "cons8") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
+    assert o.store.job["cons8"].last_end_at == tie
+    o.feed(Event(at=tie, kind="OFF_NOEXEC", payload={"job": "cons8"}))
+    o.feed(Event(at=tie, kind="STATUS", payload={"job": "pred8", "status": "SUCCESS"}))
+    assert o.store.job["pred8"].status_at == tie == o.store.job["cons8"].last_end_at
+    assert transitions(o, "cons8") == [
+        "ON_NOEXEC",
+        "INACTIVE->SUCCESS",
+        "OFF_NOEXEC",
+        "SUCCESS->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem32_armed_survives_ice_off_ice_cycle_then_starts_on_fresh_edge() -> None:
+    """T32/T20 (SEM-32/SEM-20, Q3, DL-54): an arm latched by a scheduled tick
+    is untouched by a subsequent ON_ICE/OFF_ICE cycle -- ON_ICE's early
+    return in _attempt_start never reaches the arm, and OFF_ICE only clears
+    on_ice, not armed. The job stays blocked (iced) throughout, then a fresh
+    condition edge after OFF_ICE starts it THROUGH the still-latched arm --
+    exactly the schedule-gate bypass a bare condition edge could not achieve
+    on its own (contrast: the never-armed ice-no-arm test above)."""
+    text = (
+        "insert_job: ice_arm_survives\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(gate_ias)\n\n"
+        "insert_job: gate_ias\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="ice_arm_survives"))  # condition false: arms
+    assert transitions(o, "ice_arm_survives") == ["SCHED_ARM"]
+    o.feed(ev("ON_ICE", 1, job="ice_arm_survives"))
+    assert o.store.job["ice_arm_survives"].armed  # ice does not clear it
+    o.feed(ev("OFF_ICE", 2, job="ice_arm_survives"))
+    assert o.store.job["ice_arm_survives"].armed  # off-ice does not clear it either
+    assert transitions(o, "ice_arm_survives") == ["SCHED_ARM", "ON_ICE", "OFF_ICE"]
+    o.feed(ev("STATUS", 3, job="gate_ias", status="SUCCESS"))  # fresh condition edge
+    assert transitions(o, "ice_arm_survives") == [
+        "SCHED_ARM",
+        "ON_ICE",
+        "OFF_ICE",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+# ------------------------------------------- DL-54 adversarial-review fix pins
+
+
+def test_sem32_member_arm_dies_with_its_box_run() -> None:
+    """DL-54 review MAJOR: a member's arm is scoped to the box run that armed
+    it. Armed in run 1 (tick with false condition), the box completes via
+    box_success with the member unrun -> SCHED_DISARM; the condition edge
+    while the box is down cannot start it, and -- the actual defect -- the
+    START of box run 2 must not auto-start it either. Its real run-2 tick,
+    with the condition now latched true, starts it normally."""
+    text = (
+        "insert_job: nightly54\njob_type: b\nbox_success: s(anchor54)\n\n"
+        "insert_job: anchor54\njob_type: c\ncommand: a\nmachine: m1\nbox_name: nightly54\n\n"
+        "insert_job: late54\njob_type: c\ncommand: b\nmachine: m1\nbox_name: nightly54\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(feed54)\n\n"
+        "insert_job: feed54\njob_type: c\ncommand: f\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="nightly54"))  # box run 1; anchor54 starts, late54 double-gated
+    o.feed(ev("STARTJOB", 60, job="late54"))  # its tick: box RUNNING, s(feed54) false
+    assert transitions(o, "late54") == ["SCHED_ARM"]
+    o.feed(ev("STATUS", 120, job="anchor54", status="SUCCESS"))  # box_success folds the box
+    assert o.store.job["nightly54"].status == "SUCCESS"
+    assert transitions(o, "late54") == ["SCHED_ARM", "SCHED_DISARM"]
+    assert not o.store.job["late54"].armed
+    o.feed(ev("STATUS", 840, job="feed54", status="SUCCESS"))  # edge while box down: no start
+    assert o.store.job["late54"].status == "INACTIVE"
+    o.feed(ev("STARTJOB", 1440, job="nightly54"))  # box run 2 START: no stale-arm auto-start
+    assert o.store.job["late54"].status == "INACTIVE"
+    o.feed(ev("STARTJOB", 1500, job="late54"))  # its real run-2 tick: s(feed54) latched true
+    assert transitions(o, "late54") == [
+        "SCHED_ARM",
+        "SCHED_DISARM",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem32_held_member_of_idle_box_does_not_arm() -> None:
+    """DL-54 review MAJOR: the hold gate precedes the box gate, so _arm must
+    re-check box state -- a HELD member of a NOT-running box gets no arm from
+    its tick, and off-hold inside a later box run cannot start it from that
+    dead tick."""
+    text = (
+        "insert_job: bx54\njob_type: b\n\n"
+        "insert_job: hm54\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx54\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="hm54"))
+    o.feed(ev("STARTJOB", 1, job="hm54"))  # its tick: held AND box not running
+    assert transitions(o, "hm54") == ["ON_HOLD"]  # no SCHED_ARM
+    assert not o.store.job["hm54"].armed
+    o.feed(ev("STARTJOB", 2, job="bx54"))  # box runs; hm54 held through the member launch
+    o.feed(ev("OFF_HOLD", 3, job="hm54"))  # never armed -> schedule gate blocks
+    assert o.store.job["hm54"].status == "INACTIVE"
+    assert transitions(o, "hm54") == ["ON_HOLD", "OFF_HOLD"]
+
+
+def test_sem32_held_member_of_running_box_arms_and_off_hold_starts() -> None:
+    """DL-54: the counterpart pin -- a held member of a RUNNING box does arm
+    from its tick (SEM-21's off-hold start applies within the box run)."""
+    text = (
+        "insert_job: bx54r\njob_type: b\n\n"
+        "insert_job: hm54r\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx54r\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="bx54r"))  # box run 1; member double-gated, waits for tick
+    o.feed(ev("ON_HOLD", 1, job="hm54r"))
+    o.feed(ev("STARTJOB", 2, job="hm54r"))  # its tick: held, box RUNNING -> arms
+    assert transitions(o, "hm54r") == ["ON_HOLD", "SCHED_ARM"]
+    o.feed(ev("OFF_HOLD", 3, job="hm54r"))
+    assert transitions(o, "hm54r") == [
+        "ON_HOLD",
+        "SCHED_ARM",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem32_que_wait_enqueue_keeps_arm_and_box_death_disarms() -> None:
+    """DL-54 review MINOR: the ACTUAL start consumes the arm, not the QUE_WAIT
+    enqueue -- and when the box run dies with the member still queued, the
+    queue attempt is cancelled AND the arm dies with the box run (zero runs
+    from the tick, arm accounted for by SCHED_DISARM, nothing latched)."""
+    text = (
+        "insert_resource: POOL54\nres_type: R\namount: 1\n\n"
+        "insert_job: hog54\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (POOL54, QUANTITY=1)\n\n"
+        "insert_job: qbx54\njob_type: b\n\n"
+        "insert_job: qm54\njob_type: c\ncommand: x\nmachine: m1\nbox_name: qbx54\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "condition: s(qgate54)\nresources: (POOL54, QUANTITY=1)\n\n"
+        "insert_job: qgate54\njob_type: c\ncommand: g\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="hog54"))  # saturate the pool
+    o.feed(ev("STARTJOB", 1, job="qbx54"))  # box run 1
+    o.feed(ev("STARTJOB", 2, job="qm54"))  # its tick: condition false -> arms
+    assert transitions(o, "qm54") == ["SCHED_ARM"]
+    o.feed(ev("STATUS", 3, job="qgate54", status="SUCCESS"))  # edge -> start -> QUE_WAIT
+    assert o.store.job["qm54"].status == "QUE_WAIT"
+    assert o.store.job["qm54"].armed  # the enqueue did NOT consume the arm
+    o.feed(ev("KILLJOB", 4, job="qbx54"))  # box dies: the member's arm dies with the run
+    assert not o.store.job["qm54"].armed
+    assert transitions(o, "qm54")[-1] == "SCHED_DISARM"
+    o.feed(ev("STATUS", 5, job="hog54", status="SUCCESS"))  # release scans the queue
+    assert o.store.job["qm54"].status == "INACTIVE"  # cancelled: box no longer RUNNING
+    assert o.store.job["qm54"].run_number == 0  # zero runs from the tick -- accounted, not eaten
+
+
+def test_sem04_zero_lookback_n_atom_ignores_non_end_transitions() -> None:
+    """DL-54 review MINOR: BOTH sides of the Q2a citation are END times. An
+    n(p, 0) predecessor bounced to INACTIVE by an injected status has not
+    "run since" anything -- its last_end_at is unchanged -- so the consumer
+    must not restart; a real completed run afterwards does refresh it."""
+    text = (
+        "insert_job: p54n\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: c54n\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(p54n, 0)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 0, job="p54n", status="SUCCESS"))  # p ends 00:00; c first-run starts
+    o.feed(ev("STATUS", 60, job="c54n", status="SUCCESS"))  # c's anchor: 01:00
+    o.feed(ev("STATUS", 120, job="p54n", status="INACTIVE"))  # NOT an end: no restart
+    assert transitions(o, "c54n") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+    o.feed(ev("STATUS", 180, job="p54n", status="SUCCESS"))  # a real end at 03:00: fresh
+    assert transitions(o, "c54n")[-2:] == ["SUCCESS->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem33_armed_repeat_edges_queue_one_defer_timer() -> None:
+    """DL-54 review MINOR: an armed job whose condition keeps re-latching
+    outside the run_window records ONE defer (one pending timer per opening
+    instant), not one per edge, and starts exactly once at window open."""
+    text = (
+        "insert_job: rw54\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        'run_window: "02:00-04:00"\ncondition: s(g54)\n\n'
+        "insert_job: g54\njob_type: c\ncommand: g\nmachine: m1\n\n"
+        "insert_job: idle54\njob_type: c\ncommand: i\nmachine: m1\n"
+    )
+    o = oracle(text)
+    base = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=base, kind="STARTJOB", payload={"job": "rw54"}))  # tick: cond false, arms
+    for minute in (0, 15, 30):  # three edges at 23:00/23:15/23:30, closer to next opening
+        o.feed(
+            Event(
+                at=base.replace(hour=23, minute=minute),
+                kind="STATUS",
+                payload={"job": "g54", "status": "SUCCESS"},
+            )
+        )
+    defers = [t for t in transitions(o, "rw54") if t == "RUN_WINDOW_DEFER"]
+    assert defers == ["RUN_WINDOW_DEFER"]  # deduped: one per opening instant
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 2, 2, 30),
+            kind="STATUS",
+            payload={"job": "idle54", "status": "SUCCESS"},
+        )
+    )
+    assert transitions(o, "rw54") == [
+        "SCHED_ARM",
+        "RUN_WINDOW_DEFER",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]

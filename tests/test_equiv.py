@@ -1080,16 +1080,21 @@ def test_conds_equivalent_still_equates_true_equivalences_with_ice() -> None:
     )
 
 
-def test_zero_lookback_shares_the_oracle_q2_switch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review NIT: tier b reads ORACLE_ZERO_LOOKBACK_ANCHOR so tier b and
-    tier c never disagree on zero-lookback semantics."""
-    import dsl41.oracle as oracle_module
-
+def test_zero_lookback_freshness_bit_separates_zero_from_plain() -> None:
+    """Q2a (DL-54): s(x, 0) is a strictly stronger predicate than s(x) --
+    the since-last-end anchor test (abstracted as the per-predecessor
+    freshness bit) can be false while the latch holds, so tier b must call
+    them divergent. (The pre-DL-54 anchor switch is gone; the anchor is
+    resolved, so no reading exists under which these collapse.)"""
     zero = parse_condition("s(x, 0)")
     plain = parse_condition("s(x)")
-    assert conds_equivalent(zero, plain).verdict == "divergent"  # midnight default
-    monkeypatch.setattr(oracle_module, "ORACLE_ZERO_LOOKBACK_ANCHOR", "last_change")
-    assert conds_equivalent(zero, plain).verdict == "equivalent"  # latched reading
+    assert conds_equivalent(zero, plain).verdict == "divergent"
+    # and the bit is per-predecessor, shared by every zero-lookback atom on
+    # the same job: two syntactically different zero-lookback atoms agree
+    assert (
+        conds_equivalent(parse_condition("s(x, 0)"), parse_condition("s(x, 00)")).verdict
+        == "equivalent"
+    )
 
 
 def test_too_large_is_inconclusive_not_divergent() -> None:

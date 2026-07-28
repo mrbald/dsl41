@@ -202,7 +202,8 @@ def parse_lookback(raw: str, *, pos: int | None = None) -> Lookback:
     if mm_s is None:
         hours = int(hours_s)
         if hours == 0:
-            # PENDING: Q2 -- zero-lookback anchoring; the kind carries it to the oracle.
+            # Q2a (DL-54): zero-lookback anchors to the evaluating job's own
+            # last end; the kind carries it to the oracle.
             return Lookback(kind="zero", minutes=None, raw=raw)
         if raw == "9999":
             return Lookback(kind="indefinite", minutes=None, raw=raw)

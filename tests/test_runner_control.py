@@ -806,6 +806,7 @@ def test_status_log_paths_default_shape_for_a_ran_cmd_job(short_root: Path) -> N
             jobs = resp["jobs"]["ple_job"]
             assert jobs["log_out"] == str(run_root / "logs" / "ple_job.1.out")
             assert jobs["log_err"] == str(run_root / "logs" / "ple_job.1.err")
+            assert jobs["armed"] is False  # DL-54: the Q3 latch is on the wire
         finally:
             await _teardown(engine, server, loop_task)
 

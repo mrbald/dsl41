@@ -1671,3 +1671,86 @@
   design pass, next unit), Q6/Q7 (genuinely need a live instance), U1
   (version-cutover residue), U3 (the base-serializer downgrade is its own unit;
   DL-08/DL-15 still stand).
+- DL-54 Q2/Q3 behavioral unit (2026-07-28; the "next unit" DL-53 deferred). One
+  web re-verification agent captured verbatim TechDocs wording BEFORE the flip
+  (the DL-53 method: no doc-derived change without a surviving quote).
+  (1) Q2 SPLIT, Q2a RESOLVED: zero-lookback anchors to the DEPENDENT job's own
+  last end -- "When you specify 0, AutoSys Workload Automation examines the last
+  end time of the job first. It then examines the last end time of the condition
+  job. If the condition job has run since the last run of the job for which the
+  condition is coded for, the job is allowed to start." (12.0.01, condition
+  attribute page; the page's own "the job for which the condition is coded for"
+  disambiguates the referent). Per the DL-06 protocol the resolved question's
+  switch is DELETED (ORACLE_ZERO_LOOKBACK_ANCHOR: midnight default and
+  last_change alternate both superseded); test_sem04_zero_lookback_* pin the
+  reading against midnight in BOTH directions (same-day-stale must not fire;
+  cross-midnight-fresh must). Mechanism: JobRuntime.last_end_at records every
+  transition into a terminal status; condition evaluation threads the EVALUATING
+  job (the starting job; the box for box_success/box_failure -- runner _explain
+  passes the queried job); tier b's per-job bit is reinterpreted as
+  job_zero_fresh ("the anchor test passes" -- exact per predecessor because both
+  compared conditions share one evaluator). Q2b stays OPEN (# PENDING: Q2b):
+  first-run (dependent never ended -> no anchor) is undocumented, pinned as
+  unbounded/satisfied. CONSEQUENCE: SEM-35's Q2-adjacent timezone corner
+  DISSOLVES (a relational anchor is tz-independent; L005 loses its caveat).
+  (2) Q3 default FLIPPED to arm-and-wait, question stays open behind
+  ORACLE_SCHEDULED_FALSE_CONDITION (# PENDING: Q3). Evidence is an entailment
+  (stated Q5-style, PARTIAL not dispositive): ACTIVATED is a documented WAIT
+  state for box members; "All defined starting conditions must be true" is a
+  continuously evaluated AND; SEM-21's off-hold wording is now verbatim-pinned
+  ("Jobs that meet their date and time conditions while they are on hold start
+  immediately after they are taken off hold unless other starting conditions
+  apply and are not satisfied"). Mechanism: a scheduled (non-force) tick blocked
+  at a RELEASABLE gate -- condition false, or ON_HOLD -- sets JobRuntime.armed
+  (trace marker SCHED_ARM); the schedule gate admits non-scheduled attempts
+  while armed; ANY start consumes the arm (at most one run per tick; FORCE
+  included). PINNED non-arming gates: ON_ICE (SEM-20 conditions-must-reoccur),
+  box-not-RUNNING (member ticks only count while the box runs), already-live
+  job. PINNED: an unconsumed arm never expires (disarm boundary undocumented --
+  the Q3 residue, with the standalone-case confirmation). run_window applies at
+  the moment a start goes through, armed or not.
+  (3) Consequences swept: P-M07 flips from divergence pin to ALIGNMENT pin (a
+  scheduled n() mutex now queues like UC's ExclusiveWait; the historical
+  divergence is preserved under the abandon switch) -- M07 note softened, M03
+  note sharpened (a relational anchor is inexpressible as a fixed Time Scope).
+  NEW L019 (warn; the ir-design ss11 impact-ledger rule): every
+  schedule+condition composition is a per-estate verification item while Q3 is
+  open; corpus trigger consumer_stale, per-rule fires/quiet pair. SEM-21's
+  run-window-at-off-hold sentence ("re-scheduled to their next start time") is
+  NOT fully reconciled with SEM-33's verified closer-edge rule -- noted in
+  SEM-21, not modeled apart. The sem32 abandon trace test became the
+  arm-and-wait pair; the runner's must-start pending test re-pinned (the gate
+  edge now starts the armed job and clears the deadline).
+  AMENDED same day (Opus adversarial review: 2 MAJOR behavioral, 1 MAJOR doc
+  drift, 7 MINOR, 4 NIT; all verified findings fixed pre-commit): (a) MAJOR --
+  arm was job-global and outlived its box execution (a member armed in box run
+  N auto-started at the start of run N+1 and its real tick was then swallowed
+  by SEM-10 once-per-run); fixed by scoping member arms to the arming box run
+  -- box completion clears unconsumed member arms (SCHED_DISARM), nested boxes
+  recurse naturally. (b) MAJOR -- the hold gate preceded the box gate, so a
+  HELD member of a not-running box armed from its tick; fixed by re-checking
+  box-RUNNING inside _arm. (c) MINOR promoted to pin -- arm consumption moved
+  from _start's top to the actual start tail (_run + noexec bypass): a
+  QUE_WAIT enqueue keeps the arm latched (a cancelled queue attempt no longer
+  eats the tick); KILLJOB on the queued job consumes it deliberately. (d)
+  MINOR -- zero-lookback now compares the PREDECESSOR'S last_end_at (not
+  status_at): both sides of the citation are end times, so an n() predecessor
+  bounced to INACTIVE by an injected status is not a fresh run; predecessor
+  never-ended => not satisfied. (e) MINOR -- one pending run_window defer
+  timer per (job, opening) instant (an armed job's repeated condition edges
+  previously queued unbounded duplicate timers into pending_timers()). (f)
+  MINOR -- ss10 status response now carries `armed` per job (DL-46
+  display-truth rule; an operator sendevent STARTJOB can plant the latch, so
+  it must be visible without tailing the trace). (g) MAJOR doc drift --
+  runner-design.md's three "SEM-32 abandonment" passages swept; ir-design ss9
+  gains the L019 row; README L-rule ranges; L005/equiv docstrings de-lied.
+  ACCEPTED, recorded not fixed: an armed run may land in a later run_window
+  cycle than its tick (consequence of the latch-until-consumed pin); resume's
+  at=max(at, last_at) re-stamp can move the Q2 anchor forward (pre-existing
+  status_at behavior, deterministic across re-resumes); P-M07 alignment is
+  milestone-level (catalog-order vs FIFO wake residual noted in M07); tier b's
+  zero-freshness bit over-approximates conservatively for self-referential
+  s(X,0). Pinned-by-test additions from the Sonnet breadth round: arm survives
+  ON_ICE/OFF_ICE untouched; run_window gates an armed start exactly like an
+  unarmed one; the zero-lookback tie (predecessor end == anchor instant) is
+  satisfied (>= inclusive).

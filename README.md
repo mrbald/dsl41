@@ -47,7 +47,7 @@ dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 ```
 
-Runs L001-L018 (IR-F rules, truth-table rules, graph rules over the derived
+Runs L001-L019 (IR-F rules, truth-table rules, graph rules over the derived
 graph, dangling-name checks). `--strict` is the migration gate: refuse to ship a catalog that lints
 dirty.
 
@@ -240,7 +240,7 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   condition/box_success/box_failure expressions; lookback + span retention
 - src/dsl41/ir.py — IR-F Pydantic entity models + AST->IR-F lowering; DL-07 firewall
   refuses unknown attributes unless `permit_unknown` is set
-- src/dsl41/lint.py — Violation model + rules L001-L018 (pure IR-F rules L001-L005/L015,
+- src/dsl41/lint.py — Violation model + rules L001-L019 (pure IR-F rules L001-L005/L015,
   truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 over the derived
   graph, dangling-name rules L016-L018)
 - src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes producing edges, mutex
@@ -370,14 +370,18 @@ UC record emission is blocked on U3 (pull /resources/openapi.json from a live
 controller, freeze docs/uc-edge-schema.md, generate client) — until then backend_uc
 emits only the migration report + edge classification. A 2026-07-28 public-doc
 sweep (DL-53) closed Q1, Q4, Q5 (autosys dossier §9) and U2, U4, U5, U6a, U7, U8
-(stonebranch Part III), each pinned to a dossier citation. Still open: Q2, Q3, Q6,
-Q7 (autosys dossier §9), U1, U3, U6b (stonebranch Part III), and the runner's
-E5-E10 (runner-design ss15; E8 was swept too and stays open — publicly
-undocumented, needs a live instance). Those with a behavior default in code
-(Q2, Q3, Q7, U1, E5-E10) run on a documented default marked
-`# PENDING: Qn/Un/En`; Q6 is dossier-only (no code switch) and U6b lives in
-backend_uc's migration-report question table. Q2, Q3, Q6, Q7 need
-a live AutoSys instance; U3 needs a live UC controller. The runner is complete
+(stonebranch Part III), each pinned to a dossier citation; DL-54 (same day) then
+resolved Q2a — zero-lookback anchors to the dependent job's own last end, cited
+verbatim — and flipped Q3's default to arm-and-wait (a scheduled tick blocked by a
+false condition or a hold now arms the job instead of abandoning the run). Still
+open: Q2b (the first-run corner of the zero-lookback anchor), Q3, Q6, Q7 (autosys
+dossier §9), U1, U3, U6b (stonebranch Part III), and the runner's E5-E10
+(runner-design ss15; E8 was swept too and stays open — publicly undocumented,
+needs a live instance). Those with a behavior default in code (Q2b, Q3, Q7, U1,
+E5-E10) run on a documented default marked `# PENDING: Qn/Un/En`; Q6 is
+dossier-only (no code switch) and U6b lives in backend_uc's migration-report
+question table. Q2b, Q3, Q6, Q7 need a live AutoSys instance; U3 needs a live UC
+controller. The runner is complete
 through phase 11f (the detached supervisor tier); phase 10 (the DSL surface)
 remains the last design item.
 

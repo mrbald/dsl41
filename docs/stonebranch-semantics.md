@@ -148,11 +148,11 @@ rule and a migration-report entry.
 |---|---|---|---|---|
 | M01 | `s(A)` within one stream, producer+consumer same schedule cycle (SEM-01) | edge A→X (Success) | **A** | Assumption: no cross-run staleness relied upon. Detector: producer and consumer share one derived subgraph + one trigger cadence |
 | M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | Time Scope has no documented max (U5 resolved, DL-53) but is launch-relative and retention-bound — anchoring still differs from an indefinite latch; flag each |
-| M03 | `s(A, hhhh.mm)` lookback (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Window anchoring differs (SEM-04 Q2); verify per case |
+| M03 | `s(A, hhhh.mm)` lookback (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Window anchoring differs per case; zero-lookback (Q2a, DL-54) anchors to the consumer's own last end — relational, NO fixed Time Scope expresses it; flag every use |
 | M04 | `f(A)` | edge A→X (Failure) | **E** | within-run |
 | M05 | `d(A)` | edge A→X (Success/Failure) | **E** | within-run |
 | M06 | `t(A)` | Failure-ish: UC Cancelled/Failed distinction | **A** | UC separates Cancelled from Failed; choose mapping, document |
-| M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource | **A** | NOT an edge. Detector: `n()` atoms → mutex candidates |
+| M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource | **A** | NOT an edge. Detector: `n()` atoms → mutex candidates. DL-54 softened: under SEM-32 arm-and-wait a *scheduled* n() job queues until the peer completes — converging with UC's ExclusiveWait (P-M07 now pins alignment at milestone level; divergence only under the superseded abandon reading). Residual ordering divergence: several armed jobs waiting on one peer wake in catalog order, UC releases ExclusiveWait FIFO by arrival — flag when >1 waiter shares a peer |
 | M08 | `exitcode(A) op k` (SEM-02) | edge variable condition on exit-code variable, or task-level exit-code→status mapping | **A** | mechanism pinned (U4 resolved, DL-53): per-task "Exit Code Processing" field, default method Success Exitcode Range; the exit-code range value itself is required with no documented default — record the configured range per task in the report |
 | M09 | `value(G) op k` (SEM-08) | edge variable condition / Variable Monitor trigger | **A** | Re-eval-on-set: AutoSys re-evaluates on SET_GLOBAL event; UC edge conditions evaluate at predecessor completion — timing differs → R if the JIL used globals as async gates |
 | M10 | `$$VAR` substitution (SEM-08) | `${var}` resolution | **A** | Resolution timing + UCS-08 ordering property |
@@ -233,10 +233,11 @@ The equivalence validator tier (c) runs *both* oracles (AutoSys semantics oracle
 workflow interpreter) on generated event streams and compares. Seed pairs, one per A-row where
 the assumption can be violated: P-M01 (staleness event stream violating same-cycle assumption
 → traces MUST diverge; test asserts the divergence is detected & classified), P-M07 (n()
-overlap), P-M09 (SET_GLOBAL mid-run), P-M12 (each OR lowering vs. AutoSys `|` truth table),
-P-M19 (ice with multi-predecessor consumers), P-M27 (run_window closer-edge divergence).
-These "expected-divergence" tests document precisely what the migration changes — they are the
-honest core of the whole project.
+overlap — since DL-54 an ALIGNMENT pin under the arm-and-wait default, with the historical
+divergence preserved under the abandon switch), P-M09 (SET_GLOBAL mid-run), P-M12 (each OR
+lowering vs. AutoSys `|` truth table), P-M19 (ice with multi-predecessor consumers), P-M27
+(run_window closer-edge divergence). These expected-divergence/alignment tests document
+precisely what the migration changes — they are the honest core of the whole project.
 
 ## Sources
 Primary: docs.stonebranch.com and Stonebranch Confluence, Universal Controller 7.2–7.9 —

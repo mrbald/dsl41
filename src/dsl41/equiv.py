@@ -15,9 +15,10 @@ Decisions pinned here (each with a test; recorded as DL-14 + amendment):
   referenced job scope contributes (status in NEVER_RAN/RUNNING/SUCCESS/
   FAILURE/TERMINATED) x (iced flag -- SEM-05 makes every atom true for an
   iced non-running job, oracle parity) x (age bucket cut by the referenced
-  lookback windows) x (same-day flag when zero-lookbacks appear, sharing
-  the oracle's Q2 anchor switch) x (last exit code over comparison
-  cutpoints, None == never completed); each referenced global contributes
+  lookback windows) x (zero-freshness flag when zero-lookbacks appear --
+  "the Q2a since-last-end anchor test passes", DL-54) x (last exit code
+  over comparison cutpoints, None == never completed); each referenced
+  global contributes
   literal + numeric-cutpoint + string-cutpoint ("", lit+NUL) + UNSET
   domains, covering BOTH comparison behaviors of conditions.compare_value
   (int when both sides parse, else string order). Atoms
@@ -438,12 +439,12 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
 
 class _State(BaseModel):
     """One point of the enumeration: per-job (status, iced flag, age bucket
-    index, same-day flag, last exit code) + global values."""
+    index, zero-freshness flag, last exit code) + global values."""
 
     job_status: dict[str, str]
     job_iced: dict[str, bool]  # SEM-05/SEM-20: iced satisfies every atom
     job_age_bucket: dict[str, int]  # index into windows; len(windows) == beyond all
-    job_same_day: dict[str, bool]
+    job_zero_fresh: dict[str, bool]  # zero-lookback anchor test passes (Q2, DL-54)
     job_exit: dict[str, int | None]
     globals_: dict[str, str]
 
@@ -488,7 +489,7 @@ def _iter_states(alphabet: _Alphabet):
                 job_status={key: status for key, status, _, _, _, _ in job_choice},
                 job_iced={key: iced for key, _, iced, _, _, _ in job_choice},
                 job_age_bucket={key: age for key, _, _, age, _, _ in job_choice},
-                job_same_day={key: day for key, _, _, _, day, _ in job_choice},
+                job_zero_fresh={key: day for key, _, _, _, day, _ in job_choice},
                 job_exit={key: code for key, _, _, _, _, code in job_choice},
                 globals_={name: value for name, value in global_choice},
             )
@@ -535,13 +536,14 @@ def _lookback_holds(
     if lookback is None or lookback.kind == "indefinite":
         return True
     if lookback.kind == "zero":
-        # PENDING: Q2 -- shares the oracle's anchor switch so tier b and
-        # tier c never disagree on zero-lookback semantics
-        from dsl41 import oracle as oracle_module
-
-        if oracle_module.ORACLE_ZERO_LOOKBACK_ANCHOR == "midnight":
-            return state.job_same_day.get(key, True)
-        return True  # "last_change": the latched status itself qualifies
+        # Q2a (DL-54): the per-predecessor freshness bit abstracts the
+        # since-last-end anchor test ("the predecessor ended at-or-after the
+        # evaluator's own last end"). One free bit per predecessor is sound
+        # because both compared conditions share one evaluator, so the
+        # anchor instant is common; it over-approximates conservatively
+        # (e.g. a self-referential s(X, 0) enumerates a False bit the
+        # oracle can never reach -- extra "divergent", never false-equal).
+        return state.job_zero_fresh.get(key, True)
     assert lookback.minutes is not None
     scope = alphabet.jobs[key]
     bucket = state.job_age_bucket.get(key, 0)
@@ -566,8 +568,8 @@ def _describe(state: _State) -> dict[str, str]:
             bits.append("ON_ICE")
         if state.job_age_bucket.get(key):
             bits.append(f"age_bucket={state.job_age_bucket[key]}")
-        if not state.job_same_day.get(key, True):
-            bits.append("different_day")
+        if not state.job_zero_fresh.get(key, True):
+            bits.append("zero_lookback_stale")
         if state.job_exit.get(key) is not None:
             bits.append(f"exit={state.job_exit[key]}")
         out[key] = ",".join(bits)
