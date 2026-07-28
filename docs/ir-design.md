@@ -319,6 +319,7 @@ each traceable to a SEM/M row:
 | L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
 | L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 | L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
+| L019 | warn | date_conditions + `condition` composition: start semantics rest on the open Q3 arm-and-wait default (DL-54) — per-estate verification item | SEM-32/M02 |
 
 ## 10. Open design decisions (deliberately deferred)
 
@@ -334,7 +335,11 @@ each traceable to a SEM/M row:
 
 - Q1 (precedence): RESOLVED (DL-53), as predicted — one lark rule + canonical sort
   stability; no model change.
-- Q2 (lookback-0 anchor): `Lookback.kind=="zero"` evaluation in oracle only; no model change.
-- Q3 (time-trigger with false conds): oracle scheduling semantics + L-rule for the risky
-  pattern; possibly a `ScheduleBlock` flag if it turns out configurable.
-The IR shape is robust to all three — safe to start coding before they're resolved.
+- Q2 (lookback-0 anchor): Q2a RESOLVED (DL-54), nearly as predicted — oracle evaluation
+  plus one runtime field (`JobRuntime.last_end_at`) and evaluator threading; the IR models
+  were untouched. Q2b (first-run corner) remains open, oracle-pin only.
+- Q3 (time-trigger with false conds): default flipped to arm-and-wait (DL-54), question
+  open — oracle scheduling semantics (`JobRuntime.armed` + the releasable-gate latch) and
+  the predicted L-rule landed as L019; no `ScheduleBlock` flag (nothing suggests it is
+  configurable).
+The IR shape was robust to all three, as intended — resolution has cost no model change.

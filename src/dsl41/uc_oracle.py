@@ -20,7 +20,9 @@ open with documented defaults:
 - UCS-03: joins are conjunctive over non-skipped incoming edges.
 - UCS-09: Mutually Exclusive Tasks -- an eligible task with a mutex partner
   currently Running waits in Exclusive Wait, released FIFO when the
-  partner completes (the P-M07 divergence: AutoSys n() abandons, UC queues).
+  partner completes (P-M07: since DL-54 AutoSys's armed scheduled n() job
+  queues too -- an alignment; the divergence survives only under the
+  superseded abandon switch).
   Self-exclusion (n(self)) never reaches the mutex path v1: the one-open-
   instance-per-workflow rule already serializes successive runs (Instance
   Wait, UCS-09) before a self-partner could be seen Running (review N-1).

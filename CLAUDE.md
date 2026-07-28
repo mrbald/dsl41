@@ -25,9 +25,12 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
   production JIL from any employer estate into the repo, tests, or docs (LICENSING.md).
 - **Open questions stay open.** Q1–Q7 (autosys dossier §9), U1–U8 (stonebranch
   Part III). DL-53 (2026-07-28) closed nine — Q1, Q4, Q5, U2, U4, U5, U6a, U7,
-  U8 — each pinned to a dossier citation; do not relitigate them. Still open,
-  with a live `# PENDING: Qn/Un` code marker: Q2, Q3, Q7, U1, U3 (Q1's switch
-  and Q4's marker were deleted per DL-53). Q6 has no code switch, dossier-only
+  U8 — each pinned to a dossier citation; DL-54 (same day) resolved Q2a
+  (zero-lookback anchors to the dependent's own last end; anchor switch
+  deleted) and flipped Q3's default to arm-and-wait (switch kept). Do not
+  relitigate any of them. Still open, with a live `# PENDING: Qn/Un` code
+  marker: Q2b (first-run corner), Q3, Q7, U1, U3 (Q1's switch and Q4's marker
+  were deleted per DL-53; Q2's per DL-54). Q6 has no code switch, dossier-only
   (Q6-adjacent aside in oracle.py); U6b lives in backend_uc's `_U_QUESTIONS`
   table, pruned to exactly U1+U6b. A separate `# PENDING: Qr*`
   series in ir.py/oracle.py/runner.py is unrelated — resource-manager
@@ -76,8 +79,9 @@ map); this list stays as the normative order and scope of each unit.
   metaprogramming in the IR.
 
 ## When live-instance access is available (ask the user, don't assume)
-- Resolve Q2 (lookback-0 anchor), Q3 (time+condition composition) with tiny
-  throwaway jobs; record answers as SEM amendments + trace tests.
+- Resolve Q2b (zero-lookback first-run corner), Q3 (standalone time+condition
+  composition + the disarm boundary) with tiny throwaway jobs; record answers
+  as SEM amendments + trace tests.
 - Pull OpenAPI (U3), pin UC version, freeze edge schema.
 - `autorep -q` samples may be INSPECTED by the user to inform synthetic fixture
   shapes but never committed (corpus hygiene).

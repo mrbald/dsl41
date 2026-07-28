@@ -66,7 +66,7 @@ The cut line falls out of the oracle's existing event contract:
 - **Oracle keeps**: KILLJOB termination, term_run_time auto-TERMINATE
   (dossier §5; timer-heap scheduled), run_window closer-edge (SEM-33), SLA
   alarms (SEM-34), box folds, ON_ICE/ON_HOLD/ON_NOEXEC (SEM-20/21/22),
-  SEM-32 abandonment.
+  SEM-32 arm-vs-abandon (arm-and-wait default since DL-54).
 
 Two additions to the oracle — the only core changes phase 11 makes:
 
@@ -126,8 +126,9 @@ role: for each `date_conditions` job it computes the next occurrence from
 `days_of_week` + `start_times` (or `start_mins` hourly ticks), applying
 `timezone` via `zoneinfo` when set, injects `STARTJOB` at the tick, and
 computes the next. The scheduler fires **unconditionally** at the tick:
-SEM-32 abandonment on a false condition (PENDING: Q3) and run_window
-closer-edge handling (SEM-33) remain oracle-side, exactly as in simulation.
+SEM-32 arm-vs-abandon on a false condition (arm-and-wait default, DL-54;
+PENDING: Q3) and run_window closer-edge handling (SEM-33) remain
+oracle-side, exactly as in simulation.
 
 `run_calendar` / `exclude_calendar` reference calendar definitions the IR
 does not model — preflight ERROR (§8). The scheduler runs identically over
@@ -546,6 +547,8 @@ code; none is guess-resolved.
   the AutoSys server's zone, which a migrated estate must set explicitly.
   DST corners pinned to PEP 495 fold=0 (ambiguous = first occurrence;
   nonexistent maps past the gap). Opened by 11c (DL-45).
-- Inherited from the oracle: Q3 (SEM-32 abandonment branch, still open) and Q4
-  (n_retrys — resolved DL-53, kept deliberately unmodeled by scope decision) —
-  the runner implements the documented oracle defaults and adds no new switch.
+- Inherited from the oracle: Q3 (SEM-32 arm-vs-abandon; arm-and-wait default
+  since DL-54, still open) and Q4 (n_retrys — resolved DL-53, kept
+  deliberately unmodeled by scope decision) — the runner implements the
+  documented oracle defaults and adds no new switch. The ss10 status
+  response carries the Q3 `armed` latch per job (DL-54).

@@ -386,8 +386,14 @@ def _classify_condition_edge(
             " max -- U5 resolved, DL-53); window anchoring differs per case (SEM-04)"
         )
         if lookback.kind == "zero":
-            # PENDING: Q2 -- zero-lookback anchoring unresolved; flag every use.
-            assumption += "; zero-lookback anchoring is unresolved (Q2)"
+            # PENDING: Q2b -- the since-last-end anchor (Q2a, DL-54) is
+            # relational: no fixed-window Time Scope expresses it; flag
+            # every use (first-run corner also still open).
+            assumption += (
+                "; zero-lookback anchors to the consumer's own last end"
+                " (Q2a, DL-54) -- no fixed Time Scope expresses it (Q2b"
+                " first-run corner still open)"
+            )
         return edge("assumed", "M03", assumption)
     if via == "success":
         if _same_cycle(src, ref.dst, tree, cadence):

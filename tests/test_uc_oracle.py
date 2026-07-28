@@ -776,22 +776,58 @@ def test_pM01_staleness_latch_vs_within_run() -> None:
     assert job_outcomes(uc_trace)["pm01_prod"] == ["RUNNING", "SUCCESS", "RUNNING"]
 
 
-def test_pM07_mutex_overlap_abandon_vs_queue() -> None:
+def test_pM07_mutex_overlap_queue_alignment_under_arm_and_wait() -> None:
     """P-M07 (Part IV; M07 mapping-table assumption for n()). 'ja' is
     date_conditions-scheduled with condition n(jb) (bare, local -> a mutex
     PAIR at the derive layer, DL-12 -- never an edge); 'jb' is plain.
     Script: jb starts; ja's scheduled tick finds jb RUNNING -> n(jb) false
-    -> AutoSys ABANDONS the attempt (SEM-32/Q3 default); DL-13's schedule
-    double gate then blocks the LATER wake too -- a scheduled job only
-    starts on its own tick, never via edge-triggered re-evaluation -- so ja
-    is permanently abandoned in AutoSys. The closing STATUS SUCCESS is a
-    script-artifact latch onto a job that never ran (oracle.py: injected
-    STATUS is unconditional); that is precisely why the assertion below
-    reads the FULL milestone SEQUENCE (['SUCCESS'], no RUNNING) rather than
-    just the final status. UC has no schedule concept at all (UCS-09 mutex
-    is a runtime resource, not a trigger gate): ja goes to ExclusiveWait and
-    is released, FIFO, the instant jb completes -- a real run.
-    """
+    -> under SEM-32 arm-and-wait (Q3, DL-54) the tick LATCHES; jb's
+    completion is the n(jb) edge that releases ja through the armed
+    schedule gate. UC's UCS-09 mutex is a runtime resource: ja goes to
+    ExclusiveWait and is released, FIFO, the instant jb completes. The two
+    systems now CONVERGE on this script -- both queue and run ja after jb
+    -- which is exactly the M07 alignment DL-54 records (under the
+    superseded abandon reading they diverged; see the switch variant)."""
+    text = (
+        "insert_job: pm07_ja\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\ncondition: n(pm07_jb)\n\n'
+        "insert_job: pm07_jb\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    script = [
+        ev("STARTJOB", 0, job="pm07_jb"),
+        ev("STARTJOB", 1, job="pm07_ja"),
+        ev("STATUS", 2, job="pm07_jb", status="SUCCESS"),
+        ev("STATUS", 3, job="pm07_ja", status="SUCCESS"),
+    ]
+    autosys_trace, uc_trace = run_both(text, script)
+    assert transitions(autosys_trace, "pm07_ja") == [
+        "SCHED_ARM",  # tick 1: n(jb) false while jb RUNNING
+        "INACTIVE->STARTING",  # jb's completion is the releasing edge
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+    assert transitions(uc_trace, "pm07_ja") == [
+        "Waiting->ExclusiveWait",
+        "ExclusiveWait->Running",
+        "Running->Success",
+    ]
+    assert first_divergence(autosys_trace, uc_trace, ["pm07_ja"]) is None  # aligned
+
+
+def test_pM07_mutex_overlap_diverges_under_abandon_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P-M07 under ORACLE_SCHEDULED_FALSE_CONDITION == "abandon" (the
+    superseded pre-DL-54 reading, kept live PENDING Q3): the tick is
+    dropped, DL-13's schedule double gate blocks the later wake, ja never
+    runs in AutoSys. The closing STATUS SUCCESS is a script-artifact latch
+    onto a job that never ran (injected STATUS is unconditional) -- which
+    is why the assertion reads the FULL milestone SEQUENCE (['SUCCESS'],
+    no RUNNING). UC still queues and runs ja: the divergence the original
+    P-M07 pinned."""
+    from dsl41 import oracle as oracle_module
+
+    monkeypatch.setattr(oracle_module, "ORACLE_SCHEDULED_FALSE_CONDITION", "abandon")
     text = (
         "insert_job: pm07_ja\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\ncondition: n(pm07_jb)\n\n'
@@ -805,11 +841,6 @@ def test_pM07_mutex_overlap_abandon_vs_queue() -> None:
     ]
     autosys_trace, uc_trace = run_both(text, script)
     assert transitions(autosys_trace, "pm07_ja") == ["INACTIVE->SUCCESS"]  # never RUNNING
-    assert transitions(uc_trace, "pm07_ja") == [
-        "Waiting->ExclusiveWait",
-        "ExclusiveWait->Running",
-        "Running->Success",
-    ]
 
     divergence = first_divergence(autosys_trace, uc_trace, ["pm07_ja"])
     assert divergence is not None

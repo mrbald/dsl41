@@ -48,6 +48,7 @@ from dsl41.lint import (
     rule_l016,
     rule_l017,
     rule_l018,
+    rule_l019,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -389,6 +390,34 @@ def test_l016_quiet_when_every_resource_is_defined() -> None:
     assert rule_l016(catalog) == []
 
 
+def test_l019_fires_for_schedule_plus_condition_composition() -> None:
+    """L019 (Q3, DL-54): a date_conditions job that also carries a condition
+    is a per-estate verification item -- its start semantics rest on the
+    open Q3 arm-and-wait default."""
+    text = (
+        "insert_job: l19_both\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "condition: s(l19_gate)\n\n"
+        "insert_job: l19_gate\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l019(catalog)
+    assert violation.severity == "warn"
+    assert violation.jobs == ["l19_both"]
+    assert "arm-and-wait" in violation.message
+    assert "Q3" in violation.message
+
+
+def test_l019_quiet_for_schedule_only_and_condition_only_jobs() -> None:
+    text = (
+        "insert_job: l19_sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
+        "insert_job: l19_cond\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(l19_sched)\n"
+    )
+    assert rule_l019(lower_source(text)) == []
+
+
 def test_l017_fires_only_when_the_set_defines_machines() -> None:
     """DL-25 heuristic: a job-only slice (zero insert_machine) stays quiet;
     once machine records are in the set, a ref outside them is a smell."""
@@ -501,7 +530,11 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     l016_resource_ref.jil (DL-25); L017 is registered but quiet -- the
     corpus defines every machine it references (machines_base.jil). L018
     joined with l018_calendar_ref.jil (DL-36); calendars_autocal.jil arms
-    it corpus-wide and resolves its own holcal/cyccal refs in-file."""
+    it corpus-wide and resolves its own holcal/cyccal refs in-file. L019
+    (Q3, DL-54) joined via consumer_stale -- sem04_lookback.jil's scheduled
+    consumer with a condition is exactly the schedule+condition composition
+    the rule flags (one job, two distinct hazards: L009 staleness, L019
+    arm-vs-abandon)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -515,6 +548,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L015",
         "L016",
         "L018",
+        "L019",
     }
 
 
@@ -536,7 +570,9 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     gate, which is exactly why v() reads are warn, not error). L016 x1 via
     l016_resource_ref.jil's missing pool. L018 x1 via l018_calendar_ref.jil's
     deliberately missing exclude_calendar (DL-36; the calendar fixtures added
-    no other finding -- every other count is unchanged)."""
+    no other finding -- every other count is unchanged). L019 x1 via
+    sem04_lookback.jil's consumer_stale, the corpus's one schedule+condition
+    composition (Q3, DL-54)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -552,6 +588,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L009": 1,
             "L016": 1,
             "L018": 1,
+            "L019": 1,
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))

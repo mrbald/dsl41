@@ -35,20 +35,31 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - Scheduling is script-driven too: the oracle owns no calendar. The script
   injects STARTJOB where AutoSys's scheduler would fire (start_times /
   start_mins ticks); a date_conditions job -- standalone or box member (the
-  SEM-31/L013 double gate) -- starts only on its tick, never on condition
-  edges. A scheduled STARTJOB whose `condition` is false is ABANDONED
-  (SEM-32 default reading; PENDING: Q3 -- arm-and-wait would change this
-  branch), except that run_window gating applies first.
+  SEM-31/L013 double gate) -- normally starts only on its tick. A scheduled
+  tick blocked at a RELEASABLE gate -- `condition` false, or ON_HOLD -- ARMS
+  the job (SEM-32 arm-and-wait, the doc-leaning reading, DL-54): condition
+  edges and OFF_HOLD may then start it through the schedule gate, any start
+  consumes the arm (at most one start per tick), and an unconsumed arm never
+  expires (the disarm boundary is undocumented -- pinned). Ticks blocked at
+  ON_ICE (SEM-20: conditions must REOCCUR), at box-not-RUNNING (member ticks
+  only count while the box runs -- pinned), or on an already-live job do NOT
+  arm. run_window gating applies at the moment a start goes through, armed
+  or not. PENDING: Q3 -- the switch ORACLE_SCHEDULED_FALSE_CONDITION keeps
+  the old "abandon" reading alive; standalone-job confirmation and the
+  disarm boundary need a live instance.
 - run_window (SEM-33): a start attempt outside the window applies the
   closer-edge rule -- nearer the next opening: schedule a TIMER STARTJOB at
   window open (box context stays RUNNING overnight); nearer the previous
   end: no run this cycle (INACTIVE stays). Exact midpoint: next opening
   ([?] undocumented; pinned here, revisit with live access).
 - Lookback (SEM-04): window -> status_at >= now - window. zero -> satisfied
-  iff status_at is on `now`'s calendar day (midnight anchor). PENDING: Q2 --
-  the switch ORACLE_ZERO_LOOKBACK_ANCHOR ("midnight" | "last_change") keeps
-  the alternative reading alive: "last_change" reads zero-lookback as "the
-  job's most recent transition satisfies the predicate" (no window at all).
+  iff the predecessor's own last end (last_end_at) is at-or-after the
+  EVALUATING job's last end (Q2a RESOLVED by citation, DL-54 -- "examines
+  the last end time of the job first ... then the last end time of the
+  condition job": BOTH sides are end times, so an n() predecessor bounced
+  to INACTIVE is not a fresh run; box overrides anchor on the box itself).
+  PENDING: Q2b -- a never-ended evaluator has no anchor: the first-run
+  corner is undocumented, pinned as unbounded (satisfied).
 - ON_ICE (SEM-05/SEM-20): every status/exitcode atom whose job is currently
   ON_ICE evaluates TRUE -- f()/t()/e() included, per SEM-05's blanket
   wording over SEM-20's "as though it succeeded" (DL-13, Q6-adjacent) --
@@ -144,8 +155,10 @@ from dsl41.conditions import (
 )
 from dsl41.ir import CatalogIR, JobIR, Semantics, Time
 
-#: PENDING: Q2 -- zero-lookback anchoring; see module docstring.
-ORACLE_ZERO_LOOKBACK_ANCHOR: Literal["midnight", "last_change"] = "midnight"
+#: PENDING: Q3 -- scheduled tick blocked at a releasable gate: arm-and-wait (the
+#: doc-leaning SEM-32 reading, DL-54) vs the superseded abandon default.
+#: Standalone-job confirmation and the disarm boundary need a live instance.
+ORACLE_SCHEDULED_FALSE_CONDITION: Literal["arm_and_wait", "abandon"] = "arm_and_wait"
 
 JobStatus = Literal[
     "INACTIVE",
@@ -203,11 +216,13 @@ class TraceEntry(BaseModel):
 class JobRuntime(BaseModel):
     status: JobStatus = "INACTIVE"
     status_at: datetime | None = None
+    last_end_at: datetime | None = None  # last transition into a terminal status (Q2 anchor)
     exit_code: int | None = None
     run_number: int = 0
     on_ice: bool = False
     on_hold: bool = False
     on_noexec: bool = False
+    armed: bool = False  # a scheduled tick latched at a releasable gate (Q3, DL-54)
 
 
 class StatusStore(BaseModel):
@@ -401,6 +416,8 @@ class Oracle:
         old = rt.status
         rt.status = status
         rt.status_at = self._now
+        if status in _TERMINAL:
+            rt.last_end_at = self._now  # Q2 anchor: the job's own last end (DL-54)
         if exit_code is not None:
             rt.exit_code = exit_code
         self._record(job, f"{old}->{status}", cause)
@@ -413,6 +430,20 @@ class Oracle:
             box = job_ir.box.box_name
             if box is not None:
                 self._on_member_transition(box, job, old, new)
+            if job_ir.job_type == "BOX" and new in _TERMINAL:
+                # Q3 (DL-54, review MAJOR): a member's arm is scoped to the
+                # box run that armed it -- an unconsumed arm dies with the
+                # run, BEFORE any wake can ride it (nested boxes recurse via
+                # their own completion transitions).
+                for member in self._members(job):
+                    m_rt = self.store.job.get(member)
+                    if m_rt is not None and m_rt.armed:
+                        m_rt.armed = False
+                        self._record(
+                            member,
+                            "SCHED_DISARM",
+                            f"unconsumed arm dies with box {job!r} run (Q3, DL-54)",
+                        )
         # DL-50: RELEASE a completed holder's units BEFORE waking anything. A
         # self-referencing re-trigger (the L010 tight-loop -- _wake_referencers
         # may re-start the very job that just completed) must re-acquire against
@@ -462,6 +493,9 @@ class Oracle:
                 # standalone queued job has no box-end to cancel it. It holds
                 # nothing; dequeue and TERMINATE (the kill happened).
                 self._dequeue(job)
+                # Q3 (DL-54): the kill consumes a latched arm -- the queued
+                # attempt was the tick's run and it just got killed.
+                self._runtime(job).armed = False
                 self._set_status(job, "TERMINATED", cause="KILLJOB (dequeued from QUE_WAIT, DL-50)")
         elif kind in ("ON_ICE", "OFF_ICE", "ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "OFF_NOEXEC"):
             self._handle_oob(kind, self._required_job(ev))
@@ -538,7 +572,7 @@ class Oracle:
 
     # -------------------------------------------------------- condition evaluation
 
-    def _atom_true(self, atom: StatusAtom | ExitCodeAtom) -> bool:
+    def _atom_true(self, atom: StatusAtom | ExitCodeAtom, evaluator: str) -> bool:
         name = (
             atom.job.name if atom.job.instance is None else f"{atom.job.name}^{atom.job.instance}"
         )
@@ -551,7 +585,7 @@ class Oracle:
             # at completion (the in-flight run is still real)
             return True
         if isinstance(atom, ExitCodeAtom):
-            if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback):
+            if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback, evaluator):
                 return False
             return compare_int(rt.exit_code, atom.op, atom.value)
         wanted = atom.status
@@ -566,35 +600,46 @@ class Oracle:
             return False
         if wanted == "NOTRUNNING" and rt.status_at is None:
             return True  # never-run jobs are notrunning with no timestamp
-        return self._lookback_ok(rt, atom.lookback)
+        return self._lookback_ok(rt, atom.lookback, evaluator)
 
-    def _lookback_ok(self, rt: JobRuntime, lookback: Lookback | None) -> bool:
+    def _lookback_ok(self, rt: JobRuntime, lookback: Lookback | None, evaluator: str) -> bool:
         if lookback is None or lookback.kind == "indefinite":
             return True
         if rt.status_at is None:
             return False
         assert self._now is not None
         if lookback.kind == "zero":
-            # PENDING: Q2 -- midnight anchor is the documented default
-            if ORACLE_ZERO_LOOKBACK_ANCHOR == "midnight":
-                return rt.status_at.date() == self._now.date()
-            return True  # "last_change": the latched status itself qualifies
+            # Q2a (DL-54): the predecessor qualifies iff its own LAST END is
+            # at-or-after the evaluating job's last end -- both sides of the
+            # cited doc reading are end times ("examines the last end time of
+            # the job first. It then examines the last end time of the
+            # condition job"), so an n() predecessor bounced to INACTIVE does
+            # not read its non-end transition as a fresh run (review MINOR).
+            anchor_rt = self.store.job.get(evaluator)
+            anchor = None if anchor_rt is None else anchor_rt.last_end_at
+            if anchor is None:
+                # PENDING: Q2b -- first-run corner (evaluator never ended):
+                # no anchor exists; pinned as unbounded (satisfied).
+                return True
+            if rt.last_end_at is None:
+                return False  # the predecessor never ended: nothing ran "since"
+            return rt.last_end_at >= anchor
         assert lookback.minutes is not None
         return rt.status_at >= self._now - timedelta(minutes=lookback.minutes)
 
-    def _cond_true(self, cond: Cond) -> bool:
+    def _cond_true(self, cond: Cond, evaluator: str) -> bool:
         if isinstance(cond, And):
-            return all(self._cond_true(op) for op in cond.operands)
+            return all(self._cond_true(op, evaluator) for op in cond.operands)
         if isinstance(cond, Or):
-            return any(self._cond_true(op) for op in cond.operands)
+            return any(self._cond_true(op, evaluator) for op in cond.operands)
         if isinstance(cond, Paren):
-            return self._cond_true(cond.inner)
+            return self._cond_true(cond.inner, evaluator)
         if isinstance(cond, GlobalAtom):
             actual = self.store.globals_.get(cond.name)
             if actual is None:
                 return False
             return compare_value(actual, cond.op, cond.value)
-        return self._atom_true(cond)
+        return self._atom_true(cond, evaluator)
 
     # --------------------------------------------------------------- job starting
 
@@ -604,30 +649,56 @@ class Oracle:
             return  # starting an undefined job is a no-op for the oracle
         rt = self._runtime(job)
         if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
-            return  # already starting/running, or queued for resources (DL-50)
+            return  # already starting/running, or queued for resources (DL-50);
+            # a tick on a live job does not arm (Q3 pin)
         if rt.on_ice:
-            return  # SEM-20: iced jobs never run (FORCE included -- DL-13)
+            return  # SEM-20: iced jobs never run (FORCE included -- DL-13);
+            # never arms: conditions must REOCCUR after OFF_ICE
         if rt.on_hold and not force:
-            return  # SEM-21 (FORCE on a held job: dossier is silent; force wins)
+            # SEM-21: held jobs do not start; a scheduled tick latches so the
+            # missed run collapses to at most one on OFF_HOLD (Q3, DL-54)
+            self._arm(job_ir, rt, scheduled, "blocked ON_HOLD")
+            return
         if not force:
-            if job_ir.schedule is not None and not scheduled:
+            if job_ir.schedule is not None and not scheduled and not rt.armed:
                 # SEM-30/31 (DL-13): a date_conditions job -- standalone OR
                 # box member (the L013 double gate) -- starts only on its
-                # script-injected schedule tick, never on condition edges.
+                # script-injected schedule tick, or while a prior tick's arm
+                # is latched (Q3, DL-54) -- never on bare condition edges.
                 return
             box = job_ir.box.box_name
             if box is not None:
                 if self._runtime(box).status != "RUNNING":
-                    return  # SEM-10: member needs its box RUNNING
+                    return  # SEM-10: member needs its box RUNNING; member
+                    # ticks only count while the box runs -- no arm (Q3 pin)
                 if job in self._box_ran.get(box, set()):
                     return  # SEM-10: at most once per box execution
-            if job_ir.sem.condition is not None and not self._cond_true(job_ir.sem.condition):
-                # PENDING: Q3 -- scheduled trigger with false conditions is
-                # abandoned (SEM-32 default reading), not queued
+            if job_ir.sem.condition is not None and not self._cond_true(job_ir.sem.condition, job):
+                # SEM-32 arm-and-wait (Q3, DL-54): the tick latches; condition
+                # edges may start the job later. "abandon" keeps the old
+                # reading (arm is a no-op there).
+                self._arm(job_ir, rt, scheduled, "condition false")
                 return
         if not self._run_window_permits(job_ir, cause):
             return
         self._start(job, cause)
+
+    def _arm(self, job_ir: JobIR, rt: JobRuntime, scheduled: bool, why: str) -> None:
+        """Q3 (DL-54): a scheduled tick blocked at a releasable gate latches
+        until a start consumes it. Only schedule-bearing jobs arm -- the flag
+        is read solely by the schedule gate. A member arms only while its box
+        is RUNNING (review MAJOR: the hold gate precedes the box gate, so the
+        box state must be re-checked here), and the arm dies with that box
+        run (_after_transition)."""
+        if not scheduled or job_ir.schedule is None or rt.armed:
+            return
+        if ORACLE_SCHEDULED_FALSE_CONDITION != "arm_and_wait":
+            return  # PENDING: Q3 -- "abandon": the superseded reading
+        box = job_ir.box.box_name
+        if box is not None and self._runtime(box).status != "RUNNING":
+            return  # member ticks only count while the box runs (Q3 pin)
+        rt.armed = True
+        self._record(job_ir.name, "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32/Q3, DL-54)")
 
     def _run_window_permits(self, job_ir: JobIR, cause: str) -> bool:
         """SEM-33 closer-edge rule; True == start may proceed now."""
@@ -650,15 +721,23 @@ class Oracle:
         to_open = next_open - self._now
         since_close = self._now - prev_close
         if to_open <= since_close:  # [?] midpoint tie -> next opening
-            self._schedule_timer(
-                next_open,
-                Event(at=next_open, kind="TIMER", payload={"job": job_ir.name}),
+            # DL-54 review MINOR: an armed job can reach this branch on every
+            # condition edge -- one pending defer per (job, opening) instant,
+            # not one per attempt (duplicate timers spammed pending_timers()).
+            pending = any(
+                due == next_open and e.kind == "TIMER" and e.payload.get("job") == job_ir.name
+                for due, _, e in self._timers
             )
-            self._record(
-                job_ir.name,
-                "RUN_WINDOW_DEFER",
-                f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
-            )
+            if not pending:
+                self._schedule_timer(
+                    next_open,
+                    Event(at=next_open, kind="TIMER", payload={"job": job_ir.name}),
+                )
+                self._record(
+                    job_ir.name,
+                    "RUN_WINDOW_DEFER",
+                    f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
+                )
         else:
             self._record(
                 job_ir.name,
@@ -673,6 +752,7 @@ class Oracle:
         if rt.on_noexec:
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
             # A bypassed job never runs, so it acquires no resources (DL-50).
+            rt.armed = False  # Q3: the bypass IS the tick's run (DL-54)
             self._set_status(job, "SUCCESS", cause=f"ON_NOEXEC bypass ({cause})")
             return
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
@@ -690,6 +770,10 @@ class Oracle:
         bookkeeping, STARTING -> RUNNING, box member launch (SEM-10)."""
         job = job_ir.name
         rt = self._runtime(job)
+        # Q3 (DL-54, review MINOR): the ACTUAL start consumes the arm, FORCE
+        # included -- a QUE_WAIT enqueue keeps it latched, so a cancelled
+        # queue attempt does not eat the tick.
+        rt.armed = False
         self._arm_sla_and_term(job_ir)  # reads run_number before the bump
         rt.run_number += 1
         box = job_ir.box.box_name
@@ -888,7 +972,7 @@ class Oracle:
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
         ):
-            if cond is not None and self._cond_true(cond):
+            if cond is not None and self._cond_true(cond, box):
                 if self._runtime(box).status != target:
                     self._set_status(
                         box,
@@ -918,7 +1002,7 @@ class Oracle:
             # external/global ref: evaluate only at member completion moments
             if not (refs_member or member_completed):
                 continue
-            if self._cond_true(cond):
+            if self._cond_true(cond, box):
                 self._set_status(
                     box,
                     target,  # type: ignore[arg-type]

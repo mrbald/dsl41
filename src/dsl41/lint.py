@@ -316,9 +316,11 @@ def rule_l005(catalog: CatalogIR) -> list[Violation]:
     """Time attributes present while date_conditions is falsy/absent (SEM-30):
     AutoSys ignores them -- dead configuration. Lowering routes exactly this
     shape into passthrough, which is where we look. Re-verified for timezone
-    against TechDocs 2026-07-09 (SEM-35 note; one Q2-adjacent [?] corner:
-    lookback-0 midnight anchoring). Estates that carry these attrs as a
-    convention can drop the code via `dsl41 lint --suppress L005` (DL-23)."""
+    against TechDocs 2026-07-09 (SEM-35 note); the old Q2-adjacent caveat
+    (midnight-anchor re-basing) dissolved with Q2a (DL-54) -- the
+    since-last-end anchor is tz-independent, so timezone here is
+    unconditionally dead. Estates that carry these attrs as a convention can
+    drop the code via `dsl41 lint --suppress L005` (DL-23)."""
     out: list[Violation] = []
     for job in catalog.jobs.values():
         dead = sorted(k for k in job.passthrough if k.lower() in TIME_CLUSTER)
@@ -501,6 +503,38 @@ def rule_l018(catalog: CatalogIR) -> list[Violation]:
                         detail=ref,
                     )
                 )
+    return out
+
+
+def rule_l019(catalog: CatalogIR) -> list[Violation]:
+    """Schedule + condition composition rests on open Q3 (DL-54, the
+    ir-design ss11 impact-ledger rule): a date_conditions job that also
+    carries a `condition` now ARMS on a tick blocked by a false condition
+    (SEM-32 arm-and-wait, the doc-leaning default) instead of abandoning
+    it. The two readings produce different estates -- under abandon the
+    run is skipped; under arm-and-wait it fires late, whenever the
+    condition next comes true. Until Q3 is closed on a live instance,
+    every such job is a per-estate verification item (and the UC mapping
+    M02 inherits the same ambiguity)."""
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        if job.schedule is None or job.sem.condition is None:
+            continue
+        out.append(
+            Violation(
+                code="L019",
+                severity="warn",
+                message=(
+                    f"{job.name!r} combines date_conditions scheduling with a"
+                    f" condition -- its start semantics rest on the open Q3"
+                    f" arm-and-wait default (SEM-32, DL-54): a tick with a false"
+                    f" condition arms and fires late instead of abandoning;"
+                    f" verify against a live instance before migrating"
+                ),
+                jobs=[job.name],
+                span=job.span,
+            )
+        )
     return out
 
 
@@ -856,6 +890,7 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L016", rule_l016),
     ("L017", rule_l017),
     ("L018", rule_l018),
+    ("L019", rule_l019),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (

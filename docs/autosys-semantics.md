@@ -68,10 +68,19 @@ candidate grammar rule is deleted.)*
 Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
 - `s(job, 2)` — satisfied only if the status was reached within the last 2 hours. Sub-hour
   windows require leading `00`: `00.30` = 30 min; bare `30` = 30 *hours*; `.30` is invalid. **[V]**
-- `s(job, 0)` — "zero lookback": examines the last end time of the job; interpreted as
-  "since the current schedule day / most recent run boundary". **[?]** The exact anchoring of
-  lookback 0 (midnight vs. last end time) must be pinned with a live test; Broadcom's wording
-  ("examines the last end time of the job first") is ambiguous.
+- `s(job, 0)` — "zero lookback": satisfied iff the condition job ended at-or-after the
+  **dependent job's own last end**. **[V]** *(Q2a, resolved 2026-07-28, DL-54 doc sweep;
+  TechDocs 12.0.01, condition attribute page: "When you specify 0, AutoSys Workload
+  Automation examines the last end time of the job first. It then examines the last end
+  time of the condition job. If the condition job has run since the last run of the job for
+  which the condition is coded for, the job is allowed to start. If the condition job has
+  not run since the last run of the job for which the condition is coded for, the job is
+  not allowed to start." The page's own phrase "the job for which the condition is coded
+  for" disambiguates the anchor as the dependent. The superseded midnight reading is
+  discriminated both directions by the `test_sem04_zero_lookback_*` pinning tests; its
+  switch is deleted per the DL-06 protocol.)* **[?]** Q2b residue: the first-run case (the
+  dependent has never ended — no anchor exists) is undocumented; pinned as unbounded
+  (satisfied), needs a live test. For box overrides the box itself is the evaluator/anchor.
 - `s(job, 9999)` — explicit "indefinite lookback", equivalent to no qualifier (legacy 4.5.1
   default). **[V]**
 - Lookback applies to **status, cross-instance/external status, and exitcode atoms only —
@@ -186,7 +195,15 @@ box is RUNNING, member not yet started."
 ### SEM-21 · ON_HOLD **[V]**
 - Job will not run; **downstream is blocked** (conditions on it do not become true).
 - OFF_HOLD: if starting conditions are *already satisfied*, the job runs immediately (missed
-  runs during hold collapse to at most one run). **[V]**
+  runs during hold collapse to at most one run). **[V]** *(Re-verified verbatim 2026-07-28,
+  DL-54; TechDocs 12.0, Start Conditions: "When you take jobs off hold, the scheduler does
+  not re-evaluate date and time conditions. Jobs that meet their date and time conditions
+  while they are on hold start immediately after they are taken off hold unless other
+  starting conditions apply and are not satisfied." Oracle: a scheduled tick landing on a
+  held job ARMS it — the same Q3 latch as SEM-32 — so OFF_HOLD starts it through the
+  schedule gate. The page's run-window exception — off-hold outside the run window
+  reschedules "to their next start time" — stays governed by SEM-33's verified closer-edge
+  rule; the two sources are not fully reconciled, noted, not modeled apart.)*
 - In a box: a held member prevents box completion — holds the whole stream.
 - IR: on_hold ≙ pause node, edges intact.
 
@@ -242,11 +259,33 @@ member of a non-running box does not fire (schedule + box gate compose with AND)
 
 ### SEM-32 · start_times / start_mins **[V]**
 `start_times: "10:00, 11:00"` — absolute times of day (24h). `start_mins: 10,20,30` — minutes
-past *every* hour. Each firing inserts a STARTJOB event; conditions (if any) must *also* hold
-at that moment — time and condition compose as AND, and if conditions are not yet true the job
-does not queue-wait for them by default **[?]** (verify: does a time-triggered evaluation with
-false conditions abandon or wait? Encode as trace test — this determines whether
-`date_conditions` jobs with conditions are "time AND state" or "time-gated arm then wait").
+past *every* hour. Each firing inserts a STARTJOB event; time and condition compose as AND.
+Default reading since DL-54 (2026-07-28): **time-gated arm then wait** — a tick whose
+`condition` is still false ARMS the job; the condition edge later starts it, the start
+consumes the arm (at most one run per tick). The doc lean, assembled 2026-07-28 (an
+entailment, not one dispositive sentence — the inference is stated deliberately, Q5-style):
+box members explicitly wait ("When a box starts running, the status of all the jobs it
+contains ... changes to ACTIVATED"; "Maintains jobs with additional starting conditions in
+the ACTIVATED state until those additional dependencies are met" — TechDocs 12.0, Basic Box
+Job Concepts; Job States: ACTIVATED "the job itself is waiting to start"); the governing
+rule is a continuously evaluated AND ("All defined starting conditions must be true for a
+job to start" — Start Conditions, 12.0); and the held-across-tick case is documented as
+start-on-release (SEM-21). **[?]** Q3 residue: no page narrates the *standalone*
+time+condition case in one sentence, and the disarm boundary (does an unconsumed arm expire
+at day end / next tick?) is undocumented — pinned as latch-until-consumed. The superseded
+abandon reading stays live behind `ORACLE_SCHEDULED_FALSE_CONDITION` (PENDING: Q3). Ticks
+blocked at ON_ICE (SEM-20 reoccurrence) or at box-not-RUNNING do NOT arm — including a
+HELD member of a not-running box — and a tick on an already-live job does not arm
+(pinned). Review-hardened pins (DL-54 adversarial round): a member's arm is scoped to the
+box run that armed it — an unconsumed member arm dies at box completion (`SCHED_DISARM`
+trace marker), so no member ever auto-starts a later box run from a stale tick; a
+pre-existing arm survives ON_ICE/OFF_ICE untouched (ice neither arms nor disarms — the
+latched tick predates the ice); the ACTUAL start consumes the arm (a DL-50 QUE_WAIT
+enqueue keeps it latched, so a cancelled queue attempt does not eat the tick; KILLJOB on
+the queued job consumes it — the kill happened); an armed job re-blocked by run_window
+re-uses one pending defer timer per opening instant. Accepted consequence of
+latch-until-consumed: an armed run may land in a LATER run_window cycle than its tick
+(the SEM-33 closer-edge rule applies at the armed start's own moment).
 
 ### SEM-33 · run_window is a gate, not a trigger **[V]**
 `run_window: "02:00-04:00"` — not a starting condition; an additional constraint on when a
@@ -271,11 +310,12 @@ block; equivalence of schedules is tz-aware.
 Scope re-verified 2026-07-09 (DL-23): TechDocs' own `date_conditions` page lists `timezone`
 (with `run_window` and `must_*_times`) among the attributes date_conditions gates, and the
 `timezone` page describes only "the job's time settings" — so timezone without truthy
-date_conditions is dead configuration (SEM-30/L005 stands). **[?]** One unverified corner:
-whether per-job timezone re-bases the zero-lookback "same day" midnight anchor (Q2-adjacent).
-If it does, `timezone` on a condition-only job whose conditions use lookback-0 would not be
-fully dead. Resolve together with Q2 on a live instance; until then L005 keeps firing and
-estates that carry timezone as convention can `dsl41 lint --suppress L005`.
+date_conditions is dead configuration (SEM-30/L005 stands). The formerly-open Q2-adjacent
+corner (does timezone re-base the zero-lookback midnight anchor?) DISSOLVED with Q2a
+(DL-54): the anchor is the dependent's own last end — a comparison of two instants that no
+timezone re-basing can affect — so timezone on a condition-only job is unconditionally dead
+and L005 fires without the old caveat. Estates that carry timezone as convention can
+`dsl41 lint --suppress L005`.
 
 ---
 
@@ -352,8 +392,10 @@ T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
 T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass (SEM-22) ·
 T23 force start satisfies latch (SEM-23) ·
 T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
-(SEM-24) · T32 time AND condition composition (SEM-32, after
-live verification) · T33a/b run_window closer-edge both sides + box variant (SEM-33) ·
+(SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
+corner (SEM-04, DL-54: `test_sem04_zero_lookback_*`) · T32 arm-and-wait: tick arms, edge
+starts, start consumes; abandon kept under the Q3 switch (SEM-32, DL-54:
+`test_sem32_*`) · T33a/b run_window closer-edge both sides + box variant (SEM-33) ·
 T34 must_* emit alarms only (SEM-34).
 
 ## 9. Open questions — resolve against a live instance or deeper doc dive before oracle v1
@@ -362,8 +404,22 @@ T34 must_* emit alarms only (SEM-34).
   precedence: "The parentheses force precedence, and the equation is evaluated from left to
   right" (TechDocs 12.1, condition attribute page). Pinned by the `test_sem03_*` pinning
   tests; the C-precedence candidate grammar is deleted.
-- Q2 (SEM-04): precise anchoring of lookback `0`.
-- Q3 (SEM-32): time-trigger firing with currently-false conditions — abandon vs. arm-and-wait.
+- Q2 (SEM-04): SPLIT by DL-54 (2026-07-28, doc sweep). **Q2a RESOLVED** — lookback `0`
+  anchors to the dependent job's own last end time ("examines the last end time of the job
+  first. It then examines the last end time of the condition job ... has run since the last
+  run of the job for which the condition is coded for" — TechDocs 12.0.01, condition
+  attribute page; full quote in SEM-04). The anchor switch is deleted per the DL-06
+  protocol; `test_sem04_zero_lookback_*` pin the reading against midnight both directions.
+  **Q2b OPEN** — the first-run case (dependent never ended: no anchor) is undocumented;
+  pinned as unbounded (satisfied), `# PENDING: Q2b` in oracle.py; needs one live test
+  (define A→B with s(A,0), run A once, never run B, check whether B fires).
+- Q3 (SEM-32): still open, NARROWED by DL-54 — default flipped to arm-and-wait (the doc
+  lean: ACTIVATED wait state for box members, the continuously-evaluated AND rule, the
+  SEM-21 hold-across-tick start-on-release; see SEM-32 for the stated entailment). Residue
+  for a live instance: the standalone time+condition case has no dispositive sentence, and
+  the disarm boundary (arm expiry at day end / next tick vs latch-until-consumed — pinned
+  the latter) is undocumented. The abandon reading stays behind
+  `ORACLE_SCHEDULED_FALSE_CONDITION` (`# PENDING: Q3`).
 - Q4 (§5): RESOLVED 2026-07-28 (DL-53, doc sweep) — FAILURE only. TechDocs 12.0.01 n_retrys:
   "specifies how many times to attempt to restart the job after it exits with a FAILURE
   status. If a job exits with a TERMINATED status, it does not restart."; "This attribute
@@ -396,7 +452,9 @@ T34 must_* emit alarms only (SEM-34).
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 — JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
 `must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
-Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties),
+Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties,
+Start Conditions, Job States — the DL-54 Q2a/Q3/SEM-21 quotes), the monitoring guide's
+Manage Job Events pages (off-hold/STARTJOB event semantics, 12.1.01),
 administration pages (`MaxRestartTrys`, `KillSignals`), system-states reference (Events),
 Getting Started (AutoSys Architecture), Broadcom KB 186248 (global variables), KB 11013
 (scheduler-outage event recovery, Q5 corroboration). Secondary corroboration: legacy CA User

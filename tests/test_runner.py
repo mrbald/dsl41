@@ -142,12 +142,12 @@ def test_pending_timers_stale_by_status_hides_a_completed_jobs_deadline() -> Non
 
 
 def test_pending_timers_must_start_pending_until_the_run_actually_starts() -> None:
-    """(SEM-34, DL-46): a must_start deadline arms on the schedule tick
-    whether or not the start succeeds. A condition-gated scheduled job (the
-    SEM-30/31 double gate: an edge-triggered wake alone never starts a
-    date_conditions job, only its own next schedule tick does) stays
-    pending across the gate flipping true, and only clears once a SECOND
-    tick actually starts it (run_number moves off the armed value)."""
+    """(SEM-34, DL-46 / Q3, DL-54): a must_start deadline arms on the
+    schedule tick whether or not the start succeeds. The tick with a false
+    condition also ARMS the schedule gate (SEM-32 arm-and-wait), so the
+    deadline stays pending only while the condition stays false -- the edge
+    that flips the gate true starts the job through the latched arm and
+    clears the pending deadline (run_number moves off the armed value)."""
     text = (
         "insert_job: pt_gate\njob_type: c\ncommand: y\nmachine: m1\n\n"
         "insert_job: pt_ms\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -155,17 +155,15 @@ def test_pending_timers_must_start_pending_until_the_run_actually_starts() -> No
         "must_start_times: +5\ncondition: s(pt_gate)\n"
     )
     o = Oracle(lower_source(text))
-    o.feed(ev("STARTJOB", 0, job="pt_ms"))  # tick 1: arms must_start, condition false
+    o.feed(ev("STARTJOB", 0, job="pt_ms"))  # tick: arms must_start AND the schedule gate
     assert o.store.job["pt_ms"].status == "INACTIVE"
+    assert o.store.job["pt_ms"].armed
     assert o.pending_timers() == [(T0 + timedelta(minutes=5), "pt_ms", "must_start")]
 
-    o.feed(ev("STATUS", 1, job="pt_gate", status="SUCCESS"))  # gate true, edge wake only
-    assert o.store.job["pt_ms"].status == "INACTIVE"  # double gate: still didn't start
-    assert o.pending_timers() == [(T0 + timedelta(minutes=5), "pt_ms", "must_start")]
-
-    o.feed(ev("STARTJOB", 2, job="pt_ms"))  # tick 2: gate now satisfied -> starts
-    assert o.store.job["pt_ms"].status == "RUNNING"
-    assert o.pending_timers() == []
+    o.feed(ev("STATUS", 1, job="pt_gate", status="SUCCESS"))  # the gate edge
+    assert o.store.job["pt_ms"].status == "RUNNING"  # armed tick + true condition -> start
+    assert not o.store.job["pt_ms"].armed  # consumed
+    assert o.pending_timers() == []  # the run began in time; deadline satisfied
 
 
 def test_pending_timers_run_window_defer_reports_kind_run_window() -> None:
