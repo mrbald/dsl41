@@ -65,9 +65,10 @@ where an ``int`` is the RAW exit code (SEM-09/DL-33 classification stays
 oracle-side), ``Terminated`` reports a kill the wrapper actually observed
 (-> STATUS TERMINATED), and ``Failed`` reports a completion with no raw exit
 code (spawn failure, or the E7 unobservable case -> STATUS FAILURE with its
-cause). Adapters never retry (Q4 parity: a shell-side retry would fork
-semantics from the simulator) and never time out (term_run_time is the
-oracle's timer). Under VirtualClock an adapter may block ONLY through
+cause). Adapters never retry (n_retrys is unmodeled v1, DL-53 scope: a
+shell-side retry would fork semantics from the simulator) and never time
+out (term_run_time is the oracle's timer). Under VirtualClock an adapter
+may block ONLY through
 ctx.clock.sleep_until; that restriction is what makes quiescence decidable
 (Engine._settle counts live tasks against pending sleeps). Real adapters
 (11b) run under RealClock, where the loop blocks on real IO -- _settle is a
@@ -143,7 +144,7 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
   jumps never yield mid-move, so the 11a determinism pins are unchanged.
 - Preflight (ss8): ERROR refuses the run (job-type / machine / owner /
   calendar / timezone / oracle construction), WARN prints + journals and
-  runs (n-retrys Q4, resources, AND-success skeleton cycle -- cycles are
+  runs (n-retrys DL-53 scope, resources, AND-success skeleton cycle -- cycles are
   legal AutoSys, DL-13/L010, so they only disable `plan`). Identity rules
   (machine/owner) guard real execution and are skipped for rehearse
   (execution=False): the FakeAdapter runs nothing.
@@ -665,7 +666,10 @@ def _outcome_from_status(status: dict[str, Any]) -> AdapterResult:
         )
         # PENDING: E8 -- an EXTERNAL signal death (engine alive, no oracle
         # kill decision) maps to TERMINATED per the DL-41a recorded-signal
-        # reading; vendor parity unverified (real AutoSys may mark FAILURE)
+        # reading; vendor parity unverified (real AutoSys may mark FAILURE).
+        # Swept 2026-07-28 (DL-53): publicly undocumented -- TERMINATED is
+        # defined mechanism-agnostically ("the job was killed"); needs a live
+        # instance to pin.
         return Terminated(cause)
     if outcome == "terminated":
         return Terminated(str(status.get("cause", "terminated")))
@@ -716,8 +720,9 @@ def _build_run_spec(
 
 class LocalCommandAdapter:
     """ss6 CMD adapter: spawn the ss6a Tier-0 wrapper, await it, read
-    status.json -- the sole outcome channel. No retries (Q4 parity), no
-    timeouts (term_run_time is the oracle's timer), no classification.
+    status.json -- the sole outcome channel. No retries (n_retrys unmodeled,
+    DL-53 scope), no timeouts (term_run_time is the oracle's timer), no
+    classification.
     stdout/stderr APPEND to std_out_file/std_err_file when set (vendor
     appends), else to <run_root>/logs/<job>.<run_number>.{out,err};
     std_in_file when set, else /dev/null. `profile` sources first:
@@ -2540,8 +2545,8 @@ def preflight(
                     severity="WARN",
                     code="n-retrys",
                     job=name,
-                    message=f"n_retrys={job.sem.n_retrys}: runs WITHOUT retries (PENDING: Q4;"
-                    " a shell-side retry would fork semantics from the oracle)",
+                    message=f"n_retrys={job.sem.n_retrys}: runs WITHOUT retries (unmodeled v1,"
+                    " DL-53 scope; a shell-side retry would fork semantics from the oracle)",
                 )
             )
         items.extend(_resource_preflight(name, job, catalog))

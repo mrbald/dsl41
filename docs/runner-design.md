@@ -152,9 +152,10 @@ outcome durably like any other completion. stdout/stderr **append** to
 `<run_dir>/logs/<job>.<run_number>.{out,err}`. Whether the engine unescapes
 `\:` inside command/std_* values is the DL-39 [?] — verbatim carry stands
 here too. No timeout logic (term_run_time is the oracle's timer). **No
-retry logic**: n_retrys is NOT modeled v1 (PENDING: Q4); a shell-side retry
-would fork semantics from the oracle and break bisimulation. Preflight
-warns instead (§8).
+retry logic**: n_retrys is FAILURE-only (Q4 resolved, DL-53) and retry
+modeling stays deliberately unimplemented v1 — a recorded scope decision, not
+an open question; a shell-side retry would fork semantics from the oracle
+and break bisimulation. Preflight warns instead (§8).
 
 **FileWatcherAdapter** (FW): poll every `watch_interval` seconds (default
 60 [?]) until `watch_file` exists with size `>= watch_file_min_size` and
@@ -374,7 +375,8 @@ ERROR:
 - Oracle construction failure (surfaces IR-level refusals unchanged).
 
 WARN:
-- `n_retrys > 0` — runs WITHOUT retries (PENDING: Q4).
+- `n_retrys > 0` — runs WITHOUT retries (Q4 resolved, DL-53: retries stay
+  deliberately unmodeled v1 by scope decision).
 - `job_load` on a **pool** machine — machine-load throttle unmodelled for pools
   (DL-50, PENDING Qr3); resource semaphores on such a job still apply. (Plain
   `job_load`/`priority`/`resources:` are now HONORED — DL-50 — not warned; an
@@ -442,7 +444,8 @@ supervisor's.
 ## 12. Non-goals
 
 HA/clustering, remote machines or agent fabric, RBAC, custom calendars,
-retry semantics (Q4), non-child orphan adoption (dissolved by design: the
+retry semantics (Q4 resolved DL-53, kept deliberately unmodeled by scope
+decision), non-child orphan adoption (dissolved by design: the
 11f supervisor makes survival a *reattachment*, never an adoption — E4),
 alarm delivery beyond journal + UI (no mail/pager integrations), cgroup/
 scope containment (documented Linux hardening path, §6a). Resource/load
@@ -525,8 +528,8 @@ code; none is guess-resolved.
   operator `kill -9` of the command). Default: TERMINATED, uniform with
   the DL-41a recorded-signal reading; real AutoSys may instead mark
   FAILURE (128+signum through the SEM-09 boundary), which would flip
-  t()/f() routing. Needs a live instance; opened by the 11b adversarial
-  review (DL-44 amendment).
+  t()/f() routing. Opened by the 11b adversarial review (DL-44 amendment).
+  Swept 2026-07-28 (DL-53): publicly undocumented; needs a live instance.
 - **E9** — scheduler ticks missed across engine DOWNTIME (crash/stop →
   resume). Default: skip-and-report — resume drops each missed tick AND
   journals it (a WAL `drop` record), never fires it late; a
@@ -543,5 +546,6 @@ code; none is guess-resolved.
   the AutoSys server's zone, which a migrated estate must set explicitly.
   DST corners pinned to PEP 495 fold=0 (ambiguous = first occurrence;
   nonexistent maps past the gap). Opened by 11c (DL-45).
-- Inherited pendings: Q3 (SEM-32 abandonment branch), Q4 (n_retrys) — the
-  runner implements the documented oracle defaults and adds no new switch.
+- Inherited from the oracle: Q3 (SEM-32 abandonment branch, still open) and Q4
+  (n_retrys — resolved DL-53, kept deliberately unmodeled by scope decision) —
+  the runner implements the documented oracle defaults and adds no new switch.

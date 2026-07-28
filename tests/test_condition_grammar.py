@@ -12,12 +12,7 @@ from lark import Lark, Tree
 GRAMMAR = (Path(__file__).parent.parent / "grammars" / "condition.lark").read_text()
 
 
-def make_parser(start: str) -> Lark:
-    return Lark(GRAMMAR, start=start, parser="lalr")
-
-
-FLAT = make_parser("start_flat")
-PREC = make_parser("start_prec")
+PARSER = Lark(GRAMMAR, start="start", parser="lalr")
 
 # (source, why / provenance)
 VALID = [
@@ -60,29 +55,29 @@ INVALID = [
 
 
 @pytest.mark.parametrize("src,why", VALID, ids=[w for _, w in VALID])
-def test_valid_both_precedence_modes(src: str, why: str) -> None:
-    FLAT.parse(src)
-    PREC.parse(src)
+def test_valid(src: str, why: str) -> None:
+    PARSER.parse(src)
 
 
 @pytest.mark.parametrize("src,why", INVALID, ids=[w for _, w in INVALID])
 def test_invalid_rejected(src: str, why: str) -> None:
-    for parser in (FLAT, PREC):
-        with pytest.raises(Exception):
-            parser.parse(src)
+    with pytest.raises(Exception):
+        PARSER.parse(src)
 
 
-def test_precedence_modes_differ_where_expected() -> None:
-    """The Q1 sentinel: `s(A) | s(B) & s(C)` must parse into different shapes
-    under the two candidate grammars; equal-precedence left-assoc gives
-    ((A|B)&C), C-style gives (A|(B&C)). When Q1 resolves, this test is replaced
-    by a trace test pinning the surviving interpretation."""
+def test_sem03_flat_left_to_right_precedence_pinned() -> None:
+    """Q1 resolved (SEM-03 [V], DL-53): "The parentheses force precedence, and
+    the equation is evaluated from left to right." (TechDocs 12.1, condition
+    attribute page). `s(A) | s(B) & s(C)` is ((A|B) & C) — & does NOT bind
+    tighter than |; only parentheses group."""
     src = "s(A) | s(B) & s(C)"
-    t_flat = FLAT.parse(src).children[0]  # unwrap start_flat
-    t_prec = PREC.parse(src).children[0]  # unwrap start_prec
-    # flat, left-assoc: ((A|B) & C) → top binop's op is '&'
-    assert isinstance(t_flat, Tree) and t_flat.data == "binop"
-    op = t_flat.children[1]
+    tree = PARSER.parse(src).children[0]  # unwrap start
+    # left-assoc: ((A|B) & C) → top binop's op is '&'
+    assert isinstance(tree, Tree) and tree.data == "binop"
+    op = tree.children[1]
     assert isinstance(op, Tree) and op.children[0] == "&"
-    # prec, C-style: (A | (B&C)) → top node is or_
-    assert isinstance(t_prec, Tree) and t_prec.data == "or_"
+    # its left operand is the earlier (A|B) binop
+    left = tree.children[0]
+    assert isinstance(left, Tree) and left.data == "binop"
+    inner_op = left.children[1]
+    assert isinstance(inner_op, Tree) and inner_op.children[0] == "|"

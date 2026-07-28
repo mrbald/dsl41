@@ -53,11 +53,15 @@ patterns: (a) restructure so alternatives are conditional paths from a common an
 **[?]** Verify on live instance whether 7.x has native OR join (there are "All/Any" complete
 criteria on some constructs); the compiler needs a decided, tested lowering for `Or` nodes.
 
-### UCS-04 · Workflow-level conditions **[C/?]**
-Workflow completion status derives from member instances (Success when all terminal paths
-complete successfully; Running/Problems status exists for contained failures). No direct
-analog of box_success/box_failure predicate override — external-reference gating (SEM-12)
-does not exist at all. Pin exact workflow-status derivation rules on live instance.
+### UCS-04 · Workflow-level conditions **[V]**
+Workflow completion status derives from member instances. *(U2 resolved 2026-07-28, DL-53 —
+UC 7.4 "Displaying Task Instance Status": a workflow whose member is in Cancelled /
+Confirmation Required / Failure / In Doubt / Running-Problems (sub-workflow) / Start Failure
+/ Undeliverable goes **Running/Problems** and keeps running; "Workflows will transition to
+Success status when all of its task instances have transitioned to Success, Finished, or
+Skipped status."; the Failed status row applies to "All (except Workflow)" — a workflow
+instance itself is never Failed.)* No direct analog of box_success/box_failure predicate
+override — external-reference gating (SEM-12) does not exist at all.
 
 ### UCS-05 · Triggers **[V]**
 Types include Time (calendar-based), Cron, Task Monitor (fires on another task's status —
@@ -66,11 +70,15 @@ Manual, Application Monitor. A trigger launches one or more tasks; all listed ta
 each satisfaction. Built-in trigger variables are injected. Calendars/Business Days handle
 run/exclude date logic.
 
-### UCS-06 · Task Monitor tasks & triggers **[V/C]**
+### UCS-06 · Task Monitor tasks & triggers **[V]**
 A Task Monitor watches for other task instances reaching specified statuses, with a **Time
-Scope** (can look into the past within bounds). This is the closest UC gets to AutoSys's
-status-store queries and the main tool for cross-workflow dependencies. A Task Monitor
-*trigger* + task pair replaces "condition on a job in another stream."
+Scope** (a window relative to the Task Monitor's launch time: "The Time Scope window is
+always relative to the time that the Task Monitor launched"). *(U5 resolved 2026-07-28,
+DL-53 — Task Monitor Task field spec: From/To format `(+/-)hh:mm`, "hh must be a positive
+integer", minutes 0–59; the worked example uses ±124:00. There is NO documented maximum —
+the window is retention-bound in practice, not spec-capped.)* This is the closest UC gets to
+AutoSys's status-store queries and the main tool for cross-workflow dependencies. A Task
+Monitor *trigger* + task pair replaces "condition on a job in another stream."
 
 ### UCS-07 · File monitors **[V]**
 Agent File Monitor task: watches create/change/delete (blocking, goes Success on event) or
@@ -79,13 +87,17 @@ trigger-launched tasks then don't fire). Trigger + monitor-task composition rule
 and verified: monitor-type Exists under a File Monitor trigger disables the trigger — use
 Create + "Trigger on Existence". Maps from AutoSys FW jobs.
 
-### UCS-08 · Variables **[V/C]**
+### UCS-08 · Variables **[V]**
 Global variables + workflow/task-level variables; `${variable}` resolution; Set Variable
 actions on task events; Variable Monitor triggers fire on value changes. Ordering subtlety
-(verified): edge variable-condition evaluation can occur before or after Set Variable Actions
+(verified): edge variable-condition evaluation occurs before or after Set Variable Actions
 on Success/Failed depending on the system property `Perform Set Variable Actions Before
-Workflow Dependency Evaluation` — the compiler must not assume either default; emit
-configuration requirement notes.
+Workflow Dependency Evaluation`. *(U8 resolved 2026-07-28, DL-53 — System Properties:
+`uc.perform_actions.before_wf_dependency_evaluation`, "whether or not the Set Variable
+Action of a task in a workflow will occur before downstream path conditions of that task are
+evaluated", **default `true`** — variables set by actions are visible to downstream
+dependency evaluation on a default-config controller. Per-controller configurable, so the
+compiler still emits a configuration requirement note pinning `true` as the assumed value.)*
 
 ### UCS-09 · Mutual exclusion & resources **[V]**
 - **Mutually Exclusive Tasks**: declared per-task list; instances wait in Exclusive Wait.
@@ -135,13 +147,13 @@ rule and a migration-report entry.
 | # | AutoSys construct (SEM) | UC target | Class | Notes / assumption |
 |---|---|---|---|---|
 | M01 | `s(A)` within one stream, producer+consumer same schedule cycle (SEM-01) | edge A→X (Success) | **A** | Assumption: no cross-run staleness relied upon. Detector: producer and consumer share one derived subgraph + one trigger cadence |
-| M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | Time Scope bounds differ from indefinite latch; flag each |
+| M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | Time Scope has no documented max (U5 resolved, DL-53) but is launch-relative and retention-bound — anchoring still differs from an indefinite latch; flag each |
 | M03 | `s(A, hhhh.mm)` lookback (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Window anchoring differs (SEM-04 Q2); verify per case |
 | M04 | `f(A)` | edge A→X (Failure) | **E** | within-run |
 | M05 | `d(A)` | edge A→X (Success/Failure) | **E** | within-run |
 | M06 | `t(A)` | Failure-ish: UC Cancelled/Failed distinction | **A** | UC separates Cancelled from Failed; choose mapping, document |
 | M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource | **A** | NOT an edge. Detector: `n()` atoms → mutex candidates |
-| M08 | `exitcode(A) op k` (SEM-02) | edge variable condition on exit-code variable, or task-level exit-code→status mapping | **A/?** | UC tasks map exit codes to Success/Failed at task level (output conditions); pin exact mechanism per task type |
+| M08 | `exitcode(A) op k` (SEM-02) | edge variable condition on exit-code variable, or task-level exit-code→status mapping | **A** | mechanism pinned (U4 resolved, DL-53): per-task "Exit Code Processing" field, default method Success Exitcode Range; the exit-code range value itself is required with no documented default — record the configured range per task in the report |
 | M09 | `value(G) op k` (SEM-08) | edge variable condition / Variable Monitor trigger | **A** | Re-eval-on-set: AutoSys re-evaluates on SET_GLOBAL event; UC edge conditions evaluate at predecessor completion — timing differs → R if the JIL used globals as async gates |
 | M10 | `$$VAR` substitution (SEM-08) | `${var}` resolution | **A** | Resolution timing + UCS-08 ordering property |
 | M11 | AND `&` | multiple incoming edges | **E** | with UCS-02 skip caveat |
@@ -159,12 +171,12 @@ rule and a migration-report entry.
 | M23 | CHANGE_STATUS | Force Finish / Set status via API | **A** | Force Finish leaves process running **[V]** — runbook warning |
 | M24 | date_conditions + start_times/days/calendars (SEM-30–32) | Time trigger + UC Calendars | **E/A** | calendar algebra (exclude_calendar) → UC calendar with non-business days; verify custom calendar parity |
 | M25 | start_mins (SEM-32) | Cron trigger (`m * * * *`) or Time trigger interval | **E** | |
-| M26 | timezone (SEM-35) | trigger-level time zone | **E/?** | pin per-trigger tz support on live instance |
+| M26 | timezone (SEM-35) | trigger-level time zone | **E** | per-trigger Time Zone field documented (U6a resolved, DL-53; quote-provenance hedge in Part III); calendar parity stays open (U6b) |
 | M27 | run_window (SEM-33) | no direct analog; Time Wait on task + trigger restrictions | **R** | closer-edge rule (R5) unreproducible; must redesign & document per job |
 | M28 | must_start/must_complete (SEM-34) | Late Start / Late Finish flags (UCS-10) | **E** | cleanest mapping in the whole table |
-| M29 | term_run_time (§5) | task Maximum Run Time with Cancel action | **A/?** | pin exact UC auto-cancel config |
-| M30 | n_retrys (§5) | task Retry options (max retries, interval, suppress intermediate failures) | **A** | retry trigger sets differ (Q4) |
-| M31 | max_exit_success + success_codes/fail_codes (SEM-09/DL-33) | task exit-code / output success criteria | **A/?** | per task type; pin — twin shares ir.exit_is_success on both sides, Q7 corners included |
+| M29 | term_run_time (§5) | Late Finish (Time/Duration) + Abort Action (Force Finish / Force Finish-Cancel) | **A** | mechanism pinned (U7 resolved, DL-53): Late Finish flags the overrun, an Abort Action on late finish kills; "maximum-runtime equivalent" is our interpretive composite, not a vendor-labeled single knob |
+| M30 | n_retrys (§5) | task Retry options (max retries, retry indefinitely, retry interval, retry exit codes) | **A** | both sides auto-retry on failure only (Q4 + U7 resolved, DL-53): n_retrys fires on application-failure exits, UC retry on Failed status; AutoSys system-level failures restart via MaxRestartTrys (scheduler config) with no per-task UC analog — flag estates relying on it. "Suppress Intermediate Failures" is a Re-run command modifier (UCS-11), not a Retry option |
+| M31 | max_exit_success + success_codes/fail_codes (SEM-09/DL-33) | task exit-code / output success criteria | **A** | mechanism pinned per M08 (U4 resolved, DL-53); twin shares ir.exit_is_success on both sides, Q7 corners still open |
 | M32 | FW jobs (watch_file) (§5) | Agent File Monitor task/trigger (UCS-07) | **A** | steady-state vs existence modes; trigger-disable gotchas **[V]** |
 | M33 | cross-instance `job^INST` (SEM-07) | Task Monitor across... or UC agent/remote — depends on target topology | **R** | consolidating instances is a migration design decision, not a translation |
 | M34 | job_load/priority/QUE_WAIT | Virtual Resources + Agent task limits | **A** | model mapping per machine definition |
@@ -185,15 +197,35 @@ rule and a migration-report entry.
 ## Part III — Open questions (live UC instance / OpenAPI dive)
 
 - U1: native OR-join / "Any" completion criteria in 7.x workflows (UCS-03) — decides M12 lowering.
-- U2: exact workflow-status derivation incl. Running/Problems transitions (UCS-04).
+- U2: RESOLVED 2026-07-28 (DL-53, doc sweep) — workflow-status derivation pinned in UCS-04:
+  member failure → Running/Problems (workflow keeps running); Success iff all members
+  Success/Finished/Skipped; a workflow instance is never Failed ("Displaying Task Instance
+  Status", UC 7.4).
 - U3: edge record JSON schema (vertex ids, condition enum, variable-condition fields) — pull
   from openapi.json, freeze as `docs/uc-edge-schema.md`; foundation of the UC backend.
-- U4: per-task-type exit-code→status configuration (M08/M31).
-- U5: Time Scope bounds on Task Monitors (M02/M03) — max lookback window.
-- U6: trigger timezone + calendar parity with AutoSys extended calendars (M24/M26).
-- U7: Maximum Run Time auto-cancel config (M29); retry trigger set (M30).
-- U8: default of `Perform Set Variable Actions Before Workflow Dependency Evaluation` on the
-  target controller (UCS-08) — record in migration assumptions.
+- U4: RESOLVED 2026-07-28 (DL-53, doc sweep) — mechanism pinned: per-task "Exit Code
+  Processing" field (Success/Failure Exitcode Range, Success/Failure Output Contains),
+  default Success Exitcode Range ("Linux Unix Task Properties"). The exit-code range value
+  is a required field with NO documented default — an earlier "default 0" claim did not
+  survive verification; per-task configured ranges must be recorded at migration time.
+- U5: RESOLVED 2026-07-28 (DL-53, doc sweep) — no documented maximum on Task Monitor Time
+  Scope; launch-relative window, hours uncapped ("hh must be a positive integer", ±124:00
+  example), retention-bound in practice (UCS-06).
+- U6: SPLIT 2026-07-28 (DL-53). U6a trigger timezone: RESOLVED — per-trigger Time Zone /
+  Trigger Time Zone field documented ("Triggering by Date and Time"; quote sits in the
+  Trigger-Now execution section, matching field-table text unretrieved — cosmetic residue).
+  U6b calendar parity with AutoSys extended calendars (M24), incl. any multi-calendar
+  AND/OR algebra for run/exclude combinations: OPEN — no documented algebra found.
+- U7: RESOLVED 2026-07-28 (DL-53, doc sweep) — M29 overrun mechanism is Late Finish +
+  Abort Action (composite; see M29 caveat); auto-retry applies to Failed status only
+  ("auto-retry of tasks in FAILED status", Retry Exit Codes field); "Suppress Intermediate
+  Failures" is a Re-run command modifier suppressing failure propagation (actions, failure-
+  path successors, Task Monitor notification, Running/Problems rollup), NOT an auto-retry
+  knob — M30's earlier note conflated it.
+- U8: RESOLVED 2026-07-28 (DL-53, doc sweep) — `uc.perform_actions.before_wf_dependency_
+  evaluation` defaults to `true` (System Properties; see UCS-08): Set Variable actions run
+  before downstream path-condition evaluation on a default-config controller. Per-controller
+  configurable — the migration report records `true` as the assumed value.
 
 ## Part IV — Trace tests (oracle-pair set)
 
@@ -209,8 +241,12 @@ honest core of the whole project.
 ## Sources
 Primary: docs.stonebranch.com and Stonebranch Confluence, Universal Controller 7.2–7.9 —
 Creating and Maintaining Workflows (edge conditions, skip rules, step/variable conditions),
-Manually Running and Controlling Tasks (dependency clearing, re-run, force finish),
-Setting Mutually Exclusive Tasks, Creating Task Virtual Resources, Triggers Overview,
-Agent File Monitor Task, Workflows PDF (7.4/7.9: instance wait, late start, wait/delay),
-Task Web Services & RESTful Web Services API (XML/JSON records, OpenAPI endpoint),
-Workflow Task Instance Web Services (vertex addressing errors).
+Manually Running and Controlling Tasks (dependency clearing, re-run incl. Suppress
+Intermediate Failures, force finish), Setting Mutually Exclusive Tasks, Creating Task
+Virtual Resources, Triggers Overview, Agent File Monitor Task, Workflows PDF (7.4/7.9:
+instance wait, late start, wait/delay), Task Web Services & RESTful Web Services API
+(XML/JSON records, OpenAPI endpoint), Workflow Task Instance Web Services (vertex addressing
+errors). DL-53 doc-sweep additions (2026-07-28): Displaying Task Instance Status (UC 7.4),
+Linux Unix Task Properties / Windows Task (Exit Code Processing, Retry fields), Task Monitor
+Task (Time Scope spec), Triggering by Date and Time (trigger time zones), Abort Actions
+(UC 7.8), System Properties (`uc.perform_actions.before_wf_dependency_evaluation`).

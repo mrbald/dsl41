@@ -4,33 +4,21 @@
 //
 // Semantics references: docs/autosys-semantics.md SEM-02..08.
 //
-// ── Q1 PRECEDENCE SWITCH ─────────────────────────────────────────────────────
-// Broadcom docs say "evaluated left to right, parentheses force precedence"
-// (SEM-03). Until Q1 is resolved on a live instance, TWO start rules exist:
-//   start_flat : & and | at EQUAL precedence, strictly left-associative  [DEFAULT]
-//   start_prec : & binds tighter than |  (C-style)
-// The loader (conditions.py) selects via the CONDITION_PRECEDENCE env var /
-// module setting.
-// After Q1: delete the losing rule, delete this banner, keep the trace test.
-// ─────────────────────────────────────────────────────────────────────────────
+// Q1 RESOLVED (SEM-03 [V], DL-53): "The parentheses force precedence, and the
+// equation is evaluated from left to right." (TechDocs 12.1, condition
+// attribute page). & and | share one precedence level, strictly
+// left-associative; the C-style candidate grammar is deleted. Pinning tests:
+// test_condition_grammar.py::test_sem03_flat_left_to_right_precedence_pinned,
+// test_conditions.py::test_sem03_precedence_pinned_model_level.
 
-start_flat: expr_flat
-start_prec: expr_prec
+start: expr
 
-// ---- flat: single left-recursive level, & and | equal ----
-?expr_flat: expr_flat op atom_or_group_flat   -> binop
-          | atom_or_group_flat
-?atom_or_group_flat: atom
-          | "(" expr_flat ")"                 -> paren
+// single left-recursive level, & and | at equal precedence
+?expr: expr op atom_or_group   -> binop
+     | atom_or_group
+?atom_or_group: atom
+     | "(" expr ")"            -> paren
 op: AND | OR
-
-// ---- prec: conventional two-level ----
-?expr_prec: expr_prec OR term                 -> or_
-          | term
-?term: term AND factor                        -> and_
-     | factor
-?factor: atom
-       | "(" expr_prec ")"                    -> paren
 
 // ---- atoms (SEM-02) ----
 ?atom: status_atom

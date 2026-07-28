@@ -93,9 +93,12 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   not own; scripts exercise relative forms.
 - term_run_time (dossier ss5): control flow -- auto-TERMINATE when the run
   exceeds the limit, checked lazily as the clock advances.
-- n_retrys: NOT modeled v1 (PENDING: Q4 -- the retry trigger set is open;
-  modeling a guess would bake it in). auto_hold: member enters ON_HOLD when
-  its box starts (dossier ss5 [C]).
+- n_retrys: Q4 resolved (DL-53) -- the trigger set is FAILURE-only application
+  failures (TERMINATED does not restart; system failures restart via the
+  scheduler's MaxRestartTrys config instead). Retry modeling stays out of
+  scope v1 as a recorded DL-53 scope decision, not an open question; a future
+  work item. auto_hold: member enters ON_HOLD when its box starts (dossier
+  ss5 [C]).
 - Undefined jobs in conditions evaluate FALSE forever (SEM-06). Cross-
   instance atoms (SEM-07) evaluate against instance-qualified pseudo-job
   entries in the status store, settable only by injected STATUS events with

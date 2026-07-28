@@ -527,8 +527,9 @@ class CalendarIR(BaseModel):
     """autocal_asc export record (DL-36): a standard `calendar:` (bare date
     rows) or `extended_calendar:` (rule attributes) definition. Carried
     opaquely like MachineIR (DL-18) -- generating dates from extended rules
-    is autocal's semantics, not this compiler's (U6/M24 parity); v1 needs
-    the NAMES for L018 existence checks and the definitions verbatim."""
+    is autocal's semantics, not this compiler's (U6b/M24 parity; per-trigger
+    timezone U6a is resolved, DL-53); v1 needs the NAMES for L018 existence
+    checks and the definitions verbatim."""
 
     name: str
     kind: Literal["standard", "extended"]

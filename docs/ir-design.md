@@ -121,9 +121,11 @@ class Paren(BaseModel):
 Cond = Annotated[StatusAtom|ExitCodeAtom|GlobalAtom|And|Or|Paren, Field(discriminator="kind")]
 ```
 
-- Parser precedence: **left-associative, & and | equal precedence unless Q1 says otherwise** —
-  the grammar file carries a `# PRECEDENCE: pending Q1` marker and one switchable rule; both
-  candidate grammars exist as tests, the wrong one is deleted after live verification.
+- Parser precedence: **resolved (DL-53): left-associative, & and | equal precedence** —
+  per TechDocs 12.1 "The parentheses force precedence, and the equation is evaluated
+  from left to right." Single grammar rule (the earlier C-style candidate is deleted);
+  pinning tests `test_sem03_flat_left_to_right_precedence_pinned` (grammar) and
+  `test_sem03_precedence_pinned_model_level` (Cond model) hold this shape.
 - There is no negation node (SEM-03): the atom set is closed under AutoSys's actual language.
 
 ## 4. IR-F: entities
@@ -330,7 +332,8 @@ each traceable to a SEM/M row:
 
 ## 11. What Q1/Q2/Q3 resolution changes (impact ledger)
 
-- Q1 (precedence): one lark rule + canonical sort stability; no model change.
+- Q1 (precedence): RESOLVED (DL-53), as predicted — one lark rule + canonical sort
+  stability; no model change.
 - Q2 (lookback-0 anchor): `Lookback.kind=="zero"` evaluation in oracle only; no model change.
 - Q3 (time-trigger with false conds): oracle scheduling semantics + L-rule for the risky
   pattern; possibly a `ScheduleBlock` flag if it turns out configurable.
