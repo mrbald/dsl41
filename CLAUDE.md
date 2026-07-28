@@ -27,12 +27,16 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
   Part III). DL-53 (2026-07-28) closed nine — Q1, Q4, Q5, U2, U4, U5, U6a, U7,
   U8 — each pinned to a dossier citation; DL-54 (same day) resolved Q2a
   (zero-lookback anchors to the dependent's own last end; anchor switch
-  deleted) and flipped Q3's default to arm-and-wait (switch kept). Do not
+  deleted) and flipped Q3's default to arm-and-wait (switch kept); DL-55
+  (same day) split U3 — U3a (base CREATE-ONLY record schema) doc-frozen in
+  docs/uc-edge-schema.md, U3b (rich forms + live write-path) open. Do not
   relitigate any of them. Still open, with a live `# PENDING: Qn/Un` code
-  marker: Q2b (first-run corner), Q3, Q7, U1, U3 (Q1's switch and Q4's marker
+  marker: Q2b (first-run corner), Q3, Q7, U1, U3b (Q1's switch and Q4's marker
   were deleted per DL-53; Q2's per DL-54). Q6 has no code switch, dossier-only
   (Q6-adjacent aside in oracle.py); U6b lives in backend_uc's `_U_QUESTIONS`
-  table, pruned to exactly U1+U6b. A separate `# PENDING: Qr*`
+  table, pruned to exactly U1+U6b (U3b deliberately NOT there — it gates
+  emission, not a mapping row; it surfaces via quarantine + the report
+  footer). A separate `# PENDING: Qr*`
   series in ir.py/oracle.py/runner.py is unrelated — resource-manager
   questions (DL-49/50), no dossier, outside this ledger. Do not guess-resolve
   any open question; implement the documented default and keep the switch
@@ -57,9 +61,11 @@ map); this list stays as the normative order and scope of each unit.
 7. `oracle`: event loop + status store + box fold; port dossier §8 trace tests.
 8. `equiv`: canonical form, tier a (structural), tier b (truth table w/ atom
    ceiling), tier c (oracle traces, hypothesis event scripts).
-9. `backend_uc`: BLOCKED on U3 (pull `/resources/openapi.json` from the live
-   controller, freeze `docs/uc-edge-schema.md`, generate client). Until then only
-   the migration-report emitter and edge-classification plumbing.
+9. `backend_uc`: migration-report emitter, edge classification, UC twin, and —
+   since DL-55 — the U3a base CREATE-ONLY record bundle (`dsl41 uc`; schema
+   frozen in `docs/uc-edge-schema.md`, whole-workflow quarantine for anything
+   the base cannot express). Rich-condition emission, the OpenAPI pull, and the
+   generated client stay BLOCKED on U3b (live controller).
 10. DSL (`decompiler` + surface): LAST, extracted from patterns the corpus shows
     (DL-03). Do not design combinators speculatively.
 
@@ -82,7 +88,8 @@ map); this list stays as the normative order and scope of each unit.
 - Resolve Q2b (zero-lookback first-run corner), Q3 (standalone time+condition
   composition + the disarm boundary) with tiny throwaway jobs; record answers
   as SEM amendments + trace tests.
-- Pull OpenAPI (U3), pin UC version, freeze edge schema.
+- Pull OpenAPI (U3b), pin UC version, verify the frozen base schema's write
+  path (one live POST + GET readback), then unfreeze the rich condition forms.
 - `autorep -q` samples may be INSPECTED by the user to inform synthetic fixture
   shapes but never committed (corpus hygiene).
 

@@ -328,7 +328,8 @@ each traceable to a SEM/M row:
 - D2: DSL surface — postponed by plan; decompiler emits builder calls
   (`job()`, `box()`, `sequence()`, `parallel()`) over IR-F; context/interpolation design lands
   after the first corpus pass shows real patterns.
-- D3: UC record emission templates — after U3 (edge schema from openapi.json).
+- D3: UC record emission templates — base subset SHIPPED (U3a, DL-55: CREATE-ONLY
+  records per docs/uc-edge-schema.md); rich condition forms after U3b (live openapi.json).
 - D4: whether the oracle's UC twin shares the Event/trace types (goal: yes; one comparator).
 
 ## 11. What Q1/Q2/Q3 resolution changes (impact ledger)

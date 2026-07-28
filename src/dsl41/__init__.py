@@ -10,8 +10,9 @@ built, the phase-11 runner in progress per docs/runner-design.md ss14):
   viz        - IR-G -> Mermaid
   oracle     - discrete-event AutoSys semantics interpreter (docs/ir-design.md ss7)
   equiv      - canonical form + equivalence tiers a/b/c (docs/ir-design.md ss6)
-  backend_uc - UC twin model + edge classification + migration report
-               (record emission PENDING: U3 -- see BlockedOnU3)
+  backend_uc - UC twin model + edge classification + migration report +
+               U3a base CREATE-ONLY record bundle (docs/uc-edge-schema.md;
+               rich condition forms PENDING: U3b)
   uc_oracle  - minimal UC workflow interpreter + trace comparator
                (the P-Mxx expected-divergence pairs, stonebranch Part IV)
   dsl        - builder surface (job/box/sequence/parallel) + decompiler

@@ -127,9 +127,10 @@ workflow exists via API. Operational mapping table for runbooks: sendevent ↔ t
   vertex and edge lists; API operations address vertices by task name (ambiguous-name and
   missing-name operations fail loudly with defined errors **[V]**).
 - Bulk import/export exists for whole-controller definition sets.
-**IR consequence:** the UC backend compiles Layer-G graphs to these record sets; `retainSysIds`
-/ name-addressing strategy must be decided (names as primary keys → enforce unique task names
-per workflow in the linter).
+**IR consequence:** the UC backend compiles Layer-G graphs to these record sets. *(Decided,
+DL-55: names are the primary keys — vertices reference tasks by name verbatim, task names are
+catalog-unique so each appears once per workflow; records pin `retainSysIds: false` and omit
+all system attributes — the CREATE-ONLY rules are frozen in `docs/uc-edge-schema.md`.)*
 
 ### UCS-13 · No status latching, no lookback — restated as target constraint **[V]**
 All predecessor evaluation is within the workflow instance. Anything in the JIL corpus that
@@ -201,8 +202,17 @@ rule and a migration-report entry.
   member failure → Running/Problems (workflow keeps running); Success iff all members
   Success/Finished/Skipped; a workflow instance is never Failed ("Displaying Task Instance
   Status", UC 7.4).
-- U3: edge record JSON schema (vertex ids, condition enum, variable-condition fields) — pull
-  from openapi.json, freeze as `docs/uc-edge-schema.md`; foundation of the UC backend.
+- U3: SPLIT 2026-07-28 (DL-55). **U3a base record schema: RESOLVED** — the CREATE-ONLY
+  whole-record shape (workflowVertices with explicit string vertexIds and value-wrapper
+  task refs; workflowEdges with condition/sourceId/targetId value wrappers; condition
+  tokens verbatim `Success` / `Failure` / `Success/Failure`; retainSysIds a record
+  attribute, pinned false) is doc-frozen in `docs/uc-edge-schema.md` from the current
+  docs site (UC 8.0), cross-verified against two OSS clients; `dsl41 uc` emits exactly
+  this subset, quarantining WHOLE any workflow with an inexpressible edge (a `Cancelled`
+  edge condition does not exist — M06 t() edges quarantine). **U3b: OPEN** — rich
+  condition forms (Exit Code / Step Condition / Variable + variableCondition, vertex
+  conditionExpression), the live openapi.json pull, and write-path verification (one
+  live POST + GET readback); the API client stays generated-from-OpenAPI (DL-08).
 - U4: RESOLVED 2026-07-28 (DL-53, doc sweep) — mechanism pinned: per-task "Exit Code
   Processing" field (Success/Failure Exitcode Range, Success/Failure Output Contains),
   default Success Exitcode Range ("Linux Unix Task Properties"). The exit-code range value

@@ -1,10 +1,14 @@
-"""UC backend, U3-independent slice: edge classification + migration report.
+"""UC backend: edge classification + migration report + base record emission.
 
-Phase 9 of the implementation order (CLAUDE.md / DL-03). Record emission is
-BLOCKED on U3 (pull /resources/openapi.json from the live controller, freeze
-docs/uc-edge-schema.md, generate the client -- DL-08); until then this module
-implements exactly the two things the plan allows: the migration-report
-emitter and the edge-classification plumbing.
+Phase 9 of the implementation order (CLAUDE.md / DL-03). U3 is SPLIT
+(DL-55, the U6/Q2 pattern): U3a -- the CREATE-ONLY whole-record shape for
+workflows whose edges carry the three base condition tokens (Success /
+Failure / Success/Failure) -- is doc-frozen in docs/uc-edge-schema.md, and
+compile_to_uc() emits exactly that subset. U3b stays open (# PENDING: U3b
+below): rich condition forms (Exit Code / Step Condition / Variable +
+variableCondition, vertex conditionExpression), the live OpenAPI pull, and
+write-path verification. DL-08 still stands: the API *client* is generated
+from OpenAPI, never hand-written -- this module emits records, not calls.
 
 Mapping-driven compiler requirements (stonebranch-semantics Part II):
 1. Every Layer-G edge carries its M-row (derive supplies it).
@@ -16,10 +20,20 @@ Mapping-driven compiler requirements (stonebranch-semantics Part II):
    markdown): all A assumptions, all R redesigns, all [?]-dependent
    mappings.
 
-Decisions pinned here (each with a test; recorded as DL-15):
-- compile_to_uc() raises BlockedOnU3 unconditionally: emitting records
-  against a guessed schema would be silent loss with extra steps. The
-  error names U3 and the unblock path.
+Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
+- compile_to_uc() serializes the TWIN model (DL-16: UcModel is "the
+  structure the backend serializes post-U3") into a self-describing
+  UcBundle: wire records + quarantine ledger + apply-time notes + the
+  catalog hash, so a pipeline cannot apply the records while missing what
+  they exclude.
+- QUARANTINE, never partial-emit (the safe-freeze rule, DL-55): a workflow
+  containing ANY edge the base schema cannot express -- the twin's
+  `cancelled` (M06 t(); UC documents no Cancelled edge condition) or any
+  var_condition (U3b rich forms) -- is withheld WHOLE, with every offending
+  edge listed. No silent edge drop (DL-04).
+- CREATE-ONLY hygiene (uc-edge-schema.md): records pin retainSysIds=false
+  and omit sysId/version/exportTable/exportReleaseLevel; vertexIds are
+  explicit strings; layout coordinates are deterministic.
 - The report pins catalog_hash (ir-design ss8: "pin what was verified") and
   the tool version; it is deterministic for identical input -- no
   timestamps (callers stamp their own).
@@ -27,7 +41,9 @@ Decisions pinned here (each with a test; recorded as DL-15):
   human: M27 run_window flags (pass 6), M07 mutex groups (edge-less
   constructs), M12 OR shapes with their suggested lowering, M33 external
   boundary refs, and the open-question ledger (each U-question whose
-  resolution changes a mapping the catalog actually uses).
+  resolution changes a mapping the catalog actually uses). U3b is NOT in
+  that ledger: it gates emission, not a mapping row -- it surfaces through
+  the quarantine section and the footer instead (DL-55).
 - Report generation never fails on R rows -- the report IS the loud error
   channel; the `dsl41 report` CLI always exits 0 on a generated report
   (the linter is the gate; documented in the command help).
@@ -43,18 +59,6 @@ from pydantic import BaseModel
 from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph
 from dsl41.equiv import catalog_hash
 from dsl41.ir import CatalogIR, tool_version
-
-
-class BlockedOnU3(NotImplementedError):
-    """UC record emission is blocked until the edge schema is frozen."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            "UC record emission is BLOCKED on U3: pull /resources/openapi.json"
-            " from the live controller, freeze docs/uc-edge-schema.md, and"
-            " generate the client (DL-08). Until then use the migration report"
-            " (dsl41 report) and the linter."
-        )
 
 
 class CompilePlan(BaseModel):
@@ -84,11 +88,6 @@ def classify_edges(graph: DerivedGraph) -> CompilePlan:
         else:
             plan.refused.append(edge)
     return plan
-
-
-def compile_to_uc(catalog: CatalogIR) -> None:
-    """PENDING: U3 -- always raises; see BlockedOnU3."""
-    raise BlockedOnU3()
 
 
 #: Open questions whose resolution changes a mapping, keyed by the M-rows
@@ -154,14 +153,18 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
     if calendars:
         used_rows.add("M24")
 
+    bundle = compile_to_uc(catalog, graph)
     lines: list[str] = [
         "# Migration report",
         "",
-        f"- catalog hash: `{catalog_hash(catalog)}`",
+        f"- catalog hash: `{bundle.catalog_hash}`",
         f"- tool version: `{tool_version()}`",
         f"- jobs: {len(catalog.jobs)}, derived edges: {len(graph.edges)}"
         f" (exact {counts['exact']}, assumed {counts['assumed']},"
         f" refused {counts['refused']})",
+        f"- UC base serialization (U3a): {len(bundle.records)} of"
+        f" {len(bundle.records) + len(bundle.quarantined)} workflows emit;"
+        f" {len(bundle.quarantined)} quarantined",
     ]
     row_counts = Counter(edge.mapping_row for edge in graph.edges)
     if row_counts:
@@ -230,6 +233,18 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
             defined = catalog.calendars.get(calendar)
             status = f"{defined.kind}, defined in set" if defined else "NO DEFINITION in set"
             lines.append(f"- `{calendar}` ({status}) — used by {jobs_list}")
+    if bundle.quarantined:
+        lines += [
+            "",
+            "## Quarantined workflows (U3a base schema cannot express these)",
+            "",
+            "Withheld WHOLE from the `dsl41 uc` bundle -- no partial workflow"
+            " ever ships (DL-55). Each offending edge:",
+            "",
+        ]
+        for workflow in bundle.quarantined:
+            lines.append(f"- `{workflow.name}`")
+            lines += [f"  - {reason}" for reason in workflow.reasons]
     open_questions = [
         (question, dep_rows, why)
         for question, dep_rows, why in _U_QUESTIONS
@@ -248,8 +263,11 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         "",
         "---",
         "",
-        "Record emission is blocked on **U3** (freeze `docs/uc-edge-schema.md`"
-        " from the live controller's `/resources/openapi.json`; DL-08).",
+        "Base record emission is available via `dsl41 uc` (**U3a**, the"
+        " doc-frozen CREATE-ONLY subset in `docs/uc-edge-schema.md`). Rich"
+        " condition forms, the OpenAPI pull, and write-path verification"
+        " remain blocked on **U3b** (live controller; the client stays"
+        " generated-not-hand-written, DL-08).",
         "",
     ]
     return "\n".join(lines)
@@ -257,10 +275,10 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
 
 # ------------------------------------------------ UC twin model (compile target)
 
-# The in-memory UC workflow model the backend will serialize once U3 freezes
-# the record schema. Until then it feeds the minimal UC interpreter
-# (uc_oracle.py) that powers the P-Mxx expected-divergence pairs
-# (stonebranch Part IV). Semantics sources are all public [V] entries:
+# The in-memory UC workflow model. compile_to_uc serializes it to the U3a
+# base record bundle (DL-55), and the minimal UC interpreter (uc_oracle.py)
+# interprets it for the P-Mxx expected-divergence pairs (stonebranch
+# Part IV). Semantics sources are all public [V] entries:
 # UCS-01 edge conditions, UCS-02 skip propagation, UCS-03 joins, UCS-09
 # mutual exclusion, UCS-13 within-run evaluation.
 
@@ -476,8 +494,11 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 edges=[e for e in compiled if e.src in tasks and e.dst in tasks],
             )
         )
+    workflow_task_sets = [set(wf.tasks) for wf in workflows]
     cross = [
-        e for e in compiled if not any(e.src in wf.tasks and e.dst in wf.tasks for wf in workflows)
+        e
+        for e in compiled
+        if not any(e.src in tasks and e.dst in tasks for tasks in workflow_task_sets)
     ]
     for e in cross:
         excluded.append(
@@ -588,3 +609,237 @@ def _exitcode_var_condition(edge: DerivedEdge, catalog: CatalogIR) -> UcVarCondi
         if isinstance(atom, ExitCodeAtom) and atom.job.name == edge.src:
             return UcVarCondition(name=f"exit:{edge.src}", op=atom.op, value=str(atom.value))
     return None
+
+
+# ------------------------------------------- U3a base record emission (DL-55)
+
+#: UcEdgeCondition -> wire token, base subset only (uc-edge-schema.md).
+#: `cancelled` is deliberately absent: UC documents no Cancelled edge
+#: condition, so M06 t() edges quarantine their workflow.
+_BASE_WIRE_TOKENS: dict[UcEdgeCondition, str] = {
+    "success": "Success",
+    "failure": "Failure",
+    "done": "Success/Failure",
+}
+
+# PENDING: U3b -- rich condition forms (Exit Code / Step Condition /
+# Variable + variableCondition, vertex conditionExpression), the live
+# /resources/openapi.json pull, and one live POST + GET readback. Until
+# then every edge outside _BASE_WIRE_TOKENS quarantines its workflow.
+
+
+class QuarantinedWorkflow(BaseModel):
+    """One workflow withheld WHOLE from the bundle, with every offending
+    edge listed (no silent edge drop, DL-04; safe-freeze rule, DL-55)."""
+
+    name: str
+    reasons: list[str]
+
+
+class UcBundle(BaseModel):
+    """Self-describing serialization artifact: the records AND their own
+    exclusion ledgers, so applying the records without reading what they
+    exclude is impossible by construction (everything travels in one file).
+    `excluded` is the twin lowering's ledger verbatim (R-class edges, M27
+    windows, resources, ...); `notes` are serialization-time facts (M07
+    mutex groups, M31 exit-code boundaries, synthesized names, the apply
+    worklist) -- DL-55 review amendment."""
+
+    catalog_hash: str
+    tool_version: str
+    records: list[dict[str, object]] = []
+    quarantined: list[QuarantinedWorkflow] = []
+    excluded: list[str] = []
+    notes: list[str] = []
+
+
+def _vertex_layout(workflow: UcWorkflow) -> dict[str, tuple[int, int]]:
+    """Deterministic layered layout: y grows with longest-path depth over
+    the DFS-forward subgraph -- an edge whose source is on the DFS stack is
+    a back edge and contributes nothing (cycles are legal AutoSys, L010;
+    any layering of a cycle necessarily leaves one edge pointing up, which
+    break is cosmetic, review-accepted in DL-55) -- x by arrival order
+    within a layer. Iterative DFS: a chain's depth is bounded by catalog
+    size, not the interpreter's recursion limit."""
+    preds: dict[str, list[str]] = {t: [] for t in workflow.tasks}
+    for edge in workflow.edges:
+        preds[edge.dst].append(edge.src)
+    depth: dict[str, int] = {}
+
+    for root in workflow.tasks:
+        if root in depth:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]  # (task, next-pred index)
+        on_stack = {root}
+        while stack:
+            task, i = stack[-1]
+            pushed = False
+            while i < len(preds[task]):
+                pred = preds[task][i]
+                i += 1
+                # on-stack pred = back edge on a cycle: no contribution
+                if pred not in on_stack and pred not in depth:
+                    stack[-1] = (task, i)
+                    stack.append((pred, 0))
+                    on_stack.add(pred)
+                    pushed = True
+                    break
+            if pushed:
+                continue
+            stack.pop()
+            on_stack.discard(task)
+            depth[task] = max((depth[p] + 1 for p in preds[task] if p in depth), default=0)
+    columns: dict[int, int] = {}
+    layout: dict[str, tuple[int, int]] = {}
+    for task in workflow.tasks:
+        column = columns.get(depth[task], 0)
+        columns[depth[task]] = column + 1
+        layout[task] = (90 + 180 * column, 90 + 180 * depth[task])
+    return layout
+
+
+def _workflow_record(workflow: UcWorkflow) -> dict[str, object]:
+    """One CREATE-ONLY taskWorkflow record, exactly the uc-edge-schema.md
+    shape: explicit string vertexIds, value-wrapper references,
+    retainSysIds=false, no sysId/version/export attributes."""
+    vertex_ids = {task: str(i + 1) for i, task in enumerate(workflow.tasks)}
+    layout = _vertex_layout(workflow)
+    return {
+        "type": "taskWorkflow",
+        "name": workflow.name,
+        "retainSysIds": False,
+        "workflowVertices": [
+            {
+                "task": {"value": task},
+                "vertexId": vertex_ids[task],
+                "vertexX": str(layout[task][0]),
+                "vertexY": str(layout[task][1]),
+            }
+            for task in workflow.tasks
+        ],
+        "workflowEdges": [
+            {
+                "condition": {"value": _BASE_WIRE_TOKENS[edge.condition]},
+                "sourceId": {"value": vertex_ids[edge.src]},
+                "targetId": {"value": vertex_ids[edge.dst]},
+                "straightEdge": True,
+            }
+            for edge in workflow.edges
+        ],
+    }
+
+
+def _quarantine_reasons(workflow: UcWorkflow) -> list[str]:
+    reasons: list[str] = []
+    for edge in workflow.edges:
+        if edge.condition not in _BASE_WIRE_TOKENS:
+            reasons.append(
+                f"{edge.mapping_row} edge {edge.src} -> {edge.dst}: condition"
+                f" '{edge.condition}' has no base wire token (M06: UC documents"
+                " no Cancelled edge condition)"
+            )
+        if edge.var_condition is not None:
+            reasons.append(
+                f"{edge.mapping_row} edge {edge.src} -> {edge.dst}: variable"
+                f" condition on ${edge.var_condition.name} is a U3b rich form"
+                " (variableCondition)"
+            )
+    return reasons
+
+
+def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBundle:
+    """Serialize the twin model to the U3a base record bundle (DL-55).
+
+    Deterministic for identical input -- no timestamps (callers stamp their
+    own). Workflows the base schema cannot express are quarantined WHOLE
+    with per-edge reasons; everything else becomes one CREATE-ONLY
+    taskWorkflow record per docs/uc-edge-schema.md."""
+    if graph is None:
+        graph = derive_graph(catalog)
+    twin = compile_twin(catalog, graph)
+    emitted: list[UcWorkflow] = []
+    quarantined: list[QuarantinedWorkflow] = []
+    for workflow in twin.workflows:
+        reasons = _quarantine_reasons(workflow)
+        if reasons:
+            quarantined.append(QuarantinedWorkflow(name=workflow.name, reasons=reasons))
+        else:
+            emitted.append(workflow)
+    # duplicate record names silently clobber under any upsert wrapper --
+    # every collision party quarantines (DL-55 review amendment)
+    name_counts = Counter(workflow.name for workflow in emitted)
+    collided = {name for name, n in name_counts.items() if n > 1}
+    if collided:
+        survivors: list[UcWorkflow] = []
+        for workflow in emitted:
+            if workflow.name in collided:
+                quarantined.append(
+                    QuarantinedWorkflow(
+                        name=workflow.name,
+                        reasons=[
+                            f"record name collision: {name_counts[workflow.name]}"
+                            f" workflows serialize to '{workflow.name}'"
+                            " (one-POST-per-record fails the second create; an"
+                            " upsert wrapper would silently clobber)"
+                        ],
+                    )
+                )
+            else:
+                survivors.append(workflow)
+        emitted = survivors
+    records = [_workflow_record(workflow) for workflow in emitted]
+    notes: list[str] = []
+    for workflow in emitted:
+        if workflow.aliases:
+            aliases = ", ".join(workflow.aliases)
+            notes.append(
+                f"workflow {workflow.name}: nested boxes flattened into the top-level"
+                f" record (M18 v1, DL-16); the alias names ({aliases}) have no UC"
+                " record of their own"
+            )
+    referenced = sorted({task for workflow in emitted for task in workflow.tasks})
+    if referenced:
+        notes.append(
+            f"referenced tasks must exist on the controller before applying"
+            f" ({len(referenced)}): {', '.join(referenced)}"
+        )
+    if records:
+        notes.append(
+            "task names pass through verbatim: UC documents no name"
+            " constraint (uc-edge-schema.md); an invalid name fails loudly at"
+            " create time"
+        )
+    synthesized = [w.name for w in emitted if w.name not in catalog.jobs]
+    if synthesized:
+        notes.append(
+            "synthesized workflow record name(s), not estate names (component"
+            f" workflows are named wf_<first task>): {', '.join(synthesized)}"
+        )
+    # constraints the twin models but a workflow record cannot carry: named
+    # here so a mutex-only catalog cannot produce a clean-looking bundle
+    # (review MAJOR 2 -- no silent loss, DL-04)
+    if twin.mutex_groups:
+        rendered = "; ".join(
+            "+".join(group) if len(group) > 1 else f"{group[0]} (self)"
+            for group in twin.mutex_groups
+        )
+        notes.append(
+            "M07 mutual exclusion is NOT expressible in workflow records --"
+            " map to UC Mutually Exclusive Tasks / Virtual Resources at"
+            f" cutover: {rendered}"
+        )
+    exit_tasks = sorted(set(twin.max_exit_success) | set(twin.success_codes) | set(twin.fail_codes))
+    if exit_tasks:
+        notes.append(
+            f"M31 exit-code success boundaries for task(s) {', '.join(exit_tasks)}"
+            " are NOT in workflow records -- configure per-task Exit Code"
+            " Processing at cutover (task bodies are estate work)"
+        )
+    return UcBundle(
+        catalog_hash=catalog_hash(catalog),
+        tool_version=tool_version(),
+        records=records,
+        quarantined=quarantined,
+        excluded=list(twin.excluded),
+        notes=notes,
+    )

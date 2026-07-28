@@ -80,6 +80,22 @@ per-edge assumptions (A rows), and the open U-question table. Always exits 0
 once generated -- the report IS the loud channel; use `lint --strict` as the
 pass/fail gate.
 
+### Emit UC workflow records (base subset)
+
+```sh
+dsl41 uc jobs.jil -o bundle.json            # CREATE-ONLY taskWorkflow records
+dsl41 uc --strict jobs.jil                  # exit 1 if anything was quarantined
+```
+
+One `taskWorkflow` record per serializable workflow, exactly the shape frozen
+in [docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md)
+(U3a, DL-55): base edge conditions only (Success /
+Failure / Success/Failure), `retainSysIds: false`, no system ids. A workflow
+containing any edge the base schema cannot express (a t()-derived condition,
+a variable condition) is QUARANTINED whole and listed in the bundle's own
+ledger -- no partial workflow, no silent edge drop. Rich condition forms and
+write-path verification stay blocked on U3b (live controller).
+
 ### Prove two catalogs equivalent
 
 ```sh
@@ -253,9 +269,11 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
   tier b (per-job state-space enumeration), tier c (oracle trace comparison)
 - src/dsl41/backend_uc.py and src/dsl41/uc_oracle.py — UC backend pair: backend_uc
-  builds the UC twin model, classifies edges, and emits the migration report (record
-  emission blocked on U3); uc_oracle is the UC-side twin interpreter that runs the
-  P-Mxx expected-divergence pairs against it, sharing Event/TraceEntry with oracle.py
+  builds the UC twin model, classifies edges, emits the migration report, and
+  serializes the U3a base CREATE-ONLY record bundle
+  ([docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md); rich
+  condition forms blocked on U3b); uc_oracle is the UC-side twin interpreter that runs
+  the P-Mxx expected-divergence pairs against it, sharing Event/TraceEntry with oracle.py
 - src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
   extracted from corpus-observed patterns only (phase 10, last by design)
 - src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
@@ -279,7 +297,8 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary), records spawn.json/status.json durably, kills
   and records on lifeline EOF; spool contract in docs/supervisor-protocol.md
-- src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `viz`, `decompile`,
+- src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `uc` (the U3a
+  record bundle; `--strict` fails on quarantine), `viz`, `decompile`,
   `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
   real processes, control socket; stop with SIGINT/SIGTERM; `--detached` runs CMD
   jobs under a supervisor that survives engine restarts), `rehearse` (virtual
@@ -357,8 +376,8 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
   SHUTDOWN; detach-stop SIGINT → reattach SUCCESS; oracle KILLJOB detached)
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
-- tests/test_backend_uc.py — edge classification, migration report, report CLI, the
-  U3 block itself
+- tests/test_backend_uc.py — edge classification, migration report, report + uc CLIs,
+  the U3a record bundle (frozen-shape golden test, CREATE-ONLY hygiene, quarantine)
 - tests/test_uc_oracle.py — UCS-entry trace semantics (UCS-01/02/03/09/13) plus the
   P-Mxx expected-divergence pairs against the UC twin interpreter
 - tests/test_dsl.py — the four corpus-extracted builders, cond_to_source fidelity, and
@@ -366,21 +385,24 @@ synthetic/doc-derived JIL corpus under `tests/corpus/`.
 
 ### What's not done
 
-UC record emission is blocked on U3 (pull /resources/openapi.json from a live
-controller, freeze docs/uc-edge-schema.md, generate client) — until then backend_uc
-emits only the migration report + edge classification. A 2026-07-28 public-doc
+A 2026-07-28 public-doc
 sweep (DL-53) closed Q1, Q4, Q5 (autosys dossier §9) and U2, U4, U5, U6a, U7, U8
 (stonebranch Part III), each pinned to a dossier citation; DL-54 (same day) then
 resolved Q2a — zero-lookback anchors to the dependent job's own last end, cited
 verbatim — and flipped Q3's default to arm-and-wait (a scheduled tick blocked by a
-false condition or a hold now arms the job instead of abandoning the run). Still
-open: Q2b (the first-run corner of the zero-lookback anchor), Q3, Q6, Q7 (autosys
-dossier §9), U1, U3, U6b (stonebranch Part III), and the runner's E5-E10
+false condition or a hold now arms the job instead of abandoning the run); DL-55
+(same day) split U3: U3a, the base CREATE-ONLY workflow record schema, is
+doc-frozen in [docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md)
+and `dsl41 uc` emits it, while U3b (rich
+condition forms, the live /resources/openapi.json pull, write-path verification,
+and the generated-from-OpenAPI client, DL-08) stays blocked on a live controller.
+Still open: Q2b (the first-run corner of the zero-lookback anchor), Q3, Q6, Q7
+(autosys dossier §9), U1, U3b, U6b (stonebranch Part III), and the runner's E5-E10
 (runner-design ss15; E8 was swept too and stays open — publicly undocumented,
 needs a live instance). Those with a behavior default in code (Q2b, Q3, Q7, U1,
-E5-E10) run on a documented default marked `# PENDING: Qn/Un/En`; Q6 is
+U3b, E5-E10) run on a documented default marked `# PENDING: Qn/Un/En`; Q6 is
 dossier-only (no code switch) and U6b lives in backend_uc's migration-report
-question table. Q2b, Q3, Q6, Q7 need a live AutoSys instance; U3 needs a live UC
+question table. Q2b, Q3, Q6, Q7 need a live AutoSys instance; U3b needs a live UC
 controller. The runner is complete
 through phase 11f (the detached supervisor tier); phase 10 (the DSL surface)
 remains the last design item.

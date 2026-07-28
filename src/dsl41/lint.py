@@ -845,8 +845,9 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     duplicates, so the residual hazard is names that collide once UC
     addresses them -- case-insensitive equality (JIL names are case-sensitive
     on UNIX targets, ir-design ss6). Fuller UC name constraints (charset,
-    length) are unpinned until the U3 OpenAPI pull freezes the record
-    schema; extend this rule then."""
+    length) have NO documented spec (searched, NOT FOUND -- DL-55): names
+    pass through verbatim and an invalid one fails loudly at create time;
+    extend this rule only if the U3b live pull reveals real constraints."""
     by_folded: dict[str, list[str]] = {}
     for name in catalog.jobs:
         by_folded.setdefault(name.lower(), []).append(name)

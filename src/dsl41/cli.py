@@ -268,6 +268,50 @@ def report(
 
 
 @app.command()
+def uc(
+    files: list[Path] = typer.Argument(
+        ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
+    out: Path = typer.Option(
+        None, "--out", "-o", help="Write the JSON bundle here instead of stdout."
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Exit 1 when any workflow was quarantined."
+    ),
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Emit the U3a base CREATE-ONLY UC workflow record bundle (JSON).
+
+    One taskWorkflow record per serializable workflow, exactly the shape
+    frozen in docs/uc-edge-schema.md; workflows the base schema cannot
+    express are QUARANTINED whole and listed in the bundle's own ledger
+    (summarized on stderr). Exit 0 once a bundle is generated (1 with
+    --strict when anything was quarantined); exit 2 when the input never
+    reached the backend.
+    """
+    from dsl41.backend_uc import compile_to_uc
+
+    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    bundle = compile_to_uc(catalog)
+    text = bundle.model_dump_json(indent=2)
+    if out is None:
+        typer.echo(text)
+    else:
+        out.write_text(text + "\n", encoding="utf-8")
+        typer.echo(f"wrote {out}")
+    typer.echo(
+        f"{len(bundle.records)} record(s); {len(bundle.quarantined)} quarantined",
+        err=True,
+    )
+    for workflow in bundle.quarantined:
+        for reason in workflow.reasons:
+            typer.echo(f"quarantined {workflow.name}: {reason}", err=True)
+    if strict and bundle.quarantined:
+        raise typer.Exit(1)
+
+
+@app.command()
 def decompile(
     files: list[Path] = typer.Argument(
         ..., help="JIL files / autocal calendar exports forming one catalog"

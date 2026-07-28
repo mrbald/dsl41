@@ -1754,3 +1754,109 @@
   ON_ICE/OFF_ICE untouched; run_window gates an armed start exactly like an
   unarmed one; the zero-lookback tie (predecessor end == anchor instant) is
   satisfied (>= inclusive).
+- DL-55 U3 base-serializer unit (2026-07-28; the DL-53 audit's last actionable
+  item). One web re-verification agent captured verbatim wire evidence BEFORE
+  the freeze (the DL-53 method) from the current docs.stonebranch.com site
+  (product selector "8.0", build stamp v2026.07.5), raw-fetched and grepped
+  against saved bytes; cross-checked against gomleksiz/uac-api and
+  OptionMetrics/terraform-provider-stonebranch (whose community openapi.yaml,
+  self-versioned 7.9.1.0, is PARTIAL-confidence corroboration only).
+  (1) U3 SPLIT (the U6/Q2 pattern): U3a RESOLVED -- the CREATE-ONLY
+  whole-record shape (type "taskWorkflow"; workflowVertices with value-wrapper
+  task refs, explicit STRING vertexIds, optional string coordinates;
+  workflowEdges with condition/sourceId/targetId value wrappers, straightEdge)
+  is frozen in docs/uc-edge-schema.md with verbatim citations; base condition
+  tokens confirmed exactly "Success" / "Failure" / "Success/Failure" (forward
+  slash, from the doc's own worked examples). U3b OPEN (# PENDING: U3b in
+  backend_uc.py): rich condition forms (Exit Code / Step Condition / Variable
+  + variableCondition{firstValue, operator, secondValue}, vertex-level
+  conditionExpression), the live /resources/openapi.json pull, and write-path
+  verification (one live POST + GET readback). DL-08 stands: the API client is
+  generated from OpenAPI, never hand-written -- the serializer emits records,
+  not calls.
+  (2) compile_to_uc() is now REAL: it serializes the twin (DL-16's "structure
+  the backend serializes post-U3") into a self-describing UcBundle
+  {catalog_hash, tool_version, records, quarantined, notes} -- the exclusion
+  ledger travels in the same file as the records, so a pipeline cannot apply
+  one without the other. BlockedOnU3 DELETED per the DL-06 protocol (the
+  resolved half's guard goes; the open half is per-workflow quarantine, not an
+  exception). DL-15's report decisions are otherwise unchanged.
+  (3) Safe-freeze rules (codex, 2026-07-12 audit, now verified): CREATE-ONLY
+  -- retainSysIds pinned false (VERIFIED a record attribute -- JSON top-level
+  field / XML attribute -- NOT a query parameter; vendor default true) and
+  sysId/version/exportTable/exportReleaseLevel omitted ("read only" /
+  Read-and-List-only per the property table). QUARANTINE the WHOLE workflow on
+  any edge outside the base tokens -- the twin's `cancelled` (M06 t(); a
+  "Cancelled" edge condition confirmed NOT to exist in any public source) or
+  any var_condition (M08/M09) -- with every offending edge listed: no partial
+  workflow, no silent edge drop (DL-04).
+  (4) Scope pins: workflow records ONLY -- task bodies (agents, credentials,
+  commands) are estate-specific and not doc-frozen; the bundle's notes carry
+  the referenced-task worklist and the verbatim-name assumption (task `name`
+  has NO documented character/length constraint -- searched, NOT FOUND -- so
+  AutoSys-derived odd names, e.g. embedded colons, fail loudly at create
+  rather than silently at compile). Nested boxes stay flattened (M18 v1,
+  DL-16) with a per-workflow alias note. Layout is a deterministic cycle-safe
+  layered pass (longest-path depth -> y, arrival order -> x); vertexIds are
+  catalog-order strings. No timestamps anywhere (DL-15 determinism).
+  (5) CLI `dsl41 uc` (stdout / --out; quarantine summary on stderr; exit 0
+  once a bundle is generated, --strict flips quarantine to exit 1 -- lint's
+  warn/strict pattern). The migration report grew a U3a summary bullet and a
+  quarantined-workflows section; the footer now names U3b. _U_QUESTIONS
+  deliberately stays U1+U6b: U3b gates emission, not a mapping row -- it
+  surfaces through quarantine + the footer instead.
+  (6) New facts recorded in the schema doc for future units: "Success/Failure
+  and Failure are not valid for Workflow, Timer, and Manual tasks" (our
+  source-type reading, consistent with resolved U2) -- unreachable in v1
+  flattened output, load-bearing when M18 sub-workflow nesting lands; the
+  community openapi.yaml's ConditionWsData {vertexId, type} conflicts with the
+  doc's verified {"value": ...} condition shape -- the doc wins, re-check at
+  the live pull.
+  AMENDED same day (Sonnet breadth round: 20 tests, no product bugs, exact
+  layout expectations matched; Opus adversarial review: 2 MAJOR, 6 MINOR,
+  2 NIT, verdict SHIP-AFTER-FIXES -- every schema-doc quote byte-verified
+  against the saved raw sources, quarantine soundness confirmed
+  unbreakable; all verified findings fixed pre-merge):
+  (a) MAJOR self-found pre-review, reviewer-confirmed -- _vertex_layout's
+  recursive DFS blew the interpreter stack on a legal >=~1000-job chain
+  declared consumer-first (catalog order is the memo shortcut, so forward
+  order masked it), which DL-55's report integration newly extended to
+  `dsl41 report`; rewritten as the value-identical iterative DFS.
+  (b) MAJOR -- M07 mutex groups (and M31 exit-code boundaries) vanished
+  from the bundle with zero trace: twin-MODELED constraints that workflow
+  records cannot carry got no note, so a mutex-only catalog produced a
+  clean-looking bundle (the exact failure the self-describing-bundle pin
+  exists to prevent). Fixed: notes now name every mutex group and every
+  exit-code task whenever the twin carries them.
+  (c) MINOR -- the twin-exclusion pointer was a count ("N constructs
+  excluded -- see the report"); the bundle now carries the twin ledger
+  VERBATIM as its own `excluded` field (edges quarantine, node-level
+  R-constructs ride the ledger -- the asymmetry is deliberate and now
+  visible in the artifact).
+  (d) MINOR -- "names pass through verbatim" was false for
+  component-synthesized wf_<first task> records: the claim is re-scoped to
+  task names and a note lists every synthesized record name.
+  (e) MINOR -- duplicate record names (a box literally named wf_x plus a
+  standalone job x) would silently clobber under an upsert wrapper: every
+  collision party now quarantines.
+  (f) MINOR -- report cost: compile_twin's cross-edge scan used list
+  membership (quadratic; 12k-job report 0.17s->2.9s) -- set-based now; the
+  report reuses the bundle's catalog_hash instead of hashing twice.
+  (g) MINOR -- stale bare-U3 pointers swept: the twin-model comment
+  ("will serialize once U3 freezes"), L014's "extend when U3 freezes the
+  schema" (name constraints are searched-NOT-FOUND, DL-55 item 4),
+  ir-design D3 ("after U3" -> U3a shipped / U3b), and the schema doc's
+  task_workflow.go citation (file re-fetched, Type literal byte-verified,
+  now in the saved evidence set) + the condition-enum "verbatim" label
+  (tokens verbatim, list reflowed -- now says so).
+  (h) NIT -- empty-box records no longer emit a dangling "(0): "
+  worklist note (gated on referenced tasks, not records).
+  ACCEPTED, recorded not fixed: on cyclic input the layered layout leaves
+  one back edge pointing up and downstream tasks may share a layer with
+  cycle members -- inherent to acyclically layering a legal cycle (L010),
+  deterministic, cosmetic-only (the reviewer's relaxation suggestion
+  reproduces byte-identical coordinates: mid-cycle memoization IS
+  back-edge-stripped longest path); degenerate self-loop / duplicate wire
+  edges pass through and fail loudly at create at worst; DL-15's
+  historical "raises BlockedOnU3" wording stays untouched (append-only
+  log; this entry records the supersession).
