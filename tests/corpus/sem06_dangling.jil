@@ -1,0 +1,6 @@
+/* L001: condition references a job not defined anywhere. SEM-06. */
+insert_job: orphan_consumer
+job_type: c
+command: echo hi
+machine: m1
+condition: s(THIS_JOB_DOES_NOT_EXIST) & s(also_missing^PRD)

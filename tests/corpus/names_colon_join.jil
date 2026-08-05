@@ -1,0 +1,38 @@
+/* DL-39 name-identity witness: colon-carrying job names join on the
+   SEMANTIC (unescaped) name across catalog keys, box linkage, condition
+   references, derive edges, mutex pairs, and the decompiler folds. The
+   subject/box_name spellings here use the vendor-canonical escaped form
+   (rule 4b); condition references MUST escape (colon is a condition-syntax
+   metachar, JOB_NAME token). */
+
+insert_job: etl\:extract
+job_type: c
+command: /opt/etl/extract.sh
+machine: colon_mach
+date_conditions: 1
+start_times: "03:00"
+
+insert_job: etl\:load
+job_type: c
+command: /opt/etl/load.sh
+machine: colon_mach
+condition: s(etl\:extract) & n(etl\:probe)
+
+insert_job: etl\:probe
+job_type: c
+command: /opt/etl/probe.sh
+machine: colon_mach
+condition: n(etl\:load)
+
+insert_job: night\:box
+job_type: b
+date_conditions: 1
+start_times: "02:00"
+
+insert_job: boxed\:member
+job_type: c
+command: /opt/etl/member.sh
+machine: colon_mach
+box_name: night\:box
+
+insert_machine: colon_mach

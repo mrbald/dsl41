@@ -1,0 +1,63 @@
+/* T-003 any-of fan-in (DL-38): fold_or_m1/fold_or_m2 fan out from
+   fold_or_seed; fold_or_join is the UNIQUE OR-of-member-successes join, so
+   decompile() folds the group as parallel(then_any=). fold_or2_* is the
+   non-trigger witness: fold_or2_joina and fold_or2_joinb are BOTH exactly
+   the OR of the same member set, so the join is ambiguous and both stay
+   explicit job(condition=...) calls (fan-out still folds). Synthetic. */
+insert_job: fold_or_seed
+job_type: c
+command: /opt/fold_or_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "01:00"
+
+insert_job: fold_or_m1
+job_type: c
+command: /opt/fold_or_m1.sh
+machine: m1
+condition: s(fold_or_seed)
+
+insert_job: fold_or_m2
+job_type: c
+command: /opt/fold_or_m2.sh
+machine: m1
+condition: s(fold_or_seed)
+
+insert_job: fold_or_join
+job_type: c
+command: /opt/fold_or_join.sh
+machine: m1
+condition: s(fold_or_m1) | s(fold_or_m2)
+
+insert_job: fold_or2_seed
+job_type: c
+command: /opt/fold_or2_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "01:30"
+
+insert_job: fold_or2_m1
+job_type: c
+command: /opt/fold_or2_m1.sh
+machine: m1
+condition: s(fold_or2_seed)
+
+insert_job: fold_or2_m2
+job_type: c
+command: /opt/fold_or2_m2.sh
+machine: m1
+condition: s(fold_or2_seed)
+
+insert_job: fold_or2_joina
+job_type: c
+command: /opt/fold_or2_joina.sh
+machine: m1
+condition: s(fold_or2_m1) | s(fold_or2_m2)
+
+insert_job: fold_or2_joinb
+job_type: c
+command: /opt/fold_or2_joinb.sh
+machine: m1
+condition: s(fold_or2_m2) | s(fold_or2_m1)

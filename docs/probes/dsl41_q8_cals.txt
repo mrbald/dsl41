@@ -1,0 +1,48 @@
+calendar: dsl41_hols_aug
+08/17/2026
+
+calendar: dsl41_hols_dec
+12/24/2026
+12/25/2026
+
+extended_calendar: dsl41_q8b_1
+workday: mo,tu,we,th,fr
+non_workday: w
+adjust: 1
+condition: MNTHD#14
+
+extended_calendar: dsl41_q8b_2
+workday: mo,tu,we,th,fr
+non_workday: w
+adjust: 1
+condition: MNTHD#15
+
+extended_calendar: dsl41_q8c_1
+workday: mo,tu,we,th,fr
+non_workday: n
+holiday: s
+holcal: dsl41_hols_aug
+condition: sat
+
+extended_calendar: dsl41_q8c_2
+workday: mo,tu,we,th,fr
+holiday: n
+holcal: dsl41_hols_dec
+condition: MNTHD#24
+
+extended_calendar: dsl41_q8d_1
+workday: mo,tu,we,th,fr
+condition: mo | we & fri
+
+extended_calendar: dsl41_q8d_2
+workday: mo,tu,we,th,fr
+condition: NOT mo
+condition: mo
+
+extended_calendar: dsl41_q8d_3
+workday: mo,tu,we,th,fr
+condition: xtue | xwed
+
+extended_calendar: dsl41_q8d_4
+workday: mo,tu,we,th,fr
+condition: mo OR we

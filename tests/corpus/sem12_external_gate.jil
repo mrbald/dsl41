@@ -1,0 +1,25 @@
+/* SEM-12 box_success/box_failure external gating: if all members finish
+   before the external condition is met, the box hangs RUNNING. box_success
+   references a job outside the box; box_failure references a global. Both
+   are M16 (redesign, no UC analog) and both trigger L008. Synthetic. */
+insert_job: gate_box
+job_type: b
+box_success: s(gate_outside_job)
+box_failure: v(ABORT_FLAG) = 1
+
+insert_job: gate_member_a
+job_type: c
+command: /opt/gate_a.sh
+machine: m1
+box_name: gate_box
+
+insert_job: gate_member_b
+job_type: c
+command: /opt/gate_b.sh
+machine: m1
+box_name: gate_box
+
+insert_job: gate_outside_job
+job_type: c
+command: /opt/gate_outside.sh
+machine: m1

@@ -1,0 +1,23 @@
+# Dependency vulnerability audit: pip-audit over the locked, non-dev
+# dependency set (uv export pins the exact transitive closure; --no-deps
+# audits precisely that set with no re-resolution). Weekly schedule catches
+# advisories published between pushes. README's "vulnerabilities" brick
+# badges this workflow.
+
+name: vulnerabilities
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv export --frozen --no-dev --no-emit-project -o requirements.txt
+      - run: uvx pip-audit --no-deps -r requirements.txt

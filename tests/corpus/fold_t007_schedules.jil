@@ -1,0 +1,38 @@
+/* T-007 shared schedules (DL-38): fold_sched_a/fold_sched_b carry
+   emission-IDENTICAL schedule blocks -- decompile() factors them into one
+   shared SCHED_* module-level dict. fold_sched_c/fold_sched_d are the
+   near-identical, NOT-merged witness: each differs from every other job's
+   start_times by a minute, which is enough for T-007's exact-emission-
+   equality test to keep all four apart into two singleton schedules that
+   stay inline. Synthetic. */
+insert_job: fold_sched_a
+job_type: c
+command: /opt/fold_sched_a.sh
+machine: m1
+date_conditions: 1
+days_of_week: mo,tu,we,th,fr
+start_times: "05:00"
+
+insert_job: fold_sched_b
+job_type: c
+command: /opt/fold_sched_b.sh
+machine: m1
+date_conditions: 1
+days_of_week: mo,tu,we,th,fr
+start_times: "05:00"
+
+insert_job: fold_sched_c
+job_type: c
+command: /opt/fold_sched_c.sh
+machine: m1
+date_conditions: 1
+days_of_week: mo,tu,we,th,fr
+start_times: "05:01"
+
+insert_job: fold_sched_d
+job_type: c
+command: /opt/fold_sched_d.sh
+machine: m1
+date_conditions: 1
+days_of_week: mo,tu,we,th,fr
+start_times: "05:02"

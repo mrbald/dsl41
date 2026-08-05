@@ -1,0 +1,19 @@
+/* must_start/complete example, verbatim-shaped from TechDocs 12.1.01. SEM-30..34. */
+insert_job: test_must_start_complete
+job_type: CMD
+machine: localhost
+command: /opt/StartTransactions.sh
+date_conditions: y
+days_of_week: all
+start_times: "10:00, 11:00, 12:00"
+must_start_times: +3
+must_complete_times: +8
+
+insert_job: quarter_past
+job_type: CMD
+machine: localhost
+command: /opt/tick.sh
+date_conditions: 1
+days_of_week: mo,tu,we,th,fr
+start_mins: 15, 30
+run_window: "14:00-18:00"

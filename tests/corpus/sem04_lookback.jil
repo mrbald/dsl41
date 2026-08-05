@@ -1,0 +1,32 @@
+/* Lookback forms, condition-attribute page. SEM-04, L015 fodder. */
+insert_job: consumer_hourly
+job_type: c
+command: /opt/run.sh
+machine: m1
+condition: success(Joba,01\:00) and failure(JobB,02\:15)
+
+insert_job: consumer_window
+job_type: c
+command: /opt/run2.sh
+machine: m1
+condition: s(JOB_MARKET_FEED, 00.30) & v(REGION) = EU
+
+insert_job: consumer_stale
+job_type: c
+command: /opt/run3.sh
+machine: m1
+# L009 candidate: unqualified latch feeding a scheduled consumer
+date_conditions: 1
+days_of_week: all
+start_times: "10:00"
+condition: s(upstream_daily)
+
+# defined producer on a different cadence: genuine cross-stream (M02) latch,
+# so L009 fires on consumer_stale (undefined producers are L001's finding)
+insert_job: upstream_daily
+job_type: c
+command: /opt/feed_daily.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "02:00"

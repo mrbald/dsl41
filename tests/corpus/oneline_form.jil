@@ -1,0 +1,6 @@
+# one-line subcommand form + trailing comment
+insert_job: template   job_type: c
+owner: alice
+command: ls -l /tmp    /* colon-free value with comment */
+machine: localhost
+condition: s(job1)

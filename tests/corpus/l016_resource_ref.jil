@@ -1,0 +1,12 @@
+/* L016 trigger: L16_MISSING_POOL has no insert_resource anywhere in the
+   corpus; L16_DEFINED_LOCK is the in-file non-trigger. */
+insert_resource: L16_DEFINED_LOCK
+res_type: R
+amount: 1
+
+insert_job: l16_writer   job_type: cmd
+machine: m1
+command: /usr/bin/true
+date_conditions: 1
+start_times: "03:15"
+resources: (L16_DEFINED_LOCK, QUANTITY=1, FREE=A) and (L16_MISSING_POOL, QUANTITY=2)
