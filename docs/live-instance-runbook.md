@@ -57,6 +57,8 @@ URL patterns:
 | TechDocs 12.1 Define Extended Calendars | Q8a holiday-action precedence quote; action code definitions; adjust prompt wording; preview flow |
 | TechDocs 24.2 Manage Job Status | Stale-status philosophy ("most recent completion … regardless of when"), ACTIVATED-on-box-start, INACTIVE-at-insert |
 | TechDocs 24.2 job_depends | `-c\|-d\|-r\|-t` report modes; `-e` ("all start times", -t only) with `-F/-T` |
+| TechDocs 12.1 timezone attribute | SEM-35 name resolution: ujo_timezones entry / OS name / POSIX value; not case-sensitive; OS matched first, table read up to five times (DL-62) |
+| TechDocs 12.1 autotimezone command | ujo_timezones entry types (Zone/Alias/City), `-l/-q/-a/-c/-t/-d` verbs, POSIX TZ west-positive offset syntax (DL-62) |
 
 A second-opinion pass helps: hand a brief that contains the pins and
 the leans to an independent reviewer. Before you move any pin, RE-FETCH
@@ -71,6 +73,21 @@ read-only). All `jil` blocks are heredocs: `jil <<'EOF' … EOF`. Cleanup
 for each protocol: for each job, run `jil <<< "delete_job: <name>"`. For
 each box, use `delete_box:` (this command deletes the box and its member
 jobs).
+
+### Timezone map — read-only, run on ANY estate you migrate (DL-62)
+
+`timezone:` values resolve through the instance's ujo_timezones table
+(SEM-35 name-resolution note). Capture it once, read-only:
+
+```
+autotimezone -l > ujo_timezones.txt
+```
+
+Feed the file to the runner verbatim: `dsl41 run|rehearse --timezone-map
+ujo_timezones.txt …`. Without it, city names fall back to the unique
+zoneinfo city match (a preflight WARN per job); with it, the listing is
+complete estate truth and unknown names refuse. If an estate carries
+admin-added entries (`autotimezone -a/-c`), only the export knows them.
 
 ### Q9 — export bytes — **CLOSED (DL-60, [F])**
 

@@ -132,9 +132,15 @@ The oracle "owns no calendar". In trace tests, the script injects STARTJOB
 at the points where AutoSys's scheduler fires. In run mode, the runner has
 that role. For each `date_conditions` job, the runner computes the next
 occurrence from `days_of_week` + `start_times` (or `start_mins` hourly
-ticks). When `timezone` is set, the runner applies it via `zoneinfo`. The
-runner injects `STARTJOB` at the tick and then computes the next
-occurrence. The scheduler fires **unconditionally** at the tick. SEM-32
+ticks). When `timezone` is set, the runner resolves the name per SEM-35
+(DL-62): `zoneinfo` first (case-insensitively -- the vendor value is not
+case-sensitive), then the instance's ujo_timezones table supplied as
+`--timezone-map` (the `autotimezone -l` listing; Alias/City entries chain
+at most five reads, the vendor's own bound), then -- only without a map --
+the unique-zoneinfo-city default (Zurich -> Europe/Zurich, a preflight
+WARN). POSIX fixed offsets (`GMT+5`, `IST-5:30`) resolve west-positive;
+POSIX strings with dst rules refuse. The runner injects `STARTJOB` at the
+tick and then computes the next occurrence. The scheduler fires **unconditionally** at the tick. SEM-32
 arm-and-wait on a false condition (Q3 resolved by citation, DL-58) and
 run_window closer-edge handling (SEM-33) stay oracle-side, exactly as in
 simulation.
@@ -427,7 +433,12 @@ ERROR:
   defaults and never refuse. With a `start` anchor, the probe also
   surfaces generation-time refusals (for example, an exhausted replacement
   walk) as ERRORs.
-- `timezone` not resolvable in `zoneinfo`.
+- `timezone` not resolvable through the SEM-35 ladder (DL-62): not a
+  `zoneinfo` name (case-insensitive), not in the supplied `--timezone-map`,
+  not a POSIX fixed offset, and -- without a map -- not a unique zoneinfo
+  city match (a unique match resolves with a WARN, not an ERROR). The
+  message names the applicable remedy (`autotimezone -l` via
+  `--timezone-map`; the full zone name for an ambiguous city).
 - `resources:` that requires a resource with no `insert_resource` in the
   set, or with no parseable `amount` — an unsized semaphore cannot be
   honored (DL-50: fail-closed, stricter than L016's warn). A

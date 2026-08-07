@@ -538,6 +538,12 @@ def viz(
         "--include-singletons",
         help="Also chart standalone jobs (they are always listed in Appendix A).",
     ),
+    whole_graph: bool = typer.Option(
+        False,
+        "--whole-graph",
+        help="Emit one bare Mermaid chart of the entire graph instead of the Markdown "
+        "report (standalone jobs always included; --direction auto means LR).",
+    ),
     elk: bool = typer.Option(
         False,
         "--elk",
@@ -548,23 +554,32 @@ def viz(
     properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Render FILES' derived dependency graph as a Markdown report of
-    per-workflow Mermaid charts (DL-35)."""
+    per-workflow Mermaid charts (DL-35), or one whole-graph chart
+    (--whole-graph, DL-61)."""
     from dsl41.derive import derive_graph
-    from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown
+    from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
     if direction not in ("auto", "LR", "TD"):
         typer.echo(f"--direction must be auto, LR, or TD, got {direction!r}", err=True)
         raise typer.Exit(2)
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
-    report = to_markdown(
-        derive_graph(catalog),
-        title=", ".join(f.name for f in files),
-        collapse_threshold=threshold,
-        direction=direction,  # type: ignore[arg-type]  # validated above
-        include_singletons=include_singletons,
-        elk=elk,
-    )
+    if whole_graph:
+        report = to_mermaid(
+            derive_graph(catalog),
+            collapse_threshold=threshold,
+            direction="LR" if direction == "auto" else direction,  # type: ignore[arg-type]
+            elk=elk,
+        )
+    else:
+        report = to_markdown(
+            derive_graph(catalog),
+            title=", ".join(f.name for f in files),
+            collapse_threshold=threshold,
+            direction=direction,  # type: ignore[arg-type]  # validated above
+            include_singletons=include_singletons,
+            elk=elk,
+        )
     if out is None:
         typer.echo(report, nl=False)
     else:
@@ -587,6 +602,7 @@ def _preflight_or_exit(
     machine_policy: str = "strict",
     as_machine: "list[str] | None" = None,
     start: "datetime | None" = None,
+    tz_aliases: "dict[str, str] | None" = None,
 ) -> list:
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
     journals them next to the run -- WARN prints, journals, and runs).
@@ -603,6 +619,7 @@ def _preflight_or_exit(
         machine_policy=cast("MachinePolicy", machine_policy),
         as_machine=frozenset(as_machine or ()),
         start=start,
+        tz_aliases=tz_aliases,
     )
     for item in items:
         target = f" {item.job}" if item.job else ""
@@ -636,20 +653,44 @@ _TIMEZONE_OPT = typer.Option(
     " default UTC -- vendor uses the server's zone).",
 )
 
+_TIMEZONE_MAP_OPT = typer.Option(
+    None,
+    "--timezone-map",
+    help="File resolving vendor timezone names (SEM-35/DL-62): the instance's"
+    " `autotimezone -l` listing verbatim, or bare 'name zone' pairs. Without"
+    " it, an unknown city name falls back to the unique zoneinfo city match"
+    " with a preflight WARN.",
+)
 
-def _check_base_tz(timezone: str | None) -> None:
-    """Preflight the run-level base zone: per-job zones gate in ss8, but the
-    --timezone flag would otherwise surface as a raw ZoneInfo traceback from
-    the Scheduler with the wrong exit code (DL-45 review M3)."""
-    if timezone is None:
-        return
-    from zoneinfo import ZoneInfo
+
+def _load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
+    """Parse --timezone-map (DL-62); unreadable/malformed exits 2."""
+    if path is None:
+        return None
+    from dsl41.runner import parse_timezone_map
 
     try:
-        ZoneInfo(timezone)
-    except (KeyError, ValueError, OSError) as exc:
-        typer.echo(f"--timezone {timezone!r} is not resolvable in zoneinfo: {exc}", err=True)
+        return parse_timezone_map(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"--timezone-map {path}: {exc}", err=True)
         raise typer.Exit(2) from exc
+
+
+def _check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = None) -> None:
+    """Preflight the run-level base zone: per-job zones gate in ss8, but the
+    --timezone flag would otherwise surface as a raw traceback from the
+    Scheduler with the wrong exit code (DL-45 review M3)."""
+    if timezone is None:
+        return
+    from dsl41.runner import resolve_timezone
+
+    if resolve_timezone(timezone, tz_aliases) is None:
+        typer.echo(
+            f"--timezone {timezone!r} is not resolvable (SEM-35: zoneinfo, the"
+            " --timezone-map table, or a POSIX fixed offset)",
+            err=True,
+        )
+        raise typer.Exit(2)
 
 
 @app.command()
@@ -690,6 +731,7 @@ def run(
         " reverse-DNS). Declaring is explicit and drops all hostname guessing.",
     ),
     timezone: str = _TIMEZONE_OPT,
+    timezone_map: Path = _TIMEZONE_MAP_OPT,
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
 ) -> None:
@@ -708,19 +750,23 @@ def run(
     if ui:
         _import_tui_or_exit_2()  # fail before the engine starts, not after
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    tz_aliases = _load_tz_aliases(timezone_map)
     warns = _preflight_or_exit(
         catalog,
         execution=True,
         machine_policy=machine_policy,
         as_machine=as_machine,
         start=datetime.now(UTC).replace(tzinfo=None),
+        tz_aliases=tz_aliases,
     )
-    _check_base_tz(timezone)
+    _check_base_tz(timezone, tz_aliases)
     from dsl41.runner import EngineError
 
     try:
         raise typer.Exit(
-            asyncio.run(_serve_run(catalog, run_root, resume, timezone, warns, ui, detached))
+            asyncio.run(
+                _serve_run(catalog, run_root, resume, timezone, warns, ui, detached, tz_aliases)
+            )
         )
     except EngineError as exc:
         # start/resume gates (existing journal, hash/domain mismatch, live
@@ -748,6 +794,7 @@ async def _serve_run(
     warns: list,
     ui: bool = False,
     detached: bool = False,
+    tz_aliases: "dict[str, str] | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -790,7 +837,7 @@ async def _serve_run(
         }
     else:
         adapters = {"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()}
-    scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone)
+    scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone, tz_aliases=tz_aliases)
     if resume:
         engine = await _resume_run(
             catalog,
@@ -897,6 +944,7 @@ def rehearse(
         24.0, "--hours", help="Horizon: quiesce once no work remains within start + HOURS."
     ),
     timezone: str = _TIMEZONE_OPT,
+    timezone_map: Path = _TIMEZONE_MAP_OPT,
     run_root: Path = typer.Option(
         None, "--run-root", help="Also persist a WAL journal under this directory."
     ),
@@ -929,8 +977,9 @@ def rehearse(
         if start
         else datetime.now(UTC).replace(tzinfo=None, microsecond=0)
     )
-    warns = _preflight_or_exit(catalog, execution=False, start=start_dt)
-    _check_base_tz(timezone)
+    tz_aliases = _load_tz_aliases(timezone_map)
+    warns = _preflight_or_exit(catalog, execution=False, start=start_dt, tz_aliases=tz_aliases)
+    _check_base_tz(timezone, tz_aliases)
     script: dict[tuple[str, int], tuple[float, int]] = {}
     default: tuple[float, int] | None = (0.0, 0)
     events: list[Event] = []
@@ -950,7 +999,7 @@ def rehearse(
             raise typer.Exit(2) from exc
     clock = VirtualClock(start_dt)
     adapter = FakeAdapter(script, default=default)
-    scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone)
+    scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone, tz_aliases=tz_aliases)
     adapters = {"CMD": adapter, "FW": adapter}
     try:
         if run_root is not None:

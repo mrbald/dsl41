@@ -541,9 +541,11 @@ def to_mermaid(
     *,
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
     direction: Direction = "LR",
+    elk: bool = False,
 ) -> str:
     """Render the whole derived graph as one Mermaid flowchart body."""
-    return _render_chart(graph, None, collapse_threshold=collapse_threshold, direction=direction)
+    body = _render_chart(graph, None, collapse_threshold=collapse_threshold, direction=direction)
+    return (_ELK_FRONTMATTER if elk else "") + body
 
 
 # ------------------------------------------------------------- markdown report

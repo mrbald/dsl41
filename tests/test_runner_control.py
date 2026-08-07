@@ -260,7 +260,9 @@ def test_every_accepted_control_event_is_journaled_with_source_control(short_roo
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            await _control_call(server.path, {"cmd": "sendevent", "event": "ON_HOLD", "job": "jr_job"})
+            await _control_call(
+                server.path, {"cmd": "sendevent", "event": "ON_HOLD", "job": "jr_job"}
+            )
             await _control_call(
                 server.path, {"cmd": "sendevent", "event": "OFF_HOLD", "job": "jr_job"}
             )
@@ -637,6 +639,49 @@ def test_cli_rehearse_scheduled_estate_deterministic_start_hours(tmp_path: Path)
     assert result.exit_code == 0, result.output
     assert "reh_job" in result.output
     assert "SUCCESS" in result.output
+
+
+def test_cli_rehearse_timezone_map_resolves_a_city_name(tmp_path: Path) -> None:
+    """(SEM-35/DL-62): --timezone-map feeds the instance's autotimezone
+    listing in; `timezone: Zurich` schedules at Zurich-local time (09:00
+    CEST = 07:00 UTC) and the run completes without the city-default WARN."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text(
+        "insert_job: zrh_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\ntimezone: Zurich\n',
+        encoding="utf-8",
+    )
+    tz_map = tmp_path / "ujo_timezones.txt"
+    tz_map.write_text(
+        "Entry Type Zone\n------ ---- ----\nZurich City Europe/Zurich\n", encoding="utf-8"
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--timezone-map",
+            str(tz_map),
+            "--start",
+            "2026-07-06T00:00:00",
+            "--hours",
+            "8",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "zrh_job" in result.output
+    assert "SUCCESS" in result.output
+    assert "WARN" not in result.output  # mapped, not assumed
+
+
+def test_cli_rehearse_malformed_timezone_map_exits_2(tmp_path: Path) -> None:
+    jil = tmp_path / "estate.jil"
+    jil.write_text("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    tz_map = tmp_path / "bad_map.txt"
+    tz_map.write_text("utterly not a listing at all\n", encoding="utf-8")
+    result = cli_runner.invoke(app, ["rehearse", str(jil), "--timezone-map", str(tz_map)])
+    assert result.exit_code == 2
+    assert "--timezone-map" in result.output
 
 
 def test_cli_rehearse_with_a_scenario_file(tmp_path: Path) -> None:

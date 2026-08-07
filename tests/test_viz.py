@@ -270,7 +270,10 @@ def test_scheduled_box_subgraph_title_stays_single_line() -> None:
     mermaid = to_mermaid(graph_of(text))
     title = next(ln for ln in mermaid.splitlines() if ln.strip().startswith("subgraph"))
     assert "<br/>" not in title
-    assert 'subgraph n0["bx \N{MIDDLE DOT} \N{ALARM CLOCK}\N{NO-BREAK SPACE}06:00\N{NO-BREAK SPACE}all"]' in title
+    assert (
+        'subgraph n0["bx \N{MIDDLE DOT} \N{ALARM CLOCK}\N{NO-BREAK SPACE}06:00\N{NO-BREAK SPACE}all"]'
+        in title
+    )
     assert 'n1["m1<br/>\N{ALARM CLOCK}\N{NO-BREAK SPACE}07:00\N{NO-BREAK SPACE}all"]' in mermaid
 
 
@@ -772,6 +775,41 @@ def test_cli_viz_include_singletons_adds_a_section() -> None:
     )
     assert result.exit_code == 0
     assert "## Standalone jobs" in result.stdout
+
+
+def test_cli_viz_whole_graph_emits_one_bare_chart() -> None:
+    result = runner.invoke(app, ["viz", "--whole-graph", str(CORPUS_DIR / "sem10_box_basic.jil")])
+    assert result.exit_code == 0
+    assert result.stdout.startswith("flowchart LR")
+    assert "# Workflow graph:" not in result.stdout
+    assert "```" not in result.stdout
+    assert 'subgraph n0["box_a"]' in result.stdout
+
+
+def test_cli_viz_whole_graph_honors_direction_and_elk() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "viz",
+            "--whole-graph",
+            "--direction",
+            "TD",
+            "--elk",
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert result.stdout.startswith("---\nconfig:\n  layout: elk\n---\n")
+    assert "flowchart TD" in result.stdout
+
+
+def test_cli_viz_whole_graph_includes_standalone_jobs() -> None:
+    # the report drops these two singletons to Appendix A; the whole graph
+    # has no appendices, so they render unconditionally
+    result = runner.invoke(app, ["viz", "--whole-graph", str(CORPUS_DIR / "sem30_schedule.jil")])
+    assert result.exit_code == 0
+    assert '"test_must_start_complete' in result.stdout
+    assert '"quarter_past' in result.stdout
 
 
 def test_cli_viz_elk_prepends_frontmatter() -> None:

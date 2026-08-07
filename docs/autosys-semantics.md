@@ -349,6 +349,20 @@ timezone re-basing can affect. Thus timezone on a condition-only job is uncondit
 dead, and L005 fires without the old caveat. Estates that carry timezone as convention can
 run `dsl41 lint --suppress L005`.
 
+**Name resolution [V]** (added 2026-08-07, DL-62; 12.1 `timezone` attribute page + the
+`autotimezone` command page): the value is "a string that corresponds to an entry in the
+ujo_timezones table or is recognized by the operating system or is any valid POSIX value",
+**not case-sensitive**, up to 50 chars of `a-zA-Z0-9/_-` (quote values containing colons,
+e.g. `"IST-5:30"`). The scheduling manager matches the string against the OS **first**;
+only if not found is the ujo_timezones table read, **up to five times**, to chase a chain
+down to a resolvable zone; unresolved after five reads, the job fails. ujo_timezones is a
+vendor-shipped, admin-editable (`autotimezone -a/-c/-t/-d`) table of three entry types --
+Zone, Alias, City -- mapping names to POSIX TZ variables; `autotimezone -l` lists it, and
+city entries such as `Vancouver City Canada/Pacific` (the docs' own excerpt) name the
+matching region zone. POSIX TZ offsets are **west-positive** (`GMT+5` = 5h west of GMT).
+The runner's port of this ladder, including the no-map unique-city default and its WARN,
+is DL-62 / runner-design ss5.
+
 ### SEM-36 · Calendar definitions: the autocal_asc record model **[V]**
 The scanner/IR *carry* of calendar exports is DL-36's. This entry pins what the records mean.
 A standard `calendar:` is a literal day list (bare `MM/DD/YYYY [HH:MM]` rows). An extended

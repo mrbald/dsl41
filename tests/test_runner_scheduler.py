@@ -25,15 +25,18 @@ from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Event, Oracle
 from dsl41.runner import (
     Engine,
+    EngineError,
     FakeAdapter,
     RealClock,
     Scheduler,
     VirtualClock,
     _local_identity,
     and_success_skeleton,
+    parse_timezone_map,
     preflight,
     read_journal,
     resolve_machine,
+    resolve_timezone,
     resume_run,
     start_run,
 )
@@ -193,6 +196,131 @@ def test_dst_fall_back_ambiguous_time_fires_at_its_first_occurrence() -> None:
     )
     sched = Scheduler(lower_source(text), start=datetime(2026, 11, 1, 0, 0))
     assert sched.next_occurrence() == datetime(2026, 11, 1, 5, 30)
+
+
+def test_timezone_city_name_resolves_via_the_unique_iana_match() -> None:
+    """(SEM-35/DL-62): a vendor city name (`timezone: Zurich`, a
+    ujo_timezones City entry) with no --timezone-map resolves to the unique
+    zoneinfo zone whose final path component matches -- Europe/Zurich, CEST
+    (UTC+2) in July, so the 09:00 local tick lands at 07:00 UTC."""
+    text = (
+        "insert_job: city_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "timezone: Zurich\n"
+    )
+    sched = Scheduler(lower_source(text), start=datetime(2026, 7, 6, 0, 0))
+    assert sched.next_occurrence() == datetime(2026, 7, 6, 7, 0)
+
+
+def test_timezone_names_are_case_insensitive() -> None:
+    """(SEM-35, TechDocs: 'not case-sensitive'): america/new_york reads
+    like America/New_York."""
+    text = (
+        "insert_job: fold_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "timezone: america/new_york\n"
+    )
+    sched = Scheduler(lower_source(text), start=datetime(2026, 7, 6, 0, 0))
+    assert sched.next_occurrence() == datetime(2026, 7, 6, 13, 0)
+
+
+def test_timezone_map_alias_chain_resolves_to_the_zone() -> None:
+    """(SEM-35/DL-62): tz_aliases (the autotimezone listing) chains
+    Alias -> City -> zone exactly like the vendor's <=5 table reads."""
+    text = (
+        "insert_job: hq_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "timezone: HQ\n"
+    )
+    aliases = parse_timezone_map("HQ Alias Zurich\nZurich City Europe/Zurich\n")
+    sched = Scheduler(lower_source(text), start=datetime(2026, 7, 6, 0, 0), tz_aliases=aliases)
+    assert sched.next_occurrence() == datetime(2026, 7, 6, 7, 0)
+
+
+def test_timezone_unresolvable_in_scheduler_raises_engine_error() -> None:
+    """(ss5 backstop): preflight gates first, but direct Scheduler
+    construction with an unresolvable per-job zone refuses comprehensibly."""
+    text = (
+        "insert_job: bad_tz\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "timezone: Bogus/Fake_Zone\n"
+    )
+    with pytest.raises(EngineError, match="bad_tz.*not resolvable"):
+        Scheduler(lower_source(text), start=datetime(2026, 7, 6, 0, 0))
+
+
+def test_resolve_timezone_posix_offsets_are_west_positive() -> None:
+    """(SEM-35, TechDocs TZ syntax): POSIX offsets are west-positive --
+    IST-5:30 (the docs' own example) is UTC+05:30, GMT+5 is UTC-05:00.
+    A POSIX string WITH dst rules stays unresolvable (modelling vendor DST
+    rules approximately would silently shift ticks)."""
+    ist = resolve_timezone("IST-5:30")
+    assert ist is not None and ist.how == "posix"
+    assert ist.tz.utcoffset(None) == timedelta(hours=5, minutes=30)
+    gmt5 = resolve_timezone("GMT+5")
+    assert gmt5 is not None and gmt5.tz.utcoffset(None) == timedelta(hours=-5)
+    assert resolve_timezone("MET-1METDST") is None
+
+
+def test_resolve_timezone_chain_limit_and_cycles_stay_unresolved() -> None:
+    """(SEM-35: 'the ujo_timezones table is read up to five times'): a
+    six-hop chain exhausts the limit; a cycle terminates as unresolvable."""
+    deep = {
+        "a": "b",
+        "b": "c",
+        "c": "d",
+        "d": "e",
+        "e": "f",
+        "f": "Europe/Zurich",
+    }
+    assert resolve_timezone("a", deep) is None  # 6th read would be needed
+    assert resolve_timezone("b", deep) is not None  # 5 reads suffice from here
+    assert resolve_timezone("loop", {"loop": "pool", "pool": "loop"}) is None
+
+
+def test_resolve_timezone_map_suppresses_the_city_default() -> None:
+    """(DL-62): a supplied listing is complete estate truth -- a city name
+    missing from it does NOT fall back to the zoneinfo city match."""
+    assert resolve_timezone("Zurich") is not None
+    assert resolve_timezone("Zurich", {"dallas": "US/Central"}) is None
+
+
+def test_resolve_timezone_ambiguous_city_component_is_refused() -> None:
+    """(DL-62): the city default requires a UNIQUE match; multiple zones
+    sharing a final path component resolve to none (the preflight ERROR
+    names the candidates)."""
+    from dsl41 import runner as runner_mod
+
+    monkey = {"x": ("A/X", "B/X")}
+    original = runner_mod._zone_tables
+    runner_mod._zone_tables = lambda: ({}, monkey)  # type: ignore[assignment]
+    try:
+        assert resolve_timezone("x") is None
+        assert resolve_timezone("X") is None
+    finally:
+        runner_mod._zone_tables = original
+
+
+def test_parse_timezone_map_listing_pairs_and_junk() -> None:
+    """(DL-62): the autotimezone -l shape (header + ruler + 3-field rows)
+    and bare pairs parse; names fold case and -/_; junk raises naming the
+    line (no silent loss)."""
+    listing = (
+        "Entry Type Zone\n"
+        "---------------------- ------ ----------------\n"
+        "US/Samoa Alias Pacific/Samoa\n"
+        "Port-au-Prince City America/Port-au-Prince\n"
+        "\n"
+        "Zurich Europe/Zurich\n"
+    )
+    aliases = parse_timezone_map(listing)
+    assert aliases == {
+        "us/samoa": "Pacific/Samoa",
+        "port_au_prince": "America/Port-au-Prince",
+        "zurich": "Europe/Zurich",
+    }
+    with pytest.raises(ValueError, match="line 1"):
+        parse_timezone_map("this is not a listing row\n")
 
 
 def test_dst_ticks_strictly_increase_across_repeated_pop_due_calls() -> None:
@@ -424,9 +552,7 @@ def test_scheduler_job_start_times_override_calendar_row_times() -> None:
         'date_conditions: 1\nrun_calendar: rows\nstart_times: "08:00"\n'
     )
     sched = Scheduler(lower_source(text), start=datetime(2026, 7, 1, 0, 0))
-    assert [e.at for e in sched.pop_due(datetime(2026, 8, 1, 0, 0))] == [
-        datetime(2026, 7, 3, 8, 0)
-    ]
+    assert [e.at for e in sched.pop_due(datetime(2026, 8, 1, 0, 0))] == [datetime(2026, 7, 3, 8, 0)]
 
 
 def test_scheduler_extended_run_calendar_without_start_times_ticks_at_midnight() -> None:
@@ -970,6 +1096,52 @@ def test_preflight_timezone_clean_for_a_real_zone_or_unset() -> None:
     )
     items = preflight(lower_source(text))
     assert not any(i.code == "timezone" for i in items)
+
+
+def test_preflight_timezone_city_name_warns_and_runs() -> None:
+    """(SEM-35/DL-62): with no --timezone-map a vendor city name resolves
+    through the unique zoneinfo city match -- a WARN (the assumption is
+    recorded), never an ERROR."""
+    text = (
+        "insert_job: tzc\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\ntimezone: Zurich\n'
+    )
+    items = preflight(lower_source(text), execution=False)
+    tz_items = [i for i in items if i.code == "timezone"]
+    assert [i.severity for i in tz_items] == ["WARN"]
+    assert "Europe/Zurich" in tz_items[0].message
+
+
+def test_preflight_timezone_map_is_estate_truth() -> None:
+    """(DL-62): a supplied listing resolves its entries silently and turns
+    the city default OFF -- a name missing from it is an ERROR naming the
+    --timezone-map remedy."""
+    text = (
+        "insert_job: tzm\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\ntimezone: Zurich\n\n'
+        "insert_job: tzx\njob_type: c\ncommand: y\nmachine: localhost\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\ntimezone: Dallas\n'
+    )
+    catalog = lower_source(text)
+    aliases = parse_timezone_map("Zurich City Europe/Zurich\n")
+    items = preflight(catalog, execution=False, tz_aliases=aliases)
+    tz_items = {i.job: i for i in items if i.code == "timezone"}
+    assert "tzm" not in tz_items  # mapped: resolves silently, no assumption
+    assert tz_items["tzx"].severity == "ERROR"
+    assert "--timezone-map" in tz_items["tzx"].message
+
+
+def test_preflight_timezone_posix_offset_warns_about_the_sign() -> None:
+    """(SEM-35, TechDocs TZ syntax): a POSIX fixed offset runs, with a WARN
+    spelling out the west-positive sign convention."""
+    text = (
+        "insert_job: tzp\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\ntimezone: "IST-5:30"\n'
+    )
+    items = preflight(lower_source(text), execution=False)
+    tz_items = [i for i in items if i.code == "timezone"]
+    assert [i.severity for i in tz_items] == ["WARN"]
+    assert "UTC+05:30" in tz_items[0].message
 
 
 def test_preflight_n_retrys_warns() -> None:

@@ -126,8 +126,10 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
 - Scheduler (ss5): the calendar the oracle deliberately lacks. Per
   date_conditions job it computes the next occurrence from days_of_week +
   start_times/start_mins (absent days_of_week = every day; per-job
-  zoneinfo timezone, else the run-level base zone, else UTC -- both
-  defaults PENDING: E10), or -- run_calendar with neither -- from the
+  timezone, else the run-level base zone, else UTC -- both defaults
+  PENDING: E10 -- with names resolved per SEM-35: zoneinfo, then the
+  --timezone-map ujo_timezones listing, then the DL-62 unique-city
+  default), or -- run_calendar with neither -- from the
   calendar rows' own times (E11 resolved, DL-58), and hands the engine
   STARTJOB events at the tick, timestamped at the tick and journaled like
   any input (source=scheduler). It fires UNCONDITIONALLY: SEM-32
@@ -184,12 +186,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import getpass
 import graphlib
 import hashlib
 import heapq
 import json
 import os
+import re
 import signal
 import socket as socket_mod
 import subprocess
@@ -199,10 +203,10 @@ import uuid
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Literal, Protocol, get_args
-from zoneinfo import ZoneInfo
+from typing import Any, Literal, NamedTuple, Protocol, get_args
+from zoneinfo import ZoneInfo, available_timezones
 
 from pydantic import BaseModel
 
@@ -1428,7 +1432,7 @@ class _SchedulePlan:
 
     days: frozenset[str]
     times: tuple[tuple[int, int], ...]
-    tz: ZoneInfo | None
+    tz: tzinfo | None
     run_dates: frozenset[date] | None = None
     exclude_dates: frozenset[date] = frozenset()
     run_gen: _CalCache | None = None
@@ -1484,13 +1488,131 @@ def _scheduler_calendar(
         raise EngineError(f"{job}: {exc}") from exc
 
 
-def _preflight_local_day(tz_name: str | None, start: datetime) -> date:
+# ------------------------------------------------------------- timezone names
+#
+# SEM-35 name resolution (TechDocs 12.1, `timezone` attribute + the
+# autotimezone command): a JIL `timezone:` value is matched against the OS
+# zone database FIRST; only if that misses is the instance's ujo_timezones
+# table read -- a vendor-shipped, admin-editable map whose City/Alias
+# entries chain ("up to five times") down to a Zone the OS recognizes.
+# Values are not case-sensitive. dsl41's port: zoneinfo is the OS database;
+# `--timezone-map` (the `autotimezone -l` listing, or bare `name zone`
+# pairs) is the table. Without a map, a city name resolves through a
+# documented deterministic default (DL-62): the UNIQUE zoneinfo zone whose
+# final path component matches (Zurich -> Europe/Zurich), surfaced as a
+# preflight WARN -- a supplied listing is complete estate truth, so the
+# default is off when a map is given. A POSIX fixed-offset form (`GMT+5`,
+# `IST-5:30`) resolves per the POSIX sign convention (positive = WEST of
+# GMT); POSIX strings WITH dst rules stay unresolvable -- modelling vendor
+# DST rules approximately would silently shift ticks.
+
+_TZ_CHAIN_LIMIT = 5  # vendor: "the ujo_timezones table is read up to five times"
+
+_POSIX_FIXED = re.compile(r"^([A-Za-z]{3,})([+-]?\d{1,2})(?::(\d{2})(?::(\d{2}))?)?$")
+
+
+class ResolvedTz(NamedTuple):
+    tz: tzinfo
+    zone: str  # the zoneinfo key / POSIX token it landed on
+    how: Literal["os", "map", "city", "posix"]
+
+
+def _tz_fold(name: str) -> str:
+    """Vendor names are case-insensitive; fold -/_ too (both are valid JIL
+    characters, zoneinfo uses each: Port-au-Prince vs New_York)."""
+    return name.casefold().replace("-", "_")
+
+
+@functools.lru_cache(maxsize=1)
+def _zone_tables() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """(folded full name -> canonical key, folded final path component ->
+    candidate keys) over the zoneinfo database, built once."""
+    full: dict[str, str] = {}
+    leaf: dict[str, list[str]] = {}
+    for zone in sorted(available_timezones()):
+        full.setdefault(_tz_fold(zone), zone)
+        leaf.setdefault(_tz_fold(zone.rsplit("/", 1)[-1]), []).append(zone)
+    return full, {component: tuple(zones) for component, zones in leaf.items()}
+
+
+def _city_candidates(name: str) -> tuple[str, ...]:
+    """Zoneinfo keys whose final path component is `name` (folded)."""
+    return _zone_tables()[1].get(_tz_fold(name), ())
+
+
+def _os_zone(token: str) -> ResolvedTz | None:
+    """One vendor "recognized by the operating system" lookup: zoneinfo
+    exact, zoneinfo case/-/_-insensitive, then a POSIX fixed offset."""
+    with contextlib.suppress(KeyError, ValueError, OSError):
+        return ResolvedTz(ZoneInfo(token), token, "os")
+    canonical = _zone_tables()[0].get(_tz_fold(token))
+    if canonical is not None:
+        return ResolvedTz(ZoneInfo(canonical), canonical, "os")
+    if (match := _POSIX_FIXED.match(token)) is not None:
+        _, hours, minutes, seconds = match.groups()
+        offset = timedelta(
+            hours=abs(int(hours)), minutes=int(minutes or 0), seconds=int(seconds or 0)
+        )
+        if int(minutes or 0) < 60 and int(seconds or 0) < 60 and offset < timedelta(hours=24):
+            west = not hours.startswith("-")  # POSIX: unsigned/+ = west of GMT
+            return ResolvedTz(timezone(-offset if west else offset, token), token, "posix")
+    return None
+
+
+def parse_timezone_map(text: str) -> dict[str, str]:
+    """An `autotimezone -l`/-q listing (`Entry Type Zone` rows) or bare
+    `name zone` pairs -> folded alias map. Header, ruler, and blank lines
+    skip; any other unparseable line raises ValueError (no silent loss)."""
+    aliases: dict[str, str] = {}
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or not set(line) - set("- "):
+            continue
+        fields = line.split()
+        if [f.casefold() for f in fields] == ["entry", "type", "zone"]:
+            continue
+        if len(fields) == 3 and fields[1].casefold() in {"zone", "alias", "city"}:
+            name, _, zone = fields
+        elif len(fields) == 2:
+            name, zone = fields
+        else:
+            raise ValueError(
+                f"line {lineno}: expected an autotimezone 'entry type zone' row"
+                f" or a 'name zone' pair, got {raw!r}"
+            )
+        aliases[_tz_fold(name)] = zone
+    return aliases
+
+
+def resolve_timezone(name: str, aliases: Mapping[str, str] | None = None) -> ResolvedTz | None:
+    """The SEM-35 ladder (module comment above): OS lookup, then the alias
+    map chained <=5 hops with an OS lookup per hop, then -- only with NO
+    map -- the unique-city default. None = genuinely unresolvable."""
+    current = name
+    seen: set[str] = set()
+    for hop in range(_TZ_CHAIN_LIMIT + 1):
+        if (resolved := _os_zone(current)) is not None:
+            if current == name:
+                return resolved
+            return ResolvedTz(resolved.tz, resolved.zone, "map")
+        folded = _tz_fold(current)
+        if aliases is None or hop == _TZ_CHAIN_LIMIT or folded in seen or folded not in aliases:
+            break
+        seen.add(folded)
+        current = aliases[folded]
+    if aliases is None and len(candidates := _city_candidates(name)) == 1:
+        return ResolvedTz(ZoneInfo(candidates[0]), candidates[0], "city")
+    return None
+
+
+def _preflight_local_day(
+    tz_name: str | None, start: datetime, aliases: Mapping[str, str] | None = None
+) -> date:
     """The run anchor as the job's LOCAL day (E10 basis; unresolvable
     zones fall back to the naive basis -- they carry their own ERROR)."""
     tz = None
-    if tz_name:
-        with contextlib.suppress(KeyError, ValueError, OSError):
-            tz = ZoneInfo(tz_name)
+    if tz_name and (resolved := resolve_timezone(tz_name, aliases)) is not None:
+        tz = resolved.tz
     return (start.replace(tzinfo=UTC).astimezone(tz) if tz else start).date()
 
 
@@ -1526,14 +1648,28 @@ def _next_eligible_day(
     return None
 
 
+def _scheduler_tz(name: str, owner: str, aliases: Mapping[str, str] | None) -> tzinfo:
+    """Resolve or refuse comprehensibly -- preflight gates this first (ss8);
+    the EngineError is the backstop for direct Scheduler construction."""
+    resolved = resolve_timezone(name, aliases)
+    if resolved is None:
+        raise EngineError(
+            f"{owner}: timezone {name!r} is not resolvable (SEM-35: zoneinfo,"
+            " the --timezone-map table, or a POSIX fixed offset)"
+        )
+    return resolved.tz
+
+
 class Scheduler:
     """ss5: the calendar the oracle deliberately lacks. Computes per-job next
     occurrences from the ScheduleBlock and yields STARTJOB events at the
     tick; it fires unconditionally (SEM-32 arm-and-wait and SEM-33
     run_window stay oracle-side, exactly as in simulation). Ticks are naive-UTC instants
     (the engine's time basis): per-job `timezone` -- else `default_tz`, else
-    UTC -- is applied via zoneinfo, so rehearse under the virtual clock
-    exercises real calendar arithmetic (ss5).
+    UTC -- is applied via resolve_timezone's SEM-35 ladder (zoneinfo, the
+    `tz_aliases` ujo_timezones map, the DL-62 city default, POSIX fixed
+    offsets), so rehearse under the virtual clock exercises real calendar
+    arithmetic (ss5).
 
     Pinned interpretation defaults (PENDING: E10): absent days_of_week means
     every day; jobs without `timezone` read their times in `default_tz`
@@ -1555,9 +1691,14 @@ class Scheduler:
     windowed, out to the dormancy ceiling for unbounded rules."""
 
     def __init__(
-        self, catalog: CatalogIR, *, start: datetime, default_tz: str | None = None
+        self,
+        catalog: CatalogIR,
+        *,
+        start: datetime,
+        default_tz: str | None = None,
+        tz_aliases: Mapping[str, str] | None = None,
     ) -> None:
-        base_tz = ZoneInfo(default_tz) if default_tz else None
+        base_tz = _scheduler_tz(default_tz, "--timezone", tz_aliases) if default_tz else None
         self._plans: dict[str, _SchedulePlan] = {}
         for name, job in catalog.jobs.items():
             sched = job.schedule
@@ -1607,7 +1748,7 @@ class Scheduler:
                 # E11 (DL-58): a generated (extended) day has no row time --
                 # neither the calendar nor the job supplies one -> 00:00
                 times=self._ticks(sched) if own_ticks else ((0, 0),),
-                tz=ZoneInfo(sched.timezone) if sched.timezone else base_tz,
+                tz=_scheduler_tz(sched.timezone, name, tz_aliases) if sched.timezone else base_tz,
                 run_dates=run_dates,
                 exclude_dates=exclude_dates,
                 run_gen=run_gen,
@@ -2644,6 +2785,7 @@ def preflight(
     machine_policy: MachinePolicy = "strict",
     as_machine: frozenset[str] = frozenset(),
     start: datetime | None = None,
+    tz_aliases: Mapping[str, str] | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
     the machine/owner identity rules -- they guard real processes, and the
@@ -2655,6 +2797,11 @@ def preflight(
     run_calendar whose last eligible day lies before it never fires. None
     skips that check (the base-zone --timezone flag is NOT consulted here:
     the comparison uses the per-job zone else UTC, advisory only).
+
+    `tz_aliases` (DL-62) is the instance's ujo_timezones table (parsed
+    `autotimezone -l` output, --timezone-map). SEM-35 names resolve through
+    resolve_timezone's ladder; a unique-city default resolution WARNs, an
+    unresolvable name ERRORs with the applicable remedy.
 
     `as_machine` (DL-52) is the identity this runner answers to. Empty = the
     forward hostname (zero-config, no reverse-DNS); non-empty = EXACTLY those
@@ -2783,7 +2930,7 @@ def preflight(
                             )
                         )
                     elif start is not None:
-                        local_day = _preflight_local_day(sched.timezone, start)
+                        local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
                         if max(eligible) < local_day:
                             items.append(
                                 PreflightItem(
@@ -2799,7 +2946,7 @@ def preflight(
                     # an extended source probes its generator from the run
                     # anchor (run: wall-now; rehearse: --start); anchorless
                     # construction gets compile validation only (DL-56/57)
-                    local_day = _preflight_local_day(sched.timezone, start)
+                    local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
                     try:
                         nxt = _next_eligible_day(run_src, exclude_src, local_day)
                     except CalendarRuleError as exc:
@@ -2832,7 +2979,7 @@ def preflight(
                 # a days_of_week source under an extended exclusion: a
                 # standard exclude set can never cover a weekly source, an
                 # extended one can (DL-57) -- probe two years of it
-                local_day = _preflight_local_day(sched.timezone, start)
+                local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
                 tokens = (
                     frozenset(_DAY_CODES)
                     if (sched.days_of_week is None or "all" in sched.days_of_week)
@@ -2860,15 +3007,52 @@ def preflight(
                             )
                         )
         if sched is not None and sched.timezone is not None:
-            try:
-                ZoneInfo(sched.timezone)
-            except (KeyError, ValueError, OSError):
+            tz_res = resolve_timezone(sched.timezone, tz_aliases)
+            if tz_res is None:
+                if tz_aliases is not None:
+                    detail = "not a zoneinfo name and not in the supplied --timezone-map"
+                elif len(candidates := _city_candidates(sched.timezone)) > 1:
+                    detail = (
+                        f"ambiguous city name ({', '.join(candidates)}); use the full"
+                        " zone name or a --timezone-map"
+                    )
+                else:
+                    detail = (
+                        "not a zoneinfo name; the vendor resolves SEM-35 names through"
+                        " the instance's ujo_timezones table -- feed its `autotimezone"
+                        " -l` listing in via --timezone-map"
+                    )
                 items.append(
                     PreflightItem(
                         severity="ERROR",
                         code="timezone",
                         job=name,
-                        message=f"timezone {sched.timezone!r} is not resolvable in zoneinfo",
+                        message=f"timezone {sched.timezone!r} is not resolvable: {detail}",
+                    )
+                )
+            elif tz_res.how == "city":
+                items.append(
+                    PreflightItem(
+                        severity="WARN",
+                        code="timezone",
+                        job=name,
+                        message=f"timezone {sched.timezone!r} assumed to be {tz_res.zone}"
+                        " (unique zoneinfo city match, DL-62); pin it with --timezone-map"
+                        " (`autotimezone -l`) if the estate maps it differently",
+                    )
+                )
+            elif tz_res.how == "posix" and tz_res.tz.utcoffset(None) != timedelta(0):
+                offset = tz_res.tz.utcoffset(None) or timedelta(0)
+                hh, rem = divmod(abs(int(offset.total_seconds())), 3600)
+                rendered = f"UTC{'+' if offset >= timedelta(0) else '-'}{hh:02d}:{rem // 60:02d}"
+                items.append(
+                    PreflightItem(
+                        severity="WARN",
+                        code="timezone",
+                        job=name,
+                        message=f"timezone {sched.timezone!r} read as a POSIX fixed offset"
+                        f" = {rendered} (POSIX offsets are west-positive: GMT+5 means"
+                        " 5h WEST of GMT)",
                     )
                 )
         if job.sem.n_retrys > 0:

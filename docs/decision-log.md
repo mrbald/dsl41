@@ -2096,3 +2096,42 @@
   unpinned, not re-verified; KB 29387's export command stays the
   byte-exact re-verification if a live instance becomes available.
   Tests 1681 → 1687.
+- DL-61 `dsl41 viz --whole-graph` (2026-08-07). DL-35 dropped the
+  monolithic chart from the CLI (unreadable for a whole estate) but kept
+  `to_mermaid` as the public single-chart function; this re-exposes it as
+  an opt-in CLI flag — one bare Mermaid flowchart body instead of the
+  Markdown report, suitable for piping into mermaid-cli or pasting into a
+  live editor. Interactions: `--collapse-threshold` and `--elk` apply
+  (`to_mermaid` grew the `elk` keyword rather than the CLI importing the
+  private frontmatter constant); `--direction auto` falls back to LR (the
+  per-component heuristic has no meaning here); `--include-singletons` is
+  moot — the whole graph has no appendices, so standalone jobs always
+  render. The DL-35 report stays the default output. Tests 1687 → 1690.
+- DL-62 SEM-35 timezone-name resolution: the ujo_timezones ladder +
+  `--timezone-map` (2026-08-07). Problem: `timezone: Zurich` (a vendor
+  city entry) refused at preflight — the runner resolved names through raw
+  zoneinfo only, but the vendor resolves them through the OS *and* the
+  instance's ujo_timezones table (TechDocs 12.1, timezone attribute +
+  autotimezone command pages, both [V]; SEM-35 carries the condensed
+  quotes). Port, in vendor order: (1) zoneinfo, case-insensitively and
+  with -/_ folded (the attribute is "not case-sensitive"); (2) the alias
+  map given as `--timezone-map` on run/rehearse — the `autotimezone -l`
+  listing verbatim (Entry/Type/Zone rows; bare `name zone` pairs also
+  accepted), Alias/City chains chased at most FIVE reads (the vendor's own
+  bound), cycles refuse; (3) POSIX fixed offsets (`GMT+5`, `"IST-5:30"`)
+  west-positive per the TZ-variable syntax, with a preflight WARN spelling
+  the sign convention; POSIX strings WITH dst rules refuse — approximating
+  vendor DST rules would silently shift ticks. Without a map, a city name
+  falls back to a documented deterministic default in the DL-59 spirit:
+  the UNIQUE zoneinfo zone whose final path component matches (Zurich →
+  Europe/Zurich; the docs' own City rows — Vancouver → Canada/Pacific,
+  Denver → US/Mountain — follow this shape), surfaced as a preflight WARN
+  naming the assumed zone; ambiguous components (Indianapolis) refuse and
+  list candidates. A supplied listing is complete estate truth (`-l`
+  lists ALL entries), so the city default is OFF when a map is given —
+  a name missing from it would fail on the real instance too. Mechanics:
+  `resolve_timezone`/`parse_timezone_map` in runner.py; Scheduler and
+  preflight take `tz_aliases`; `--timezone` (base zone) resolves through
+  the same ladder; unresolvable stays a preflight ERROR, now naming the
+  applicable remedy. The runbook grows a read-only `autotimezone -l`
+  capture step for any migrated estate. Tests 1690 → 1704.

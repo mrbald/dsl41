@@ -79,6 +79,7 @@ gate: do not ship a catalog that lints dirty.
 dsl41 viz jobs.jil -o graph.md             # Markdown report of Mermaid charts
 dsl41 viz --direction TD --collapse-threshold 20 jobs.jil
 dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores it)
+dsl41 viz --whole-graph jobs.jil           # one bare Mermaid chart, no report
 ```
 
 The report shows each independent workflow as its own chart (largest first).
@@ -90,7 +91,9 @@ subgraphs, and edges carry their E/A/R migration class
 triggers. Mutual exclusions appear as lock links or as a shared lock hub. If
 a box has more direct members than the collapse threshold (default 12), the
 box folds into a single node. Any Mermaid renderer works (GitHub,
-mermaid.live, IDE preview).
+mermaid.live, IDE preview). `--whole-graph` skips the report and emits the
+entire estate as one bare Mermaid chart, ready for mermaid-cli or a live
+editor.
 
 ### Migration report
 
@@ -198,6 +201,14 @@ The built-in autocal rule engine interprets extended calendars (SEM-36..39).
 An exhausted calendar makes the job dormant and does not cause an error.
 Before the engine starts, preflight (ss8) examines the calendar wiring:
 dangling references are errors, and empty or stale calendars cause warnings.
+
+`timezone:` names resolve the vendor's way (SEM-35/DL-62): the zone
+database first (case-insensitive), then the instance's ujo_timezones
+table — capture it read-only with `autotimezone -l` and pass the listing
+via `--timezone-map`. Without a map, a city name such as `Zurich` falls
+back to the unique zone whose city component matches (`Europe/Zurich`)
+with a preflight WARN. POSIX fixed offsets (`GMT+5`, west-positive) work;
+an unresolvable name is a preflight error naming the remedy.
 
 ### Detached mode (phase 11f)
 
