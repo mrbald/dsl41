@@ -78,7 +78,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
-from dsl41.runner import _JOB_EVENT_VERBS, _STATUSES
+from dsl41.runner import _JOB_EVENT_VERBS, _LINE_LIMIT, _STATUSES
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
 _STATUS_STYLE = {
@@ -114,7 +114,11 @@ class ControlClient:
         async with self._lock:
             try:
                 if self._writer is None:
-                    self._reader, self._writer = await asyncio.open_unix_connection(str(self.path))
+                    # limit: one `status` response line covers every job and
+                    # overruns asyncio's 64 KiB default at ~300 jobs
+                    self._reader, self._writer = await asyncio.open_unix_connection(
+                        str(self.path), limit=_LINE_LIMIT
+                    )
                 assert self._reader is not None
                 self._writer.write(json.dumps(payload).encode("utf-8") + b"\n")
                 await self._writer.drain()
@@ -148,7 +152,7 @@ class ControlClient:
         ControlClientError if the connection fails or the engine refuses
         (e.g. a journal-less run)."""
         try:
-            reader, writer = await asyncio.open_unix_connection(str(self.path))
+            reader, writer = await asyncio.open_unix_connection(str(self.path), limit=_LINE_LIMIT)
         except OSError as exc:
             raise ControlClientError(str(exc)) from exc
         try:

@@ -982,7 +982,9 @@ class SupervisorClient:
         if not self.sock_path.exists():
             return False
         try:
-            reader, writer = await asyncio.open_unix_connection(str(self.sock_path))
+            reader, writer = await asyncio.open_unix_connection(
+                str(self.sock_path), limit=_LINE_LIMIT
+            )
         except ConnectionRefusedError:
             with contextlib.suppress(OSError):
                 self.sock_path.unlink()  # stale: nobody is listening (parity with ss10)
@@ -3109,6 +3111,13 @@ _JOB_EVENT_VERBS: frozenset[EventKind] = frozenset(
 )
 _STATUSES: frozenset[str] = frozenset(get_args(JobStatus))
 
+# JSON-lines buffer cap for every asyncio stream endpoint (control socket
+# both sides, supervisor client). One `status` response is one line covering
+# EVERY job (~220 bytes each), so asyncio's 64 KiB default readline() limit
+# overruns at ~300 jobs; 16 MiB clears any plausible estate while still
+# bounding a runaway peer.
+_LINE_LIMIT: int = 2**24
+
 
 class ControlServer:
     """ss10 control plane: a unix domain socket in the run directory, mode
@@ -3155,7 +3164,9 @@ class ControlServer:
                 probe.close()
         old_umask = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._handle, path=str(self.path))
+            self._server = await asyncio.start_unix_server(
+                self._handle, path=str(self.path), limit=_LINE_LIMIT
+            )
         except OSError as exc:
             # two engines racing past the probe: the loser's bind fails --
             # same refusal class as the live-socket case (review M9)

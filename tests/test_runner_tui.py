@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import shutil
 import sys
 import tempfile
@@ -270,6 +271,36 @@ def test_control_client_request_round_trip(short_root: Path) -> None:
             resp = await client.request({"cmd": "status"})
             assert resp["ok"] is True
             assert set(resp["jobs"]) == {"cc_job"}
+        finally:
+            await client.close()
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_control_client_status_response_over_the_64k_default_readline_limit(
+    short_root: Path,
+) -> None:
+    """LimitOverrunError regression: one `status` response is one JSON line
+    covering EVERY job (~220 bytes each), so a ~300-job estate overruns
+    asyncio's 64 KiB default readline() buffer -- a default-limit connection
+    raises ValueError('Separator is not found, and chunk exceed the limit')
+    on the very first TUI refresh. The client must open every connection
+    with an explicit limit (_LINE_LIMIT)."""
+    text = "".join(
+        f"insert_job: bulk_{i:04d}\njob_type: c\ncommand: x\nmachine: m1\n\n" for i in range(400)
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        client = ControlClient(server.path)
+        try:
+            resp = await client.request({"cmd": "status"})
+            assert resp["ok"] is True
+            assert len(resp["jobs"]) == 400
+            # self-check: the fixture really is past the 64 KiB default, so
+            # this test regresses if the per-job payload ever shrinks below it
+            assert len(json.dumps(resp, sort_keys=True)) > 64 * 1024
         finally:
             await client.close()
             await _teardown(engine, server, loop_task)
