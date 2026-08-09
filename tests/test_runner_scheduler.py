@@ -644,10 +644,41 @@ def test_engine_scheduler_trace_matches_oracle_direct_startjobs(tmp_path: Path) 
     o = Oracle(catalog)
     for hour in (8, 9):
         at = start + timedelta(hours=hour)
-        o.feed(Event(at=at, kind="STARTJOB", payload={"job": "bisim_sched"}))
+        # source="scheduler": the engine tags its ticks, and cause strings are
+        # a function of the input including source (DL-68)
+        o.feed(Event(at=at, kind="STARTJOB", payload={"job": "bisim_sched"}, source="scheduler"))
         o.feed(Event(at=at, kind="STATUS", payload={"job": "bisim_sched", "status": "SUCCESS"}))
 
     assert [t.model_dump() for t in o.trace()] == [t.model_dump() for t in engine.oracle.trace()]
+
+
+def test_scheduler_tick_start_cause_and_started_by_carry_scheduler_source() -> None:
+    """(DL-68): a calendar-tick start is attributable -- the trace cause and
+    JobRuntime.started_by both read "STARTJOB event (scheduler)", never the
+    bare string an unattributed injection leaves."""
+    text = (
+        "insert_job: prov_sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    catalog = lower_source(text)
+    start = datetime(2026, 7, 1, 0, 0)
+
+    async def scenario() -> Engine:
+        adapter = FakeAdapter()
+        engine = Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        await engine.run_until_quiescent(start + timedelta(hours=9))
+        await engine.shutdown()
+        return engine
+
+    engine = asyncio.run(scenario())
+    starting = next(t for t in engine.oracle.trace() if t.transition == "INACTIVE->STARTING")
+    assert starting.cause == "STARTJOB event (scheduler)"
+    assert engine.oracle.store.job["prov_sched"].started_by == "STARTJOB event (scheduler)"
 
 
 # --------------------------------------------------------------------- 5. resume

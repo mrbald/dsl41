@@ -321,6 +321,31 @@ def test_replay_reproduces_a_set_global_gated_trace(tmp_path: Path) -> None:
     ]
 
 
+def test_replay_reproduces_source_tagged_causes_and_started_by(tmp_path: Path) -> None:
+    """(DL-68): input records persist source, so a fresh Oracle replay
+    re-derives the SAME "(control)"-tagged cause and started_by the live
+    engine recorded -- provenance survives a resume."""
+    text = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
+    adapter = FakeAdapter({("j1", 1): (5.0, 0)})
+    script = [ev("STARTJOB", 0, job="j1")]
+
+    async def scenario() -> Engine:
+        return await _run_virtual(
+            text, tmp_path / "run", script, adapter=adapter, horizon=T0 + timedelta(minutes=10)
+        )
+
+    engine = asyncio.run(scenario())
+    assert engine.oracle.store.job["j1"].started_by == "STARTJOB event (control)"
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    fresh = Oracle(lower_source(text))
+    replay_inputs(fresh, records)
+    assert fresh.store.job["j1"].started_by == "STARTJOB event (control)"
+    assert [t.model_dump() for t in fresh.trace()] == [
+        t.model_dump() for t in engine.oracle.trace()
+    ]
+
+
 # ------------------------------------------------ 5. engine journal-first behavior
 
 
@@ -445,7 +470,7 @@ def test_cli_journal_renders_the_trace_when_the_catalog_matches(tmp_path: Path) 
     result = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
     assert result.exit_code == 0
     assert result.output == (
-        "2026-07-01T08:00:00 j1 INACTIVE->STARTING [STARTJOB event]\n"
+        "2026-07-01T08:00:00 j1 INACTIVE->STARTING [STARTJOB event (control)]\n"
         "2026-07-01T08:00:00 j1 STARTING->RUNNING"
         " [QUE_WAIT collapses to immediate (ss7 non-goal)]\n"
         "2026-07-01T08:00:00 j1 RUNNING->SUCCESS [injected STATUS]\n"

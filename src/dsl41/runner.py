@@ -423,8 +423,10 @@ class Journal:
         )
         return journal
 
-    def input(self, ev: Event, source: str) -> None:
-        """source in {scheduler, adapter, control, reconcile} (ss7)."""
+    def input(self, ev: Event, source: str | None) -> None:
+        """source in {scheduler, adapter, control, reconcile} (ss7); None
+        marks an unattributed script injection and never occurs in a real
+        run. Persisted so replay re-derives the same causes (DL-68)."""
         self.seq += 1
         self._write(
             {
@@ -550,6 +552,9 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> None:
                     at=datetime.fromisoformat(record["at"]),
                     kind=record["kind"],
                     payload=record["payload"],
+                    # DL-68: provenance is part of the input alphabet -- replay
+                    # must re-derive the same causes and started_by
+                    source=record.get("source"),
                 )
             )
 
@@ -1879,9 +1884,10 @@ class Engine:
         #: case b): the SupervisedCommandAdapter then abandons instead of killing
         self.detach = DetachSignal()
         self.drops: list[tuple[Event, str]] = []  # gate rejections; also WAL drop records
-        #: time-ordered event queue: (at, arrival seq, event, is_completion, source);
-        #: see the module docstring for why FIFO alone is wrong here
-        self._queue: list[tuple[datetime, int, Event, bool, str]] = []
+        #: time-ordered event queue: (at, arrival seq, event, is_completion);
+        #: provenance rides on Event.source (DL-68); see the module docstring
+        #: for why FIFO alone is wrong here
+        self._queue: list[tuple[datetime, int, Event, bool]] = []
         self._queue_seq = 0
         #: real-domain wake signal: set on every enqueue and adapter-task
         #: completion so a blocked wait_until() re-plans immediately
@@ -1896,15 +1902,17 @@ class Engine:
         #: non-CancelledError they die with (fail loudly, never swallow)
         self._reaping: list[asyncio.Task[None]] = []
 
-    def inject(self, ev: Event, *, source: str = "control") -> None:
+    def inject(self, ev: Event, *, source: str | None = "control") -> None:
         """Queue an external event (test scripts; ss10 sendevent verbs).
         External events are never gated: injected STATUS keeps its
-        CHANGE_STATUS parity."""
+        CHANGE_STATUS parity. source=None injects unattributed (the bisim
+        harness: oracle-direct scripts carry no provenance, DL-68)."""
         self._enqueue(ev, is_completion=False, source=source)
 
-    def _enqueue(self, ev: Event, *, is_completion: bool, source: str = "adapter") -> None:
+    def _enqueue(self, ev: Event, *, is_completion: bool, source: str | None = "adapter") -> None:
+        ev.source = source  # DL-68: the event carries its own provenance
         self._queue_seq += 1
-        heapq.heappush(self._queue, (ev.at, self._queue_seq, ev, is_completion, source))
+        heapq.heappush(self._queue, (ev.at, self._queue_seq, ev, is_completion))
         self._activity.set()
 
     async def run_until_quiescent(self, horizon: datetime) -> list[Event]:
@@ -1977,7 +1985,7 @@ class Engine:
                 and (self.clock.virtual or eff_due <= now)
             )
             if take_event:
-                _, _, ev, is_completion, source = heapq.heappop(self._queue)
+                _, _, ev, is_completion = heapq.heappop(self._queue)
                 if is_completion:
                     # kill-wins gate ordering (DL-44 amendment, review B1):
                     # fire the oracle timers due at or before the completion's
@@ -2001,7 +2009,7 @@ class Engine:
                             self.journal.drop(ev, reason)
                         continue
                 if self.journal is not None:
-                    self.journal.input(ev, source)  # WAL-append + fsync BEFORE feed (ss7)
+                    self.journal.input(ev, ev.source)  # WAL-append + fsync BEFORE feed (ss7)
                 await self.clock.wait_until(ev.at)
                 out = self.oracle.feed(ev)
                 emitted.extend(out)
@@ -3406,6 +3414,9 @@ class ControlServer:
                 # INACTIVE but the next condition edge starts it -- operators
                 # must see the latch, not tail the trace for SCHED_ARM
                 "armed": rt.armed,
+                # DL-68: the trigger of the most recent start, trace-cause
+                # verbatim (null = never started)
+                "started_by": rt.started_by,
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,
                 "log_err": log_err,

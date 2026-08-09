@@ -204,6 +204,10 @@ class Event(BaseModel):
     at: datetime
     kind: EventKind
     payload: dict[str, object] = {}
+    #: provenance of an externally injected event -- the engine's ss7 input
+    #: alphabet (scheduler | control | adapter | reconcile); None for oracle-
+    #: internal and script events. Start causes surface it (DL-68).
+    source: str | None = None
 
     def job(self) -> str | None:
         job = self.payload.get("job")
@@ -227,6 +231,7 @@ class JobRuntime(BaseModel):
     on_hold: bool = False
     on_noexec: bool = False
     armed: bool = False  # a scheduled tick latched at a releasable gate (Q3, DL-54)
+    started_by: str | None = None  # trace cause of the most recent actual start (DL-68)
 
 
 class StatusStore(BaseModel):
@@ -481,7 +486,10 @@ class Oracle:
                 # SEM-34: the schedule tick arms the must_start deadline
                 # whether or not the start succeeds -- that is its point
                 self._arm_must_start(job)
-            refused = self._attempt_start(job, force=force, scheduled=True, cause=f"{kind} event")
+            # DL-68: a sourced event names its trigger -- a scheduler tick and
+            # an operator sendevent must not collapse to one cause string
+            cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
+            refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
                 self._record(job, "START_REFUSED", f"{refused} ({kind})")
         elif kind == "SET_GLOBAL":
@@ -809,6 +817,7 @@ class Oracle:
             self._box_ran[job] = set()
         assert self._now is not None
         self._run_started_at[job] = self._now
+        rt.started_by = cause  # DL-68: what triggered THIS run, trace-cause verbatim
         self._set_status(job, "STARTING", cause=cause)
         running_cause = (
             "admitted: resources acquired (DL-50)"

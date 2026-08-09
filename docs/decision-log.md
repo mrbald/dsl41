@@ -2303,3 +2303,31 @@
   cost model is rows not lines), and shelling out to real less via
   App.suspend (dies under textual-serve — E3 web-posture parity).
   Tests 1735 -> 1742 (pager suite: test_runner_tui.py section 5).
+- DL-68 trigger visibility: what started this job, what starts the next
+  one (2026-08-09). The gap: a running job's trigger was not attributable
+  in the TUI — the engine's queue entries carry provenance (source in
+  {scheduler, adapter, control, reconcile}, ss7 input records) but the
+  oracle collapsed a scheduler calendar tick and an operator sendevent
+  into the identical cause "STARTJOB event", and nothing forward-looking
+  said what would fire next or why. Five units. (1) Provenance
+  thread-through: Event grows a `source` field the engine stamps at
+  enqueue (the WAL input record already persisted it); event-driven start
+  causes carry it — "STARTJOB event (scheduler)", "FORCE_STARTJOB event
+  (control)" — while internal/synthetic dispatches without a source keep
+  the old format; JobRuntime.started_by records the MOST RECENT actual
+  start's trace cause verbatim (source-tagged events, condition edges
+  "status of X changed to ...", box starts, OFF_HOLD, resources-freed —
+  one mechanism, set where every start funnels), and the status verb
+  serves it. Replay threads the recorded source back through re-injection,
+  so a resumed run re-derives byte-identical causes and started_by; the
+  bisim harness injects source=None deliberately — trace identity is
+  pinned over inputs INCLUDING source, and oracle-direct scripts carry
+  none. Cause-string format change: old pinned trace tests updated where
+  a source is now attached. (2) A TUI triggers view on key `t`, backed by
+  the existing timers verb, with countdowns to each due instant. (3)
+  Filewatch visibility: synthesized "filewatch" rows in the timers verb
+  plus a "watching" status. (4) The armed latch (SEM-32/DL-54) rendered
+  as flag "A" in the jobs table and listed in the triggers view. (5) The
+  details popup gains started-by / next-tick / pending-timers / armed /
+  watching lines. Tests 1742 -> 1745 (unit 1: scheduler/control cause
+  tags, status verb field, replay determinism).

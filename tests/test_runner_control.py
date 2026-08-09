@@ -364,6 +364,39 @@ def test_status_query_all_single_and_unknown(short_root: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_startjob_via_control_socket_tags_cause_and_started_by_control(short_root: Path) -> None:
+    """(DL-68): an operator sendevent STARTJOB is distinguishable from a
+    scheduler tick -- the trace cause reads "STARTJOB event (control)" and
+    the status verb serves it as started_by (null before any start)."""
+    text = "insert_job: prov_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            before = await _control_call(server.path, {"cmd": "status", "job": "prov_job"})
+            assert before["jobs"]["prov_job"]["started_by"] is None
+
+            await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "prov_job"}
+            )
+
+            async def done() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "prov_job"})
+                return r["jobs"]["prov_job"]["status"] == "SUCCESS"
+
+            await _wait_for_async(done)
+            after = await _control_call(server.path, {"cmd": "status", "job": "prov_job"})
+            assert after["jobs"]["prov_job"]["started_by"] == "STARTJOB event (control)"
+            starting = next(
+                t for t in engine.oracle.trace() if t.transition == "INACTIVE->STARTING"
+            )
+            assert starting.cause == "STARTJOB event (control)"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_trace_query_since_filtering(short_root: Path) -> None:
     text = "insert_job: tr_job\njob_type: c\ncommand: x\nmachine: m1\n"
 

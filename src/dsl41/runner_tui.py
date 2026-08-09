@@ -1323,6 +1323,10 @@ class RunnerApp(App[None]):
                 f"  exit {'-' if exit_code is None else exit_code}"
                 f"  at {row.get('status_at') or '-'} UTC\n"
             )
+            if row.get("started_by"):
+                # DL-68: what triggered the most recent run, trace-cause verbatim
+                body.append("started by: ", style="bold")
+                body.append(f"{row['started_by']}\n")
             for label, key in (("log out", "log_out"), ("log err", "log_err")):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")

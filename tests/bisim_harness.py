@@ -54,7 +54,10 @@ class EngineHarness:
         return self.engine.oracle.store
 
     def feed(self, ev: Event) -> list[Event]:
-        self.engine.inject(ev)
+        # source=None: oracle-direct scripts carry no provenance, and cause
+        # strings are a function of the input INCLUDING source (DL-68) -- a
+        # "control" tag here would break trace identity by construction
+        self.engine.inject(ev, source=None)
         return _loop().run_until_complete(self.engine.run_until_quiescent(ev.at))
 
     def run_script(self, events: list[Event]) -> list[TraceEntry]:
