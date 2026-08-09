@@ -120,7 +120,12 @@ async def _wait_for_async(predicate, timeout_s: float = 3.0, interval_s: float =
 
 
 async def _serve(
-    run_root: Path, text: str, *, adapter: FakeAdapter | None = None, scheduler=None
+    run_root: Path,
+    text: str,
+    *,
+    adapter: FakeAdapter | None = None,
+    scheduler=None,
+    spec_texts: dict[str, str] | None = None,
 ) -> tuple[Engine, ControlServer, asyncio.Task]:
     """Shared harness: a real-domain, hold_open engine serving a control
     socket, with run_until_quiescent(datetime.max) as a background task (the
@@ -136,7 +141,7 @@ async def _serve(
         scheduler=scheduler,
         hold_open=True,
     )
-    server = ControlServer(engine, run_root / "control.sock")
+    server = ControlServer(engine, run_root / "control.sock", spec_texts=spec_texts)
     await server.start()
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
     return engine, server, loop_task
@@ -455,6 +460,73 @@ def test_plan_waves_for_a_chain_and_a_cycle_refuses(short_root: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_spec_serves_the_rendered_block_and_nulls_without_texts(short_root: Path) -> None:
+    """DL-64 `spec` verb: the job's preserve-rendered JIL block when the
+    server was given spec texts (the `dsl41 run` path renders them from the
+    post-placeholder AST), jil:null when it was not (embedders), and the
+    usual unknown-job refusal."""
+    text = (
+        "insert_job: sp_box\njob_type: b\n\n"
+        "insert_job: sp_a\njob_type: c\ncommand: echo hi\nmachine: m1\nbox_name: sp_box\n"
+    )
+    block = "insert_job: sp_a\njob_type: c\ncommand: echo hi\nmachine: m1\nbox_name: sp_box\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, spec_texts={"sp_a": block}
+        )
+        try:
+            resp = await _control_call(server.path, {"cmd": "spec", "job": "sp_a"})
+            assert resp == {
+                "ok": True,
+                "job": "sp_a",
+                "job_type": "CMD",
+                "box_name": "sp_box",
+                "jil": block,
+            }
+            resp = await _control_call(server.path, {"cmd": "spec", "job": "sp_box"})
+            assert resp["ok"] is True and resp["jil"] is None  # no text handed over
+            resp = await _control_call(server.path, {"cmd": "spec", "job": "nope"})
+            assert resp["ok"] is False
+        finally:
+            await _teardown(engine, server, loop_task)
+
+        engine2, server2, loop_task2 = await _serve(short_root / "run_bare", text)
+        try:
+            resp = await _control_call(server2.path, {"cmd": "spec", "job": "sp_a"})
+            assert resp["ok"] is True and resp["jil"] is None
+        finally:
+            await _teardown(engine2, server2, loop_task2)
+
+    asyncio.run(scenario())
+
+
+def test_spec_texts_helper_renders_post_placeholder_blocks() -> None:
+    """The `dsl41 run` side of DL-64: _spec_texts maps every catalog job to
+    its preserve-rendered statement block -- placeholder-resolved, comments
+    kept, separating blank lines dropped."""
+    from dsl41.ast_jil import parse
+    from dsl41.cli import _spec_texts
+    from dsl41.ir import lower_catalog
+    from dsl41.placeholders import substitute
+
+    source = (
+        "/* the box */\n"
+        "insert_job: st_box\njob_type: b\n\n\n"
+        "insert_job: st_a\njob_type: c\n"
+        "command: fakework ~{$WHO}~\nmachine: m1\nbox_name: st_box\n"
+    )
+    resolved, _ = substitute(source, {"WHO": "st_a"}, file="mem.jil")
+    parsed = [parse(resolved, file="mem.jil")]
+    catalog = lower_catalog(parsed, permit_unknown=False)
+    texts = _spec_texts(parsed, catalog)
+    assert set(texts) == {"st_box", "st_a"}
+    assert texts["st_box"] == "/* the box */\ninsert_job: st_box\njob_type: b\n"
+    assert texts["st_a"] == (
+        "insert_job: st_a\njob_type: c\ncommand: fakework st_a\nmachine: m1\nbox_name: st_box\n"
+    )
+
+
 # ------------------------------------------------------------------ 3. subscribe
 
 
@@ -770,6 +842,12 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
             return bool(r["ok"]) and r["jobs"]["proc_job"]["status"] == "SUCCESS"
 
         wait_for(succeeded, timeout_s=5.0)
+
+        # the `dsl41 run` path hands the server real spec texts (DL-64):
+        # the block served over the wire is the loaded source, byte-faithful
+        spec = _sync_control_call(sock_path, {"cmd": "spec", "job": "proc_job"})
+        assert spec["ok"] is True
+        assert spec["jil"] == "insert_job: proc_job\njob_type: c\ncommand: exit 0\n"
 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5.0)

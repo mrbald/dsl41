@@ -45,7 +45,13 @@ from dsl41.runner import (
     _JOB_EVENT_VERBS,
     start_run,
 )
-from dsl41.runner_tui import ControlClient, ControlClientError, RunnerApp, parse_console_command
+from dsl41.runner_tui import (
+    ControlClient,
+    ControlClientError,
+    RunnerApp,
+    SpecScreen,
+    parse_console_command,
+)
 from textual.widgets import DataTable, Input, RichLog, Static
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
@@ -64,7 +70,11 @@ def short_root():
 
 
 async def _serve(
-    run_root: Path, text: str, *, adapter: FakeAdapter | None = None
+    run_root: Path,
+    text: str,
+    *,
+    adapter: FakeAdapter | None = None,
+    spec_texts: dict[str, str] | None = None,
 ) -> tuple[Engine, ControlServer, asyncio.Task]:
     """Shared harness (test_runner_control.py): a real-domain, hold_open
     engine serving a control socket, run_until_quiescent(datetime.max) as a
@@ -75,7 +85,7 @@ async def _serve(
     engine = start_run(
         catalog, run_root, clock=clock, adapters={"CMD": adapter, "FW": adapter}, hold_open=True
     )
-    server = ControlServer(engine, run_root / "control.sock")
+    server = ControlServer(engine, run_root / "control.sock", spec_texts=spec_texts)
     await server.start()
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
     return engine, server, loop_task
@@ -521,8 +531,10 @@ def test_pilot_pending_term_run_time_timer_appears_while_running_and_clears_afte
                 await pilot.press("s")
                 await _wait_for_ui(
                     pilot,
-                    lambda: str(table.get_cell("tp_trt", "timers")) != ""
-                    and str(table.get_cell("tp_trt", "status")) == "RUNNING",
+                    lambda: (
+                        str(table.get_cell("tp_trt", "timers")) != ""
+                        and str(table.get_cell("tp_trt", "status")) == "RUNNING"
+                    ),
                 )
                 assert "term_run_time" in str(table.get_cell("tp_trt", "timers"))
 
@@ -573,6 +585,77 @@ def test_pilot_log_tail_shows_appended_bytes_for_the_selected_job(short_root: Pa
                 logtail = app.query_one("#logtail", RichLog)
                 await _wait_for_ui(pilot, lambda: len(logtail.lines) > 0)
                 assert any("hello from the job" in ln.text for ln in logtail.lines)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_d_key_opens_the_spec_popup_and_escape_closes_it(short_root: Path) -> None:
+    """DL-64 job-details popup: `d` on the selected row pushes a SpecScreen
+    whose body carries the `spec` verb's rendered JIL block plus the status
+    facts; escape pops it."""
+    text = "insert_job: tp_spec\njob_type: c\ncommand: echo spec\nmachine: m1\n"
+    block = "insert_job: tp_spec\njob_type: c\ncommand: echo spec\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, spec_texts={"tp_spec": block}
+        )
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "tp_spec" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+
+                await pilot.press("d")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                body = str(app.screen.query_one("#specbox Static", Static).content)
+                assert "command: echo spec" in body
+                assert "INACTIVE" in body  # the status fact line
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, SpecScreen))
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) -> None:
+    """DL-64 keyboard geometry: `m` maximizes the log tail and `m` again
+    restores; `]` and `}` move the fr shares within their 1..4 clamp."""
+    text = "insert_job: tp_geo\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "tp_geo" in app._rows)
+                logtail = app.query_one("#logtail", RichLog)
+
+                await pilot.press("m")
+                await pilot.pause()
+                assert app.screen.maximized is logtail
+                await pilot.press("m")
+                await pilot.pause()
+                assert app.screen.maximized is None
+
+                assert (app._log_share, app._table_share) == (3, 3)
+                await pilot.press("]")
+                assert app._log_share == 4
+                assert str(logtail.styles.height) == "4fr"
+                await pilot.press("]")  # clamped: neither pane may collapse
+                assert app._log_share == 4
+                await pilot.press("{")
+                await pilot.press("{")
+                await pilot.press("{")  # clamped at 1
+                assert app._table_share == 1
+                assert str(app.query_one("#jobs", DataTable).styles.width) == "1fr"
         finally:
             await _teardown(engine, server, loop_task)
 

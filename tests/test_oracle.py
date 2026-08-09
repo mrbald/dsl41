@@ -700,6 +700,50 @@ def test_sem10b_member_does_not_start_when_its_box_is_not_running() -> None:
     assert transitions(o, "mem_idle") == []
 
 
+def test_sem10c_explicit_startjob_refused_at_a_sem10_gate_leaves_a_trace_record() -> None:
+    """DL-64: an operator's plain STARTJOB dying at either SEM-10 gate used
+    to be fully silent -- no transition, no record, untrainable. Both gates
+    now leave a START_REFUSED trace record naming FORCE_STARTJOB, for the
+    EXPLICIT event only: internal condition-edge re-evaluations probing
+    members of non-running boxes stay silent (sem10b's scenario records
+    nothing), and FORCE itself never reaches the gates."""
+    text = (
+        "insert_job: box10c\njob_type: b\n\n"
+        "insert_job: mem_r\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box10c\n\n"
+        "insert_job: mem_keep\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box10c\n\n"
+        "insert_job: mem_g\njob_type: c\ncommand: z\nmachine: m1\nbox_name: box10c\n"
+        "condition: v(GO10C) = 1\n"
+    )
+
+    def refusals(o: Oracle | EngineHarness) -> list[str]:
+        return [t.job for t in o.trace() if t.transition == "START_REFUSED"]
+
+    o = oracle(text)
+    # internal wake at the box-not-RUNNING gate: silent (edge-triggered
+    # re-evaluation is not an operator's start attempt)
+    o.feed(ev("SET_GLOBAL", 0, name="GO10C", value="1"))
+    assert refusals(o) == []
+
+    # gate 1, explicit: member of a non-RUNNING box
+    o.feed(ev("STARTJOB", 1, job="mem_r"))
+    assert transitions(o, "mem_r") == ["START_REFUSED"]  # recorded, not started
+    refused = [t for t in o.trace() if t.transition == "START_REFUSED"]
+    assert "FORCE_STARTJOB" in refused[0].cause and "SEM-10" in refused[0].cause
+
+    # gate 2, explicit: already ran in this box execution (mem_keep still
+    # RUNNING keeps the box open, so the box gate passes)
+    o.feed(ev("STARTJOB", 2, job="box10c"))
+    o.feed(ev("STATUS", 3, job="mem_r", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 4, job="mem_r"))
+    assert refusals(o) == ["mem_r", "mem_r"]
+    assert "already ran" in [t for t in o.trace() if t.transition == "START_REFUSED"][1].cause
+
+    # FORCE_STARTJOB bypasses both gates and records no refusal (SEM-23)
+    o.feed(ev("FORCE_STARTJOB", 5, job="mem_r"))
+    assert transitions(o, "mem_r")[-2:] == ["SUCCESS->STARTING", "STARTING->RUNNING"]
+    assert refusals(o) == ["mem_r", "mem_r"]
+
+
 # ------------------------------------------------------------------ 9. SEM-11 box fold
 
 
@@ -1958,7 +2002,11 @@ def test_dl50_machine_load_throttles_by_job_load_vs_max_load() -> None:
     o = oracle(text)
     for j in ("ml1", "ml2", "ml3"):
         o.feed(ev("STARTJOB", 0, job=j))
-    assert _statuses(o, "ml1", "ml2", "ml3") == {"ml1": "RUNNING", "ml2": "RUNNING", "ml3": "QUE_WAIT"}
+    assert _statuses(o, "ml1", "ml2", "ml3") == {
+        "ml1": "RUNNING",
+        "ml2": "RUNNING",
+        "ml3": "QUE_WAIT",
+    }
     o.feed(ev("STATUS", 1, job="ml1", status="SUCCESS"))
     assert o.store.job["ml3"].status == "RUNNING"
 
@@ -2138,10 +2186,12 @@ def test_sem20_scheduled_ice_never_arms_and_off_ice_condition_edge_does_not_star
 def test_sem32_box_member_tick_while_box_not_running_does_not_arm() -> None:
     """T10/T32 (SEM-10/31 double gate + Q3, DL-54): a scheduled box member's
     tick while its box is not yet RUNNING is a PINNED non-arming gate -- the
-    box-not-RUNNING check is reached and returns before the arm call, so the
-    tick leaves no trace at all. When the box later starts, the member does
-    not start from that dead tick (only a fresh tick or a latched arm would
-    let it in)."""
+    box-not-RUNNING check is reached and returns before the arm call. The
+    dead tick is VISIBLE as a START_REFUSED record (DL-64: the explicit
+    event path surfaces SEM-10 refusals; this is observability, not a
+    semantic change) but arms nothing. When the box later starts, the
+    member does not start from that dead tick (only a fresh tick or a
+    latched arm would let it in)."""
     text = (
         "insert_job: box_ng\njob_type: b\n\n"
         "insert_job: mem_ng\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_ng\n"
@@ -2149,10 +2199,10 @@ def test_sem32_box_member_tick_while_box_not_running_does_not_arm() -> None:
     )
     o = oracle(text)
     o.feed(ev("STARTJOB", 0, job="mem_ng"))
-    assert transitions(o, "mem_ng") == []
+    assert transitions(o, "mem_ng") == ["START_REFUSED"]  # recorded, nothing else
     assert not o.store.job["mem_ng"].armed
     o.feed(ev("STARTJOB", 1, job="box_ng"))
-    assert transitions(o, "mem_ng") == []
+    assert transitions(o, "mem_ng") == ["START_REFUSED"]  # the dead tick stays dead
     assert o.store.job["mem_ng"].status == "INACTIVE"
     assert o.store.job["box_ng"].status == "RUNNING"  # hung: sole member never ran
 

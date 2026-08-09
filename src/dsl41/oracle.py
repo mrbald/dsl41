@@ -481,7 +481,9 @@ class Oracle:
                 # SEM-34: the schedule tick arms the must_start deadline
                 # whether or not the start succeeds -- that is its point
                 self._arm_must_start(job)
-            self._attempt_start(job, force=force, scheduled=True, cause=f"{kind} event")
+            refused = self._attempt_start(job, force=force, scheduled=True, cause=f"{kind} event")
+            if refused is not None:
+                self._record(job, "START_REFUSED", f"{refused} ({kind})")
         elif kind == "SET_GLOBAL":
             name = ev.payload.get("name")
             value = ev.payload.get("value")
@@ -651,44 +653,59 @@ class Oracle:
 
     # --------------------------------------------------------------- job starting
 
-    def _attempt_start(self, job: str, *, force: bool, scheduled: bool, cause: str) -> None:
+    def _attempt_start(self, job: str, *, force: bool, scheduled: bool, cause: str) -> str | None:
+        """Returns a refusal reason for the SEM-10 gates, None otherwise.
+
+        Only the explicit-event dispatch path surfaces that reason as a
+        START_REFUSED trace record: internal callers (condition edges, box
+        starts, OFF_HOLD sweeps) probe members of non-running boxes on every
+        wake, where silence is correct -- but an operator's STARTJOB dying
+        without any visible acknowledgement proved untrainable (the vendor
+        is equally silent; the trace record is our one deliberate visibility
+        addition, DL-64)."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None:
-            return  # starting an undefined job is a no-op for the oracle
+            return None  # starting an undefined job is a no-op for the oracle
         rt = self._runtime(job)
         if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
-            return  # already starting/running, or queued for resources (DL-50);
+            return None  # already starting/running, or queued for resources (DL-50);
             # a tick on a live job does not arm (Q3 pin)
         if rt.on_ice:
-            return  # SEM-20: iced jobs never run (FORCE included -- DL-13);
+            return None  # SEM-20: iced jobs never run (FORCE included -- DL-13);
             # never arms: conditions must REOCCUR after OFF_ICE
         if rt.on_hold and not force:
             # SEM-21: held jobs do not start; a scheduled tick latches so the
             # missed run collapses to at most one on OFF_HOLD (Q3, DL-54)
             self._arm(job_ir, rt, scheduled, "blocked ON_HOLD")
-            return
+            return None
         if not force:
             if job_ir.schedule is not None and not scheduled and not rt.armed:
                 # SEM-30/31 (DL-13): a date_conditions job -- standalone OR
                 # box member (the L013 double gate) -- starts only on its
                 # script-injected schedule tick, or while a prior tick's arm
                 # is latched (Q3, DL-54) -- never on bare condition edges.
-                return
+                return None
             box = job_ir.box.box_name
             if box is not None:
                 if self._runtime(box).status != "RUNNING":
-                    return  # SEM-10: member needs its box RUNNING; member
-                    # ticks only count while the box runs -- no arm (Q3 pin)
+                    # SEM-10: member needs its box RUNNING; member ticks only
+                    # count while the box runs -- no arm (Q3 pin)
+                    return f"box {box!r} is not RUNNING -- rerun needs FORCE_STARTJOB (SEM-10)"
                 if job in self._box_ran.get(box, set()):
-                    return  # SEM-10: at most once per box execution
+                    # SEM-10: at most once per box execution
+                    return (
+                        f"already ran in this {box!r} execution -- "
+                        "rerun needs FORCE_STARTJOB (SEM-10)"
+                    )
             if job_ir.sem.condition is not None and not self._cond_true(job_ir.sem.condition, job):
                 # SEM-32 arm-and-wait (Q3 resolved, DL-58): the tick latches;
                 # condition edges may start the job later.
                 self._arm(job_ir, rt, scheduled, "condition false")
-                return
+                return None
         if not self._run_window_permits(job_ir, cause):
-            return
+            return None
         self._start(job, cause)
+        return None
 
     def _arm(self, job_ir: JobIR, rt: JobRuntime, scheduled: bool, why: str) -> None:
         """Q3 (DL-54, resolved by citation DL-58 -- the abandon switch is
@@ -846,7 +863,10 @@ class Oracle:
     def _can_admit(self, vector: list[tuple[str, int, str, str | None]]) -> bool:
         """True iff every bucket has room for its demand (gate and acquire share
         the same free>=units test; keys are guaranteed sized)."""
-        return all(self._bucket_used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
+        return all(
+            self._bucket_used.get(key, 0) + units <= self._bucket_cap[key]
+            for key, units, _, _ in vector
+        )
 
     def _acquire(self, job: str, vector: list[tuple[str, int, str, str | None]]) -> None:
         held: list[tuple[str, int, str]] = []
@@ -894,7 +914,9 @@ class Oracle:
             return
         self._in_wake = True
         try:
-            while any(self._readmit(job) in ("admitted", "cancelled") for job in self._sorted_waiters()):
+            while any(
+                self._readmit(job) in ("admitted", "cancelled") for job in self._sorted_waiters()
+            ):
                 pass  # queue changed; _sorted_waiters is re-read each scan
         finally:
             self._in_wake = False

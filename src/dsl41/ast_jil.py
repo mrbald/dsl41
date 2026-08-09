@@ -599,6 +599,16 @@ def render_preserve(jf: JilFile) -> str:
     return nl.join(out) + (nl if jf.final_newline else "")
 
 
+def render_statement(stmt: JilStatement) -> str:
+    """Preserve-render one statement as a standalone block: the statement's
+    own bytes (comments, layout trivia, date rows) minus the blank lines that
+    separated it from its neighbours. The ss10 `spec` query serves this --
+    operators read the block that was actually loaded, post-placeholder."""
+    solo = stmt.model_copy(update={"pre_blank_lines": []})
+    # lstrip: a leading comment carries its own pre_blank_lines trivia
+    return render_preserve(JilFile(statements=[solo], file=stmt.span.file)).lstrip("\n")
+
+
 #: Fixed canonical attribute order (ir-design ss2: "subcommand first, then a
 #: fixed key order, unknown keys alphabetically last"). The exact order within
 #: the known set is implementation-defined; keep it stable -- canonical output

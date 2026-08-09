@@ -495,7 +495,10 @@ with a JSON-lines protocol.
   ON_NOEXEC/OFF_NOEXEC, SET_GLOBAL, CHANGE_STATUS (inject STATUS).
 - **Queries**: `status [job]`, `trace [--since seq]`, `explain <job>` — the
   job's condition shown with per-atom truth over the current store (the
-  Cond IR makes this nearly free), and `plan` (acyclic estates only).
+  Cond IR makes this nearly free), `spec <job>` — the preserve-rendered
+  post-placeholder JIL block the engine loaded (DL-64; served from an
+  optional spec_texts map, jil:null when the embedder has no source), and
+  `plan` (acyclic estates only).
 - **subscribe** — stream journal records from a seq (the UI feed).
 
 Every control input is journaled like any other injected event
@@ -512,7 +515,10 @@ the engine. This split is forced, not stylistic. textual-serve spawns one
 app instance per browser session, so an in-process engine hands every
 viewer a private universe. Views: jobs table (status, run_number, pending
 timers/alarms), explain pane ("waiting on: s(A) ∧ ¬f(B)" with live truth),
-log tail (the §6 std files), event console (sendevent verbs).
+log tail (the §6 std files), event console (sendevent verbs), job-details
+popup (the `spec` block). The header clock is UTC — the engine's time
+basis, one time base on screen (DL-64). Pane geometry is keyboard-only:
+maximize toggle on the log tail plus fr-share nudges for both splits.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal.
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web

@@ -2153,3 +2153,28 @@
   packaged. Smoke coverage in tests/test_nightbank_example.py (lint
   zero-findings gate, full-night VirtualClock rehearsal to the SOD flip
   with operator actions as scripted events, QUE_WAIT/priority pins).
+- DL-64 operator-visibility batch from the first nightbank training night
+  (2026-08-09). Four decisions, one origin: a real operator ran the DL-63
+  sandbox and got silently confused. (1) SEM-10 STARTJOB refusals leave a
+  START_REFUSED trace record naming FORCE_STARTJOB — for the EXPLICIT
+  event only; internal condition-edge probes stay silent (they hit the
+  same gates constantly, and vendor parity stays: the event is accepted,
+  the start is declined — we record the decline, we do not error it).
+  (2) The TUI header clock renders UTC, matching the engine's naive-UTC
+  time basis (ss9): one time base on screen, never the viewer's local
+  wall; the FORCE_STARTJOB key (`f`) joins the visible footer — the
+  training night showed `s` visible + `f` hidden is exactly backwards.
+  (3) New read-only control verb `spec job` (+ `dsl41 query spec`):
+  serves the preserve-rendered post-placeholder JIL block the running
+  engine loaded (rendered at load from the parsed AST via
+  render_statement; ControlServer takes an optional spec_texts map, so
+  embedders without source text serve jil:null rather than refusing).
+  The TUI shows it as a job-details popup (`d`/Enter). (4) Pane geometry
+  stays keyboard-only: `m` maximize-toggles the log tail, `]`/`[` and
+  `}`/`{` nudge the two splits; no mouse splitters (value/effort, and
+  textual-serve keeps keyboard parity in the browser). Tests 1710 → 1716
+  (SEM-10c refusal records on both bisimulation paths, spec verb wire
+  shape, _spec_texts rendering, spec popup pilot, geometry pilot); the
+  SEM-32 dead-tick test now expects the tick's START_REFUSED record --
+  its "no trace at all" wording was a proxy for the pinned no-arm, which
+  stands unchanged.

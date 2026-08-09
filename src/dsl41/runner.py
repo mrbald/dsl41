@@ -3129,7 +3129,7 @@ class ControlServer:
     parity set (job verbs carry "job"; SET_GLOBAL carries "name"/"value";
     CHANGE_STATUS carries "job"/"status" and optional int "exit_code" --
     injected as STATUS, keeping overwrite parity). Queries: status [job],
-    trace [since], explain job, plan; and subscribe [since]. Job arguments
+    trace [since], explain job, spec job, plan; and subscribe [since]. Job arguments
     are validated against the catalog -- vendor sendevent errors on unknown
     jobs rather than queueing them.
 
@@ -3140,9 +3140,15 @@ class ControlServer:
     Queries read the oracle store directly: feed() never yields, so a
     handler task can never observe a half-applied event."""
 
-    def __init__(self, engine: Engine, path: Path) -> None:
+    def __init__(
+        self, engine: Engine, path: Path, *, spec_texts: Mapping[str, str] | None = None
+    ) -> None:
         self.engine = engine
         self.path = path
+        #: job -> preserve-rendered JIL block, post-placeholder (the `spec`
+        #: verb, DL-64): what THIS run actually loaded, not the template on
+        #: disk. Optional -- embedders without source text serve jil: null.
+        self.spec_texts: Mapping[str, str] = spec_texts or {}
         self._server: asyncio.Server | None = None
         self._conn_tasks: set[asyncio.Task[Any]] = set()
 
@@ -3249,6 +3255,8 @@ class ControlServer:
             return self._trace(request)
         if cmd == "explain":
             return self._explain(request)
+        if cmd == "spec":
+            return self._spec(request)
         if cmd == "plan":
             return self._plan()
         return {"ok": False, "error": f"unknown cmd {cmd!r}"}
@@ -3381,6 +3389,20 @@ class ControlServer:
                 {"atom": cond_to_source(atom), "true": oracle._cond_true(atom, job)}
                 for atom in iter_atoms(cond)
             ],
+        }
+
+    def _spec(self, request: dict[str, Any]) -> dict[str, Any]:
+        job = request.get("job")
+        if (error := self._check_job(job)) is not None:
+            return error
+        assert isinstance(job, str)
+        job_ir = self.engine.oracle.catalog.jobs[job]
+        return {
+            "ok": True,
+            "job": job,
+            "job_type": job_ir.job_type,
+            "box_name": job_ir.box.box_name,
+            "jil": self.spec_texts.get(job),  # null: server started without source texts
         }
 
     def _plan(self) -> dict[str, Any]:

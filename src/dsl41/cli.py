@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, cast
 
 import typer
 
-from dsl41.ast_jil import JilFile, JilParseError, parse, parse_file
+from dsl41.ast_jil import JilFile, JilParseError, parse, parse_file, render_statement
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
@@ -54,6 +54,14 @@ def _load_catalog_or_exit_2(
     permit_unknown: bool,
     properties: list[Path] | None = None,
 ) -> CatalogIR:
+    return _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)[0]
+
+
+def _load_catalog_and_ast_or_exit_2(
+    files: Iterable[Path],
+    permit_unknown: bool,
+    properties: list[Path] | None = None,
+) -> tuple[CatalogIR, list[JilFile]]:
     try:
         parsed: list[JilFile] = []
         if properties:
@@ -64,12 +72,25 @@ def _load_catalog_or_exit_2(
                 parsed.append(parse(resolved, file=str(path)))
         else:
             parsed = [parse_file(path) for path in files]
-        return lower_catalog(parsed, permit_unknown=permit_unknown)
+        return lower_catalog(parsed, permit_unknown=permit_unknown), parsed
     except (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
         # OSError/UnicodeDecodeError: unreadable input (missing file, directory,
         # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
+
+
+def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
+    """job -> preserve-rendered block for the ss10 `spec` verb: every
+    statement whose subject is a catalog job, concatenated in file order
+    (insert_job plus any later update_job/delete_job the estate carries)."""
+    texts: dict[str, str] = {}
+    for jf in parsed:
+        for stmt in jf.statements:
+            if stmt.subject in catalog.jobs:
+                block = render_statement(stmt)
+                texts[stmt.subject] = texts.get(stmt.subject, "") + block
+    return texts
 
 
 _PERMIT_UNKNOWN = typer.Option(
@@ -749,7 +770,7 @@ def run(
 
     if ui:
         _import_tui_or_exit_2()  # fail before the engine starts, not after
-    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    catalog, parsed = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     tz_aliases = _load_tz_aliases(timezone_map)
     warns = _preflight_or_exit(
         catalog,
@@ -765,7 +786,17 @@ def run(
     try:
         raise typer.Exit(
             asyncio.run(
-                _serve_run(catalog, run_root, resume, timezone, warns, ui, detached, tz_aliases)
+                _serve_run(
+                    catalog,
+                    run_root,
+                    resume,
+                    timezone,
+                    warns,
+                    ui,
+                    detached,
+                    tz_aliases,
+                    spec_texts=_spec_texts(parsed, catalog),
+                )
             )
         )
     except EngineError as exc:
@@ -795,6 +826,7 @@ async def _serve_run(
     ui: bool = False,
     detached: bool = False,
     tz_aliases: "dict[str, str] | None" = None,
+    spec_texts: "dict[str, str] | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -856,7 +888,7 @@ async def _serve_run(
         typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
     if warns and engine.journal is not None:
         engine.journal.preflight(warns)
-    server = ControlServer(engine, run_root / "control.sock")
+    server = ControlServer(engine, run_root / "control.sock", spec_texts=spec_texts)
     try:
         await server.start()
     except EngineError as exc:
@@ -1160,9 +1192,9 @@ def serve(
 
 @app.command()
 def query(
-    what: str = typer.Argument(..., help="status|trace|explain|plan|subscribe"),
+    what: str = typer.Argument(..., help="status|trace|explain|spec|plan|subscribe"),
     socket_path: Path = _SOCKET_OPT,
-    job: str = typer.Option(None, "--job", "-J", help="status: filter; explain: the job."),
+    job: str = typer.Option(None, "--job", "-J", help="status: filter; explain/spec: the job."),
     since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
 ) -> None:
     """Read-only control-plane queries (runner-design ss10); `subscribe`
@@ -1172,8 +1204,8 @@ def query(
     import socket as socket_mod
 
     verb = what.lower()
-    if verb not in ("status", "trace", "explain", "plan", "subscribe"):
-        typer.echo(f"unknown query {what!r} (status|trace|explain|plan|subscribe)", err=True)
+    if verb not in ("status", "trace", "explain", "spec", "plan", "subscribe"):
+        typer.echo(f"unknown query {what!r} (status|trace|explain|spec|plan|subscribe)", err=True)
         raise typer.Exit(2)
     request: dict = {"cmd": verb}
     if job is not None:

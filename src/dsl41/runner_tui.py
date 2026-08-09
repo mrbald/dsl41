@@ -41,6 +41,14 @@ Normative detail for DL-46, within DL-41's frame:
   the selected job. Every request and its response is echoed to the
   console; refusals render red and change nothing -- the server already
   validates against the catalog (vendor parity), the TUI never pre-judges.
+- JOB DETAILS POPUP (`d` / Enter on a row): the ss10 `spec` verb's
+  preserve-rendered JIL block -- the post-placeholder source THIS engine
+  loaded -- topped with the status facts. HEADER CLOCK is UTC, matching
+  the engine's naive-UTC time basis (ss9): every timestamp on screen is
+  one time base, deliberately not the viewer's local wall (DL-64).
+- PANE GEOMETRY, keyboard only: `m` toggles maximizing the log tail
+  (escape also restores); `]`/`[` grow/shrink the log against explain,
+  `}`/`{` the jobs table against the side column. No mouse splitters.
 - ONE REQUEST CONNECTION, lock-serialized (the server answers one line per
   line); `subscribe` owns its own connection until hangup (ss10). A dead
   socket flips the header subtitle to "disconnected", is reported once to
@@ -61,18 +69,25 @@ import asyncio
 import contextlib
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 try:
     from rich.text import Text
     from textual import on
-    from textual.app import App, ComposeResult
+    from textual.app import App, ComposeResult, RenderResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.coordinate import Coordinate
     from textual.css.query import NoMatches
+    from textual.screen import ModalScreen
     from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+
+    # private textual module, deliberately: the Header composes its clock
+    # internally with no timezone hook, and these names are stable across
+    # the pinned textual>=8 family (DL-46). Revisit at any floor bump.
+    from textual.widgets._header import HeaderClock, HeaderIcon, HeaderTitle
 except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guard
     raise ModuleNotFoundError(
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
@@ -91,6 +106,58 @@ _STATUS_STYLE = {
 }
 _TAIL_SEED_BYTES = 8192  # start a fresh tail this close to EOF
 _COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
+
+
+class _UTCHeaderClock(HeaderClock):
+    """The engine's time basis is naive UTC (runner ss9); every timestamp
+    this app renders -- status_at, trace, timers -- is UTC. The stock header
+    clock renders LOCAL wall time, which reads as a constant skew against
+    every other number on screen; this one matches the data (DL-64)."""
+
+    def render(self) -> RenderResult:
+        return Text(datetime.now(UTC).strftime("%H:%M:%S") + " UTC")
+
+
+class _UTCHeader(Header):
+    """Stock Header with the clock swapped for the UTC one (always shown)."""
+
+    def compose(self) -> ComposeResult:
+        yield HeaderIcon().data_bind(Header.icon)
+        yield HeaderTitle()
+        yield _UTCHeaderClock()
+
+
+class SpecScreen(ModalScreen[None]):
+    """Job-details popup: runtime facts + the `spec` verb's JIL block --
+    the post-placeholder source the RUNNING engine loaded, not whatever
+    the file on disk says now. Escape/enter/d closes."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "close"),
+        Binding("enter", "dismiss", "close", show=False),
+        Binding("d", "dismiss", "close", show=False),
+    ]
+    CSS = """
+    SpecScreen { align: center middle; }
+    #specbox {
+        width: 90%; max-width: 110; height: 80%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    """
+
+    def __init__(self, title: str, body: Text) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="specbox"):
+            yield Static(self._body)
+
+    def on_mount(self) -> None:
+        box = self.query_one("#specbox")
+        box.border_title = self._title
+        box.focus()
 
 
 class ControlClientError(RuntimeError):
@@ -270,7 +337,9 @@ class RunnerApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "quit"),
         Binding("s", "send('STARTJOB')", "start"),
-        Binding("f", "send('FORCE_STARTJOB')", "force", show=False),
+        # visible: FORCE is the rerun verb -- plain STARTJOB is SEM-10-gated
+        # on box members and its refusal used to be silent (DL-64)
+        Binding("f", "send('FORCE_STARTJOB')", "force"),
         Binding("k", "send('KILLJOB')", "kill"),
         Binding("i", "send('ON_ICE')", "ice", show=False),
         Binding("I", "send('OFF_ICE')", "off-ice", show=False),
@@ -278,9 +347,18 @@ class RunnerApp(App[None]):
         Binding("H", "send('OFF_HOLD')", "off-hold", show=False),
         Binding("n", "send('ON_NOEXEC')", "noexec", show=False),
         Binding("N", "send('OFF_NOEXEC')", "off-noexec", show=False),
+        Binding("d", "details", "details"),
+        Binding("m", "maximize_log", "zoom log"),
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
         Binding("slash", "focus_console", "console"),
+        # pane sizing (no mouse splitters in a keyboard-first TUI):
+        # ]/[ grow/shrink the log tail against explain; }/{ the jobs table
+        # against the whole side column
+        Binding("]", "resize('log', 1)", "log+", show=False),
+        Binding("[", "resize('log', -1)", "log-", show=False),
+        Binding("}", "resize('table', 1)", "table+", show=False),
+        Binding("{", "resize('table', -1)", "table-", show=False),
     ]
 
     def __init__(self, socket_path: Path) -> None:
@@ -296,6 +374,9 @@ class RunnerApp(App[None]):
         self._tail_stream: int = 0  # 0 = out, 1 = err
         self._tail_path: str | None = None
         self._tail_pos: int | None = None
+        # pane shares, resized by ]/[ and }/{ -- fr weights out of _SHARE_TOTAL
+        self._log_share = 3  # log vs explain (CSS default 3fr : 2fr)
+        self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
@@ -303,7 +384,7 @@ class RunnerApp(App[None]):
     # ------------------------------------------------------------- layout
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield _UTCHeader()
         with Horizontal(id="main"):
             yield DataTable(id="jobs")
             with Vertical(id="side"):
@@ -405,7 +486,14 @@ class RunnerApp(App[None]):
                 self._alarms[job] = self._alarms.get(job, 0) + 1
             at = str(entry.get("at", ""))
             clock = at[11:19] if len(at) >= 19 else at
-            style = "bold red" if transition in _ALARM_TRANSITIONS else "dim"
+            if transition in _ALARM_TRANSITIONS:
+                style = "bold red"
+            elif transition == "START_REFUSED":
+                # DL-64: a refused operator start must not blend into the
+                # dim commentary -- it IS the answer to "why did nothing happen"
+                style = "yellow"
+            else:
+                style = "dim"
             console.write(
                 Text(f"{clock} {job} {transition} [{entry.get('cause', '')}]", style=style)
             )
@@ -556,6 +644,77 @@ class RunnerApp(App[None]):
         self._selected = selected
         self.run_worker(self._update_explain(), group="explain", exclusive=True)
         self._tail_step()
+
+    @on(DataTable.RowSelected, "#jobs")
+    def _on_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key is not None and event.row_key.value is not None:
+            self._selected = str(event.row_key.value)
+        self.action_details()
+
+    def action_details(self) -> None:
+        if self._selected is not None:
+            self.run_worker(self._show_details(self._selected), group="details", exclusive=True)
+
+    async def _show_details(self, job: str) -> None:
+        """The spec popup: runtime facts from `status`, source from `spec`."""
+        try:
+            spec = await self._client.request({"cmd": "spec", "job": job})
+            status = await self._client.request({"cmd": "status", "job": job})
+        except ControlClientError as exc:
+            self._set_connected(False, str(exc))
+            return
+        self._set_connected(True)
+        body = Text()
+        row = status.get("jobs", {}).get(job, {}) if status.get("ok") else {}
+        if row:
+            state = str(row.get("status", ""))
+            body.append(state, style=_STATUS_STYLE.get(state, "bold"))
+            exit_code = row.get("exit_code")
+            body.append(
+                f"  run {row.get('run_number', 0)}"
+                f"  exit {'-' if exit_code is None else exit_code}"
+                f"  at {row.get('status_at') or '-'} UTC\n"
+            )
+            for label, key in (("log out", "log_out"), ("log err", "log_err")):
+                if row.get(key):
+                    body.append(f"{label}: {row[key]}\n", style="dim")
+            body.append("\n")
+        if not spec.get("ok"):
+            body.append(str(spec.get("error", "spec failed")), style="red")
+        elif spec.get("jil"):
+            body.append(str(spec["jil"]))
+        else:
+            body.append("no source text served by this engine", style="dim")
+        self.push_screen(SpecScreen(job, body))
+
+    # ------------------------------------------------------- pane geometry
+
+    _SHARE_TOTAL = 5  # both splits are X fr : (5 - X) fr
+
+    def action_maximize_log(self) -> None:
+        log = self.query_one("#logtail", RichLog)
+        if self.screen.maximized is log:
+            self.screen.minimize()
+            self.query_one("#jobs", DataTable).focus()
+        else:
+            self.screen.maximize(log)
+            # focus the log EXPLICITLY: textual otherwise lands focus on the
+            # console Input, which consumes every letter key as text -- the
+            # restore keystroke included
+            log.focus()
+
+    def action_resize(self, pane: str, delta: int) -> None:
+        span = range(1, self._SHARE_TOTAL)  # 1..4: neither side collapses
+        if pane == "log":
+            self._log_share = min(max(self._log_share + delta, span.start), span[-1])
+            self.query_one("#logtail", RichLog).styles.height = f"{self._log_share}fr"
+            self.query_one(
+                "#explain-box"
+            ).styles.height = f"{self._SHARE_TOTAL - self._log_share}fr"
+        else:
+            self._table_share = min(max(self._table_share + delta, span.start), span[-1])
+            self.query_one("#jobs", DataTable).styles.width = f"{self._table_share}fr"
+            self.query_one("#side").styles.width = f"{self._SHARE_TOTAL - self._table_share}fr"
 
     def action_send(self, verb: str) -> None:
         request = parse_console_command(verb, self._selected)
