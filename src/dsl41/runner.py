@@ -399,6 +399,7 @@ class Journal:
     def __init__(self, path: Path | str, *, fsync_each: bool, start_seq: int = 0) -> None:
         self.path = Path(path)
         self._f = self.path.open("ab")
+        os.chmod(self.path, 0o600)  # sol #3: the WAL carries globals + every input
         self._fsync_each = fsync_each
         self.seq = start_seq
         #: live feeds for ss10 subscribe: every appended record is fanned out
@@ -2218,6 +2219,9 @@ def start_run(
             f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
         )
     run_root.mkdir(parents=True, exist_ok=True)
+    # sol #3: the run root holds the journal (global values, every control
+    # input), job output, and data -- owner-only, loudly, not umask-hopefully
+    os.chmod(run_root, 0o700)
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     journal = Journal.create(
@@ -2280,6 +2284,7 @@ async def resume_run(
             f"journal is from the future ({last_at.isoformat()} > now): the machine"
             " clock moved backwards; refusing to feed non-decreasing time backwards"
         )
+    os.chmod(run_root, 0o700)  # sol #3: tighten pre-existing looser roots on resume
     journal = Journal(
         run_root / "journal.jsonl",
         fsync_each=not clock.virtual,
@@ -3446,15 +3451,24 @@ class ControlServer:
             return {"ok": True, "job": job, "condition": None, "satisfied": True, "atoms": []}
         # oracle._cond_true is package-private on purpose: explain must use
         # the ORACLE's truth (ice bypass, lookback, instances), never a copy
+        atoms: list[dict[str, Any]] = []
+        for atom in iter_atoms(cond):
+            entry: dict[str, Any] = {
+                "atom": cond_to_source(atom),
+                "true": oracle._cond_true(atom, job),
+            }
+            if isinstance(atom, GlobalAtom):
+                # DL-66 (review): atom truth alone hides WHY -- serve the
+                # effective global value (null = never set); there is no
+                # standalone show-globals verb, explain is the read path
+                entry["actual"] = oracle.store.globals_.get(atom.name)
+            atoms.append(entry)
         return {
             "ok": True,
             "job": job,
             "condition": cond_to_source(cond),
             "satisfied": oracle._cond_true(cond, job),
-            "atoms": [
-                {"atom": cond_to_source(atom), "true": oracle._cond_true(atom, job)}
-                for atom in iter_atoms(cond)
-            ],
+            "atoms": atoms,
         }
 
     def _spec(self, request: dict[str, Any]) -> dict[str, Any]:

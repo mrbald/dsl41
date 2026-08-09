@@ -75,17 +75,39 @@ def produce_file(root: Path, rel: str, job: str) -> None:
 
 
 def do_flip(root: Path, job: str) -> None:
-    """The transactional new-day activation: pending/ becomes current/."""
+    """The new-day activation: pending/ becomes current/. Two recovery
+    properties an operator can rely on:
+
+    - IDEMPOTENT rerun: an empty pending/ beside a populated current/ means
+      the flip already happened -- the JIL chains this step with the
+      SOD_DATE publish, so an engine-down window between the two makes the
+      whole command rerun, and rerunning must never rotate the fresh day
+      into previous/.
+    - destruction LAST: every step before the final rmtree is a rename, so
+      a crash mid-flip loses no directory -- worst case leaves previous.old/
+      for the next run's cleanup.
+    """
     pending, current, previous = root / "pending", root / "current", root / "previous"
+    doomed = root / "previous.old"
     if not pending.is_dir():
         log(job, f"NOTHING TO FLIP: {pending} missing")
         raise typer.Exit(4)
+    if not any(pending.iterdir()):
+        if current.is_dir() and any(current.iterdir()):
+            log(job, "already flipped (pending/ empty, current/ populated) -- no-op rerun")
+            return
+        log(job, "NOTHING TO FLIP: pending/ is empty and current/ is not populated")
+        raise typer.Exit(4)
+    if doomed.exists():
+        shutil.rmtree(doomed)  # a prior flip crashed after its renames: finish its cleanup
     if previous.exists():
-        shutil.rmtree(previous)
+        previous.rename(doomed)
     if current.exists():
         current.rename(previous)
     pending.rename(current)
     pending.mkdir()
+    if doomed.exists():
+        shutil.rmtree(doomed)  # the only destructive step, deliberately last
     log(job, "flipped pending/ -> current/ (previous day kept in previous/)")
 
 

@@ -122,5 +122,63 @@ def test_bank_estate_regenerates_byte_stable(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     generated = sorted(p.name for p in tmp_path.glob("*.jil"))
     assert generated == sorted(Path(p).name for p in BANK)
-    for name in generated:
+    for name in [*generated, "incidents.conf"]:  # incidents ship with the estate
         assert (tmp_path / name).read_text() == (NB / "estate" / "bank" / name).read_text(), name
+
+
+def _load_estate(estate: str, props_file: Path):
+    from dsl41.ast_jil import parse
+    from dsl41.ir import lower_catalog
+    from dsl41.placeholders import load_properties, substitute
+
+    bindings = load_properties([props_file])
+    parsed = []
+    for path in sorted((NB / "estate" / estate).glob("*.jil")):
+        resolved, _ = substitute(path.read_text(), bindings, file=str(path))
+        parsed.append(parse(resolved, file=str(path)))
+    return lower_catalog(parsed, permit_unknown=False)
+
+
+@pytest.mark.parametrize("estate", ["small", "bank"])
+def test_incident_targets_exist_in_their_estate(estate: str, props_file: Path) -> None:
+    """Every job an estate's incidents.conf scripts must exist in THAT
+    estate's catalog (review: bank marks/trades incidents silently targeted
+    small-estate names that are per-asset-class there)."""
+    catalog = _load_estate(estate, props_file)
+    conf = NB / "estate" / estate / "incidents.conf"
+    targets = [
+        line.split()[0]
+        for line in conf.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert targets, "incidents.conf must script something"
+    missing = [t for t in targets if t not in catalog.jobs]
+    assert not missing, f"incident targets not in the {estate} estate: {missing}"
+
+
+def test_runbook_job_names_exist_in_an_estate(props_file: Path) -> None:
+    """The RUNBOOK is a contract: every estate job it names must exist in
+    the small or bank catalog (review: two exercises referenced plays that
+    could not run as written)."""
+    import re
+
+    text = (NB / "RUNBOOK.md").read_text()
+    names = set(re.findall(r"\b(?:APAC|EMEA|AMER|GLOBAL|SOD|OPS)_[A-Z0-9_]*_(?:B|C|F)\b", text))
+    assert len(names) > 15  # the extraction itself must keep working
+    small = _load_estate("small", props_file).jobs
+    bank = _load_estate("bank", props_file).jobs
+    missing = sorted(n for n in names if n not in small and n not in bank)
+    assert not missing, f"RUNBOOK names not in any estate: {missing}"
+
+
+def test_readme_pipeline_claims_hold(props_file: Path) -> None:
+    """README: viz/report/uc also accept the estate (lint + rehearse are
+    pinned above). Claims are CI-substantiated, not asserted (review)."""
+    report = _cli("report", *SMALL, "-p", str(props_file))
+    assert report.returncode == 0, report.stdout + report.stderr
+    viz = _cli("viz", "--whole-graph", *SMALL, "-p", str(props_file))
+    assert viz.returncode == 0, viz.stdout + viz.stderr
+    assert "flowchart" in viz.stdout  # --whole-graph emits the bare chart
+    uc = _cli("uc", *SMALL, "-p", str(props_file))
+    assert uc.returncode == 0, uc.stdout + uc.stderr
+    json.loads(uc.stdout)  # a bundle, not a traceback

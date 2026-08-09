@@ -56,7 +56,7 @@ Goal: read the estate the way an operator does.
 ## 2. The query surface
 
 ```sh
-dsl41 query status --socket $S              # every job, one line each
+dsl41 query status --socket $S --brief      # every job, one line each
 dsl41 query status --socket $S --job EMEA_MKT_MARKS_C
 dsl41 query trace  --socket $S | tail -20   # the transition log
 dsl41 query explain --socket $S --job SOD_B # per-atom condition truth
@@ -140,9 +140,15 @@ ON_HOLD every time its box starts.
 1. When preflight is green, check what the box waited for:
    `dsl41 query explain --socket $S --job SOD_B` — all v(RECON_*) CLEAN.
 2. Release: `dsl41 sendevent OFF_HOLD -J SOD_APPROVE_C --socket $S`.
-3. Watch `SOD_FLIP_C` swap `data/pending/` → `data/current/` (the
-   transactional new-day activation) and publish `SOD_DATE`;
-   `SOD_WARMUP_C` proves it by reading from `current/`.
+3. Watch `SOD_FLIP_C` swap `data/pending/` → `data/current/` (the new-day
+   activation) and publish `SOD_DATE`; `SOD_WARMUP_C` proves it by
+   reading from `current/`.
+
+The flip is safe to RERUN: an empty `pending/` beside a populated
+`current/` is recognized as already-flipped (idempotent no-op), so a
+FORCE_STARTJOB after an engine outage between the flip and the
+`SOD_DATE` publish cannot rotate the fresh day away. Destructive cleanup
+happens last — a crash mid-flip loses no directory.
 
 ## 8. Resource contention and QUE_WAIT
 
@@ -171,7 +177,8 @@ dsl41 sendevent SET_GLOBAL --global RECON_EMEA=CLEAN --socket $S
 ```
 
 There is no "show globals" query verb: `explain` on a consumer is how you
-read a global's effective truth. (SET_GLOBAL events are edge-triggered —
+read a global — each `v()` atom line carries its effective value
+(`= 'WAIVED'`, or `(unset)`). (SET_GLOBAL events are edge-triggered —
 setting a global wakes exactly the jobs whose conditions reference it.)
 
 ## 10. Restart drills
@@ -208,6 +215,11 @@ still the truth. The operator flow is cold:
    refuses re-baselining; the old night's journal stays intact as the
    record of what happened).
 
+Every run root is self-contained: `<run>/engine/manifest/` holds the
+post-placeholder JIL this run actually loaded plus `manifest.json`
+(tool version, catalog hash, input hashes, launch options) — the audit
+artifact outlives the estate files it was launched from.
+
 Try it: after a night completes, change `EMEA_ACC_CASH_C`'s sleep and
 start a new night. The point of the hash gate: a journal only replays
 against the estate that wrote it.
@@ -217,7 +229,10 @@ against the estate that wrote it.
 - `OPS_LEGACY_REPORT_C` is born ON_ICE (`status: ON_ICE` in JIL). Its
   upstream succeeds, it never runs — and any status atom naming an iced
   job evaluates TRUE, so nothing downstream would wait for it. Revive:
-  `dsl41 sendevent OFF_ICE -J OPS_LEGACY_REPORT_C --socket $S`.
+  `dsl41 sendevent OFF_ICE -J OPS_LEGACY_REPORT_C --socket $S` — and note
+  it STILL does not run: OFF_ICE does not re-evaluate, the condition must
+  REOCCUR (SEM-20). Either retrigger its upstream or
+  `FORCE_STARTJOB` it; watch `explain` before and after.
 - `ON_HOLD`/`OFF_HOLD`: park a healthy job before it starts (try it on
   `OPS_ARCHIVE_C` early).
 - `ON_NOEXEC`: the job "runs" without spawning anything (status flows,
@@ -240,7 +255,13 @@ against the estate that wrote it.
 ## Bank scale
 
 `nightbank up --estate bank` runs the ~520-job profile (same topology,
-8 asset classes × 8 shards, per-region valuation grids). Same incidents
-(plus per-asset-class variants), same runbook — but now the TUI earns its
-keep. Regenerate with different knobs: `uv run python generate.py
---asset-classes 4 --shards 6`.
+8 asset classes × 8 shards, per-region valuation grids) — now the TUI's
+tree, filter, and views earn their keep. Each estate ships its OWN
+`incidents.conf` (the launcher copies the one next to the estate): the
+bank names are per-asset-class, so the marks hang lands on
+`EMEA_MKT_EQ_MARKS_C` and the recon breaks on `APAC_REC_EQ_TRADES_C`
+(custody no-show and FX fail_once keep their small-estate names). The
+contention exercise is 8 shards per asset class (`job_load: 40`,
+shard 8 low priority) instead of 4. Everything else in this runbook
+applies unchanged. Regenerate with different knobs:
+`uv run python generate.py --asset-classes 4 --shards 6`.

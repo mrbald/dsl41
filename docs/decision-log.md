@@ -2223,3 +2223,38 @@
   (hashes the loaded bytes, inside the exit-2 guard), flat views wore
   stale fold decoration, }/{ resized the wrong node after the layout
   change. Tests 1716 -> 1731.
+- DL-66 recovery, artifact, and truthfulness hardening (2026-08-09). An
+  independent adversarial review of the DL-63/64 state (8 findings)
+  drove one batch; every High/Major addressed, two defers recorded.
+  (1) The nightbank SOD flip is IDEMPOTENT under rerun (empty pending/
+  beside populated current/ = already-flipped no-op) and destroys last
+  (every pre-rmtree step is a rename; a crashed flip leaves
+  previous.old/ for the next run's cleanup) — an engine-down window
+  between the flip and the SOD_DATE publish reruns the whole JIL chain,
+  and rerunning must not rotate the fresh day away. (2) Run roots are
+  self-contained artifacts: manifest/ holds the post-placeholder JIL
+  (render_preserve, byte-exact) + manifest.json (version, catalog hash,
+  input sha256s, original paths, launch options), written before
+  baselining, never repainted onto a used root. DEFER: catalog-hash
+  relocation-independence (SourceSpan.file is hashed; changing that
+  orphans every existing journal's resume gate — own migration unit).
+  (3) Secure defaults: run roots 0700 (tightened at resume too),
+  journal/spool/std files 0600; the nightbank launcher matches
+  (0700 run tree, 0600 properties/profile). (4) Each estate ships its
+  OWN incidents.conf (bank targets are per-asset-class; generate.py
+  emits it; the launcher copies from the estate dir); bank gains
+  OPS_XINST_DEMO_C (519 jobs); the runbook's bank section states the
+  real mapping instead of "same incidents". (5) nightbank drop-file
+  resolves the ONE live night by socket probe (ambiguity refuses and
+  lists; "latest directory" is not "the live night") and refuses paths
+  escaping data/; README deletion advice now says stop the night first.
+  (6) Runbook truth: OFF_ICE does not re-run the iced job (SEM-20
+  reoccurrence documented; retrigger or FORCE); the xinst play works
+  since DL-65's CHANGE_STATUS fix. (7) query status --brief (one line
+  per job) + explain global atoms carry the effective value (actual;
+  null = unset) in CLI and TUI. DEFER: full table/NDJSON output modes
+  and trace windowing — the analyze unit's territory. (8) Claims are
+  CI-substantiated: incident targets exist in their estate (both
+  profiles), RUNBOOK job names exist in a catalog (regex contract),
+  README's viz/report/uc acceptance runs in CI; the bank byte-stable
+  pin now covers incidents.conf. Tests 1731 -> 1735.

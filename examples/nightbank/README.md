@@ -40,10 +40,15 @@ drills). The default night does not complete without you.
   and execs `dsl41 run`. Also `props` and `drop-file` subcommands.
 - `bin/fakework` — the only worker any job runs; consumes/produces marker
   files under the run's `data/` and applies `incidents.conf` behaviors.
-- `incidents.conf` — the default night's scripted failures.
+- `estate/<profile>/incidents.conf` — each estate's scripted failures
+  (bank targets are per-asset-class names that only exist there).
 
 Each night is one directory under `runs/` (data, logs, properties, WAL
-journal, control socket) — delete freely.
+journal, manifest, control socket). Delete old ones freely — but stop
+the night first (Ctrl-C, and for `--detached` runs drain the supervisor:
+`dsl41 supervise shutdown --run-root <run>/engine`); deleting a LIVE
+run pulls the socket, journal, and supervisor state out from under
+running processes.
 
 ## Notes
 

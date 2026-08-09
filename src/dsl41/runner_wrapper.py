@@ -104,7 +104,7 @@ def durable_write(path: str, data: bytes) -> None:
     rename, fsync(directory). Requires a local filesystem."""
     directory = os.path.dirname(path) or "."
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # sol #3: owner-only
     try:
         os.write(fd, data)
         os.fsync(fd)
@@ -344,11 +344,16 @@ def main() -> int:
         json.dumps({**identity, "boot_id": boot_id}, sort_keys=True).encode("utf-8")
     ).decode("ascii")
 
+    def _open_append_0600(path: str):
+        # vendor APPENDS; 0600 at create (job output may carry anything the
+        # command prints -- owner-only by default, sol #3)
+        return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+
     _test_pause("pre_spawn")
     try:
         with (
-            open(spec["stdout_path"], "ab") as stdout_f,  # vendor APPENDS
-            open(spec["stderr_path"], "ab") as stderr_f,
+            _open_append_0600(spec["stdout_path"]) as stdout_f,
+            _open_append_0600(spec["stderr_path"]) as stderr_f,
             open(spec.get("stdin_path") or os.devnull, "rb") as stdin_f,
         ):
             child = subprocess.Popen(

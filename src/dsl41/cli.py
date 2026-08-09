@@ -89,6 +89,58 @@ def _load_catalog_and_ast_or_exit_2(
         raise typer.Exit(2) from exc
 
 
+def _write_manifest(
+    run_root: Path,
+    parsed: "list[JilFile]",
+    catalog: CatalogIR,
+    fingerprint: "dict[str, str]",
+    options: "dict[str, object]",
+) -> None:
+    """DL-66 (review finding: old runs were not self-contained artifacts).
+    manifest/ preserves the POST-PLACEHOLDER source this run loaded
+    (render_preserve is byte-exact, F1) plus manifest.json: tool version,
+    catalog hash, sha256 of every input, original paths, launch options.
+    The manifest sources are valid JIL needing no -p; the catalog hash
+    covers SourceSpan.file, so byte-exact resume/replay against them also
+    needs the original paths recorded here (relocation-independent hashing
+    is a DELIBERATE defer -- changing the hash orphans every existing
+    journal's resume gate; it needs its own versioned migration)."""
+    import json as json_mod
+    import os
+    from datetime import UTC, datetime
+
+    from dsl41.ast_jil import render_preserve
+    from dsl41.runner import _dsl41_version, catalog_hash
+
+    manifest_dir = run_root / "manifest"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(manifest_dir, 0o700)
+    sources: list[dict[str, str]] = []
+    used: set[str] = set()
+    for jf in parsed:
+        base = Path(jf.file).name or "estate.jil"
+        name, n = base, 1
+        while name in used:
+            n += 1
+            name = f"{n:02d}-{base}"
+        used.add(name)
+        (manifest_dir / name).write_text(render_preserve(jf))
+        os.chmod(manifest_dir / name, 0o600)
+        sources.append({"file": name, "original_path": jf.file})
+    payload = {
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "dsl41_version": _dsl41_version(),
+        "catalog_hash": catalog_hash(catalog),
+        "inputs_sha256": fingerprint,
+        "sources": sources,
+        "options": options,
+    }
+    (manifest_dir / "manifest.json").write_text(
+        json_mod.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    os.chmod(manifest_dir / "manifest.json", 0o600)
+
+
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
     """job -> preserve-rendered block for the ss10 `spec` verb: every
     statement whose subject is a catalog job, concatenated in file order
@@ -794,6 +846,24 @@ def run(
     _check_base_tz(timezone, tz_aliases)
     from dsl41.runner import EngineError
 
+    if not resume and not (run_root / "journal.jsonl").exists():
+        # a used run root is start_run's refusal to make -- never repaint
+        # its manifest on the way to that refusal
+        _write_manifest(
+            run_root,
+            parsed,
+            catalog,
+            fingerprint,
+            {
+                "files": [str(f) for f in files],
+                "properties": [str(p) for p in (properties or [])],
+                "run_root": str(run_root),
+                "detached": detached,
+                "machine_policy": machine_policy,
+                "as_machine": list(as_machine),
+                "timezone": timezone,
+            },
+        )
     try:
         raise typer.Exit(
             asyncio.run(
@@ -1218,6 +1288,12 @@ def query(
         None, "--job", "-J", help="status: filter; explain/spec/deps/is-*: the job."
     ),
     since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
+    brief: bool = typer.Option(
+        False,
+        "--brief",
+        help="status: one line per job (name, status, at, run, exit, flags)"
+        " instead of the JSON document -- the estate-scale skim (DL-66).",
+    ),
 ) -> None:
     """Read-only control-plane queries (runner-design ss10); `subscribe`
     streams journal records as JSON lines until interrupted. The headless
@@ -1245,6 +1321,9 @@ def query(
         current = response["jobs"][job]["status"]
         typer.echo(current)
         raise typer.Exit(0 if current in predicates[verb] else 1)
+    if brief and verb != "status":
+        typer.echo("--brief applies to status only", err=True)
+        raise typer.Exit(2)
     request: dict = {"cmd": verb}
     if job is not None:
         request["job"] = job
@@ -1252,6 +1331,24 @@ def query(
         request["since"] = since
     if verb != "subscribe":
         response = _control_roundtrip(socket_path, request)
+        if brief and response.get("ok"):
+            for name in sorted(response.get("jobs", {})):
+                row = response["jobs"][name]
+                flags = "".join(
+                    mark
+                    for mark, key in (("I", "on_ice"), ("H", "on_hold"), ("N", "on_noexec"))
+                    if row.get(key)
+                )
+                exit_code = row.get("exit_code")
+                typer.echo(
+                    f"{name:<44} {row.get('status', ''):<10}"
+                    f" {(row.get('status_at') or '-'):<26}"
+                    f" run {row.get('run_number', 0):<4}"
+                    f" exit {'-' if exit_code is None else exit_code:<4} {flags}".rstrip()
+                )
+            if response.get("spec_drift"):
+                typer.echo("SPEC DRIFT: estate files changed on disk", err=True)
+            raise typer.Exit(0)
         typer.echo(json_mod.dumps(response, indent=2, sort_keys=True))
         raise typer.Exit(0 if response.get("ok") else 2)
     try:

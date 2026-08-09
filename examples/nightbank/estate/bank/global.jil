@@ -145,3 +145,13 @@ profile: ~{$NB_PROFILE}~
 std_out_file: ~{$NB_LOGS}~/OPS_LEGACY_REPORT_C.out
 std_err_file: ~{$NB_LOGS}~/OPS_LEGACY_REPORT_C.err
 status: ON_ICE
+
+insert_job: OPS_XINST_DEMO_C
+job_type: c
+condition: s(GROUP_TREASURY_EOD^PRD, 9999)
+command: fakework OPS_XINST_DEMO_C --sleep 13
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.err

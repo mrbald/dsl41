@@ -779,7 +779,11 @@ class RunnerApp(App[None]):
         for atom in response.get("atoms", []):
             true = bool(atom.get("true"))
             text.append("  ✔ " if true else "  ✘ ", style="green" if true else "red")
-            text.append(f"{atom.get('atom', '')}\n", style="" if true else "bold")
+            text.append(f"{atom.get('atom', '')}", style="" if true else "bold")
+            if "actual" in atom:  # global atoms carry the effective value (DL-66)
+                actual = atom["actual"]
+                text.append(f"   = {actual!r}" if actual is not None else "   (unset)", style="dim")
+            text.append("\n")
         pane.update(text)
 
     # -------------------------------------------------------- change feed

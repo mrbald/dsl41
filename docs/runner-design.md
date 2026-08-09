@@ -363,6 +363,21 @@ inputs and advances through a fresh Oracle to reconstruct the full trace.
 One source of truth, no divergence possible. Write-ahead discipline: fsync
 per record before `feed()`/`advance()` in run mode, batched in rehearse.
 
+**Self-contained artifact** (DL-66): `dsl41 run` writes `manifest/` into
+the run root before baselining — the post-placeholder JIL the run loaded
+(byte-exact, F1) plus `manifest.json` (tool version, catalog hash, sha256
+of every input, original paths, launch options). The run root outlives
+the estate files it was launched from. The catalog hash covers
+`SourceSpan.file`, so byte-exact replay against relocated manifest copies
+still needs the recorded original paths; relocation-independent hashing
+is a deliberate defer (it orphans every existing journal's resume gate).
+
+**Permissions** (DL-66): run roots are `0700` (created and re-tightened
+at resume); the journal, wrapper spool files, and job stdout/stderr are
+`0600` at creation. The WAL carries globals and every control input, and
+job output carries whatever commands print — owner-only, not
+umask-hopeful.
+
 **Resume** (`dsl41 run --resume <journal>`):
 
 1. On catalog-hash mismatch, refuse — no silent semantic drift. A changed

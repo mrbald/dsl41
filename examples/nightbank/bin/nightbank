@@ -80,12 +80,36 @@ def estate_files(estate: str) -> list[Path]:
     return files
 
 
-def latest_run() -> Path:
+def _socket_alive(sock: Path) -> bool:
+    import socket as socket_mod
+
+    probe = socket_mod.socket(socket_mod.AF_UNIX)
+    probe.settimeout(0.2)
+    try:
+        probe.connect(str(sock))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def live_run() -> Path:
+    """The ONE run with an answering control socket. 'Latest directory' is
+    not 'the live night' -- header-only and diagnostic runs shuffle the
+    ordering, and a file dropped into a dead run is a new incident, not an
+    intervention. Ambiguity refuses and lists candidates."""
     runs = sorted((BASE / "runs").glob("*"), key=lambda p: p.name)
-    if not runs:
-        typer.echo("nightbank: no runs/ yet -- start one with `nightbank up`", err=True)
-        raise typer.Exit(2)
-    return runs[-1]
+    live = [r for r in runs if _socket_alive(r / "engine" / "control.sock")]
+    if len(live) == 1:
+        return live[0]
+    if not live:
+        typer.echo("nightbank: no live night (no answering control socket) -- pass --run", err=True)
+    else:
+        typer.echo("nightbank: several live nights -- pass --run, one of:", err=True)
+        for r in live:
+            typer.echo(f"  {r}", err=True)
+    raise typer.Exit(2)
 
 
 @app.command()
@@ -106,11 +130,13 @@ def up(
         raise typer.Exit(2)
     for sub in ("data/incoming", "data/pending", "data/current", "data/state", "logs"):
         (run_dir / sub).mkdir(parents=True)
+    os.chmod(run_dir, 0o700)  # run artifacts are owner-only (journal/logs/data)
     engine_dir = run_dir / "engine"
 
     anchor = datetime.now(UTC) + timedelta(minutes=lead_mins)
     props = compute_properties(run_dir, anchor, stagger_mins)
     write_kv(run_dir / "night.properties", props)
+    os.chmod(run_dir / "night.properties", 0o600)
 
     env_lines = {
         "NIGHTBANK_DATA": props["NB_DATA"],
@@ -119,11 +145,14 @@ def up(
         "PATH": f"{BASE / 'bin'}:{Path(sys.executable).parent}:$PATH",
     }
     if not no_incidents:
-        shutil.copy(BASE / "incidents.conf", run_dir / "incidents.conf")
+        # per-estate incidents: the bank estate's targets are per-asset-class
+        # names that only exist there (each estate ships its own file)
+        shutil.copy(BASE / "estate" / estate.value / "incidents.conf", run_dir / "incidents.conf")
         env_lines["NIGHTBANK_INCIDENTS"] = str(run_dir / "incidents.conf")
     (run_dir / "profile.env").write_text(
         "".join(f'export {k}="{v}"\n' for k, v in env_lines.items())
     )
+    os.chmod(run_dir / "profile.env", 0o600)
 
     argv = [
         sys.executable, "-m", "dsl41", "run",
@@ -171,12 +200,18 @@ def drop_file(
     name: str = typer.Argument(
         ..., help=f"One of {', '.join(DROPPABLE)} (or a data/-relative path)."
     ),
-    run: Path = typer.Option(None, "--run", help="Run directory (default: latest under runs/)."),
+    run: Path = typer.Option(
+        None, "--run", help="Run directory (default: the one LIVE night under runs/)."
+    ),
 ) -> None:
     """Deliver a "missing" feed file by hand."""
     rel = DROPPABLE.get(name, name)
-    run_dir = run if run else latest_run()
-    target = run_dir / "data" / rel
+    run_dir = run if run else live_run()
+    data_root = (run_dir / "data").resolve()
+    target = (data_root / rel).resolve()
+    if not target.is_relative_to(data_root):
+        typer.echo(f"nightbank: {rel!r} escapes {data_root}", err=True)
+        raise typer.Exit(2)
     target.parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).isoformat(timespec="seconds")
     target.write_text(f"# manually delivered by nightbank drop-file at {stamp}\nrows=4242\n")
