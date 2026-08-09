@@ -1375,6 +1375,67 @@ def test_timers_merges_scheduler_next_ticks_due_ordered(short_root: Path) -> Non
     asyncio.run(scenario())
 
 
+def test_timers_synthesizes_a_filewatch_row_and_status_gains_watching_for_live_fw(
+    short_root: Path,
+) -> None:
+    """DL-68 filewatch visibility: a live FW run (an in-flight adapter task,
+    nothing else) gets one synthesized due-less timers row after the dated
+    ones -- {due: null, kind: "filewatch", detail: "watching <file> every
+    <N>s, min_size <n>"} -- and its status payload gains a "watching" dict.
+    The parked CMD job proves the key is FW-only, and before STARTJOB the FW
+    job has neither row nor key (not live = not watching)."""
+    text = (
+        "insert_job: fwv_cmd\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 1\n\n"
+        "insert_job: fwv_fw\njob_type: f\nwatch_file: /nonexistent/fwv.dat\n"
+        "watch_interval: 5\nwatch_file_min_size: 12\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # parks both jobs live forever
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            before = await _control_call(server.path, {"cmd": "status"})
+            assert "watching" not in before["jobs"]["fwv_fw"]
+            resp = await _control_call(server.path, {"cmd": "timers"})
+            assert resp["timers"] == []
+
+            for job in ("fwv_cmd", "fwv_fw"):
+                resp = await _control_call(
+                    server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": job}
+                )
+                assert resp["ok"] is True
+
+            async def both_running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status"})
+                return all(
+                    r["jobs"][j]["status"] == "RUNNING" for j in ("fwv_cmd", "fwv_fw")
+                )
+
+            await _wait_for_async(both_running)
+            resp = await _control_call(server.path, {"cmd": "timers"})
+            assert resp["ok"] is True
+            entries = resp["timers"]
+            assert [(e["job"], e["kind"]) for e in entries] == [
+                ("fwv_cmd", "term_run_time"),  # dated rows first
+                ("fwv_fw", "filewatch"),
+            ]
+            fw_row = entries[1]
+            assert fw_row["due"] is None
+            assert fw_row["detail"] == "watching /nonexistent/fwv.dat every 5s, min_size 12"
+
+            status = await _control_call(server.path, {"cmd": "status"})
+            assert status["jobs"]["fwv_fw"]["watching"] == {
+                "file": "/nonexistent/fwv.dat",
+                "interval": 5,
+                "min_size": 12,
+            }
+            assert "watching" not in status["jobs"]["fwv_cmd"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_status_job_type_and_box_name_for_members_boxes_and_store_ghosts(
     short_root: Path,
 ) -> None:

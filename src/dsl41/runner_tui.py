@@ -287,6 +287,48 @@ def assemble_trigger_rows(
     return dated + undated + armed
 
 
+def assemble_detail_trigger_lines(
+    job: str,
+    row: dict[str, Any],
+    timers: list[dict[str, Any]],
+) -> list[str]:
+    """The details popup's trigger story (DL-68): started by, the armed
+    latch, a live filewatch, the earliest dated timer for this job, then
+    every pending timer. Pure so the assembly needs no live socket."""
+    lines: list[str] = []
+    if row.get("started_by"):
+        lines.append(f"started by: {row['started_by']}")
+    if row.get("armed"):
+        lines.append("armed: waiting on next condition edge")
+    watching = row.get("watching")
+    if isinstance(watching, dict):
+        line = f"watching {watching.get('file')} every {watching.get('interval')}s"
+        if watching.get("min_size") is not None:
+            line += f", min_size {watching['min_size']}"
+        lines.append(line)
+    dated = [
+        e for e in timers if e.get("job") == job and isinstance(e.get("due"), str)
+    ]
+    if dated:
+        first = min(dated, key=lambda e: str(e["due"]))
+        try:
+            due = datetime.fromisoformat(str(first["due"]))
+        except ValueError:
+            due = None
+        if due is not None:
+            lines.append(f"next: {first.get('kind', '?')} @ {due:%Y-%m-%d %H:%M:%S}Z")
+    pending = [e for e in row.get("pending_timers") or [] if isinstance(e.get("due"), str)]
+    if pending:
+        lines.append("pending timers:")
+        for entry in pending:
+            try:
+                at = datetime.fromisoformat(str(entry["due"]))
+            except ValueError:
+                continue
+            lines.append(f"  {entry.get('kind', '?')} @ {at:%H:%M:%S}")
+    return lines
+
+
 class TriggersScreen(ModalScreen[None]):
     """DL-68 triggers view: the `timers` verb live (2s re-query while open)
     plus the armed latches from the last status snapshot. Read-only -- every
@@ -1476,6 +1518,7 @@ class RunnerApp(App[None]):
             spec = await self._client.request({"cmd": "spec", "job": job})
             status = await self._client.request({"cmd": "status", "job": job})
             deps = await self._client.request({"cmd": "deps", "job": job})
+            timers = await self._client.request({"cmd": "timers"})
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
             return
@@ -1491,10 +1534,18 @@ class RunnerApp(App[None]):
                 f"  exit {'-' if exit_code is None else exit_code}"
                 f"  at {row.get('status_at') or '-'} UTC\n"
             )
-            if row.get("started_by"):
-                # DL-68: what triggered the most recent run, trace-cause verbatim
-                body.append("started by: ", style="bold")
-                body.append(f"{row['started_by']}\n")
+            # DL-68 trigger story: started by, armed latch, live filewatch,
+            # next tick from the timers verb, pending timers
+            timer_entries = timers.get("timers", []) if timers.get("ok") else []
+            for line in assemble_detail_trigger_lines(job, row, timer_entries):
+                label, sep, rest = line.partition(": ")
+                if sep and not line.startswith(" "):
+                    body.append(label + sep, style="bold")
+                    body.append(rest + "\n")
+                elif line.endswith(":"):
+                    body.append(line + "\n", style="bold")
+                else:
+                    body.append(line + "\n")
             for label, key in (("log out", "log_out"), ("log err", "log_err")):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")

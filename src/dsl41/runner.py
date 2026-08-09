@@ -3426,6 +3426,12 @@ class ControlServer:
                 "job_type": job_ir.job_type if job_ir is not None else None,
                 "box_name": job_ir.box.box_name if job_ir is not None else None,
             }
+            if job_ir is not None:
+                watching = self._fw_watching(job_ir)
+                if watching is not None:
+                    # DL-68: present ONLY for a live FW run -- absence of the
+                    # key is itself the "not watching" signal
+                    jobs[name]["watching"] = watching
         return {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -3539,11 +3545,28 @@ class ControlServer:
             "members": members,
         }
 
+    def _fw_watching(self, job_ir: JobIR) -> dict[str, Any] | None:
+        """{file, interval, min_size} for a live FW run (DL-68). A watch is
+        only an in-flight adapter task -- no registry, no status field -- so
+        the facts come from the spec; interval resolves through the FW
+        adapter's default so the number shown is the one the poll sleeps."""
+        if not isinstance(job_ir.exec_, FwSpec) or job_ir.name not in self.engine._live:
+            return None
+        spec = job_ir.exec_
+        default = getattr(self.engine.adapters.get("FW"), "default_interval_s", 60)
+        return {
+            "file": spec.watch_file,
+            "interval": spec.watch_interval or default,
+            "min_size": spec.watch_file_min_size,
+        }
+
     def _timers(self) -> dict[str, Any]:
         """DL-65 (the list-timers analog): every pending oracle timer plus
         each scheduled job's next calendar tick, one due-ordered list --
-        'what happens next' across the estate."""
-        entries = [
+        'what happens next' across the estate. DL-68: live filewatches join
+        as due-less rows after the dated ones (they fire on a file, not a
+        clock, but they ARE a pending trigger an operator must see)."""
+        entries: list[dict[str, Any]] = [
             {"due": due.isoformat(), "job": job, "kind": kind}
             for due, job, kind in self.engine.oracle.pending_timers()
         ]
@@ -3553,6 +3576,18 @@ class ControlServer:
                 for tick, job in self.engine.scheduler.upcoming()
             )
         entries.sort(key=lambda e: (e["due"], e["job"]))
+        catalog = self.engine.oracle.catalog
+        for name in sorted(self.engine._live):
+            job_ir = catalog.jobs.get(name)
+            if job_ir is None:
+                continue
+            watching = self._fw_watching(job_ir)
+            if watching is None:
+                continue
+            detail = f"watching {watching['file']} every {watching['interval']}s"
+            if watching["min_size"] is not None:
+                detail += f", min_size {watching['min_size']}"
+            entries.append({"due": None, "job": name, "kind": "filewatch", "detail": detail})
         return {"ok": True, "timers": entries}
 
     def _plan(self) -> dict[str, Any]:

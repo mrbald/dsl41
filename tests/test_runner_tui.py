@@ -53,6 +53,7 @@ from dsl41.runner_tui import (
     TriggersScreen,
     _LogPane,
     _LogTail,
+    assemble_detail_trigger_lines,
     assemble_trigger_rows,
     compile_search,
     format_countdown,
@@ -1292,6 +1293,44 @@ def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -
         ("-", "-", "tv_a_armed", "armed", "waiting on next condition edge"),
         ("-", "-", "tv_b_armed", "armed", "waiting on next condition edge"),
     ]
+
+
+def test_assemble_detail_trigger_lines_full_story_in_spec_order() -> None:
+    """DL-68 popup trigger story, pure assembly: started by, armed, a live
+    watch (min_size only when set), the earliest dated timer for THIS job
+    (other jobs' entries and due-less rows ignored), then one indented line
+    per pending timer under a header."""
+    row = {
+        "started_by": "sendevent STARTJOB (operator)",
+        "armed": True,
+        "watching": {"file": "/data/in.csv", "interval": 30, "min_size": 1024},
+        "pending_timers": [
+            {"due": "2026-08-09T12:45:00", "kind": "term_run_time"},
+            {"due": "2026-08-09T12:50:00", "kind": "must_complete"},
+        ],
+    }
+    timers = [
+        {"due": "2026-08-09T12:05:00", "job": "other", "kind": "schedule"},
+        {"due": None, "job": "dt_job", "kind": "filewatch", "detail": "x"},
+        {"due": "2026-08-10T04:00:00", "job": "dt_job", "kind": "schedule"},
+        {"due": "2026-08-09T12:45:00", "job": "dt_job", "kind": "term_run_time"},
+    ]
+    assert assemble_detail_trigger_lines("dt_job", row, timers) == [
+        "started by: sendevent STARTJOB (operator)",
+        "armed: waiting on next condition edge",
+        "watching /data/in.csv every 30s, min_size 1024",
+        "next: term_run_time @ 2026-08-09 12:45:00Z",
+        "pending timers:",
+        "  term_run_time @ 12:45:00",
+        "  must_complete @ 12:50:00",
+    ]
+
+
+def test_assemble_detail_trigger_lines_empty_row_yields_nothing() -> None:
+    assert assemble_detail_trigger_lines("dt_job", {}, []) == []
+    assert assemble_detail_trigger_lines(
+        "dt_job", {"watching": {"file": "/f", "interval": 60, "min_size": None}}, []
+    ) == ["watching /f every 60s"]
 
 
 def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
