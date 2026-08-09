@@ -489,9 +489,14 @@ class Oracle:
             # DL-68: a sourced event names its trigger -- a scheduler tick and
             # an operator sendevent must not collapse to one cause string
             cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
+            deferred = ev.payload.get("deferred_cause")
+            if isinstance(deferred, str):
+                # SEM-33 defer: the fired timer replays the original start's
+                # provenance instead of collapsing to a bare TIMER (DL-68)
+                cause = f"run_window-deferred {deferred}"
             refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
-                self._record(job, "START_REFUSED", f"{refused} ({kind})")
+                self._record(job, "START_REFUSED", f"{refused} ({cause})")
         elif kind == "SET_GLOBAL":
             name = ev.payload.get("name")
             value = ev.payload.get("value")
@@ -762,7 +767,11 @@ class Oracle:
             if not pending:
                 self._schedule_timer(
                     next_open,
-                    Event(at=next_open, kind="TIMER", payload={"job": job_ir.name}),
+                    Event(
+                        at=next_open,
+                        kind="TIMER",
+                        payload={"job": job_ir.name, "deferred_cause": cause},
+                    ),
                 )
                 self._record(
                     job_ir.name,

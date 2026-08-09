@@ -1278,6 +1278,13 @@ def serve(
         raise typer.Exit(2) from exc
 
 
+def _brief_flags(row: dict[str, object]) -> str:
+    """The --brief flags column, I/H/N/A in the TUI's fixed order -- both
+    surfaces render the same alphabet from the same status payload (DL-68)."""
+    marks = (("I", "on_ice"), ("H", "on_hold"), ("N", "on_noexec"), ("A", "armed"))
+    return "".join(mark for mark, key in marks if row.get(key))
+
+
 @app.command()
 def query(
     what: str = typer.Argument(
@@ -1334,11 +1341,7 @@ def query(
         if brief and response.get("ok"):
             for name in sorted(response.get("jobs", {})):
                 row = response["jobs"][name]
-                flags = "".join(
-                    mark
-                    for mark, key in (("I", "on_ice"), ("H", "on_hold"), ("N", "on_noexec"))
-                    if row.get(key)
-                )
+                flags = _brief_flags(row)
                 exit_code = row.get("exit_code")
                 typer.echo(
                     f"{name:<44} {row.get('status', ''):<10}"

@@ -745,6 +745,65 @@ def test_started_by_reflects_the_most_recent_start_not_the_first() -> None:
     assert o.store.job["prov_two"].started_by == "FORCE_STARTJOB event (control)"
 
 
+def test_run_window_deferred_start_replays_the_original_events_provenance() -> None:
+    """(DL-68 review): the SEM-33 defer re-dispatches through an internal
+    TIMER event -- the fired start must carry the deferred event's
+    provenance, not collapse to the bare "TIMER event" that made a
+    window-deferred scheduler tick indistinguishable from a control-socket
+    one."""
+    text = (
+        "insert_job: rw_prov\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        'run_window: "10:00-11:00"\n\n'
+        "insert_job: dummy_rwp\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = Oracle(lower_source(text))
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 1, 9, 50),
+            kind="STARTJOB",
+            payload={"job": "rw_prov"},
+            source="scheduler",
+        )
+    )
+    defer = next(t for t in o.trace() if t.transition == "RUN_WINDOW_DEFER")
+    assert "STARTJOB event (scheduler)" in defer.cause
+    # an unrelated later event drives the timer heap past window open
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 1, 10, 1),
+            kind="STATUS",
+            payload={"job": "dummy_rwp", "status": "SUCCESS"},
+        )
+    )
+    starting = next(
+        t for t in o.trace() if t.job == "rw_prov" and t.transition == "INACTIVE->STARTING"
+    )
+    assert starting.cause == "run_window-deferred STARTJOB event (scheduler)"
+    assert o.store.job["rw_prov"].started_by == "run_window-deferred STARTJOB event (scheduler)"
+
+
+def test_start_refused_record_carries_the_events_source() -> None:
+    """(DL-68 review): a refusal is the moment the operator most needs to
+    know WHOSE start died -- the START_REFUSED record carries the same
+    source-tagged cause the successful path does, so a scheduler tick and
+    an operator sendevent rejected at a SEM-10 gate no longer collapse to
+    one line."""
+    text = (
+        "insert_job: box_ref\njob_type: b\n\n"
+        "insert_job: mem_ref\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_ref\n"
+    )
+    o = Oracle(lower_source(text))
+    at = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "mem_ref"}, source="control"))
+    refused = next(t for t in o.trace() if t.transition == "START_REFUSED")
+    assert refused.cause.endswith("(STARTJOB event (control))")
+
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "mem_ref"}))
+    bare = [t for t in o.trace() if t.transition == "START_REFUSED"][-1]
+    assert bare.cause.endswith("(STARTJOB event)")
+
+
 # --------------------------------------------------------------------- 5. resume
 
 

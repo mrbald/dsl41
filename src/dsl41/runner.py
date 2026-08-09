@@ -3584,7 +3584,9 @@ class ControlServer:
             watching = self._fw_watching(job_ir)
             if watching is None:
                 continue
-            detail = f"watching {watching['file']} every {watching['interval']}s"
+            # no "watching" prefix: the row's kind column already says
+            # filewatch, and the path is the information (review MINOR)
+            detail = f"{watching['file']} every {watching['interval']}s"
             if watching["min_size"] is not None:
                 detail += f", min_size {watching['min_size']}"
             entries.append({"due": None, "job": name, "kind": "filewatch", "detail": detail})

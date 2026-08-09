@@ -1466,3 +1466,53 @@ def test_pilot_t_opens_the_live_triggers_view_and_operator_verbs_do_not_fire(
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Path) -> None:
+    """Review MAJOR: the 2s re-query must not clear() the table -- a clear
+    resets the row cursor and scroll to 0, so the operator could never read
+    past the first screenful of an estate-scale trigger list. Steady-state
+    refreshes update cells in place; a membership change rebuilds but puts
+    the cursor back on the same trigger."""
+    text = (
+        "insert_job: tc_a\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n\n"
+        "insert_job: tc_b\njob_type: c\ncommand: y\nmachine: m1\nterm_run_time: 5\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # both stay RUNNING: two dated rows
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 2)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                for row in (0, 1):
+                    table.move_cursor(row=row)
+                    await pilot.pause()
+                    await pilot.press("s")
+                await _wait_for_ui(
+                    pilot,
+                    lambda: all(
+                        str(table.get_cell(j, "status")) == "RUNNING" for j in ("tc_a", "tc_b")
+                    ),
+                )
+
+                await pilot.press("t")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+                screen = app.screen
+                assert isinstance(screen, TriggersScreen)
+                trig = screen.query_one("#trigbox", DataTable)
+                await _wait_for_ui(pilot, lambda: trig.row_count == 2)
+                trig.move_cursor(row=1)
+                await pilot.pause()
+
+                await screen._refresh()  # the interval tick, without the 2s wait
+                await pilot.pause()
+                assert trig.row_count == 2
+                assert trig.cursor_row == 1  # clear() would have bounced it to 0
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

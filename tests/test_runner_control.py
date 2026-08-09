@@ -1462,7 +1462,9 @@ def test_timers_synthesizes_a_filewatch_row_and_status_gains_watching_for_live_f
             ]
             fw_row = entries[1]
             assert fw_row["due"] is None
-            assert fw_row["detail"] == "watching /nonexistent/fwv.dat every 5s, min_size 12"
+            # path-first, no "watching" prefix: kind already says filewatch
+            # and the redundant word pushed the path off narrow panes
+            assert fw_row["detail"] == "/nonexistent/fwv.dat every 5s, min_size 12"
 
             status = await _control_call(server.path, {"cmd": "status"})
             assert status["jobs"]["fwv_fw"]["watching"] == {
@@ -1644,3 +1646,15 @@ def test_cli_query_predicates_require_job_and_unknown_verb_lists_them() -> None:
     assert "timers" in result.output
     assert "is-success" in result.output
     assert "is-failed" in result.output
+
+
+def test_cli_brief_flags_include_the_armed_latch_in_ihna_order() -> None:
+    """DL-68 review: `query status --brief` and the TUI jobs table render
+    the same flags column from the same status payload -- the armed latch
+    (SEM-32) must show as A on the headless skim too, after I/H/N."""
+    from dsl41.cli import _brief_flags
+
+    all_on = {"on_ice": True, "on_hold": True, "on_noexec": True, "armed": True}
+    assert _brief_flags(all_on) == "IHNA"
+    assert _brief_flags({"armed": True}) == "A"
+    assert _brief_flags({"status": "INACTIVE"}) == ""

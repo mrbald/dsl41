@@ -517,9 +517,13 @@ with a JSON-lines protocol.
   downstream jobs whose conditions reference this one, straight from the
   oracle's edge-trigger index (DL-65: the blast-radius view), `timers` —
   every pending oracle timer plus each scheduled job's next calendar
-  tick, due-ordered (DL-65), and `plan` (acyclic estates only). The
+  tick, due-ordered (DL-65); `due` is nullable since DL-68 — live
+  filewatches join as trailing rows with `due: null` (they fire on a
+  file, not a clock), and `plan` (acyclic estates only). The
   status response also carries per-job `job_type`/`box_name` (the ss11
-  tree) and a `spec_drift` flag — a lazy fingerprint re-check of the
+  tree), `started_by` — the trace cause of the most recent actual start
+  — plus, for a live FW run, a `watching {file, interval, min_size}`
+  object (both DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; there is no reload, the flag tells the operator
   the running catalog no longer matches the disk (DL-65). The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
@@ -541,7 +545,9 @@ app instance per browser session, so an in-process engine hands every
 viewer a private universe. Views: jobs table (status, run_number, pending
 timers/alarms), explain pane ("waiting on: s(A) ∧ ¬f(B)" with live truth),
 log tail (the §6 std files), event console (sendevent verbs), job-details
-popup (the `spec` block + `deps` needs/blocks lines + a short log tail).
+popup (the `spec` block + `deps` needs/blocks lines + a short log tail),
+and the read-only triggers view on `t` (the `timers` verb live with
+countdowns, plus one row per armed job — DL-68).
 The header clock is UTC — the engine's time basis, one time base on
 screen (DL-64). Pane geometry is keyboard-only: maximize toggle on the
 log tail plus fr-share nudges for both splits. Navigation at estate

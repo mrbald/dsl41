@@ -384,6 +384,8 @@ class TriggersScreen(ModalScreen[None]):
             table.add_column(label, key=label)
         table.border_title = "triggers"
         table.focus()
+        self._row_ids: list[tuple[str, str, str]] = []
+        self._last_rows: list[tuple[str, str, str, str, str]] = []
         self.action_refresh_now()
         self.set_interval(2.0, self.action_refresh_now)
 
@@ -410,9 +412,30 @@ class TriggersScreen(ModalScreen[None]):
             table = self.query_one("#trigbox", DataTable)
         except NoMatches:
             return  # a worker resuming after the await can outlive the screen
-        table.clear()
-        for i, row in enumerate(rows):
-            table.add_row(*row, key=str(i))
+        ids = [(job, kind, detail) for _, _, job, kind, detail in rows]
+        if ids == self._row_ids:
+            # steady state: countdowns tick but membership is unchanged --
+            # update cells in place; clear() every 2s would reset the row
+            # cursor and scroll (the jobs-table pathology, DL-67; review
+            # MAJOR)
+            for i, (row, old) in enumerate(zip(rows, self._last_rows)):
+                if row == old:
+                    continue
+                for column, new, prev in zip(self._COLUMNS, row, old):
+                    if new != prev:
+                        table.update_cell(str(i), column, new, update_width=True)
+        else:
+            # membership/order changed: rebuild, then put the cursor back on
+            # the same trigger if it survived
+            cursor = table.cursor_row
+            selected = self._row_ids[cursor] if 0 <= cursor < len(self._row_ids) else None
+            table.clear()
+            for i, row in enumerate(rows):
+                table.add_row(*row, key=str(i))
+            if selected in ids:
+                table.move_cursor(row=ids.index(selected))
+            self._row_ids = ids
+        self._last_rows = rows
         table.border_title = f"triggers ({len(rows)})"
 
 

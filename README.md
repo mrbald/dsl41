@@ -196,6 +196,9 @@ per-atom condition truth, log tail, sendevent console) is the optional
 control socket. `sendevent`/`query` speak the same protocol. Zooming the
 log tail (`m`) turns it into a less-style pager — `/` search, `&` filter,
 `n`/`N`, `F` follow — and the operator verbs are unreachable while paging.
+`t` opens a read-only triggers view — every pending timer, calendar tick,
+and live filewatch with countdowns — and the jobs table marks the armed
+latch (SEM-32) as flag `A`.
 
 The scheduler obeys `run_calendar`/`exclude_calendar` (DL-56/57). Standard
 calendar day sets apply on the job's local day (run minus exclude, SEM-31).
