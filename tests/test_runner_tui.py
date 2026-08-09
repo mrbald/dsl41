@@ -29,7 +29,7 @@ import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -50,9 +50,12 @@ from dsl41.runner_tui import (
     ControlClientError,
     RunnerApp,
     SpecScreen,
+    TriggersScreen,
     _LogPane,
     _LogTail,
+    assemble_trigger_rows,
     compile_search,
+    format_countdown,
     parse_console_command,
 )
 from textual.binding import Binding
@@ -949,6 +952,7 @@ def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
         "m",  # zoom toggle
         "o",  # out/err stream toggle -- log-scoped
         "r",  # refresh: harmless, keeps the tail's source fresh
+        "t",  # triggers view: a read-only modal (DL-68), estate untouched
         "]",
         "[",
         "}",
@@ -1246,6 +1250,127 @@ def test_pilot_pager_follow_is_pinned_at_bottom_and_capital_f_resumes(short_root
                 _append_log(app, "pg_w", ["one more"])
                 await _wait_for_ui(pilot, lambda: len(pager._buffer) == 141)
                 assert pager.is_vertical_scroll_end  # following again
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+# -------------------- 6. DL-68 triggers view (t: due-ordered timers + armed latch)
+
+
+def test_format_countdown_humanizes_each_magnitude_and_dashes_overdue() -> None:
+    now = datetime(2026, 8, 9, 12, 0, 0)
+    assert format_countdown(now + timedelta(seconds=42), now) == "42s"
+    assert format_countdown(now + timedelta(minutes=3, seconds=12), now) == "3m12s"
+    assert format_countdown(now + timedelta(hours=2, minutes=5), now) == "2h05m"
+    assert format_countdown(now + timedelta(days=1, hours=3), now) == "1d03h"
+    assert format_countdown(now, now) == "-"  # due now = nothing left to count
+    assert format_countdown(now - timedelta(seconds=5), now) == "-"
+
+
+def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -> None:
+    """The server's due order carries through untouched; a due-less filewatch
+    row renders generically below the dated rows; armed jobs (from the status
+    snapshot, not the timers verb) append last, name-sorted; today's dues are
+    time-only, tomorrow's carry the date."""
+    timers = [
+        {"due": "2026-08-09T12:30:00", "job": "tv_sched", "kind": "schedule"},
+        {"due": "2026-08-10T01:00:00", "job": "tv_late", "kind": "must_start"},
+        {"job": "tv_watch", "kind": "filewatch", "detail": "/data/in.csv"},
+    ]
+    jobs = {
+        "tv_b_armed": {"status": "INACTIVE", "armed": True},
+        "tv_a_armed": {"status": "INACTIVE", "armed": True},
+        "tv_plain": {"status": "INACTIVE", "armed": False},
+    }
+    now = datetime(2026, 8, 9, 12, 0, 0)
+    assert assemble_trigger_rows(timers, jobs, now) == [
+        ("12:30:00", "30m00s", "tv_sched", "schedule", ""),
+        ("2026-08-10 01:00:00", "13h00m", "tv_late", "must_start", ""),
+        ("-", "watching", "tv_watch", "filewatch", "/data/in.csv"),
+        ("-", "-", "tv_a_armed", "armed", "waiting on next condition edge"),
+        ("-", "-", "tv_b_armed", "armed", "waiting on next condition edge"),
+    ]
+
+
+def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
+    """The status payload's `armed` boolean (SEM-32; served since DL-54 but
+    never rendered) surfaces as flag A, ordered after I/H/N."""
+    app = RunnerApp(Path("/tmp/unused.sock"))
+    all_on = {"status": "INACTIVE", "on_ice": True, "on_hold": True, "on_noexec": True,
+              "armed": True}
+    assert app._row_cells("j", all_on)[5] == "IHNA"
+    assert app._row_cells("j", {"status": "INACTIVE", "armed": True})[5] == "A"
+    assert app._row_cells("j", {"status": "INACTIVE", "armed": False})[5] == ""
+
+
+def test_t_binding_is_registered_with_a_footer_label() -> None:
+    bindings = {b.key: b for b in RunnerApp.BINDINGS if isinstance(b, Binding)}
+    assert bindings["t"].action == "triggers"
+    assert bindings["t"].description == "triggers"
+    assert bindings["t"].show is True
+
+
+def test_triggers_screen_shadows_every_app_key() -> None:
+    """The pager drift guard's sibling (DL-67 discipline): while the
+    read-only triggers screen is open, every key the app binds must be
+    remapped (close/refresh) or neutralized to the bell by the screen --
+    a new app binding reachable from inside it would mutate the estate
+    from a view that exists to look."""
+
+    def keys(bindings) -> set[str]:
+        return {b.key if isinstance(b, Binding) else b[0] for b in bindings}
+
+    leaks = keys(RunnerApp.BINDINGS) - keys(TriggersScreen.BINDINGS)
+    assert not leaks, f"app keys reachable from the triggers screen: {sorted(leaks)}"
+
+
+def test_pilot_t_opens_the_live_triggers_view_and_operator_verbs_do_not_fire(
+    short_root: Path,
+) -> None:
+    """`t` pushes the TriggersScreen; while the started job RUNs its
+    term_run_time timer shows as a dated row with a live countdown; the
+    operator verbs pressed inside the screen reach nothing (no new console
+    echo, no spec popup); escape closes."""
+    text = "insert_job: tv_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING: the timer stays pending
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "tv_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("tv_run", "status")) == "RUNNING"
+                )
+
+                await pilot.press("t")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+                trig = app.screen.query_one("#trigbox", DataTable)
+                await _wait_for_ui(pilot, lambda: trig.row_count >= 1)
+                due, countdown, job, kind, _detail = trig.get_row_at(0)
+                assert (job, kind) == ("tv_run", "term_run_time")
+                assert due != "-"
+                assert countdown != "-"  # counting down, not overdue
+
+                console = app.query_one("#console", RichLog)
+                echoes_before = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                await pilot.press("s", "f", "k", "d", "colon")
+                await pilot.pause()
+                assert isinstance(app.screen, TriggersScreen)  # d opened no popup
+                assert app.focused is trig  # `:` did not focus the hidden console
+                echoes_after = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                assert echoes_after == echoes_before  # looking mutated nothing
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, TriggersScreen))
         finally:
             await _teardown(engine, server, loop_task)
 

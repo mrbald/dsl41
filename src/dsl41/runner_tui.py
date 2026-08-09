@@ -56,6 +56,15 @@ Normative detail for DL-46, within DL-41's frame:
   the selected job. Every request and its response is echoed to the
   console; refusals render red and change nothing -- the server already
   validates against the catalog (vendor parity), the TUI never pre-judges.
+- TRIGGERS VIEW (`t`, DL-68): "what fires next" -- the ss10 `timers` verb
+  (pending oracle timers merged with each scheduled job's next calendar
+  tick, due-ordered by the server) re-queried on a 2s interval while open,
+  each row with an absolute UTC due and a countdown against now. Armed jobs
+  (the SEM-32 latch from `status`) append below every dated row: no due --
+  the next condition edge starts them. Due-less rows (a filewatch, once a
+  later unit serves one) render generically. READ-ONLY: every operator verb
+  is shadowed to the bell (DL-67 discipline); `t`/`q`/escape close. The
+  jobs table's flags column carries `A` for the same latch.
 - JOB DETAILS POPUP (`d` / Enter on a row): the ss10 `spec` verb's
   preserve-rendered JIL block -- the post-placeholder source THIS engine
   loaded -- topped with the status facts, the `deps` verb's needs/blocks
@@ -215,6 +224,154 @@ class SpecScreen(ModalScreen[None]):
         box = self.query_one("#specbox")
         box.border_title = self._title
         box.focus()
+
+
+def format_due(due: datetime, now: datetime) -> str:
+    """Absolute UTC due: HH:MM:SS today, date + time otherwise. Pure
+    function (naive-UTC datetimes, the engine's time basis)."""
+    if due.date() == now.date():
+        return due.strftime("%H:%M:%S")
+    return due.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_countdown(due: datetime, now: datetime) -> str:
+    """Humanized time-to-due ("42s", "3m12s", "2h05m", "1d03h"); "-" once
+    due/overdue -- a negative countdown reads as a bug, not a fact. Pure
+    function so the rendering rule is testable without a terminal."""
+    total = int((due - now).total_seconds())
+    if total <= 0:
+        return "-"
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def assemble_trigger_rows(
+    timers: list[dict[str, Any]],
+    jobs: dict[str, dict[str, Any]],
+    now: datetime,
+) -> list[tuple[str, str, str, str, str]]:
+    """(due, in, job, kind, detail) rows for the triggers view: the server's
+    due-ordered `timers` entries kept stable, due-less rows (filewatch shows
+    "watching") below them, then one row per armed job (the SEM-32 latch --
+    no due, the next condition edge starts it), name-sorted. Pure function
+    so the assembly needs no live socket."""
+    dated: list[tuple[str, str, str, str, str]] = []
+    undated: list[tuple[str, str, str, str, str]] = []
+    for entry in timers:
+        job = str(entry.get("job", ""))
+        kind = str(entry.get("kind", "?"))
+        detail = str(entry.get("detail") or "")
+        due: datetime | None = None
+        if isinstance(entry.get("due"), str):
+            try:
+                due = datetime.fromisoformat(entry["due"])
+            except ValueError:
+                due = None
+        if due is not None:
+            dated.append((format_due(due, now), format_countdown(due, now), job, kind, detail))
+        else:
+            undated.append(("-", "watching" if kind == "filewatch" else "-", job, kind, detail))
+    armed = [
+        ("-", "-", name, "armed", "waiting on next condition edge")
+        for name in sorted(jobs)
+        if jobs[name].get("armed")
+    ]
+    return dated + undated + armed
+
+
+class TriggersScreen(ModalScreen[None]):
+    """DL-68 triggers view: the `timers` verb live (2s re-query while open)
+    plus the armed latches from the last status snapshot. Read-only -- every
+    operator verb is shadowed to the bell (DL-67: keys must never mutate the
+    estate from a view that exists to look); t/q/escape close, r re-queries."""
+
+    _COLUMNS = ("due", "in", "job", "kind", "detail")
+    BINDINGS = [
+        Binding("escape", "dismiss", "close"),
+        Binding("q", "dismiss", "close", show=False),
+        Binding("t", "dismiss", "close", show=False),
+        Binding("r", "refresh_now", "refresh", show=False),
+        # operator verbs and pane/navigation keys: bell, exactly like the
+        # log pager -- NOT check_action=False, which would let the key fall
+        # through to the app binding it exists to shadow (DL-67)
+        Binding("s", "app.bell", "", show=False),
+        Binding("f", "app.bell", "", show=False),
+        Binding("k", "app.bell", "", show=False),
+        Binding("i", "app.bell", "", show=False),
+        Binding("I", "app.bell", "", show=False),
+        Binding("h", "app.bell", "", show=False),
+        Binding("H", "app.bell", "", show=False),
+        Binding("n", "app.bell", "", show=False),
+        Binding("N", "app.bell", "", show=False),
+        Binding("d", "app.bell", "", show=False),
+        Binding("m", "app.bell", "", show=False),
+        Binding("o", "app.bell", "", show=False),
+        Binding("slash", "app.bell", "", show=False),
+        Binding("v", "app.bell", "", show=False),
+        Binding("space", "app.bell", "", show=False),
+        Binding("z", "app.bell", "", show=False),
+        Binding("colon", "app.bell", "", show=False),
+        Binding("]", "app.bell", "", show=False),
+        Binding("[", "app.bell", "", show=False),
+        Binding("}", "app.bell", "", show=False),
+        Binding("{", "app.bell", "", show=False),
+    ]
+    CSS = """
+    TriggersScreen { align: center middle; }
+    #trigbox {
+        width: 90%; max-width: 110; height: 80%;
+        border: round $primary; background: $surface;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield DataTable(id="trigbox")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#trigbox", DataTable)
+        table.cursor_type = "row"
+        for label in self._COLUMNS:
+            table.add_column(label, key=label)
+        table.border_title = "triggers"
+        table.focus()
+        self.action_refresh_now()
+        self.set_interval(2.0, self.action_refresh_now)
+
+    def action_refresh_now(self) -> None:
+        # the bound METHOD, not a coroutine (the RunnerApp explain-worker
+        # pattern: a superseded exclusive worker must not leave a
+        # created-never-awaited coroutine)
+        self.run_worker(self._refresh, group="triggers", exclusive=True)  # type: ignore[arg-type]
+
+    async def _refresh(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        try:
+            response = await app._client.request({"cmd": "timers"})
+        except ControlClientError as exc:
+            app._set_connected(False, str(exc))
+            return
+        app._set_connected(True)
+        timers = response.get("timers", []) if response.get("ok") else []
+        rows = assemble_trigger_rows(
+            timers, app._jobs_snapshot, datetime.now(UTC).replace(tzinfo=None)
+        )
+        try:
+            table = self.query_one("#trigbox", DataTable)
+        except NoMatches:
+            return  # a worker resuming after the await can outlive the screen
+        table.clear()
+        for i, row in enumerate(rows):
+            table.add_row(*row, key=str(i))
+        table.border_title = f"triggers ({len(rows)})"
 
 
 class _FilterInput(Input):
@@ -772,6 +929,7 @@ class RunnerApp(App[None]):
         Binding("n", "send('ON_NOEXEC')", "noexec", show=False),
         Binding("N", "send('OFF_NOEXEC')", "off-noexec", show=False),
         Binding("d", "details", "details"),
+        Binding("t", "triggers", "triggers"),
         Binding("m", "maximize_log", "zoom log"),
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
@@ -1145,9 +1303,16 @@ class RunnerApp(App[None]):
     def _row_cells(self, name: str, row: dict[str, Any]) -> list[Any]:
         status = str(row.get("status", ""))
         at = str(row.get("status_at") or "")
+        # A last: the operator flags are set states, the armed latch is a
+        # promise -- IHNA order keeps the cell diffable by eye
         flags = "".join(
             mark
-            for mark, flag in (("I", "on_ice"), ("H", "on_hold"), ("N", "on_noexec"))
+            for mark, flag in (
+                ("I", "on_ice"),
+                ("H", "on_hold"),
+                ("N", "on_noexec"),
+                ("A", "armed"),
+            )
             if row.get(flag)
         )
         timers = row.get("pending_timers") or []
@@ -1299,6 +1464,9 @@ class RunnerApp(App[None]):
             # before starting must not leave a created-never-awaited coroutine
             work = functools.partial(self._show_details, self._selected)
             self.run_worker(work, group="details", exclusive=True)  # type: ignore[arg-type]
+
+    def action_triggers(self) -> None:
+        self.push_screen(TriggersScreen())
 
     async def _show_details(self, job: str) -> None:
         """The spec popup: runtime facts from `status`, dependency lines from
