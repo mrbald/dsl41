@@ -50,8 +50,12 @@ from dsl41.runner_tui import (
     ControlClientError,
     RunnerApp,
     SpecScreen,
+    _LogPane,
+    _LogTail,
+    compile_search,
     parse_console_command,
 )
+from textual.binding import Binding
 from textual.widgets import DataTable, Input, RichLog, Static
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
@@ -626,8 +630,10 @@ def test_pilot_d_key_opens_the_spec_popup_and_escape_closes_it(short_root: Path)
 
 
 def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) -> None:
-    """DL-64 keyboard geometry: `m` maximizes the log tail and `m` again
-    restores; `]` and `}` move the fr shares within their 1..4 clamp."""
+    """DL-64 keyboard geometry, DL-67 target: `m` maximizes the log PANE
+    (tail + search prompt, so the prompt stays visible while zoomed) and
+    hands focus to the pager; `m` again restores. `]` and `}` move the fr
+    shares within their 1..4 clamp -- on the pane, the split participant."""
     text = "insert_job: tp_geo\njob_type: c\ncommand: x\nmachine: m1\n"
 
     async def scenario() -> None:
@@ -636,19 +642,21 @@ def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) 
             app = RunnerApp(server.path)
             async with app.run_test(size=(120, 40)) as pilot:
                 await _wait_for_ui(pilot, lambda: "tp_geo" in app._rows)
-                logtail = app.query_one("#logtail", RichLog)
+                logbox = app.query_one("#logbox", _LogPane)
+                logtail = app.query_one("#logtail", _LogTail)
 
                 await pilot.press("m")
                 await pilot.pause()
-                assert app.screen.maximized is logtail
-                await pilot.press("m")
+                assert app.screen.maximized is logbox
+                assert app.focused is logtail  # focus IS the pager mode
+                await pilot.press("m")  # pass-through key: the app toggles
                 await pilot.pause()
                 assert app.screen.maximized is None
 
                 assert (app._log_share, app._table_share) == (3, 3)
                 await pilot.press("]")
                 assert app._log_share == 4
-                assert str(logtail.styles.height) == "4fr"
+                assert str(logbox.styles.height) == "4fr"
                 await pilot.press("]")  # clamped: neither pane may collapse
                 assert app._log_share == 4
                 await pilot.press("{")
@@ -908,6 +916,336 @@ def test_pilot_details_popup_shows_needs_blocks_and_a_log_tail(short_root: Path)
                 assert "command: y" in body  # the spec block still renders
                 assert "log tail:" in body
                 assert "last fake log line" in body
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+# ----------------------- 5. DL-67 log pager (the zoomed/focused log tail = less)
+
+
+def test_compile_search_smartcase_and_bad_pattern() -> None:
+    """Pager patterns are regex with smartcase (rg/vim): case-insensitive
+    unless the pattern itself carries an uppercase letter; a broken regex
+    comes back as an error STRING for the prompt to render, never a raise."""
+    lower = compile_search("error")
+    assert not isinstance(lower, str)
+    assert lower.search("an ERROR line")
+    upper = compile_search("Error")
+    assert not isinstance(upper, str)
+    assert upper.search("Error!") and not upper.search("error!")
+    bad = compile_search("(")
+    assert isinstance(bad, str) and bad.startswith("bad pattern:")
+
+
+def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
+    """Drift guard: while the pager has focus its bindings shadow the app's,
+    so every key the app binds must be either remapped/neutralized by the
+    pager or on the DELIBERATE pass-through allowlist. A new app binding
+    that lands in neither set would silently fire operator actions from
+    inside the pager -- the exact bug class DL-67 removed."""
+    pass_through = {
+        "m",  # zoom toggle
+        "o",  # out/err stream toggle -- log-scoped
+        "r",  # refresh: harmless, keeps the tail's source fresh
+        "]",
+        "[",
+        "}",
+        "{",  # pane shares
+    }
+
+    def keys(bindings) -> set[str]:
+        # tuple-form bindings are legal textual; a guard that skipped them
+        # would have a hole exactly where a careless future binding lands
+        return {b.key if isinstance(b, Binding) else b[0] for b in bindings}
+
+    leaks = keys(RunnerApp.BINDINGS) - keys(_LogTail.BINDINGS) - pass_through
+    assert not leaks, f"app keys reachable from the focused pager: {sorted(leaks)}"
+
+
+async def _seed_pager(pilot, app: RunnerApp, job: str, lines: list[str]) -> _LogTail:
+    """Select the job, start it (the one legitimate '> STARTJOB' echo), then
+    write `lines` to its resolved log_out and wait for the tail to show them
+    -- the test_pilot_log_tail technique, shared by every pager test."""
+    await _wait_for_ui(pilot, lambda: job in app._rows)
+    table = app.query_one("#jobs", DataTable)
+    table.focus()
+    table.move_cursor(row=0)
+    await pilot.pause()
+    assert app._selected == job
+    await pilot.press("s")
+    await _wait_for_ui(pilot, lambda: (app._log_paths.get(job) or (None, None))[0] is not None)
+    _append_log(app, job, lines)
+    pager = app.query_one("#logtail", _LogTail)
+    await _wait_for_ui(pilot, lambda: len(pager._buffer) >= len(lines))
+    return pager
+
+
+def _append_log(app: RunnerApp, job: str, lines: list[str]) -> None:
+    path = app._log_paths[job][0]
+    assert path is not None
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "ab") as f:
+        f.write(("\n".join(lines) + "\n").encode())
+
+
+def test_pilot_zoomed_slash_searches_the_log_and_escape_cancels_only_the_prompt(
+    short_root: Path,
+) -> None:
+    """The DL-67 headline: with the log maximized, `/` opens the PAGER's
+    search prompt (visible inside the maximized pane), never the hidden
+    tree filter; Enter finds; Escape in the prompt cancels the prompt and
+    stays zoomed -- textual's escape-to-minimize special case would swallow
+    it first, which is why the app turns that off."""
+    text = "insert_job: pg_s\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING; the test owns the log
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                lines = [f"line {i:04d}" for i in range(50)]
+                lines[10] = "needle here 10"
+                lines[30] = "needle here 30"
+                pager = await _seed_pager(pilot, app, "pg_s", lines)
+
+                await pilot.press("m")
+                await pilot.pause()
+                assert app.focused is pager
+
+                await pilot.press("slash")
+                await pilot.pause()
+                assert app.focused is not None and app.focused.id == "logsearch"
+                filterline = app.query_one("#filterline", Input)
+                assert str(filterline.styles.display) == "none"  # the old bug
+
+                await pilot.press(*"needle")
+                await pilot.press("enter")
+                await pilot.pause()
+                assert app.focused is pager  # prompt closed, back to the log
+                assert pager._matches == [10, 30]
+                assert "/needle/" in pager._title_cache
+                assert app._filter == ""  # the jobs tree never felt a thing
+
+                await pilot.press("slash")
+                await pilot.pause()
+                await pilot.press("escape")  # cancel the PROMPT...
+                await pilot.pause()
+                assert app.screen.maximized is not None  # ...not the zoom
+                assert app.focused is pager
+
+                await pilot.press("escape")  # escape on the log DOES leave
+                await pilot.pause()
+                assert app.screen.maximized is None
+                assert app.focused is app.query_one("#jobs", DataTable)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_pager_motion_keys_scroll_and_never_reach_the_operator_verbs(
+    short_root: Path,
+) -> None:
+    """The hazard DL-67 exists to remove: less/vim muscle memory inside the
+    pager must move the VIEW, never the estate. `k` scrolls up (never
+    KILLJOB), `f`/`b` page (never FORCE_STARTJOB), the no-pager-meaning
+    verbs ring the bell and do nothing, `:` cannot focus the hidden console,
+    and `q` leaves the pager, not the app. Every sendevent echoes to the
+    console, so 'no new echo' is proof of 'no verb fired'."""
+    text = "insert_job: pg_k\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                pager = await _seed_pager(pilot, app, "pg_k", [f"line {i:04d}" for i in range(200)])
+                console = app.query_one("#console", RichLog)
+
+                await pilot.press("m")
+                await pilot.pause()
+                assert pager.is_vertical_scroll_end  # fresh tail follows
+                bottom = pager.scroll_y
+                assert bottom > 0
+
+                await pilot.press("k")  # less: up one line. NEVER KILLJOB.
+                await pilot.pause()
+                assert pager.scroll_y == bottom - 1
+                await pilot.press("b")  # page up
+                await pilot.pause()
+                assert pager.scroll_y < bottom - 1
+                await pilot.press("f")  # less: page forward. NEVER FORCE.
+                await pilot.pause()
+                assert pager.scroll_y > bottom - 1 - pager.scrollable_content_region.height
+
+                echoes_before = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                await pilot.press("s", "i", "h", "v", "colon")
+                await pilot.pause()
+                assert app.focused is pager  # `:` did not focus the hidden console
+                echoes_after = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                assert echoes_after == echoes_before  # paging mutated nothing
+                assert not any("KILLJOB" in ln.text or "FORCE" in ln.text for ln in console.lines)
+
+                await pilot.press("q")  # less muscle memory: leave the PAGER
+                await pilot.pause()
+                assert app.screen.maximized is None
+                assert app.focused is app.query_one("#jobs", DataTable)
+                assert not app._exit  # the app itself is alive
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_pager_search_jump_n_wraps_and_question_mark_reverses(short_root: Path) -> None:
+    """less search semantics: `/` jumps to the first match after the current
+    top row (wrapping when none), `n` repeats in the search direction with
+    wraparound, `N` opposes, `?` searches backward and flips what `n`
+    means, and an empty submit clears the needle without moving the view."""
+    text = "insert_job: pg_n\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                lines = [f"line {i:04d}" for i in range(200)]
+                for row in (5, 50, 120):
+                    lines[row] = f"mark {row}"
+                pager = await _seed_pager(pilot, app, "pg_n", lines)
+
+                await pilot.press("m")
+                await pilot.pause()
+                assert pager.scroll_y > 120  # following: every mark is above
+
+                await pilot.press("slash", *"mark", "enter")
+                await pilot.pause()
+                assert pager._matches == [5, 50, 120]
+                assert pager._match_pos == 0  # nothing below: wrapped to first
+                assert pager.scroll_y == 5  # match at top, like less
+                assert "/mark/ 1/3" in pager._title_cache
+
+                await pilot.press("n")
+                await pilot.pause()
+                assert (pager._match_pos, pager.scroll_y) == (1, 50)
+                await pilot.press("n", "n")
+                await pilot.pause()
+                assert pager._match_pos == 0  # 120, then wrap to 5
+                await pilot.press("N")
+                await pilot.pause()
+                assert pager._match_pos == 2  # N opposes: wrap straight back
+
+                await pilot.press("slash", "enter")  # empty submit clears
+                await pilot.pause()
+                assert pager._needle is None
+                assert "/mark/" not in pager._title_cache
+                anchored = pager.scroll_y  # de-highlight must not move the view
+                assert anchored == 120
+
+                await pilot.press("question_mark", *"mark", "enter")
+                await pilot.pause()
+                assert (pager._match_pos, pager.scroll_y) == (1, 50)  # last BELOW top
+                await pilot.press("n")  # n follows the ? direction: upward
+                await pilot.pause()
+                assert (pager._match_pos, pager.scroll_y) == (0, 5)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_pager_ampersand_line_filter_is_a_view_and_bad_patterns_hold_the_prompt(
+    short_root: Path,
+) -> None:
+    """less's `&`: show only matching lines. It is a VIEW of the buffer --
+    lines appended while filtered join the view when they match, an empty
+    submit restores everything -- and a broken regex keeps the prompt open
+    with the error on its border instead of half-applying."""
+    text = "insert_job: pg_f\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                lines = [f"line {i:04d}" for i in range(60)]
+                for row in (7, 21, 40):
+                    lines[row] = f"ERROR at {row}"
+                pager = await _seed_pager(pilot, app, "pg_f", lines)
+
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("ampersand", *"ERROR", "enter")
+                await pilot.pause()
+                assert len(pager._display) == 3
+                assert len(pager.lines) == 3  # the widget shows exactly the view
+                assert "&ERROR" in pager._title_cache
+
+                _append_log(app, "pg_f", ["plain tail line", "ERROR at tail"])
+                await _wait_for_ui(pilot, lambda: len(pager._display) == 4)
+                assert len(pager._buffer) == 62  # the buffer lost nothing
+
+                await pilot.press("ampersand", "enter")  # empty clears the view
+                await _wait_for_ui(pilot, lambda: len(pager._display) == 62)
+
+                await pilot.press("ampersand", "(", "enter")  # broken regex
+                await pilot.pause()
+                prompt = app.query_one("#logsearch", Input)
+                assert app.focused is prompt  # still open, value intact
+                assert prompt.value == "("
+                assert "bad pattern" in str(prompt.border_title)
+                await pilot.press("escape")
+                await pilot.pause()
+                assert app.focused is pager
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_pager_follow_is_pinned_at_bottom_and_capital_f_resumes(short_root: Path) -> None:
+    """Follow semantics: pinned at the bottom the tail sticks through new
+    appends; any scroll up pauses it ([paused] in the title) and appends no
+    longer move the view; `F` jumps back to the end and follow resumes."""
+    text = "insert_job: pg_w\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                pager = await _seed_pager(pilot, app, "pg_w", [f"line {i:04d}" for i in range(100)])
+
+                await pilot.press("m")
+                await pilot.pause()
+                assert pager.is_vertical_scroll_end
+
+                _append_log(app, "pg_w", [f"tail {i}" for i in range(20)])
+                await _wait_for_ui(pilot, lambda: len(pager._buffer) == 120)
+                assert pager.is_vertical_scroll_end  # followed the append
+
+                await pilot.press("g")  # top -> paused
+                await pilot.pause()
+                assert pager.scroll_y == 0
+                _append_log(app, "pg_w", [f"more {i}" for i in range(20)])
+                await _wait_for_ui(pilot, lambda: len(pager._buffer) == 140)
+                assert pager.scroll_y == 0  # the operator's place held still
+                await _wait_for_ui(pilot, lambda: "[paused]" in pager._title_cache)
+
+                await pilot.press("F")
+                await pilot.pause()
+                assert pager.is_vertical_scroll_end
+                _append_log(app, "pg_w", ["one more"])
+                await _wait_for_ui(pilot, lambda: len(pager._buffer) == 141)
+                assert pager.is_vertical_scroll_end  # following again
         finally:
             await _teardown(engine, server, loop_task)
 

@@ -193,7 +193,9 @@ dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 The TUI (jobs table with pending timers and alarms, explain pane with
 per-atom condition truth, log tail, sendevent console) is the optional
 `[ui]` extra: `pip install 'dsl41[ui]'`. It is a thin client of the run's
-control socket. `sendevent`/`query` speak the same protocol.
+control socket. `sendevent`/`query` speak the same protocol. Zooming the
+log tail (`m`) turns it into a less-style pager — `/` search, `&` filter,
+`n`/`N`, `F` follow — and the operator verbs are unreachable while paging.
 
 The scheduler obeys `run_calendar`/`exclude_calendar` (DL-56/57). Standard
 calendar day sets apply on the job's local day (run minus exclude, SEM-31).
@@ -372,9 +374,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   lease), with same-uid peer-cred and a Linux subreaper.
 - src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
   client of the control socket only (jobs table with pending timers/alarms, explain
-  pane with per-atom truth, log tail of the ss6 std files, sendevent console).
-  Subscribe is a wake-up signal, and every view that the TUI shows comes from
-  the idempotent ss10 queries.
+  pane with per-atom truth, log tail of the ss6 std files — a less-style pager when
+  focused/zoomed (DL-67), sendevent console). Subscribe is a wake-up signal, and
+  every view that the TUI shows comes from the idempotent ss10 queries.
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary). It records spawn.json/status.json durably.
   On lifeline EOF, it kills and records. Spool contract in docs/supervisor-protocol.md.
@@ -456,8 +458,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the DL-46 status-response fields (pending_timers, log paths)
 - tests/test_runner_tui.py — phase-11d TUI (skips without the [ui] extra): the
   sendevent console parser, ControlClient against a real ControlServer (round trip,
-  reconnect, subscribe), and the ss13.6 pilot smokes (table, explain atoms, pending
-  timers, log tail, key-driven STARTJOB)
+  reconnect, subscribe), the ss13.6 pilot smokes (table, explain atoms, pending
+  timers, log tail, key-driven STARTJOB), and the DL-67 log-pager suite (search,
+  line filter, follow, verb-shadowing with its binding-drift guard)
 - tests/test_runner_serve.py — phase-11e `serve` CLI: missing-socket and
   missing-extra exit-2 paths, the constructed textual-serve command (a socket
   path with a space is quoted), default loopback bind, bind-failure exit 2 — the

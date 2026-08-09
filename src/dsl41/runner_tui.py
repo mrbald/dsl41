@@ -35,6 +35,21 @@ Normative detail for DL-46, within DL-41's frame:
   resets on truncation -- smoke-grade, not line-perfect. std_* paths carry
   verbatim (DL-39): a RELATIVE std file resolves against the viewer's cwd,
   guaranteed to match the wrapper's only under `run --ui` (shared cwd).
+- LOG PAGER (DL-67): whenever the log tail has FOCUS -- which `m` grants --
+  it is a less-style pager. Focus is the mode switch: textual consults the
+  focused widget's bindings before the app's, so one mechanism provides the
+  pager verbs AND shadows the operator verbs (`k` scrolls up, never
+  KILLJOB; `f`/space page forward, never FORCE; `q`/escape leave the pager,
+  never the app; verbs with no pager meaning ring the bell, as less does).
+  Paging never mutates the estate. `/` and `?` search (regex, smartcase,
+  all matches reverse-video, `n`/`N` wrap in the less directions), `&`
+  shows only matching lines -- a view of the buffer, never a loss; an empty
+  submit clears, escape cancels the prompt only (ESCAPE_TO_MINIMIZE is off
+  so textual cannot swallow it first). Follow is pinned-at-bottom:
+  scrolling up pauses ([paused] in the title), `F`/`G`/End resume. Buffer,
+  filter view, and widget cap at _PAGER_BUFFER_LINES in lockstep; `m`
+  maximizes the log PANE (tail + prompt line) so the prompt stays visible
+  while zoomed. `m`/`o`/`r` and the resize keys pass through by design.
 - EVENT CONSOLE accepts exactly the ss10 sendevent verbs (job verbs;
   SET_GLOBAL NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an
   omitted job means the selected row. Key bindings fire the common verbs on
@@ -53,15 +68,20 @@ Normative detail for DL-46, within DL-41's frame:
   box, `z` folds/unfolds all; a folded box shows its hidden descendant
   count and a red problem tally -- a fold must never swallow a FAILURE
   silently). `/` opens an incremental name filter (space-separated
-  substrings AND'd; Enter keeps it, Esc clears), `v` cycles the view
+  substrings AND'd; Enter keeps it, Esc clears; with the log pager focused
+  `/` searches the LOG instead -- find-in-what-fills-the-screen), `v`
+  cycles the view
   all -> problems -> active. Filtered and non-'all' views are FLAT:
   a match inside a folded box must never be invisible. The console
   moved to `:` (vim command-line muscle memory). The status response's
   spec_drift flag renders in the subtitle: files changed on disk, the
   running catalog is the truth.
-- PANE GEOMETRY, keyboard only: `m` toggles maximizing the log tail
-  (escape also restores); `]`/`[` grow/shrink the log against explain,
-  `}`/`{` the jobs table against the side column. No mouse splitters.
+- PANE GEOMETRY, keyboard only: `m` toggles maximizing the log pane and
+  hands focus to the pager (`q`/escape also restore); `]`/`[` grow/shrink
+  the log against explain, `}`/`{` the jobs table against the side column.
+  No mouse splitters. While anything is maximized the tree filter and the
+  console never take focus -- an input the operator cannot see must never
+  swallow keystrokes (DL-67).
 - ONE REQUEST CONNECTION, lock-serialized (the server answers one line per
   line); `subscribe` owns its own connection until hangup (ss10). A dead
   socket flips the header subtitle to "disconnected", is reported once to
@@ -83,6 +103,8 @@ import contextlib
 import functools
 import json
 import os
+import re
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -120,6 +142,9 @@ _STATUS_STYLE = {
     "TERMINATED": "magenta",
 }
 _TAIL_SEED_BYTES = 8192  # start a fresh tail this close to EOF
+#: pager memory bound: buffer, widget, and display list all cap here in
+#: lockstep. Paging serves triage; the file on disk is the forensic truth.
+_PAGER_BUFFER_LINES = 10_000
 _COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
 #: fixed render widths for the bounded columns (max of content and header
 #: label: TERMINATED, HH:MM:SS, IHN, ...). Auto-width stays only where content
@@ -202,6 +227,352 @@ class _FilterInput(Input):
         app = self.app
         assert isinstance(app, RunnerApp)
         app.clear_filter()
+
+
+def compile_search(pattern: str) -> re.Pattern[str] | str:
+    """Compile a pager search/filter pattern: regex, smartcase (insensitive
+    unless the pattern itself carries an uppercase letter -- the rg/vim
+    default). Returns an error string instead of raising so the prompt can
+    render it; pure function so the rule is testable without a terminal."""
+    flags = 0 if any(ch.isupper() for ch in pattern) else re.IGNORECASE
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        return f"bad pattern: {exc}"
+
+
+class _LogSearchInput(Input):
+    """The pager prompt line (`/`, `?`, `&`). Escape cancels the PROMPT and
+    hands focus back to the log -- it must not leave the pager, which is why
+    RunnerApp disables textual's escape-to-minimize special case (it swallows
+    escape BEFORE any binding runs while a widget is maximized) and owns
+    escape through explicit bindings instead."""
+
+    BINDINGS = [Binding("escape", "cancel_prompt", "cancel")]
+
+    def action_cancel_prompt(self) -> None:
+        pane = self.parent
+        assert isinstance(pane, _LogPane)
+        pane.close_prompt()
+
+
+class _LogTail(RichLog):
+    """The log tail, and -- whenever it has focus -- a less-style pager.
+
+    Focus IS the mode: textual consults the focused widget's bindings before
+    the app's, so the keymap below both provides the pager verbs and shadows
+    the operator verbs (`k` aimed at scroll-up must never KILLJOB, `f` aimed
+    at page-forward must never FORCE_STARTJOB, `q` leaves the pager, not the
+    app). Estate-mutating keys with no pager meaning ring the bell exactly
+    like less does on an unknown key; `m`/`o`/`r` and the pane-resize keys
+    deliberately fall through to the app (allowlist in tests). Paging must
+    never mutate the estate.
+
+    Search is regex with smartcase, all matches reverse-video, `n`/`N`
+    wrap; `&` shows only matching lines (less's own filter key) as a VIEW of
+    the buffer, never a loss. Follow is pinned-at-bottom: scrolling up
+    pauses it ([paused] in the title), `F`/`G`/End resume. The buffer, the
+    display list, and the widget all cap at _PAGER_BUFFER_LINES in lockstep.
+    """
+
+    BINDINGS = [
+        # search (the pager's reason to exist)
+        Binding("slash", "prompt('search')", "search"),
+        Binding("question_mark", "prompt('rsearch')", "search back", show=False),
+        Binding("ampersand", "prompt('filter')", "filter lines"),
+        Binding("n", "match_step(1)", "next"),
+        Binding("N", "match_step(-1)", "prev"),
+        # motion (less/vim), shadowing k=KILLJOB / f=FORCE / d=details /
+        # space=fold / z=fold-all with their pager meanings
+        Binding("j", "scroll_down", "down", show=False),
+        Binding("k", "scroll_up", "up", show=False),
+        Binding("d", "half_page(1)", "half down", show=False),
+        Binding("u", "half_page(-1)", "half up", show=False),
+        Binding("f", "page_down", "page down", show=False),
+        Binding("space", "page_down", "page down", show=False),
+        Binding("z", "page_down", "page down", show=False),
+        Binding("b", "page_up", "page up", show=False),
+        Binding("g", "scroll_home", "top", show=False),
+        Binding("G", "follow", "end", show=False),
+        Binding("F", "follow", "follow"),
+        # leaving the pager (q must not quit the app from muscle memory)
+        Binding("q", "leave", "close"),
+        Binding("escape", "leave", "close", show=False),
+        # estate-mutating operator verbs with no pager meaning: bell, like
+        # less on an unknown key -- NOT check_action=False, which would let
+        # the key fall through to the app binding it exists to shadow
+        Binding("s", "app.bell", "", show=False),
+        Binding("i", "app.bell", "", show=False),
+        Binding("I", "app.bell", "", show=False),
+        Binding("h", "app.bell", "", show=False),
+        Binding("H", "app.bell", "", show=False),
+        Binding("v", "app.bell", "", show=False),
+        Binding("colon", "app.bell", "", show=False),
+    ]
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 -- textual's own name
+        super().__init__(
+            id=id,
+            highlight=False,
+            markup=False,
+            wrap=False,
+            auto_scroll=False,
+            max_lines=_PAGER_BUFFER_LINES,
+        )
+        self._stream = "out"
+        self._path: str | None = None
+        self._buffer: deque[str] = deque(maxlen=_PAGER_BUFFER_LINES)
+        self._display: list[str] = []  # lines currently in the widget (filter view)
+        self._needle: re.Pattern[str] | None = None
+        self._needle_text = ""
+        self._search_backward = False
+        self._line_filter: re.Pattern[str] | None = None
+        self._line_filter_text = ""
+        self._matches: list[int] = []  # widget rows matching the needle
+        self._match_pos: int | None = None  # index into _matches
+        self._title_cache = ""
+
+    # ------------------------------------------------------------- data plane
+
+    def set_source(self, stream: str, path: str | None) -> None:
+        """New tail target (job switch, o toggle, truncation): drop the
+        buffer, keep the search/filter patterns -- less keeps the pattern
+        across files, and `n` after a job switch is a feature."""
+        self._stream, self._path = stream, path
+        self._buffer.clear()
+        self._display = []
+        self._matches = []
+        self._match_pos = None
+        self.clear()
+        self._refresh_title()
+
+    def feed(self, lines: list[str]) -> None:
+        was_at_end = self.is_vertical_scroll_end
+        for line in lines:
+            self._buffer.append(line)
+            if self._line_filter is None or self._line_filter.search(line):
+                self._display.append(line)
+                self._write_row(line, len(self._display) - 1)
+        overflow = len(self._display) - _PAGER_BUFFER_LINES
+        if overflow > 0:
+            # the widget already trimmed itself via max_lines; mirror it
+            del self._display[:overflow]
+            dropped = 0
+            shifted = []
+            for row in self._matches:
+                if row < overflow:
+                    dropped += 1
+                else:
+                    shifted.append(row - overflow)
+            self._matches = shifted
+            if self._match_pos is not None:
+                self._match_pos = max(0, self._match_pos - dropped) if self._matches else None
+        if was_at_end:
+            self.scroll_end(animate=False)
+        elif overflow > 0:
+            # keep the operator's place: content slid up under a paused view
+            self.scroll_to(y=max(0, self.scroll_y - overflow), animate=False)
+        self._refresh_title()
+
+    def _write_row(self, line: str, row: int) -> None:
+        text = Text(line)
+        if self._needle is not None:
+            spans = list(self._needle.finditer(line))
+            if spans:
+                for span in spans:
+                    text.stylize("reverse", span.start(), span.end())
+                self._matches.append(row)
+        self.write(text, scroll_end=False)
+
+    def _rebuild(self) -> None:
+        """Re-render the whole view from the buffer (search or filter
+        changed): restyles every line and recomputes the match rows."""
+        self.clear()
+        self._display = []
+        self._matches = []
+        self._match_pos = None
+        for line in self._buffer:
+            if self._line_filter is None or self._line_filter.search(line):
+                self._display.append(line)
+                self._write_row(line, len(self._display) - 1)
+
+    # ------------------------------------------------------------ search model
+
+    def apply_search(self, pattern: str, backward: bool) -> str | None:
+        """Set (or with '' clear) the needle; returns an error string for the
+        prompt to render, None on success. On success jumps less-style: the
+        first match after (before, for `?`) the current top row, wrapping."""
+        top = int(self.scroll_y)  # clear() inside _rebuild resets the scroll
+        if not pattern:
+            self._needle = None
+            self._needle_text = ""
+            self._rebuild()
+            # de-highlight in place: clearing a search must not move the view
+            self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
+            self._refresh_title()
+            return None
+        compiled = compile_search(pattern)
+        if isinstance(compiled, str):
+            return compiled
+        self._needle, self._needle_text, self._search_backward = compiled, pattern, backward
+        self._rebuild()
+        if self._matches:
+            if backward:
+                below = [i for i, row in enumerate(self._matches) if row < top]
+                self._match_pos = below[-1] if below else len(self._matches) - 1
+            else:
+                above = [i for i, row in enumerate(self._matches) if row > top]
+                self._match_pos = above[0] if above else 0
+            self._jump()
+        else:
+            self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
+        self._refresh_title()
+        return None
+
+    def apply_line_filter(self, pattern: str) -> str | None:
+        if pattern:
+            compiled = compile_search(pattern)
+            if isinstance(compiled, str):
+                return compiled
+            self._line_filter, self._line_filter_text = compiled, pattern
+        else:
+            self._line_filter, self._line_filter_text = None, ""
+        self._rebuild()
+        self.scroll_end(animate=False)  # a new view of a log starts at its tail
+        self._refresh_title()
+        return None
+
+    def action_match_step(self, step: int) -> None:
+        """`n` repeats in the search direction, `N` opposes it (less)."""
+        if not self._matches:
+            self.app.bell()  # no search, or the pattern matches nothing
+            return
+        direction = -step if self._search_backward else step
+        if self._match_pos is None:
+            self._match_pos = 0 if direction > 0 else len(self._matches) - 1
+        else:
+            self._match_pos = (self._match_pos + direction) % len(self._matches)
+        self._jump()
+        self._refresh_title()
+
+    def _jump(self) -> None:
+        assert self._match_pos is not None
+        self.scroll_to(y=self._matches[self._match_pos], animate=False)  # match at top (less)
+
+    # ------------------------------------------------------------ pager verbs
+
+    def action_prompt(self, kind: str) -> None:
+        pane = self.parent
+        assert isinstance(pane, _LogPane)
+        pane.open_prompt(kind)
+
+    # the widget-inherited motion actions animate by default and move
+    # RELATIVE TO scroll_target_y, which goes stale when the viewport
+    # changes size (the small pane's scroll_end leaves a target beyond the
+    # maximized pane's max, and every scroll_up after that only shaves the
+    # phantom overshoot). A pager SNAPS (less has no smooth scrolling), and
+    # snapping from the real offset sidesteps the stale target entirely.
+
+    def _snap(self, y: float) -> None:
+        self.scroll_to(y=y, animate=False)
+        self.call_after_refresh(self._refresh_title)
+
+    def action_half_page(self, sign: int) -> None:
+        half = max(1, self.scrollable_content_region.height // 2)
+        self._snap(self.scroll_y + sign * half)
+
+    def action_follow(self) -> None:
+        self._snap(self.max_scroll_y)
+
+    def action_scroll_up(self) -> None:
+        self._snap(self.scroll_y - 1)
+
+    def action_scroll_down(self) -> None:
+        self._snap(self.scroll_y + 1)
+
+    def action_page_up(self) -> None:
+        self._snap(self.scroll_y - self.scrollable_content_region.height)
+
+    def action_page_down(self) -> None:
+        self._snap(self.scroll_y + self.scrollable_content_region.height)
+
+    def action_scroll_home(self) -> None:
+        self._snap(0)
+
+    def action_scroll_end(self) -> None:
+        self._snap(self.max_scroll_y)
+
+    def action_leave(self) -> None:
+        self.screen.minimize()
+        self.app.query_one("#jobs", DataTable).focus()
+
+    # ------------------------------------------------------------------ title
+
+    def on_mount(self) -> None:
+        self._refresh_title()
+        # scroll state feeds the title ([paused]); arrows/wheel bypass our
+        # actions, so a light tick keeps it honest between feeds
+        self.set_interval(0.5, self._refresh_title)
+
+    def _refresh_title(self) -> None:
+        title = Text(f"log ({self._stream}): {self._path or 'none yet'}")
+        if self._line_filter_text:
+            title.append(f"  &{self._line_filter_text}", style="italic")
+        if self._needle_text:
+            at = "-" if self._match_pos is None else str(self._match_pos + 1)
+            title.append(f"  /{self._needle_text}/ {at}/{len(self._matches)}", style="italic")
+        if not self.is_vertical_scroll_end:
+            title.append("  [paused]", style="bold yellow")
+        if title.plain != self._title_cache:
+            self._title_cache = title.plain
+            self.border_title = title
+
+
+class _LogPane(Vertical):
+    """The log column cell: the pager plus its prompt line. Maximizing THIS
+    (not the bare RichLog) is what keeps the prompt visible while zoomed --
+    maximize hides every widget outside the maximized subtree, which is
+    exactly how the old tree-filter-under-zoom bug happened."""
+
+    ALLOW_MAXIMIZE = True  # containers default to False
+
+    _prompt_kind = "search"  # which verb the open prompt serves
+    _PROMPTS = {
+        "search": ("/", "search (regex, smartcase) -- Enter finds, empty clears, Esc cancels"),
+        "rsearch": ("?", "search backward (regex, smartcase) -- empty clears, Esc cancels"),
+        "filter": ("&", "show only matching lines (regex, smartcase) -- empty clears"),
+    }
+
+    def open_prompt(self, kind: str) -> None:
+        marker, placeholder = self._PROMPTS[kind]
+        prompt = self.query_one("#logsearch", _LogSearchInput)
+        self._prompt_kind = kind
+        prompt.placeholder = placeholder
+        prompt.border_title = marker
+        prompt.styles.display = "block"
+        prompt.focus()
+
+    def close_prompt(self) -> None:
+        prompt = self.query_one("#logsearch", _LogSearchInput)
+        prompt.value = ""
+        prompt.border_title = ""
+        prompt.styles.display = "none"
+        self.query_one("#logtail", _LogTail).focus()
+
+    @on(Input.Submitted, "#logsearch")
+    def _on_prompt_submitted(self, event: Input.Submitted) -> None:
+        event.stop()  # the app handles #filterline submits; this one is ours
+        pager = self.query_one("#logtail", _LogTail)
+        kind = self._prompt_kind
+        if kind == "filter":
+            error = pager.apply_line_filter(event.value.strip())
+        else:
+            error = pager.apply_search(event.value.strip(), backward=(kind == "rsearch"))
+        if error is not None:
+            # stay open with the text intact; the border carries the refusal
+            event.input.border_title = Text(error, style="bold red")
+            return
+        self.close_prompt()
 
 
 class ControlClientError(RuntimeError):
@@ -368,6 +739,11 @@ class RunnerApp(App[None]):
     """The ss11 app: jobs table, explain pane, log tail, event console."""
 
     TITLE = "dsl41 runner"
+    #: textual's default swallows escape BEFORE any binding runs while a
+    #: widget is maximized -- escape in the pager's search prompt would exit
+    #: the pager instead of cancelling the prompt. Escape is owned by
+    #: explicit bindings instead (_LogTail leave, _LogSearchInput cancel).
+    ESCAPE_TO_MINIMIZE = False
     CSS = """
     #main { height: 1fr; }
     #tablecol { width: 3fr; }
@@ -375,7 +751,9 @@ class RunnerApp(App[None]):
     #jobs { height: 1fr; border: round $primary; }
     #side { width: 2fr; }
     #explain-box { height: 2fr; border: round $primary; }
-    #logtail { height: 3fr; border: round $primary; }
+    #logbox { height: 3fr; }
+    #logtail { height: 1fr; border: round $primary; }
+    #logsearch { display: none; }
     #consolebox { height: 11; }
     #console { height: 1fr; border: round $secondary; }
     """
@@ -424,7 +802,9 @@ class RunnerApp(App[None]):
         self._alarms: dict[str, int] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
-        self._tail_path: str | None = None
+        # (stream, path) rather than the bare path: out and err may legally
+        # resolve to the SAME file, and an `o` toggle must still retitle
+        self._tail_key: tuple[str, str | None] | None = None
         self._tail_pos: int | None = None
         # pane shares, resized by ]/[ and }/{ -- fr weights out of _SHARE_TOTAL
         self._log_share = 3  # log vs explain (CSS default 3fr : 2fr)
@@ -462,7 +842,9 @@ class RunnerApp(App[None]):
             with Vertical(id="side"):
                 with VerticalScroll(id="explain-box"):
                     yield Static(id="explain")
-                yield RichLog(id="logtail", highlight=False, markup=False, wrap=False)
+                with _LogPane(id="logbox"):
+                    yield _LogTail(id="logtail")
+                    yield _LogSearchInput(id="logsearch")
         with Vertical(id="consolebox"):
             yield RichLog(id="console", markup=False, wrap=True)
             yield Input(
@@ -478,7 +860,6 @@ class RunnerApp(App[None]):
         for label in _COLUMNS:  # singular add_column: key= predates the 6.2 tuple form
             table.add_column(label, key=label, width=_COLUMN_WIDTHS.get(label))
         self.query_one("#explain-box").border_title = "explain"
-        self.query_one("#logtail", RichLog).border_title = "log"
         self.query_one("#console", RichLog).border_title = "events"
         table.focus()
         self.run_worker(self._refresh(), group="refresh", exclusive=False)
@@ -846,17 +1227,16 @@ class RunnerApp(App[None]):
 
     def _tail_step(self) -> None:
         try:
-            widget = self.query_one("#logtail", RichLog)
+            pager = self.query_one("#logtail", _LogTail)
         except NoMatches:
             return  # a set_interval tick can outlive the unmounting screen
         paths = self._log_paths.get(self._selected or "", (None, None))
         path = paths[self._tail_stream]
         stream = ("out", "err")[self._tail_stream]
-        if path != self._tail_path:
-            self._tail_path = path
+        if (stream, path) != self._tail_key:
+            self._tail_key = (stream, path)
             self._tail_pos = None
-            widget.clear()
-            widget.border_title = f"log ({stream}): {path or 'none yet'}"
+            pager.set_source(stream, path)
         if path is None:
             return
         try:
@@ -867,7 +1247,7 @@ class RunnerApp(App[None]):
             self._tail_pos = max(0, size - _TAIL_SEED_BYTES)
         elif size < self._tail_pos:  # truncated underneath us: start over
             self._tail_pos = 0
-            widget.clear()
+            pager.set_source(stream, path)
         if size == self._tail_pos:
             return
         try:
@@ -877,8 +1257,7 @@ class RunnerApp(App[None]):
         except OSError:
             return
         self._tail_pos = size
-        for line in data.decode("utf-8", errors="replace").splitlines():
-            widget.write(line)
+        pager.feed(data.decode("utf-8", errors="replace").splitlines())
 
     def action_toggle_stream(self) -> None:
         self._tail_stream = 1 - self._tail_stream
@@ -990,22 +1369,27 @@ class RunnerApp(App[None]):
     _SHARE_TOTAL = 5  # both splits are X fr : (5 - X) fr
 
     def action_maximize_log(self) -> None:
-        log = self.query_one("#logtail", RichLog)
-        if self.screen.maximized is log:
+        pane = self.query_one("#logbox", _LogPane)
+        if self.screen.maximized is pane:
             self.screen.minimize()
             self.query_one("#jobs", DataTable).focus()
         else:
-            self.screen.maximize(log)
-            # focus the log EXPLICITLY: textual otherwise lands focus on the
-            # console Input, which consumes every letter key as text -- the
-            # restore keystroke included
-            log.focus()
+            # the PANE, not the bare log: maximize hides everything outside
+            # the maximized subtree, and the search prompt must stay visible
+            self.screen.maximize(pane)
+            # focus the log EXPLICITLY: focus is the pager mode switch, and
+            # textual otherwise lands focus on the console Input, which
+            # consumes every letter key as text -- the restore keystroke
+            # included
+            self.query_one("#logtail", _LogTail).focus()
 
     def action_resize(self, pane: str, delta: int) -> None:
         span = range(1, self._SHARE_TOTAL)  # 1..4: neither side collapses
         if pane == "log":
             self._log_share = min(max(self._log_share + delta, span.start), span[-1])
-            self.query_one("#logtail", RichLog).styles.height = f"{self._log_share}fr"
+            # logbox, not #logtail: the pane (log + prompt) is what
+            # participates in the vertical split against explain
+            self.query_one("#logbox", _LogPane).styles.height = f"{self._log_share}fr"
             self.query_one(
                 "#explain-box"
             ).styles.height = f"{self._SHARE_TOTAL - self._log_share}fr"
@@ -1025,11 +1409,18 @@ class RunnerApp(App[None]):
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
     def action_focus_console(self) -> None:
+        if self.screen.maximized is not None:
+            return  # never focus an input the maximized view is hiding
         self.query_one("#cmdline", Input).focus()
 
     # -------------------------------------------- filter / view / fold (DL-65)
 
     def action_focus_filter(self) -> None:
+        # defense in depth: the pager's bindings shadow `/` while the log is
+        # focused, but a focus hole must never reopen the type-into-an-
+        # invisible-filter bug that motivated the pager (DL-67)
+        if self.screen.maximized is not None:
+            return
         line = self.query_one("#filterline", Input)
         line.styles.display = "block"
         line.focus()

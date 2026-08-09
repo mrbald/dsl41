@@ -2258,3 +2258,48 @@
   profiles), RUNBOOK job names exist in a catalog (regex contract),
   README's viz/report/uc acceptance runs in CI; the bank byte-stable
   pin now covers incidents.conf. Tests 1731 -> 1735.
+- DL-67 the zoomed log is a real pager; operator verbs unreachable while
+  paging (2026-08-09). The report that triggered it: `/` with the log
+  maximized opened the DL-65 tree filter — an Input the maximized view
+  HIDES — so keystrokes vanished into an invisible widget and the tree
+  came back mysteriously narrowed. The hole generalized: every app-level
+  key stayed live under maximize, so less/vim muscle memory aimed at the
+  VIEW fired estate verbs — `k` (scroll up) sent KILLJOB at the selected
+  job, `f` (page forward) sent FORCE_STARTJOB, `q` (leave the pager) quit
+  the app. Decision, per the category convention (less/vim/tig/k9s all
+  agree `/` in a full-screen log searches the log — find-in-what-fills-
+  the-screen, so the key's meaning is stable even though its target
+  changes): the log tail WITH FOCUS is a less-style pager, and focus is
+  the mode switch. Textual consults the focused widget's bindings before
+  the app's, so one mechanism both provides the pager verbs and shadows
+  the operator verbs; keys with no pager meaning ring the bell exactly
+  as less does; `m`/`o`/`r` and the pane-resize keys pass through
+  deliberately; a binding-drift guard test keeps the shadow/allowlist
+  partition total so a future app binding cannot silently leak into the
+  pager. Paging never mutates the estate. Mechanics: `m` maximizes the
+  log PANE (tail + prompt line — the prompt must render inside the
+  maximized subtree, which is exactly what the tree filter got wrong);
+  search is regex with smartcase, all matches reverse-video, `/`/`?`/
+  `n`/`N` in the less directions with wrap; `&` shows only matching
+  lines as a VIEW of the buffer (appends join it, empty submit restores,
+  a broken regex holds the prompt open with the error on its border);
+  follow is pinned-at-bottom — scrolling up pauses ([paused] in the
+  title), F/G/End resume; buffer, filter view, and widget cap at 10k
+  lines in lockstep (the tail grew unbounded before). ESCAPE_TO_MINIMIZE
+  is OFF: textual swallows escape before any binding runs while a widget
+  is maximized, which would make escape-in-the-prompt exit the pager;
+  escape is owned by explicit bindings instead (prompt: cancel; log:
+  leave), and the tree filter/console focus actions are guarded under
+  maximize as defense in depth. Found while building: the widget-
+  inherited relative scrolls move against scroll_TARGET, which goes
+  stale across a viewport resize (the small pane's scroll_end left a
+  target past the maximized pane's max, so `k` only shaved the phantom
+  overshoot; they also animate, which reads as "not at the end" to the
+  follow logic) — pager motion snaps from the real offset; the tail key
+  is (stream, path), was path-only, so `o` retitles even when out and
+  err resolve to the same file. Deliberately NOT done: live incremental
+  log search (a per-keystroke restyle of a 10k-line buffer; less is
+  submit-driven and so is the pager — the tree filter stays live, its
+  cost model is rows not lines), and shelling out to real less via
+  App.suspend (dies under textual-serve — E3 web-posture parity).
+  Tests 1735 -> 1742 (pager suite: test_runner_tui.py section 5).
