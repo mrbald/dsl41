@@ -2178,3 +2178,48 @@
   SEM-32 dead-tick test now expects the tick's START_REFUSED record --
   its "no trace at all" wording was a proxy for the pinned no-arm, which
   stands unchanged.
+- DL-65 navigation & observability at estate scale (2026-08-09). Origin:
+  bank-profile training (518 rows) made the flat jobs table unnavigable,
+  and a deliberate systemctl/systemd API review supplied the orthogonal
+  ideas worth stealing. TUI: the jobs table renders the BOX TREE from a
+  new per-job box_name/job_type in the ss10 status response (space folds
+  the selected box, z all; a folded box row carries its hidden-descendant
+  count and a red problem tally -- a fold must never swallow a FAILURE
+  silently); `/` incremental name filter (substrings AND'd; Enter keeps,
+  Esc clears); `v` view cycle all -> problems -> active; filtered and
+  non-all views are deliberately FLAT (a match inside a folded box must
+  never be invisible); the event console moved from `/` to `:`. Table
+  rebuilds wholesale only when row ORDER changes, else per-cell updates;
+  border titles are rich Text (markup injection via user filters).
+  Control plane, each a systemctl analog: `deps job` = list-dependencies
+  --reverse (upstream from _entity_keys, downstream from the oracle's
+  edge-trigger index -- the blast radius before KILLJOB/ON_HOLD);
+  `timers` = list-timers (oracle pending timers + Scheduler.upcoming(),
+  one due-ordered list); status gains `spec_drift` = the daemon-reload
+  hint INVERTED (lazy 15s sha256 re-check of the loaded input files;
+  there is no reload -- the TUI subtitle says the running catalog no
+  longer matches the disk, cold restart to adopt); CLI predicates
+  `is-success`/`is-failed` = is-active (print status, exit 0/1, shell
+  glue). The details popup gains needs:/blocks: lines and a log tail
+  (the `systemctl status` composite). Deliberately NOT copied:
+  daemon-reload (cold-restart doctrine stands), drop-in overrides (the
+  properties file is the one templating layer), mouse splitters.
+  `analyze` (blame/critical-chain over the WAL) is noted as the next
+  standalone unit, not built here. Review round (standing flow, run as a
+  parallel five-agent workflow: two test writers + three adversarial
+  lenses): 13 breadth tests green first pass; 10 findings, all fixed
+  same session -- 4 MAJOR: rebuilds bounced the selection through row 0
+  wiping the log tail on every filter keystroke (restore-guard in the
+  highlight handler); an empty filtered view left keyed verbs aimed at
+  an invisible job (selection cleared); CHANGE_STATUS refused the
+  "JOB^INST" pseudo-entity so the cross-instance runbook play could
+  never fire (declared-xinst suffixes now pass the gate, SEM-07); the
+  folded-box rollup and the problems view disagreed on QUE_WAIT one
+  keystroke apart (single _is_problem predicate). MINORs: deps
+  classified by key-string sniffing (atom-type walk now; a job legally
+  named 'g:x' no longer reads as global x), deps omitted box
+  containment (box_name/members served + popup lines -- condition edges
+  are not a box's blast radius), fingerprint re-read raced the loader
+  (hashes the loaded bytes, inside the exit-2 guard), flat views wore
+  stale fold decoration, }/{ resized the wrong node after the layout
+  change. Tests 1716 -> 1731.

@@ -497,8 +497,18 @@ with a JSON-lines protocol.
   job's condition shown with per-atom truth over the current store (the
   Cond IR makes this nearly free), `spec <job>` — the preserve-rendered
   post-placeholder JIL block the engine loaded (DL-64; served from an
-  optional spec_texts map, jil:null when the embedder has no source), and
-  `plan` (acyclic estates only).
+  optional spec_texts map, jil:null when the embedder has no source),
+  `deps <job>` — upstream entities the condition references plus the
+  downstream jobs whose conditions reference this one, straight from the
+  oracle's edge-trigger index (DL-65: the blast-radius view), `timers` —
+  every pending oracle timer plus each scheduled job's next calendar
+  tick, due-ordered (DL-65), and `plan` (acyclic estates only). The
+  status response also carries per-job `job_type`/`box_name` (the ss11
+  tree) and a `spec_drift` flag — a lazy fingerprint re-check of the
+  loaded input files; there is no reload, the flag tells the operator
+  the running catalog no longer matches the disk (DL-65). The CLI adds
+  scriptable predicates `is-success`/`is-failed` (print status, exit
+  0/1) over the status verb.
 - **subscribe** — stream journal records from a seq (the UI feed).
 
 Every control input is journaled like any other injected event
@@ -516,9 +526,15 @@ app instance per browser session, so an in-process engine hands every
 viewer a private universe. Views: jobs table (status, run_number, pending
 timers/alarms), explain pane ("waiting on: s(A) ∧ ¬f(B)" with live truth),
 log tail (the §6 std files), event console (sendevent verbs), job-details
-popup (the `spec` block). The header clock is UTC — the engine's time
-basis, one time base on screen (DL-64). Pane geometry is keyboard-only:
-maximize toggle on the log tail plus fr-share nudges for both splits.
+popup (the `spec` block + `deps` needs/blocks lines + a short log tail).
+The header clock is UTC — the engine's time basis, one time base on
+screen (DL-64). Pane geometry is keyboard-only: maximize toggle on the
+log tail plus fr-share nudges for both splits. Navigation at estate
+scale (DL-65): the table renders the box tree from the status response's
+box_name (fold a box with space, all with z; a folded box shows its
+hidden count and a red problem tally), `/` filters by name, `v` cycles
+all → problems → active — filtered and non-all views flatten so a match
+never hides inside a fold. The console focuses with `:`.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal.
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web

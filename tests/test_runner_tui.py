@@ -655,7 +655,259 @@ def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) 
                 await pilot.press("{")
                 await pilot.press("{")  # clamped at 1
                 assert app._table_share == 1
-                assert str(app.query_one("#jobs", DataTable).styles.width) == "1fr"
+                # tablecol (the filter+table column) is the horizontal-split
+                # participant, not #jobs inside it (DL-65 review)
+                assert str(app.query_one("#tablecol").styles.width) == "1fr"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+# ------------------- 4. DL-65 estate navigation (box tree / filter / views / details)
+
+
+def test_pilot_box_tree_order_indent_fold_and_fold_all(short_root: Path) -> None:
+    """DL-65 box tree: rows follow the box hierarchy (alpha within each
+    level), members indent under their box, space folds the SELECTED box
+    (members leave the table, the label gains the hidden-descendant count),
+    space again unfolds, and `z` folds/unfolds every box at once."""
+    text = (
+        "insert_job: bt_box\njob_type: b\n\n"
+        "insert_job: bt_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
+        "insert_job: bt_m2\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
+        "insert_job: bt_inner\njob_type: b\nbox_name: bt_box\n\n"
+        "insert_job: bt_deep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_inner\n\n"
+        "insert_job: bt_solo\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+    tree_order = ["bt_box", "bt_inner", "bt_deep", "bt_m1", "bt_m2", "bt_solo"]
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                table = app.query_one("#jobs", DataTable)
+                assert str(table.get_cell("bt_box", "job")) == "▾ bt_box"
+                assert str(table.get_cell("bt_inner", "job")) == "  ▾ bt_inner"
+                assert str(table.get_cell("bt_deep", "job")) == "    bt_deep"
+                assert str(table.get_cell("bt_m1", "job")) == "  bt_m1"
+                assert str(table.get_cell("bt_solo", "job")) == "bt_solo"
+
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "bt_box"
+
+                await pilot.press("space")  # fold: the whole subtree buries
+                await _wait_for_ui(pilot, lambda: app._row_order == ["bt_box", "bt_solo"])
+                assert str(table.get_cell("bt_box", "job")) == "▸ bt_box (4)"
+
+                await pilot.press("space")  # unfold restores the same order
+                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                assert str(table.get_cell("bt_box", "job")) == "▾ bt_box"
+
+                await pilot.press("z")  # fold ALL boxes
+                await _wait_for_ui(pilot, lambda: app._row_order == ["bt_box", "bt_solo"])
+                await pilot.press("z")  # unfold all
+                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_folded_box_rollup_carries_a_red_problem_tally(short_root: Path) -> None:
+    """A fold must never swallow a FAILURE silently (DL-65): with one member
+    driven to FAILURE, the folded box label reads "(2, 1!)" in bold red."""
+    text = (
+        "insert_job: pr_box\njob_type: b\n\n"
+        "insert_job: pr_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pr_box\n\n"
+        "insert_job: pr_m2\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pr_box\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 3)
+                table = app.query_one("#jobs", DataTable)
+
+                cmdline = app.query_one("#cmdline", Input)
+                cmdline.focus()
+                cmdline.value = "CHANGE_STATUS pr_m1 FAILURE 1"
+                await pilot.press("enter")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("pr_m1", "status")) == "FAILURE"
+                )
+
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "pr_box"
+                await pilot.press("space")
+                await _wait_for_ui(pilot, lambda: app._row_order == ["pr_box"])
+                label = table.get_cell("pr_box", "job")
+                assert str(label) == "▸ pr_box (2, 1!)"
+                assert label.style == "bold red"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears(short_root: Path) -> None:
+    """DL-65 incremental name filter: `/` focuses the filter line, each
+    keystroke re-narrows the table LIVE and FLAT (a match inside a box must
+    never be invisible), space-separated substrings AND together, the border
+    title carries the visible/total counts plus the filter, Enter keeps the
+    filter and returns to the table, Escape clears and refocuses it."""
+    text = (
+        "insert_job: fx_box\njob_type: b\n\n"
+        "insert_job: fx_apple\njob_type: c\ncommand: x\nmachine: m1\nbox_name: fx_box\n\n"
+        "insert_job: fx_apricot\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: fx_banana\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+    tree_order = ["fx_apricot", "fx_banana", "fx_box", "fx_apple"]
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                table = app.query_one("#jobs", DataTable)
+
+                await pilot.press("slash")
+                await pilot.pause()
+                assert app.focused is not None and app.focused.id == "filterline"
+
+                await pilot.press("a", "p")
+                await _wait_for_ui(pilot, lambda: app._row_order == ["fx_apple", "fx_apricot"])
+                # the filtered view is FLAT: the box member renders unindented
+                assert str(table.get_cell("fx_apple", "job")) == "fx_apple"
+                assert "jobs 2/4" in str(table.border_title)
+                assert "/ap/" in str(table.border_title)
+
+                await pilot.press("space", "p", "l", "e")  # "ap ple": terms AND
+                await _wait_for_ui(pilot, lambda: app._row_order == ["fx_apple"])
+
+                await pilot.press("enter")  # keep the filter, back to the table
+                await pilot.pause()
+                assert app.focused is table
+                assert app._filter == "ap ple"
+                assert app._row_order == ["fx_apple"]
+
+                await pilot.press("slash")
+                await pilot.pause()
+                await pilot.press("escape")  # clear and refocus the table
+                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                assert app._filter == ""
+                assert app.focused is table
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_v_cycles_all_problems_active_and_back_to_all(short_root: Path) -> None:
+    """DL-65 view cycle: `v` -> problems (FAILURE/TERMINATED/QUE_WAIT or
+    alarmed only), `v` -> active (STARTING/RUNNING/QUE_WAIT: none here),
+    `v` -> back to all."""
+    text = (
+        "insert_job: vc_bad\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: vc_ok\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 2)
+                table = app.query_one("#jobs", DataTable)
+
+                cmdline = app.query_one("#cmdline", Input)
+                cmdline.focus()
+                cmdline.value = "CHANGE_STATUS vc_bad FAILURE 1"
+                await pilot.press("enter")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("vc_bad", "status")) == "FAILURE"
+                )
+
+                table.focus()
+                await pilot.press("v")  # problems: only the FAILURE row stays
+                await _wait_for_ui(pilot, lambda: app._row_order == ["vc_bad"])
+                assert "problems" in str(table.border_title)
+
+                await pilot.press("v")  # active: nothing STARTING/RUNNING/QUE_WAIT
+                await _wait_for_ui(pilot, lambda: app._row_order == [])
+                await pilot.press("v")  # back to all
+                await _wait_for_ui(pilot, lambda: app._row_order == ["vc_bad", "vc_ok"])
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_colon_focuses_the_event_console(short_root: Path) -> None:
+    """DL-65 rebind: the console moved from `/` (now the filter) to `:`."""
+    text = "insert_job: cr_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "cr_job" in app._rows)
+                await pilot.press("colon")
+                await pilot.pause()
+                assert app.focused is not None and app.focused.id == "cmdline"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_details_popup_shows_needs_blocks_and_a_log_tail(short_root: Path) -> None:
+    """DL-65 popup additions on top of DL-64's spec block: the `deps` verb's
+    needs:/blocks: lines (upstream condition entities / referencing jobs)
+    and a short local log tail of the job's resolved log_out -- an explicit
+    std_out_file resolves before any run, so the tail needs no adapter."""
+    out_path = short_root / "dp_b.out"
+    text = (
+        "insert_job: dp_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: dp_b\njob_type: c\ncommand: y\nmachine: m1\n"
+        f"condition: s(dp_a)\nstd_out_file: {out_path}\n\n"
+        "insert_job: dp_c\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(dp_b)\n"
+    )
+    block = "insert_job: dp_b\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(dp_a)\n"
+
+    async def scenario() -> None:
+        out_path.write_text("first line\nlast fake log line\n")
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, spec_texts={"dp_b": block}
+        )
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 3)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=1)  # alpha-sorted: dp_a, dp_b, dp_c
+                await pilot.pause()
+                assert app._selected == "dp_b"
+
+                await pilot.press("d")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                body = str(app.screen.query_one("#specbox Static", Static).content)
+                assert "needs:   dp_a" in body
+                assert "blocks:  dp_c" in body
+                assert "command: y" in body  # the spec block still renders
+                assert "log tail:" in body
+                assert "last fake log line" in body
         finally:
             await _teardown(engine, server, loop_task)
 

@@ -16,13 +16,14 @@ unresolved tokens by design -- preprocessing IS the supported path.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import typer
 
-from dsl41.ast_jil import JilFile, JilParseError, parse, parse_file, render_statement
+from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
@@ -61,18 +62,26 @@ def _load_catalog_and_ast_or_exit_2(
     files: Iterable[Path],
     permit_unknown: bool,
     properties: list[Path] | None = None,
-) -> tuple[CatalogIR, list[JilFile]]:
+) -> tuple[CatalogIR, list[JilFile], dict[str, str]]:
+    """Returns (catalog, parsed ASTs, input fingerprint). The fingerprint --
+    path -> sha256 -- is the ss10 spec_drift baseline (DL-65) and hashes the
+    SAME bytes this load parsed (review: a separate re-read could baseline
+    bytes the run never loaded, inverting the drift hint's one job), inside
+    the same guarded try so an unreadable input stays an exit-2 refusal."""
     try:
         parsed: list[JilFile] = []
-        if properties:
-            bindings = load_properties(properties)
-            for path in files:
-                text = path.read_bytes().decode("utf-8")
-                resolved, _ = substitute(text, bindings, file=str(path))
-                parsed.append(parse(resolved, file=str(path)))
-        else:
-            parsed = [parse_file(path) for path in files]
-        return lower_catalog(parsed, permit_unknown=permit_unknown), parsed
+        fingerprint: dict[str, str] = {}
+        bindings = load_properties(properties) if properties else None
+        for path in properties or []:
+            fingerprint[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in files:
+            data = path.read_bytes()
+            fingerprint[str(path)] = hashlib.sha256(data).hexdigest()
+            text = data.decode("utf-8")
+            if bindings is not None:
+                text, _ = substitute(text, bindings, file=str(path))
+            parsed.append(parse(text, file=str(path)))
+        return lower_catalog(parsed, permit_unknown=permit_unknown), parsed, fingerprint
     except (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
         # OSError/UnicodeDecodeError: unreadable input (missing file, directory,
         # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
@@ -770,7 +779,9 @@ def run(
 
     if ui:
         _import_tui_or_exit_2()  # fail before the engine starts, not after
-    catalog, parsed = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+    catalog, parsed, fingerprint = _load_catalog_and_ast_or_exit_2(
+        files, permit_unknown, properties
+    )
     tz_aliases = _load_tz_aliases(timezone_map)
     warns = _preflight_or_exit(
         catalog,
@@ -796,6 +807,7 @@ def run(
                     detached,
                     tz_aliases,
                     spec_texts=_spec_texts(parsed, catalog),
+                    estate_fingerprint=fingerprint,
                 )
             )
         )
@@ -827,6 +839,7 @@ async def _serve_run(
     detached: bool = False,
     tz_aliases: "dict[str, str] | None" = None,
     spec_texts: "dict[str, str] | None" = None,
+    estate_fingerprint: "dict[str, str] | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -888,7 +901,12 @@ async def _serve_run(
         typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
     if warns and engine.journal is not None:
         engine.journal.preflight(warns)
-    server = ControlServer(engine, run_root / "control.sock", spec_texts=spec_texts)
+    server = ControlServer(
+        engine,
+        run_root / "control.sock",
+        spec_texts=spec_texts,
+        estate_fingerprint=estate_fingerprint,
+    )
     try:
         await server.start()
     except EngineError as exc:
@@ -1192,21 +1210,41 @@ def serve(
 
 @app.command()
 def query(
-    what: str = typer.Argument(..., help="status|trace|explain|spec|plan|subscribe"),
+    what: str = typer.Argument(
+        ..., help="status|trace|explain|spec|deps|timers|plan|subscribe|is-success|is-failed"
+    ),
     socket_path: Path = _SOCKET_OPT,
-    job: str = typer.Option(None, "--job", "-J", help="status: filter; explain/spec: the job."),
+    job: str = typer.Option(
+        None, "--job", "-J", help="status: filter; explain/spec/deps/is-*: the job."
+    ),
     since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
 ) -> None:
     """Read-only control-plane queries (runner-design ss10); `subscribe`
     streams journal records as JSON lines until interrupted. The headless
-    autorep analog -- the ss11 TUI consumes the same verbs."""
+    autorep analog -- the ss11 TUI consumes the same verbs. `is-success` /
+    `is-failed` are scriptable predicates (DL-65): print the current status
+    and exit 0 when it matches (SUCCESS; FAILURE or TERMINATED), 1 when it
+    does not -- shell glue's `systemctl is-active` analog."""
     import json as json_mod
     import socket as socket_mod
 
     verb = what.lower()
-    if verb not in ("status", "trace", "explain", "spec", "plan", "subscribe"):
-        typer.echo(f"unknown query {what!r} (status|trace|explain|spec|plan|subscribe)", err=True)
+    known = ("status", "trace", "explain", "spec", "deps", "timers", "plan", "subscribe")
+    predicates = {"is-success": ("SUCCESS",), "is-failed": ("FAILURE", "TERMINATED")}
+    if verb not in known and verb not in predicates:
+        typer.echo(f"unknown query {what!r} ({'|'.join([*known, *predicates])})", err=True)
         raise typer.Exit(2)
+    if verb in predicates:
+        if job is None:
+            typer.echo(f"{verb} requires --job", err=True)
+            raise typer.Exit(2)
+        response = _control_roundtrip(socket_path, {"cmd": "status", "job": job})
+        if not response.get("ok"):
+            typer.echo(str(response.get("error", "status query failed")), err=True)
+            raise typer.Exit(2)
+        current = response["jobs"][job]["status"]
+        typer.echo(current)
+        raise typer.Exit(0 if current in predicates[verb] else 1)
     request: dict = {"cmd": verb}
     if job is not None:
         request["job"] = job

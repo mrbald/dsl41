@@ -43,9 +43,22 @@ Normative detail for DL-46, within DL-41's frame:
   validates against the catalog (vendor parity), the TUI never pre-judges.
 - JOB DETAILS POPUP (`d` / Enter on a row): the ss10 `spec` verb's
   preserve-rendered JIL block -- the post-placeholder source THIS engine
-  loaded -- topped with the status facts. HEADER CLOCK is UTC, matching
-  the engine's naive-UTC time basis (ss9): every timestamp on screen is
-  one time base, deliberately not the viewer's local wall (DL-64).
+  loaded -- topped with the status facts, the `deps` verb's needs/blocks
+  lines (the blast radius, DL-65), and a short local log tail. HEADER
+  CLOCK is UTC, matching the engine's naive-UTC time basis (ss9): every
+  timestamp on screen is one time base, deliberately not the viewer's
+  local wall (DL-64).
+- NAVIGATION AT ESTATE SCALE (DL-65): the jobs table renders the BOX TREE
+  (indent from the status response's box_name; space folds the selected
+  box, `z` folds/unfolds all; a folded box shows its hidden descendant
+  count and a red problem tally -- a fold must never swallow a FAILURE
+  silently). `/` opens an incremental name filter (space-separated
+  substrings AND'd; Enter keeps it, Esc clears), `v` cycles the view
+  all -> problems -> active. Filtered and non-'all' views are FLAT:
+  a match inside a folded box must never be invisible. The console
+  moved to `:` (vim command-line muscle memory). The status response's
+  spec_drift flag renders in the subtitle: files changed on disk, the
+  running catalog is the truth.
 - PANE GEOMETRY, keyboard only: `m` toggles maximizing the log tail
   (escape also restores); `]`/`[` grow/shrink the log against explain,
   `}`/`{` the jobs table against the side column. No mouse splitters.
@@ -67,6 +80,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import os
 from datetime import UTC, datetime
@@ -158,6 +172,18 @@ class SpecScreen(ModalScreen[None]):
         box = self.query_one("#specbox")
         box.border_title = self._title
         box.focus()
+
+
+class _FilterInput(Input):
+    """The `/` filter line. Escape clears and hides it; Enter (Input.Submitted,
+    handled by the app) keeps the filter applied and returns to the table."""
+
+    BINDINGS = [Binding("escape", "clear_filter", "clear")]
+
+    def action_clear_filter(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app.clear_filter()
 
 
 class ControlClientError(RuntimeError):
@@ -326,7 +352,9 @@ class RunnerApp(App[None]):
     TITLE = "dsl41 runner"
     CSS = """
     #main { height: 1fr; }
-    #jobs { width: 3fr; border: round $primary; }
+    #tablecol { width: 3fr; }
+    #filterline { display: none; }
+    #jobs { height: 1fr; border: round $primary; }
     #side { width: 2fr; }
     #explain-box { height: 2fr; border: round $primary; }
     #logtail { height: 3fr; border: round $primary; }
@@ -351,7 +379,13 @@ class RunnerApp(App[None]):
         Binding("m", "maximize_log", "zoom log"),
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
-        Binding("slash", "focus_console", "console"),
+        # navigation at estate scale (DL-65): / filters by name, v cycles
+        # all -> problems -> active, space folds the selected box, z all
+        Binding("slash", "focus_filter", "filter"),
+        Binding("v", "cycle_view", "view"),
+        Binding("space", "toggle_box", "fold", show=False),
+        Binding("z", "toggle_all", "fold-all", show=False),
+        Binding("colon", "focus_console", "console"),
         # pane sizing (no mouse splitters in a keyboard-first TUI):
         # ]/[ grow/shrink the log tail against explain; }/{ the jobs table
         # against the whole side column
@@ -377,6 +411,18 @@ class RunnerApp(App[None]):
         # pane shares, resized by ]/[ and }/{ -- fr weights out of _SHARE_TOTAL
         self._log_share = 3  # log vs explain (CSS default 3fr : 2fr)
         self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
+        # DL-65 navigation state
+        self._jobs_snapshot: dict[str, dict[str, Any]] = {}  # last status response
+        self._filter = ""  # space-separated substrings, AND'd, case-insensitive
+        self._view_mode = 0  # index into _VIEW_MODES
+        self._collapsed: set[str] = set()  # box rows folded shut
+        self._row_order: list[str] = []  # current table order; differs -> rebuild
+        #: set across a table rebuild that restores the selection: the first
+        #: add_row fires a spurious row-0 highlight BEFORE move_cursor lands,
+        #: and each such bounce would wipe the log tail (review MAJOR). The
+        #: highlight handler ignores events until the restore target arrives.
+        self._restore_selected: str | None = None
+        self._spec_drift = False
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
@@ -386,7 +432,11 @@ class RunnerApp(App[None]):
     def compose(self) -> ComposeResult:
         yield _UTCHeader()
         with Horizontal(id="main"):
-            yield DataTable(id="jobs")
+            with Vertical(id="tablecol"):
+                yield _FilterInput(
+                    placeholder="filter: substring(s) -- Enter keeps, Esc clears", id="filterline"
+                )
+                yield DataTable(id="jobs")
             with Vertical(id="side"):
                 with VerticalScroll(id="explain-box"):
                     yield Static(id="explain")
@@ -451,6 +501,7 @@ class RunnerApp(App[None]):
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):
+                    self._set_drift(bool(status.get("spec_drift")))
                     self._update_table(status.get("jobs", {}))
                 await self._update_explain()
                 if not self._dirty:
@@ -460,17 +511,40 @@ class RunnerApp(App[None]):
         finally:
             self._refreshing = False
 
+    def _refresh_subtitle(self) -> None:
+        base = str(self.socket_path)
+        if self._connected is False:
+            base += " (disconnected)"
+        if self._spec_drift:
+            base += "  [SPEC DRIFT: estate files changed on disk]"
+        self.sub_title = base
+
     def _set_connected(self, up: bool, detail: str = "") -> None:
         if up == self._connected:
             return
         self._connected = up
+        self._refresh_subtitle()
         console = self.query_one("#console", RichLog)
         if up:
-            self.sub_title = str(self.socket_path)
             console.write(Text("connected", style="green"))
         else:
-            self.sub_title = f"{self.socket_path} (disconnected)"
             console.write(Text(f"control socket unreachable: {detail}", style="red"))
+
+    def _set_drift(self, drift: bool) -> None:
+        """DL-65 daemon-reload-hint analog, inverted: there is no reload --
+        the subtitle says the running catalog no longer matches the files."""
+        if drift == self._spec_drift:
+            return
+        self._spec_drift = drift
+        self._refresh_subtitle()
+        if drift:
+            self._console_write(
+                Text(
+                    "spec drift: estate files changed on disk; the running catalog is"
+                    " the truth (cold restart into a fresh run root to adopt)",
+                    style="yellow",
+                )
+            )
 
     def _consume_trace(self, entries: list[dict[str, Any]]) -> None:
         console = self.query_one("#console", RichLog)
@@ -498,18 +572,151 @@ class RunnerApp(App[None]):
                 Text(f"{clock} {job} {transition} [{entry.get('cause', '')}]", style=style)
             )
 
+    _VIEW_MODES = ("all", "problems", "active")
+
     def _update_table(self, jobs: dict[str, dict[str, Any]]) -> None:
-        table = self.query_one("#jobs", DataTable)
-        for name in sorted(jobs):
-            row = jobs[name]
+        self._jobs_snapshot = jobs
+        for name, row in jobs.items():
             self._log_paths[name] = (row.get("log_out"), row.get("log_err"))
-            cells = self._row_cells(name, row)
-            if name in self._rows:
+        self._render_table()
+
+    def _is_problem(self, name: str, row: dict[str, Any]) -> bool:
+        """ONE definition of 'problem', shared by the `v` problems view and
+        the folded-box rollup (review MAJOR: two definitions one keystroke
+        apart hid a QUE_WAIT under a quiet fold). QUE_WAIT counts: on a
+        contended estate it can park a region indefinitely."""
+        status = str(row.get("status", ""))
+        return status in ("FAILURE", "TERMINATED", "QUE_WAIT") or bool(self._alarms.get(name))
+
+    def _match(self, name: str, row: dict[str, Any]) -> bool:
+        mode = self._VIEW_MODES[self._view_mode]
+        if mode == "problems" and not self._is_problem(name, row):
+            return False
+        if mode == "active" and str(row.get("status", "")) not in (
+            "STARTING",
+            "RUNNING",
+            "QUE_WAIT",
+        ):
+            return False
+        hay = name.lower()
+        return all(term in hay for term in self._filter.lower().split())
+
+    def _children(self) -> dict[str | None, list[str]]:
+        """box name -> member names (None -> top-level), from the status
+        snapshot's box_name field (DL-65) -- alpha within each level."""
+        kids: dict[str | None, list[str]] = {}
+        for name in sorted(self._jobs_snapshot):
+            box = self._jobs_snapshot[name].get("box_name")
+            kids.setdefault(box if isinstance(box, str) else None, []).append(name)
+        return kids
+
+    def _visible(self) -> list[tuple[str, int]]:
+        """(job, depth) rows in display order: the box tree with collapsed
+        subtrees omitted -- or a FLAT filtered list while a name filter or a
+        non-'all' view mode is active (predictability over cleverness: a
+        filter match inside a collapsed box must never be invisible)."""
+        jobs = self._jobs_snapshot
+        if self._filter or self._view_mode:
+            return [(n, 0) for n in sorted(jobs) if self._match(n, jobs[n])]
+        kids = self._children()
+        out: list[tuple[str, int]] = []
+        buried: set[str] = set()
+
+        def bury(name: str) -> None:
+            buried.add(name)
+            for child in kids.get(name, []):
+                bury(child)
+
+        def walk(name: str, depth: int) -> None:
+            out.append((name, depth))
+            for child in kids.get(name, []):
+                bury(child) if name in self._collapsed else walk(child, depth + 1)
+
+        for top in kids.get(None, []):
+            walk(top, 0)
+        placed = {n for n, _ in out} | buried
+        # ghosts whose box_name names a job the store never saw: flat, never hidden
+        out.extend((n, 0) for n in sorted(jobs) if n not in placed)
+        return out
+
+    def _rollup(self, name: str, kids: dict[str | None, list[str]]) -> tuple[int, int]:
+        """(descendants, problems) hidden beneath a collapsed box: a folded
+        subtree must never hide a problem silently -- and 'problem' is
+        _is_problem, the same set the `v` problems view shows."""
+        total = problems = 0
+        stack = list(kids.get(name, []))
+        while stack:
+            n = stack.pop()
+            total += 1
+            if self._is_problem(n, self._jobs_snapshot.get(n, {})):
+                problems += 1
+            stack.extend(kids.get(n, []))
+        return total, problems
+
+    def _decorated_cells(
+        self, name: str, depth: int, kids: dict[str | None, list[str]], *, flat: bool = False
+    ) -> list[Any]:
+        cells = self._row_cells(name, self._jobs_snapshot.get(name, {}))
+        if flat:
+            # filtered / non-'all' views: no fold markers, no rollup -- the
+            # "hidden beneath" claim would be false with the members listed
+            # right below (review MINOR)
+            return cells
+        marker = ""
+        if kids.get(name):
+            marker = "▸ " if name in self._collapsed else "▾ "
+        label = "  " * depth + marker + name
+        style = ""
+        if name in self._collapsed and kids.get(name):
+            total, problems = self._rollup(name, kids)
+            label += f" ({total}{f', {problems}!' if problems else ''})"
+            if problems:
+                style = "bold red"
+        cells[0] = Text(label, style=style)
+        return cells
+
+    def _render_table(self) -> None:
+        try:
+            table = self.query_one("#jobs", DataTable)
+        except NoMatches:
+            return  # teardown
+        visible = self._visible()
+        kids = self._children()
+        flat = bool(self._filter or self._view_mode)
+        order = [name for name, _ in visible]
+        if order != self._row_order:
+            # membership/order changed (fold, filter, mode, new jobs):
+            # rebuild wholesale and put the cursor back on the selected key
+            table.clear()
+            self._row_order = order
+            self._rows = set(order)
+            # arm the bounce guard BEFORE add_row: the first row fires a
+            # spurious row-0 highlight ahead of the cursor restore below
+            self._restore_selected = self._selected if self._selected in self._rows else None
+            if not order:
+                # nothing visible: keyed verbs must not fire at a job the
+                # operator cannot see (review MAJOR)
+                self._selected = None
+            for name, depth in visible:
+                table.add_row(*self._decorated_cells(name, depth, kids, flat=flat), key=name)
+            if self._restore_selected is not None:
+                table.move_cursor(row=order.index(self._restore_selected))
+            elif order:
+                table.move_cursor(row=0)  # highlight event resyncs _selected
+        else:
+            for name, depth in visible:
+                cells = self._decorated_cells(name, depth, kids, flat=flat)
                 for column, value in zip(_COLUMNS, cells):
                     table.update_cell(name, column, value, update_width=True)
-            else:
-                table.add_row(*cells, key=name)
-                self._rows.add(name)
+        # a Text title: border_title strings parse as rich markup, so a
+        # user-typed filter (or a bracketed mode tag) would vanish into it
+        title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")
+        if self._filter:
+            title.append(f" /{self._filter}/", style="italic")
+        mode = self._VIEW_MODES[self._view_mode]
+        if mode != "all":
+            title.append(f" · {mode}", style="bold")
+        table.border_title = title
         if self._selected is None and table.row_count:
             self._selected = str(table.coordinate_to_cell_key(Coordinate(0, 0)).row_key.value)
 
@@ -639,10 +846,21 @@ class RunnerApp(App[None]):
         if event.row_key is None or event.row_key.value is None:
             return
         selected = str(event.row_key.value)
+        if self._restore_selected is not None:
+            if selected != self._restore_selected:
+                return  # the rebuild's spurious row-0 bounce, not the operator
+            # the restore landed; it equals _selected, so the guard below
+            # keeps the log tail and explain pane untouched
+            self._restore_selected = None
         if selected == self._selected:
             return
         self._selected = selected
-        self.run_worker(self._update_explain(), group="explain", exclusive=True)
+        # the bound METHOD, not a coroutine: an exclusive worker superseded
+        # before it starts would leave a created-never-awaited coroutine
+        # (rebuild-driven highlight bursts made that warning real)
+        # (arg-type: run_worker's ResultType inference chokes on the bound
+        # async method; textual accepts it -- iscoroutinefunction dispatch)
+        self.run_worker(self._update_explain, group="explain", exclusive=True)  # type: ignore[arg-type]
         self._tail_step()
 
     @on(DataTable.RowSelected, "#jobs")
@@ -653,13 +871,19 @@ class RunnerApp(App[None]):
 
     def action_details(self) -> None:
         if self._selected is not None:
-            self.run_worker(self._show_details(self._selected), group="details", exclusive=True)
+            # partial, not a bare coroutine: an exclusive worker superseded
+            # before starting must not leave a created-never-awaited coroutine
+            work = functools.partial(self._show_details, self._selected)
+            self.run_worker(work, group="details", exclusive=True)  # type: ignore[arg-type]
 
     async def _show_details(self, job: str) -> None:
-        """The spec popup: runtime facts from `status`, source from `spec`."""
+        """The spec popup: runtime facts from `status`, dependency lines from
+        `deps` (needs/blocks -- the blast radius, DL-65), source from `spec`,
+        and a short local log tail (the `systemctl status` composite)."""
         try:
             spec = await self._client.request({"cmd": "spec", "job": job})
             status = await self._client.request({"cmd": "status", "job": job})
+            deps = await self._client.request({"cmd": "deps", "job": job})
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
             return
@@ -678,13 +902,42 @@ class RunnerApp(App[None]):
             for label, key in (("log out", "log_out"), ("log err", "log_err")):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")
-            body.append("\n")
+        if deps.get("ok"):
+            needs = [*deps.get("upstream", []), *(f"v({g})" for g in deps.get("globals", []))]
+            if needs:
+                body.append("needs:   ", style="bold")
+                body.append(", ".join(needs) + "\n")
+            if deps.get("box_name"):
+                body.append("box:     ", style="bold")
+                body.append(f"{deps['box_name']}\n")
+            downstream = deps.get("downstream", [])
+            if downstream:
+                body.append("blocks:  ", style="bold")
+                body.append(", ".join(downstream) + "\n")
+            members = deps.get("members", [])
+            if members:
+                # containment IS blast radius: a KILLJOB here reaches these
+                body.append("members: ", style="bold")
+                body.append(", ".join(members) + "\n")
+        body.append("\n")
         if not spec.get("ok"):
             body.append(str(spec.get("error", "spec failed")), style="red")
         elif spec.get("jil"):
             body.append(str(spec["jil"]))
         else:
             body.append("no source text served by this engine", style="dim")
+        out_path = row.get("log_out") if row else None
+        if out_path:
+            try:
+                with open(out_path, "rb") as handle:
+                    handle.seek(max(0, os.stat(out_path).st_size - 4096))
+                    lines = handle.read().decode("utf-8", errors="replace").splitlines()[-10:]
+            except OSError:
+                lines = []
+            if lines:
+                body.append("\nlog tail:\n", style="bold")
+                for line in lines:
+                    body.append(f"  {line}\n", style="dim")
         self.push_screen(SpecScreen(job, body))
 
     # ------------------------------------------------------- pane geometry
@@ -713,7 +966,9 @@ class RunnerApp(App[None]):
             ).styles.height = f"{self._SHARE_TOTAL - self._log_share}fr"
         else:
             self._table_share = min(max(self._table_share + delta, span.start), span[-1])
-            self.query_one("#jobs", DataTable).styles.width = f"{self._table_share}fr"
+            # tablecol, not #jobs: the table sits inside the filter column,
+            # which is what participates in the horizontal split (review)
+            self.query_one("#tablecol").styles.width = f"{self._table_share}fr"
             self.query_one("#side").styles.width = f"{self._SHARE_TOTAL - self._table_share}fr"
 
     def action_send(self, verb: str) -> None:
@@ -726,6 +981,57 @@ class RunnerApp(App[None]):
 
     def action_focus_console(self) -> None:
         self.query_one("#cmdline", Input).focus()
+
+    # -------------------------------------------- filter / view / fold (DL-65)
+
+    def action_focus_filter(self) -> None:
+        line = self.query_one("#filterline", Input)
+        line.styles.display = "block"
+        line.focus()
+
+    def clear_filter(self) -> None:
+        line = self.query_one("#filterline", Input)
+        line.value = ""
+        self._filter = ""
+        line.styles.display = "none"
+        self.query_one("#jobs", DataTable).focus()
+        self._render_table()
+
+    @on(Input.Changed, "#filterline")
+    def _on_filter_changed(self, event: Input.Changed) -> None:
+        self._filter = event.value.strip()
+        self._render_table()
+
+    @on(Input.Submitted, "#filterline")
+    def _on_filter_submitted(self, event: Input.Submitted) -> None:
+        if not event.value.strip():
+            self.clear_filter()
+            return
+        self.query_one("#filterline", Input).styles.display = "none"
+        self.query_one("#jobs", DataTable).focus()
+
+    def action_cycle_view(self) -> None:
+        self._view_mode = (self._view_mode + 1) % len(self._VIEW_MODES)
+        self._render_table()
+
+    def action_toggle_box(self) -> None:
+        name = self._selected
+        if name is None or self._filter or self._view_mode:
+            return  # the tree only exists in the unfiltered 'all' view
+        if not self._children().get(name):
+            return  # not a box with members: nothing to fold
+        self._collapsed.symmetric_difference_update({name})
+        self._render_table()
+
+    def action_toggle_all(self) -> None:
+        if self._filter or self._view_mode:
+            return
+        if self._collapsed:
+            self._collapsed.clear()
+        else:
+            kids = self._children()
+            self._collapsed = {name for name in self._jobs_snapshot if kids.get(name)}
+        self._render_table()
 
     @on(Input.Submitted, "#cmdline")
     def _on_command(self, event: Input.Submitted) -> None:

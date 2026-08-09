@@ -219,7 +219,7 @@ from dsl41.autocal import (
     standard_days,
     standard_rows,
 )
-from dsl41.conditions import And, Cond, Paren, StatusAtom, iter_atoms
+from dsl41.conditions import And, Cond, GlobalAtom, Paren, StatusAtom, iter_atoms
 from dsl41.ir import (
     CatalogIR,
     ExecSpec,
@@ -1782,6 +1782,12 @@ class Scheduler:
         """Earliest pending tick across all jobs (naive UTC), or None."""
         return min(self._next.values(), default=None)
 
+    def upcoming(self) -> list[tuple[datetime, str]]:
+        """Read-only snapshot of every scheduled job's NEXT tick, due-ordered
+        (the ss10 `timers` verb; the list-timers analog, DL-65). One entry
+        per job -- the estate's near future, not the full tick expansion."""
+        return sorted((tick, job) for job, tick in self._next.items())
+
     def pop_due(self, upto: datetime) -> list[Event]:
         """Consume every tick due at or before `upto` and return its STARTJOB
         event, stamped at the tick and ordered by (tick, job). A stalled-but-
@@ -3129,7 +3135,8 @@ class ControlServer:
     parity set (job verbs carry "job"; SET_GLOBAL carries "name"/"value";
     CHANGE_STATUS carries "job"/"status" and optional int "exit_code" --
     injected as STATUS, keeping overwrite parity). Queries: status [job],
-    trace [since], explain job, spec job, plan; and subscribe [since]. Job arguments
+    trace [since], explain job, spec job, deps job, timers, plan; and
+    subscribe [since]. Job arguments
     are validated against the catalog -- vendor sendevent errors on unknown
     jobs rather than queueing them.
 
@@ -3140,8 +3147,17 @@ class ControlServer:
     Queries read the oracle store directly: feed() never yields, so a
     handler task can never observe a half-applied event."""
 
+    #: seconds between on-disk re-checks of the estate fingerprint (the
+    #: drift hint below); reads happen lazily inside a status query
+    DRIFT_CHECK_INTERVAL_S = 15.0
+
     def __init__(
-        self, engine: Engine, path: Path, *, spec_texts: Mapping[str, str] | None = None
+        self,
+        engine: Engine,
+        path: Path,
+        *,
+        spec_texts: Mapping[str, str] | None = None,
+        estate_fingerprint: Mapping[str, str] | None = None,
     ) -> None:
         self.engine = engine
         self.path = path
@@ -3149,6 +3165,14 @@ class ControlServer:
         #: verb, DL-64): what THIS run actually loaded, not the template on
         #: disk. Optional -- embedders without source text serve jil: null.
         self.spec_texts: Mapping[str, str] = spec_texts or {}
+        #: input-file path -> sha256 of the bytes the run LOADED (JIL +
+        #: properties). The `spec_drift` status flag (DL-65, the
+        #: daemon-reload-hint analog inverted): there is deliberately no
+        #: reload -- the hint tells the operator the running catalog no
+        #: longer matches the files on disk (cold restart to adopt).
+        self.estate_fingerprint: Mapping[str, str] = estate_fingerprint or {}
+        self._drift: bool = False
+        self._drift_checked_at: float | None = None
         self._server: asyncio.Server | None = None
         self._conn_tasks: set[asyncio.Task[Any]] = set()
 
@@ -3257,6 +3281,10 @@ class ControlServer:
             return self._explain(request)
         if cmd == "spec":
             return self._spec(request)
+        if cmd == "deps":
+            return self._deps(request)
+        if cmd == "timers":
+            return self._timers()
         if cmd == "plan":
             return self._plan()
         return {"ok": False, "error": f"unknown cmd {cmd!r}"}
@@ -3284,7 +3312,17 @@ class ControlServer:
         elif verb == "CHANGE_STATUS":
             job, status = request.get("job"), request.get("status")
             if (error := self._check_job(job)) is not None:
-                return error
+                # SEM-07 (DL-65 review): "JOB^INST" with INST a declared
+                # insert_xinst is a legal CHANGE_STATUS target even though
+                # no such job is in the catalog -- overwriting the store's
+                # pseudo-entity is exactly how an operator satisfies a
+                # cross-instance atom the sandbox cannot see (the oracle
+                # creates the store row on demand; only this gate stood in
+                # the way). Other job verbs stay catalog-only: starting or
+                # killing a ghost is meaningless.
+                name, sep, inst = job.rpartition("^") if isinstance(job, str) else ("", "", "")
+                if not (sep and name and inst in self.engine.oracle.catalog.external_instances):
+                    return error
             if status not in _STATUSES:
                 return {
                     "ok": False,
@@ -3300,6 +3338,29 @@ class ControlServer:
             return {"ok": False, "error": f"unknown event {verb!r}"}
         self.engine.inject(ev, source="control")
         return {"ok": True, "kind": ev.kind, "at": at.isoformat()}
+
+    def _spec_drift(self) -> bool | None:
+        """None = no fingerprint to check against (embedders). Lazy re-read
+        at most every DRIFT_CHECK_INTERVAL_S; estate files are small, so the
+        synchronous reads inside a status query are acceptable by design."""
+        if not self.estate_fingerprint:
+            return None
+        now = time.monotonic()
+        if self._drift_checked_at is None or now - self._drift_checked_at >= (
+            self.DRIFT_CHECK_INTERVAL_S
+        ):
+            self._drift_checked_at = now
+            self._drift = False
+            for path, digest in self.estate_fingerprint.items():
+                try:
+                    current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                except OSError:
+                    self._drift = True  # unreadable/deleted counts as changed
+                    break
+                if current != digest:
+                    self._drift = True
+                    break
+        return self._drift
 
     def _status(self, request: dict[str, Any]) -> dict[str, Any]:
         catalog = self.engine.oracle.catalog
@@ -3343,8 +3404,13 @@ class ControlServer:
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,
                 "log_err": log_err,
+                # DL-65: catalog placement, so the ss11 table can render the
+                # box hierarchy without a second query (null for store-only
+                # ghosts a CHANGE_STATUS invented)
+                "job_type": job_ir.job_type if job_ir is not None else None,
+                "box_name": job_ir.box.box_name if job_ir is not None else None,
             }
-        return {"ok": True, "jobs": jobs}
+        return {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)
@@ -3404,6 +3470,65 @@ class ControlServer:
             "box_name": job_ir.box.box_name,
             "jil": self.spec_texts.get(job),  # null: server started without source texts
         }
+
+    def _deps(self, request: dict[str, Any]) -> dict[str, Any]:
+        """DL-65 (the list-dependencies analog). upstream/globals = what this
+        job's condition references, split by ATOM TYPE -- never by sniffing
+        the oracle's key strings, where a job legally named 'g:x' (DL-39
+        escapes) collides with global x. downstream = jobs whose conditions
+        reference this one, from the oracle's edge-trigger index (same
+        package-private stance as _explain; the index inherits that key
+        collision for pathological names, documented not guarded). Condition
+        edges are NOT the whole blast radius of a box, so containment is
+        served alongside: box_name (upward) and members (downward) -- a
+        KILLJOB/ON_HOLD on a box reaches every member with no condition
+        edge in sight."""
+        job = request.get("job")
+        if (error := self._check_job(job)) is not None:
+            return error
+        assert isinstance(job, str)
+        oracle = self.engine.oracle
+        job_ir = oracle.catalog.jobs[job]
+        upstream: set[str] = set()
+        globals_: set[str] = set()
+        if job_ir.sem.condition is not None:
+            for atom in iter_atoms(job_ir.sem.condition):
+                if isinstance(atom, GlobalAtom):
+                    globals_.add(atom.name)
+                elif atom.job.instance is None:
+                    upstream.add(atom.job.name)
+                else:
+                    upstream.add(f"{atom.job.name}^{atom.job.instance}")
+        members = (
+            sorted(n for n, j in oracle.catalog.jobs.items() if j.box.box_name == job)
+            if job_ir.job_type == "BOX"
+            else []
+        )
+        return {
+            "ok": True,
+            "job": job,
+            "upstream": sorted(upstream),
+            "globals": sorted(globals_),
+            "downstream": sorted(oracle._referencers.get(job, [])),
+            "box_name": job_ir.box.box_name,
+            "members": members,
+        }
+
+    def _timers(self) -> dict[str, Any]:
+        """DL-65 (the list-timers analog): every pending oracle timer plus
+        each scheduled job's next calendar tick, one due-ordered list --
+        'what happens next' across the estate."""
+        entries = [
+            {"due": due.isoformat(), "job": job, "kind": kind}
+            for due, job, kind in self.engine.oracle.pending_timers()
+        ]
+        if self.engine.scheduler is not None:
+            entries.extend(
+                {"due": tick.isoformat(), "job": job, "kind": "schedule"}
+                for tick, job in self.engine.scheduler.upcoming()
+            )
+        entries.sort(key=lambda e: (e["due"], e["job"]))
+        return {"ok": True, "timers": entries}
 
     def _plan(self) -> dict[str, Any]:
         sorter = graphlib.TopologicalSorter(and_success_skeleton(self.engine.oracle.catalog))

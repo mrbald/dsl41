@@ -26,17 +26,26 @@ group risk is done, the SOD box arms, preflight runs — and the night then
 
 Goal: read the estate the way an operator does.
 
-- In the TUI: collapse/expand the region boxes; watch statuses flow
-  INACTIVE → STARTING → RUNNING → SUCCESS. Box rows fold from their
-  members (SEM-11).
+- The jobs table is the estate's box TREE: members indent under their
+  box (EMEA's department boxes nest two deep). `space` folds the
+  selected box shut — its row shows the hidden count, red with a `!`
+  tally if the fold hides a FAILURE — and `z` folds/unfolds everything.
+  Watch statuses flow INACTIVE → STARTING → RUNNING → SUCCESS; box rows
+  fold their status from members (SEM-11).
+- `/` opens the name filter (substrings, AND'd: try `emea rec`); Enter
+  keeps it, Esc clears. `v` cycles the view: all → problems → active.
+  Filtered views are flat — a match never hides inside a folded box.
 - The header clock is UTC — the engine's time basis, and the base of
   every timestamp on screen. Your local wall time is deliberately absent.
 - Select a row and press `d` (or Enter): the job-details popup shows the
   post-placeholder JIL block **this engine loaded** (not the template on
-  disk) plus current status and log paths. Escape closes.
+  disk), current status, `needs:`/`blocks:` dependency lines (blast
+  radius before you hold or kill anything), and the log tail. Escape
+  closes.
 - Pane geometry, keyboard only: `m` maximizes the log tail (`m` or
   escape restores); `]`/`[` grow/shrink the log against the explain
-  pane, `}`/`{` the jobs table against the side column.
+  pane, `}`/`{` the jobs table against the side column. The event
+  console focuses with `:`.
 - Find the two file-watcher jobs per region (`*_F`): they RUN from box
   start, polling every 5s, and complete once the vendor file lands and
   its size is stable across two polls.
@@ -52,8 +61,12 @@ dsl41 query status --socket $S --job EMEA_MKT_MARKS_C
 dsl41 query trace  --socket $S | tail -20   # the transition log
 dsl41 query explain --socket $S --job SOD_B # per-atom condition truth
 dsl41 query spec   --socket $S --job SOD_B  # the loaded JIL block, verbatim
+dsl41 query deps   --socket $S --job EMEA_ACC_GL_CLOSE_C  # needs / blocks
+dsl41 query timers --socket $S              # everything due next, estate-wide
 dsl41 query plan   --socket $S              # topological waves
 dsl41 query subscribe --socket $S           # live journal stream (Ctrl-C)
+dsl41 query is-success --socket $S -J APAC_EOD_B && echo done  # shell glue
+
 ```
 
 `explain` is the money view: it shows each atom of a condition and whether
@@ -185,7 +198,9 @@ uv run dsl41 supervise list --run-root <run>/engine   # what's still alive
 ## 11. Changing a job spec
 
 There is no mid-run reload, by design: resume gates on the exact catalog
-hash. The operator flow is cold:
+hash. Try editing a JIL file while the night runs: within ~15s the TUI
+subtitle flags **SPEC DRIFT** — the files changed, the running catalog is
+still the truth. The operator flow is cold:
 
 1. Stop the engine (Ctrl-C).
 2. Edit the JIL (e.g. bump a `--sleep`, add a condition atom).

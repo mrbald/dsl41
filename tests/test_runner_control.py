@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import shutil
 import signal
@@ -39,6 +40,7 @@ from dsl41.runner import (
     EngineError,
     FakeAdapter,
     RealClock,
+    Scheduler,
     read_journal,
     start_run,
 )
@@ -126,6 +128,7 @@ async def _serve(
     adapter: FakeAdapter | None = None,
     scheduler=None,
     spec_texts: dict[str, str] | None = None,
+    estate_fingerprint: dict[str, str] | None = None,
 ) -> tuple[Engine, ControlServer, asyncio.Task]:
     """Shared harness: a real-domain, hold_open engine serving a control
     socket, with run_until_quiescent(datetime.max) as a background task (the
@@ -141,7 +144,12 @@ async def _serve(
         scheduler=scheduler,
         hold_open=True,
     )
-    server = ControlServer(engine, run_root / "control.sock", spec_texts=spec_texts)
+    server = ControlServer(
+        engine,
+        run_root / "control.sock",
+        spec_texts=spec_texts,
+        estate_fingerprint=estate_fingerprint,
+    )
     await server.start()
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
     return engine, server, loop_task
@@ -804,10 +812,33 @@ def test_cli_rehearse_preflight_error_estate_exits_2(tmp_path: Path) -> None:
     assert "calendar" in result.output
 
 
+def _query_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
+    """One `dsl41 query ...` CLI invocation as a real subprocess, against a
+    live control socket (the DL-65 is-success/is-failed predicates need the
+    wire; CliRunner has no engine to talk to)."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from dsl41.cli import app; app()",
+            "query",
+            *args,
+            "--socket",
+            str(sock_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> None:
     """Integration test: spawn `dsl41 run` as a real subprocess (the pattern
     tests/test_runner_lifecycle.py uses), wait for its control socket, drive
-    it with sendevent/query over the wire, then stop it with SIGTERM."""
+    it with sendevent/query over the wire, then stop it with SIGTERM.
+    DL-65 rides the same live window: the is-success/is-failed scriptable
+    predicates are exercised on both branches (exit 0 on match, 1 on
+    mismatch, current status on stdout either way)."""
     jil = short_root / "estate.jil"
     jil.write_text("insert_job: proc_job\njob_type: c\ncommand: exit 0\n", encoding="utf-8")
     run_root = short_root / "run"
@@ -848,6 +879,34 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         spec = _sync_control_call(sock_path, {"cmd": "spec", "job": "proc_job"})
         assert spec["ok"] is True
         assert spec["jil"] == "insert_job: proc_job\njob_type: c\ncommand: exit 0\n"
+
+        # DL-65 predicates against the SUCCESS job: is-success matches
+        # (exit 0), is-failed does not (exit 1) -- both print the status
+        matched = _query_cli(sock_path, "is-success", "--job", "proc_job")
+        assert matched.returncode == 0, matched.stderr
+        assert matched.stdout.strip() == "SUCCESS"
+        mismatched = _query_cli(sock_path, "is-failed", "--job", "proc_job")
+        assert mismatched.returncode == 1, mismatched.stderr
+        assert mismatched.stdout.strip() == "SUCCESS"
+
+        # flip the job to FAILURE over the wire; the predicates swap branches
+        flip = _sync_control_call(
+            sock_path,
+            {"cmd": "sendevent", "event": "CHANGE_STATUS", "job": "proc_job", "status": "FAILURE"},
+        )
+        assert flip["ok"] is True
+
+        def failed() -> bool:
+            r = _sync_control_call(sock_path, {"cmd": "status", "job": "proc_job"})
+            return bool(r["ok"]) and r["jobs"]["proc_job"]["status"] == "FAILURE"
+
+        wait_for(failed, timeout_s=5.0)
+        now_failed = _query_cli(sock_path, "is-failed", "--job", "proc_job")
+        assert now_failed.returncode == 0, now_failed.stderr
+        assert now_failed.stdout.strip() == "FAILURE"
+        not_success = _query_cli(sock_path, "is-success", "--job", "proc_job")
+        assert not_success.returncode == 1, not_success.stderr
+        assert not_success.stdout.strip() == "FAILURE"
 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5.0)
@@ -1036,3 +1095,370 @@ def test_status_log_paths_non_cmd_jobs_are_null(short_root: Path, tmp_path: Path
             await _teardown(engine, server, loop_task)
 
     asyncio.run(fw_scenario())
+
+
+# ------------------------------- 8. deps/timers verbs + status additions (DL-65)
+
+
+def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path) -> None:
+    """DL-65 `deps` verb (the list-dependencies analog): upstream = the
+    entities the job's own condition references (jobs vs globals split, the
+    g: prefix stripped), downstream = the oracle's edge-trigger index
+    (_referencers) -- who this job wakes. A chain a->b->c with a v(GFLAG)
+    atom on b pins all three directions; a condition-free, unreferenced job
+    reports three empty lists; an unknown job is refused."""
+    text = (
+        "insert_job: dp_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: dp_b\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(dp_a) & v(GFLAG) = go\n\n"
+        "insert_job: dp_c\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(dp_b)\n\n"
+        "insert_job: dp_d\njob_type: c\ncommand: w\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            mid = await _control_call(server.path, {"cmd": "deps", "job": "dp_b"})
+            assert mid == {
+                "ok": True,
+                "job": "dp_b",
+                "upstream": ["dp_a"],
+                "globals": ["GFLAG"],
+                "downstream": ["dp_c"],
+                "box_name": None,
+                "members": [],
+            }
+
+            head = await _control_call(server.path, {"cmd": "deps", "job": "dp_a"})
+            assert head == {
+                "ok": True,
+                "job": "dp_a",
+                "upstream": [],
+                "globals": [],
+                "downstream": ["dp_b"],
+                "box_name": None,
+                "members": [],
+            }
+
+            tail = await _control_call(server.path, {"cmd": "deps", "job": "dp_c"})
+            assert tail == {
+                "ok": True,
+                "job": "dp_c",
+                "upstream": ["dp_b"],
+                "globals": [],
+                "downstream": [],
+                "box_name": None,
+                "members": [],
+            }
+
+            solo = await _control_call(server.path, {"cmd": "deps", "job": "dp_d"})
+            assert solo == {
+                "ok": True,
+                "job": "dp_d",
+                "upstream": [],
+                "globals": [],
+                "downstream": [],
+                "box_name": None,
+                "members": [],
+            }
+
+            unknown = await _control_call(server.path, {"cmd": "deps", "job": "nope"})
+            assert unknown["ok"] is False
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_deps_serves_box_containment_alongside_condition_edges(short_root: Path) -> None:
+    """DL-65 review: condition edges alone are not a box's blast radius --
+    KILLJOB/ON_HOLD on a box reaches every member with no condition edge in
+    sight, so `deps` serves box_name (upward) and members (downward) too."""
+    text = (
+        "insert_job: bc_box\njob_type: b\n\n"
+        "insert_job: bc_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bc_box\n\n"
+        "insert_job: bc_m2\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bc_box\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            box = await _control_call(server.path, {"cmd": "deps", "job": "bc_box"})
+            assert box["ok"] is True
+            assert box["members"] == ["bc_m1", "bc_m2"]
+            assert box["box_name"] is None
+            member = await _control_call(server.path, {"cmd": "deps", "job": "bc_m1"})
+            assert member["box_name"] == "bc_box"
+            assert member["members"] == []
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_change_status_on_declared_xinst_ghost_satisfies_a_cross_instance_atom(
+    short_root: Path,
+) -> None:
+    """DL-65 review MAJOR: "JOB^INST" with INST a declared insert_xinst is a
+    legal CHANGE_STATUS target (SEM-07) -- the store pseudo-entity is created
+    on demand and the dependent's cross-instance atom fires. An undeclared
+    instance suffix stays refused."""
+    text = (
+        "insert_xinst: PRD\nxtype: a\n\n"
+        "insert_job: xg_dep\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(FEED^PRD, 9999)\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=(0.05, 0))
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            refused = await _control_call(
+                server.path,
+                {
+                    "cmd": "sendevent",
+                    "event": "CHANGE_STATUS",
+                    "job": "FEED^NOPE",
+                    "status": "SUCCESS",
+                },
+            )
+            assert refused["ok"] is False
+
+            resp = await _control_call(
+                server.path,
+                {
+                    "cmd": "sendevent",
+                    "event": "CHANGE_STATUS",
+                    "job": "FEED^PRD",
+                    "status": "SUCCESS",
+                },
+            )
+            assert resp["ok"] is True
+
+            async def dep_fired() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "xg_dep"})
+                return r["ok"] and r["jobs"]["xg_dep"]["status"] == "SUCCESS"
+
+            await _wait_for_async(dep_fired)
+
+            # the ghost is now a store-only row: visible in status, nulls for
+            # its catalog placement (the DL-65 status additions)
+            ghost = await _control_call(server.path, {"cmd": "status", "job": "FEED^PRD"})
+            assert ghost["ok"] is True
+            row = ghost["jobs"]["FEED^PRD"]
+            assert row["status"] == "SUCCESS"
+            assert row["job_type"] is None and row["box_name"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_timers_oracle_deadlines_due_ordered_no_schedule_entries_without_scheduler(
+    short_root: Path,
+) -> None:
+    """DL-65 `timers` verb, oracle half: two jobs held RUNNING by an inert
+    adapter each arm a term_run_time deadline (1 and 2 minutes out); the
+    response carries exactly {due, job, kind} per entry, due-ordered. With
+    no scheduler wired in, no kind:"schedule" entry exists at all -- the
+    section is simply absent, not an error."""
+    text = (
+        "insert_job: tm_one\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 1\n\n"
+        "insert_job: tm_two\njob_type: c\ncommand: y\nmachine: m1\nterm_run_time: 2\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # unscripted: park RUNNING forever
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            for job in ("tm_one", "tm_two"):
+                resp = await _control_call(
+                    server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": job}
+                )
+                assert resp["ok"] is True
+
+            async def both_running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status"})
+                return all(r["jobs"][j]["status"] == "RUNNING" for j in ("tm_one", "tm_two"))
+
+            await _wait_for_async(both_running)
+            resp = await _control_call(server.path, {"cmd": "timers"})
+            assert resp["ok"] is True
+            entries = resp["timers"]
+            assert [set(e) for e in entries] == [{"due", "job", "kind"}] * 2
+            assert [e["job"] for e in entries] == ["tm_one", "tm_two"]  # 1min before 2min
+            assert [e["kind"] for e in entries] == ["term_run_time", "term_run_time"]
+            assert entries[0]["due"] < entries[1]["due"]  # ISO strings order chronologically
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_timers_merges_scheduler_next_ticks_due_ordered(short_root: Path) -> None:
+    """DL-65 `timers` verb, scheduler half: with a Scheduler wired in, each
+    scheduled job's NEXT calendar tick (Scheduler.upcoming()) joins the
+    oracle deadlines as kind:"schedule", one due-ordered list. A parked
+    term_run_time deadline (~1 minute out) sorts before a start_times tick
+    ~2 hours out; the schedule entry's due is the exact tick instant."""
+    now = RealClock().now()
+    tick = (now + timedelta(hours=2)).replace(second=0, microsecond=0)
+    text = (
+        "insert_job: tm_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 1\n\n"
+        "insert_job: sch_job\njob_type: c\ncommand: y\nmachine: m1\n"
+        f'date_conditions: 1\ndays_of_week: all\nstart_times: "{tick:%H:%M}"\n'
+    )
+    scheduler = Scheduler(lower_source(text), start=now)
+    assert scheduler.upcoming() == [(tick, "sch_job")]  # the new snapshot API itself
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, adapter=adapter, scheduler=scheduler
+        )
+        try:
+            resp = await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "tm_run"}
+            )
+            assert resp["ok"] is True
+
+            async def running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "tm_run"})
+                return r["jobs"]["tm_run"]["status"] == "RUNNING"
+
+            await _wait_for_async(running)
+            resp = await _control_call(server.path, {"cmd": "timers"})
+            assert resp["ok"] is True
+            entries = resp["timers"]
+            assert [(e["job"], e["kind"]) for e in entries] == [
+                ("tm_run", "term_run_time"),
+                ("sch_job", "schedule"),
+            ]
+            assert entries[1]["due"] == tick.isoformat()
+            assert entries[0]["due"] < entries[1]["due"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_job_type_and_box_name_for_members_boxes_and_store_ghosts(
+    short_root: Path,
+) -> None:
+    """DL-65 status additions: catalog placement rides every status row --
+    a member reports its job_type and owning box, the box itself reports
+    job_type BOX with box_name null. A store-only ghost (a STATUS event for
+    a name outside the catalog -- CHANGE_STATUS's injection parity -- creates
+    the JobRuntime lazily) has no catalog row at all: job_type and box_name
+    are both null, yet the single-job status query still resolves it."""
+    text = (
+        "insert_job: bx_box\njob_type: b\n\n"
+        "insert_job: bx_mem\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx_box\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "status"})
+            assert resp["jobs"]["bx_mem"]["job_type"] == "CMD"
+            assert resp["jobs"]["bx_mem"]["box_name"] == "bx_box"
+            assert resp["jobs"]["bx_box"]["job_type"] == "BOX"
+            assert resp["jobs"]["bx_box"]["box_name"] is None
+
+            engine.inject(
+                Event(
+                    at=engine.clock.now(),
+                    kind="STATUS",
+                    payload={"job": "gh_ghost", "status": "SUCCESS"},
+                )
+            )
+
+            async def ghost_visible() -> bool:
+                r = await _control_call(server.path, {"cmd": "status"})
+                return "gh_ghost" in r["jobs"]
+
+            await _wait_for_async(ghost_visible)
+            single = await _control_call(server.path, {"cmd": "status", "job": "gh_ghost"})
+            assert single["ok"] is True
+            ghost = single["jobs"]["gh_ghost"]
+            assert ghost["status"] == "SUCCESS"
+            assert ghost["job_type"] is None
+            assert ghost["box_name"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_spec_drift_null_without_fingerprint(short_root: Path) -> None:
+    """DL-65 spec_drift, the embedder shape: a server started without an
+    estate fingerprint has nothing to check against -- the flag is null,
+    never false (unknown is not 'clean')."""
+    text = "insert_job: nf_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "status"})
+            assert resp["ok"] is True
+            assert resp["spec_drift"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_spec_drift_false_then_true_on_rewrite_with_lazy_interval(
+    short_root: Path,
+) -> None:
+    """DL-65 spec_drift, the `dsl41 run` shape: with a matching sha256
+    fingerprint the flag is false; rewriting the file flips it to true only
+    once the DRIFT_CHECK_INTERVAL_S lazy re-check runs (forced here by
+    clearing _drift_checked_at, the test seam for the 15s interval). The
+    cache cuts both ways: restoring the original bytes WITHOUT forcing a
+    re-check still reports true -- the flag is a sampled hint, not a live
+    watch."""
+    text = "insert_job: fp_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    estate = short_root / "estate.jil"
+    estate.write_text(text, encoding="utf-8")
+    fingerprint = {str(estate): hashlib.sha256(estate.read_bytes()).hexdigest()}
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, estate_fingerprint=fingerprint
+        )
+        try:
+            clean = await _control_call(server.path, {"cmd": "status"})
+            assert clean["spec_drift"] is False
+
+            estate.write_text(text + "/* touched */\n", encoding="utf-8")
+            cached = await _control_call(server.path, {"cmd": "status"})
+            assert cached["spec_drift"] is False  # within the 15s interval: stale-clean
+
+            server._drift_checked_at = None  # force the lazy re-check
+            drifted = await _control_call(server.path, {"cmd": "status"})
+            assert drifted["spec_drift"] is True
+
+            estate.write_text(text, encoding="utf-8")  # restore, but do NOT force
+            still = await _control_call(server.path, {"cmd": "status"})
+            assert still["spec_drift"] is True
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_cli_query_predicates_require_job_and_unknown_verb_lists_them() -> None:
+    """DL-65 CLI arg validation, in-process (both paths exit before touching
+    the socket): a predicate without --job exits 2; an unknown verb's error
+    listing now includes the new verbs and predicates."""
+    result = cli_runner.invoke(app, ["query", "is-success", "--socket", "/nonexistent.sock"])
+    assert result.exit_code == 2
+    assert "--job" in result.output
+
+    result = cli_runner.invoke(app, ["query", "bogus", "--socket", "/nonexistent.sock"])
+    assert result.exit_code == 2
+    assert "deps" in result.output
+    assert "timers" in result.output
+    assert "is-success" in result.output
+    assert "is-failed" in result.output
