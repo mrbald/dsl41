@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 try:
+    from rich.cells import cell_len
     from rich.text import Text
     from textual import on
     from textual.app import App, ComposeResult, RenderResult
@@ -120,6 +121,23 @@ _STATUS_STYLE = {
 }
 _TAIL_SEED_BYTES = 8192  # start a fresh tail this close to EOF
 _COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
+#: fixed render widths for the bounded columns (max of content and header
+#: label: TERMINATED, HH:MM:SS, IHN, ...). Auto-width stays only where content
+#: genuinely varies -- job (indent, fold markers, rollup tallies) and timers.
+#: The point is to keep update_cell's update_width off these columns: textual's
+#: width recompute re-measures a WHOLE column per updated-and-shrunk cell, and
+#: with every cell of every row queued each refresh that is O(cells x rows) --
+#: ~2M rich measures, ~25s of blocked loop, at a 519-job estate.
+_COLUMN_WIDTHS = {"status": 10, "at": 8, "run": 4, "exit": 4, "flags": 5, "alarms": 6}
+
+
+def _cell_sig(value: Any) -> tuple[str, str]:
+    """Comparable identity of a rendered cell: (plain text, style). Text.__eq__
+    ignores the style attribute, so diffing the cell objects directly would
+    call a restyled-but-same-text cell unchanged."""
+    if isinstance(value, Text):
+        return value.plain, str(value.style)
+    return str(value), ""
 
 
 class _UTCHeaderClock(HeaderClock):
@@ -417,6 +435,10 @@ class RunnerApp(App[None]):
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
         self._row_order: list[str] = []  # current table order; differs -> rebuild
+        #: row key -> cell signatures as last rendered; the steady-state diff
+        #: (unchanged rows cost nothing, changed rows update only their
+        #: changed cells)
+        self._cell_sigs: dict[str, list[tuple[str, str]]] = {}
         #: set across a table rebuild that restores the selection: the first
         #: add_row fires a spurious row-0 highlight BEFORE move_cursor lands,
         #: and each such bounce would wipe the log tail (review MAJOR). The
@@ -454,7 +476,7 @@ class RunnerApp(App[None]):
         table = self.query_one("#jobs", DataTable)
         table.cursor_type = "row"
         for label in _COLUMNS:  # singular add_column: key= predates the 6.2 tuple form
-            table.add_column(label, key=label)
+            table.add_column(label, key=label, width=_COLUMN_WIDTHS.get(label))
         self.query_one("#explain-box").border_title = "explain"
         self.query_one("#logtail", RichLog).border_title = "log"
         self.query_one("#console", RichLog).border_title = "events"
@@ -697,17 +719,36 @@ class RunnerApp(App[None]):
                 # nothing visible: keyed verbs must not fire at a job the
                 # operator cannot see (review MAJOR)
                 self._selected = None
+            self._cell_sigs = {}
             for name, depth in visible:
-                table.add_row(*self._decorated_cells(name, depth, kids, flat=flat), key=name)
+                cells = self._decorated_cells(name, depth, kids, flat=flat)
+                self._cell_sigs[name] = [_cell_sig(cell) for cell in cells]
+                table.add_row(*cells, key=name)
             if self._restore_selected is not None:
                 table.move_cursor(row=order.index(self._restore_selected))
             elif order:
                 table.move_cursor(row=0)  # highlight event resyncs _selected
         else:
+            # steady state: update only cells whose (text, style) actually
+            # changed -- pushing every cell each refresh queues them all for
+            # textual's width recompute, which re-measures a whole column per
+            # shrunk cell (the O(cells x rows) freeze at estate scale)
             for name, depth in visible:
                 cells = self._decorated_cells(name, depth, kids, flat=flat)
-                for column, value in zip(_COLUMNS, cells):
-                    table.update_cell(name, column, value, update_width=True)
+                sigs = [_cell_sig(cell) for cell in cells]
+                old = self._cell_sigs.get(name)
+                if sigs == old:
+                    continue
+                for i, (column, cell, sig) in enumerate(zip(_COLUMNS, cells, sigs)):
+                    if old is not None and old[i] == sig:
+                        continue
+                    # update_width only where it can matter: an auto-width
+                    # column whose rendered width changed with the text
+                    widen = column not in _COLUMN_WIDTHS and (
+                        old is None or cell_len(old[i][0]) != cell_len(sig[0])
+                    )
+                    table.update_cell(name, column, cell, update_width=widen)
+                self._cell_sigs[name] = sigs
         # a Text title: border_title strings parse as rich markup, so a
         # user-typed filter (or a bracketed mode tag) would vanish into it
         title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")
