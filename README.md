@@ -263,6 +263,17 @@ of its own here. The control socket is 0600 from birth (ss10). Thus `serve`
 only sees what its own user can already reach directly. It does not widen
 access. It makes existing access reachable from a browser.
 
+### Training sandbox (examples/nightbank)
+
+A synthetic bank overnight estate — three regions closing follow-the-sun,
+demand-driven refdata, a human approval before the start-of-day flip — for
+learning to *operate* the engine: scripted incidents (stalled feeds, hung
+jobs, failed loads) that the night does not survive without you. A whole
+night plays in ~15 real minutes on the real engine. Start with
+[examples/nightbank/README.md](examples/nightbank/README.md) and its
+[RUNBOOK](examples/nightbank/RUNBOOK.md) of operator exercises
+(`uv run examples/nightbank/bin/nightbank up`). Repo-only; not packaged.
+
 ## Implementation memo
 
 All ten phases from the implementation order in CLAUDE.md are implemented and

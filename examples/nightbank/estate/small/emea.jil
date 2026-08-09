@@ -1,0 +1,331 @@
+/* EMEA -- Zurich close, head office. Full-depth region: departments are
+   nested boxes, refdata is a separate step, valuation runs four shards
+   (three fit the grid -- one QUE_WAITs), and the MKT box carries a
+   box_success override tolerating the chronically broken secondary vendor. */
+
+insert_job: EMEA_EOD_B
+job_type: b
+owner: ~{$OWNER}~
+description: "EMEA end-of-day close and overnight processing (head office)"
+date_conditions: 1
+days_of_week: all
+exclude_calendar: HOL_GLOBAL
+start_times: "~{$EOD_EMEA}~"
+timezone: Europe/Zurich
+must_complete_times: "+20"
+
+/* -------- Execution (EXE) -------------------------------------------- */
+
+insert_job: EMEA_EXE_B
+job_type: b
+box_name: EMEA_EOD_B
+owner: ~{$OWNER}~
+
+insert_job: EMEA_EXE_ORDER_FREEZE_C
+job_type: c
+box_name: EMEA_EXE_B
+command: fakework EMEA_EXE_ORDER_FREEZE_C --sleep 8 --produce exe/emea/orders_frozen.flag
+machine: exe_gw
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_EXE_ORDER_FREEZE_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_EXE_ORDER_FREEZE_C.err
+
+insert_job: EMEA_EXE_TRADES_EXTRACT_C
+job_type: c
+box_name: EMEA_EXE_B
+condition: s(EMEA_EXE_ORDER_FREEZE_C)
+command: fakework EMEA_EXE_TRADES_EXTRACT_C --sleep 12 --consume exe/emea/orders_frozen.flag --produce exe/emea/trades.csv
+machine: exe_gw
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_EXE_TRADES_EXTRACT_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_EXE_TRADES_EXTRACT_C.err
+
+insert_job: EMEA_EXE_OPEN_ORDERS_C
+job_type: c
+box_name: EMEA_EXE_B
+condition: s(EMEA_EXE_ORDER_FREEZE_C)
+command: fakework EMEA_EXE_OPEN_ORDERS_C --sleep 10 --consume exe/emea/orders_frozen.flag --produce exe/emea/open_orders.csv
+machine: exe_gw
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_EXE_OPEN_ORDERS_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_EXE_OPEN_ORDERS_C.err
+
+/* -------- Accounting master (ACC) ------------------------------------ */
+
+insert_job: EMEA_ACC_B
+job_type: b
+box_name: EMEA_EOD_B
+owner: ~{$OWNER}~
+
+insert_job: EMEA_ACC_GL_CLOSE_C
+job_type: c
+box_name: EMEA_ACC_B
+command: fakework EMEA_ACC_GL_CLOSE_C --sleep 20 --produce acc/emea/gl_closed.flag
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_ACC_GL_CLOSE_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_ACC_GL_CLOSE_C.err
+resources: (GL_DB, QUANTITY=1)
+
+insert_job: EMEA_ACC_POSITIONS_C
+job_type: c
+box_name: EMEA_ACC_B
+condition: s(EMEA_ACC_GL_CLOSE_C)
+command: fakework EMEA_ACC_POSITIONS_C --sleep 12 --consume acc/emea/gl_closed.flag --produce acc/emea/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_ACC_POSITIONS_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_ACC_POSITIONS_C.err
+
+insert_job: EMEA_ACC_CASH_C
+job_type: c
+box_name: EMEA_ACC_B
+condition: s(EMEA_ACC_GL_CLOSE_C)
+command: fakework EMEA_ACC_CASH_C --sleep 9 --consume acc/emea/gl_closed.flag --produce acc/emea/cash.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_ACC_CASH_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_ACC_CASH_C.err
+
+/* -------- Investment macros (INV) ------------------------------------ */
+
+insert_job: EMEA_INV_MACROS_C
+job_type: c
+box_name: EMEA_EOD_B
+command: fakework EMEA_INV_MACROS_C --sleep 10 --produce inv/emea/macros.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_INV_MACROS_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_INV_MACROS_C.err
+
+/* The demand inversion (see apac.jil). */
+insert_job: EMEA_UNIV_DEMAND_C
+job_type: c
+box_name: EMEA_EOD_B
+condition: s(EMEA_ACC_POSITIONS_C) & s(EMEA_INV_MACROS_C) & s(EMEA_EXE_OPEN_ORDERS_C)
+command: fakework EMEA_UNIV_DEMAND_C --sleep 8 --consume acc/emea/positions.csv --consume inv/emea/macros.csv --consume exe/emea/open_orders.csv --produce univ/emea/universe.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_UNIV_DEMAND_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_UNIV_DEMAND_C.err
+
+/* -------- Market data + refdata (MKT) -------------------------------- */
+/* box_success: primary marks + FX suffice; the secondary vendor feed is a
+   known broken feed (exits 6 every night) and must not fail the box.     */
+
+insert_job: EMEA_MKT_B
+job_type: b
+box_name: EMEA_EOD_B
+owner: ~{$OWNER}~
+condition: s(EMEA_UNIV_DEMAND_C)
+box_success: s(EMEA_MKT_MARKS_C) & s(EMEA_MKT_FX_C)
+
+insert_job: EMEA_MKT_SFTP_SIM_C
+job_type: c
+box_name: EMEA_MKT_B
+command: fakework EMEA_MKT_SFTP_SIM_C --sleep 15 --produce incoming/emea_prices.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_MKT_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_MKT_SFTP_SIM_C.err
+
+insert_job: EMEA_MKT_PX_F
+job_type: f
+box_name: EMEA_MKT_B
+watch_file: ~{$NB_DATA}~/incoming/emea_prices.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/EMEA_MKT_PX_F.out
+std_err_file: ~{$NB_LOGS}~/EMEA_MKT_PX_F.err
+
+/* Refdata orders instrument definitions for the demanded universe only. */
+insert_job: EMEA_REF_INSTR_C
+job_type: c
+box_name: EMEA_MKT_B
+condition: s(EMEA_MKT_PX_F)
+command: fakework EMEA_REF_INSTR_C --sleep 10 --consume univ/emea/universe.csv --consume incoming/emea_prices.csv --produce ref/emea/instruments.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REF_INSTR_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REF_INSTR_C.err
+
+insert_job: EMEA_MKT_MARKS_C
+job_type: c
+box_name: EMEA_MKT_B
+condition: s(EMEA_REF_INSTR_C)
+command: fakework EMEA_MKT_MARKS_C --sleep 14 --consume ref/emea/instruments.csv --produce mkt/emea/marks.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_MKT_MARKS_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_MKT_MARKS_C.err
+term_run_time: 4
+
+insert_job: EMEA_MKT_FX_C
+job_type: c
+box_name: EMEA_MKT_B
+condition: s(EMEA_MKT_PX_F)
+command: fakework EMEA_MKT_FX_C --sleep 9 --produce mkt/emea/fx.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_MKT_FX_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_MKT_FX_C.err
+
+/* Chronically broken secondary vendor -- fails every night by design. */
+insert_job: EMEA_MKT_VENDOR2_C
+job_type: c
+box_name: EMEA_MKT_B
+condition: s(EMEA_MKT_PX_F)
+command: fakework EMEA_MKT_VENDOR2_C --sleep 6 --exit 6
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_MKT_VENDOR2_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_MKT_VENDOR2_C.err
+
+/* -------- Corporate actions (CA) ------------------------------------- */
+
+insert_job: EMEA_CA_APPLY_C
+job_type: c
+box_name: EMEA_EOD_B
+condition: s(EMEA_ACC_POSITIONS_C) & s(EMEA_REF_INSTR_C)
+command: fakework EMEA_CA_APPLY_C --sleep 10 --consume acc/emea/positions.csv --consume ref/emea/instruments.csv --produce ca/emea/positions_adj.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_CA_APPLY_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_CA_APPLY_C.err
+
+/* -------- Valuation (VAL): 4 shards x job_load 40 vs max_load 100 ----- */
+/* Two shards run, two QUE_WAIT. Priority orders the waiters, not the
+   instant admissions (no preemption): shard 4's better (lower) priority
+   makes it the first waiter admitted when a slot frees, ahead of shard 3. */
+
+insert_job: EMEA_VAL_B
+job_type: b
+box_name: EMEA_EOD_B
+owner: ~{$OWNER}~
+condition: s(EMEA_MKT_B) & s(EMEA_CA_APPLY_C)
+
+insert_job: EMEA_VAL_SHARD1_C
+job_type: c
+box_name: EMEA_VAL_B
+command: fakework EMEA_VAL_SHARD1_C --sleep 25 --consume mkt/emea/marks.csv --consume mkt/emea/fx.csv --consume ca/emea/positions_adj.csv --produce val/emea/shard1.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD1_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD1_C.err
+job_load: 40
+priority: 20
+
+insert_job: EMEA_VAL_SHARD2_C
+job_type: c
+box_name: EMEA_VAL_B
+command: fakework EMEA_VAL_SHARD2_C --sleep 25 --consume mkt/emea/marks.csv --consume mkt/emea/fx.csv --consume ca/emea/positions_adj.csv --produce val/emea/shard2.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD2_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD2_C.err
+job_load: 40
+priority: 20
+
+insert_job: EMEA_VAL_SHARD3_C
+job_type: c
+box_name: EMEA_VAL_B
+command: fakework EMEA_VAL_SHARD3_C --sleep 25 --consume mkt/emea/marks.csv --consume mkt/emea/fx.csv --consume ca/emea/positions_adj.csv --produce val/emea/shard3.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD3_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD3_C.err
+job_load: 40
+priority: 20
+
+insert_job: EMEA_VAL_SHARD4_C
+job_type: c
+box_name: EMEA_VAL_B
+command: fakework EMEA_VAL_SHARD4_C --sleep 25 --consume mkt/emea/marks.csv --consume mkt/emea/fx.csv --consume ca/emea/positions_adj.csv --produce val/emea/shard4.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD4_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_VAL_SHARD4_C.err
+job_load: 40
+priority: 10
+
+/* -------- Reconciliation (REC) --------------------------------------- */
+
+insert_job: EMEA_REC_B
+job_type: b
+box_name: EMEA_EOD_B
+owner: ~{$OWNER}~
+condition: s(EMEA_EXE_B) & s(EMEA_ACC_B)
+
+insert_job: EMEA_REC_CUST_SFTP_SIM_C
+job_type: c
+box_name: EMEA_REC_B
+command: fakework EMEA_REC_CUST_SFTP_SIM_C --sleep 20 --produce incoming/emea_custody.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REC_CUST_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REC_CUST_SFTP_SIM_C.err
+
+insert_job: EMEA_REC_CUST_F
+job_type: f
+box_name: EMEA_REC_B
+watch_file: ~{$NB_DATA}~/incoming/emea_custody.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REC_CUST_F.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REC_CUST_F.err
+
+insert_job: EMEA_REC_TRADES_C
+job_type: c
+box_name: EMEA_REC_B
+condition: s(EMEA_REC_CUST_F) & s(EMEA_EXE_TRADES_EXTRACT_C)
+command: fakework EMEA_REC_TRADES_C --sleep 10 --consume incoming/emea_custody.csv --consume exe/emea/trades.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REC_TRADES_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REC_TRADES_C.err
+max_exit_success: 1
+
+insert_job: EMEA_REC_POSN_C
+job_type: c
+box_name: EMEA_REC_B
+condition: s(EMEA_REC_CUST_F) & s(EMEA_ACC_POSITIONS_C)
+command: fakework EMEA_REC_POSN_C --sleep 12 --consume incoming/emea_custody.csv --consume acc/emea/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REC_POSN_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REC_POSN_C.err
+resources: (GL_DB, QUANTITY=1)
+
+insert_job: EMEA_REC_GATE_C
+job_type: c
+box_name: EMEA_REC_B
+condition: s(EMEA_REC_TRADES_C) & s(EMEA_REC_POSN_C)
+command: dsl41 sendevent SET_GLOBAL --socket "$NIGHTBANK_SOCKET" --global RECON_EMEA=CLEAN
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/EMEA_REC_GATE_C.out
+std_err_file: ~{$NB_LOGS}~/EMEA_REC_GATE_C.err

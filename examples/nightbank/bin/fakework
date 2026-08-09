@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""fakework -- the only worker the nightbank estate ever runs.
+
+One unit of fake overnight work: consume input files, sleep, produce output
+files, exit. Incident behaviors are looked up by job name in the TSV file
+named by $NIGHTBANK_INCIDENTS; attempt counters live under $NIGHTBANK_STATE,
+so *_once behaviors clear on rerun -- an operator's FORCE_STARTJOB succeeds.
+
+The engine above knows nothing about any of this: real process, real files,
+real exit codes.
+
+Behaviors (incidents.conf columns: JOB BEHAVIOR [ARG]):
+  fail_once [code]   exit code (default 5) on the first attempt of the night
+  hang_once          first attempt sleeps forever (term_run_time kills it)
+  late SECONDS       extra delay before doing the work
+  no_show            do the work but skip every --produce (feed never lands)
+  breaks [n]         exit 1 after producing -- "n breaks within tolerance"
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+import typer
+
+app = typer.Typer(add_completion=False)
+
+
+def log(job: str, msg: str) -> None:
+    print(f"{datetime.now(UTC).isoformat(timespec='seconds')} {job} {msg}", flush=True)
+
+
+def data_root() -> Path:
+    root = os.environ.get("NIGHTBANK_DATA")
+    if not root:
+        sys.exit("fakework: NIGHTBANK_DATA is not set (profile.env not sourced?)")
+    return Path(root)
+
+
+def incident_for(job: str) -> tuple[str, str]:
+    path = os.environ.get("NIGHTBANK_INCIDENTS", "")
+    if not path or not Path(path).exists():
+        return "", ""
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if parts[0] == job:
+            return parts[1], parts[2] if len(parts) > 2 else ""
+    return "", ""
+
+
+def bump_attempts(job: str, root: Path) -> int:
+    state = Path(os.environ.get("NIGHTBANK_STATE", str(root / "state")))
+    state.mkdir(parents=True, exist_ok=True)
+    marker = state / f"{job}.attempts"
+    attempt = int(marker.read_text()) + 1 if marker.exists() else 1
+    marker.write_text(str(attempt))
+    return attempt
+
+
+def produce_file(root: Path, rel: str, job: str) -> None:
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    rows = sum(ord(c) for c in rel) % 9000 + 1000  # stable fake row count
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    target.write_text(f"# produced by {job} at {stamp}\nrows={rows}\n")
+    log(job, f"produced {rel} ({rows} rows)")
+
+
+def do_flip(root: Path, job: str) -> None:
+    """The transactional new-day activation: pending/ becomes current/."""
+    pending, current, previous = root / "pending", root / "current", root / "previous"
+    if not pending.is_dir():
+        log(job, f"NOTHING TO FLIP: {pending} missing")
+        raise typer.Exit(4)
+    if previous.exists():
+        shutil.rmtree(previous)
+    if current.exists():
+        current.rename(previous)
+    pending.rename(current)
+    pending.mkdir()
+    log(job, "flipped pending/ -> current/ (previous day kept in previous/)")
+
+
+@app.command()
+def main(
+    job: str = typer.Argument(...),
+    sleep: float = typer.Option(5.0, "--sleep", help="Seconds of fake work."),
+    consume: list[str] = typer.Option([], "--consume", metavar="REL"),
+    produce: list[str] = typer.Option([], "--produce", metavar="REL"),
+    flip: bool = typer.Option(False, "--flip", help="pending/ -> current/ swap."),
+    exit_code: int = typer.Option(0, "--exit"),
+) -> None:
+    root = data_root()
+    attempt = bump_attempts(job, root)
+    behavior, barg = incident_for(job)
+    log(job, f"start attempt={attempt} sleep={sleep:g}s pid={os.getpid()}")
+    if behavior:
+        log(job, f"incident active: {behavior} {barg}".rstrip())
+
+    if behavior == "hang_once" and attempt == 1:
+        log(job, "hung -- waiting to be killed (term_run_time or KILLJOB)")
+        time.sleep(21600)
+        raise typer.Exit(99)  # unreachable in practice: the engine kills us first
+    if behavior == "late":
+        time.sleep(float(barg or 60))
+
+    for rel in consume:
+        if not (root / rel).exists():
+            log(job, f"MISSING INPUT {rel} (exit 3)")
+            raise typer.Exit(3)
+        log(job, f"consumed {rel}")
+
+    time.sleep(sleep)
+
+    if behavior == "fail_once" and attempt == 1:
+        code = int(barg or 5)
+        log(job, f"FAILED (exit {code}) -- rerun will succeed")
+        raise typer.Exit(code)
+    if behavior == "no_show":
+        log(job, "completed with nothing to deliver (produces skipped)")
+        raise typer.Exit(0)
+
+    for rel in produce:
+        produce_file(root, rel, job)
+    if flip:
+        do_flip(root, job)
+
+    if behavior == "breaks":
+        log(job, f"done: {int(barg or 7)} breaks within tolerance (exit 1)")
+        raise typer.Exit(1)
+    log(job, f"done (exit {exit_code})")
+    raise typer.Exit(exit_code)
+
+
+if __name__ == "__main__":
+    app()

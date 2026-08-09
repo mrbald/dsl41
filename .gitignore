@@ -12,3 +12,6 @@ dist/
 /*.jpeg
 /*.jpg
 /*.png
+
+# nightbank sandbox run artifacts (journals, logs, data)
+examples/nightbank/runs/

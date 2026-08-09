@@ -1,0 +1,204 @@
+/* AMER -- New York close. Light region: jobs sit directly in the region box
+   (EMEA shows the fully nested department style). The night is almost
+   entirely condition/file-driven; the region anchor is the only clock. */
+
+insert_job: AMER_EOD_B
+job_type: b
+owner: ~{$OWNER}~
+description: "AMER end-of-day close and overnight processing"
+date_conditions: 1
+days_of_week: all
+exclude_calendar: HOL_GLOBAL
+start_times: "~{$EOD_AMER}~"
+timezone: America/New_York
+must_complete_times: "+20"
+
+/* Execution: freeze the order book, extract last-day trades + open orders. */
+insert_job: AMER_EXE_TRADES_C
+job_type: c
+box_name: AMER_EOD_B
+command: fakework AMER_EXE_TRADES_C --sleep 12 --produce exe/amer/trades.csv --produce exe/amer/open_orders.csv
+machine: exe_gw
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_EXE_TRADES_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_EXE_TRADES_C.err
+
+/* Accounting master: ledger close, then the source-of-truth positions. */
+insert_job: AMER_ACC_GL_CLOSE_C
+job_type: c
+box_name: AMER_EOD_B
+command: fakework AMER_ACC_GL_CLOSE_C --sleep 18 --produce acc/amer/gl_closed.flag
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_ACC_GL_CLOSE_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_ACC_GL_CLOSE_C.err
+resources: (GL_DB, QUANTITY=1)
+
+insert_job: AMER_ACC_POSITIONS_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_ACC_GL_CLOSE_C)
+command: fakework AMER_ACC_POSITIONS_C --sleep 10 --consume acc/amer/gl_closed.flag --produce acc/amer/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_ACC_POSITIONS_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_ACC_POSITIONS_C.err
+
+/* Investment macros: which instruments and groups each purpose uses. */
+insert_job: AMER_INV_MACROS_C
+job_type: c
+box_name: AMER_EOD_B
+command: fakework AMER_INV_MACROS_C --sleep 8 --produce inv/amer/macros.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_INV_MACROS_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_INV_MACROS_C.err
+
+/* The demand inversion: instrument definitions and marks are ordered only
+   once positions + macros + open orders tell us which universe we need. */
+insert_job: AMER_UNIV_DEMAND_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_ACC_POSITIONS_C) & s(AMER_INV_MACROS_C) & s(AMER_EXE_TRADES_C)
+command: fakework AMER_UNIV_DEMAND_C --sleep 8 --consume acc/amer/positions.csv --consume inv/amer/macros.csv --consume exe/amer/open_orders.csv --produce univ/amer/universe.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_UNIV_DEMAND_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_UNIV_DEMAND_C.err
+
+/* Market data: the vendor "SFTP arrival" is simulated by a job; the file
+   watcher is the real dependency the loaders hang off. */
+insert_job: AMER_MKT_SFTP_SIM_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_UNIV_DEMAND_C)
+command: fakework AMER_MKT_SFTP_SIM_C --sleep 15 --produce incoming/amer_prices.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_MKT_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_MKT_SFTP_SIM_C.err
+
+insert_job: AMER_MKT_PX_F
+job_type: f
+box_name: AMER_EOD_B
+watch_file: ~{$NB_DATA}~/incoming/amer_prices.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/AMER_MKT_PX_F.out
+std_err_file: ~{$NB_LOGS}~/AMER_MKT_PX_F.err
+
+insert_job: AMER_MKT_MARKS_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_MKT_PX_F) & s(AMER_UNIV_DEMAND_C)
+command: fakework AMER_MKT_MARKS_C --sleep 14 --consume incoming/amer_prices.csv --consume univ/amer/universe.csv --produce mkt/amer/marks.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_MKT_MARKS_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_MKT_MARKS_C.err
+term_run_time: 4
+
+insert_job: AMER_MKT_FX_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_MKT_PX_F)
+command: fakework AMER_MKT_FX_C --sleep 9 --produce mkt/amer/fx.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_MKT_FX_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_MKT_FX_C.err
+
+/* Valuation shards on the grid (lower priority number wins admission). */
+insert_job: AMER_VAL_SHARD1_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_MKT_MARKS_C) & s(AMER_MKT_FX_C)
+command: fakework AMER_VAL_SHARD1_C --sleep 20 --consume mkt/amer/marks.csv --consume mkt/amer/fx.csv --consume acc/amer/positions.csv --produce val/amer/shard1.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_VAL_SHARD1_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_VAL_SHARD1_C.err
+job_load: 40
+priority: 20
+
+insert_job: AMER_VAL_SHARD2_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_MKT_MARKS_C) & s(AMER_MKT_FX_C)
+command: fakework AMER_VAL_SHARD2_C --sleep 20 --consume mkt/amer/marks.csv --consume mkt/amer/fx.csv --consume acc/amer/positions.csv --produce val/amer/shard2.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_VAL_SHARD2_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_VAL_SHARD2_C.err
+job_load: 40
+priority: 10
+
+/* Reconciliation: custodian file vs ledger, trades vs postings. */
+insert_job: AMER_REC_CUST_SFTP_SIM_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_ACC_GL_CLOSE_C)
+command: fakework AMER_REC_CUST_SFTP_SIM_C --sleep 20 --produce incoming/amer_custody.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_REC_CUST_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_REC_CUST_SFTP_SIM_C.err
+
+insert_job: AMER_REC_CUST_F
+job_type: f
+box_name: AMER_EOD_B
+watch_file: ~{$NB_DATA}~/incoming/amer_custody.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/AMER_REC_CUST_F.out
+std_err_file: ~{$NB_LOGS}~/AMER_REC_CUST_F.err
+
+/* Exit 1 = breaks within tolerance: max_exit_success turns it into SUCCESS. */
+insert_job: AMER_REC_TRADES_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_REC_CUST_F) & s(AMER_EXE_TRADES_C)
+command: fakework AMER_REC_TRADES_C --sleep 10 --consume incoming/amer_custody.csv --consume exe/amer/trades.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_REC_TRADES_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_REC_TRADES_C.err
+max_exit_success: 1
+
+insert_job: AMER_REC_POSN_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_REC_CUST_F) & s(AMER_ACC_POSITIONS_C)
+command: fakework AMER_REC_POSN_C --sleep 12 --consume incoming/amer_custody.csv --consume acc/amer/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_REC_POSN_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_REC_POSN_C.err
+resources: (GL_DB, QUANTITY=1)
+
+/* Clean recon reports itself to the control plane: a job driving sendevent. */
+insert_job: AMER_REC_GATE_C
+job_type: c
+box_name: AMER_EOD_B
+condition: s(AMER_REC_TRADES_C) & s(AMER_REC_POSN_C)
+command: dsl41 sendevent SET_GLOBAL --socket "$NIGHTBANK_SOCKET" --global RECON_AMER=CLEAN
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/AMER_REC_GATE_C.out
+std_err_file: ~{$NB_LOGS}~/AMER_REC_GATE_C.err

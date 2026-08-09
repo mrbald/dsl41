@@ -2135,3 +2135,21 @@
   the same ladder; unresolvable stays a preflight ERROR, now naming the
   applicable remedy. The runbook grows a read-only `autotimezone -l`
   capture step for any migrated estate. Tests 1690 → 1704.
+- DL-63 nightbank operator-training sandbox (2026-08-09). New top-level
+  `examples/nightbank/`: a synthetic bank overnight estate ("Alpenbank
+  Global Overnight") for training operators on the REAL engine — TUI,
+  sendevent/query, supervisor, scheduler, restart/resume. Boundary
+  decision: the engine is untouched; all fakery lives estate-side (a
+  `fakework` worker moving marker files + a scripted `incidents.conf`).
+  Clock manipulation was considered (a ScaledClock with a fixed-point
+  clock-id encoding) and REJECTED for v1 — real clock, real processes;
+  compressed play comes from the estate being condition/file-driven with
+  launch-stamped anchors (`~{$X}~` placeholders + a per-night properties
+  file, the existing preprocessor). libfaketime remains the documented
+  external route if wall-time compression is ever needed. Two profiles
+  from one topology: `estate/small` (~80 jobs, hand-written) and
+  `estate/bank` (~520 jobs, `generate.py`, byte-stable regeneration,
+  pinned by test). Corpus hygiene: fully synthetic, repo-only, not
+  packaged. Smoke coverage in tests/test_nightbank_example.py (lint
+  zero-findings gate, full-night VirtualClock rehearsal to the SOD flip
+  with operator actions as scripted events, QUE_WAIT/priority pins).

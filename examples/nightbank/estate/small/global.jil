@@ -1,0 +1,205 @@
+/* Global tail: consolidation risk, the transactional start-of-day flip,
+   and operations. Runs after the last region closes. */
+
+/* -------- Group risk ------------------------------------------------- */
+
+insert_job: GLOBAL_RISK_B
+job_type: b
+owner: ~{$OWNER}~
+condition: s(APAC_EOD_B) & s(EMEA_EOD_B) & s(AMER_EOD_B)
+
+insert_job: GLOBAL_RISK_EXPO_C
+job_type: c
+box_name: GLOBAL_RISK_B
+command: fakework GLOBAL_RISK_EXPO_C --sleep 15 --consume val/apac/shard1.csv --consume val/emea/shard1.csv --consume val/amer/shard1.csv --produce risk/exposures.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/GLOBAL_RISK_EXPO_C.out
+std_err_file: ~{$NB_LOGS}~/GLOBAL_RISK_EXPO_C.err
+
+/* VaR insists the EMEA FX marks are fresh: a 4-hour lookback atom. */
+insert_job: GLOBAL_RISK_VAR_C
+job_type: c
+box_name: GLOBAL_RISK_B
+condition: s(GLOBAL_RISK_EXPO_C) & s(EMEA_MKT_FX_C, 04.00)
+command: fakework GLOBAL_RISK_VAR_C --sleep 12 --consume risk/exposures.csv --produce risk/var.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/GLOBAL_RISK_VAR_C.out
+std_err_file: ~{$NB_LOGS}~/GLOBAL_RISK_VAR_C.err
+
+/* -------- Start of day: preflight, approval, transactional flip ------ */
+/* The box arms on three v() gates the recon jobs set via sendevent. */
+
+insert_job: SOD_B
+job_type: b
+owner: ~{$OWNER}~
+condition: v(RECON_APAC) = CLEAN & v(RECON_EMEA) = CLEAN & v(RECON_AMER) = CLEAN & s(GLOBAL_RISK_B)
+
+insert_job: SOD_PREFLIGHT_C
+job_type: c
+box_name: SOD_B
+command: fakework SOD_PREFLIGHT_C --sleep 8 --consume risk/exposures.csv --consume risk/var.csv --produce pending/sod_ready.flag
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/SOD_PREFLIGHT_C.out
+std_err_file: ~{$NB_LOGS}~/SOD_PREFLIGHT_C.err
+
+/* Ops sign-off: auto_hold parks every run until OFF_HOLD releases it. */
+insert_job: SOD_APPROVE_C
+job_type: c
+box_name: SOD_B
+condition: s(SOD_PREFLIGHT_C)
+description: "release with: dsl41 sendevent OFF_HOLD -J SOD_APPROVE_C -S <socket>"
+command: fakework SOD_APPROVE_C --sleep 2
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/SOD_APPROVE_C.out
+std_err_file: ~{$NB_LOGS}~/SOD_APPROVE_C.err
+auto_hold: 1
+
+/* The transactional new-day activation: pending/ -> current/, then the
+   business date is published to the control plane. */
+insert_job: SOD_FLIP_C
+job_type: c
+box_name: SOD_B
+condition: s(SOD_APPROVE_C)
+command: fakework SOD_FLIP_C --sleep 3 --flip && dsl41 sendevent SET_GLOBAL --socket "$NIGHTBANK_SOCKET" --global SOD_DATE=$(date +%F)
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/SOD_FLIP_C.out
+std_err_file: ~{$NB_LOGS}~/SOD_FLIP_C.err
+
+/* Warmup proves the flip: it reads from current/, not pending/. */
+insert_job: SOD_WARMUP_C
+job_type: c
+box_name: SOD_B
+condition: s(SOD_FLIP_C)
+command: fakework SOD_WARMUP_C --sleep 5 --consume current/sod_ready.flag
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/SOD_WARMUP_C.out
+std_err_file: ~{$NB_LOGS}~/SOD_WARMUP_C.err
+
+/* -------- Operations -------------------------------------------------- */
+/* Housekeeping vs archive both start with the box and contend for the one
+   tape drive: the loser sits in QUE_WAIT (an n() pair here would gate
+   nothing -- L007 -- since conditions only gate the START). The
+   box_terminator/job_terminator pair is the SEM-14 cascade: housekeeping
+   failing terminates the box, which kills the spooler. */
+
+insert_job: OPS_B
+job_type: b
+owner: ~{$OWNER}~
+condition: s(GLOBAL_RISK_B)
+
+insert_job: OPS_HOUSEKEEP_C
+job_type: c
+box_name: OPS_B
+command: fakework OPS_HOUSEKEEP_C --sleep 35
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_HOUSEKEEP_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_HOUSEKEEP_C.err
+resources: (TAPE_DRIVE, QUANTITY=1)
+box_terminator: 1
+
+insert_job: OPS_ARCHIVE_C
+job_type: c
+box_name: OPS_B
+command: fakework OPS_ARCHIVE_C --sleep 35
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_ARCHIVE_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_ARCHIVE_C.err
+resources: (TAPE_DRIVE, QUANTITY=1)
+
+insert_job: OPS_SPOOL_C
+job_type: c
+box_name: OPS_B
+command: fakework OPS_SPOOL_C --sleep 240
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_SPOOL_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_SPOOL_C.err
+job_terminator: 1
+
+/* -------- Standalone scheduled + parked jobs -------------------------- */
+
+/* Fires every quarter hour inside a one-hour window stamped at launch:
+   live evidence the calendar scheduler keeps re-arming. */
+insert_job: OPS_HEARTBEAT_C
+job_type: c
+command: fakework OPS_HEARTBEAT_C --sleep 3
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_HEARTBEAT_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_HEARTBEAT_C.err
+date_conditions: 1
+days_of_week: all
+start_mins: 0, 15, 30, 45
+run_window: "~{$HB_WINDOW}~"
+timezone: UTC
+
+/* Decommissioned report, kept on ice: the "why does this never run?"
+   exercise -- an iced job satisfies every status atom that names it. */
+insert_job: OPS_LEGACY_REPORT_C
+job_type: c
+condition: s(GLOBAL_RISK_B)
+command: fakework OPS_LEGACY_REPORT_C --sleep 5
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_LEGACY_REPORT_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_LEGACY_REPORT_C.err
+status: ON_ICE
+
+/* Dormant except on the right calendar date -- the scheduler resolves the
+   extended calendars nightly; watch them in the preflight output. */
+insert_job: OPS_MONTHLY_ATTRIB_C
+job_type: c
+command: fakework OPS_MONTHLY_ATTRIB_C --sleep 10 --produce risk/attribution.csv
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_MONTHLY_ATTRIB_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_MONTHLY_ATTRIB_C.err
+date_conditions: 1
+run_calendar: EOM_BUSINESS
+start_times: "06:00"
+timezone: Europe/Zurich
+
+insert_job: OPS_QTR_REG_REPORT_C
+job_type: c
+command: fakework OPS_QTR_REG_REPORT_C --sleep 10 --produce risk/quarterly_reg.csv
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_QTR_REG_REPORT_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_QTR_REG_REPORT_C.err
+date_conditions: 1
+run_calendar: QTR_LAST_WORKDAY
+start_times: "06:30"
+timezone: Europe/Zurich
+
+/* Waits on a job in the production instance (never satisfied here):
+   exercise -- release it with CHANGE_STATUS, or explain why it waits. */
+insert_job: OPS_XINST_DEMO_C
+job_type: c
+condition: s(GROUP_TREASURY_EOD^PRD, 9999)
+command: fakework OPS_XINST_DEMO_C --sleep 5
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.err

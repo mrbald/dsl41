@@ -1,0 +1,35 @@
+/* Calendars. HOL_GLOBAL is deliberately sparse so a training night never
+   collides with a holiday (unless you train on Christmas -- README warns). */
+
+calendar: HOL_GLOBAL
+01/01/2026
+12/25/2026
+01/01/2027
+
+cycle: QTR_WINDOWS
+description: "quarter close windows"
+start_date: 03/28/2026
+end_date: 04/02/2026
+start_date: 06/27/2026
+end_date: 07/02/2026
+start_date: 09/26/2026
+end_date: 10/02/2026
+start_date: 12/28/2026
+end_date: 01/05/2027
+
+extended_calendar: EOM_BUSINESS
+description: "last working day of each month"
+workday: mo,tu,we,th,fr
+non_workday: S
+holiday: S
+holcal: HOL_GLOBAL
+condition: EOMWORK
+
+extended_calendar: QTR_LAST_WORKDAY
+description: "last workday inside each quarter-close window"
+workday: mo,tu,we,th,fr
+non_workday: W
+holiday: W
+holcal: HOL_GLOBAL
+cyccal: QTR_WINDOWS
+condition: CWRK#L

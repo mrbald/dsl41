@@ -1,0 +1,204 @@
+/* APAC -- Tokyo close. Light region: jobs sit directly in the region box
+   (EMEA shows the fully nested department style). The night is almost
+   entirely condition/file-driven; the region anchor is the only clock. */
+
+insert_job: APAC_EOD_B
+job_type: b
+owner: ~{$OWNER}~
+description: "APAC end-of-day close and overnight processing"
+date_conditions: 1
+days_of_week: all
+exclude_calendar: HOL_GLOBAL
+start_times: "~{$EOD_APAC}~"
+timezone: Asia/Tokyo
+must_complete_times: "+20"
+
+/* Execution: freeze the order book, extract last-day trades + open orders. */
+insert_job: APAC_EXE_TRADES_C
+job_type: c
+box_name: APAC_EOD_B
+command: fakework APAC_EXE_TRADES_C --sleep 12 --produce exe/apac/trades.csv --produce exe/apac/open_orders.csv
+machine: exe_gw
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_EXE_TRADES_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_EXE_TRADES_C.err
+
+/* Accounting master: ledger close, then the source-of-truth positions. */
+insert_job: APAC_ACC_GL_CLOSE_C
+job_type: c
+box_name: APAC_EOD_B
+command: fakework APAC_ACC_GL_CLOSE_C --sleep 18 --produce acc/apac/gl_closed.flag
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_ACC_GL_CLOSE_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_ACC_GL_CLOSE_C.err
+resources: (GL_DB, QUANTITY=1)
+
+insert_job: APAC_ACC_POSITIONS_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_ACC_GL_CLOSE_C)
+command: fakework APAC_ACC_POSITIONS_C --sleep 10 --consume acc/apac/gl_closed.flag --produce acc/apac/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_ACC_POSITIONS_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_ACC_POSITIONS_C.err
+
+/* Investment macros: which instruments and groups each purpose uses. */
+insert_job: APAC_INV_MACROS_C
+job_type: c
+box_name: APAC_EOD_B
+command: fakework APAC_INV_MACROS_C --sleep 8 --produce inv/apac/macros.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_INV_MACROS_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_INV_MACROS_C.err
+
+/* The demand inversion: instrument definitions and marks are ordered only
+   once positions + macros + open orders tell us which universe we need. */
+insert_job: APAC_UNIV_DEMAND_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_ACC_POSITIONS_C) & s(APAC_INV_MACROS_C) & s(APAC_EXE_TRADES_C)
+command: fakework APAC_UNIV_DEMAND_C --sleep 8 --consume acc/apac/positions.csv --consume inv/apac/macros.csv --consume exe/apac/open_orders.csv --produce univ/apac/universe.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_UNIV_DEMAND_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_UNIV_DEMAND_C.err
+
+/* Market data: the vendor "SFTP arrival" is simulated by a job; the file
+   watcher is the real dependency the loaders hang off. */
+insert_job: APAC_MKT_SFTP_SIM_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_UNIV_DEMAND_C)
+command: fakework APAC_MKT_SFTP_SIM_C --sleep 15 --produce incoming/apac_prices.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_MKT_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_MKT_SFTP_SIM_C.err
+
+insert_job: APAC_MKT_PX_F
+job_type: f
+box_name: APAC_EOD_B
+watch_file: ~{$NB_DATA}~/incoming/apac_prices.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/APAC_MKT_PX_F.out
+std_err_file: ~{$NB_LOGS}~/APAC_MKT_PX_F.err
+
+insert_job: APAC_MKT_MARKS_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_MKT_PX_F) & s(APAC_UNIV_DEMAND_C)
+command: fakework APAC_MKT_MARKS_C --sleep 14 --consume incoming/apac_prices.csv --consume univ/apac/universe.csv --produce mkt/apac/marks.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_MKT_MARKS_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_MKT_MARKS_C.err
+term_run_time: 4
+
+insert_job: APAC_MKT_FX_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_MKT_PX_F)
+command: fakework APAC_MKT_FX_C --sleep 9 --produce mkt/apac/fx.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_MKT_FX_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_MKT_FX_C.err
+
+/* Valuation shards on the grid (lower priority number wins admission). */
+insert_job: APAC_VAL_SHARD1_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_MKT_MARKS_C) & s(APAC_MKT_FX_C)
+command: fakework APAC_VAL_SHARD1_C --sleep 20 --consume mkt/apac/marks.csv --consume mkt/apac/fx.csv --consume acc/apac/positions.csv --produce val/apac/shard1.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_VAL_SHARD1_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_VAL_SHARD1_C.err
+job_load: 40
+priority: 20
+
+insert_job: APAC_VAL_SHARD2_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_MKT_MARKS_C) & s(APAC_MKT_FX_C)
+command: fakework APAC_VAL_SHARD2_C --sleep 20 --consume mkt/apac/marks.csv --consume mkt/apac/fx.csv --consume acc/apac/positions.csv --produce val/apac/shard2.csv
+machine: val_grid
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_VAL_SHARD2_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_VAL_SHARD2_C.err
+job_load: 40
+priority: 10
+
+/* Reconciliation: custodian file vs ledger, trades vs postings. */
+insert_job: APAC_REC_CUST_SFTP_SIM_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_ACC_GL_CLOSE_C)
+command: fakework APAC_REC_CUST_SFTP_SIM_C --sleep 20 --produce incoming/apac_custody.csv
+machine: mkt_feed
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_REC_CUST_SFTP_SIM_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_REC_CUST_SFTP_SIM_C.err
+
+insert_job: APAC_REC_CUST_F
+job_type: f
+box_name: APAC_EOD_B
+watch_file: ~{$NB_DATA}~/incoming/apac_custody.csv
+watch_interval: 5
+machine: mkt_feed
+owner: ~{$OWNER}~
+std_out_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.out
+std_err_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.err
+
+/* Exit 1 = breaks within tolerance: max_exit_success turns it into SUCCESS. */
+insert_job: APAC_REC_TRADES_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_REC_CUST_F) & s(APAC_EXE_TRADES_C)
+command: fakework APAC_REC_TRADES_C --sleep 10 --consume incoming/apac_custody.csv --consume exe/apac/trades.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_REC_TRADES_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_REC_TRADES_C.err
+max_exit_success: 1
+
+insert_job: APAC_REC_POSN_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_REC_CUST_F) & s(APAC_ACC_POSITIONS_C)
+command: fakework APAC_REC_POSN_C --sleep 12 --consume incoming/apac_custody.csv --consume acc/apac/positions.csv
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_REC_POSN_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_REC_POSN_C.err
+resources: (GL_DB, QUANTITY=1)
+
+/* Clean recon reports itself to the control plane: a job driving sendevent. */
+insert_job: APAC_REC_GATE_C
+job_type: c
+box_name: APAC_EOD_B
+condition: s(APAC_REC_TRADES_C) & s(APAC_REC_POSN_C)
+command: dsl41 sendevent SET_GLOBAL --socket "$NIGHTBANK_SOCKET" --global RECON_APAC=CLEAN
+machine: bank_core
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/APAC_REC_GATE_C.out
+std_err_file: ~{$NB_LOGS}~/APAC_REC_GATE_C.err

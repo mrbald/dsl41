@@ -1,0 +1,55 @@
+/* Alpenbank Global Overnight -- infrastructure.
+   Entirely synthetic (LICENSING.md corpus hygiene applies: nothing here is
+   derived from any production estate). Every machine is an agent on
+   localhost so the whole bank runs under one `dsl41 run` on this host. */
+
+insert_machine: bank_core
+type: a
+node_name: localhost
+
+insert_machine: exe_gw
+type: a
+node_name: localhost
+
+insert_machine: mkt_feed
+type: a
+node_name: localhost
+
+/* Valuation grid: max_load 100 against per-shard job_load makes QUE_WAIT
+   visible when a region's shards outnumber the headroom (EMEA has 4x30). */
+insert_machine: val_grid
+type: a
+node_name: localhost
+max_load: 100
+
+insert_machine: ops_util
+type: a
+node_name: localhost
+
+/* One ledger write head: GL close and position recon contend for it. */
+insert_resource: GL_DB
+res_type: R
+amount: 1
+
+/* One tape drive: housekeeping vs archive serialize on it. */
+insert_resource: TAPE_DRIVE
+res_type: R
+amount: 1
+
+/* Recon gates: each region's recon flips its global to CLEAN via sendevent;
+   the SOD box conditions on all three (v() atoms, edge-triggered). */
+insert_global: RECON_APAC
+value: PENDING
+
+insert_global: RECON_EMEA
+value: PENDING
+
+insert_global: RECON_AMER
+value: PENDING
+
+insert_global: SOD_DATE
+value: NONE
+
+/* External production instance for the cross-instance dependency demo. */
+insert_xinst: PRD
+xtype: a

@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""nightbank -- launch and poke the Alpenbank Global Overnight sandbox.
+
+Run from inside the dsl41 project environment (`uv run bin/nightbank ...`):
+the launcher execs `python -m dsl41 run` with the same interpreter.
+
+The estate is static JIL parameterized with ~{$X}~ placeholders; `up`
+computes one properties file per night (region EOD anchors a few minutes
+ahead, per-region local wall time) and starts the real engine on it.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import shutil
+import sys
+from datetime import UTC, datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import typer
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+BASE = Path(__file__).resolve().parent.parent
+REGION_TZ = {  # anchor order is the follow-the-sun order
+    "APAC": "Asia/Tokyo",
+    "EMEA": "Europe/Zurich",
+    "AMER": "America/New_York",
+}
+DROPPABLE = {
+    "apac-prices": "incoming/apac_prices.csv",
+    "emea-prices": "incoming/emea_prices.csv",
+    "amer-prices": "incoming/amer_prices.csv",
+    "apac-custody": "incoming/apac_custody.csv",
+    "emea-custody": "incoming/emea_custody.csv",
+    "amer-custody": "incoming/amer_custody.csv",
+}
+
+
+class Estate(str, Enum):
+    small = "small"
+    bank = "bank"
+
+
+def ceil_minute(t: datetime) -> datetime:
+    return (t + timedelta(seconds=math.ceil(t.second / 60) * 60 - t.second)).replace(
+        second=0, microsecond=0
+    ) if t.second or t.microsecond else t
+
+
+def compute_properties(run_dir: Path, anchor_utc: datetime, stagger_mins: int) -> dict[str, str]:
+    props = {
+        "OWNER": os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown",
+        "NB_DATA": str(run_dir / "data"),
+        "NB_LOGS": str(run_dir / "logs"),
+        "NB_PROFILE": str(run_dir / "profile.env"),
+    }
+    anchor = ceil_minute(anchor_utc)
+    for i, (region, tz) in enumerate(REGION_TZ.items()):
+        local = (anchor + timedelta(minutes=i * stagger_mins)).astimezone(ZoneInfo(tz))
+        props[f"EOD_{region}"] = local.strftime("%H:%M")
+    win_start = anchor_utc.replace(second=0, microsecond=0)
+    win_end = min(win_start + timedelta(minutes=90), win_start.replace(hour=23, minute=59))
+    props["HB_WINDOW"] = f"{win_start.strftime('%H:%M')}-{win_end.strftime('%H:%M')}"
+    return props
+
+
+def write_kv(path: Path, kv: dict[str, str]) -> None:
+    path.write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
+
+
+def estate_files(estate: str) -> list[Path]:
+    files = sorted((BASE / "estate" / estate).glob("*.jil"))
+    if not files:
+        typer.echo(f"nightbank: no JIL under estate/{estate}/", err=True)
+        raise typer.Exit(2)
+    return files
+
+
+def latest_run() -> Path:
+    runs = sorted((BASE / "runs").glob("*"), key=lambda p: p.name)
+    if not runs:
+        typer.echo("nightbank: no runs/ yet -- start one with `nightbank up`", err=True)
+        raise typer.Exit(2)
+    return runs[-1]
+
+
+@app.command()
+def up(
+    estate: Estate = typer.Option(Estate.small, "--estate"),
+    no_incidents: bool = typer.Option(False, "--no-incidents"),
+    headless: bool = typer.Option(False, "--headless", help="No TUI; drive via socket."),
+    detached: bool = typer.Option(False, "--detached", help="Pass --detached to dsl41 run."),
+    lead_mins: int = typer.Option(2, "--lead-mins"),
+    stagger_mins: int = typer.Option(3, "--stagger-mins"),
+    run: Path = typer.Option(None, "--run", help="Run directory (default runs/<timestamp>)."),
+) -> None:
+    """Start a night on the real engine."""
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    run_dir = run if run else BASE / "runs" / stamp
+    if run_dir.exists():
+        typer.echo(f"nightbank: {run_dir} already exists (a run root is one night)", err=True)
+        raise typer.Exit(2)
+    for sub in ("data/incoming", "data/pending", "data/current", "data/state", "logs"):
+        (run_dir / sub).mkdir(parents=True)
+    engine_dir = run_dir / "engine"
+
+    anchor = datetime.now(UTC) + timedelta(minutes=lead_mins)
+    props = compute_properties(run_dir, anchor, stagger_mins)
+    write_kv(run_dir / "night.properties", props)
+
+    env_lines = {
+        "NIGHTBANK_DATA": props["NB_DATA"],
+        "NIGHTBANK_STATE": f"{props['NB_DATA']}/state",
+        "NIGHTBANK_SOCKET": str(engine_dir / "control.sock"),
+        "PATH": f"{BASE / 'bin'}:{Path(sys.executable).parent}:$PATH",
+    }
+    if not no_incidents:
+        shutil.copy(BASE / "incidents.conf", run_dir / "incidents.conf")
+        env_lines["NIGHTBANK_INCIDENTS"] = str(run_dir / "incidents.conf")
+    (run_dir / "profile.env").write_text(
+        "".join(f'export {k}="{v}"\n' for k, v in env_lines.items())
+    )
+
+    argv = [
+        sys.executable, "-m", "dsl41", "run",
+        *(str(f) for f in estate_files(estate.value)),
+        "-p", str(run_dir / "night.properties"),
+        "--run-root", str(engine_dir),
+    ]
+    if detached:
+        argv.append("--detached")
+    if not headless:
+        argv.append("--ui")
+
+    typer.echo(f"night: {run_dir}")
+    typer.echo(
+        f"anchors (UTC {ceil_minute(anchor):%H:%M} + {stagger_mins}min stagger): "
+        + " ".join(f"{r}={props[f'EOD_{r}']}" for r in REGION_TZ)
+    )
+    typer.echo(f"socket: {env_lines['NIGHTBANK_SOCKET']}")
+    typer.echo(f"second terminal:  dsl41 ui --socket {env_lines['NIGHTBANK_SOCKET']}")
+    typer.echo(f"                  dsl41 query status --socket {env_lines['NIGHTBANK_SOCKET']}")
+    typer.echo("exec: " + " ".join(argv))
+    os.execv(sys.executable, argv)
+
+
+@app.command()
+def props(
+    anchor: str = typer.Option(None, "--anchor", help="First region anchor, ISO datetime, UTC."),
+    lead_mins: int = typer.Option(2, "--lead-mins"),
+    stagger_mins: int = typer.Option(3, "--stagger-mins"),
+    run: Path = typer.Option(None, "--run", help="Run directory the paths should point into."),
+) -> None:
+    """Print the computed properties only."""
+    anchor_utc = (
+        datetime.fromisoformat(anchor).replace(tzinfo=UTC)
+        if anchor
+        else datetime.now(UTC) + timedelta(minutes=lead_mins)
+    )
+    run_dir = run if run else BASE / "runs" / "PREVIEW"
+    for key, value in compute_properties(run_dir, anchor_utc, stagger_mins).items():
+        typer.echo(f"{key}={value}")
+
+
+@app.command("drop-file")
+def drop_file(
+    name: str = typer.Argument(
+        ..., help=f"One of {', '.join(DROPPABLE)} (or a data/-relative path)."
+    ),
+    run: Path = typer.Option(None, "--run", help="Run directory (default: latest under runs/)."),
+) -> None:
+    """Deliver a "missing" feed file by hand."""
+    rel = DROPPABLE.get(name, name)
+    run_dir = run if run else latest_run()
+    target = run_dir / "data" / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    target.write_text(f"# manually delivered by nightbank drop-file at {stamp}\nrows=4242\n")
+    typer.echo(f"delivered {target}")
+
+
+if __name__ == "__main__":
+    app()
