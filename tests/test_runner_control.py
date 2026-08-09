@@ -397,6 +397,47 @@ def test_startjob_via_control_socket_tags_cause_and_started_by_control(short_roo
     asyncio.run(scenario())
 
 
+def test_force_startjob_via_control_socket_tags_cause_and_started_by_control(
+    short_root: Path,
+) -> None:
+    """(DL-68): sendevent FORCE_STARTJOB tags exactly like plain STARTJOB --
+    "FORCE_STARTJOB event (control)" -- distinguishing the forced bypass
+    (SEM-23: the condition below is false and would otherwise arm-and-wait)
+    from an ordinary control-socket start in both the trace cause and the
+    status verb's started_by."""
+    text = (
+        "insert_job: force_dep\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: force_job\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(force_dep)\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(
+                server.path, {"cmd": "sendevent", "event": "FORCE_STARTJOB", "job": "force_job"}
+            )
+            assert resp["ok"] is True
+
+            async def done() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "force_job"})
+                return r["jobs"]["force_job"]["status"] == "SUCCESS"
+
+            await _wait_for_async(done)
+            after = await _control_call(server.path, {"cmd": "status", "job": "force_job"})
+            assert after["jobs"]["force_job"]["started_by"] == "FORCE_STARTJOB event (control)"
+            starting = next(
+                t
+                for t in engine.oracle.trace()
+                if t.job == "force_job" and t.transition == "INACTIVE->STARTING"
+            )
+            assert starting.cause == "FORCE_STARTJOB event (control)"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_trace_query_since_filtering(short_root: Path) -> None:
     text = "insert_job: tr_job\njob_type: c\ncommand: x\nmachine: m1\n"
 
@@ -1430,6 +1471,53 @@ def test_timers_synthesizes_a_filewatch_row_and_status_gains_watching_for_live_f
                 "min_size": 12,
             }
             assert "watching" not in status["jobs"]["fwv_cmd"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_timers_and_status_drop_the_filewatch_row_once_the_fw_run_completes(
+    short_root: Path,
+) -> None:
+    """DL-68 filewatch visibility, completion side: a watch is live ONLY
+    while the adapter task is in-flight (`Engine._live`) -- once the FW job
+    finishes, both the synthesized `timers` row and status's "watching" key
+    must be gone, not just stale. Distinguishes "gone because completed"
+    from the earlier test's "absent because never started"."""
+    text = (
+        "insert_job: fwc_fw\njob_type: f\nwatch_file: /nonexistent/fwc.dat\n"
+        "watch_interval: 5\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter({("fwc_fw", 1): (0.05, 0)})  # completes fast, then quiet
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            resp = await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "fwc_fw"}
+            )
+            assert resp["ok"] is True
+
+            async def running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "fwc_fw"})
+                return r["jobs"]["fwc_fw"]["status"] == "RUNNING"
+
+            await _wait_for_async(running)
+            mid = await _control_call(server.path, {"cmd": "timers"})
+            assert [e["kind"] for e in mid["timers"]] == ["filewatch"]
+            mid_status = await _control_call(server.path, {"cmd": "status", "job": "fwc_fw"})
+            assert "watching" in mid_status["jobs"]["fwc_fw"]
+
+            async def done() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "fwc_fw"})
+                return r["jobs"]["fwc_fw"]["status"] == "SUCCESS"
+
+            await _wait_for_async(done)
+            after_timers = await _control_call(server.path, {"cmd": "timers"})
+            assert after_timers["timers"] == []
+            after_status = await _control_call(server.path, {"cmd": "status", "job": "fwc_fw"})
+            assert "watching" not in after_status["jobs"]["fwc_fw"]
         finally:
             await _teardown(engine, server, loop_task)
 

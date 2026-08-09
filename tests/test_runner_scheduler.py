@@ -681,6 +681,70 @@ def test_scheduler_tick_start_cause_and_started_by_carry_scheduler_source() -> N
     assert engine.oracle.store.job["prov_sched"].started_by == "STARTJOB event (scheduler)"
 
 
+def test_source_tag_is_generic_across_arbitrary_sources_not_hardcoded() -> None:
+    """(DL-68): the cause-tagging mechanism keys off Event.source verbatim,
+    for any string the ss7 input alphabet carries -- not a lookup table
+    special-casing "scheduler"/"control". Engine-level reconcile only ever
+    re-injects STATUS completions (never a start event), so a direct Oracle
+    feed with source="reconcile" is the only way to pin that a re-injected
+    START would tag "(reconcile)" exactly like the others, per the single
+    `cause = f"{kind} event ({ev.source})"` rule (oracle.py)."""
+    text = "insert_job: prov_any\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = Oracle(lower_source(text))
+    at = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "prov_any"}, source="reconcile"))
+    starting = next(t for t in o.trace() if t.transition == "INACTIVE->STARTING")
+    assert starting.cause == "STARTJOB event (reconcile)"
+    assert o.store.job["prov_any"].started_by == "STARTJOB event (reconcile)"
+
+
+def test_sourceless_startjob_keeps_the_bare_untagged_cause_format() -> None:
+    """(DL-68): Event.source defaults to None for an unattributed internal
+    dispatch (the bisim harness, oracle-direct scripts) -- the cause stays
+    the pre-DL-68 bare string, no trailing "()" or "(None)"."""
+    text = "insert_job: prov_none\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = Oracle(lower_source(text))
+    at = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "prov_none"}))
+    starting = next(t for t in o.trace() if t.transition == "INACTIVE->STARTING")
+    assert starting.cause == "STARTJOB event"
+    assert o.store.job["prov_none"].started_by == "STARTJOB event"
+
+
+def test_condition_edge_start_leaves_started_by_as_the_bare_edge_cause() -> None:
+    """(DL-68): a condition-edge start (SEM-01, Oracle._wake_referencers) is
+    never sourced -- only the explicit STARTJOB/FORCE_STARTJOB/TIMER event
+    dispatch tags a source suffix. started_by carries the edge's own cause
+    ("status of 'dep' changed to SUCCESS") verbatim, with no "(...)" tail."""
+    text = (
+        "insert_job: edge_dep\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: edge_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(edge_dep)\n"
+    )
+    o = Oracle(lower_source(text))
+    at = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=at, kind="STATUS", payload={"job": "edge_dep", "status": "SUCCESS"}))
+    starting = next(
+        t for t in o.trace() if t.job == "edge_cons" and t.transition == "INACTIVE->STARTING"
+    )
+    assert starting.cause == "status of 'edge_dep' changed to SUCCESS"
+    assert o.store.job["edge_cons"].started_by == "status of 'edge_dep' changed to SUCCESS"
+
+
+def test_started_by_reflects_the_most_recent_start_not_the_first() -> None:
+    """(DL-68): started_by is overwritten on every _start, not set-once --
+    a second run's cause replaces the first's, exactly like `status_at`."""
+    text = "insert_job: prov_two\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = Oracle(lower_source(text))
+    at = datetime(2026, 7, 1, 8, 0)
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "prov_two"}, source="scheduler"))
+    o.feed(Event(at=at, kind="STATUS", payload={"job": "prov_two", "status": "SUCCESS"}))
+    assert o.store.job["prov_two"].started_by == "STARTJOB event (scheduler)"
+
+    at2 = at + timedelta(minutes=5)
+    o.feed(Event(at=at2, kind="FORCE_STARTJOB", payload={"job": "prov_two"}, source="control"))
+    assert o.store.job["prov_two"].started_by == "FORCE_STARTJOB event (control)"
+
+
 # --------------------------------------------------------------------- 5. resume
 
 

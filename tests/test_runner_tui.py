@@ -1270,6 +1270,19 @@ def test_format_countdown_humanizes_each_magnitude_and_dashes_overdue() -> None:
     assert format_countdown(now - timedelta(seconds=5), now) == "-"
 
 
+def test_format_countdown_pins_exact_unit_boundaries() -> None:
+    """The magnitude cascade (seconds -> minutes -> hours -> days) trips on
+    divmod, not on a threshold compare -- pin the exact crossings so a
+    future refactor of the cascade can't silently shift them by one unit."""
+    now = datetime(2026, 8, 9, 12, 0, 0)
+    assert format_countdown(now + timedelta(seconds=59), now) == "59s"
+    assert format_countdown(now + timedelta(seconds=60), now) == "1m00s"
+    assert format_countdown(now + timedelta(minutes=59), now) == "59m00s"
+    assert format_countdown(now + timedelta(minutes=60), now) == "1h00m"
+    assert format_countdown(now + timedelta(hours=23), now) == "23h00m"
+    assert format_countdown(now + timedelta(hours=24), now) == "1d00h"
+
+
 def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -> None:
     """The server's due order carries through untouched; a due-less filewatch
     row renders generically below the dated rows; armed jobs (from the status
@@ -1293,6 +1306,35 @@ def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -
         ("-", "-", "tv_a_armed", "armed", "waiting on next condition edge"),
         ("-", "-", "tv_b_armed", "armed", "waiting on next condition edge"),
     ]
+
+
+def test_assemble_trigger_rows_empty_timers_and_no_armed_jobs_yields_no_rows() -> None:
+    assert assemble_trigger_rows([], {}, datetime(2026, 8, 9, 12, 0, 0)) == []
+    jobs = {"tv_plain": {"status": "INACTIVE", "armed": False}}
+    assert assemble_trigger_rows([], jobs, datetime(2026, 8, 9, 12, 0, 0)) == []
+
+
+def test_assemble_trigger_rows_preserves_input_order_for_equal_due_times() -> None:
+    """The server, not this function, is the sort authority (DL-65 due
+    ordering); two entries sharing a due time must come through in the
+    order the server gave them, not get reshuffled by a stable-sort
+    assumption the assembly function doesn't actually need to hold."""
+    timers = [
+        {"due": "2026-08-09T12:30:00", "job": "tv_z", "kind": "schedule"},
+        {"due": "2026-08-09T12:30:00", "job": "tv_a", "kind": "must_start"},
+    ]
+    now = datetime(2026, 8, 9, 12, 0, 0)
+    rows = assemble_trigger_rows(timers, {}, now)
+    assert [r[2] for r in rows] == ["tv_z", "tv_a"]
+
+
+def test_assemble_trigger_rows_malformed_due_string_falls_back_to_undated() -> None:
+    """A `due` that fails datetime.fromisoformat (server/client version
+    skew, a hand-typed test fixture) must not crash the TUI renderer -- it
+    degrades to a due-less row exactly like a missing key."""
+    timers = [{"due": "not-a-timestamp", "job": "tv_bad", "kind": "schedule"}]
+    now = datetime(2026, 8, 9, 12, 0, 0)
+    assert assemble_trigger_rows(timers, {}, now) == [("-", "-", "tv_bad", "schedule", "")]
 
 
 def test_assemble_detail_trigger_lines_full_story_in_spec_order() -> None:
@@ -1342,6 +1384,16 @@ def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
     assert app._row_cells("j", all_on)[5] == "IHNA"
     assert app._row_cells("j", {"status": "INACTIVE", "armed": True})[5] == "A"
     assert app._row_cells("j", {"status": "INACTIVE", "armed": False})[5] == ""
+
+
+def test_row_cells_flags_compose_partial_combinations_in_deterministic_order() -> None:
+    """Partial flag sets (not just the all-on/A-alone extremes) still land
+    letters in the fixed I-H-N-A order, never in insertion/dict order."""
+    app = RunnerApp(Path("/tmp/unused.sock"))
+    i_and_a = {"status": "INACTIVE", "on_ice": True, "armed": True}
+    assert app._row_cells("j", i_and_a)[5] == "IA"
+    h_n_and_a = {"status": "INACTIVE", "on_hold": True, "on_noexec": True, "armed": True}
+    assert app._row_cells("j", h_n_and_a)[5] == "HNA"
 
 
 def test_t_binding_is_registered_with_a_footer_label() -> None:
