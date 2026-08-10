@@ -232,7 +232,9 @@ against the estate that wrote it.
   `dsl41 sendevent OFF_ICE -J OPS_LEGACY_REPORT_C --socket $S` — and note
   it STILL does not run: OFF_ICE does not re-evaluate, the condition must
   REOCCUR (SEM-20). Either retrigger its upstream or
-  `FORCE_STARTJOB` it; watch `explain` before and after.
+  `FORCE_STARTJOB` it; watch `explain` before and after. Ice is a
+  skip-*and-satisfy*, never a quiesce: icing a job wakes everything
+  downstream of it immediately (exercise 13 makes this bite).
 - `ON_HOLD`/`OFF_HOLD`: park a healthy job before it starts (try it on
   `OPS_ARCHIVE_C` early).
 - `ON_NOEXEC`: the job "runs" without spawning anything (status flows,
@@ -241,6 +243,80 @@ against the estate that wrote it.
   in another (production) instance this sandbox can't see. `explain`
   shows the atom; release it with
   `dsl41 sendevent CHANGE_STATUS -J "GROUP_TREASURY_EOD^PRD" -s SUCCESS --socket $S`.
+
+## 13. Skip the day
+
+The compounding-failure ending: three incidents deep, the batch window is
+gone, and the decision comes down — no SOD today. There is deliberately
+no "skip day" button; the drill is choosing the right verbs, in the
+right order, and knowing which ones lie.
+
+**Variant A — abandon the night (the honest skip).**
+
+1. Survey what is still live and due: `dsl41 query timers --socket $S`
+   for the upcoming ticks, `query status --brief` for RUNNING rows and
+   flag `A` — latched ticks that WILL fire on release. The TUI shows
+   both at once: `t` (triggers view) and the flags column.
+2. Quiesce with HOLD, not ICE: `dsl41 sendevent ON_HOLD -J <box>
+   --socket $S` (TUI: `h`) on every top-level box that has not fired
+   yet. A held job starts nothing and satisfies nothing. ON_ICE would be
+   wrong here: exercise 12's rule means icing a broken region box fires
+   `GLOBAL_RISK_B` on the spot. Ice skips, hold parks.
+3. Kill the running work: `v` to the active view, `k` (KILLJOB) each
+   RUNNING command job. Kill leaves, not boxes: KILLJOB on a box
+   terminates the box row but only `job_terminator` members die with it
+   (SEM-14) — the rest keep running to completion.
+4. The trap: a tick that lands on a held job arms the latch (flag `A`),
+   and the latch has no expiry — OFF_HOLD tonight fires the missed run
+   at once. After the skip decision, nobody releases holds. There is no
+   discharge verb; the latch dies with the night (step 6).
+5. Leave `SOD_APPROVE_C` parked. The auto_hold approval gate IS the
+   skip-day veto: the night never flips, `current/` keeps whatever the
+   last flip left there (empty, in a fresh sandbox run root — the
+   production reading is "yesterday stays live"). The flip would refuse
+   anyway — nothing produced
+   `pending/sod_ready.flag`, and an empty `pending/` beside an empty
+   `current/` is "NOTHING TO FLIP", exit 4. The estate cannot fabricate
+   a day.
+6. End the night: Ctrl-C. The journal and `manifest/` are the audit
+   record of the decision; tomorrow is a fresh `nightbank up`.
+7. Calendar residue: dropped ticks never fire late. If tonight was the
+   `EOM_BUSINESS` date, `OPS_MONTHLY_ATTRIB_C`'s month-end run is
+   *lost*, not deferred — tomorrow's catch-up is an explicit
+   `FORCE_STARTJOB`, journaled as an operator action like everything
+   else.
+
+**Variant B — the business insists the date rolls.** Possible, and every
+fake step is a distinct, sourced, journaled operator action — the system
+makes lying expensive and attributable, not impossible:
+
+```sh
+dsl41 sendevent SET_GLOBAL --global RECON_APAC=CLEAN --socket $S   # recorded waiver
+dsl41 sendevent SET_GLOBAL --global RECON_EMEA=CLEAN --socket $S   # (x3)
+dsl41 sendevent SET_GLOBAL --global RECON_AMER=CLEAN --socket $S
+dsl41 sendevent ON_NOEXEC -J SOD_PREFLIGHT_C --socket $S   # bypass BEFORE the box
+dsl41 sendevent ON_NOEXEC -J SOD_FLIP_C      --socket $S
+dsl41 sendevent ON_NOEXEC -J SOD_WARMUP_C    --socket $S
+dsl41 sendevent FORCE_STARTJOB -J SOD_B --socket $S        # overrides s(GLOBAL_RISK_B)
+dsl41 sendevent OFF_HOLD -J SOD_APPROVE_C --socket $S      # the sign-off, real
+until dsl41 query is-success -J SOD_B --socket $S; do sleep 2; done
+dsl41 sendevent SET_GLOBAL --global SOD_DATE=$(date +%F) --socket $S
+```
+
+`sendevent` returns when the engine accepts the event, not when the job
+finishes — hence the `is-success` wait: the date is published after the
+sign-off actually succeeded, never before (or despite) it.
+
+Set the NOEXEC bypasses before force-starting the box — preflight has no
+condition and fires the moment the box runs. The bypassed flip never runs
+its command, so its `SOD_DATE` publish never happens: the operator does
+it by hand, last. Read `query trace` afterwards: the whole variant is
+five lies and a signature, each a sourced control-plane event in the
+journal (DL-68). The WAL records that an operator did it and when — not
+which human held the socket; the *who* is your access controls' story,
+so don't share the service account if that distinction matters. Note
+what stayed true: `current/` still holds yesterday's data — this
+variant rolls the *date*, not the day.
 
 ## Day-shift extras
 

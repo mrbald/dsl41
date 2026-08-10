@@ -574,6 +574,12 @@ class Oracle:
             rt.on_ice = False
             self._record(job, "OFF_ICE", "sendevent OFF_ICE")
             # SEM-20: deliberately NO re-evaluation -- conditions must reoccur
+            # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
+            # round-trip untouched (DL-54 pin, uncited), so a stale tick can
+            # still start this job on the next condition edge despite the
+            # "reoccur" rule. If the vendor instead discards the queued start
+            # on ICE, clear rt.armed in the ON_ICE branch (SCHED_DISARM) and
+            # amend SEM-20/32 -- protocol in docs/live-instance-runbook.md.
         elif kind == "ON_HOLD":
             rt.on_hold = True
             self._record(job, "ON_HOLD", "sendevent ON_HOLD")

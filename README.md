@@ -21,6 +21,10 @@ Read these documents in this order:
 5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
 6. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - working agreement + implementation order
 
+Operating the runner on a server — install, systemd, web UI exposure,
+the JIL-update cycle, upgrades — is
+[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md).
+
 Status: all ten compiler phases are built and tested. The phase-11 runner
 ([docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
 is also complete: 11a (engine core + bisimulation gate), 11b (process

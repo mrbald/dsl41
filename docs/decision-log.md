@@ -2331,3 +2331,19 @@
   details popup gains started-by / next-tick / pending-timers / armed /
   watching lines. Tests 1742 -> 1745 (unit 1: scheduler/control cause
   tags, status verb field, replay determinism).
+- DL-69 Q3d opened — does ON_ICE discard a latched tick (2026-08-10).
+  DL-54's adversarial round pinned "a pre-existing arm survives
+  ON_ICE/OFF_ICE untouched" without a citation. Writing the skip-a-day
+  operator drill (nightbank RUNBOOK exercise 13) surfaced the
+  consequence: the sendevent set has no latch-discharge verb precisely
+  because of this pin — if the vendor instead discards the queued start
+  on ICE, ON_ICE *is* that verb, and a stale tick could no longer start
+  a job on a post-OFF_ICE condition edge (the current pinned behavior,
+  in tension with SEM-20's reoccurrence rule). Registered per the
+  open-questions discipline instead of living as a runbook aside:
+  `# PENDING: Q3d` at the oracle's OFF_ICE handler, [?] residue note on
+  the SEM-32 pin, live discriminator protocol in
+  docs/live-instance-runbook.md (Q3c's shape, standalone job, ~3 min).
+  The survive-pin stands as the deterministic default; a flip clears
+  `armed` in ON_ICE (SCHED_DISARM record) and amends SEM-20/32.
+  Doc + comment only — no behavior change, tests unchanged.

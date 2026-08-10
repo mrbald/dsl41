@@ -40,9 +40,11 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
   autocal_asc export sample (extended_calendar: spelling, empty-valued keys
   emitted, workday `all`, braces as grouping, WORKD#L, holiday S without
   holcal, HH:MM:SS row tails — all folded into SEM-36/37 at the [F] tier
-  and fixed in the interpreter/scanner). Do not relitigate any of them.
-  Still open, with a live `# PENDING: Qn/Un` code marker: Q3c (oracle.py),
-  Q8b–Q8d (autocal.py), U1, U3b. Q6 has no code switch, dossier-only
+  and fixed in the interpreter/scanner); DL-69 (2026-08-10) opened Q3d —
+  arm × ON_ICE round-trip (DL-54's uncited survive-pin stands as the
+  default; live discriminator in the runbook). Do not relitigate any of
+  them. Still open, with a live `# PENDING: Qn/Un` code marker: Q3c and
+  Q3d (oracle.py), Q8b–Q8d (autocal.py), U1, U3b. Q6 has no code switch, dossier-only
   (narrowed by DL-58: atom half cited; Q6-adjacent aside in oracle.py); U6b
   lives in backend_uc's `_U_QUESTIONS` table, pruned to exactly U1+U6b (U3b
   deliberately NOT there — it gates emission, not a mapping row; it surfaces

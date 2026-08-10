@@ -310,7 +310,10 @@ HELD member of a not-running box. A tick on an already-live job does not arm
 box run that armed it — an unconsumed member arm dies at box completion (`SCHED_DISARM`
 trace marker). As a result, no member ever auto-starts a later box run from a stale tick. A
 pre-existing arm survives ON_ICE/OFF_ICE untouched (ice neither arms nor disarms — the
-latched tick predates the ice). The ACTUAL start consumes the arm (a DL-50 QUE_WAIT
+latched tick predates the ice). **[?]** Q3d residue (DL-69): that survive-pin is uncited,
+and its consequence is that a stale tick can start the job on a condition edge after
+OFF_ICE, in tension with the reoccurrence rule — pin stands until the live discriminator
+runs (`# PENDING: Q3d`, oracle.py; protocol in the live-instance runbook). The ACTUAL start consumes the arm (a DL-50 QUE_WAIT
 enqueue keeps it latched, so a canceled queue attempt does not eat the tick, while KILLJOB
 on the queued job consumes it — the kill happened). An armed job re-blocked by run_window
 re-uses one pending defer timer per opening instant. Accepted consequence of

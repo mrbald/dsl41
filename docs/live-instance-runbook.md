@@ -249,6 +249,47 @@ flipped). If `dsl41_q3c_m` does not run, the arm dies with its box run
 (our pin holds). Delete all three jobs the same day (the schedule ticks
 daily).
 
+### Q3d — does ON_ICE discard a latched tick (arm × ice)
+
+DL-54's adversarial round pinned "a pre-existing arm survives
+ON_ICE/OFF_ICE untouched" without a citation; DL-69 registers the
+residue as Q3d (`# PENDING: Q3d`, oracle.py — the survive-pin stands
+as the deterministic default until this runs). If the vendor instead
+discards the queued start on ice, ON_ICE is the latch-*discharge* verb —
+the one thing the sendevent set otherwise lacks (nightbank exercise 13
+step 4 documents the gap). Same shape as Q3c, standalone job, ~3 min:
+
+```
+jil <<'EOF'
+insert_job: dsl41_q3ice
+job_type: c
+machine: <M>
+command: /bin/true
+date_conditions: 1
+days_of_week: all
+start_times: "HH:MM"
+condition: s(dsl41_q3ice_gate)
+insert_job: dsl41_q3ice_gate
+job_type: c
+machine: <M>
+command: /bin/true
+EOF
+# wait past HH:MM: the tick lands, condition false (gate never ran) -- armed
+sendevent -E JOB_ON_ICE  -J dsl41_q3ice
+sendevent -E JOB_OFF_ICE -J dsl41_q3ice
+sendevent -E FORCE_STARTJOB -J dsl41_q3ice_gate    # the condition edge
+sleep 60; autorep -J dsl41_q3ice%
+```
+
+If `dsl41_q3ice` runs on the edge, the arm survived the ice round-trip
+(our pin holds — and note the tension with SEM-20's "conditions must
+reoccur": the tick, not the condition, is what carried over). If it does
+not run, ice discards the queued start: amend SEM-20/SEM-32, clear
+`armed` in the oracle's ON_ICE handler (`SCHED_DISARM` trace record),
+and exercise 13's "no discharge verb" caveat gets rewritten — ON_ICE
+becomes the discharge, with its downstream-satisfaction cost stated.
+Delete both jobs the same day (the schedule ticks daily).
+
 ### E8 — external kill verdict (+ the mechanism discriminator)
 
 ```
