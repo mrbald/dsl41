@@ -727,6 +727,41 @@ def test_to_markdown_elk_prepends_frontmatter_inside_the_chart_fence_only() -> N
     assert fences[1].startswith("---\nconfig:\n  layout: elk\n---\nflowchart")
 
 
+def test_to_markdown_fixed_scale_prepends_flowchart_frontmatter() -> None:
+    text = (
+        "insert_job: prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod)\n"
+    )
+    md = to_markdown(graph_of(text), title="t", fixed_scale=True)
+    fences = _mermaid_fences(md)
+    assert not fences[0].startswith("---")  # legend is a fixed template, untouched
+    assert fences[1].startswith("---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\nflowchart")
+
+
+def test_to_markdown_elk_and_fixed_scale_merge_into_one_frontmatter_block() -> None:
+    text = (
+        "insert_job: prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod)\n"
+    )
+    md = to_markdown(graph_of(text), title="t", elk=True, fixed_scale=True)
+    fences = _mermaid_fences(md)
+    assert fences[1].startswith(
+        "---\nconfig:\n  layout: elk\n  flowchart:\n    useMaxWidth: false\n---\nflowchart"
+    )
+    assert fences[1].count("---\n") == 2  # one merged block, not two stacked ones
+
+
+def test_to_mermaid_fixed_scale_composes_with_elk() -> None:
+    text = "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"
+    graph = graph_of(text)
+    assert to_mermaid(graph, fixed_scale=True).startswith(
+        "---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\nflowchart"
+    )
+    assert to_mermaid(graph, elk=True, fixed_scale=True).startswith(
+        "---\nconfig:\n  layout: elk\n  flowchart:\n    useMaxWidth: false\n---\nflowchart"
+    )
+
+
 def test_to_markdown_is_deterministic() -> None:
     graph = derive_graph(corpus_catalog())
     assert to_markdown(graph, title="t") == to_markdown(graph, title="t")
@@ -816,6 +851,14 @@ def test_cli_viz_elk_prepends_frontmatter() -> None:
     result = runner.invoke(app, ["viz", "--elk", str(CORPUS_DIR / "sem10_box_basic.jil")])
     assert result.exit_code == 0
     assert "config:\n  layout: elk" in result.stdout
+
+
+def test_cli_viz_fixed_scale() -> None:
+    result = runner.invoke(
+        app, ["viz", "--elk", "--fixed-scale", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 0
+    assert "config:\n  layout: elk\n  flowchart:\n    useMaxWidth: false" in result.stdout
 
 
 def test_cli_viz_writes_out_file(tmp_path: Path) -> None:

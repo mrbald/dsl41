@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow graph: __DSL41_TITLE__</title>
+<!-- Self-contained page emitted by `dsl41 viz --html`. Embeds mermaid 11.16.1
+     (MIT), @mermaid-js/layout-elk 0.2.2 (MIT), elkjs 0.9.3 (EPL-2.0); full
+     texts and source URLs in THIRD_PARTY_LICENSES of the dsl41 distribution. -->
+<style>
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+         Roboto, sans-serif; color: #1f2937; background: #ffffff; }
+  header { position: sticky; top: 0; z-index: 10; background: #ffffffee;
+           border-bottom: 1px solid #e5e7eb; padding: 0.5rem 1.5rem; }
+  header h1 { font-size: 1.15rem; margin: 0; }
+  header p { margin: 0.15rem 0; color: #4b5563; font-size: 0.85rem; }
+  #progress { color: #92400e; }
+  #progress.done { color: #046c4e; }
+  main, nav.toc, details.legend { padding: 0 1.5rem; }
+  nav.toc ol { margin: 0.5rem 0; padding-left: 1.25rem; }
+  section { margin: 1rem 0; }
+  summary { cursor: pointer; }
+  summary .h2, section > h2 { display: inline-block; font-size: 1.05rem;
+           font-weight: 600; margin: 0.5rem 0; }
+  .chartbox { position: relative; }
+  .zoombar { position: absolute; top: 8px; right: 8px; z-index: 5;
+             display: flex; gap: 4px; }
+  .zoombar button { width: 2rem; height: 2rem; padding: 0; border: 1px solid
+             #d1d5db; border-radius: 4px; background: #ffffffee; color: #374151;
+             font: inherit; font-size: 0.95rem; cursor: pointer; }
+  .zoombar button:hover { background: #f3f4f6; }
+  .viewport { overflow: auto; max-height: 85vh; border: 1px solid #e5e7eb;
+              border-radius: 4px; background: #fafafa; }
+  .viewport.grabbing { cursor: grabbing; }
+  .chart { width: max-content; padding: 8px; }
+  .chart .pending { color: #9ca3af; margin: 1rem; }
+  .chart-error { color: #b91c1c; white-space: pre-wrap; margin: 1rem; }
+  .hint { color: #9ca3af; font-size: 0.8rem; margin: 0.25rem 0 0; }
+  table { border-collapse: collapse; margin: 0.5rem 0 1rem; font-size: 0.85rem; }
+  th, td { border: 1px solid #e5e7eb; padding: 0.3rem 0.6rem; text-align: left;
+           vertical-align: top; }
+  th { background: #f3f4f6; }
+  tbody tr:nth-child(even) { background: #f9fafb; }
+  code { background: #f3f4f6; padding: 0.05rem 0.3rem; border-radius: 3px;
+         font-size: 0.9em; }
+  footer { color: #9ca3af; font-size: 0.8rem; padding: 1rem 1.5rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow graph: __DSL41_TITLE__</h1>
+  <p>__DSL41_SUMMARY__</p>
+  <p id="progress">rendering&hellip;</p>
+</header>
+<details class="legend">
+  <summary>Legend</summary>
+  <div class="chartbox">
+    <div class="zoombar" hidden><button type="button" data-zoom="in" title="zoom in">+</button><button type="button" data-zoom="out" title="zoom out">&minus;</button><button type="button" data-zoom="reset" title="reset zoom">1:1</button></div>
+    <div class="viewport"><div id="c0" class="chart"><p class="pending">chart pending&hellip;</p></div></div>
+  </div>
+  <p>__DSL41_LEGEND_PROSE__</p>
+</details>
+__DSL41_TOC__
+<main>
+__DSL41_SECTIONS__
+__DSL41_TABLES__
+</main>
+<footer>Zoom with the +/&minus;/1:1 buttons or Ctrl/&#8984;+wheel; drag pans,
+double-click resets. Emitted by dsl41; renders offline &mdash; no network
+access.</footer>
+<script>__DSL41_MERMAID_JS__</script>
+<script>__DSL41_ELK_JS__</script>
+<script id="chart-data" type="application/json">__DSL41_CHART_JSON__</script>
+<script>
+"use strict";
+
+/* The elk IIFE exposes a module namespace; the loader array sits at
+   .default (esbuild --global-name wraps the namespace, not the export). */
+mermaid.registerLayoutLoaders(elkLayouts.default || elkLayouts);
+
+/* maxEdges/maxTextSize are secure-listed: only initialize (not per-chart
+   frontmatter) may raise them, and bank-scale estates exceed the 500/50k
+   defaults. layout+useMaxWidth here give every chart ELK at natural size. */
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "default",
+  securityLevel: "strict",
+  layout: "elk",
+  flowchart: { useMaxWidth: false },
+  maxEdges: 10000,
+  maxTextSize: 10000000
+});
+
+function enablePanZoom(viewport) {
+  var svg = viewport.querySelector("svg");
+  if (!svg) return;
+  var baseW = parseFloat(svg.getAttribute("width"));
+  var baseH = parseFloat(svg.getAttribute("height"));
+  if (!baseW || !baseH) return;
+  var scale = 1;
+
+  /* rescale the SVG layout box, keeping the viewport point (x, y) fixed */
+  function setScale(next, x, y) {
+    var k = Math.min(8, Math.max(0.1, next)) / scale;
+    scale = scale * k;
+    svg.style.width = (baseW * scale) + "px";
+    svg.style.height = (baseH * scale) + "px";
+    viewport.scrollLeft = (viewport.scrollLeft + x) * k - x;
+    viewport.scrollTop = (viewport.scrollTop + y) * k - y;
+  }
+
+  function center() {
+    return { x: viewport.clientWidth / 2, y: viewport.clientHeight / 2 };
+  }
+
+  viewport.addEventListener("wheel", function (e) {
+    if (!e.ctrlKey && !e.metaKey) return; /* plain wheel keeps scrolling */
+    e.preventDefault();
+    var rect = viewport.getBoundingClientRect();
+    /* keep the point under the cursor fixed while the layout box grows */
+    setScale(scale * Math.exp(-e.deltaY * 0.002),
+             e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+
+  var pan = null;
+  viewport.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0) return;
+    pan = { x: e.clientX, y: e.clientY,
+            left: viewport.scrollLeft, top: viewport.scrollTop };
+    viewport.setPointerCapture(e.pointerId);
+    viewport.classList.add("grabbing");
+  });
+  viewport.addEventListener("pointermove", function (e) {
+    if (!pan) return;
+    viewport.scrollLeft = pan.left - (e.clientX - pan.x);
+    viewport.scrollTop = pan.top - (e.clientY - pan.y);
+  });
+  viewport.addEventListener("pointerup", function (e) {
+    pan = null;
+    viewport.releasePointerCapture(e.pointerId);
+    viewport.classList.remove("grabbing");
+  });
+  viewport.addEventListener("dblclick", function () {
+    var c = center();
+    setScale(1, c.x, c.y);
+  });
+
+  var zoombar = viewport.parentElement.querySelector(".zoombar");
+  if (!zoombar) return;
+  zoombar.hidden = false; /* buttons appear only once the chart rendered */
+  zoombar.addEventListener("click", function (e) {
+    var mode = e.target.getAttribute && e.target.getAttribute("data-zoom");
+    if (!mode) return;
+    var c = center();
+    if (mode === "in") setScale(scale * 1.25, c.x, c.y);
+    else if (mode === "out") setScale(scale / 1.25, c.x, c.y);
+    else setScale(1, c.x, c.y);
+  });
+}
+
+(async function () {
+  var charts = JSON.parse(document.getElementById("chart-data").textContent).charts;
+  var progress = document.getElementById("progress");
+  for (var i = 0; i < charts.length; i++) {
+    progress.textContent = "rendering chart " + (i + 1) + " of " + charts.length + "…";
+    await new Promise(requestAnimationFrame); /* paint the counter before ELK blocks */
+    var holder = document.getElementById(charts[i].el);
+    try {
+      var out = await mermaid.render(charts[i].el + "-svg", charts[i].src);
+      holder.innerHTML = out.svg;
+      enablePanZoom(holder.parentElement);
+    } catch (err) {
+      var stray = document.getElementById("d" + charts[i].el + "-svg");
+      if (stray) stray.remove(); /* mermaid leaves an error node behind */
+      var pre = document.createElement("pre");
+      pre.className = "chart-error";
+      pre.textContent = "chart failed to render: " + err + "\n\n" + charts[i].src;
+      holder.replaceChildren(pre); /* one bad chart never kills the page */
+    }
+  }
+  progress.textContent = charts.length + " charts rendered";
+  progress.className = "done";
+})();
+</script>
+</body>
+</html>

@@ -626,18 +626,35 @@ def viz(
         help="Emit one bare Mermaid chart of the entire graph instead of the Markdown "
         "report (standalone jobs always included; --direction auto means LR).",
     ),
+    html: bool = typer.Option(
+        False,
+        "--html",
+        help="Emit one self-contained HTML page (charts render in-browser, offline; "
+        "ELK layout and fixed scale are page defaults, so --elk/--fixed-scale are "
+        "implied; --direction/--collapse-threshold/--include-singletons shape the "
+        "charts as in the report; --whole-graph makes a single-chart page). "
+        "The page embeds ~5 MB of JavaScript; -o is recommended.",
+    ),
     elk: bool = typer.Option(
         False,
         "--elk",
         help="Prepend Mermaid ELK-layout frontmatter (VS Code/local; GitHub ignores it).",
+    ),
+    fixed_scale: bool = typer.Option(
+        False,
+        "--fixed-scale",
+        help="Per-chart frontmatter flowchart.useMaxWidth=false: charts render at natural "
+        "size (uniform scale across charts) instead of shrinking to fit the page. "
+        "Composes with --elk into one frontmatter block.",
     ),
     out: Path = typer.Option(None, "--out", "-o", help="Write the report here, not stdout."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
 ) -> None:
     """Render FILES' derived dependency graph as a Markdown report of
-    per-workflow Mermaid charts (DL-35), or one whole-graph chart
-    (--whole-graph, DL-61)."""
+    per-workflow Mermaid charts (DL-35), one whole-graph chart
+    (--whole-graph, DL-61), or a self-contained offline HTML page
+    (--html, DL-70)."""
     from dsl41.derive import derive_graph
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
@@ -646,12 +663,24 @@ def viz(
         raise typer.Exit(2)
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
-    if whole_graph:
+    if html:
+        from dsl41.viz_html import to_html
+
+        report = to_html(
+            derive_graph(catalog),
+            title=", ".join(f.name for f in files),
+            collapse_threshold=threshold,
+            direction=direction,  # type: ignore[arg-type]  # validated above
+            include_singletons=include_singletons,
+            whole_graph=whole_graph,
+        )
+    elif whole_graph:
         report = to_mermaid(
             derive_graph(catalog),
             collapse_threshold=threshold,
             direction="LR" if direction == "auto" else direction,  # type: ignore[arg-type]
             elk=elk,
+            fixed_scale=fixed_scale,
         )
     else:
         report = to_markdown(
@@ -661,6 +690,7 @@ def viz(
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
             elk=elk,
+            fixed_scale=fixed_scale,
         )
     if out is None:
         typer.echo(report, nl=False)

@@ -51,7 +51,7 @@ Rendering decisions (each with a test):
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph
 
@@ -82,7 +82,20 @@ _CLASS_DEFS = {
     "lockNode": "fill:#f3f4f6,stroke:#6b7280,color:#111,stroke-dasharray: 2 2",
 }
 
-_ELK_FRONTMATTER = "---\nconfig:\n  layout: elk\n---\n"
+def _frontmatter(*, elk: bool, fixed_scale: bool) -> str:
+    """One merged per-chart YAML frontmatter block. `layout:` precedes
+    `flowchart:` so elk-only output stays byte-identical to the historical
+    constant (renderer-facing bytes are pinned by tests)."""
+    if not (elk or fixed_scale):
+        return ""
+    lines = ["---", "config:"]
+    if elk:
+        lines.append("  layout: elk")
+    if fixed_scale:
+        lines.append("  flowchart:")
+        lines.append("    useMaxWidth: false")
+    lines.append("---")
+    return "\n".join(lines) + "\n"
 
 
 def _esc(name: str) -> str:
@@ -542,19 +555,21 @@ def to_mermaid(
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
     direction: Direction = "LR",
     elk: bool = False,
+    fixed_scale: bool = False,
 ) -> str:
     """Render the whole derived graph as one Mermaid flowchart body."""
     body = _render_chart(graph, None, collapse_threshold=collapse_threshold, direction=direction)
-    return (_ELK_FRONTMATTER if elk else "") + body
+    return _frontmatter(elk=elk, fixed_scale=fixed_scale) + body
 
 
-# ------------------------------------------------------------- markdown report
+# ------------------------------------------------------------- report content
+#
+# The legend/prose/rows split exists so the Markdown report and the HTML page
+# (viz_html) format the SAME content -- parity drift between emitters is the
+# no-silent-loss failure mode. to_markdown owns every Markdown literal;
+# _report_content owns every decision about what the report says.
 
-_LEGEND = """\
-<details>
-<summary>Legend</summary>
-
-```mermaid
+_LEGEND_CHART = """\
 flowchart LR
     cmd["command job"] --> dep1["exact dependency"]
     fw(["\N{PAGE FACING UP} file watcher"]) -.-> dep2["assumed dependency"]
@@ -577,16 +592,127 @@ flowchart LR
     class cbox collapsedBox
     classDef lockNode fill:#f3f4f6,stroke:#6b7280,color:#111,stroke-dasharray: 2 2
     class lk lockNode
-```
+"""
 
+_LEGEND_PROSE = """\
 Solid arrow = exact mapping; dashed = assumed (assumption in Appendix B);
 thick red = needs redesign (M-row on the edge). Edge letters: f failure,
 d done, t terminated, n notrunning, e exitcode, v global variable;
 unmarked = success. `(HH:MM)` etc. are lookback qualifiers. `lock` links
 and \N{LOCK} hubs are mutual exclusion, not flow.
-
-</details>
 """
+
+_LEGEND = (
+    "<details>\n<summary>Legend</summary>\n\n```mermaid\n"
+    + _LEGEND_CHART
+    + "```\n\n"
+    + _LEGEND_PROSE
+    + "\n</details>\n"
+)
+
+_LOCKS_PROSE = (
+    "Every stated mutual exclusion. Drawn in charts as lock links, hubs,"
+    " or single-instance badges; enumerated here so none hides in a"
+    " collapsed box or between workflows (DL-35a)."
+)
+
+
+class _ChartSection(NamedTuple):
+    """One charted workflow: heading parts plus the bare chart body."""
+
+    wid: str  # "W1"
+    comp_title: str  # _component_title, raw
+    count_label: str  # "5 jobs" / "1 job"
+    prefix: str  # stripped common name prefix, "" if none
+    chart: str  # _render_chart body, no frontmatter
+
+
+class _ReportContent(NamedTuple):
+    """Everything the report says, before either emitter formats it. Rows
+    carry RAW strings; each emitter applies its own escaping. Appendix C
+    (redesign flags / OR shapes / cycles) is read off the graph directly."""
+
+    summary: str
+    sections: list[_ChartSection]
+    standalone: list[str]  # Appendix A job names
+    standalone_chart: str | None  # only when include_singletons and any exist
+    lock_rows: list[tuple[str, str, str]]  # (members joined with x, kind, charts)
+    annotated: list[DerivedEdge]  # Appendix B rows
+
+
+def _report_content(
+    graph: DerivedGraph,
+    *,
+    collapse_threshold: int,
+    direction: Direction | Literal["auto"],
+    include_singletons: bool,
+) -> _ReportContent:
+    components = split_components(graph)
+    touched = _incident_nodes(graph)
+    standalone = [comp[0] for comp in components if _is_standalone(comp, touched)]
+    charted = [comp for comp in components if not _is_standalone(comp, touched)]
+
+    by_class = {"exact": 0, "assumed": 0, "redesign": 0}
+    for edge in graph.edges:
+        by_class[edge.cls] += 1
+    summary = (
+        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(graph.edges)} edges"
+        f" ({by_class['exact']} exact, {by_class['assumed']} assumed,"
+        f" {by_class['redesign']} redesign)"
+        f" \N{MIDDLE DOT} {len(charted)} workflows"
+        f" \N{MIDDLE DOT} {len(standalone)} standalone jobs"
+        + ("" if include_singletons else " (Appendix A, not charted)")
+        + f" \N{MIDDLE DOT} {len(graph.mutex_groups)} locks"
+    )
+
+    comp_of: dict[str, str] = {}
+    sections: list[_ChartSection] = []
+    for i, comp in enumerate(charted, start=1):
+        wid = f"W{i}"
+        for name in comp:
+            comp_of[name] = wid
+        prefix = _common_prefix(comp)
+        chart_dir = _auto_direction(comp, graph) if direction == "auto" else direction
+        sections.append(
+            _ChartSection(
+                wid=wid,
+                comp_title=_component_title(comp, graph),
+                count_label=f"{len(comp)} job" + ("s" if len(comp) != 1 else ""),
+                prefix=prefix,
+                chart=_render_chart(
+                    graph,
+                    set(comp),
+                    collapse_threshold=collapse_threshold,
+                    direction=chart_dir,
+                    strip_prefix=prefix,
+                ),
+            )
+        )
+
+    standalone_chart: str | None = None
+    if include_singletons and standalone:
+        sub = DerivedGraph(nodes=standalone, node_meta=graph.node_meta)
+        standalone_chart = _render_chart(
+            sub, None, collapse_threshold=collapse_threshold, direction="LR"
+        )
+
+    lock_rows: list[tuple[str, str, str]] = []
+    for group in graph.mutex_groups:
+        kind = "self" if len(group) == 1 else "pair"
+        charts = ", ".join(dict.fromkeys(comp_of.get(m, "not in catalog") for m in group))
+        lock_rows.append((" \N{MULTIPLICATION SIGN} ".join(group), kind, charts))
+
+    return _ReportContent(
+        summary=summary,
+        sections=sections,
+        standalone=standalone,
+        standalone_chart=standalone_chart,
+        lock_rows=lock_rows,
+        annotated=[e for e in graph.edges if e.cls != "exact"],
+    )
+
+
+# ------------------------------------------------------------- markdown report
 
 
 def _cell(text: str | None) -> str:
@@ -616,89 +742,54 @@ def to_markdown(
     direction: Direction | Literal["auto"] = "auto",
     include_singletons: bool = False,
     elk: bool = False,
+    fixed_scale: bool = False,
 ) -> str:
     """Full Markdown report: summary, legend, one chart per component,
     shared-locks section, appendices A (standalone jobs) / B (non-exact
     edges) / C (redesign flags, OR shapes, cycles)."""
-    components = split_components(graph)
-    touched = _incident_nodes(graph)
-    standalone = [comp[0] for comp in components if _is_standalone(comp, touched)]
-    charted = [comp for comp in components if not _is_standalone(comp, touched)]
+    content = _report_content(
+        graph,
+        collapse_threshold=collapse_threshold,
+        direction=direction,
+        include_singletons=include_singletons,
+    )
+    frontmatter = _frontmatter(elk=elk, fixed_scale=fixed_scale)
 
     def fence(body: str) -> list[str]:
-        return ["```mermaid", (_ELK_FRONTMATTER if elk else "") + body.rstrip("\n"), "```", ""]
+        return ["```mermaid", frontmatter + body.rstrip("\n"), "```", ""]
 
-    by_class = {"exact": 0, "assumed": 0, "redesign": 0}
-    for edge in graph.edges:
-        by_class[edge.cls] += 1
-    summary = (
-        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(graph.edges)} edges"
-        f" ({by_class['exact']} exact, {by_class['assumed']} assumed,"
-        f" {by_class['redesign']} redesign)"
-        f" \N{MIDDLE DOT} {len(charted)} workflows"
-        f" \N{MIDDLE DOT} {len(standalone)} standalone jobs"
-        + ("" if include_singletons else " (Appendix A, not charted)")
-        + f" \N{MIDDLE DOT} {len(graph.mutex_groups)} locks"
-    )
+    out: list[str] = [f"# Workflow graph: {title}", "", content.summary, "", _LEGEND]
 
-    out: list[str] = [f"# Workflow graph: {title}", "", summary, "", _LEGEND]
-
-    comp_of: dict[str, str] = {}
-    for i, comp in enumerate(charted, start=1):
-        wid = f"W{i}"
-        for name in comp:
-            comp_of[name] = wid
-        comp_title = _component_title(comp, graph)
-        prefix = _common_prefix(comp)
-        count = f"{len(comp)} job" + ("s" if len(comp) != 1 else "")
-        heading = f"## {wid} \N{EM DASH} {comp_title} ({count})"
-        out.append(heading)
-        if prefix:
+    for sec in content.sections:
+        out.append(f"## {sec.wid} \N{EM DASH} {sec.comp_title} ({sec.count_label})")
+        if sec.prefix:
             out.append("")
-            out.append(f"All names share the prefix `{prefix}` (stripped in the chart).")
+            out.append(f"All names share the prefix `{sec.prefix}` (stripped in the chart).")
         out.append("")
-        chart_dir = _auto_direction(comp, graph) if direction == "auto" else direction
-        body = _render_chart(
-            graph,
-            set(comp),
-            collapse_threshold=collapse_threshold,
-            direction=chart_dir,
-            strip_prefix=prefix,
-        )
-        out.extend(fence(body))
+        out.extend(fence(sec.chart))
 
-    if include_singletons and standalone:
-        out.append(f"## Standalone jobs ({len(standalone)})")
+    if content.standalone_chart is not None:
+        out.append(f"## Standalone jobs ({len(content.standalone)})")
         out.append("")
-        sub = DerivedGraph(nodes=standalone, node_meta=graph.node_meta)
-        out.extend(
-            fence(_render_chart(sub, None, collapse_threshold=collapse_threshold, direction="LR"))
-        )
+        out.extend(fence(content.standalone_chart))
 
-    if graph.mutex_groups:
+    if content.lock_rows:
         out.append("## Locks")
         out.append("")
-        out.append(
-            "Every stated mutual exclusion. Drawn in charts as lock links, hubs,"
-            " or single-instance badges; enumerated here so none hides in a"
-            " collapsed box or between workflows (DL-35a)."
-        )
+        out.append(_LOCKS_PROSE)
         out.append("")
         out.append("| lock | kind | charts |")
         out.append("|---|---|---|")
-        for group in graph.mutex_groups:
-            kind = "self" if len(group) == 1 else "pair"
-            charts = ", ".join(dict.fromkeys(comp_of.get(m, "not in catalog") for m in group))
-            joined = " \N{MULTIPLICATION SIGN} ".join(group)
+        for joined, kind, charts in content.lock_rows:
             out.append(f"| {_cell(joined)} | {kind} | {charts} |")
         out.append("")
 
     out.append("## Appendix A \N{EM DASH} standalone jobs (not part of any workflow)")
     out.append("")
-    if standalone:
+    if content.standalone:
         out.append("| job | kind | schedule | command / watched file |")
         out.append("|---|---|---|---|")
-        for name in standalone:
+        for name in content.standalone:
             meta = graph.node_meta.get(name)
             out.append(
                 f"| {_cell(name)} | {_cell(meta.kind if meta else None)}"
@@ -709,13 +800,12 @@ def to_markdown(
         out.append("None.")
     out.append("")
 
-    annotated = [e for e in graph.edges if e.cls != "exact"]
     out.append("## Appendix B \N{EM DASH} edge annotations")
     out.append("")
-    if annotated:
+    if content.annotated:
         out.append("| producer | consumer | via | lookback | class | row | assumption |")
         out.append("|---|---|---|---|---|---|---|")
-        for e in annotated:
+        for e in content.annotated:
             lookback = e.lookback.raw if e.lookback is not None else ""
             out.append(
                 f"| {_cell(e.src)} | {_cell(e.dst)} | {e.via} | {_cell(lookback)}"

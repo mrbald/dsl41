@@ -179,6 +179,11 @@ def test_readme_pipeline_claims_hold(props_file: Path) -> None:
     viz = _cli("viz", "--whole-graph", *SMALL, "-p", str(props_file))
     assert viz.returncode == 0, viz.stdout + viz.stderr
     assert "flowchart" in viz.stdout  # --whole-graph emits the bare chart
+    page = Path(props_file).parent / "page.html"
+    html = _cli("viz", "--html", "-o", str(page), *SMALL, "-p", str(props_file))
+    assert html.returncode == 0, html.stdout + html.stderr
+    assert page.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert page.stat().st_size > 4_000_000  # the vendor payloads really embedded
     uc = _cli("uc", *SMALL, "-p", str(props_file))
     assert uc.returncode == 0, uc.stdout + uc.stderr
     json.loads(uc.stdout)  # a bundle, not a traceback
