@@ -5,7 +5,7 @@ description = "AutoSys->Stonebranch migration compiler: JIL frontend, semantic I
 readme = "README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-only"
-license-files = ["LICENSE", "LICENSING.md", "COMMERCIAL.md"]
+license-files = ["LICENSE", "LICENSING.md", "COMMERCIAL.md", "THIRD_PARTY_LICENSES"]
 authors = [{ name = "dsl41 authors", email = "mail@bobah.net" }]
 keywords = [
     "autosys",
