@@ -635,6 +635,16 @@ def viz(
         "charts as in the report; --whole-graph makes a single-chart page). "
         "The page embeds ~5 MB of JavaScript; -o is recommended.",
     ),
+    explore: bool = typer.Option(
+        False,
+        "--explore",
+        help="Emit one self-contained interactive navigation page (offline; wins "
+        "over --html). Always the whole graph at natural scale with ELK layout and "
+        "uncollapsed boxes, singletons included, so --whole-graph/--elk/"
+        "--fixed-scale/--collapse-threshold/--include-singletons are no-ops; "
+        "--direction sets the layout direction. "
+        "The page embeds ~2 MB of JavaScript; -o is recommended.",
+    ),
     elk: bool = typer.Option(
         False,
         "--elk",
@@ -653,8 +663,8 @@ def viz(
 ) -> None:
     """Render FILES' derived dependency graph as a Markdown report of
     per-workflow Mermaid charts (DL-35), one whole-graph chart
-    (--whole-graph, DL-61), or a self-contained offline HTML page
-    (--html, DL-70)."""
+    (--whole-graph, DL-61), a self-contained offline HTML page
+    (--html, DL-70), or an interactive navigation page (--explore, DL-71)."""
     from dsl41.derive import derive_graph
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
@@ -663,7 +673,15 @@ def viz(
         raise typer.Exit(2)
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
-    if html:
+    if explore:
+        from dsl41.viz_explore import to_explore_html
+
+        report = to_explore_html(
+            derive_graph(catalog),
+            title=", ".join(f.name for f in files),
+            direction=direction,  # type: ignore[arg-type]  # validated above
+        )
+    elif html:
         from dsl41.viz_html import to_html
 
         report = to_html(

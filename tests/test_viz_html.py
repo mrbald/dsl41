@@ -106,6 +106,18 @@ def test_to_html_embeds_each_vendor_payload_exactly_once() -> None:
         assert page.count(probe) == 1
 
 
+def test_to_html_survives_marker_shaped_job_and_title() -> None:
+    # a legal job name (or title) containing a substitution marker must not
+    # splice the mermaid payload into the chart JSON (review finding:
+    # single-pass substitution, replaced content never re-scanned)
+    text = "insert_job: EVIL__DSL41_MERMAID_JS__X\njob_type: c\ncommand: x\nmachine: m1\n"
+    page = to_html(graph_of(text), title="x__DSL41_CHART_JSON__.jil", include_singletons=True)
+    for name in ("mermaid.min.js", "mermaid-layout-elk.iife.min.js"):
+        probe = _vendor_bytes(name).decode("utf-8")[:200]
+        assert page.count(probe) == 1
+    assert "EVIL__DSL41_MERMAID_JS__X" in "\n".join(c["src"] for c in _charts(page))
+
+
 def test_to_html_pins_page_defaults() -> None:
     # maxEdges/maxTextSize are secure-listed: only initialize can raise them,
     # and the bank estate exceeds the 500-edge/50k-char defaults

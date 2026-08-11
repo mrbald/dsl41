@@ -15,9 +15,11 @@ Rendering decisions (each with a test):
   drives mermaid.render() itself for progress + per-chart error isolation.
 - Vendor payloads are inlined verbatim; their integrity invariants (no
   </script substring, attribution banner) are pinned in tests.
-- Template substitution is unique-marker .replace(), not str.format or
-  string.Template: the template is {}-heavy JS/CSS and the vendor JS is
-  full of "$".
+- Template substitution is unique-marker single-pass (_substitute), not
+  str.format or string.Template: the template is {}-heavy JS/CSS and the
+  vendor JS is full of "$". Single-pass, not chained .replace(): replaced
+  content is never re-scanned, so marker-shaped user input (a job or file
+  named __DSL41_..._JS__) cannot trigger a second substitution.
 - Table cells mirror viz's content policy: full text for assumptions,
   60-char ellipsis for command/path cells (_code_cell's rule); escaping is
   html.escape here, pipe-escaping there.
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from importlib.resources import files
 from typing import Literal
 
@@ -40,6 +43,15 @@ from dsl41.viz import (
     _report_content,
     to_mermaid,
 )
+
+
+def _substitute(template: str, mapping: dict[str, str]) -> str:
+    """Replace every __DSL41_*__ marker in one pass over the template.
+    Replacement text is never re-scanned, so data that happens to contain a
+    marker (job names and file names allow the marker charset) cannot splice
+    a later payload into itself (review finding on DL-70/71)."""
+    pattern = re.compile("|".join(re.escape(marker) for marker in mapping))
+    return pattern.sub(lambda m: mapping[m.group(0)], template)
 
 
 def _text(raw: str | None) -> str:
@@ -235,22 +247,21 @@ def to_html(
 
     package = files("dsl41")
     template = (package / "templates" / "viz_report.html").read_text(encoding="utf-8")
-    page = (
-        template.replace("__DSL41_TITLE__", _text(title))
-        .replace("__DSL41_SUMMARY__", _text(summary))
-        .replace("__DSL41_LEGEND_PROSE__", _text(_LEGEND_PROSE.rstrip("\n")))
-        .replace("__DSL41_TOC__", toc_html)
-        .replace("__DSL41_SECTIONS__", "\n".join(sections))
-        .replace("__DSL41_TABLES__", "\n".join(tables))
-        .replace("__DSL41_CHART_JSON__", payload)
-        # vendor payloads last: they are ~5 MB and contain no markers
-        .replace(
-            "__DSL41_MERMAID_JS__",
-            (package / "_vendor" / "mermaid.min.js").read_text(encoding="utf-8"),
-        )
-        .replace(
-            "__DSL41_ELK_JS__",
-            (package / "_vendor" / "mermaid-layout-elk.iife.min.js").read_text(encoding="utf-8"),
-        )
+    return _substitute(
+        template,
+        {
+            "__DSL41_TITLE__": _text(title),
+            "__DSL41_SUMMARY__": _text(summary),
+            "__DSL41_LEGEND_PROSE__": _text(_LEGEND_PROSE.rstrip("\n")),
+            "__DSL41_TOC__": toc_html,
+            "__DSL41_SECTIONS__": "\n".join(sections),
+            "__DSL41_TABLES__": "\n".join(tables),
+            "__DSL41_CHART_JSON__": payload,
+            "__DSL41_MERMAID_JS__": (package / "_vendor" / "mermaid.min.js").read_text(
+                encoding="utf-8"
+            ),
+            "__DSL41_ELK_JS__": (
+                package / "_vendor" / "mermaid-layout-elk.iife.min.js"
+            ).read_text(encoding="utf-8"),
+        },
     )
-    return page

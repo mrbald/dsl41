@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Explore: __DSL41_TITLE__</title>
+<!-- Self-contained page emitted by `dsl41 viz --explore`. Embeds cytoscape
+     3.33.1 (MIT), cytoscape-elk 2.3.0 (MIT), cytoscape-context-menus 4.1.0
+     (MIT), elkjs 0.9.3 (EPL-2.0); full texts and source URLs in
+     THIRD_PARTY_LICENSES of the dsl41 distribution. Renders offline: no
+     network access. -->
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column;
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI",
+         Roboto, sans-serif; color: #1f2937; background: #ffffff; }
+  header { border-bottom: 1px solid #e5e7eb; padding: 0.4rem 1rem; }
+  header h1 { font-size: 1.05rem; margin: 0; display: inline; }
+  header .summary { color: #4b5563; margin-left: 0.75rem; }
+  #toolbar { display: flex; align-items: center; gap: 0.6rem;
+             margin-top: 0.35rem; flex-wrap: wrap; }
+  #toolbar input[type="search"] { width: 18rem; padding: 0.25rem 0.5rem;
+             border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
+  #toolbar button { padding: 0.25rem 0.7rem; border: 1px solid #d1d5db;
+             border-radius: 4px; background: #f9fafb; color: #374151;
+             font: inherit; cursor: pointer; }
+  #toolbar button:hover { background: #f3f4f6; }
+  #toolbar label { color: #374151; user-select: none; }
+  #stats { color: #6b7280; font-size: 0.85rem; }
+  #wrap { position: relative; flex: 1; min-height: 0; }
+  #cy { position: absolute; inset: 0; }
+  #details { position: absolute; top: 8px; right: 8px; z-index: 20;
+             width: 26rem; max-width: 45%; max-height: calc(100% - 16px);
+             overflow: auto; background: #fffffff5; border: 1px solid #d1d5db;
+             border-radius: 6px; padding: 0.6rem 0.8rem;
+             box-shadow: 0 2px 8px #0002; }
+  #details h2 { font-size: 0.95rem; margin: 0 1.5rem 0.4rem 0;
+             word-break: break-all; }
+  #details table { border-collapse: collapse; width: 100%;
+             font-size: 0.85rem; }
+  #details th { text-align: left; vertical-align: top; color: #6b7280;
+             font-weight: 500; padding: 0.15rem 0.6rem 0.15rem 0;
+             white-space: nowrap; }
+  #details td { padding: 0.15rem 0; word-break: break-word; }
+  #details code { background: #f3f4f6; padding: 0.05rem 0.3rem;
+             border-radius: 3px; font-size: 0.9em; }
+  #d-close { position: absolute; top: 6px; right: 8px; border: 0;
+             background: none; color: #6b7280; font-size: 1rem;
+             cursor: pointer; padding: 0; }
+  .hint { color: #9ca3af; font-size: 0.8rem; }
+
+  /* begin cytoscape-context-menus 4.1.0 CSS -- inlined (re-indented;
+     content drift-checked against the npm package line-by-line by
+     scripts/vendor_mermaid.sh; the submenu indicator asset is never
+     loaded -- the page's menu is flat). */
+  .cy-context-menus-cxt-menu {
+    display:none;
+    z-index: 1000;
+    position:absolute;
+    border:1px solid #A0A0A0;
+    padding: 0;
+    margin: 0;
+    width:auto;
+  }
+
+  .cy-context-menus-cxt-menuitem {
+    display:block;
+    width: 100%;
+    padding: 3px 20px;
+    position:relative;
+    margin:0;
+    background-color:#f8f8f8;
+    font-weight:normal;
+    font-size: 12px;
+    white-space:nowrap;
+    border: 0;
+    text-align: left;
+  }
+
+  .cy-context-menus-cxt-menuitem:enabled {
+    color: #000000;
+  }
+
+  .cy-context-menus-ctx-operation:focus {
+  outline: none;
+  }
+
+  .cy-context-menus-cxt-menuitem:hover {
+    color: #ffffff;
+    text-decoration: none;
+    background-color: #0B9BCD;
+    background-image: none;
+    cursor: pointer;
+  }
+
+  .cy-context-menus-cxt-menuitem[content]:before {
+    content:attr(content);
+  }
+
+  .cy-context-menus-divider {
+  border-bottom:1px solid #A0A0A0;
+  }
+
+  .cy-context-menus-submenu-indicator {
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  /* end cytoscape-context-menus CSS */
+</style>
+</head>
+<body>
+<header>
+  <h1>Explore: __DSL41_TITLE__</h1><span class="summary">__DSL41_SUMMARY__</span>
+  <div id="toolbar">
+    <input id="search" type="search"
+           placeholder="find job &mdash; substring, Enter" spellcheck="false">
+    <button type="button" id="show-all">show all</button>
+    <button type="button" id="fit">fit</button>
+    <label><input type="checkbox" id="relayout" checked> re-layout on focus</label>
+    <span id="stats">laying out&hellip;</span>
+    <span class="hint">right-click a node to focus / hide &middot; click for
+    details &middot; drag pans, wheel zooms</span>
+  </div>
+</header>
+<div id="wrap">
+  <div id="cy"></div>
+  <aside id="details" hidden>
+    <button type="button" id="d-close" title="close">&#10005;</button>
+    <h2 id="d-title"></h2>
+    <table><tbody id="d-rows"></tbody></table>
+  </aside>
+</div>
+<script>__DSL41_CYTOSCAPE_JS__</script>
+<script id="graph-data" type="application/json">__DSL41_ELEMENTS_JSON__</script>
+<script>
+"use strict";
+
+/* esbuild --global-name wraps the module namespace; the registered
+   cytoscape constructor sits at .default. */
+var cytoscape = cyBundle.default;
+
+var DIRECTION = "__DSL41_ELK_DIRECTION__";
+var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
+
+function elkLayout(extra) {
+  var opts = {
+    name: "elk",
+    nodeDimensionsIncludeLabels: true,
+    fit: true,
+    padding: 30,
+    elk: {
+      algorithm: "layered",
+      "elk.direction": DIRECTION,
+      "elk.hierarchyHandling": "INCLUDE_CHILDREN"
+    }
+  };
+  if (extra) Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
+  return opts;
+}
+
+var elements = JSON.parse(document.getElementById("graph-data").textContent);
+
+var cy = cytoscape({
+  container: document.getElementById("cy"),
+  elements: elements,
+  boxSelectionEnabled: false,
+  style: [
+    { selector: "node", style: {
+        shape: "round-rectangle",
+        width: function (ele) {
+          return Math.max(30, ele.data("label").length * 6.5 + 14);
+        },
+        height: 24,
+        label: "data(label)",
+        "text-valign": "center",
+        "text-halign": "center",
+        "font-size": 11,
+        color: "#111827",
+        "background-color": "#ffffff",
+        "border-width": 1,
+        "border-color": "#374151"
+    } },
+    { selector: "node.fw", style: {  /* file watcher: source/trigger */
+        shape: "diamond",
+        height: 34,
+        "background-color": "#def7ec",
+        "border-color": "#046c4e"
+    } },
+    { selector: "node.ext", style: {  /* endpoint outside the catalog */
+        "border-style": "dashed",
+        "background-color": "#f3f4f6",
+        "border-color": "#6b7280",
+        color: "#374151"
+    } },
+    { selector: "node.global", style: {  /* global variable producer */
+        shape: "rhomboid",
+        "background-color": "#fdf6b2",
+        "border-color": "#8a6d00"
+    } },
+    { selector: "node.box", style: {  /* compound container */
+        shape: "round-rectangle",
+        "text-valign": "top",
+        "background-color": "#ece9fd",
+        "background-opacity": 0.3,
+        "border-color": "#5b21b6",
+        "font-weight": "bold"
+    } },
+    { selector: "edge", style: {
+        "curve-style": "bezier",
+        width: 1.5,
+        "line-color": "#4b5563",
+        "target-arrow-shape": "triangle",
+        "target-arrow-color": "#4b5563",
+        "arrow-scale": 0.9,
+        label: "data(label)",
+        "font-size": 9,
+        color: "#374151",
+        "text-rotation": "autorotate",
+        "text-background-color": "#ffffff",
+        "text-background-opacity": 0.8,
+        "text-background-padding": "1px"
+    } },
+    { selector: "edge.assumed", style: {
+        "line-style": "dashed",
+        "line-color": "#b45309",
+        "target-arrow-color": "#b45309"
+    } },
+    { selector: "edge.redesign", style: {
+        "line-style": "dotted",
+        width: 2,
+        "line-color": "#b91c1c",
+        "target-arrow-color": "#b91c1c"
+    } },
+    { selector: "edge.nolabel", style: {
+        "text-opacity": 0,
+        "text-background-opacity": 0
+    } },
+    { selector: ".hidden", style: { display: "none" } },
+    { selector: "node.hit", style: {
+        "border-width": 3,
+        "border-color": "#1d4ed8"
+    } },
+    { selector: ":selected", style: {
+        "overlay-color": "#1d4ed8",
+        "overlay-opacity": 0.15,
+        "overlay-padding": 4
+    } }
+  ]
+});
+
+var stats = document.getElementById("stats");
+var relayoutToggle = document.getElementById("relayout");
+
+function updateStats(suffix) {
+  var vn = cy.nodes(":visible").length, ve = cy.edges(":visible").length;
+  stats.textContent = "visible " + vn + " / " + cy.nodes().length + " nodes · "
+    + ve + " / " + cy.edges().length + " edges" + (suffix ? " · " + suffix : "");
+}
+
+/* Edge labels overlap at fit zoom on a bank-scale graph: hide them below
+   LABEL_ZOOM, restore when the operator zooms in. */
+var labelsShown = null;
+function updateEdgeLabels() {
+  var show = cy.zoom() >= LABEL_ZOOM;
+  if (show === labelsShown) return;
+  labelsShown = show;
+  cy.edges().toggleClass("nolabel", !show);
+}
+cy.on("zoom", updateEdgeLabels);
+
+function relayoutOrFit() {
+  if (relayoutToggle.checked) {
+    var visible = cy.elements(":visible");
+    var layout = visible.layout(elkLayout());
+    layout.on("layoutstop", function () { updateStats(); });
+    layout.run();
+  } else {
+    cy.fit(cy.nodes(":visible"), 40);
+  }
+  updateStats();
+}
+
+/* focus = hide non-selected, keeping compound ancestors (members without
+   their box do not render), then ELK re-layout of the visible subset
+   (toggle off = fit only). */
+function focusOn(keep) {
+  keep = keep.union(keep.ancestors());
+  cy.batch(function () {
+    cy.nodes().addClass("hidden");
+    keep.removeClass("hidden");
+  });
+  relayoutOrFit();
+}
+
+function showAll() {
+  cy.batch(function () {
+    cy.elements().removeClass("hidden");
+    cy.nodes().removeClass("hit");
+  });
+  relayoutOrFit();
+}
+
+/* ------------------------------------------------------------ details panel */
+
+var details = document.getElementById("details");
+var dTitle = document.getElementById("d-title");
+var dRows = document.getElementById("d-rows");
+
+function showDetails(title, rows) {
+  dTitle.textContent = title;
+  dRows.replaceChildren();
+  rows.forEach(function (row) {
+    if (row[1] === null || row[1] === undefined || row[1] === "") return;
+    var tr = document.createElement("tr");
+    var th = document.createElement("th");
+    th.textContent = row[0];
+    var td = document.createElement("td");
+    if (row[2] === "code") {
+      var code = document.createElement("code");
+      code.textContent = row[1];
+      td.appendChild(code);
+    } else {
+      td.textContent = row[1]; /* full text, never truncated */
+    }
+    tr.appendChild(th);
+    tr.appendChild(td);
+    dRows.appendChild(tr);
+  });
+  details.hidden = false;
+}
+
+document.getElementById("d-close").addEventListener("click", function () {
+  details.hidden = true;
+});
+
+cy.on("tap", "node", function (evt) {
+  var d = evt.target.data();
+  showDetails(d.id, [
+    ["kind", d.kind],
+    ["schedule", d.schedule],
+    ["command / watched file", d.detail, "code"],
+    ["owning box", d.parent]
+  ]);
+});
+
+cy.on("tap", "edge", function (evt) {
+  var d = evt.target.data();
+  showDetails(d.source + " → " + d.target, [
+    ["via", d.via],
+    ["lookback", d.lookback],
+    ["class", d.cls],
+    ["mapping row", d.mapping_row],
+    ["assumption", d.assumption]
+  ]);
+});
+
+cy.on("tap", function (evt) {
+  if (evt.target === cy) details.hidden = true;
+});
+
+/* ------------------------------------------------------------- context menu */
+
+function target(evt) { return evt.target || evt.cyTarget; }
+
+cy.contextMenus({
+  menuItems: [
+    { id: "fan-in", content: "focus fan-in (direct)", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt); focusOn(n.union(n.incomers("node")));
+      } },
+    { id: "fan-out", content: "focus fan-out (direct)", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt); focusOn(n.union(n.outgoers("node")));
+      } },
+    { id: "fan-in-tree", content: "focus fan-in tree", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt); focusOn(n.union(n.predecessors("node")));
+      } },
+    { id: "fan-out-tree", content: "focus fan-out tree", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt); focusOn(n.union(n.successors("node")));
+      } },
+    { id: "both-trees", content: "focus both trees", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt);
+        focusOn(n.union(n.predecessors("node")).union(n.successors("node")));
+      } },
+    { id: "neighbours", content: "focus this + neighbours", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt); focusOn(n.union(n.neighborhood("node")));
+      }, hasTrailingDivider: true },
+    { id: "hide", content: "hide this node", selector: "node",
+      onClickFunction: function (evt) {
+        var n = target(evt);
+        n.union(n.descendants()).addClass("hidden");
+        updateStats();
+      }, hasTrailingDivider: true },
+    /* item ids become DOM ids of the menu entries -- keep them distinct
+       from the toolbar's #show-all/#fit (review finding: duplicate ids) */
+    { id: "menu-show-all", content: "show all", selector: "node",
+      coreAsWell: true, onClickFunction: showAll },
+    { id: "menu-fit", content: "fit", selector: "node", coreAsWell: true,
+      onClickFunction: function () { cy.fit(cy.nodes(":visible"), 40); } }
+  ]
+});
+
+/* ----------------------------------------------------------------- toolbar */
+
+document.getElementById("show-all").addEventListener("click", showAll);
+document.getElementById("fit").addEventListener("click", function () {
+  cy.fit(cy.nodes(":visible"), 40);
+});
+
+/* Substring search. Hits hidden by a previous focus are un-hidden -- a
+   search that cannot find a hidden node is a lying search. */
+document.getElementById("search").addEventListener("keydown", function (evt) {
+  if (evt.key !== "Enter") return;
+  var query = evt.target.value.trim().toLowerCase();
+  cy.nodes().removeClass("hit");
+  if (!query) { updateStats(); return; }
+  var hits = cy.nodes().filter(function (n) {
+    return n.data("id").toLowerCase().indexOf(query) !== -1;
+  });
+  if (hits.empty()) {
+    updateStats("no match for “" + query + "”");
+    return;
+  }
+  cy.batch(function () {
+    hits.union(hits.ancestors()).removeClass("hidden");
+    hits.addClass("hit");
+  });
+  updateStats(hits.length + " hit" + (hits.length === 1 ? "" : "s"));
+  cy.fit(hits, 60);
+});
+
+/* ------------------------------------------------------------ initial layout */
+
+var initial = cy.elements().layout(elkLayout());
+initial.on("layoutstop", function () {
+  updateEdgeLabels();
+  updateStats();
+});
+initial.run();
+</script>
+</body>
+</html>

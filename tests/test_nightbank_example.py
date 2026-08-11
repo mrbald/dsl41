@@ -184,6 +184,11 @@ def test_readme_pipeline_claims_hold(props_file: Path) -> None:
     assert html.returncode == 0, html.stdout + html.stderr
     assert page.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert page.stat().st_size > 4_000_000  # the vendor payloads really embedded
+    lens = Path(props_file).parent / "explore.html"
+    explore = _cli("viz", "--explore", "-o", str(lens), *SMALL, "-p", str(props_file))
+    assert explore.returncode == 0, explore.stdout + explore.stderr
+    assert 'id="graph-data"' in lens.read_text(encoding="utf-8")
+    assert lens.stat().st_size > 1_500_000  # the cytoscape payload really embedded
     uc = _cli("uc", *SMALL, "-p", str(props_file))
     assert uc.returncode == 0, uc.stdout + uc.stderr
     json.loads(uc.stdout)  # a bundle, not a traceback
