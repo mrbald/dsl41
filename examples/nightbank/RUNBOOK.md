@@ -324,7 +324,9 @@ variant rolls the *date*, not the day.
 - Whole-night dry run in seconds: `dsl41 rehearse` with the same files
   and a properties file from `nightbank props` (virtual clock, scripted
   adapters — see tests/test_nightbank_example.py for a scenario).
-- Pictures: `dsl41 viz --whole-graph <estate files> -p <props>`.
+- Pictures: `dsl41 viz --whole-graph <estate files> -p <props>`, or
+  `dsl41 viz --html <estate files> -p <props> -o graph.html` for a
+  self-contained page that renders offline in any browser.
 - The migration angle: `dsl41 lint`, `dsl41 report`, `dsl41 uc` all run
   on this estate — it is a full-pipeline fixture, not just a runner toy.
 

@@ -2347,3 +2347,63 @@
   The survive-pin stands as the deterministic default; a flip clears
   `armed` in ON_ICE (SCHED_DISARM record) and amends SEM-20/32.
   Doc + comment only — no behavior change, tests unchanged.
+- DL-70 viz gains --fixed-scale and a self-contained --html report
+  (2026-08-11). Problem: on a bank-scale estate, rendering the DL-35
+  report to HTML is unreadable — Mermaid's default useMaxWidth=true lets
+  the host fit-to-width each chart independently, so every workflow lands
+  at a different scale; only the ELK layout held up. Re-opens DL-35(8)'s
+  parked "alternative renderers, revisit here" clause. Decisions:
+  (1) --fixed-scale emits per-chart frontmatter `flowchart.useMaxWidth:
+  false` (natural size, uniform scale in any frontmatter-honoring
+  renderer); _ELK_FRONTMATTER became _frontmatter(elk, fixed_scale) with
+  `layout:` deliberately ordered before `flowchart:` so elk-only bytes are
+  unchanged — zero pre-existing test assertions edited is the byte-safety
+  proof. (2) dsl41 viz --html emits ONE offline page (file://, zero
+  network): full report parity via the new viz._report_content that both
+  to_markdown (byte-identical, verified by empty small-estate diff) and
+  viz_html.to_html format — parity drift between emitters is the
+  no-silent-loss failure mode, so neither re-walks the graph. Charts
+  render in-browser: sources ship as one JSON script with every "<"
+  escaped to \u003c (neutralizes </script and <!-- in a single rule); the
+  page drives mermaid.render itself — sequential async loop, progress
+  counter, per-chart try/catch so one bad chart cannot kill the page;
+  hand-rolled pan/zoom (resizes the SVG layout box, no CSS transform, so
+  overflow:auto scrollbars stay coherent; per-chart +/-/1:1 toolbar
+  overlaid on a non-scrolling chartbox wrapper, revealed once the chart
+  renders — wheel-only zoom was invisible UI). Page defaults layout=elk +
+  useMaxWidth=false + maxEdges=10000 + maxTextSize=1e7 via
+  mermaid.initialize — the latter two are secure-listed (frontmatter
+  CANNOT raise them) and the bank estate exceeds both vendor defaults
+  (500 edges / 50k chars). (3) Vendored assets in the wheel (user
+  decision): src/dsl41/_vendor/ carries mermaid 11.16.1 dist/mermaid.min.js
+  byte-exact (MIT, sha256-pinned in tests, inline-safe: no </script
+  substring) and an esbuild IIFE bundle of @mermaid-js/layout-elk 0.2.2
+  (MIT) + elkjs 0.9.3 (EPL-2.0) — layout-elk publishes ESM-only, which is
+  not single-file-inlinable (103 chunks, dynamic imports);
+  scripts/vendor_mermaid.sh pins all versions and stamps an attribution
+  banner (elkjs ships no /*! comments of its own). The elk IIFE global is
+  a namespace — the page uses elkLayouts.default || elkLayouts. Wheel
+  grows 290 KiB -> 1.74 MiB (vendor deflates to 1.45 MiB; 5.1 MiB raw JS
+  committed to git, marked linguist-vendored -diff). License posture: first third-party
+  code redistributed by this AGPL-3.0-only + commercial project — mere
+  aggregation (browser-side assets copied into an output artifact, never
+  linked with the Python code); EPL-2.0 §3.2 notice/source obligations
+  discharged by THIRD_PARTY_LICENSES (repo root, license-files, wheel
+  dist-info) + the page's head comment; flagged for deliberate sign-off
+  before the next PyPI release. (4) Flag interactions, DL-61 style
+  (absorb, never error): --html implies --elk/--fixed-scale (page
+  defaults; passing them is a no-op), --direction/--collapse-threshold/
+  --include-singletons shape charts as in the report, --whole-graph
+  composes into a single-chart page (legend kept — an HTML page is a
+  terminal artifact, unlike the pipeable bare chart), -o recommended in
+  help (~5 MB page), stdout still allowed, exit codes unchanged. Layout
+  name is `elk` — layout-elk 0.2.2 silently falls back to dagre for the
+  README-documented `elk.layered`. Deliberately NOT done: no CDN or
+  --js-dir variants (offline is the point), no vendored pan/zoom lib
+  (~70 lines hand-rolled), no dark theme, no markdown->HTML conversion
+  (deps stay lark/pydantic/typer). Only a browser can verify the ELK
+  render, pan/zoom feel, and error isolation — headless node verified
+  payload evaluation, global shapes, and loop syntax; mermaid.parse needs
+  a DOM (DOMPurify). Tests 1771 -> 1788 (fixed-scale frontmatter x4,
+  vendor integrity x2, html emitter/CLI x11; nightbank acceptance
+  extended in-place).

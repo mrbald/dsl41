@@ -83,7 +83,9 @@ gate: do not ship a catalog that lints dirty.
 dsl41 viz jobs.jil -o graph.md             # Markdown report of Mermaid charts
 dsl41 viz --direction TD --collapse-threshold 20 jobs.jil
 dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores it)
+dsl41 viz --elk --fixed-scale jobs.jil     # uniform chart scale (no fit-to-width)
 dsl41 viz --whole-graph jobs.jil           # one bare Mermaid chart, no report
+dsl41 viz --html jobs.jil -o graph.html    # self-contained HTML page, offline
 ```
 
 The report shows each independent workflow as its own chart (largest first).
@@ -95,9 +97,13 @@ subgraphs, and edges carry their E/A/R migration class
 triggers. Mutual exclusions appear as lock links or as a shared lock hub. If
 a box has more direct members than the collapse threshold (default 12), the
 box folds into a single node. Any Mermaid renderer works (GitHub,
-mermaid.live, IDE preview). `--whole-graph` skips the report and emits the
-entire estate as one bare Mermaid chart, ready for mermaid-cli or a live
-editor.
+mermaid.live, IDE preview); `--fixed-scale` adds frontmatter that stops
+renderers from fit-to-width scaling each chart differently. `--whole-graph`
+skips the report and emits the entire estate as one bare Mermaid chart,
+ready for mermaid-cli or a live editor. `--html` writes the whole report as
+one self-contained page (~5 MB: mermaid + ELK are embedded — see
+THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
+pan/zoom, offline, straight from `file://`.
 
 ### Migration report
 
@@ -338,6 +344,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - src/dsl41/viz.py — IR-G -> Markdown report of per-workflow Mermaid charts (DL-35):
   component split, trigger/lock visual grammar, E/A/R edge-class arrows, collapse
   threshold, appendices for everything that the charts omit
+- src/dsl41/viz_html.py — the same report content as one self-contained offline HTML
+  page (DL-70): vendored mermaid + ELK from src/dsl41/_vendor/, uniform chart scale,
+  progressive in-browser rendering with pan/zoom
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
   completion, edge-triggered re-evaluation, per-SEM-entry trace tests.
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
@@ -422,6 +431,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_viz.py — Mermaid render structure (balanced blocks, id-safety, one golden
   render), the DL-35 markdown report (components, appendices, mutex encodings) plus
   the viz CLI
+- tests/test_viz_html.py — the --html page: chart parity with the markdown report,
+  JSON-embedding escape invariant, vendored-asset integrity, page defaults, appendix
+  parity
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
   cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
   T03/precedence is pinned at parse time in test_condition_grammar.py, not here).
