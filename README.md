@@ -86,6 +86,7 @@ dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores
 dsl41 viz --elk --fixed-scale jobs.jil     # uniform chart scale (no fit-to-width)
 dsl41 viz --whole-graph jobs.jil           # one bare Mermaid chart, no report
 dsl41 viz --html jobs.jil -o graph.html    # self-contained HTML page, offline
+dsl41 viz --explore jobs.jil -o lens.html  # interactive navigation page, offline
 ```
 
 The report shows each independent workflow as its own chart (largest first).
@@ -103,7 +104,13 @@ skips the report and emits the entire estate as one bare Mermaid chart,
 ready for mermaid-cli or a live editor. `--html` writes the whole report as
 one self-contained page (~5 MB: mermaid + ELK are embedded — see
 THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
-pan/zoom, offline, straight from `file://`.
+pan/zoom, offline, straight from `file://`. `--explore` writes a different
+kind of page (~2 MB: cytoscape + ELK embedded): the whole graph as an
+interactive map — substring search, click for full edge annotations, and a
+right-click menu that focuses a job's fan-in/fan-out (direct, tree, or
+both) by hiding everything else and re-laying-out what remains. It is a
+navigation lens for bank-scale estates; the report stays the artifact of
+record with the appendices.
 
 ### Migration report
 
@@ -347,6 +354,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - src/dsl41/viz_html.py — the same report content as one self-contained offline HTML
   page (DL-70): vendored mermaid + ELK from src/dsl41/_vendor/, uniform chart scale,
   progressive in-browser rendering with pan/zoom
+- src/dsl41/viz_explore.py — IR-G -> cytoscape.js elements for the interactive
+  navigation page (DL-71): compound-node box tree, EXT-node synthesis, edge
+  annotations in a click-details panel, ELK layout + focus/search in the browser
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
   completion, edge-triggered re-evaluation, per-SEM-entry trace tests.
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
@@ -434,6 +444,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_viz_html.py — the --html page: chart parity with the markdown report,
   JSON-embedding escape invariant, vendored-asset integrity, page defaults, appendix
   parity
+- tests/test_viz_explore.py — the --explore page: elements emission (box parents,
+  EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), the
+  same escape invariant, cytoscape-bundle integrity, CLI flag absorption
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
   cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
   T03/precedence is pinned at parse time in test_condition_grammar.py, not here).

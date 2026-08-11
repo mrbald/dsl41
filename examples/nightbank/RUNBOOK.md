@@ -327,6 +327,11 @@ variant rolls the *date*, not the day.
 - Pictures: `dsl41 viz --whole-graph <estate files> -p <props>`, or
   `dsl41 viz --html <estate files> -p <props> -o graph.html` for a
   self-contained page that renders offline in any browser.
+- Navigation: `dsl41 viz --explore <estate files> -p <props> -o lens.html`
+  — the whole estate as an interactive offline map: search a job, then
+  right-click it to see only what feeds it (fan-in/fan-out, direct or
+  tree); click any edge for its full annotation. At bank scale this is
+  the answer to "what does APAC settlement actually wait for".
 - The migration angle: `dsl41 lint`, `dsl41 report`, `dsl41 uc` all run
   on this estate — it is a full-pipeline fixture, not just a runner toy.
 

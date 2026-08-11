@@ -2407,3 +2407,96 @@
   a DOM (DOMPurify). Tests 1771 -> 1788 (fixed-scale frontmatter x4,
   vendor integrity x2, html emitter/CLI x11; nightbank acceptance
   extended in-place).
+- DL-71 viz gains --explore: an interactive cytoscape.js navigation page
+  (2026-08-11). Problem: DL-70's --html report renders faithfully but a
+  bank-scale whole-graph chart is a static hairball — the operator task
+  is "find this job, see what feeds it, hide everything else", which no
+  pre-rendered SVG can serve. Feasibility was proven on a throwaway
+  prototype against the nightbank estate (523 nodes / 420 edges / 63
+  compound boxes; ELK layered layout in 0.7 s headless Chrome; focus
+  re-layouts instant). Decisions: (1) `dsl41 viz --explore` emits ONE
+  self-contained offline page (file://, zero network — DL-70's posture),
+  a third output mode beside the report and --html. It is a navigation
+  LENS, not the artifact of record: the Markdown/HTML report keeps the
+  appendices and stays the no-silent-loss carrier; explore must still
+  surface every edge annotation via a click-details panel (node: kind,
+  schedule, command/watched path, owning box; edge: via, lookback,
+  class, mapping row, full assumption text — assumptions are never
+  truncated, mirroring the report's content policy). (2) Data path: new
+  viz_explore.py emits cytoscape elements JSON straight from
+  DerivedGraph — no Mermaid text anywhere. Nodes carry id/label/kind/
+  schedule/detail + parent from box_tree.parent (boxes = cytoscape
+  compound nodes); endpoints outside the catalog (externals "name^INST",
+  global names) synthesize EXT nodes (class `global` added when
+  via=="global"); edges carry via/lookback/cls/mapping_row/assumption
+  with cls as the style class. Pure function _elements(graph) for
+  emitter tests; to_explore_html(graph, *, title, direction) wraps it.
+  JSON embeds with the DL-70 rule (every "<" -> \u003c). (3) Vendor
+  bundle #2, built by extending scripts/vendor_mermaid.sh: esbuild IIFE
+  of cytoscape 3.33.1 (MIT) + cytoscape-elk 2.3.0 (MIT) + elkjs 0.9.3
+  (EPL-2.0, same pin as the mermaid bundle) + cytoscape-context-menus
+  4.1.0 (MIT; its CSS inlined into the template), global `cyBundle`,
+  ~1.9 MiB minified. cytoscape-elk drives elk.bundled.js on the MAIN
+  thread — no Worker, no fetch, so the offline invariant holds. Same
+  vendor invariants, same tests shape: no `</script` substring,
+  attribution banner, size floor (esbuild output is not
+  byte-reproducible). elkjs is deliberately DUPLICATED across the two
+  bundles — they are independent artifacts; a shared-chunk build couples
+  their upgrade cadence for ~500 KiB deflated, not worth it. License
+  posture unchanged: adds MIT payloads only, EPL-2.0 already discharged
+  by THIRD_PARTY_LICENSES (new source URLs appended); re-flag for the
+  same deliberate sign-off before the next PyPI release. (4) Page
+  behavior (prototype-validated): ELK layered, direction from
+  --direction (auto/LR -> RIGHT, TD -> DOWN),
+  hierarchyHandling=INCLUDE_CHILDREN, nodeDimensionsIncludeLabels; DL-35
+  visual grammar re-expressed in the cytoscape stylesheet (CMD
+  round-rect, FW diamond, BOX compound container, EXT dashed grey;
+  edges: exact solid, assumed dashed amber, redesign dotted red; labels
+  via + [lookback]). Toolbar: substring search over node names (Enter ->
+  highlight + fit; hits hidden by a previous focus are un-hidden — a
+  search that cannot find a hidden node is a lying search), show-all,
+  fit, re-layout-on-focus toggle, visible/total stats line. Node context
+  menu: select fan-in / fan-out (direct = incomers/outgoers), fan-in /
+  fan-out tree (predecessors/successors), both trees; focus this +
+  neighbours; focus = hide non-selected (keeps compound ancestors —
+  members without their box do not render) then ELK re-layout of the
+  visible subset (toggle off = fit only); hide this node; show all; fit
+  (last two also on the core menu). Prototype cleanups owed: edge labels
+  hidden below a zoom threshold (they overlap at fit zoom), drop
+  deprecated width:'label' styling, leave wheelSensitivity at default.
+  (5) Flag interactions, DL-61 style (absorb, never error): --explore
+  wins over --html if both are passed (explore IS an html page);
+  --whole-graph / --elk / --fixed-scale / --collapse-threshold /
+  --include-singletons are no-ops under --explore — the page is always
+  the whole graph, always ELK, always natural scale, boxes never
+  collapse (navigation replaces collapsing), singletons always present
+  (search must find them); --direction maps per (4); -o recommended in
+  help (~2 MiB page), stdout allowed, exit codes unchanged.
+  (6) Verification posture as DL-70: emitter tests pin elements JSON
+  (parent mapping, EXT synthesis, edge classes, escaping), CLI tests pin
+  flag absorption + -o, vendor tests pin the invariants, nightbank
+  acceptance extends in-place; only a browser verifies render/menu/
+  focus feel — the prototype's playwright-over-installed-Chrome smoke
+  (throwaway venv, channel="chrome") is the recorded dev technique, not
+  a test dependency. Implementation landed as specced; the dev smoke
+  re-ran green against the emitted bank-estate page (523/420/63, ELK
+  0.7 s, menu/focus/search/details verified, zero console errors, zero
+  network requests). An adversarial review pass hardened the unit:
+  edge ids prefix away from the shared cytoscape id namespace (a job
+  named "e0" would have silently swallowed an edge at init -- no-silent-
+  loss), template substitution became single-pass in BOTH html emitters
+  (chained .replace() let a marker-shaped job/file name splice the
+  vendor bundle into the embedded JSON and kill the page -- latent in
+  DL-70 too), menu item ids no longer duplicate toolbar DOM ids, the
+  vendor script's `! grep` invariants became real gates (POSIX errexit
+  exempts `!` pipelines) and the CSS drift check diffs the whole
+  normalized block instead of grepping lines. Tests 1791 -> 1811
+  (vendor integrity x1, elements emitter x9, page x6, CLI x3,
+  determinism-across-hash-seeds x1; marker-injection regression added
+  to test_viz_html.py; nightbank acceptance extended in-place).
+  Deliberately NOT done: expand/collapse of compound
+  boxes (cytoscape-expand-collapse drags in an undo stack; revisit here
+  if bank-scale boxes drown the canvas), minimap (cytoscape-navigator),
+  dark theme, view-state persistence, regex search, replacing the
+  mermaid report (both stay: report = record, explore = lens), CDN or
+  --js-dir variants (offline is the point).
