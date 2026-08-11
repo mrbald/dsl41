@@ -1,9 +1,10 @@
 Third-party licenses for vendored browser assets
 ================================================
 
-dsl41 vendors two JavaScript payloads under src/dsl41/_vendor/ and copies
-them verbatim into every HTML page emitted by `dsl41 viz --html` (so the
-page renders offline, with no network access). Nothing below is linked
+dsl41 vendors three JavaScript payloads under src/dsl41/_vendor/ and copies
+them verbatim into the HTML pages emitted by `dsl41 viz --html` (mermaid +
+layout-elk payloads) and `dsl41 viz --explore` (cytoscape payload), so the
+pages render offline, with no network access. Nothing below is linked
 with or derived from dsl41's own AGPL-3.0-only Python code; it is
 aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
 
@@ -24,11 +25,34 @@ aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
    Source: https://github.com/kieler/elkjs
            https://registry.npmjs.org/elkjs/-/elkjs-0.9.3.tgz
    Bundled inside: src/dsl41/_vendor/mermaid-layout-elk.iife.min.js
+   and src/dsl41/_vendor/cytoscape-explore.iife.min.js (deliberately
+   duplicated -- the two bundles are independent artifacts, DL-71).
    Per EPL-2.0 section 3.2, the corresponding source is available at the
    URLs above.
 
+4. cytoscape 3.33.1 -- MIT
+   Copyright (c) 2016-2025, The Cytoscape Consortium.
+   Source: https://github.com/cytoscape/cytoscape.js
+           https://registry.npmjs.org/cytoscape/-/cytoscape-3.33.1.tgz
+   Vendored (bundled) into: src/dsl41/_vendor/cytoscape-explore.iife.min.js
+
+5. cytoscape-elk 2.3.0 -- MIT
+   Copyright (c) 2016-2018, 2020, The Cytoscape Consortium.
+   Source: https://github.com/cytoscape/cytoscape.js-elk
+           https://registry.npmjs.org/cytoscape-elk/-/cytoscape-elk-2.3.0.tgz
+   Vendored (bundled) into: src/dsl41/_vendor/cytoscape-explore.iife.min.js
+
+6. cytoscape-context-menus 4.1.0 -- MIT
+   Copyright (c) 2019 iVis-at-Bilkent
+   Source: https://github.com/iVis-at-Bilkent/cytoscape.js-context-menus
+           https://registry.npmjs.org/cytoscape-context-menus/-/cytoscape-context-menus-4.1.0.tgz
+   Vendored (bundled) into: src/dsl41/_vendor/cytoscape-explore.iife.min.js
+   (its stylesheet is inlined in the emitted page's <style> block)
+
 ----------------------------------------------------------------------
-The MIT License (mermaid 11.16.1 and @mermaid-js/layout-elk 0.2.2)
+The MIT License (mermaid 11.16.1, @mermaid-js/layout-elk 0.2.2,
+cytoscape 3.33.1, cytoscape-elk 2.3.0, cytoscape-context-menus 4.1.0;
+per-package copyright lines above)
 ----------------------------------------------------------------------
 
 The MIT License (MIT)
