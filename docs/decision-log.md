@@ -2775,7 +2775,9 @@
   standing in for a deleted mode is exactly the residue this unit exists to
   remove — and passing the two flags together gets its own refusal naming
   the removal, since routing that user to `--format chart` or `--format
-  html` would hand them something else without saying so. The three
+  html` would hand them something else without saying so. That deletion is
+  superseded by DL-76, which restores the mode as `--format html-chart`.
+  The three
   booleans otherwise survive as hidden options for one purpose only —
   passing one exits 2 naming its replacement, which beats a bare "no such
   option" for anyone with the old command in a script. (2) The rule for the
@@ -2856,3 +2858,57 @@
   tripped and not-tripped over tiny synthesised trees, plus two deliberate
   assertions on the real tree (the IR-F schema pin still matches, and the
   citation index still parses into its namespace rows).
+- DL-76 the single-chart offline page returns as `--format html-chart`
+  (2026-08-12). Supersedes DL-75(1)'s deletion. Problem: DL-75 collapsed
+  three viz mode booleans into one exclusive enum, which was right, and in
+  the same move deleted the outcome `--html --whole-graph` composed —
+  counting the old surface as four modes when it was five. The mode was not
+  an accident of the flag matrix: DL-70(4) chose it deliberately and wrote
+  down why ("--whole-graph composes into a single-chart page (legend kept —
+  an HTML page is a terminal artifact, unlike the pipeable bare chart)").
+  A capability with a recorded design rationale should not fall out of a
+  surface refactor, and `--format explore`, which the refusal pointed at,
+  answers a different question: the operator who wants ONE picture of the
+  estate to open, print or attach is not the operator who wants to navigate
+  it. Decisions: (1) It comes back as a fifth enum VALUE, `html-chart`, and
+  never as a flag combination — the exclusivity DL-75 made structural is
+  the part that must survive, and it does: typer still rejects a sixth
+  value, there is still no precedence rule, and no boolean is un-hidden.
+  (2) `to_html`'s deleted `whole_graph` branch is restored from git rather
+  than rewritten, and adapted to DL-73's `(catalog, graph)` signature. It
+  does NOT come back as a mode parameter on `to_html`: the page shell both
+  emitters share (header, legend chart, chart JSON, vendor payloads) is now
+  `_page`, and the single-chart page is its own function `to_html_chart`.
+  A bool selecting between two bodies inside the emitter is the same shape
+  DL-75 removed from the CLI, and keeping the report body at its own
+  indentation left every one of its lines byte-identical. `to_html` shrank
+  165 -> 148 lines as a side effect. (3) Shaping-flag verdicts, by DL-75's
+  rule (refuse only what the format cannot deliver): this format delivers
+  all five, so it refuses NOTHING. `--collapse-threshold` and `--direction`
+  are passed to `to_mermaid` and shape the chart; `--elk` and
+  `--fixed-scale` are page defaults set by `mermaid.initialize`
+  (`layout: "elk"`, `useMaxWidth: false`) exactly as under `--format html`;
+  `--include-singletons` asks for standalone jobs that `to_mermaid` renders
+  unconditionally — the whole-graph chart has no appendix to drop them to,
+  which is the same reason `--format chart` accepts it silently. (4) The
+  `--html --whole-graph` refusal stays a special case of
+  `_refuse_removed_viz_flags`, because the generic loop would send its user
+  to `--format html` AND `--format chart`, neither of which emits this
+  page; it now names `--format html-chart` instead of announcing a removal.
+  Verification: `viz --format html-chart` over the whole lowerable corpus is
+  byte-identical to `viz --html --whole-graph` run from the branch point,
+  except the provenance comment DL-75 already moved
+  (`dsl41 viz --html` -> `dsl41 viz --format html`, 12 bytes over a 5.1 MB
+  page) — that comment is left naming the format family, as it did before,
+  rather than editing the shared template and moving the `--format html`
+  capture with it. Tests 1845 -> 1854 (five emitter, four CLI; the refusal
+  test was renamed, not added). The gate's size ratchet was re-blessed for
+  two entries and the reason is here rather than in a silent baseline diff:
+  a fifth format costs cli.py 16 lines (1576 -> 1592, already over the
+  advisory 1200 before this unit) and takes `viz` to 124 lines, over the
+  120 advisory. Splitting `viz` was weighed and declined — 55 of those
+  lines are typer option declarations, and the only extraction available
+  is an eight-parameter dispatch helper that would have to import the
+  emitter types at module level, defeating the lazy imports the CLI keeps
+  for startup time. Taste is not a build failure (DL-75(4)); a
+  nine-parameter pass-through would be a real one.

@@ -1,4 +1,5 @@
-"""Self-contained HTML report of the derived graph (DL-70).
+"""Self-contained HTML pages of the derived graph (DL-70): to_html is the
+whole report, to_html_chart the whole graph as one chart (DL-76).
 
 Same content as viz.to_markdown -- both emitters format one ReportContent,
 so nothing the Markdown report says can go missing here (no-silent-loss).
@@ -45,6 +46,7 @@ from dsl41.viz import (
     job_kind,
     job_schedule,
     report_content,
+    to_mermaid,
 )
 
 
@@ -98,6 +100,77 @@ def _viewport(chart_id: str) -> str:
     )
 
 
+def _page(
+    *,
+    title: str,
+    summary: str,
+    charts: list[dict[str, str]],
+    toc: list[str],
+    sections: list[str],
+    tables: list[str],
+) -> str:
+    """The shell both pages share (DL-76): header, legend chart, chart JSON,
+    vendor payloads. Splitting it out is what lets the two emitters below be
+    two functions rather than one with a mode flag -- the shape DL-75 is
+    about."""
+    toc_html = '<nav class="toc"><ol>\n' + "\n".join(toc) + "\n</ol></nav>" if toc else ""
+    payload = json.dumps({"charts": charts}).replace("<", "\\u003c")
+
+    package = files("dsl41")
+    template = (package / "templates" / "viz_report.html").read_text(encoding="utf-8")
+    return substitute(
+        template,
+        {
+            "__DSL41_TITLE__": _text(title),
+            "__DSL41_SUMMARY__": _text(summary),
+            "__DSL41_LEGEND_PROSE__": _text(LEGEND_PROSE.rstrip("\n")),
+            "__DSL41_TOC__": toc_html,
+            "__DSL41_SECTIONS__": "\n".join(sections),
+            "__DSL41_TABLES__": "\n".join(tables),
+            "__DSL41_CHART_JSON__": payload,
+            "__DSL41_MERMAID_JS__": (package / "_vendor" / "mermaid.min.js").read_text(
+                encoding="utf-8"
+            ),
+            "__DSL41_ELK_JS__": (
+                package / "_vendor" / "mermaid-layout-elk.iife.min.js"
+            ).read_text(encoding="utf-8"),
+        },
+    )
+
+
+def to_html_chart(
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
+    *,
+    title: str = "catalog",
+    collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
+    direction: Direction | Literal["auto"] = "auto",
+) -> str:
+    """The whole graph as ONE chart in the same offline page (DL-70(4),
+    restored by DL-76 as --format html-chart). No toc and no appendices --
+    a single chart has nothing to index -- but the legend stays: an HTML
+    page is a terminal artifact, unlike the pipeable bare chart."""
+    if graph is None:
+        graph = derive_graph(catalog)
+    body = to_mermaid(
+        catalog,
+        graph,
+        collapse_threshold=collapse_threshold,
+        direction="LR" if direction == "auto" else direction,
+    )
+    return _page(
+        title=title,
+        summary=f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(graph.edges)} edges",
+        charts=[
+            {"el": "c0", "src": LEGEND_CHART.rstrip("\n")},
+            {"el": "c1", "src": body.rstrip("\n")},
+        ],
+        toc=[],
+        sections=[f'<section id="whole">\n{_viewport("c1")}\n</section>'],
+        tables=[],
+    )
+
+
 def to_html(
     catalog: CatalogIR,
     graph: DerivedGraph | None = None,
@@ -108,9 +181,7 @@ def to_html(
     include_singletons: bool = False,
 ) -> str:
     """One self-contained HTML page with report parity: summary, legend,
-    charts, locks, appendices. The single-chart variant DL-70(4) composed
-    from --whole-graph went with that flag (DL-75) -- --format explore is
-    the whole graph in one offline page now."""
+    charts, locks, appendices."""
     if graph is None:
         graph = derive_graph(catalog)
     charts: list[dict[str, str]] = [{"el": "c0", "src": LEGEND_CHART.rstrip("\n")}]
@@ -240,26 +311,11 @@ def to_html(
         f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>'
     )
 
-    toc_html = '<nav class="toc"><ol>\n' + "\n".join(toc) + "\n</ol></nav>" if toc else ""
-    payload = json.dumps({"charts": charts}).replace("<", "\\u003c")
-
-    package = files("dsl41")
-    template = (package / "templates" / "viz_report.html").read_text(encoding="utf-8")
-    return substitute(
-        template,
-        {
-            "__DSL41_TITLE__": _text(title),
-            "__DSL41_SUMMARY__": _text(summary),
-            "__DSL41_LEGEND_PROSE__": _text(LEGEND_PROSE.rstrip("\n")),
-            "__DSL41_TOC__": toc_html,
-            "__DSL41_SECTIONS__": "\n".join(sections),
-            "__DSL41_TABLES__": "\n".join(tables),
-            "__DSL41_CHART_JSON__": payload,
-            "__DSL41_MERMAID_JS__": (package / "_vendor" / "mermaid.min.js").read_text(
-                encoding="utf-8"
-            ),
-            "__DSL41_ELK_JS__": (
-                package / "_vendor" / "mermaid-layout-elk.iife.min.js"
-            ).read_text(encoding="utf-8"),
-        },
+    return _page(
+        title=title,
+        summary=summary,
+        charts=charts,
+        toc=toc,
+        sections=sections,
+        tables=tables,
     )

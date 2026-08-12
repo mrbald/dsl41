@@ -87,11 +87,12 @@ dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores
 dsl41 viz --elk --fixed-scale jobs.jil     # uniform chart scale (no fit-to-width)
 dsl41 viz --format chart jobs.jil          # one bare Mermaid chart, no report
 dsl41 viz --format html jobs.jil -o graph.html     # self-contained page, offline
+dsl41 viz --format html-chart jobs.jil -o chart.html  # that chart as a page
 dsl41 viz --format explore jobs.jil -o lens.html   # navigation page, offline
 ```
 
-`--format` picks one of four exclusive outputs — `report` (the default),
-`chart`, `html`, `explore` (DL-75). The shaping options
+`--format` picks one of five exclusive outputs — `report` (the default),
+`chart`, `html`, `html-chart`, `explore` (DL-75, DL-76). The shaping options
 (`--collapse-threshold`, `--direction`, `--include-singletons`, `--elk`,
 `--fixed-scale`) apply wherever the chosen format can deliver their effect,
 and exit 2 naming the reason where it cannot.
@@ -111,7 +112,10 @@ skips the report and emits the entire estate as one bare Mermaid chart,
 ready for mermaid-cli or a live editor. `--format html` writes the whole
 report as one self-contained page (~5 MB: mermaid + ELK are embedded — see
 THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
-pan/zoom, offline, straight from `file://`. `--format explore` writes a
+pan/zoom, offline, straight from `file://`. `--format html-chart` writes
+that same page holding the whole-graph chart alone, with the legend and
+without the appendices — the terminal-artifact counterpart to `chart`,
+which is bare pipeable text. `--format explore` writes a
 different kind of page (~2 MB: cytoscape + ELK embedded): the whole graph as an
 interactive map — substring search, click for full edge annotations, and a
 right-click menu that focuses a job's fan-in/fan-out (direct, tree, or
@@ -360,7 +364,8 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   threshold, appendices for everything that the charts omit
 - src/dsl41/viz_html.py — the same report content as one self-contained offline HTML
   page (DL-70): vendored mermaid + ELK from src/dsl41/_vendor/, uniform chart scale,
-  progressive in-browser rendering with pan/zoom
+  progressive in-browser rendering with pan/zoom; the same page around the whole-graph
+  chart alone is --format html-chart (DL-76)
 - src/dsl41/viz_explore.py — IR-F + IR-G -> cytoscape.js elements for the interactive
   navigation page (DL-71): compound-node box tree, EXT-node synthesis, edge
   annotations in a click-details panel, ELK layout + focus/search in the browser
@@ -481,7 +486,8 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the viz CLI
 - tests/test_viz_html.py — the --format html page: chart parity with the markdown report,
   JSON-embedding escape invariant, vendored-asset integrity, page defaults, appendix
-  parity
+  parity; plus the --format html-chart single-chart page (DL-76) and the shaping
+  flags it delivers
 - tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
   EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), the
   same escape invariant, cytoscape-bundle integrity, CLI flag absorption

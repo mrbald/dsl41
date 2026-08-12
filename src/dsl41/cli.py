@@ -602,27 +602,30 @@ def resolve(
 
 
 class VizFormat(str, Enum):
-    """The four viz outputs, exclusive by construction (DL-75). They used to
-    be three booleans -- eight combinations for four modes, plus a precedence
-    rule (--explore beat --html) and per-flag prose about what each nullified."""
+    """The five viz outputs, exclusive by construction (DL-75). They used to
+    be three booleans -- eight combinations for five modes, plus a precedence
+    rule (--explore beat --html) and per-flag prose about what each nullified.
+    html-chart is the mode DL-75 miscounted away and DL-76 brought back; it
+    returns as a value here, never as a flag combination."""
 
     report = "report"
     chart = "chart"
     html = "html"
+    html_chart = "html-chart"
     explore = "explore"
 
 
 def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> None:
     """DL-75: the three mode booleans are gone. Naming the replacement beats
     a bare "no such option" for anyone with the old command in a script --
-    and the one combination that has no replacement (DL-70(4)'s
-    --html --whole-graph single-chart page, deleted, not renamed) says so
-    itself rather than pointing at two formats that emit something else."""
+    and the one COMBINATION that named a mode of its own (DL-70(4)'s
+    --html --whole-graph single-chart page) gets its own line, because the
+    generic loop below would send its user to two formats that emit
+    something else."""
     if whole_graph and html:
         typer.echo(
-            "--html --whole-graph (the single-chart offline page, DL-70) was removed,"
-            " not renamed: use --format explore for the whole graph in one offline"
-            " page, or --format chart for the bare chart (DL-75)",
+            "--html --whole-graph (the single-chart offline page, DL-70) was replaced"
+            " by --format html-chart (DL-76)",
             err=True,
         )
         raise typer.Exit(2)
@@ -646,7 +649,10 @@ def _refuse_undeliverable_viz_flags(*, collapse_threshold: int | None, fixed_sca
     deliver its effect -- refusing one the user is getting anyway teaches
     nothing except to distrust the refusals. --elk/--fixed-scale stay silent
     under --format html, which already lays its charts out with ELK at
-    natural scale; --format explore passes that same test for --elk and
+    natural scale; --format html-chart clears all five (same page defaults,
+    and its one chart is to_mermaid's whole graph, so --collapse-threshold
+    shapes it and every standalone job is on it already -- DL-76);
+    --format explore passes that same test for --elk and
     --include-singletons (it always lays out with ELK, and always carries
     every standalone job -- search must find them). The two it cannot honor
     are below."""
@@ -688,8 +694,11 @@ def viz(
         "included, --direction auto meaning LR (DL-61). "
         "html: one self-contained offline page, charts rendering in-browser "
         "with ELK layout at natural scale, ~5 MB of embedded JavaScript (DL-70). "
+        "html-chart: that same offline page holding the whole-graph chart alone "
+        "-- the terminal-artifact counterpart to chart, which is bare pipeable "
+        "Mermaid text (DL-70, DL-76). "
         "explore: one self-contained interactive navigation page, ~2 MB of "
-        "embedded JavaScript (DL-71). -o is recommended for html and explore.",
+        "embedded JavaScript (DL-71). -o is recommended for every page format.",
     ),
     collapse_threshold: int = typer.Option(
         None,
@@ -728,7 +737,7 @@ def viz(
     html: bool = typer.Option(False, "--html", hidden=True),
     explore: bool = typer.Option(False, "--explore", hidden=True),
 ) -> None:
-    """Render FILES' derived dependency graph in one of four exclusive
+    """Render FILES' derived dependency graph in one of five exclusive
     formats -- see --format. The shaping options (--collapse-threshold,
     --direction, --include-singletons, --elk, --fixed-scale) apply wherever
     the chosen format can deliver their effect, and are refused where it
@@ -764,6 +773,15 @@ def viz(
             collapse_threshold=threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
+        )
+    elif output_format is VizFormat.html_chart:
+        from dsl41.viz_html import to_html_chart
+
+        report = to_html_chart(
+            catalog,
+            title=title,
+            collapse_threshold=threshold,
+            direction=direction,  # type: ignore[arg-type]  # validated above
         )
     elif output_format is VizFormat.chart:
         report = to_mermaid(

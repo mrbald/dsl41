@@ -326,7 +326,9 @@ variant rolls the *date*, not the day.
   adapters — see tests/test_nightbank_example.py for a scenario).
 - Pictures: `dsl41 viz --format chart <estate files> -p <props>`, or
   `dsl41 viz --format html <estate files> -p <props> -o graph.html` for a
-  self-contained page that renders offline in any browser.
+  self-contained page that renders offline in any browser —
+  `--format html-chart` for that page holding the whole estate as one
+  chart instead of the per-workflow report.
 - Navigation: `dsl41 viz --format explore <estate files> -p <props> -o lens.html`
   — the whole estate as an interactive offline map: search a job, then
   right-click it to see only what feeds it (fan-in/fan-out, direct or

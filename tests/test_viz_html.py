@@ -27,8 +27,8 @@ from test_viz import (
 )
 
 from dsl41.cli import app
-from dsl41.viz import to_markdown
-from dsl41.viz_html import to_html
+from dsl41.viz import LEGEND_PROSE, to_markdown, to_mermaid
+from dsl41.viz_html import to_html, to_html_chart
 
 # mermaid.min.js is copied byte-exact from the npm tarball, so a full pin is
 # stable; the esbuild-built elk bundle is not byte-reproducible across esbuild
@@ -167,19 +167,66 @@ def test_to_html_is_deterministic() -> None:
     assert to_html(catalog) == to_html(catalog)
 
 
+# ------------------------------------------------------------ the single-chart page
+
+
+def test_to_html_chart_is_one_whole_graph_chart_beside_the_legend() -> None:
+    # DL-70(4), restored by DL-76: the page holds the legend chart and the
+    # whole graph, and nothing the report's structure needs (toc, sections
+    # per workflow, appendices) -- one chart has nothing to index.
+    catalog = corpus_catalog()
+    page = to_html_chart(catalog)
+    assert [c["el"] for c in _charts(page)] == ["c0", "c1"]
+    assert '<section id="whole">' in page
+    assert '<nav class="toc">' not in page
+    assert '<section id="appendix-a">' not in page
+    # the legend survives: an HTML page is a terminal artifact (DL-70(4))
+    assert '<details class="legend">' in page
+    assert LEGEND_PROSE.split("\n")[0] in page
+
+
+def test_to_html_chart_embeds_the_bare_chart_verbatim() -> None:
+    # same chart --format chart pipes out, minus the frontmatter the page
+    # config replaces (layout/useMaxWidth come from mermaid.initialize)
+    catalog = corpus_catalog()
+    body = _charts(to_html_chart(catalog))[1]["src"]
+    assert body == to_mermaid(catalog, direction="LR").rstrip("\n")
+    assert not body.startswith("---")
+
+
+def test_to_html_chart_summary_counts_the_whole_graph() -> None:
+    catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
+    assert "1 jobs \N{MIDDLE DOT} 0 edges" in to_html_chart(catalog)
+
+
+def test_to_html_chart_collapse_threshold_reaches_the_chart() -> None:
+    catalog = catalog_of((CORPUS_DIR / "sem10_box_basic.jil").read_text(encoding="utf-8"))
+    page = to_html_chart(catalog, collapse_threshold=1)
+    assert "box_a (2 members)" in _charts(page)[1]["src"]
+
+
+def test_to_html_chart_is_deterministic() -> None:
+    catalog = corpus_catalog()
+    assert to_html_chart(catalog) == to_html_chart(catalog)
+
+
 # --------------------------------------------------------------------------- CLI
 
 
-def test_cli_viz_names_the_deleted_single_chart_page() -> None:
-    # DL-75: --html --whole-graph composed a single-chart page (DL-70(4)).
-    # The enum has no spelling for it and the mode is gone, so the refusal
-    # says that instead of naming two formats that emit something else.
+def test_cli_viz_names_the_format_that_replaced_the_flag_pair() -> None:
+    # DL-75 deleted DL-70(4)'s single-chart page on a miscount of the old
+    # surface; DL-76 restored it as --format html-chart. The combination
+    # still gets its own refusal line, now naming that one format instead
+    # of two that emit something else.
     result = runner.invoke(
         app, ["viz", "--html", "--whole-graph", str(CORPUS_DIR / "sem10_box_basic.jil")]
     )
     assert result.exit_code == 2
-    assert "--html --whole-graph (the single-chart offline page, DL-70) was removed" in result.stderr
-    assert "--format explore" in result.stderr
+    assert (
+        "--html --whole-graph (the single-chart offline page, DL-70) was replaced"
+        " by --format html-chart" in result.stderr
+    )
+    assert "--format explore" not in result.stderr
 
 
 def test_cli_viz_html_writes_out_file(tmp_path: Path) -> None:
@@ -230,6 +277,82 @@ def test_cli_viz_html_shaping_flags_reach_the_charts() -> None:
             "viz",
             "--format",
             "html",
+            "--collapse-threshold",
+            "1",
+            "--direction",
+            "TD",
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "box_a (2 members)" in result.stdout  # threshold 1 collapsed the box
+    assert "flowchart TD" in result.stdout
+
+
+def test_cli_viz_html_chart_writes_out_file(tmp_path: Path) -> None:
+    target = tmp_path / "chart.html"
+    result = runner.invoke(
+        app,
+        [
+            "viz",
+            "--format",
+            "html-chart",
+            "--out",
+            str(target),
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
+    )
+    assert result.exit_code == 0
+    page = target.read_text(encoding="utf-8")
+    assert page.startswith("<!doctype html>")
+    assert '<section id="whole">' in page  # the single chart...
+    assert '<details class="legend">' in page  # ...and the legend beside it (DL-70(4))
+    assert target.stat().st_size > 4_000_000  # the vendor payloads really embedded
+    assert "wrote" in result.stdout
+
+
+def test_cli_viz_html_chart_stdout_is_the_single_chart_page() -> None:
+    result = runner.invoke(
+        app, ["viz", "--format", "html-chart", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 0
+    assert result.stdout.startswith("<!doctype html>")
+    assert 'id="chart-data"' in result.stdout  # the DL-70 page...
+    assert '<section id="whole">' in result.stdout  # ...with one chart, no appendices
+    assert '<section id="appendix-a">' not in result.stdout
+
+
+def test_cli_viz_html_chart_accepts_every_shaping_flag(tmp_path: Path) -> None:
+    # DL-76: refuse only what the format cannot deliver, and this one
+    # delivers all five. --elk/--fixed-scale are page defaults (as under
+    # --format html), --collapse-threshold and --direction reach to_mermaid,
+    # and its whole-graph chart carries every standalone job already -- so
+    # --include-singletons asks for what is there. No refusal, no exit 2.
+    jil = tmp_path / "solo.jil"
+    jil.write_text(
+        "insert_job: box_a\njob_type: b\n\n"
+        "insert_job: job_a\nbox_name: box_a\njob_type: c\n"
+        "command: sleep 1\nmachine: machine1\n\n"
+        "insert_job: solo\njob_type: c\ncommand: sleep 2\nmachine: machine1\n",
+        encoding="utf-8",
+    )
+    plain = runner.invoke(app, ["viz", "--format", "html-chart", str(jil)])
+    assert plain.exit_code == 0
+    assert '"solo"' in _charts(plain.stdout)[1]["src"]  # --include-singletons: there anyway
+    for argv in (["--elk"], ["--fixed-scale"], ["--include-singletons"]):
+        result = runner.invoke(app, ["viz", "--format", "html-chart", *argv, str(jil)])
+        assert result.exit_code == 0, (argv, result.stderr)
+        assert result.stderr == ""
+        assert result.stdout == plain.stdout  # accepted, and the page is unchanged
+
+
+def test_cli_viz_html_chart_shaping_flags_reach_the_chart() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "viz",
+            "--format",
+            "html-chart",
             "--collapse-threshold",
             "1",
             "--direction",
