@@ -14,6 +14,12 @@
 #                                  thread -- no Worker, no fetch)
 #   cytoscape-context-menus 4.1.0 (MIT; its CSS is inlined in
 #                                  templates/viz_explore.html, not vendored)
+#   @ungap/custom-elements 1.3.0  (ISC; dist min.js copied byte-exact. The
+#                                  context-menus plugin builds its menu from
+#                                  CUSTOMIZED BUILT-IN elements, which WebKit
+#                                  has never implemented -- the explore page
+#                                  loads this before the cytoscape bundle so
+#                                  Safari gets a working menu, DL-77)
 #   esbuild 0.28.2                (build tool only, nothing of it ships)
 #
 # Both non-mermaid payloads are built, not copied: the upstream packages
@@ -34,13 +40,17 @@ cd "$work"
 npm install --no-save --no-audit --no-fund \
     mermaid@11.16.1 @mermaid-js/layout-elk@0.2.2 elkjs@0.9.3 \
     cytoscape@3.33.1 cytoscape-elk@2.3.0 cytoscape-context-menus@4.1.0 \
-    esbuild@0.28.2
+    @ungap/custom-elements@1.3.0 esbuild@0.28.2
 
 banner='/*! @mermaid-js/layout-elk 0.2.2 (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
 banner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
 banner+=' in the dsl41 distribution for full texts and source URLs. */'
 
 cp node_modules/mermaid/dist/mermaid.min.js "$vendor/mermaid.min.js"
+# byte-exact npm copy like mermaid's -- pinned by sha256 in tests, not a size
+# floor; it is a classic script already (the package's unpkg entry), so nothing
+# to build.
+cp node_modules/@ungap/custom-elements/min.js "$vendor/custom-elements.min.js"
 npx esbuild @mermaid-js/layout-elk --bundle --format=iife \
     --global-name=elkLayouts --minify --legal-comments=inline \
     --banner:js="$banner" \
@@ -87,7 +97,8 @@ diff <(normalize template-css.txt) \
 # </script anywhere) and the attribution banners are present. Explicit
 # gates: under set -e a bare '! grep' never fails the script (POSIX
 # errexit exempts '!' pipelines -- review finding).
-for payload in mermaid.min.js mermaid-layout-elk.iife.min.js cytoscape-explore.iife.min.js; do
+for payload in mermaid.min.js mermaid-layout-elk.iife.min.js \
+               cytoscape-explore.iife.min.js custom-elements.min.js; do
     if grep -q '</script' "$vendor/$payload"; then
         echo "$payload contains </script -- not inline-safe" >&2
         exit 1
@@ -96,6 +107,8 @@ done
 grep -q 'EPL-2.0' "$vendor/mermaid-layout-elk.iife.min.js"
 grep -q 'EPL-2.0' "$vendor/cytoscape-explore.iife.min.js"
 grep -q 'var cyBundle' "$vendor/cytoscape-explore.iife.min.js"
+# upstream's own banner is the attribution here (nothing of ours is prepended)
+grep -q 'ISC' "$vendor/custom-elements.min.js"
 
 ls -l "$vendor"
 shasum -a 256 "$vendor"/*.js

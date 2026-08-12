@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Explore: __DSL41_TITLE__</title>
 <!-- Self-contained page emitted by `dsl41 viz --format explore`. Embeds
-     cytoscape 3.33.1 (MIT), cytoscape-elk 2.3.0 (MIT), cytoscape-context-menus 4.1.0
-     (MIT), elkjs 0.9.3 (EPL-2.0); full texts and source URLs in
-     THIRD_PARTY_LICENSES of the dsl41 distribution. Renders offline: no
-     network access. -->
+     @ungap/custom-elements 1.3.0 (ISC), cytoscape 3.33.1 (MIT), cytoscape-elk
+     2.3.0 (MIT), cytoscape-context-menus 4.1.0 (MIT), elkjs 0.9.3 (EPL-2.0);
+     full texts and source URLs in THIRD_PARTY_LICENSES of the dsl41
+     distribution. Renders offline: no network access. -->
 <style>
   html, body { height: 100%; }
   body { margin: 0; display: flex; flex-direction: column;
@@ -132,6 +132,13 @@
     <table><tbody id="d-rows"></tbody></table>
   </aside>
 </div>
+<!-- customElements polyfill FIRST: cytoscape-context-menus builds its menu
+     from customized built-in elements (class extends HTMLDivElement +
+     customElements.define(..., {extends: "div"})), which WebKit has never
+     implemented -- without this, `cy.contextMenus` throws "Illegal
+     constructor" in Safari. The polyfill feature-detects and is inert where
+     the browser is native (DL-77). -->
+<script>__DSL41_CUSTOM_ELEMENTS_JS__</script>
 <script>__DSL41_CYTOSCAPE_JS__</script>
 <script id="graph-data" type="application/json">__DSL41_ELEMENTS_JSON__</script>
 <script>
@@ -143,6 +150,9 @@ var cytoscape = cyBundle.default;
 
 var DIRECTION = "__DSL41_ELK_DIRECTION__";
 var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
+/* Orthogonal edge routing along ELK's layering axis: a bezier between node
+   centres reads as a spline tangle and hides the layers ELK just computed. */
+var TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal";
 
 function elkLayout(extra) {
   var opts = {
@@ -208,7 +218,10 @@ var cy = cytoscape({
         "font-weight": "bold"
     } },
     { selector: "edge", style: {
-        "curve-style": "bezier",
+        "curve-style": "taxi",
+        "taxi-direction": TAXI_DIRECTION,
+        "taxi-turn": "50%",
+        "taxi-turn-min-distance": 8,
         width: 1.5,
         "line-color": "#4b5563",
         "target-arrow-shape": "triangle",
@@ -221,6 +234,9 @@ var cy = cytoscape({
         "text-background-color": "#ffffff",
         "text-background-opacity": 0.8,
         "text-background-padding": "1px"
+    } },
+    { selector: "edge.nesting", style: {  /* member <-> its own box: see below */
+        "curve-style": "bezier"
     } },
     { selector: "edge.assumed", style: {
         "line-style": "dashed",
@@ -250,13 +266,29 @@ var cy = cytoscape({
   ]
 });
 
+/* An edge between a node and one of its own ancestors has overlapping
+   endpoints -- taxi routing cannot draw it at all ("invalid endpoints"), and
+   the dependency would just vanish from the picture. Ancestry is fixed for
+   the life of the page, so classify once and let those few keep the bezier. */
+cy.edges().forEach(function (edge) {
+  var src = edge.source(), dst = edge.target();
+  if (src.ancestors().anySame(dst) || dst.ancestors().anySame(src)) {
+    edge.addClass("nesting");
+  }
+});
+
 var stats = document.getElementById("stats");
 var relayoutToggle = document.getElementById("relayout");
+
+/* A control this browser could not give us, named for the operator: every
+   updateStats keeps it, so a degraded page never looks like a whole one. */
+var lostFeature = "";
 
 function updateStats(suffix) {
   var vn = cy.nodes(":visible").length, ve = cy.edges(":visible").length;
   stats.textContent = "visible " + vn + " / " + cy.nodes().length + " nodes · "
-    + ve + " / " + cy.edges().length + " edges" + (suffix ? " · " + suffix : "");
+    + ve + " / " + cy.edges().length + " edges" + (suffix ? " · " + suffix : "")
+    + lostFeature;
 }
 
 /* Edge labels overlap at fit zoom on a bank-scale graph: hide them below
@@ -360,52 +392,6 @@ cy.on("tap", function (evt) {
   if (evt.target === cy) details.hidden = true;
 });
 
-/* ------------------------------------------------------------- context menu */
-
-function target(evt) { return evt.target || evt.cyTarget; }
-
-cy.contextMenus({
-  menuItems: [
-    { id: "fan-in", content: "focus fan-in (direct)", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt); focusOn(n.union(n.incomers("node")));
-      } },
-    { id: "fan-out", content: "focus fan-out (direct)", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt); focusOn(n.union(n.outgoers("node")));
-      } },
-    { id: "fan-in-tree", content: "focus fan-in tree", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt); focusOn(n.union(n.predecessors("node")));
-      } },
-    { id: "fan-out-tree", content: "focus fan-out tree", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt); focusOn(n.union(n.successors("node")));
-      } },
-    { id: "both-trees", content: "focus both trees", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt);
-        focusOn(n.union(n.predecessors("node")).union(n.successors("node")));
-      } },
-    { id: "neighbours", content: "focus this + neighbours", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt); focusOn(n.union(n.neighborhood("node")));
-      }, hasTrailingDivider: true },
-    { id: "hide", content: "hide this node", selector: "node",
-      onClickFunction: function (evt) {
-        var n = target(evt);
-        n.union(n.descendants()).addClass("hidden");
-        updateStats();
-      }, hasTrailingDivider: true },
-    /* item ids become DOM ids of the menu entries -- keep them distinct
-       from the toolbar's #show-all/#fit (review finding: duplicate ids) */
-    { id: "menu-show-all", content: "show all", selector: "node",
-      coreAsWell: true, onClickFunction: showAll },
-    { id: "menu-fit", content: "fit", selector: "node", coreAsWell: true,
-      onClickFunction: function () { cy.fit(cy.nodes(":visible"), 40); } }
-  ]
-});
-
 /* ----------------------------------------------------------------- toolbar */
 
 document.getElementById("show-all").addEventListener("click", showAll);
@@ -443,6 +429,65 @@ initial.on("layoutstop", function () {
   updateStats();
 });
 initial.run();
+
+/* ------------------------------------------------------------- context menu */
+
+/* LAST, and guarded: cytoscape-context-menus is the one OPTIONAL part of the
+   page, and it registers customized built-in elements -- unimplemented in
+   WebKit until the polyfill above supplies them. Everything essential (the
+   ELK layout, the toolbar, the search) is already wired above, so a plugin
+   that still throws costs exactly itself, and says so in #stats instead of
+   leaving a page whose controls are quietly dead (DL-77). */
+
+function target(evt) { return evt.target || evt.cyTarget; }
+
+var menuItems = [
+  { id: "fan-in", content: "focus fan-in (direct)", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt); focusOn(n.union(n.incomers("node")));
+    } },
+  { id: "fan-out", content: "focus fan-out (direct)", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt); focusOn(n.union(n.outgoers("node")));
+    } },
+  { id: "fan-in-tree", content: "focus fan-in tree", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt); focusOn(n.union(n.predecessors("node")));
+    } },
+  { id: "fan-out-tree", content: "focus fan-out tree", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt); focusOn(n.union(n.successors("node")));
+    } },
+  { id: "both-trees", content: "focus both trees", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt);
+      focusOn(n.union(n.predecessors("node")).union(n.successors("node")));
+    } },
+  { id: "neighbours", content: "focus this + neighbours", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt); focusOn(n.union(n.neighborhood("node")));
+    }, hasTrailingDivider: true },
+  { id: "hide", content: "hide this node", selector: "node",
+    onClickFunction: function (evt) {
+      var n = target(evt);
+      n.union(n.descendants()).addClass("hidden");
+      updateStats();
+    }, hasTrailingDivider: true },
+  /* item ids become DOM ids of the menu entries -- keep them distinct
+     from the toolbar's #show-all/#fit (review finding: duplicate ids) */
+  { id: "menu-show-all", content: "show all", selector: "node",
+    coreAsWell: true, onClickFunction: showAll },
+  { id: "menu-fit", content: "fit", selector: "node", coreAsWell: true,
+    onClickFunction: function () { cy.fit(cy.nodes(":visible"), 40); } }
+];
+
+try {
+  cy.contextMenus({ menuItems: menuItems });
+} catch (err) {
+  lostFeature = " · context menu unavailable in this browser";
+  updateStats();
+  if (window.console) console.error("context menu unavailable:", err);
+}
 </script>
 </body>
 </html>

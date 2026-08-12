@@ -26,6 +26,10 @@ Emission decisions (each with a test):
 - Template substitution is single-pass unique-marker (viz_html.substitute):
   replaced content is never re-scanned, so marker-shaped job/file names
   cannot splice a later payload into the page.
+- Two vendored payloads embed, in this order: the customElements polyfill,
+  then the cytoscape bundle. cytoscape-context-menus builds its menu out of
+  customized built-in elements, which WebKit has never implemented -- the
+  polyfill has to be defined before the plugin registers them (DL-77).
 """
 
 from __future__ import annotations
@@ -151,6 +155,9 @@ def to_explore_html(
             "__DSL41_SUMMARY__": html.escape(summary),
             "__DSL41_ELK_DIRECTION__": "DOWN" if direction == "TD" else "RIGHT",
             "__DSL41_ELEMENTS_JSON__": payload,
+            "__DSL41_CUSTOM_ELEMENTS_JS__": (
+                package / "_vendor" / "custom-elements.min.js"
+            ).read_text(encoding="utf-8"),
             "__DSL41_CYTOSCAPE_JS__": (
                 package / "_vendor" / "cytoscape-explore.iife.min.js"
             ).read_text(encoding="utf-8"),

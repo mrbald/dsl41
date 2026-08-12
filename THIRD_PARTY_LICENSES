@@ -1,12 +1,13 @@
 Third-party licenses for vendored browser assets
 ================================================
 
-dsl41 vendors three JavaScript payloads under src/dsl41/_vendor/ and copies
+dsl41 vendors four JavaScript payloads under src/dsl41/_vendor/ and copies
 them verbatim into the HTML pages emitted by `dsl41 viz --format html`
 (mermaid + layout-elk payloads) and `dsl41 viz --format explore` (cytoscape
-payload), so the pages render offline, with no network access. Nothing
-below is linked with or derived from dsl41's own AGPL-3.0-only Python code;
-it is aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
+payload + customElements polyfill), so the pages render offline, with no
+network access. Nothing below is linked with or derived from dsl41's own
+AGPL-3.0-only Python code; it is aggregated browser-side work.
+Regeneration: scripts/vendor_mermaid.sh.
 
 1. mermaid 11.16.1 -- MIT
    Source: https://github.com/mermaid-js/mermaid
@@ -49,6 +50,15 @@ it is aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
    Vendored (bundled) into: src/dsl41/_vendor/cytoscape-explore.iife.min.js
    (its stylesheet is inlined in the emitted page's <style> block)
 
+7. @ungap/custom-elements 1.3.0 -- ISC
+   Copyright (c) 2020, Andrea Giammarchi, @WebReflection
+   Source: https://github.com/ungap/custom-elements
+           https://registry.npmjs.org/@ungap/custom-elements/-/custom-elements-1.3.0.tgz
+   Vendored file: src/dsl41/_vendor/custom-elements.min.js (byte-exact npm
+   min.js, carrying its own /*! ... */ banner). Loaded ahead of the
+   cytoscape payload so cytoscape-context-menus' customized built-in
+   elements exist in WebKit, which does not implement them natively.
+
 ----------------------------------------------------------------------
 The MIT License (mermaid 11.16.1, @mermaid-js/layout-elk 0.2.2,
 cytoscape 3.33.1, cytoscape-elk 2.3.0, cytoscape-context-menus 4.1.0;
@@ -76,6 +86,26 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+----------------------------------------------------------------------
+ISC License (@ungap/custom-elements 1.3.0)
+----------------------------------------------------------------------
+
+ISC License
+
+Copyright (c) 2020, Andrea Giammarchi, @WebReflection
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
+OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
 
 ----------------------------------------------------------------------
 Eclipse Public License - v 2.0 (elkjs 0.9.3)

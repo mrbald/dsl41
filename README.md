@@ -116,10 +116,15 @@ pan/zoom, offline, straight from `file://`. `--format html-chart` writes
 that same page holding the whole-graph chart alone, with the legend and
 without the appendices — the terminal-artifact counterpart to `chart`,
 which is bare pipeable text. `--format explore` writes a
-different kind of page (~2 MB: cytoscape + ELK embedded): the whole graph as an
+different kind of page (~2 MB: cytoscape + ELK + a customElements polyfill
+embedded): the whole graph as an
 interactive map — substring search, click for full edge annotations, and a
 right-click menu that focuses a job's fan-in/fan-out (direct, tree, or
-both) by hiding everything else and re-laying-out what remains. It is a
+both) by hiding everything else and re-laying-out what remains. Edges route
+orthogonally along the layout axis, so the picture keeps the layering ELK
+computed. Safari included: the menu plugin's customized built-in elements
+are polyfilled (DL-77), and if a browser still refuses the menu, the page
+says so in its status line and every other control keeps working. It is a
 navigation lens for bank-scale estates; the report stays the artifact of
 record with the appendices.
 
@@ -368,7 +373,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   chart alone is --format html-chart (DL-76)
 - src/dsl41/viz_explore.py — IR-F + IR-G -> cytoscape.js elements for the interactive
   navigation page (DL-71): compound-node box tree, EXT-node synthesis, edge
-  annotations in a click-details panel, ELK layout + focus/search in the browser
+  annotations in a click-details panel, ELK layout + focus/search in the browser;
+  the customElements polyfill loads ahead of the cytoscape bundle and the context
+  menu registers last, guarded, so no optional plugin can take the page (DL-77)
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
   completion, edge-triggered re-evaluation, per-SEM-entry trace tests.
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
@@ -490,7 +497,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   flags it delivers
 - tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
   EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), the
-  same escape invariant, cytoscape-bundle integrity, CLI flag absorption
+  same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
+  customElements polyfill), script order and the guarded context menu (DL-77),
+  CLI flag absorption
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
   cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
   T03/precedence is pinned at parse time in test_condition_grammar.py, not here).

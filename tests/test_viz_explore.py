@@ -10,6 +10,7 @@ context menu, focus feel) is recorded in DL-71, not tested here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,11 @@ from dsl41.viz_explore import _elements, to_explore_html
 # ------------------------------------------------------------ vendor integrity
 
 
+#: @ungap/custom-elements 1.3.0 min.js, copied byte-exact from npm like
+#: mermaid's payload -- so it gets a full hash pin, not a size floor.
+_CUSTOM_ELEMENTS_SHA256 = "cc14433db77c53e92706d93a0c8e3df870d9826c6c334044c9fe976c2726cb22"
+
+
 def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
     payload = _vendor_bytes("cytoscape-explore.iife.min.js")
     assert len(payload) > 1_500_000  # esbuild output is not byte-reproducible
@@ -34,6 +40,18 @@ def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
     assert payload.startswith(b"/*!")  # attribution banner from vendor_mermaid.sh
     assert b"EPL-2.0" in payload[:400]
     assert b"var cyBundle" in payload[:600]  # the IIFE global the page JS expects
+
+
+def test_vendored_custom_elements_polyfill_is_the_pinned_npm_payload() -> None:
+    # cytoscape-context-menus builds its menu from CUSTOMIZED BUILT-IN elements
+    # (customElements.define(..., {extends: "div"})), which WebKit does not
+    # implement -- this payload supplies them (DL-77).
+    payload = _vendor_bytes("custom-elements.min.js")
+    assert hashlib.sha256(payload).hexdigest() == _CUSTOM_ELEMENTS_SHA256
+    assert b"</script" not in payload  # inline-safety: embedded without escaping
+    assert payload.startswith(b"/*!")  # upstream's own banner is the attribution
+    assert b"ISC" in payload[:80]
+    assert b"customElements" in payload
 
 
 # ------------------------------------------------------------------- elements
@@ -183,10 +201,59 @@ def test_to_explore_html_escapes_the_json_but_round_trips_elements() -> None:
     assert _page_elements(to_explore_html(catalog, graph)) == _elements(catalog, graph)
 
 
-def test_to_explore_html_embeds_the_vendor_payload_exactly_once() -> None:
+def test_to_explore_html_embeds_each_vendor_payload_exactly_once() -> None:
     page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
-    probe = _vendor_bytes("cytoscape-explore.iife.min.js").decode("utf-8")[:200]
-    assert page.count(probe) == 1
+    for name in ("cytoscape-explore.iife.min.js", "custom-elements.min.js"):
+        probe = _vendor_bytes(name).decode("utf-8")[:200]
+        assert page.count(probe) == 1
+
+
+def test_to_explore_html_loads_the_polyfill_before_the_cytoscape_bundle() -> None:
+    # order is the whole point: the plugin's customized built-in elements are
+    # registered when the bundle loads, so customElements must already be
+    # patched by then, or Safari throws "Illegal constructor" (DL-77)
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    polyfill = _vendor_bytes("custom-elements.min.js").decode("utf-8")[:200]
+    bundle = _vendor_bytes("cytoscape-explore.iife.min.js").decode("utf-8")[:200]
+    assert page.index(polyfill) < page.index(bundle)
+
+
+def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() -> None:
+    # DL-77: the context menu is the one optional part of the page. It is
+    # registered LAST and guarded, so a plugin that throws (an unpolyfilled
+    # browser, a future bump) costs itself and nothing else -- the bug this
+    # rule comes from left the ELK layout, the toolbar and the search dead
+    # below the throw, with the page looking merely slow.
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    registration = page.index("cy.contextMenus({ menuItems: menuItems })")
+    for essential in (
+        'document.getElementById("show-all").addEventListener',
+        'document.getElementById("fit").addEventListener',
+        'document.getElementById("search").addEventListener',
+        "initial.run();",
+    ):
+        assert page.index(essential) < registration, essential
+    # ...and the loss is named, not swallowed
+    assert "} catch (err) {" in page
+    assert 'lostFeature = " \N{MIDDLE DOT} context menu unavailable in this browser";' in page
+    assert page.count("+ lostFeature;") == 1  # every updateStats keeps it
+
+
+def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
+    # ELK lays the graph out in layers; a bezier between node centres throws
+    # that away and reads as a spline tangle, so edges route orthogonally
+    # along the same axis the layout used (DL-77).
+    catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
+    page = to_explore_html(catalog)
+    assert '"curve-style": "taxi"' in page
+    assert '"taxi-direction": TAXI_DIRECTION' in page
+    assert 'TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal"' in page
+    # the one exception: taxi cannot draw an edge whose endpoints overlap, and
+    # a member pointing at its own box is exactly that -- those keep the bezier
+    # rather than silently vanishing from the picture
+    assert 'selector: "edge.nesting"' in page
+    assert page.count('"curve-style": "bezier"') == 1
+    assert 'edge.addClass("nesting")' in page
 
 
 def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
@@ -194,12 +261,13 @@ def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
     # vendor bundle into the elements JSON, and a marker-shaped title must
     # not duplicate the JSON into <title> (review finding: single-pass
     # substitution, replaced content never re-scanned)
-    text = "insert_job: EVIL__DSL41_CYTOSCAPE_JS__X\njob_type: c\ncommand: x\nmachine: m1\n"
+    text = "insert_job: EVIL__DSL41_CUSTOM_ELEMENTS_JS__X\njob_type: c\ncommand: x\nmachine: m1\n"
     page = to_explore_html(catalog_of(text), title="x__DSL41_ELEMENTS_JSON__.jil")
-    probe = _vendor_bytes("cytoscape-explore.iife.min.js").decode("utf-8")[:200]
-    assert page.count(probe) == 1
+    for name in ("cytoscape-explore.iife.min.js", "custom-elements.min.js"):
+        probe = _vendor_bytes(name).decode("utf-8")[:200]
+        assert page.count(probe) == 1
     names = [n["data"]["id"] for n in _page_elements(page)["nodes"]]  # type: ignore[index]
-    assert names == ["EVIL__DSL41_CYTOSCAPE_JS__X"]  # JSON intact, name verbatim
+    assert names == ["EVIL__DSL41_CUSTOM_ELEMENTS_JS__X"]  # JSON intact, name verbatim
     assert "Explore: x__DSL41_ELEMENTS_JSON__.jil</title>" in page
 
 
