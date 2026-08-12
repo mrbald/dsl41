@@ -139,7 +139,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
-from dsl41.runner import _JOB_EVENT_VERBS, _LINE_LIMIT, _STATUSES
+from dsl41.runner import _JOB_EVENT_VERBS, _STATUSES
+from dsl41.runner_adapters import _LINE_LIMIT
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
 _STATUS_STYLE = {

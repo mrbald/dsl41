@@ -37,14 +37,9 @@ import pytest
 pytest.importorskip("textual")
 
 from dsl41.ir import lower_source
-from dsl41.runner import (
-    ControlServer,
-    Engine,
-    FakeAdapter,
-    RealClock,
-    _JOB_EVENT_VERBS,
-    start_run,
-)
+from dsl41.runner import ControlServer, Engine, _JOB_EVENT_VERBS, start_run
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import RealClock
 from dsl41.runner_tui import (
     ControlClient,
     ControlClientError,

@@ -21,7 +21,8 @@ import pytest
 
 from dsl41.autocal import compile_calendar
 from dsl41.ir import CalendarIR, CatalogIR, CycleIR, LoweringError, lower_source
-from dsl41.runner import Scheduler, preflight
+from dsl41.runner_preflight import preflight
+from dsl41.runner_scheduler import Scheduler
 
 # ------------------------------------------------------------ builders
 # (mirrors tests/test_autocal.py's local helpers; duplicated rather than

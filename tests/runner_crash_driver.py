@@ -19,7 +19,9 @@ from pathlib import Path
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Event
-from dsl41.runner import LocalCommandAdapter, RealClock, start_run
+from dsl41.runner import start_run
+from dsl41.runner_adapters import LocalCommandAdapter
+from dsl41.runner_clock import RealClock
 
 CRASH_JIL = """\
 insert_job: fast

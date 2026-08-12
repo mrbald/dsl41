@@ -1,9 +1,10 @@
 """Scheduler + preflight tests (phase 11c).
 
 Normative spec: docs/runner-design.md ss5 (scheduler), ss8 (preflight), and
-runner.py's own 11c docstring block (DL-45 pins the decisions). House style
-follows test_runner.py: T0-style fixed datetimes, JIL text fixtures inline,
-async scenarios driven by one `asyncio.run(...)` per test.
+the runner_scheduler.py / runner_preflight.py 11c docstring blocks (DL-45
+pins the decisions). House style follows test_runner.py: T0-style fixed
+datetimes, JIL text fixtures inline, async scenarios driven by one
+`asyncio.run(...)` per test.
 
 Every expected outcome here was verified empirically against the real
 Scheduler/Engine/preflight before the assertion was written (CLAUDE.md:
@@ -23,23 +24,17 @@ import pytest
 
 from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Event, Oracle
-from dsl41.runner import (
-    Engine,
-    EngineError,
-    FakeAdapter,
-    RealClock,
-    Scheduler,
-    VirtualClock,
+from dsl41.runner import Engine, resume_run, start_run
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from dsl41.runner_journal import read_journal
+from dsl41.runner_preflight import (
     _local_identity,
     and_success_skeleton,
-    parse_timezone_map,
     preflight,
-    read_journal,
     resolve_machine,
-    resolve_timezone,
-    resume_run,
-    start_run,
 )
+from dsl41.runner_scheduler import Scheduler, parse_timezone_map, resolve_timezone
 
 # 2026-07-01 is a Wednesday; 07-03 Fri, 07-04 Sat, 07-05 Sun, 07-06 Mon.
 
@@ -109,7 +104,7 @@ def test_all_keyword_matches_weekends_too() -> None:
 
 def test_absent_days_of_week_defaults_to_every_day() -> None:
     """PENDING: E10 -- absent days_of_week means every day, same as 'all',
-    including weekends (runner.py Scheduler docstring)."""
+    including weekends (runner_scheduler.py Scheduler docstring)."""
     text = (
         "insert_job: absent_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\nstart_times: "08:00"\n'
@@ -289,7 +284,7 @@ def test_resolve_timezone_ambiguous_city_component_is_refused() -> None:
     """(DL-62): the city default requires a UNIQUE match; multiple zones
     sharing a final path component resolve to none (the preflight ERROR
     names the candidates)."""
-    from dsl41 import runner as runner_mod
+    from dsl41 import runner_scheduler as runner_mod
 
     monkey = {"x": ("A/X", "B/X")}
     original = runner_mod._zone_tables
@@ -489,7 +484,7 @@ def test_scheduler_refuses_dangling_defective_and_unparseable_calendars() -> Non
     """(ss5 DL-56/57): preflight ERROR territory -- a hand-built catalog
     that bypassed ss8 refuses comprehensibly, never guesses. Extended
     calendars refuse only for what the interpreter cannot express."""
-    from dsl41.runner import EngineError
+    from dsl41.runner_clock import EngineError
 
     job = (
         "insert_job: cal_job\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -875,7 +870,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     in the past, over a job ticking every 30 minutes, resumes with 4 missed
     ticks -- each dropped (never fired late) and journaled as a `drop`
     record, and reported on Engine.drops."""
-    from dsl41.runner import Journal
+    from dsl41.runner_journal import Journal
 
     text = (
         "insert_job: mts_job\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -1423,7 +1418,7 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
     rule; the refusal it guards does not exist yet (test above), so the
     plumbing is pinned by injection -- a constructor refusal must surface
     as a preflight ERROR item, never a crash."""
-    import dsl41.runner as runner_mod
+    import dsl41.runner_preflight as runner_mod
 
     from dsl41.oracle import OracleError
 

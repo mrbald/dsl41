@@ -25,7 +25,9 @@ import asyncio
 
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Event, StatusStore, TraceEntry
-from dsl41.runner import Engine, FakeAdapter, VirtualClock
+from dsl41.runner import Engine
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import VirtualClock
 
 _LOOP: asyncio.AbstractEventLoop | None = None
 

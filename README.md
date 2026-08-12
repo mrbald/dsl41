@@ -384,15 +384,35 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the reference implementation that a live autocal is diffed against (Q8
   residue).
 - src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
-  (dispatch table, time-ordered event queue, stale-completion gate), VirtualClock +
-  RealClock, FakeAdapter + LocalCommandAdapter + FileWatcherAdapter, inputs-only WAL
-  journal, resume/reconciliation ladder, calendar scheduler (ss5: standard
-  calendar day sets and windowed extended-calendar generators, DL-56/57),
-  preflight (ss8),
-  control-socket server (ss10: sendevent parity, status/trace/explain/plan,
-  subscribe). It also contains the ss6a Tier-1 detached path (SupervisorClient +
+  (dispatch table, time-ordered event queue, stale-completion gate), the run
+  lifecycle (start/resume + the reconciliation ladder) and the control-socket
+  server (ss10: sendevent parity, status/trace/explain/plan, subscribe). DL-74
+  split its other four subsystems into the sibling modules below, with no
+  re-export facade: every consumer imports from the module that owns the name
+- src/dsl41/runner_clock.py — the ss9 time domains: the Clock protocol,
+  VirtualClock (the engine drives time; adapters may block only on it) and
+  RealClock (naive-UTC wall clock). It also holds EngineError, the shell's one
+  refusal type, because it is the bottom of the runner import DAG (DL-74)
+- src/dsl41/runner_adapters.py — the ss6 adapter contract and every adapter:
+  FakeAdapter, LocalCommandAdapter (each command under the ss6a Tier-0 wrapper),
+  FileWatcherAdapter, plus the ss6a Tier-1 detached path (SupervisorClient +
   SupervisedCommandAdapter: SPAWN through the supervisor, await the exit push,
-  detach-stop vs oracle-kill cancellation, resume-time reattachment)
+  detach-stop vs oracle-kill cancellation, resume-time reattachment) and the ss7
+  spool ladder through which both the detached adapter and resume resolve an
+  interrupted run's outcome
+- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
+  advance/dispatch/drop/preflight records, append+fsync before every feed),
+  read_journal, replay_inputs, and catalog_hash, the resume gate written into
+  the header
+- src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
+  day sets and windowed extended-calendar generators, DL-56/57) and the SEM-35
+  timezone ladder that turns its ticks into UTC instants (zoneinfo, the
+  `--timezone-map` ujo_timezones table, the DL-62 unique-city default, POSIX
+  fixed offsets)
+- src/dsl41/runner_preflight.py — ss8 preflight: the ERROR/WARN item model and
+  its rules — job type, machine resolution through insert_machine (DL-49/52),
+  owner, calendars, timezones, resources (DL-50), oracle construction, and the
+  AND-success skeleton cycle that disables `plan`
 - src/dsl41/runner_supervisor.py — the ss6a Tier-1 supervisor (phase 11f): stdlib-only
   (same enforced boundary as the wrapper), one per run_root. It owns the wrapper
   lifelines, so an engine restart reattaches and does not kill jobs. It speaks the

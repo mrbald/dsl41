@@ -2651,3 +2651,81 @@
   Tests +3 (the via/atom-kind validator, the edge-atom copy pin, the
   per-edge exit-code comparison); the seven node_meta tests moved from
   test_derive to test_viz as display-facts tests.
+- DL-74 structure: runner.py split along the seams its own test files
+  already used, and the Oracle's capacity subsystem extracted as a
+  _CapacityPool (2026-08-12). Pure structure — no behaviour and no output
+  moves. Problem: runner.py had grown to 3649 lines holding eleven
+  concepts, and the evidence that the seams were real was already in the
+  tree — tests/test_runner_scheduler.py, test_runner_adapters.py,
+  test_runner_journal.py, test_runner_control.py and
+  test_runner_lifecycle.py each test one of them. oracle.py had the same
+  shape one level down: a contiguous eleven-method block (_demand_vector,
+  _can_admit, _acquire, _release, _enqueue_waiter, _sorted_waiters,
+  _wake_waiters, _readmit, _dequeue, _cancel_waiter) with its own
+  vocabulary — demand vectors, waiters, QUE_WAIT, admission order — inside
+  a 55-method class. Decisions: (1) Five new modules, each holding the
+  symbols it owns and NOTHING re-exported: runner_clock.py (the ss9 Clock
+  protocol, VirtualClock, RealClock), runner_adapters.py (AdapterContext /
+  AdapterResult / Terminated / Failed / JobAdapter, FakeAdapter,
+  LocalCommandAdapter, FileWatcherAdapter, job_log_paths, _build_run_spec,
+  the ss6a Tier-1 SupervisorClient + SupervisedCommandAdapter, and the ss7
+  spool ladder _resolve_spool that the detached adapter and resume share),
+  runner_journal.py (Journal, read_journal, replay_inputs),
+  runner_scheduler.py (Scheduler, _SchedulePlan, _CalCache,
+  _scheduler_calendar AND the whole SEM-35 timezone block — timezone
+  exists to turn schedule ticks into UTC instants, so it belongs with the
+  scheduler), and runner_preflight.py (PreflightItem, preflight,
+  resolve_machine, and_success_skeleton, _resource_preflight,
+  _local_identity, and the two probe helpers _preflight_local_day /
+  _next_eligible_day, which sat in the timezone block's line range but are
+  preflight's, not the scheduler's). runner.py keeps the engine loop, the
+  run lifecycle (start_run / resume_run / _reconcile) and the ss10
+  ControlServer; Engine and ControlServer stay together deliberately —
+  they share the single-writer invariant and read better as one file.
+  (2) NO re-export shim in runner.py. Every import site — cli.py,
+  runner_tui.py, every tests/*.py, the three test drivers — now names the
+  module that owns the symbol. A facade would have kept the single door
+  the split exists to remove, and it would have left `from dsl41.runner
+  import Scheduler` working, which is how a "split" quietly becomes a
+  second name for the same monolith. (3) The import graph is a DAG:
+  runner_clock is the bottom; runner_scheduler and runner_journal sit on
+  it, runner_preflight on runner_scheduler (it consumes resolve_timezone /
+  _city_candidates / _DAY_CODES), runner_adapters on runner_clock, and
+  runner.py on all five. The two annotation-only edges — Journal in
+  AdapterContext, PreflightItem in Journal.preflight — are TYPE_CHECKING
+  imports, so the runtime graph stays as shallow as the module list
+  suggests. (4) Two symbols the split brief wanted to keep in runner.py
+  had to move, because a DAG cannot hold them there: EngineError (every
+  module raises it) went to runner_clock.py, the bottom of the graph, and
+  catalog_hash / _dsl41_version went to runner_journal.py, whose
+  Journal.create is their caller. Keeping either in runner.py would have
+  made runner_adapters/runner_journal/runner_scheduler import runner.py
+  and closed a cycle. (5) The 182-line module docstring was split with its
+  subjects, verbatim: each new module carries the paragraphs describing
+  what it now owns (the adapter contract to runner_adapters, the WAL
+  bullet to runner_journal, the naive-UTC time basis to runner_clock, the
+  scheduler bullet to runner_scheduler, the preflight bullet to
+  runner_preflight), each under its own phase header so no ss-xx / DL-xx
+  citation is orphaned. runner.py keeps the engine-loop, kill-wins,
+  resume, commit-discipline, control-plane and 11d paragraphs and gains
+  one paragraph naming where the rest went. (6) oracle.py's capacity
+  subsystem becomes a private _CapacityPool in the SAME file (~130 lines
+  does not earn a module). The line is responsibility, not vocabulary: the
+  pool owns the sized buckets, what each RUNNING job holds, the waiter
+  queue and its admission ORDER (demand_vector, can_admit, acquire,
+  holds, release, enqueue, sorted_waiters, dequeue); the Oracle keeps
+  every status transition and every event emission, which is why
+  _enqueue_waiter, _wake_waiters, _readmit and _cancel_waiter stay on it —
+  they set QUE_WAIT, INACTIVE or start a job. The `# PENDING: Qr2` and
+  `Qr4` markers travel with the code they qualify (Qr6 stays on _readmit).
+  Consequence: docs/runner-design.md ss14's "the house layout is flat:
+  runner.py (clock, engine, scheduler, adapters, journal, preflight,
+  control server)" is superseded by this entry; the design it describes is
+  unchanged, only its file count. Verification: every moved line is
+  byte-identical (the split was done by line-range extraction, so `git
+  blame -C` and `git log --follow` still resolve), the suite is unchanged
+  at 1815 passed / 3 skipped with no test added or removed, and mypy and
+  ruff stay clean. Test-side churn is imports only, plus the four
+  test-docstring pointers whose "runner.py's own docstring" target moved,
+  and test_resources.py's white-box reads of the capacity buckets, which
+  now go through `o._pool`.

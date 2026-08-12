@@ -3,7 +3,7 @@
 
 Normative spec: docs/runner-design.md ss7 (journal and recovery) and ss4 (the
 stale-completion gate whose rejections the WAL also records as drops).
-runner.py's Journal/read_journal/replay_inputs/catalog_hash docstrings are
+runner_journal.py's Journal/read_journal/replay_inputs/catalog_hash docstrings are
 the API under test; cli.py's `journal` command is the CLI surface. Resume
 and the crash/reconciliation ladder are tests/test_runner_lifecycle.py's
 territory (owned elsewhere, not duplicated here) -- this file stays on the
@@ -30,17 +30,10 @@ from typer.testing import CliRunner
 from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Event, EventKind, Oracle
-from dsl41.runner import (
-    Engine,
-    EngineError,
-    FakeAdapter,
-    Journal,
-    VirtualClock,
-    catalog_hash,
-    read_journal,
-    replay_inputs,
-    start_run,
-)
+from dsl41.runner import Engine, start_run
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_journal import Journal, catalog_hash, read_journal, replay_inputs
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

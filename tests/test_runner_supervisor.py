@@ -36,14 +36,10 @@ from datetime import datetime
 
 from dsl41 import runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner import (
-    FileWatcherAdapter,
-    RealClock,
-    SupervisedCommandAdapter,
-    SupervisorClient,
-    read_journal,
-    resume_run,
-)
+from dsl41.runner import resume_run
+from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
+from dsl41.runner_clock import RealClock
+from dsl41.runner_journal import read_journal
 
 SUPERVISOR = Path(runner_supervisor.__file__)
 DRIVER = Path(__file__).parent / "runner_detached_driver.py"

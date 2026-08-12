@@ -41,16 +41,10 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner import (
-    Failed,
-    LocalCommandAdapter,
-    RealClock,
-    Terminated,
-    _resolve_spool,
-    catalog_hash,
-    read_journal,
-    resume_run,
-)
+from dsl41.runner import resume_run
+from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, _resolve_spool
+from dsl41.runner_clock import RealClock
+from dsl41.runner_journal import catalog_hash, read_journal
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -628,7 +622,9 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
 
     from runner_crash_driver import CRASH_JIL
 
-    from dsl41.runner import EngineError, FakeAdapter, VirtualClock, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import EngineError, VirtualClock
 
     run_root = tmp_path / "run"
     catalog = lower_source(CRASH_JIL)
@@ -663,7 +659,9 @@ def test_resume_refuses_clock_domain_flip(tmp_path: Path) -> None:
     from runner_crash_driver import CRASH_JIL
     from datetime import datetime
 
-    from dsl41.runner import EngineError, FakeAdapter, VirtualClock, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import EngineError, VirtualClock
 
     catalog = lower_source(CRASH_JIL)
     run_root = tmp_path / "run"
@@ -736,7 +734,9 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     (journaled), and downstream s(x) must never run."""
     from datetime import timedelta
 
-    from dsl41.runner import FakeAdapter, VirtualClock, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
 
     catalog = lower_source(KILL_JIL)
     run_root = tmp_path / "run"
@@ -787,7 +787,10 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
     from datetime import timedelta
 
     from dsl41.oracle import Event, Oracle
-    from dsl41.runner import FakeAdapter, VirtualClock, replay_inputs, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_journal import replay_inputs
 
     catalog = lower_source(KILL_JIL)
     run_root = tmp_path / "run"
@@ -837,7 +840,9 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
     from datetime import timedelta
 
     from dsl41.oracle import Event
-    from dsl41.runner import Engine, FakeAdapter, VirtualClock
+    from dsl41.runner import Engine
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
 
     async def scenario() -> None:
         engine = Engine(
@@ -866,7 +871,7 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
 def test_m3_malformed_status_records_map_truthfully() -> None:
     """Review M3: a lying or truncated record can only make things worse,
     never better -- and the cause must say what was actually wrong."""
-    from dsl41.runner import _outcome_from_status
+    from dsl41.runner_adapters import _outcome_from_status
 
     malformed_exit = _outcome_from_status({"outcome": "exited"})
     assert isinstance(malformed_exit, Failed) and "malformed" in malformed_exit.cause
@@ -882,7 +887,9 @@ def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None
     """Review M4: an incomplete FW run whose re-dispatch adapter is missing
     at resume must refuse loudly, never hang RUNNING forever."""
     from dsl41.oracle import Event
-    from dsl41.runner import EngineError, FakeAdapter, FileWatcherAdapter, VirtualClock, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter
+    from dsl41.runner_clock import EngineError, VirtualClock
 
     fw_jil = "insert_job: w\njob_type: f\nwatch_file: /nonexistent/watched\n"
     catalog = lower_source(fw_jil)

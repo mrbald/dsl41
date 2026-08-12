@@ -110,7 +110,7 @@ def _write_manifest(
     from datetime import UTC, datetime
 
     from dsl41.ast_jil import render_preserve
-    from dsl41.runner import _dsl41_version, catalog_hash
+    from dsl41.runner_journal import _dsl41_version, catalog_hash
 
     manifest_dir = run_root / "manifest"
     manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -497,7 +497,8 @@ def journal(
     explicitly.
     """
     from dsl41.oracle import Oracle, OracleError
-    from dsl41.runner import EngineError, catalog_hash, read_journal, replay_inputs
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     try:
@@ -737,7 +738,7 @@ def _preflight_or_exit(
     journals them next to the run -- WARN prints, journals, and runs).
     `start` anchors the DL-56 calendar-exhaustion WARN: run passes wall-now,
     rehearse its virtual --start."""
-    from dsl41.runner import MachinePolicy, preflight
+    from dsl41.runner_preflight import MachinePolicy, preflight
 
     if machine_policy not in ("strict", "local-eligible"):
         typer.echo(f"--machine-policy {machine_policy!r}: expected strict|local-eligible", err=True)
@@ -796,7 +797,7 @@ def _load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
     """Parse --timezone-map (DL-62); unreadable/malformed exits 2."""
     if path is None:
         return None
-    from dsl41.runner import parse_timezone_map
+    from dsl41.runner_scheduler import parse_timezone_map
 
     try:
         return parse_timezone_map(path.read_text(encoding="utf-8"))
@@ -811,7 +812,7 @@ def _check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = N
     Scheduler with the wrong exit code (DL-45 review M3)."""
     if timezone is None:
         return
-    from dsl41.runner import resolve_timezone
+    from dsl41.runner_scheduler import resolve_timezone
 
     if resolve_timezone(timezone, tz_aliases) is None:
         typer.echo(
@@ -891,7 +892,7 @@ def run(
         tz_aliases=tz_aliases,
     )
     _check_base_tz(timezone, tz_aliases)
-    from dsl41.runner import EngineError
+    from dsl41.runner_clock import EngineError
 
     if not resume and not (run_root / "journal.jsonl").exists():
         # a used run root is start_run's refusal to make -- never repaint
@@ -964,20 +965,18 @@ async def _serve_run(
 
     from datetime import datetime
 
-    from dsl41.runner import (
-        ControlServer,
-        EngineError,
+    from dsl41.runner import ControlServer, start_run
+    from dsl41.runner import resume_run as _resume_run
+    from dsl41.runner_adapters import (
         FileWatcherAdapter,
         JobAdapter,
         LocalCommandAdapter,
-        RealClock,
-        Scheduler,
         SupervisedCommandAdapter,
         SupervisorClient,
         SupervisorUnavailable,
-        start_run,
     )
-    from dsl41.runner import resume_run as _resume_run
+    from dsl41.runner_clock import EngineError, RealClock
+    from dsl41.runner_scheduler import Scheduler
 
     clock = RealClock()
     # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
@@ -1136,7 +1135,10 @@ def rehearse(
     from datetime import UTC, datetime, timedelta
 
     from dsl41.oracle import Event, OracleError
-    from dsl41.runner import Engine, EngineError, FakeAdapter, Scheduler, VirtualClock, start_run
+    from dsl41.runner import Engine, start_run
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_scheduler import Scheduler
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     start_dt = (

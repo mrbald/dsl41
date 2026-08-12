@@ -34,7 +34,9 @@ from hypothesis import strategies as st
 
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle import Event, EventKind, Oracle, OracleError
-from dsl41.runner import AdapterContext, Engine, EngineError, FakeAdapter, VirtualClock
+from dsl41.runner import Engine
+from dsl41.runner_adapters import AdapterContext, FakeAdapter
+from dsl41.runner_clock import EngineError, VirtualClock
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

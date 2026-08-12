@@ -1,9 +1,9 @@
 """Clock, real-adapter, and result-mapping tests (phase 11b).
 
 Normative spec: docs/runner-design.md ss6 (adapters), ss6a (the wrapper
-tier), ss9 (time domains), and runner.py's own docstrings for RealClock,
-LocalCommandAdapter, FileWatcherAdapter, and the Terminated/Failed/
-AdapterResult contract. The wrapper crash matrix, kill-boundary tests, and
+tier), ss9 (time domains), and runner_clock.py's / runner_adapters.py's own
+docstrings for RealClock, LocalCommandAdapter, FileWatcherAdapter, and the
+Terminated/Failed/AdapterResult contract. The wrapper crash matrix, kill-boundary tests, and
 crash-recovery integration test are tests/test_runner_lifecycle.py's
 territory (owned elsewhere, not duplicated here) -- this file stays on the
 adapters and clocks themselves: does RealClock behave per ss9, does a real
@@ -36,19 +36,16 @@ import pytest
 from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle import Event
-from dsl41.runner import (
+from dsl41.runner import Engine, start_run
+from dsl41.runner_adapters import (
     AdapterContext,
     AdapterResult,
-    Engine,
-    EngineError,
     Failed,
     FileWatcherAdapter,
     LocalCommandAdapter,
-    RealClock,
     Terminated,
-    VirtualClock,
-    start_run,
 )
+from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("the adapters/wrapper tier is POSIX-only", allow_module_level=True)

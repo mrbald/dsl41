@@ -22,14 +22,9 @@ from pathlib import Path
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Event
-from dsl41.runner import (
-    ControlServer,
-    FileWatcherAdapter,
-    RealClock,
-    SupervisedCommandAdapter,
-    SupervisorClient,
-    start_run,
-)
+from dsl41.runner import ControlServer, start_run
+from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
+from dsl41.runner_clock import RealClock
 
 
 async def main(run_root: str, sleep_s: str) -> None:
