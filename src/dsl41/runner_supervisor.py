@@ -4,10 +4,11 @@ Normative spec: docs/runner-design.md ss6a (Tier 1) + docs/supervisor-protocol.m
 ss5 (the socket protocol this module freezes) + DL-41a/DL-42/DL-48. STDLIB ONLY:
 this module imports nothing from dsl41 and nothing third-party -- the same
 enforced extraction boundary as runner_wrapper.py (DL-42; import-graph test in
-tests/test_runner_supervisor.py). The engine runs it BY FILE PATH
-(``sys.executable <this file> --run-root <root>``), never ``-m``: ``-m`` would
-import the dsl41 package __init__ and drag third-party imports into the
-supervisor's runtime.
+tests/test_runner_supervisor.py), its one non-stdlib import being the sibling
+stdlib-only runner_procid the wrapper shares (DL-72). The engine runs it BY
+FILE PATH (``sys.executable <this file> --run-root <root>``), never ``-m``:
+``-m`` would import the dsl41 package __init__ and drag third-party imports
+into the supervisor's runtime.
 
 Why this process exists (ss6a Tier 1): the wrapper (Tier 0) makes exit status
 survive engine downtime, but a tethered engine still KILLS its jobs when it
@@ -46,124 +47,42 @@ import selectors
 import signal
 import socket
 import struct
-import subprocess
 import sys
 import time
 from datetime import UTC, datetime
 from typing import Any
+
+# DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
+# in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
+# (they were duplicated here, and had drifted). sys.path[0] is this file's
+# directory when we are run by file path, except under PYTHONSAFEPATH=1 which
+# strips it; prepend it ourselves so the plain top-level import resolves either
+# way (importing dsl41.runner_procid would drag the package __init__, and with
+# it third-party imports, into the supervisor's runtime). Prepend only when it
+# is missing and take it back off again -- the engine also imports this file as
+# an ordinary package module, and a library must not leave its own package
+# directory on the importing process's sys.path, where it would shadow
+# top-level names for the whole process. Same guard as the wrapper's.
+_PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
+if _PROCID_DIR_ADDED:
+    sys.path.insert(0, _PROCID_DIR)
+from runner_procid import (  # type: ignore[import-not-found]  # noqa: E402
+    current_boot_id,
+    durable_write_json,
+    killpg_quiet,
+    utc_now_iso,
+    verify_alive,
+)
+
+if _PROCID_DIR_ADDED:
+    sys.path.remove(_PROCID_DIR)
 
 PROTOCOL_VERSION = 1
 
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
 #: relative to THIS file so the supervisor never imports dsl41 to find it.
 _WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_wrapper.py")
-
-
-# ------------------------------------------------------------------ durability
-# (copied from runner_wrapper, not imported: the stdlib-only boundary forbids a
-# dsl41 import, and the two modules share the DL-41a durability liturgy)
-
-
-def durable_write(path: str, data: bytes) -> None:
-    """Same-dir temp file, fsync(file), rename, fsync(directory). Local FS."""
-    directory = os.path.dirname(path) or "."
-    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.rename(tmp, path)
-    dfd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
-# ------------------------------------------------------------ machine identity
-# (copied from runner_wrapper for the same stdlib-only reason: the SIGNAL
-# PID-reuse guard reimplements verify_alive here)
-
-
-def current_boot_id() -> str:
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
-            return f.read().strip()
-    except OSError:
-        pass
-    out = subprocess.run(
-        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if out.returncode == 0 and out.stdout.strip():
-        return out.stdout.strip()
-    return "unknown"
-
-
-def proc_start_token(pid: int) -> str | None:
-    if sys.platform.startswith("linux"):
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                raw = f.read().decode("ascii", "replace")
-        except OSError:
-            return None
-        fields = raw.rsplit(")", 1)[1].split()
-        return f"ticks:{fields[19]}"
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LC_ALL": "C"},
-        check=False,
-    )
-    lstart = out.stdout.strip()
-    if out.returncode != 0 or not lstart:
-        return None
-    return f"lstart:{lstart}"
-
-
-_LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
-
-
-def start_tokens_match(a: str, b: str, *, tolerance_s: float = 2.0) -> bool:
-    if a.startswith("ticks:") or b.startswith("ticks:"):
-        return a == b
-    if not (a.startswith("lstart:") and b.startswith("lstart:")):
-        return False
-    try:
-        ta = time.mktime(time.strptime(a[len("lstart:") :], _LSTART_FORMAT))
-        tb = time.mktime(time.strptime(b[len("lstart:") :], _LSTART_FORMAT))
-    except ValueError:
-        return False
-    return abs(ta - tb) <= tolerance_s
-
-
-def verify_alive(pid: int, recorded_token: str) -> bool:
-    """The PID-reuse guard: a pid is only 'ours' if it exists AND its start
-    time matches the recorded token. Never signal a pid that fails this."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        pass
-    token = proc_start_token(pid)
-    return token is not None and start_tokens_match(token, recorded_token)
-
-
-def _killpg_quiet(pgid: int, sig: int) -> None:
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 # --------------------------------------------------------------- peer identity
@@ -316,13 +235,9 @@ class Supervisor:
             os.umask(old_umask)
         os.chmod(self.sock_path, 0o600)  # belt: some platforms ignore umask on bind
         self._listen.setblocking(False)
-        durable_write(
+        durable_write_json(
             self.pid_path,
-            json.dumps(
-                {"pid": os.getpid(), "boot_id": self.boot_id, "started_at": _utc_now_iso()},
-                sort_keys=True,
-            ).encode("utf-8")
-            + b"\n",
+            {"pid": os.getpid(), "boot_id": self.boot_id, "started_at": utc_now_iso()},
         )
 
     def _install_signals(self) -> None:
@@ -553,7 +468,7 @@ class Supervisor:
             wrapper_pid, lifeline_w = self._spawn_wrapper(spec)
         except OSError as exc:
             return {"ok": False, "error": f"spawn_failed: {exc}"}
-        spawned_at = _utc_now_iso()
+        spawned_at = utc_now_iso()
         self.runs[run_id] = _Run(
             run_id=run_id,
             job=str(spec.get("job")),
@@ -626,7 +541,7 @@ class Supervisor:
             return False
         if not verify_alive(pid, token):  # the PID-reuse guard
             return False
-        _killpg_quiet(pgid, sig)
+        killpg_quiet(pgid, sig)
         return True
 
     # -- shutdown -----------------------------------------------------------
@@ -720,7 +635,7 @@ class Supervisor:
                 "push": "exit",
                 "run_id": run.run_id,
                 "wrapper_rc": run.wrapper_rc,
-                "at": _utc_now_iso(),
+                "at": utc_now_iso(),
             },
         )
 

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from dsl41 import runner_wrapper as _wrapper
+from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle import Event
 from dsl41.runner import (
@@ -437,16 +437,16 @@ def test_bogus_adapter_result_raises_engine_error_loudly() -> None:
     asyncio.run(scenario())
 
 
-# --------------------------------------------------- 5. wrapper unit helpers
+# ------------------------------------------------- 5. process-identity units
 
 
 def test_durable_write_leaves_no_temp_file_and_content_matches(tmp_path: Path) -> None:
-    """(runner_wrapper.py durable_write docstring, the DL-41a durability
+    """(runner_procid.py durable_write docstring, the DL-41a durability
     liturgy): same-dir temp file, fsync, rename, fsync(directory) -- after
     the call only the final file exists, holding the exact bytes written."""
     target = tmp_path / "sub" / "record.json"
     target.parent.mkdir()
-    _wrapper.durable_write(str(target), b"hello world")
+    _procid.durable_write(str(target), b"hello world")
     assert target.read_bytes() == b"hello world"
     assert [p.name for p in target.parent.iterdir()] == [target.name]
 
@@ -458,15 +458,15 @@ def test_start_tokens_match_lstart_within_two_seconds_but_not_beyond() -> None:
     base = "lstart:Sat Jul 11 14:19:32 2026"
     within = "lstart:Sat Jul 11 14:19:34 2026"  # +2s: still matches
     beyond = "lstart:Sat Jul 11 14:19:35 2026"  # +3s: does not
-    assert _wrapper.start_tokens_match(base, within) is True
-    assert _wrapper.start_tokens_match(base, beyond) is False
+    assert _procid.start_tokens_match(base, within) is True
+    assert _procid.start_tokens_match(base, beyond) is False
 
 
 def test_start_tokens_match_ticks_exact_only_and_mixed_forms_never_match() -> None:
     """(start_tokens_match docstring): Linux tick tokens compare exactly (no
     tolerance); a ticks token against an lstart token (or vice versa) never
     matches -- the two platforms' tokens are never comparable."""
-    assert _wrapper.start_tokens_match("ticks:100", "ticks:100") is True
-    assert _wrapper.start_tokens_match("ticks:100", "ticks:101") is False
-    assert _wrapper.start_tokens_match("ticks:100", "lstart:Sat Jul 11 14:19:32 2026") is False
-    assert _wrapper.start_tokens_match("lstart:Sat Jul 11 14:19:32 2026", "ticks:100") is False
+    assert _procid.start_tokens_match("ticks:100", "ticks:100") is True
+    assert _procid.start_tokens_match("ticks:100", "ticks:101") is False
+    assert _procid.start_tokens_match("ticks:100", "lstart:Sat Jul 11 14:19:32 2026") is False
+    assert _procid.start_tokens_match("lstart:Sat Jul 11 14:19:32 2026", "ticks:100") is False

@@ -19,10 +19,10 @@ Emission decisions (each with a test):
   plus `global` when some referencing edge has via=="global".
 - Edges carry via/lookback/cls/mapping_row/assumption; cls doubles as the
   style class (exact/assumed/redesign); the canvas label reuses
-  viz._edge_label, so the DL-35 thinning grammar is re-expressed, not forked.
+  viz.edge_label, so the DL-35 thinning grammar is re-expressed, not forked.
 - The elements JSON embeds with DL-70's rule: every "<" becomes \\u003c
   (valid JSON, neutralizes </script and <!-- in one rule).
-- Template substitution is single-pass unique-marker (viz_html._substitute):
+- Template substitution is single-pass unique-marker (viz_html.substitute):
   replaced content is never re-scanned, so marker-shaped job/file names
   cannot splice a later payload into the page.
 """
@@ -35,8 +35,8 @@ from importlib.resources import files
 from typing import Literal
 
 from dsl41.derive import DerivedGraph
-from dsl41.viz import Direction, _edge_label
-from dsl41.viz_html import _substitute
+from dsl41.viz import Direction, edge_label
+from dsl41.viz_html import substitute
 
 _KIND_CLASS = {"BOX": "box", "FW": "fw"}  # anything else renders as a command
 
@@ -112,7 +112,7 @@ def _elements(graph: DerivedGraph) -> dict[str, list[dict[str, object]]]:
                     "cls": edge.cls,
                     "mapping_row": edge.mapping_row,
                     "assumption": edge.assumption,
-                    "label": _edge_label(edge),
+                    "label": edge_label(edge),
                 },
                 "classes": edge.cls,
             }
@@ -139,7 +139,7 @@ def to_explore_html(
 
     package = files("dsl41")
     template = (package / "templates" / "viz_explore.html").read_text(encoding="utf-8")
-    return _substitute(
+    return substitute(
         template,
         {
             "__DSL41_TITLE__": html.escape(title),

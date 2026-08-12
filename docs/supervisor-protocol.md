@@ -4,7 +4,8 @@ Status: the spool format and the wrapper input spec are frozen
 (2026-07-11, phase 11b, DL-42 item 3). The supervisor socket protocol is
 frozen (2026-07-11, phase 11f, DL-48). This document is the future
 extraction boundary. If the lifecycle tier (runner_wrapper.py +
-runner_supervisor.py) is extracted (DL-42 triggers), this document is its
+runner_supervisor.py + the runner_procid.py they share, DL-72) is
+extracted (DL-42 triggers), this document is its
 public API. Each change to a frozen item requires a decision-log entry.
 
 The tier is deliberately dumb. It records process lifecycle facts durably
@@ -27,6 +28,12 @@ item 6).
   speaks the §5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING + lease
   verbs). It is stdlib-only and runs by file path — the same enforced
   boundary as the wrapper.
+- **process identity** (`runner_procid.py`, DL-72): the one copy of the
+  durability liturgy, the boot-session id, the (pid, start-time)
+  PID-reuse guard and the quiet group kill that the two above share. It
+  is a sibling *inside* the boundary: stdlib-only itself, imported by
+  both under its plain top-level name, and covered by the same import
+  test. Extraction takes all three files or none.
 
 ## 2. Wrapper input spec (frozen)
 

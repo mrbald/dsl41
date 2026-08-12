@@ -53,14 +53,14 @@ from __future__ import annotations
 
 from typing import Literal, NamedTuple
 
-from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph
+from dsl41.conditions import STATUS_LETTER
+from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components
 
+#: Via -> chart letter. The status half IS conditions.STATUS_LETTER under the
+#: lowercase Via spelling (one status vocabulary, DL-72); only the two vias
+#: that are not statuses are spelled out here.
 _VIA_LETTER = {
-    "success": "s",
-    "failure": "f",
-    "done": "d",
-    "terminated": "t",
-    "notrunning": "n",
+    **{status.lower(): letter for status, letter in STATUS_LETTER.items()},
     "exitcode": "e",
     "global": "v",
 }
@@ -113,7 +113,7 @@ class _Ids:
         return self._by_name[name]
 
 
-def _edge_label(edge: DerivedEdge) -> str:
+def edge_label(edge: DerivedEdge) -> str:
     """Thinned label (DL-35): letter iff via != success, lookback always,
     mapping row only on redesign edges (Appendix B carries the rest)."""
     parts: list[str] = []
@@ -168,31 +168,8 @@ def split_components(graph: DerivedGraph) -> list[list[str]]:
     Members in graph.nodes (catalog) order; components ordered by descending
     size, ties by first member's catalog position."""
     index = {name: i for i, name in enumerate(graph.nodes)}
-    parent: dict[str, str | None] = dict.fromkeys(graph.nodes)
-
-    def find(name: str) -> str:
-        while parent[name] is not None:
-            up = parent[name]
-            assert up is not None
-            name = up
-        return name
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for edge in graph.edges:
-        if edge.src in index and edge.dst in index:
-            union(edge.src, edge.dst)
-    for box, members in graph.box_tree.children.items():
-        for member in members:
-            union(box, member)
-
-    grouped: dict[str, list[str]] = {}
-    for name in graph.nodes:
-        grouped.setdefault(find(name), []).append(name)
-    return sorted(grouped.values(), key=lambda comp: (-len(comp), index[comp[0]]))
+    grouped = components(graph.nodes, graph.edges, bind_box_members=graph.box_tree)
+    return sorted(grouped, key=lambda comp: (-len(comp), index[comp[0]]))
 
 
 def _incident_nodes(graph: DerivedGraph) -> set[str]:
@@ -485,7 +462,7 @@ def _render_chart(
         src, dst = target(edge.src), target(edge.dst)
         if src == dst and edge.src != edge.dst:
             continue  # both endpoints inside one collapsed box
-        text = _edge_label(edge)
+        text = edge_label(edge)
         key = (src, dst, edge.cls, text)
         if key in seen_edges:
             continue  # re-anchored duplicates collapse to one rendered edge
@@ -567,9 +544,13 @@ def to_mermaid(
 # The legend/prose/rows split exists so the Markdown report and the HTML page
 # (viz_html) format the SAME content -- parity drift between emitters is the
 # no-silent-loss failure mode. to_markdown owns every Markdown literal;
-# _report_content owns every decision about what the report says.
+# report_content owns every decision about what the report says.
+#
+# These names are PUBLIC on purpose (DL-72): report_content, ReportContent,
+# ChartSection, edge_label and the legend/locks prose are the contract the
+# three emitters (viz, viz_html, viz_explore) share, not private borrowings.
 
-_LEGEND_CHART = """\
+LEGEND_CHART = """\
 flowchart LR
     cmd["command job"] --> dep1["exact dependency"]
     fw(["\N{PAGE FACING UP} file watcher"]) -.-> dep2["assumed dependency"]
@@ -594,7 +575,7 @@ flowchart LR
     class lk lockNode
 """
 
-_LEGEND_PROSE = """\
+LEGEND_PROSE = """\
 Solid arrow = exact mapping; dashed = assumed (assumption in Appendix B);
 thick red = needs redesign (M-row on the edge). Edge letters: f failure,
 d done, t terminated, n notrunning, e exitcode, v global variable;
@@ -604,20 +585,20 @@ and \N{LOCK} hubs are mutual exclusion, not flow.
 
 _LEGEND = (
     "<details>\n<summary>Legend</summary>\n\n```mermaid\n"
-    + _LEGEND_CHART
+    + LEGEND_CHART
     + "```\n\n"
-    + _LEGEND_PROSE
+    + LEGEND_PROSE
     + "\n</details>\n"
 )
 
-_LOCKS_PROSE = (
+LOCKS_PROSE = (
     "Every stated mutual exclusion. Drawn in charts as lock links, hubs,"
     " or single-instance badges; enumerated here so none hides in a"
     " collapsed box or between workflows (DL-35a)."
 )
 
 
-class _ChartSection(NamedTuple):
+class ChartSection(NamedTuple):
     """One charted workflow: heading parts plus the bare chart body."""
 
     wid: str  # "W1"
@@ -627,30 +608,30 @@ class _ChartSection(NamedTuple):
     chart: str  # _render_chart body, no frontmatter
 
 
-class _ReportContent(NamedTuple):
+class ReportContent(NamedTuple):
     """Everything the report says, before either emitter formats it. Rows
     carry RAW strings; each emitter applies its own escaping. Appendix C
     (redesign flags / OR shapes / cycles) is read off the graph directly."""
 
     summary: str
-    sections: list[_ChartSection]
+    sections: list[ChartSection]
     standalone: list[str]  # Appendix A job names
     standalone_chart: str | None  # only when include_singletons and any exist
     lock_rows: list[tuple[str, str, str]]  # (members joined with x, kind, charts)
     annotated: list[DerivedEdge]  # Appendix B rows
 
 
-def _report_content(
+def report_content(
     graph: DerivedGraph,
     *,
     collapse_threshold: int,
     direction: Direction | Literal["auto"],
     include_singletons: bool,
-) -> _ReportContent:
-    components = split_components(graph)
+) -> ReportContent:
+    comps = split_components(graph)
     touched = _incident_nodes(graph)
-    standalone = [comp[0] for comp in components if _is_standalone(comp, touched)]
-    charted = [comp for comp in components if not _is_standalone(comp, touched)]
+    standalone = [comp[0] for comp in comps if _is_standalone(comp, touched)]
+    charted = [comp for comp in comps if not _is_standalone(comp, touched)]
 
     by_class = {"exact": 0, "assumed": 0, "redesign": 0}
     for edge in graph.edges:
@@ -666,7 +647,7 @@ def _report_content(
     )
 
     comp_of: dict[str, str] = {}
-    sections: list[_ChartSection] = []
+    sections: list[ChartSection] = []
     for i, comp in enumerate(charted, start=1):
         wid = f"W{i}"
         for name in comp:
@@ -674,7 +655,7 @@ def _report_content(
         prefix = _common_prefix(comp)
         chart_dir = _auto_direction(comp, graph) if direction == "auto" else direction
         sections.append(
-            _ChartSection(
+            ChartSection(
                 wid=wid,
                 comp_title=_component_title(comp, graph),
                 count_label=f"{len(comp)} job" + ("s" if len(comp) != 1 else ""),
@@ -702,7 +683,7 @@ def _report_content(
         charts = ", ".join(dict.fromkeys(comp_of.get(m, "not in catalog") for m in group))
         lock_rows.append((" \N{MULTIPLICATION SIGN} ".join(group), kind, charts))
 
-    return _ReportContent(
+    return ReportContent(
         summary=summary,
         sections=sections,
         standalone=standalone,
@@ -747,7 +728,7 @@ def to_markdown(
     """Full Markdown report: summary, legend, one chart per component,
     shared-locks section, appendices A (standalone jobs) / B (non-exact
     edges) / C (redesign flags, OR shapes, cycles)."""
-    content = _report_content(
+    content = report_content(
         graph,
         collapse_threshold=collapse_threshold,
         direction=direction,
@@ -776,7 +757,7 @@ def to_markdown(
     if content.lock_rows:
         out.append("## Locks")
         out.append("")
-        out.append(_LOCKS_PROSE)
+        out.append(LOCKS_PROSE)
         out.append("")
         out.append("| lock | kind | charts |")
         out.append("|---|---|---|")

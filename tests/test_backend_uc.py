@@ -508,6 +508,23 @@ def test_compile_to_uc_edge_endpoints_resolve_to_known_vertex_ids_across_corpus(
             assert edge["targetId"]["value"] in vertex_ids
 
 
+def test_component_workflows_come_out_in_first_task_order() -> None:
+    """DL-72: the component split is derive.components (box co-membership NOT
+    bound in -- boxes are already workflows), and the backend sorts the groups
+    by their first task's catalog position. Here the two components' edges
+    point AWAY from the earlier task, so any ordering keyed on a union-find
+    representative instead of the first member would emit wf_b first."""
+    catalog = lower_source(
+        "insert_job: a\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: b\njob_type: c\ncommand: b\nmachine: m1\n\n"
+        "insert_job: c\njob_type: c\ncommand: c\nmachine: m1\ncondition: s(b)\n\n"
+        "insert_job: d\njob_type: c\ncommand: d\nmachine: m1\ncondition: s(a)\n"
+    )
+    twin = compile_twin(catalog)
+    assert [wf.name for wf in twin.workflows] == ["wf_a", "wf_b"]
+    assert [wf.tasks for wf in twin.workflows] == [["a", "d"], ["b", "c"]]
+
+
 # --------------------------------------------------------------- migration report
 
 

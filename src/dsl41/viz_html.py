@@ -1,6 +1,6 @@
 """Self-contained HTML report of the derived graph (DL-70).
 
-Same content as viz.to_markdown -- both emitters format one _ReportContent,
+Same content as viz.to_markdown -- both emitters format one ReportContent,
 so nothing the Markdown report says can go missing here (no-silent-loss).
 The page renders its Mermaid charts in the browser with vendored mermaid +
 ELK (src/dsl41/_vendor/), fully offline: file:// works, no network is
@@ -15,7 +15,7 @@ Rendering decisions (each with a test):
   drives mermaid.render() itself for progress + per-chart error isolation.
 - Vendor payloads are inlined verbatim; their integrity invariants (no
   </script substring, attribution banner) are pinned in tests.
-- Template substitution is unique-marker single-pass (_substitute), not
+- Template substitution is unique-marker single-pass (substitute), not
   str.format or string.Template: the template is {}-heavy JS/CSS and the
   vendor JS is full of "$". Single-pass, not chained .replace(): replaced
   content is never re-scanned, so marker-shaped user input (a job or file
@@ -36,16 +36,16 @@ from typing import Literal
 from dsl41.derive import DerivedGraph
 from dsl41.viz import (
     DEFAULT_COLLAPSE_THRESHOLD,
-    _LEGEND_CHART,
-    _LEGEND_PROSE,
-    _LOCKS_PROSE,
+    LEGEND_CHART,
+    LEGEND_PROSE,
+    LOCKS_PROSE,
     Direction,
-    _report_content,
+    report_content,
     to_mermaid,
 )
 
 
-def _substitute(template: str, mapping: dict[str, str]) -> str:
+def substitute(template: str, mapping: dict[str, str]) -> str:
     """Replace every __DSL41_*__ marker in one pass over the template.
     Replacement text is never re-scanned, so data that happens to contain a
     marker (job names and file names allow the marker charset) cannot splice
@@ -106,7 +106,7 @@ def to_html(
 ) -> str:
     """One self-contained HTML page: report parity (summary, legend, charts,
     locks, appendices) or, with whole_graph, a single-chart page."""
-    charts: list[dict[str, str]] = [{"el": "c0", "src": _LEGEND_CHART.rstrip("\n")}]
+    charts: list[dict[str, str]] = [{"el": "c0", "src": LEGEND_CHART.rstrip("\n")}]
     toc: list[str] = []
     sections: list[str] = []
     tables: list[str] = []
@@ -121,7 +121,7 @@ def to_html(
         summary = f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(graph.edges)} edges"
         sections.append(f'<section id="whole">\n{_viewport("c1")}\n</section>')
     else:
-        content = _report_content(
+        content = report_content(
             graph,
             collapse_threshold=collapse_threshold,
             direction=direction,
@@ -163,7 +163,7 @@ def to_html(
                 for joined, kind, charts_col in content.lock_rows
             ]
             tables.append(
-                f'<section id="locks">\n<h2>Locks</h2>\n<p>{_text(_LOCKS_PROSE)}</p>\n'
+                f'<section id="locks">\n<h2>Locks</h2>\n<p>{_text(LOCKS_PROSE)}</p>\n'
                 f"{_table(['lock', 'kind', 'charts'], rows)}\n</section>"
             )
 
@@ -247,12 +247,12 @@ def to_html(
 
     package = files("dsl41")
     template = (package / "templates" / "viz_report.html").read_text(encoding="utf-8")
-    return _substitute(
+    return substitute(
         template,
         {
             "__DSL41_TITLE__": _text(title),
             "__DSL41_SUMMARY__": _text(summary),
-            "__DSL41_LEGEND_PROSE__": _text(_LEGEND_PROSE.rstrip("\n")),
+            "__DSL41_LEGEND_PROSE__": _text(LEGEND_PROSE.rstrip("\n")),
             "__DSL41_TOC__": toc_html,
             "__DSL41_SECTIONS__": "\n".join(sections),
             "__DSL41_TABLES__": "\n".join(tables),

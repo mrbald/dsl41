@@ -52,13 +52,17 @@ Decisions pinned here (each with a test):
 - node_meta (DL-35) carries per-node display facts verbatim from IR-F
   (kind, trigger digest, command/watch path) so viz can distinguish
   triggers without reaching back into the catalog; no analysis lives in it.
+- `components` is the one connectivity implementation every consumer uses
+  (viz's workflow charts, the UC backend's workflow split). Whether box
+  co-membership connects is its named argument, not a second function
+  (DL-72); ordering beyond "nodes order" belongs to the caller.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
-from typing import Literal, NamedTuple
+from collections.abc import Iterable, Sequence
+from typing import Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, model_validator
 
@@ -72,6 +76,7 @@ from dsl41.conditions import (
     Lookback,
     Or,
     Paren,
+    Status,
     StatusAtom,
     iter_atoms,
 )
@@ -80,13 +85,12 @@ from dsl41.ir import CatalogIR, FwSpec, ScheduleBlock
 EdgeClass = Literal["exact", "assumed", "redesign"]  # E/A/R from the mapping table
 Via = Literal["success", "failure", "done", "terminated", "notrunning", "exitcode", "global"]
 
-_STATUS_TO_VIA: dict[str, Via] = {
-    "SUCCESS": "success",
-    "FAILURE": "failure",
-    "DONE": "done",
-    "TERMINATED": "terminated",
-    "NOTRUNNING": "notrunning",
-}
+
+def _status_via(status: Status) -> Via:
+    """A status atom's Via is simply its own name lowercased -- the Via
+    vocabulary is the status vocabulary plus exitcode/global (DL-72). The
+    cast keeps the Literal checked at every call site."""
+    return cast(Via, status.lower())
 
 
 class DerivedEdge(BaseModel):
@@ -356,7 +360,7 @@ def _classify_condition_edge(
     atom = ref.atom
     assert not isinstance(atom, GlobalAtom)
     src = atom.job.name
-    via: Via = "exitcode" if isinstance(atom, ExitCodeAtom) else _STATUS_TO_VIA[atom.status]
+    via: Via = "exitcode" if isinstance(atom, ExitCodeAtom) else _status_via(atom.status)
     lookback = atom.lookback
 
     def edge(cls: EdgeClass, row: str, assumption: str | None = None) -> DerivedEdge:
@@ -480,7 +484,7 @@ def _edge_for_ref(
         )
     if atom.job.instance is not None:
         boundary.append(atom.job)
-        via = "exitcode" if isinstance(atom, ExitCodeAtom) else _STATUS_TO_VIA[atom.status]
+        via = "exitcode" if isinstance(atom, ExitCodeAtom) else _status_via(atom.status)
         if ref.origin != "condition":
             row, why = (
                 "M16",
@@ -504,7 +508,7 @@ def _edge_for_ref(
             source_atom=ref.span,
         )
     if ref.origin != "condition":
-        via = "exitcode" if isinstance(atom, ExitCodeAtom) else _STATUS_TO_VIA[atom.status]
+        via = "exitcode" if isinstance(atom, ExitCodeAtom) else _status_via(atom.status)
         src = atom.job.name
         if _is_inside(tree, src, ref.dst):
             # U2 resolved (DL-53): Running/Problems on member failure; Success
@@ -771,6 +775,63 @@ def _parallel_groups(
         key = (tuple(sorted(preds[node])), tuple(sorted(succs[node])))
         by_signature.setdefault(key, []).append(node)
     return sorted(group for group in by_signature.values() if len(group) >= 2)
+
+
+# ------------------------------------------------------------------ connectivity
+
+
+class EdgeEnds(Protocol):
+    """The connectivity view of an edge: named endpoints, nothing else. Both
+    DerivedEdge and the UC backend's UcEdge satisfy it."""
+
+    src: str
+    dst: str
+
+
+def components(
+    nodes: Sequence[str],
+    edges: Iterable[EdgeEnds],
+    *,
+    bind_box_members: BoxTree | None = None,
+) -> list[list[str]]:
+    """Connected components (union-find) over the edges with BOTH ends in
+    `nodes`. Mutex groups never connect anything -- a shared lock would glue
+    unrelated streams together (DL-35).
+
+    `bind_box_members` is the one policy difference between this function's
+    callers, named instead of duplicated (DL-72): pass a BoxTree to union
+    each box with its members (viz, where a box and its members are one
+    workflow chart), pass None to leave box membership out (the UC backend,
+    where boxes are already their own workflows).
+
+    Members come back in `nodes` order, groups in first-member order;
+    callers wanting another order sort at the call site.
+    """
+    parent: dict[str, str] = {name: name for name in nodes}
+
+    def find(name: str) -> str:
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]  # path halving
+            name = parent[name]
+        return name
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for edge in edges:
+        if edge.src in parent and edge.dst in parent:
+            union(edge.src, edge.dst)
+    if bind_box_members is not None:
+        for box, members in bind_box_members.children.items():
+            for member in members:
+                union(box, member)
+
+    grouped: dict[str, list[str]] = {}
+    for name in nodes:
+        grouped.setdefault(find(name), []).append(name)
+    return list(grouped.values())
 
 
 # ----------------------------------------------------------------------- the driver

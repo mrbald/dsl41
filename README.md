@@ -406,6 +406,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary). It records spawn.json/status.json durably.
   On lifeline EOF, it kills and records. Spool contract in docs/supervisor-protocol.md.
+- src/dsl41/runner_procid.py — the durability liturgy (fsync/rename/fsync) and process
+  identity (boot id, (pid, start-time) PID-reuse guard, quiet group kill) the wrapper
+  and the supervisor share: one stdlib-only module both import by top-level name (DL-72)
 - src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `uc` (the U3a
   record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
   `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating

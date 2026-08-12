@@ -308,6 +308,14 @@ _STATUS_BY_KW: dict[str, Status] = {
     "n": "NOTRUNNING",
 }
 
+#: Status -> its one-letter condition keyword, DERIVED from the keyword table
+#: above (the single-character keys are exactly the letters). The one source
+#: of truth for every emitter that spells a status as a letter: the phase-10
+#: DSL's s()/f()/d()/t()/n() forms and viz's DL-35 edge labels (DL-72).
+STATUS_LETTER: dict[Status, str] = {
+    status: kw for kw, status in _STATUS_BY_KW.items() if len(kw) == 1
+}
+
 
 def _span(node: Tree[Token]) -> CondSpan | None:
     meta = node.meta

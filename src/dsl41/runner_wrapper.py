@@ -4,7 +4,9 @@ Normative spec: docs/runner-design.md ss6a (DL-41a) + docs/supervisor-protocol.m
 (the spool format this module writes is the tier's frozen public contract,
 DL-42). STDLIB ONLY: this module imports nothing from dsl41 and nothing
 third-party -- its dumbness is a correctness property and the enforced
-extraction boundary (DL-42; import-graph test in tests/test_runner_wrapper.py).
+extraction boundary (DL-42; import-graph test in tests/test_runner_lifecycle.py).
+Its one non-stdlib import is the sibling stdlib-only ``runner_procid``, which
+carries the durability/identity helpers the supervisor needs too (DL-72).
 The engine runs it BY FILE PATH (``sys.executable <this file>``), never
 ``-m dsl41.runner_wrapper``: ``-m`` would import the dsl41 package __init__
 and drag third-party imports into the recorder's runtime.
@@ -31,8 +33,9 @@ Duties, in order (ss6a Tier 0):
    macOS KERN_PROCARGS2 omits env for restricted binaries like /bin/sh and
    Linux /proc/pid/environ is ptrace-gated (DL-41a, probed empirically).
    Identity verification uses the (pid, start-time) tuple instead:
-   ``proc_start_token`` / ``start_tokens_match`` below, +/-2s tolerance on
-   macOS's 1-second ``ps -o lstart=`` resolution, tick-exact on Linux.
+   ``proc_start_token`` / ``start_tokens_match`` (runner_procid), +/-2s
+   tolerance on macOS's 1-second ``ps -o lstart=`` resolution, tick-exact
+   on Linux.
 4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe,
    lifeline}. On EVERY wakeup check child-exit BEFORE lifeline EOF -- a job
    completing at the instant its parent dies must be recorded as a
@@ -87,8 +90,33 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
 from typing import Any
+
+# DL-72: the shared process-identity helpers live in a sibling stdlib-only
+# module. sys.path[0] is this file's directory when we are run by file path --
+# except under PYTHONSAFEPATH=1, which strips it; prepend it ourselves so the
+# plain top-level import resolves either way (importing dsl41.runner_procid
+# would drag the package __init__, and with it third-party imports, in).
+# Prepend only when it is missing and take it back off again: this file is ALSO
+# imported as an ordinary package module (the engine reads __file__ and
+# SPEC_VERSION off it), and a library must not leave its own package directory
+# on the importing process's sys.path -- there it would shadow top-level names
+# (ir, cli, viz, ...) for the whole process. sys.path ends exactly as CPython
+# handed it to us, in both invocation modes.
+_PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
+if _PROCID_DIR_ADDED:
+    sys.path.insert(0, _PROCID_DIR)
+from runner_procid import (  # type: ignore[import-not-found]  # noqa: E402
+    current_boot_id,
+    durable_write_json,
+    killpg_quiet,
+    proc_start_token,
+    utc_now_iso,
+)
+
+if _PROCID_DIR_ADDED:
+    sys.path.remove(_PROCID_DIR)
 
 SPEC_VERSION = 1
 
@@ -96,117 +124,7 @@ SPEC_VERSION = 1
 PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
 
-# ------------------------------------------------------------------ durability
-
-
-def durable_write(path: str, data: bytes) -> None:
-    """The DL-41a durability liturgy: same-dir temp file, fsync(file),
-    rename, fsync(directory). Requires a local filesystem."""
-    directory = os.path.dirname(path) or "."
-    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # sol #3: owner-only
-    try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.rename(tmp, path)
-    dfd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
-def durable_write_json(path: str, record: dict[str, Any]) -> None:
-    durable_write(path, json.dumps(record, sort_keys=True).encode("utf-8") + b"\n")
-
-
-# ------------------------------------------------------------ machine identity
-
-
-def current_boot_id() -> str:
-    """Boot session identity (DL-42 item 5): a reboot recycles the whole
-    (pid, start-time) space, so a boot_id mismatch voids liveness checks AND
-    proves nothing survived."""
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
-            return f.read().strip()
-    except OSError:
-        pass
-    out = subprocess.run(
-        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if out.returncode == 0 and out.stdout.strip():
-        return out.stdout.strip()
-    return "unknown"
-
-
-def proc_start_token(pid: int) -> str | None:
-    """Opaque start-time token for the (pid, start-time) PID-reuse guard, or
-    None when the pid is gone. Linux: tick-exact starttime, field 22 of
-    /proc/<pid>/stat (split after the LAST ')' -- comm may contain spaces and
-    parens). macOS: ``ps -o lstart=`` under LC_ALL=C, 1-second resolution."""
-    if sys.platform.startswith("linux"):
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                raw = f.read().decode("ascii", "replace")
-        except OSError:
-            return None
-        fields = raw.rsplit(")", 1)[1].split()
-        return f"ticks:{fields[19]}"  # fields[0] is field 3 overall
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LC_ALL": "C"},
-        check=False,
-    )
-    lstart = out.stdout.strip()
-    if out.returncode != 0 or not lstart:
-        return None
-    return f"lstart:{lstart}"
-
-
-_LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
-
-
-def start_tokens_match(a: str, b: str, *, tolerance_s: float = 2.0) -> bool:
-    """Compare start-time tokens: tick tokens exactly, lstart tokens within
-    +/-2s (macOS ps rounds to whole seconds; DL-41a probed the drift)."""
-    if a.startswith("ticks:") or b.startswith("ticks:"):
-        return a == b
-    if not (a.startswith("lstart:") and b.startswith("lstart:")):
-        return False
-    try:
-        ta = time.mktime(time.strptime(a[len("lstart:") :], _LSTART_FORMAT))
-        tb = time.mktime(time.strptime(b[len("lstart:") :], _LSTART_FORMAT))
-    except ValueError:
-        return False
-    return abs(ta - tb) <= tolerance_s
-
-
-def verify_alive(pid: int, recorded_token: str) -> bool:
-    """The PID-reuse guard: a pid is only 'ours' if it exists AND its start
-    time matches the recorded token. Never signal a pid that fails this."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        pass  # exists under another uid; the token check decides
-    token = proc_start_token(pid)
-    return token is not None and start_tokens_match(token, recorded_token)
-
-
 # ------------------------------------------------------------------- the shim
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _test_pause(point: str) -> None:
@@ -266,20 +184,13 @@ def _restore_default_signals() -> None:
         signal.signal(sig, signal.SIG_DFL)
 
 
-def _killpg_quiet(pgid: int, sig: int) -> None:
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass  # the whole group is already gone
-
-
 def _await_exit_after_kill(
     child: subprocess.Popen[bytes], self_pipe_r: int, grace_s: float
 ) -> dict[str, Any]:
     """SIGTERM the command pgid, wait up to grace_s (waking on SIGCHLD via
     the self-pipe), then SIGKILL and wait unconditionally (an unkillable
     zombie-to-be still exits on SIGKILL; D-state is the machine's problem)."""
-    _killpg_quiet(child.pid, signal.SIGTERM)
+    killpg_quiet(child.pid, signal.SIGTERM)
     deadline = time.monotonic() + grace_s
     while True:
         observed = _observe_exit(child)
@@ -291,7 +202,7 @@ def _await_exit_after_kill(
         ready, _, _ = select.select([self_pipe_r], [], [], remaining)
         if ready:
             _drain(self_pipe_r)
-    _killpg_quiet(child.pid, signal.SIGKILL)
+    killpg_quiet(child.pid, signal.SIGKILL)
     while True:
         observed = _observe_exit(child)
         if observed is not None:
@@ -375,7 +286,7 @@ def main() -> int:
                     **identity,
                     "outcome": "spawn_failed",
                     "error": str(exc),
-                    "ended_at": _utc_now_iso(),
+                    "ended_at": utc_now_iso(),
                 },
             )
         except OSError as write_exc:
@@ -393,7 +304,7 @@ def main() -> int:
         "command_pgid": child.pid,
         "command_start_time": proc_start_token(child.pid),
         "boot_id": boot_id,
-        "started_at": _utc_now_iso(),
+        "started_at": utc_now_iso(),
     }
     try:
         durable_write_json(os.path.join(run_dir, "spawn.json"), spawn_record)
@@ -414,7 +325,7 @@ def main() -> int:
                     "outcome": "terminated",
                     "cause": f"spawn record write failed ({exc}); killed",
                     "observed": kill_observed,
-                    "ended_at": _utc_now_iso(),
+                    "ended_at": utc_now_iso(),
                 },
             )
         except OSError:
@@ -451,7 +362,7 @@ def main() -> int:
     try:
         durable_write_json(
             os.path.join(run_dir, "status.json"),
-            {"version": SPEC_VERSION, **identity, **status, "ended_at": _utc_now_iso()},
+            {"version": SPEC_VERSION, **identity, **status, "ended_at": utc_now_iso()},
         )
     except OSError as exc:
         print(f"runner_wrapper: status.json write failed: {exc}", file=sys.stderr)

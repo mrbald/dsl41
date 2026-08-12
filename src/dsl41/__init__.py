@@ -22,4 +22,6 @@ built, the phase-11 runner in progress per docs/runner-design.md ss14):
                resume/reconciliation (docs/runner-design.md; 11c-11f pending)
   runner_wrapper - per-run Tier-0 lifecycle recorder; STDLIB-ONLY, spawned
                by file path (docs/supervisor-protocol.md, DL-42 boundary)
+  runner_procid - durable records + process identity shared by the Tier-0
+               wrapper and the Tier-1 supervisor; STDLIB-ONLY (DL-72)
 """

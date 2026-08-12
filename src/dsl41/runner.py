@@ -210,6 +210,7 @@ from zoneinfo import ZoneInfo, available_timezones
 
 from pydantic import BaseModel
 
+from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
 from dsl41.autocal import (
@@ -852,21 +853,14 @@ class LocalCommandAdapter:
             isinstance(pid, int)
             and isinstance(pgid, int)
             and isinstance(token, str)
-            and _wrapper.verify_alive(pid, token)  # the PID-reuse guard
+            and _procid.verify_alive(pid, token)  # the PID-reuse guard
         ):
-            _killpg_quiet(pgid, signal.SIGTERM)
+            _procid.killpg_quiet(pgid, signal.SIGTERM)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self.grace_seconds)
             except TimeoutError:
-                _killpg_quiet(pgid, signal.SIGKILL)
+                _procid.killpg_quiet(pgid, signal.SIGKILL)
         await proc.wait()  # the wrapper records the outcome, then exits
-
-
-def _killpg_quiet(pgid: int, sig: int) -> None:
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass  # whole group already gone
 
 
 def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, str]:
@@ -1358,7 +1352,7 @@ class SupervisedCommandAdapter:
             job,
             run_number,
             run_dir,
-            _wrapper.current_boot_id(),
+            _procid.current_boot_id(),
             settle_seconds=self.settle_seconds,
             grace_seconds=self.grace_seconds,
         )
@@ -2370,7 +2364,7 @@ async def _reconcile(
     stopped, E4 dissolved). Runs listed dead or unlisted fall through to the
     spool ladder unchanged (the supervisor died, or the run predates it)."""
     assert engine.run_root is not None
-    boot_now = _wrapper.current_boot_id()
+    boot_now = _procid.current_boot_id()
     supervised_live: dict[tuple[str, int], dict[str, Any]] = {}
     if supervisor is not None:
         with contextlib.suppress(SupervisorUnavailable):
@@ -2503,7 +2497,7 @@ async def _resolve_spool(
         if (
             isinstance(wrapper_pid, int)
             and isinstance(wrapper_token, str)
-            and _wrapper.verify_alive(wrapper_pid, wrapper_token)
+            and _procid.verify_alive(wrapper_pid, wrapper_token)
         ):
             # the wrapper is mid-grace (its own parent-loss kill is running):
             # give its status.json a settle window
@@ -2512,7 +2506,7 @@ async def _resolve_spool(
                 status = _load_json(status_path)
                 if status is not None:
                     break
-                if not _wrapper.verify_alive(wrapper_pid, wrapper_token):
+                if not _procid.verify_alive(wrapper_pid, wrapper_token):
                     status = _load_json(status_path)  # one last read after death
                     break
                 await asyncio.sleep(0.1)
@@ -2524,18 +2518,18 @@ async def _resolve_spool(
                 isinstance(command_pid, int)
                 and isinstance(command_pgid, int)
                 and isinstance(command_token, str)
-                and _wrapper.verify_alive(command_pid, command_token)
+                and _procid.verify_alive(command_pid, command_token)
             ):
                 # command group survived its recorder: kill the verified
                 # leader's group -- TERMINATED is truthful (a kill happened)
-                _killpg_quiet(command_pgid, signal.SIGTERM)
+                _procid.killpg_quiet(command_pgid, signal.SIGTERM)
                 deadline = time.monotonic() + grace_seconds
                 while time.monotonic() < deadline:
-                    if not _wrapper.verify_alive(command_pid, command_token):
+                    if not _procid.verify_alive(command_pid, command_token):
                         break
                     await asyncio.sleep(0.1)
                 else:
-                    _killpg_quiet(command_pgid, signal.SIGKILL)
+                    _procid.killpg_quiet(command_pgid, signal.SIGKILL)
                 return Terminated("wrapper lost; killed at resume"), None
     if status is not None:
         ended_at = status.get("ended_at")

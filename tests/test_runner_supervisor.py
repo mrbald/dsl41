@@ -34,7 +34,7 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
 
 from datetime import datetime
 
-from dsl41 import runner_supervisor, runner_wrapper
+from dsl41 import runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
 from dsl41.runner import (
     FileWatcherAdapter,
@@ -169,7 +169,10 @@ def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
 
 def test_supervisor_imports_are_stdlib_only() -> None:
     """DL-42 item 3 / spec ss1: the supervisor is the future extraction
-    boundary alongside the wrapper -- stdlib only, nothing from dsl41."""
+    boundary alongside the wrapper -- stdlib only, nothing from dsl41. Its
+    one non-stdlib import is the sibling stdlib-only runner_procid it shares
+    with the wrapper (DL-72; that module's own boundary is pinned in
+    tests/test_runner_lifecycle.py)."""
     tree = ast.parse(SUPERVISOR.read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -180,7 +183,22 @@ def test_supervisor_imports_are_stdlib_only() -> None:
             assert node.module is not None
             imported.add(node.module.partition(".")[0])
     non_stdlib = sorted(imported - set(sys.stdlib_module_names))
-    assert non_stdlib == [], f"supervisor imports outside stdlib: {non_stdlib}"
+    assert non_stdlib == ["runner_procid"], f"supervisor imports outside stdlib: {non_stdlib}"
+
+
+def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:
+    """DL-72: run by file path, the supervisor reaches runner_procid through
+    its own directory on sys.path[0] -- the entry PYTHONSAFEPATH=1 strips.
+    With the guard it binds, PINGs, and shuts down as usual."""
+    proc = start_supervisor(short_root, env={**os.environ, "PYTHONSAFEPATH": "1"})
+    cli = RawClient(short_root)
+    try:
+        assert cli.send({"v": 1, "cmd": "PING"}) == {"ok": True, "version": 1}
+        token = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "t"})["token"]
+        assert cli.send({"v": 1, "cmd": "SHUTDOWN", "token": token}) == {"ok": True}
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
 
 
 def test_peer_uid_same_uid_on_socketpair() -> None:
@@ -341,7 +359,7 @@ def test_signal_pid_reuse_guard_refuses_spoofed_spawn(short_root: Path) -> None:
                     "command_pid": innocent.pid,
                     "command_pgid": innocent.pid,
                     "command_start_time": stale_token,
-                    "boot_id": runner_supervisor.current_boot_id(),
+                    "boot_id": runner_procid.current_boot_id(),
                     "started_at": "2026-07-11T00:00:00+00:00",
                 }
             )

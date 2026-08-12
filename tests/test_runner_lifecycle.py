@@ -39,7 +39,7 @@ import pytest
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("lifecycle tier is POSIX-only", allow_module_level=True)
 
-from dsl41 import runner_wrapper
+from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
 from dsl41.runner import (
     Failed,
@@ -53,6 +53,7 @@ from dsl41.runner import (
 )
 
 WRAPPER = Path(runner_wrapper.__file__)
+PROCID = Path(runner_procid.__file__)
 DRIVER = Path(__file__).parent / "runner_crash_driver.py"
 
 
@@ -134,11 +135,10 @@ def spawn_wrapper(
 # --------------------------------------------------------- import boundary
 
 
-def test_wrapper_imports_are_stdlib_only() -> None:
-    """DL-42 item 3: the wrapper is the future extraction boundary; its
-    dumbness is a correctness property. Nothing from dsl41, nothing
-    third-party -- enforced, not asserted."""
-    tree = ast.parse(WRAPPER.read_text(encoding="utf-8"))
+def module_imports(path: Path) -> set[str]:
+    """Top-level names a source file imports, read off the file itself (never
+    by importing it -- the boundary is a property of what is on disk)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -147,8 +147,48 @@ def test_wrapper_imports_are_stdlib_only() -> None:
             assert node.level == 0, "relative imports would reach into dsl41"
             assert node.module is not None
             imported.add(node.module.partition(".")[0])
-    non_stdlib = sorted(imported - set(sys.stdlib_module_names))
-    assert non_stdlib == [], f"wrapper imports outside stdlib: {non_stdlib}"
+    return imported
+
+
+def test_wrapper_imports_are_stdlib_only() -> None:
+    """DL-42 item 3: the wrapper is the future extraction boundary; its
+    dumbness is a correctness property. Nothing from dsl41, nothing
+    third-party -- enforced, not asserted. Its one non-stdlib import is the
+    sibling stdlib-only runner_procid (DL-72), held to the same rule here."""
+    non_stdlib = sorted(module_imports(WRAPPER) - set(sys.stdlib_module_names))
+    assert non_stdlib == ["runner_procid"], f"wrapper imports outside stdlib: {non_stdlib}"
+    procid = sorted(module_imports(PROCID) - set(sys.stdlib_module_names))
+    assert procid == [], f"runner_procid imports outside stdlib: {procid}"
+
+
+def test_wrapper_records_under_pythonsafepath(tmp_path: Path, monkeypatch) -> None:
+    """DL-72: the wrapper reaches runner_procid as a plain top-level module
+    via its own directory on sys.path[0] -- exactly the entry PYTHONSAFEPATH=1
+    strips. Without the guard the recorder would not even start; with it the
+    outcome is recorded as always."""
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    run_dir = tmp_path / "safepath.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5")
+    assert proc.wait(timeout=10) == 0
+    os.close(lifeline_w)
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "exited" and status["exit_code"] == 5
+
+
+def test_importing_the_engine_leaves_sys_path_untouched() -> None:
+    """DL-72: the wrapper and the supervisor prepend their own directory to
+    reach runner_procid by top-level name, but the engine imports BOTH of them
+    as ordinary package modules (for __file__ and SPEC_VERSION). A library must
+    not leave its package directory on the importing process's sys.path -- there
+    it would shadow top-level names (ir, cli, viz, ...) for the whole process.
+    The guard therefore adds only what is missing and takes it back off."""
+    probe = (
+        "import sys; before = list(sys.path)\n"
+        "import dsl41.runner\n"
+        "assert sys.path == before, [p for p in sys.path if p not in before]\n"
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True)
 
 
 # ------------------------------------------------------ wrapper happy paths
@@ -169,7 +209,7 @@ def test_wrapper_records_natural_exit_and_appends_stdout(tmp_path: Path) -> None
     assert (run_dir / "out.log").read_text() == "pre-existing\nhello\n"
     # ss6a duty 1: the command's own pgid, the wrapper outside it
     assert spawn["command_pgid"] == spawn["command_pid"] != spawn["wrapper_pid"]
-    assert spawn["boot_id"] == runner_wrapper.current_boot_id()
+    assert spawn["boot_id"] == runner_procid.current_boot_id()
 
 
 def test_wrapper_survives_external_group_kill_and_records_signal(tmp_path: Path) -> None:
@@ -308,7 +348,7 @@ def _resolve(run_dir: Path, job: str = "j1", run_number: int = 1, **kw):
             job,
             run_number,
             run_dir,
-            runner_wrapper.current_boot_id(),
+            runner_procid.current_boot_id(),
             settle_seconds=kw.pop("settle_seconds", 1.0),
             grace_seconds=kw.pop("grace_seconds", 2.0),
         )
@@ -409,7 +449,7 @@ def test_live_wrapper_gets_a_settle_window(tmp_path: Path) -> None:
             "j1",
             1,
             run_dir,
-            runner_wrapper.current_boot_id(),
+            runner_procid.current_boot_id(),
             settle_seconds=5.0,
             grace_seconds=2.0,
         )
@@ -446,7 +486,7 @@ def test_spoofed_spawn_json_never_signals_innocents(tmp_path: Path) -> None:
                     "command_pid": innocent.pid,
                     "command_pgid": innocent.pid,
                     "command_start_time": stale_token,
-                    "boot_id": runner_wrapper.current_boot_id(),
+                    "boot_id": runner_procid.current_boot_id(),
                     "started_at": "2026-07-11T00:00:00+00:00",
                 }
             )
@@ -465,7 +505,7 @@ def test_boot_id_flip_voids_liveness_and_resolves_from_records(tmp_path: Path) -
     and the run resolves from status.json or E7."""
     innocent = subprocess.Popen(["sleep", "30"])
     try:
-        token = runner_wrapper.proc_start_token(innocent.pid)
+        token = runner_procid.proc_start_token(innocent.pid)
         assert token is not None
         run_dir = tmp_path / "j1.1"
         run_dir.mkdir()

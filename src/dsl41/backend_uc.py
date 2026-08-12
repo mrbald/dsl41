@@ -56,7 +56,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph
+from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
 from dsl41.equiv import catalog_hash
 from dsl41.ir import CatalogIR, tool_version
 
@@ -481,7 +481,11 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 aliases=[b for b in nested_boxes if _top_of(graph, b) == root],
             )
         )
-    component = _components(
+    # box co-membership is deliberately NOT bound in (derive.components,
+    # DL-72): boxes already became workflows above, so only the loose tasks
+    # group by edges. components' own order -- groups by first member, in
+    # `nodes` order -- is exactly the wanted workflow order, so no re-sort.
+    component = components(
         [t for t in graph.nodes if t not in in_box and catalog.jobs[t].job_type != "BOX"],
         [e for e in compiled if e.src not in in_box and e.dst not in in_box],
     )
@@ -565,24 +569,6 @@ def _transitive_members(graph: DerivedGraph, box: str) -> list[str]:
             else:
                 out.append(member)
     return out
-
-
-def _components(tasks: list[str], edges: list[UcEdge]) -> list[list[str]]:
-    parent: dict[str, str] = {t: t for t in tasks}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for e in edges:
-        if e.src in parent and e.dst in parent:
-            parent[find(e.src)] = find(e.dst)
-    groups: dict[str, list[str]] = {}
-    for t in tasks:
-        groups.setdefault(find(t), []).append(t)
-    return [groups[root] for root in sorted(groups, key=tasks.index)]
 
 
 def _split_global_edge(edge: DerivedEdge, catalog: CatalogIR) -> tuple[str, str] | None:

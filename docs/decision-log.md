@@ -2500,3 +2500,84 @@
   dark theme, view-state persistence, regex search, replacing the
   mermaid report (both stay: report = record, explore = lens), CDN or
   --js-dir variants (offline is the point).
+- DL-72 deduplication and vocabulary: one process-identity module, one
+  status-letter table, one connected-components implementation, one set of
+  public names across the viz emitters (2026-08-12). Problem: four
+  near-copies had accumulated, and copies drift. The proof was already in
+  the tree — runner_wrapper.durable_write created its temp file 0o600
+  ("sol #3: owner-only"), runner_supervisor's copy of the SAME helper
+  created it 0o644; the wrapper's copy carried the richer docstrings, the
+  supervisor's had been stripped. Decisions: (1) src/dsl41/runner_procid.py
+  holds one copy of durable_write / durable_write_json / current_boot_id /
+  proc_start_token / start_tokens_match / verify_alive / killpg_quiet /
+  utc_now_iso, with the wrapper's docstrings kept and the mode unified on
+  the TIGHTER 0o600 (the run_root is 0o700 already, so nothing widens).
+  It is STDLIB ONLY like its two callers — the DL-42 extraction boundary
+  reads "nothing from dsl41, nothing third-party", and a sibling stdlib-only
+  module is inside it, not a breach. The wrapper and the supervisor are run
+  BY FILE PATH, so they import it as a plain top-level module (`import
+  runner_procid`), which resolves via sys.path[0] — except under
+  PYTHONSAFEPATH=1, which strips that entry; both therefore prepend their
+  own directory first (verified: without the guard, `PYTHONSAFEPATH=1
+  python runner_wrapper.py` dies at import). That guard is conditional and
+  self-undoing — prepend only what is missing, remove it again once the
+  import is done — because those two files are ALSO imported as ordinary
+  package modules: the engine reads __file__ and SPEC_VERSION off them, so
+  an unconditional `sys.path.insert(0, ...)` would leave src/dsl41 at the
+  front of sys.path in every `dsl41 run` / `supervise` / TUI process
+  (twice, ahead of the stdlib and of cwd) and shadow top-level names — ir,
+  cli, viz, dsl, oracle, conditions, derive, lint, equiv, autocal, runner,
+  placeholders — for the whole process, including a consumer's own module
+  of one of those names. Rejected: appending instead of prepending (still
+  leaves a library's package directory on the importer's sys.path forever)
+  and branching on __package__ to import dsl41.runner_procid in that case
+  (breaks the stdlib-only import test and mypy). sys.path now ends exactly
+  as CPython handed it over, in both invocation modes; the only residue is
+  a second module object under the top-level name in engine processes,
+  which is harmless (runner_procid is pure functions, no module state).
+  Pinned by test_importing_the_engine_leaves_sys_path_untouched. mypy maps
+  the same file as dsl41.runner_procid and cannot also see it under its
+  top-level name, so the two by-path imports carry
+  `# type: ignore[import-not-found]` — which does cost the helper calls in
+  those two files their static types (they were locally defined and typed
+  before); pinning them back would need either a hand-maintained stub, i.e.
+  the duplication this entry removes, or mypy_path surgery that trips
+  "source file found twice". Left as is, recorded here. The
+  engine, an ordinary package module, imports dsl41.runner_procid and lost
+  its own third _killpg_quiet. Import-graph tests now cover all three files
+  (the allowed non-stdlib name is exactly "runner_procid"), plus one test
+  per caller that it still works under PYTHONSAFEPATH=1. (2) The status
+  vocabulary was spelled out four times; conditions.STATUS_LETTER is now
+  DERIVED from _STATUS_BY_KW (the single-character keys ARE the letters),
+  dsl.py imports it (_FOLDABLE_STATUS keeps its meaning: everything but
+  NOTRUNNING), viz builds _VIA_LETTER from it plus the two vias that are
+  not statuses (exitcode -> e, global -> v; Via stays lowercase, no case
+  migration), and derive's _STATUS_TO_VIA dict is gone — the mapping is
+  status.lower(), now a one-line typed helper so the Via Literal stays
+  checked. (3) derive.components(nodes, edges, *, bind_box_members) is the
+  one union-find; the box-membership policy that silently differed between
+  viz.split_components (binds) and backend_uc._components (does not) is now
+  a named argument, and ordering is the caller's business (viz re-sorts by
+  descending size in one line; the UC backend wants the function's own
+  order). Its contract is "members in nodes order, groups in first-member
+  order".
+  That pins an ordering the UC backend previously left to chance: its old
+  sort keyed on the union-find REPRESENTATIVE's position, which is an
+  artifact of edge order (it differs from first-member order on ~23% of
+  random graphs; a test now pins wf_a before wf_b on such a shape). No
+  corpus output moved. (4) viz/viz_html/viz_explore are three emitters over
+  one content model, so the names they share stopped pretending to be
+  private: report_content, ReportContent, ChartSection, edge_label,
+  LEGEND_CHART, LEGEND_PROSE, LOCKS_PROSE, substitute. The modules stay
+  split — the split is genuine. (5) AGENTS.md was an untracked byte-copy of
+  CLAUDE.md (title line apart); it is now a tracked symlink (mode 120000),
+  so the working agreement cannot fork per agent. Behaviour is unchanged
+  throughout: every corpus file's report / uc / viz / --html / --explore /
+  --whole-graph / lint / decompile output is byte-identical before and
+  after, sem31_xor.jil still refuses to lower with the same message, and
+  importing the package changes no process-global state (the sys.path point
+  above — found in review of the first cut of this unit, which did leave the
+  entries behind, and fixed before it landed). The one deliberate change of
+  an unspecified ordering is the UC backend's workflow order in (3), which
+  no corpus output exercises. Tests 1808 -> 1812 (PYTHONSAFEPATH x2,
+  component ordering x1, sys.path hygiene x1).

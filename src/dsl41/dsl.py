@@ -71,12 +71,14 @@ import re
 from collections.abc import Collection, Sequence
 
 from dsl41.conditions import (
+    STATUS_LETTER,
     And,
     Cond,
     ExitCodeAtom,
     Lookback,
     Or,
     Paren,
+    Status,
     StatusAtom,
     escape_job_name,
 )
@@ -89,17 +91,11 @@ _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _ATTR_LINE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:")
 _CTRL_RE = re.compile(r"[\r\n\x00]")
 
-_STATUS_LETTER = {
-    "SUCCESS": "s",
-    "FAILURE": "f",
-    "DONE": "d",
-    "TERMINATED": "t",
-    "NOTRUNNING": "n",
-}
-
 #: Statuses a chain link / fan-out member may fold through. Bare NOTRUNNING
 #: is mutex-classified (M07, T-005), lookback-n() stays an explicit edge.
-_FOLDABLE_STATUS = {k: v for k, v in _STATUS_LETTER.items() if k != "NOTRUNNING"}
+_FOLDABLE_STATUS: dict[Status, str] = {
+    k: v for k, v in STATUS_LETTER.items() if k != "NOTRUNNING"
+}
 
 _BARE_GLOBAL_VALUE_RE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
 
@@ -160,7 +156,7 @@ def cond_to_source(cond: Cond) -> str:
         ]
         return joiner.join(parts)
     if isinstance(cond, StatusAtom):
-        letter = _STATUS_LETTER[cond.status]
+        letter = STATUS_LETTER[cond.status]
         ref = _job_ref_source(cond)
         if cond.lookback is not None:
             return f"{letter}({ref}, {_lookback_token(cond.lookback)})"
