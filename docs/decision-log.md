@@ -2912,3 +2912,95 @@
   emitter types at module level, defeating the lazy imports the CLI keeps
   for startup time. Taste is not a build failure (DL-75(4)); a
   nine-parameter pass-through would be a real one.
+- DL-77 the explore page was fatally broken in Safari, and nothing in the
+  suite ever ran it (2026-08-12). ONE entry for two commits, deliberately:
+  the fix and the browser smoke test are the same decision seen from both
+  ends — a fix to a defect no test could see is not trustworthy until a
+  test that can fail on it exists, and that test exists for no other
+  reason. Every citation this unit left in code, tests, CI, pyproject and
+  the vendor docs reads DL-77; keep it that way. Root cause:
+  cytoscape-context-menus 4.1.0 builds its menu from CUSTOMIZED BUILT-IN
+  elements (`class extends HTMLDivElement` + `customElements.define(…,
+  {extends: "div"})`). WebKit has never implemented customized built-ins —
+  autonomous custom elements only — so `cy.contextMenus(…)` threw
+  "Illegal constructor" at page init, and because that call sat ABOVE
+  them, every statement below it never ran: the initial ELK layout (so
+  #stats read "laying out…" forever and the picture was cytoscape's
+  default placement, not ELK's), the toolbar (#fit, #show-all), the
+  re-layout toggle and #search — five dead controls. Zoom, drag and the
+  click-details panel kept working (cytoscape's own handlers, registered
+  above the throw), which is why the page read as SLOW rather than dead.
+  It shipped with DL-71 because the suite asserted on the emitted BYTES
+  and not one of its 1854 tests ever executed the page: no byte assertion
+  can see a runtime throw. Decisions: (1) Vendor a polyfill rather than
+  drop the plugin (the user's call — the right-click focus menu is the
+  page's primary control, and a hand-rolled replacement is more code to
+  own than a pinned 7.6 KiB payload). @ungap/custom-elements 1.3.0, ISC
+  — the first ISC payload, so THIRD_PARTY_LICENSES gains entry 7 and the
+  vendor README a row; byte-exact npm `min.js`, sha256-pinned like
+  mermaid's (esbuild bundles get size floors instead), its own `/*! */`
+  banner kept as attribution, pinned/copied/gated by
+  scripts/vendor_mermaid.sh. It loads through its own single-pass
+  `__DSL41_CUSTOM_ELEMENTS_JS__` marker AHEAD of the cytoscape bundle,
+  because the polyfill must own `customElements` before the plugin
+  defines anything through it. It feature-detects, so it is inert where
+  the browser is native. (2) The standing rule the fix installs: nothing
+  essential may sit below an optional plugin. The layout, the toolbar and
+  the search are wired FIRST; the plugin registers LAST, inside
+  try/except; and a failed optional feature is NAMED in #stats ("context
+  menu unavailable in this browser", carried by every updateStats) rather
+  than degrading silently. This is DL-07's no-silent-loss discipline
+  applied to the browser surface: silent degradation is exactly what hid
+  this defect for a whole unit. Proven by forcing the registration to
+  throw — layout, toolbar and search still work and the notice appears.
+  (3) Edges route `curve-style: "taxi"` along a taxi-direction derived
+  from DIRECTION (horizontal for RIGHT, vertical for DOWN) instead of
+  bezier, so the drawing keeps the layering ELK computed rather than
+  discarding its bend points for centre-to-centre splines. Documented
+  exception: taxi cannot draw an edge whose endpoints overlap, and a
+  member's edge to its own ancestor box is exactly that — it would
+  vanish from the picture entirely, which is silent loss, so those edges
+  are classified once at load and kept on bezier. Checked at both
+  directions and at bank scale (523 nodes / 420 edges, 0 undrawable
+  edges after layout). (4) The test gap is closed by
+  tests/test_viz_explore_browser.py: playwright drives ONE corpus-emitted
+  page in chromium, webkit and firefox over precisely the controls the
+  defect killed — the initial ELK layout completes, #fit rescales,
+  #show-all restores every element and clears highlights, #search marks
+  hits, reports no-match and un-hides a node a focus had hidden, the
+  re-layout toggle off pins positions, the details panel opens for a node
+  AND for an edge, a real right-click opens the context menu and one of
+  its items narrows the graph, and the whole session must throw nothing.
+  The engine is a fixture param so a single-engine failure names it, and
+  the first layout timeout is remembered so the remaining eight tests
+  fail with the same diagnosis instead of waiting it out again (webkit
+  red 9:01 -> 1:01). It is a smoke test, not a rendering test: whether
+  each control is wired and does its job, never how the picture looks.
+  (5) Falsifiability is part of the deliverable — a smoke test that
+  cannot fail is worse than none. Replayed against ac2d089^, the last
+  broken tree: webkit fails 9/9 with "the initial ELK layout never
+  completed — #stats is still 'laying out…'. Uncaught page errors:
+  ['Illegal constructor']" while chromium passes 9/9 on the same tree;
+  on the fixed tree 27/27 pass in all three engines. (6) Cost: the tests
+  are opt-in via `DSL41_BROWSER_TESTS=1` and playwright is dev-only, so
+  the package keeps its three runtime dependencies and a plain
+  `pytest -q` neither slows down nor starts needing a ~200 MB browser
+  install (1854 -> 1858 passed, 3 -> 4 skipped, 51.5 s -> 52.1 s; the
+  fourth skip is this file skipping at module level). They run in their
+  own CI job `explore-page` on one python — the matrix must not pay for
+  the engines three times — beside the matrix job, so the workflow's
+  critical path is unchanged (~3 min, ~2 of it the install). The pytest
+  dev floor moves 8 -> 8.2 for `importorskip(reason=)`. (7) Two
+  corrections to the manual harness, now pinned in code rather than in
+  someone's memory: the "re-layout OFF keeps positions" check must
+  exclude COMPOUND nodes (a box is its members' bounding box and
+  legitimately moves — the harness checked all nodes and was wrong), and
+  no `page.evaluate` may return a cytoscape object (playwright serializes
+  the whole graph and webkit never finishes, which reads as a hang).
+  Verification: WebKit before = layout never completes, five dead
+  controls, 1 uncaught page error; WebKit after = 34/34 manual harness
+  checks including all nine menu items clicked by mouse, 0 uncaught
+  errors; chromium and firefox after = the same. Docs squared with the
+  behavior: README's viz section (taxi routing, the polyfill, the named
+  degradation), its source and test maps, the vendor README, and the
+  nightbank runbook's navigation bullet.

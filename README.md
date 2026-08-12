@@ -115,16 +115,18 @@ THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
 pan/zoom, offline, straight from `file://`. `--format html-chart` writes
 that same page holding the whole-graph chart alone, with the legend and
 without the appendices — the terminal-artifact counterpart to `chart`,
-which is bare pipeable text. `--format explore` writes a
-different kind of page (~2 MB: cytoscape + ELK + a customElements polyfill
-embedded): the whole graph as an
-interactive map — substring search, click for full edge annotations, and a
-right-click menu that focuses a job's fan-in/fan-out (direct, tree, or
-both) by hiding everything else and re-laying-out what remains. Edges route
-orthogonally along the layout axis, so the picture keeps the layering ELK
-computed. Safari included: the menu plugin's customized built-in elements
-are polyfilled (DL-77), and if a browser still refuses the menu, the page
-says so in its status line and every other control keeps working. It is a
+which is bare pipeable text. `--format explore` writes a different kind of
+page (~2 MB: cytoscape + ELK + a customElements polyfill embedded — see
+THIRD_PARTY_LICENSES): the whole graph as an interactive map — substring
+search, click for full edge annotations, and a right-click menu that focuses
+a job's fan-in/fan-out (direct, tree, or both) by hiding everything else and
+re-laying-out what remains. Edges route orthogonally along the layout axis, so
+the picture keeps the layering ELK computed. Chrome, Safari and Firefox all
+drive the page, and CI runs it in all three on every push
+(tests/test_viz_explore_browser.py): Safari needs a polyfill for the menu
+plugin's customized built-in elements, vendored into the page (DL-77), and if
+a browser still refuses the menu, the page says so in its status line and
+every other control keeps working. It is a
 navigation lens for bank-scale estates; the report stays the artifact of
 record with the appendices.
 
@@ -504,7 +506,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
   re-layout toggle, details panel and context menu all respond, and nothing throws.
   Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still
-  needs no browsers; CI's explore-page job is where it runs (DL-77)
+  needs no browsers; CI's explore-page job is where it runs. Locally:
+  `uv run playwright install chromium webkit firefox`, then
+  `DSL41_BROWSER_TESTS=1 uv run pytest -q tests/test_viz_explore_browser.py`
+  (~50 s). Falsifiability is on the record: replayed against the broken tree,
+  webkit failed 9/9 on the layout that never completes (DL-77)
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
   cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
   T03/precedence is pinned at parse time in test_condition_grammar.py, not here).

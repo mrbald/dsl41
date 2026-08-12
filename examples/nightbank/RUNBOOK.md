@@ -332,8 +332,14 @@ variant rolls the *date*, not the day.
 - Navigation: `dsl41 viz --format explore <estate files> -p <props> -o lens.html`
   — the whole estate as an interactive offline map: search a job, then
   right-click it to see only what feeds it (fan-in/fan-out, direct or
-  tree); click any edge for its full annotation. At bank scale this is
-  the answer to "what does APAC settlement actually wait for".
+  tree); click any edge for its full annotation. Edges run orthogonally
+  along the layout axis, so the picture keeps the layering the layout
+  computed — at bank scale (523 nodes / 420 edges) that is the difference
+  between a map and a hairball, and this is the answer to "what does APAC
+  settlement actually wait for". Chrome, Safari and Firefox all drive it
+  (the right-click menu needs a polyfill in Safari, vendored into the
+  page, DL-77); if a browser still refuses the menu, the status line
+  under the toolbar says so and every other control keeps working.
 - The migration angle: `dsl41 lint`, `dsl41 report`, `dsl41 uc` all run
   on this estate — it is a full-pipeline fixture, not just a runner toy.
 
