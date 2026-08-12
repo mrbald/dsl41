@@ -2537,12 +2537,36 @@
   which is harmless (runner_procid is pure functions, no module state).
   Pinned by test_importing_the_engine_leaves_sys_path_untouched. mypy maps
   the same file as dsl41.runner_procid and cannot also see it under its
-  top-level name, so the two by-path imports carry
-  `# type: ignore[import-not-found]` — which does cost the helper calls in
-  those two files their static types (they were locally defined and typed
-  before); pinning them back would need either a hand-maintained stub, i.e.
-  the duplication this entry removes, or mypy_path surgery that trips
-  "source file found twice". Left as is, recorded here. The
+  top-level name, so the first cut of this unit carried
+  `# type: ignore[import-not-found]` on both by-path imports — which cost
+  every helper call in those two files its static types (they were locally
+  defined and typed before), in the two files that kill process groups and
+  guard against PID reuse. RESIDUE, CLOSED in post-landing review of this
+  branch. The two repairs weighed here — a hand-maintained stub (the
+  duplication this entry removes) and mypy_path surgery ("source file found
+  twice") — are indeed worse than the disease; a third is not. The import
+  splits in two: `if TYPE_CHECKING: from dsl41.runner_procid import ...`
+  names the module mypy already maps, `else: from runner_procid import ...`
+  is what actually runs, and the sys.path guard above is unchanged because
+  the runtime half still needs it. Verified: mypy reports both argument
+  types of a deliberately wrong `verify_alive("not-an-int", 42)` in
+  runner_supervisor.py, and said nothing about it before; the runtime works
+  in all three modes that matter (spawned by file path, by file path under
+  PYTHONSAFEPATH=1, imported as an ordinary package module). The
+  import-graph tests were taught the distinction rather than loosened: they
+  read RUNTIME imports (the body of an `if TYPE_CHECKING:` does not count,
+  its `else:` does), so a type-time alias of dsl41 passes while a real
+  runtime import — at any nesting — still reds them, which was checked by
+  adding one and watching it fail. One test per file pins the two halves to
+  the same helper list, and one runs mypy over both import shapes — in a
+  single invocation, never importing mypy into the pytest process — to pin
+  WHICH one buys the coverage. That run is the heaviest step in the file and
+  it perturbed test_runner_tui.py's pager-follow pilot test into failing 3
+  full-suite runs in 13, so a latent race there was fixed with it: two
+  assertions read `is_vertical_scroll_end` on the frame the appended buffer
+  landed in, and the tail scroll settles a frame later; both now wait for the
+  scroll through _wait_for_ui, as the rest of that file does (8 consecutive
+  green full runs after, against 10 for the unchanged tree). The
   engine, an ordinary package module, imports dsl41.runner_procid and lost
   its own third _killpg_quiet. Import-graph tests now cover all three files
   (the allowed non-stdlib name is exactly "runner_procid"), plus one test
@@ -2761,9 +2785,17 @@
   deliver the effect. `--elk` and `--fixed-scale` under `--format html`
   stay silent, because that page already lays its charts out with ELK at
   natural scale — the asked-for effect happens, so there is nothing to
-  refuse; under `--format explore` the four Mermaid-shaping options exit 2
-  with the reason (one interactive canvas, no Mermaid, no collapse), and
-  `--direction` is the one it can honor. Refusing a flag whose effect the
+  refuse. Under `--format explore` the same test clears two of the four
+  Mermaid-shaping options and stops the other two — the first cut refused
+  all four, contradicting the rule it had just stated, and was corrected in
+  post-landing review of this branch. The page always lays out with ELK and
+  always carries every standalone job (search must find them), so `--elk`
+  and `--include-singletons` ask for what happens anyway and are accepted
+  silently; `--collapse-threshold` and `--fixed-scale` exit 2, each naming
+  what it cannot get and why — the canvas never collapses a box, and
+  elkLayout runs with `fit: true`, scaling its layout to the viewport,
+  which is the very thing `--fixed-scale` asks an emitter to stop doing.
+  `--direction` it honors. Refusing a flag whose effect the
   user is getting anyway teaches the user nothing except to distrust the
   refusals. (3) The sources carry ~1600 citation tokens across eighteen
   namespaces, which is the project's core discipline — but two of those
@@ -2816,8 +2848,11 @@
   is byte-identical to the pre-unit capture except the one provenance
   comment each emitted page carries, which names the flag that produced it
   (`dsl41 viz --html` -> `dsl41 viz --format html`) — the flag spelling
-  moved, nothing else did; tests 1821 -> 1841, twenty of the new ones being
-  tests/test_arch_check.py — each blocking check and the advisory ratchet,
+  moved, nothing else did; tests 1815 -> 1841 (the pre-unit tree collects
+  1815 passed + 3 skipped, as DL-74 records; the 1821 first written here was
+  wrong, corrected in post-landing review), and the corrections recorded in
+  (2) above and in DL-72's residue take it to 1845. Twenty of the new ones
+  are tests/test_arch_check.py — each blocking check and the advisory ratchet,
   tripped and not-tripped over tiny synthesised trees, plus two deliberate
   assertions on the real tree (the IR-F schema pin still matches, and the
   citation index still parses into its namespace rows).

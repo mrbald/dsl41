@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib.util
 import json
 import os
 import signal
@@ -129,30 +130,137 @@ def spawn_wrapper(
 # --------------------------------------------------------- import boundary
 
 
+def is_type_checking(test: ast.expr) -> bool:
+    """`if TYPE_CHECKING:`, in either spelling."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _collect_runtime_imports(node: ast.AST, imported: set[str]) -> None:
+    if isinstance(node, ast.If) and is_type_checking(node.test):
+        for stmt in node.orelse:  # the else branch is the one that runs
+            _collect_runtime_imports(stmt, imported)
+        return
+    if isinstance(node, ast.Import):
+        imported.update(alias.name.partition(".")[0] for alias in node.names)
+        return
+    if isinstance(node, ast.ImportFrom):
+        assert node.level == 0, "relative imports would reach into dsl41"
+        assert node.module is not None
+        imported.add(node.module.partition(".")[0])
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_runtime_imports(child, imported)
+
+
 def module_imports(path: Path) -> set[str]:
-    """Top-level names a source file imports, read off the file itself (never
-    by importing it -- the boundary is a property of what is on disk)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    """Top-level names a source file imports AT RUNTIME, read off the file
+    itself (never by importing it -- the boundary is a property of what is on
+    disk). The body of an `if TYPE_CHECKING:` does not count and its `else:`
+    does: that branch is erased before the process starts, so the type-time
+    alias `from dsl41.runner_procid import ...` the two by-path modules carry
+    (DL-72) is not a runtime dependency on dsl41, while a real one -- at any
+    nesting -- still is."""
     imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.partition(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0, "relative imports would reach into dsl41"
-            assert node.module is not None
-            imported.add(node.module.partition(".")[0])
+    _collect_runtime_imports(ast.parse(path.read_text(encoding="utf-8")), imported)
     return imported
+
+
+def procid_import_branches(path: Path) -> tuple[list[str], list[str]]:
+    """The (type-time, runtime) halves of a by-path module's runner_procid
+    import pair -- `if TYPE_CHECKING: from dsl41.runner_procid import ...` /
+    `else: from runner_procid import ...` (DL-72) -- as sorted name lists."""
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not (isinstance(node, ast.If) and is_type_checking(node.test)):
+            continue
+        type_time = [
+            alias.name
+            for stmt in node.body
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == "dsl41.runner_procid"
+            for alias in stmt.names
+        ]
+        runtime = [
+            alias.name
+            for stmt in node.orelse
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == "runner_procid"
+            for alias in stmt.names
+        ]
+        if type_time or runtime:
+            return sorted(type_time), sorted(runtime)
+    raise AssertionError(f"{path.name} has no TYPE_CHECKING runner_procid import pair")
 
 
 def test_wrapper_imports_are_stdlib_only() -> None:
     """DL-42 item 3: the wrapper is the future extraction boundary; its
     dumbness is a correctness property. Nothing from dsl41, nothing
-    third-party -- enforced, not asserted. Its one non-stdlib import is the
-    sibling stdlib-only runner_procid (DL-72), held to the same rule here."""
+    third-party -- enforced, not asserted. Its one non-stdlib RUNTIME import
+    is the sibling stdlib-only runner_procid (DL-72), held to the same rule
+    here; the type-time alias of the same file is not an import the process
+    ever performs (see test_wrapper_procid_calls_are_type_checked)."""
     non_stdlib = sorted(module_imports(WRAPPER) - set(sys.stdlib_module_names))
     assert non_stdlib == ["runner_procid"], f"wrapper imports outside stdlib: {non_stdlib}"
     procid = sorted(module_imports(PROCID) - set(sys.stdlib_module_names))
     assert procid == [], f"runner_procid imports outside stdlib: {procid}"
+
+
+def test_wrapper_procid_calls_are_type_checked() -> None:
+    """DL-72's recorded residue, closed. mypy maps the sibling as
+    dsl41.runner_procid and cannot also see it under its top-level name, so
+    the by-path import alone left every helper call in this file Any-typed --
+    in a file that kills process groups. The TYPE_CHECKING alias names the
+    module mypy knows; both halves must import the same helpers, or the
+    static types describe an import that does not happen."""
+    type_time, runtime = procid_import_branches(WRAPPER)
+    assert type_time == runtime
+    assert "proc_start_token" in runtime  # the PID-reuse guard's own input
+
+
+def test_type_checking_alias_is_what_types_the_by_path_helpers(tmp_path: Path) -> None:
+    """Why the construct above, and not the bare by-path import it replaced
+    (DL-72): over the same deliberately wrong call, the old shape's
+    import-not-found ignore makes the helper Any and mypy says nothing; the
+    alias resolves the real module and reports both arguments. Pinned on a
+    snippet -- the two files' own shape is pinned by the tests either side."""
+    if importlib.util.find_spec("mypy") is None:  # a dev dependency, not a runtime one
+        pytest.skip("mypy is not installed")  # pragma: no cover
+    # located, never imported: pulling mypy into THIS process would leave its
+    # module graph resident for every later test. One invocation over both
+    # probes, for the same reason -- a mypy run is the heaviest thing in this
+    # file, and the textual pilot tests downstream are timing-sensitive.
+    bad_call = 'verify_alive("not-an-int", 42)\n'
+    (tmp_path / "aliased.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from dsl41.runner_procid import verify_alive\n"
+        "else:\n"
+        "    from runner_procid import verify_alive\n" + bad_call,
+        encoding="utf-8",
+    )
+    (tmp_path / "bare.py").write_text(
+        "from runner_procid import verify_alive  # type: ignore[import-not-found]\n" + bad_call,
+        encoding="utf-8",
+    )
+    report = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            str(tmp_path / "aliased.py"),
+            str(tmp_path / "bare.py"),
+        ],
+        capture_output=True,
+        text=True,
+        # resolve dsl41 from the tree under test, installed or not; two
+        # isolated snippets cannot hit the "source file found twice" that
+        # rules MYPYPATH out for the repo's own run (DL-72)
+        env={**os.environ, "MYPYPATH": str(PROCID.parent.parent)},
+    ).stdout
+    errors = [line for line in report.splitlines() if "[arg-type]" in line]
+    assert len(errors) == 2, report  # both arguments of the aliased call...
+    assert all("aliased.py" in line for line in errors), report  # ...and only there
 
 
 def test_wrapper_records_under_pythonsafepath(tmp_path: Path, monkeypatch) -> None:

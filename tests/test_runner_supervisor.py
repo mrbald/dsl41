@@ -12,7 +12,6 @@ polling rather than bare sleeps.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import contextlib
 import json
@@ -33,6 +32,8 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("supervisor tier is POSIX-only", allow_module_level=True)
 
 from datetime import datetime
+
+from test_runner_lifecycle import module_imports, procid_import_branches
 
 from dsl41 import runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
@@ -166,20 +167,23 @@ def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
 def test_supervisor_imports_are_stdlib_only() -> None:
     """DL-42 item 3 / spec ss1: the supervisor is the future extraction
     boundary alongside the wrapper -- stdlib only, nothing from dsl41. Its
-    one non-stdlib import is the sibling stdlib-only runner_procid it shares
-    with the wrapper (DL-72; that module's own boundary is pinned in
-    tests/test_runner_lifecycle.py)."""
-    tree = ast.parse(SUPERVISOR.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.partition(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0, "relative imports would reach into dsl41"
-            assert node.module is not None
-            imported.add(node.module.partition(".")[0])
-    non_stdlib = sorted(imported - set(sys.stdlib_module_names))
+    one non-stdlib RUNTIME import is the sibling stdlib-only runner_procid it
+    shares with the wrapper (DL-72; that module's own boundary is pinned in
+    tests/test_runner_lifecycle.py, whose reader also owns the runtime-vs-
+    type-time distinction the next test relies on)."""
+    non_stdlib = sorted(module_imports(SUPERVISOR) - set(sys.stdlib_module_names))
     assert non_stdlib == ["runner_procid"], f"supervisor imports outside stdlib: {non_stdlib}"
+
+
+def test_supervisor_procid_calls_are_type_checked() -> None:
+    """DL-72's recorded residue, closed here as in the wrapper: the by-path
+    import alone left verify_alive and killpg_quiet Any-typed in the file
+    that owns the PID-reuse guard and the group kill. The TYPE_CHECKING
+    alias types them and is erased at runtime; both halves must import the
+    same helpers, or the static types describe an import that never runs."""
+    type_time, runtime = procid_import_branches(SUPERVISOR)
+    assert type_time == runtime
+    assert {"verify_alive", "killpg_quiet"} <= set(runtime)
 
 
 def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:

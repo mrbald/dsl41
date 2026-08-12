@@ -247,29 +247,53 @@ def test_cli_viz_explore_stdout_is_the_navigation_page() -> None:
     assert 'id="chart-data"' not in result.stdout  # ...not the --format html report
 
 
-def test_cli_viz_explore_refuses_chart_shaping_flags() -> None:
-    # DL-75: the page is one canvas -- no Mermaid frontmatter, boxes never
-    # collapse, singletons always present. None of these can be delivered,
-    # so each is refused instead of silently ignored.
-    for flag in ("--elk", "--fixed-scale", "--include-singletons"):
+def test_cli_viz_explore_refuses_only_the_undeliverable_flags() -> None:
+    # DL-75's rule applied to what the page actually does: the canvas never
+    # collapses a box, and elkLayout runs with fit:true -- it scales its
+    # layout to the viewport, which is the very thing --fixed-scale asks an
+    # emitter to stop doing. Those two are refused, with the reason.
+    for flag, argv in (
+        ("--collapse-threshold", ["--collapse-threshold", "1"]),
+        ("--fixed-scale", ["--fixed-scale"]),
+    ):
         result = runner.invoke(
-            app, ["viz", "--format", "explore", flag, str(CORPUS_DIR / "sem10_box_basic.jil")]
+            app, ["viz", "--format", "explore", *argv, str(CORPUS_DIR / "sem10_box_basic.jil")]
         )
         assert result.exit_code == 2, flag
         assert f"{flag} cannot shape --format explore" in result.stderr
-    result = runner.invoke(
-        app,
-        [
-            "viz",
-            "--format",
-            "explore",
-            "--collapse-threshold",
-            "1",
-            str(CORPUS_DIR / "sem10_box_basic.jil"),
-        ],
+        assert "shape Mermaid charts" not in result.stderr  # say what, and why
+        assert "--format html" in result.stderr
+
+
+def _solo_jil(tmp_path: Path) -> Path:
+    """A box with one member plus a standalone job -- the singleton the
+    Mermaid report would drop without --include-singletons."""
+    path = tmp_path / "solo.jil"
+    path.write_text(
+        "insert_job: box_a\njob_type: b\n\n"
+        "insert_job: job_a\nbox_name: box_a\njob_type: c\n"
+        "command: sleep 1\nmachine: machine1\n\n"
+        "insert_job: solo\njob_type: c\ncommand: sleep 2\nmachine: machine1\n",
+        encoding="utf-8",
     )
-    assert result.exit_code == 2
-    assert "--collapse-threshold" in result.stderr
+    return path
+
+
+def test_cli_viz_explore_accepts_the_flags_the_canvas_already_delivers(tmp_path: Path) -> None:
+    # DL-75: refuse only what the format cannot deliver. The page always lays
+    # out with ELK and always carries every standalone job, so --elk and
+    # --include-singletons name effects the operator is getting anyway --
+    # each is accepted silently and the page still renders.
+    jil = _solo_jil(tmp_path)
+    for argv in (["--elk"], ["--include-singletons"], ["--elk", "--include-singletons"]):
+        result = runner.invoke(app, ["viz", "--format", "explore", *argv, str(jil)])
+        assert result.exit_code == 0, (argv, result.stderr)
+        assert result.stderr == ""
+        assert result.stdout.startswith("<!doctype html>")
+        assert 'name: "elk"' in result.stdout  # --elk: the layout it asked for, always on
+        nodes = _page_elements(result.stdout)["nodes"]
+        names = sorted(n["data"]["id"] for n in nodes)  # type: ignore[index]
+        assert names == ["box_a", "job_a", "solo"]  # --include-singletons: present anyway
 
 
 def test_cli_viz_explore_honors_direction() -> None:

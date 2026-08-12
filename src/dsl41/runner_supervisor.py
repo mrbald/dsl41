@@ -50,7 +50,7 @@ import struct
 import sys
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
 # in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
@@ -63,17 +63,33 @@ from typing import Any
 # an ordinary package module, and a library must not leave its own package
 # directory on the importing process's sys.path, where it would shadow
 # top-level names for the whole process. Same guard as the wrapper's.
+#
+# The TYPE_CHECKING branch names the same file under the name mypy maps it to
+# (it cannot see one file under two names), which is what keeps verify_alive
+# and killpg_quiet statically typed at their call sites here -- a PID-reuse
+# guard and a group kill are the last calls that should be Any. It is erased
+# before the process starts, so the stdlib-only boundary is untouched: the
+# else branch is what runs, and the import-graph test reads runtime imports.
 _PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
 if _PROCID_DIR_ADDED:
     sys.path.insert(0, _PROCID_DIR)
-from runner_procid import (  # type: ignore[import-not-found]  # noqa: E402
-    current_boot_id,
-    durable_write_json,
-    killpg_quiet,
-    utc_now_iso,
-    verify_alive,
-)
+if TYPE_CHECKING:
+    from dsl41.runner_procid import (
+        current_boot_id,
+        durable_write_json,
+        killpg_quiet,
+        utc_now_iso,
+        verify_alive,
+    )
+else:
+    from runner_procid import (  # noqa: E402
+        current_boot_id,
+        durable_write_json,
+        killpg_quiet,
+        utc_now_iso,
+        verify_alive,
+    )
 
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)

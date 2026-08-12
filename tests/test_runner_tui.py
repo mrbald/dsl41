@@ -1230,7 +1230,10 @@ def test_pilot_pager_follow_is_pinned_at_bottom_and_capital_f_resumes(short_root
 
                 _append_log(app, "pg_w", [f"tail {i}" for i in range(20)])
                 await _wait_for_ui(pilot, lambda: len(pager._buffer) == 120)
-                assert pager.is_vertical_scroll_end  # followed the append
+                # the buffer arriving and the tail scrolling settle in
+                # different frames, so the scroll is waited for, not asserted
+                # on the frame the buffer landed in
+                await _wait_for_ui(pilot, lambda: pager.is_vertical_scroll_end)
 
                 await pilot.press("g")  # top -> paused
                 await pilot.pause()
@@ -1245,7 +1248,7 @@ def test_pilot_pager_follow_is_pinned_at_bottom_and_capital_f_resumes(short_root
                 assert pager.is_vertical_scroll_end
                 _append_log(app, "pg_w", ["one more"])
                 await _wait_for_ui(pilot, lambda: len(pager._buffer) == 141)
-                assert pager.is_vertical_scroll_end  # following again
+                await _wait_for_ui(pilot, lambda: pager.is_vertical_scroll_end)  # following
         finally:
             await _teardown(engine, server, loop_task)
 

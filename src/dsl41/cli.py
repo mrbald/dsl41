@@ -641,37 +641,37 @@ def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> N
         raise typer.Exit(2)
 
 
-def _refuse_undeliverable_viz_flags(
-    *,
-    collapse_threshold: int | None,
-    include_singletons: bool,
-    elk: bool,
-    fixed_scale: bool,
-) -> None:
+def _refuse_undeliverable_viz_flags(*, collapse_threshold: int | None, fixed_scale: bool) -> None:
     """DL-75: refuse a shaping flag only where the chosen format cannot
-    deliver its effect. --elk/--fixed-scale stay silent under --format html
-    because that page already lays its charts out with ELK at natural scale
-    -- the asked-for effect happens, so there is nothing to refuse. explore
-    renders no Mermaid at all and never collapses a box, so --direction is
-    the only shaping option it can honor."""
+    deliver its effect -- refusing one the user is getting anyway teaches
+    nothing except to distrust the refusals. --elk/--fixed-scale stay silent
+    under --format html, which already lays its charts out with ELK at
+    natural scale; --format explore passes that same test for --elk and
+    --include-singletons (it always lays out with ELK, and always carries
+    every standalone job -- search must find them). The two it cannot honor
+    are below."""
     undeliverable = [
-        flag
-        for flag, passed in (
-            ("--collapse-threshold", collapse_threshold is not None),
-            ("--include-singletons", include_singletons),
-            ("--elk", elk),
-            ("--fixed-scale", fixed_scale),
+        (flag, reason)
+        for flag, reason, passed in (
+            (
+                "--collapse-threshold",
+                "every box is a compound node the canvas never collapses -- navigate"
+                " (right-click a node to focus) instead of thinning the chart",
+                collapse_threshold is not None,
+            ),
+            (
+                "--fixed-scale",
+                "the canvas fits its layout to the viewport and the operator zooms from"
+                " there, so there is no emitted scale to fix",
+                fixed_scale,
+            ),
         )
         if passed
     ]
     if undeliverable:
-        typer.echo(
-            f"{', '.join(undeliverable)} cannot shape --format explore: these options"
-            " shape Mermaid charts, and the page is one interactive canvas (the whole"
-            " graph, boxes uncollapsed, standalone jobs included). Drop them, or use"
-            " --format html for a shaped offline page.",
-            err=True,
-        )
+        for flag, reason in undeliverable:
+            typer.echo(f"{flag} cannot shape --format explore: {reason}.", err=True)
+        typer.echo("Drop the option, or use --format html for a shaped offline page.", err=True)
         raise typer.Exit(2)
 
 
@@ -742,8 +742,6 @@ def viz(
     if output_format is VizFormat.explore:
         _refuse_undeliverable_viz_flags(
             collapse_threshold=collapse_threshold,
-            include_singletons=include_singletons,
-            elk=elk,
             fixed_scale=fixed_scale,
         )
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)

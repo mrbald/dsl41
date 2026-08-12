@@ -90,7 +90,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # DL-72: the shared process-identity helpers live in a sibling stdlib-only
 # module. sys.path[0] is this file's directory when we are run by file path --
@@ -103,17 +103,33 @@ from typing import Any
 # on the importing process's sys.path -- there it would shadow top-level names
 # (ir, cli, viz, ...) for the whole process. sys.path ends exactly as CPython
 # handed it to us, in both invocation modes.
+#
+# mypy maps this file's sibling as dsl41.runner_procid and cannot also see it
+# under its top-level name, so the by-path import alone left every helper call
+# below Any-typed -- in a file that kills processes. The TYPE_CHECKING branch
+# names the module mypy already knows; it is erased before the process starts,
+# so the stdlib-only boundary is untouched (the import-graph test reads runtime
+# imports only, and the else branch is what runs).
 _PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
 if _PROCID_DIR_ADDED:
     sys.path.insert(0, _PROCID_DIR)
-from runner_procid import (  # type: ignore[import-not-found]  # noqa: E402
-    current_boot_id,
-    durable_write_json,
-    killpg_quiet,
-    proc_start_token,
-    utc_now_iso,
-)
+if TYPE_CHECKING:
+    from dsl41.runner_procid import (
+        current_boot_id,
+        durable_write_json,
+        killpg_quiet,
+        proc_start_token,
+        utc_now_iso,
+    )
+else:
+    from runner_procid import (  # noqa: E402
+        current_boot_id,
+        durable_write_json,
+        killpg_quiet,
+        proc_start_token,
+        utc_now_iso,
+    )
 
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
