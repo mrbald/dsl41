@@ -6,14 +6,15 @@ carrier. What the page must still honor is the report's content policy for
 what it does show -- every edge annotation is reachable via the details
 panel, and assumptions are never truncated.
 
-The emitter goes straight from DerivedGraph to cytoscape.js elements JSON --
-no Mermaid text anywhere. The page lays out with ELK (cytoscape-elk driving
-elk.bundled.js on the main thread: no Worker, no fetch, offline like DL-70's
-report page) and re-layouts the visible subset on focus.
+The emitter goes straight from (catalog, graph) to cytoscape.js elements
+JSON -- no Mermaid text anywhere. The page lays out with ELK (cytoscape-elk
+driving elk.bundled.js on the main thread: no Worker, no fetch, offline like
+DL-70's report page) and re-layouts the visible subset on focus.
 
 Emission decisions (each with a test):
-- Nodes carry id/label/kind/schedule/detail verbatim from node_meta, plus
-  `parent` from box_tree.parent -- boxes become cytoscape compound nodes.
+- Nodes carry id/label plus kind/schedule/detail read off IR-F through
+  viz's display-facts helpers, and `parent` from box_tree.parent -- boxes
+  become cytoscape compound nodes.
 - Edge endpoints outside the catalog (undefined producers, externals
   "name^INST", global variable names) synthesize EXT nodes, class `ext`
   plus `global` when some referencing edge has via=="global".
@@ -34,39 +35,40 @@ import json
 from importlib.resources import files
 from typing import Literal
 
-from dsl41.derive import DerivedGraph
-from dsl41.viz import Direction, edge_label
+from dsl41.derive import DerivedGraph, derive_graph
+from dsl41.ir import CatalogIR
+from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule
 from dsl41.viz_html import substitute
 
 _KIND_CLASS = {"BOX": "box", "FW": "fw"}  # anything else renders as a command
 
 
-def _elements(graph: DerivedGraph) -> dict[str, list[dict[str, object]]]:
+def _elements(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, list[dict[str, object]]]:
     """Cytoscape elements for the whole graph. Pure function; deterministic
     for identical input (catalog nodes in source order, EXT nodes in
     first-reference order, edges in derivation order)."""
     nodes: list[dict[str, object]] = []
     for name in graph.nodes:
-        meta = graph.node_meta.get(name)
-        kind = meta.kind if meta else "CMD"
+        job = catalog.jobs.get(name)
+        kind = job_kind(job) or "CMD"
         data: dict[str, object] = {
             "id": name,
             "label": name,
             "kind": kind,
-            "schedule": meta.schedule if meta else None,
-            "detail": meta.detail if meta else None,
+            "schedule": job_schedule(job),
+            "detail": job_detail(job),
         }
         parent = graph.box_tree.parent.get(name)
         if parent is not None:
             data["parent"] = parent
         nodes.append({"data": data, "classes": _KIND_CLASS.get(kind, "cmd")})
 
-    catalog = set(graph.nodes)
+    charted = set(graph.nodes)
     ext_order: list[str] = []
     ext_global: dict[str, bool] = {}
     for edge in graph.edges:
         for endpoint in (edge.src, edge.dst):
-            if endpoint in catalog:
+            if endpoint in charted:
                 continue
             if endpoint not in ext_global:
                 ext_order.append(endpoint)
@@ -121,7 +123,8 @@ def _elements(graph: DerivedGraph) -> dict[str, list[dict[str, object]]]:
 
 
 def to_explore_html(
-    graph: DerivedGraph,
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
     *,
     title: str = "catalog",
     direction: Direction | Literal["auto"] = "auto",
@@ -129,7 +132,9 @@ def to_explore_html(
     """One self-contained offline HTML page: the whole graph, always ELK,
     always natural scale, boxes never collapse, singletons always present
     (search must find them). --direction maps auto/LR -> RIGHT, TD -> DOWN."""
-    elements = _elements(graph)
+    if graph is None:
+        graph = derive_graph(catalog)
+    elements = _elements(catalog, graph)
     boxes = sum(1 for n in elements["nodes"] if n["classes"] == "box")
     summary = (
         f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(elements['edges'])} edges"

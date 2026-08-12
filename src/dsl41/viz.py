@@ -1,8 +1,9 @@
 """Markdown/Mermaid rendering of the derived graph (phase 6, CLAUDE.md / DL-03).
 
-Spec (ir-design ss1 pipeline + phase list, amended DL-35): IR-G -> a Markdown
+Spec (ir-design ss1 pipeline + phase list, amended DL-35/DL-73): IR-G -> a Markdown
 report of per-component Mermaid charts, plus appendices that materialize
-everything the charts thin out or drop. Pure function of DerivedGraph;
+everything the charts thin out or drop. Pure function of (catalog, graph) --
+IR-G for the analysis, IR-F for the per-node display facts (DL-73);
 deterministic output for identical input.
 
 Rendering decisions (each with a test):
@@ -12,8 +13,9 @@ Rendering decisions (each with a test):
   redundant reinforcement, Unicode symbols not FontAwesome (hosts don't ship
   FA CSS). Command job = plain rect (unmarked default). File watcher =
   stadium + U+1F4C4 prefix (a source/trigger). Scheduled node = second label
-  line with U+23F0 + trigger digest (from node_meta; run_window/must_* are
-  excluded upstream). Cross-instance producer = hexagon (frees [[..]] for
+  line with U+23F0 + trigger digest (_schedule_digest, trigger fields only:
+  run_window is a gate per SEM-33 and must_* are alarms per SEM-34, both
+  excluded). Cross-instance producer = hexagon (frees [[..]] for
   collapsed boxes exclusively). Undefined producer = U+26A0 prefix + red
   dash (two channels). Global variable = parallelogram. Every classDef
   carries an explicit color for dark-mode hosts.
@@ -54,7 +56,8 @@ from __future__ import annotations
 from typing import Literal, NamedTuple
 
 from dsl41.conditions import STATUS_LETTER
-from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components
+from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components, derive_graph
+from dsl41.ir import CatalogIR, FwSpec, JobIR, ScheduleBlock
 
 #: Via -> chart letter. The status half IS conditions.STATUS_LETTER under the
 #: lowercase Via spelling (one status vocabulary, DL-72); only the two vias
@@ -125,6 +128,58 @@ def edge_label(edge: DerivedEdge) -> str:
     if edge.cls == "redesign":
         label = f"{label} {edge.mapping_row}" if label else edge.mapping_row
     return label
+
+
+# ------------------------------------------------------------ node display facts
+#
+# Per-node display facts (DL-35), read straight off IR-F by whichever emitter
+# needs them: IR-G used to carry a verbatim copy (DerivedGraph.node_meta),
+# which made the analysis layer own display needs it derives nothing for
+# (DL-73). Kind is JobIR.job_type verbatim; detail is the command for CMD
+# jobs and the watched path for FW jobs; the schedule digest covers the
+# TRIGGER fields only -- derive._TRIGGER_FIELDS, i.e. run_window excluded as
+# a gate (SEM-33) and must_* excluded as alarms (SEM-34).
+#
+# job_kind/job_schedule/job_detail are PUBLIC like report_content and
+# edge_label (DL-72): the three emitters share them.
+
+
+def _schedule_digest(schedule: ScheduleBlock) -> str:
+    """Human one-liner over the same trigger fields as derive._trigger_signature."""
+    parts: list[str] = []
+    if schedule.start_times is not None:
+        parts.append(",".join(f"{t.hour:02d}:{t.minute:02d}" for t in schedule.start_times))
+    if schedule.start_mins is not None:
+        parts.append(",".join(f":{m:02d}" for m in schedule.start_mins))
+    if schedule.days_of_week is not None:
+        parts.append(",".join(schedule.days_of_week))
+    if schedule.run_calendar is not None:
+        parts.append(f"cal {schedule.run_calendar}")
+    if schedule.exclude_calendar is not None:
+        parts.append(f"excl {schedule.exclude_calendar}")
+    if schedule.timezone is not None:
+        parts.append(schedule.timezone)
+    return " ".join(parts) if parts else "scheduled"
+
+
+def job_kind(job: JobIR | None) -> str | None:
+    """'CMD' | 'BOX' | 'FW' + extensible, as JobIR.job_type. None = the name
+    is not a catalog job (a pseudo-source: global, external, undefined)."""
+    return job.job_type if job is not None else None
+
+
+def job_schedule(job: JobIR | None) -> str | None:
+    """Trigger digest, or None when the job carries no schedule block."""
+    return None if job is None or job.schedule is None else _schedule_digest(job.schedule)
+
+
+def job_detail(job: JobIR | None) -> str | None:
+    """Command for CMD jobs, watched path for FW jobs, None for boxes."""
+    if job is None:
+        return None
+    if isinstance(job.exec_, FwSpec):
+        return job.exec_.watch_file
+    return job.exec_.command if job.exec_ is not None else None
 
 
 def _anchors(tree: BoxTree, threshold: int) -> tuple[dict[str, str], set[str]]:
@@ -334,7 +389,7 @@ def _schedule_label_lines(digest: str) -> list[str]:
 
 def _node_label(
     name: str,
-    graph: DerivedGraph,
+    catalog: CatalogIR,
     strip: str,
     self_locked: set[str],
     *,
@@ -343,13 +398,13 @@ def _node_label(
     """multiline=False for subgraph titles: hosts render <br/> in titles
     inconsistently (GitHub), so expanded boxes get a one-line separator."""
     sep = "<br/>" if multiline else " \N{MIDDLE DOT} "
-    meta = graph.node_meta.get(name)
+    job = catalog.jobs.get(name)
     display = name[len(strip) :] if strip and name.startswith(strip) else name
     label = _esc(display)
-    if meta is not None and meta.kind == "FW":
+    if job_kind(job) == "FW":
         label = f"\N{PAGE FACING UP}{_NBSP}{label}"
-    if meta is not None and meta.schedule is not None:
-        first, *rest = _schedule_label_lines(meta.schedule)
+    if (digest := job_schedule(job)) is not None:
+        first, *rest = _schedule_label_lines(digest)
         label += f"{sep}\N{ALARM CLOCK}{_NBSP}{first}"
         for line in rest:
             label += f"{sep}{line}"
@@ -359,6 +414,7 @@ def _node_label(
 
 
 def _render_chart(
+    catalog: CatalogIR,
     graph: DerivedGraph,
     members: set[str] | None,
     *,
@@ -383,15 +439,14 @@ def _render_chart(
         return target(name) == name
 
     def label(name: str) -> str:
-        return _node_label(name, graph, strip_prefix, self_locked)
+        return _node_label(name, catalog, strip_prefix, self_locked)
 
     lines: list[str] = [f"flowchart {direction}"]
     box_nodes: set[str] = set(graph.box_tree.children)
     trigger_nodes: list[str] = []
 
     def emit_node(name: str, indent: str) -> None:
-        meta = graph.node_meta.get(name)
-        if meta is not None and meta.kind == "FW":
+        if job_kind(catalog.jobs.get(name)) == "FW":
             trigger_nodes.append(name)
             lines.append(f'{indent}{ids(name)}(["{label(name)}"])')
         else:
@@ -401,15 +456,15 @@ def _render_chart(
         if box in collapsed:
             # hidden trigger facts stay loud on the folded node (DL-35a)
             inside = _box_members(graph.box_tree, box) - {box}
-            metas = [m for n in inside if (m := graph.node_meta.get(n)) is not None]
+            jobs = [j for n in inside if (j := catalog.jobs.get(n)) is not None]
             extras = f"{len(graph.box_tree.children[box])} members"
-            if scheduled := sum(1 for m in metas if m.schedule is not None):
+            if scheduled := sum(1 for j in jobs if j.schedule is not None):
                 extras += f", {scheduled} \N{ALARM CLOCK}"
-            if watchers := sum(1 for m in metas if m.kind == "FW"):
+            if watchers := sum(1 for j in jobs if j.job_type == "FW"):
                 extras += f", {watchers} \N{PAGE FACING UP}"
             lines.append(f'{indent}{ids(box)}[["{label(box)} ({extras})"]]')
             return
-        title = _node_label(box, graph, strip_prefix, self_locked, multiline=False)
+        title = _node_label(box, catalog, strip_prefix, self_locked, multiline=False)
         lines.append(f'{indent}subgraph {ids(box)}["{title}"]')
         for member in graph.box_tree.children[box]:
             if member in box_nodes:
@@ -527,7 +582,8 @@ def _render_chart(
 
 
 def to_mermaid(
-    graph: DerivedGraph,
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
     *,
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
     direction: Direction = "LR",
@@ -535,7 +591,11 @@ def to_mermaid(
     fixed_scale: bool = False,
 ) -> str:
     """Render the whole derived graph as one Mermaid flowchart body."""
-    body = _render_chart(graph, None, collapse_threshold=collapse_threshold, direction=direction)
+    if graph is None:
+        graph = derive_graph(catalog)
+    body = _render_chart(
+        catalog, graph, None, collapse_threshold=collapse_threshold, direction=direction
+    )
     return _frontmatter(elk=elk, fixed_scale=fixed_scale) + body
 
 
@@ -622,6 +682,7 @@ class ReportContent(NamedTuple):
 
 
 def report_content(
+    catalog: CatalogIR,
     graph: DerivedGraph,
     *,
     collapse_threshold: int,
@@ -661,6 +722,7 @@ def report_content(
                 count_label=f"{len(comp)} job" + ("s" if len(comp) != 1 else ""),
                 prefix=prefix,
                 chart=_render_chart(
+                    catalog,
                     graph,
                     set(comp),
                     collapse_threshold=collapse_threshold,
@@ -672,9 +734,9 @@ def report_content(
 
     standalone_chart: str | None = None
     if include_singletons and standalone:
-        sub = DerivedGraph(nodes=standalone, node_meta=graph.node_meta)
+        sub = DerivedGraph(nodes=standalone)
         standalone_chart = _render_chart(
-            sub, None, collapse_threshold=collapse_threshold, direction="LR"
+            catalog, sub, None, collapse_threshold=collapse_threshold, direction="LR"
         )
 
     lock_rows: list[tuple[str, str, str]] = []
@@ -716,7 +778,8 @@ def _code_cell(text: str | None) -> str:
 
 
 def to_markdown(
-    graph: DerivedGraph,
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
     *,
     title: str = "catalog",
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
@@ -728,7 +791,10 @@ def to_markdown(
     """Full Markdown report: summary, legend, one chart per component,
     shared-locks section, appendices A (standalone jobs) / B (non-exact
     edges) / C (redesign flags, OR shapes, cycles)."""
+    if graph is None:
+        graph = derive_graph(catalog)
     content = report_content(
+        catalog,
         graph,
         collapse_threshold=collapse_threshold,
         direction=direction,
@@ -771,11 +837,11 @@ def to_markdown(
         out.append("| job | kind | schedule | command / watched file |")
         out.append("|---|---|---|---|")
         for name in content.standalone:
-            meta = graph.node_meta.get(name)
+            job = catalog.jobs.get(name)
             out.append(
-                f"| {_cell(name)} | {_cell(meta.kind if meta else None)}"
-                f" | {_cell(meta.schedule if meta else None)}"
-                f" | {_code_cell(meta.detail if meta else None)} |"
+                f"| {_cell(name)} | {_cell(job_kind(job))}"
+                f" | {_cell(job_schedule(job))}"
+                f" | {_code_cell(job_detail(job))} |"
             )
     else:
         out.append("None.")

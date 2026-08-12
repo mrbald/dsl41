@@ -593,9 +593,10 @@ def rule_l007(catalog: CatalogIR) -> list[Violation]:
     names_in_order = list(catalog.jobs)
     for job in catalog.jobs.values():
         box = job.box.box_name
-        cond = job.sem.condition
-        if box is None or cond is None:
+        attr = job.sem.condition
+        if box is None or attr is None:
             continue
+        cond = attr.cond
         my_index = names_in_order.index(job.name)
         fixed: dict[str, set[str] | str] = {}
         for name, other in catalog.jobs.items():
@@ -644,7 +645,7 @@ def rule_l007(catalog: CatalogIR) -> list[Violation]:
                     severity="warn",
                     message=message,
                     jobs=[job.name],
-                    span=job.sem.condition_span,
+                    span=attr.span,
                     detail=box,
                 )
             )

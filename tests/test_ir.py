@@ -28,6 +28,7 @@ from dsl41.ir import (
     BoxLinkage,
     CalendarIR,
     CatalogIR,
+    CondAttr,
     CycleIR,
     ExecSpec,
     FwSpec,
@@ -134,18 +135,29 @@ def test_schedule_block_start_mins_out_of_range_rejected(bad_minute: int) -> Non
 
 def test_sem12_box_success_rejected_on_non_box_job() -> None:
     with pytest.raises(ValidationError, match="SEM-12"):
-        JobIR(name="x", job_type="CMD", sem=Semantics(box_success=parse_condition("s(a)")))
+        JobIR(
+            name="x",
+            job_type="CMD",
+            sem=Semantics(box_success=CondAttr(cond=parse_condition("s(a)"))),
+        )
 
 
 def test_sem12_box_failure_rejected_on_non_box_job() -> None:
     with pytest.raises(ValidationError, match="SEM-12"):
-        JobIR(name="x", job_type="CMD", sem=Semantics(box_failure=parse_condition("f(a)")))
+        JobIR(
+            name="x",
+            job_type="CMD",
+            sem=Semantics(box_failure=CondAttr(cond=parse_condition("f(a)"))),
+        )
 
 
 def test_sem12_box_success_accepted_on_box_job() -> None:
-    job = JobIR(name="x", job_type="BOX", sem=Semantics(box_success=parse_condition("s(a)")))
-    assert isinstance(job.sem.box_success, StatusAtom)
-    assert job.sem.box_success.job == JobRef(name="a")
+    job = JobIR(
+        name="x", job_type="BOX", sem=Semantics(box_success=CondAttr(cond=parse_condition("s(a)")))
+    )
+    assert job.sem.box_success is not None
+    assert isinstance(job.sem.box_success.cond, StatusAtom)
+    assert job.sem.box_success.cond.job == JobRef(name="a")
 
 
 def test_catalog_box_name_targets_missing_job() -> None:
@@ -328,7 +340,8 @@ def test_sem10_box_basic_targeted() -> None:
     assert catalog.jobs["job_b"].box.box_name == "box_a"
     box_a = catalog.jobs["box_a"]
     assert box_a.job_type == "BOX"
-    box_success = box_a.sem.box_success
+    assert box_a.sem.box_success is not None
+    box_success = box_a.sem.box_success.cond
     assert isinstance(box_success, StatusAtom)
     assert box_success.job == JobRef(name="job_a")
     assert box_success.status == "SUCCESS"
@@ -779,7 +792,8 @@ def test_bad_condition_is_a_lowering_error_naming_the_attr() -> None:
 def test_condition_span_matches_the_attribute_line() -> None:
     path = CORPUS_DIR / "sem08_globals.jil"
     job = lower_catalog([parse_file(path)]).jobs["uses_global"]
-    span = job.sem.condition_span
+    assert job.sem.condition is not None
+    span = job.sem.condition.span
     assert span is not None
     assert span.line_start == 10
     assert span.line_end == 10
@@ -789,7 +803,8 @@ def test_condition_span_matches_the_attribute_line() -> None:
 def test_condition_parses_into_a_sane_structure_on_a_happy_path() -> None:
     text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(a) & f(b)\n"
     (job,) = lower_source(text).jobs.values()
-    cond = job.sem.condition
+    assert job.sem.condition is not None
+    cond = job.sem.condition.cond
     assert isinstance(cond, And)
     left, right = cond.operands
     assert (
@@ -900,7 +915,7 @@ def test_load_dump_round_trips_the_full_corpus_catalog() -> None:
 
 def test_dump_contains_ir_version_field() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    assert '"ir_version": "0.1"' in dump_catalog(catalog)
+    assert '"ir_version": "0.2"' in dump_catalog(catalog)
 
 
 def test_dump_top_level_keys_are_sorted() -> None:
@@ -1022,7 +1037,7 @@ def test_schedule_reassignment_revalidates_sem31() -> None:
 def test_jobir_reassignment_revalidates_sem12() -> None:
     job = JobIR(name="j", job_type="CMD", exec_=ExecSpec(command="x"))
     with pytest.raises(ValidationError, match="SEM-12"):
-        job.sem = Semantics(box_success=parse_condition("s(a)"))
+        job.sem = Semantics(box_success=CondAttr(cond=parse_condition("s(a)")))
 
 
 def test_membership_problem_and_cycle_reported_together() -> None:
@@ -1237,7 +1252,8 @@ def test_dl39_colon_job_names_join_on_the_semantic_name() -> None:
     assert {"etl:extract", "etl:load", "etl:probe", "night:box", "boxed:member"} <= set(
         catalog.jobs
     )
-    cond = catalog.jobs["etl:load"].sem.condition
+    assert catalog.jobs["etl:load"].sem.condition is not None
+    cond = catalog.jobs["etl:load"].sem.condition.cond
     assert isinstance(cond, And)
     refs = {op.job.name for op in cond.operands if isinstance(op, StatusAtom)}
     assert refs == {"etl:extract", "etl:probe"}  # unescaped, matching the keys

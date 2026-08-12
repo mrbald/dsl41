@@ -73,6 +73,24 @@ def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> Non
     assert "lock1 x2 FREE=A" in entry and "pool1 x1" in entry
 
 
+def test_compile_twin_exit_code_edges_carry_their_own_comparison() -> None:
+    """DL-73: M08 op/value come off the edge's own atom. Two exit-code atoms
+    on the SAME producer are two edges with two comparisons -- the recovery
+    helper this replaced matched by producer NAME and answered with the first
+    occurrence for both."""
+    catalog = lower_source(
+        "insert_job: ecp\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ecc\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: e(ecp) >= 1 & e(ecp) <= 3\n"
+    )
+    (workflow,) = compile_twin(catalog).workflows
+    conditions = [e.var_condition for e in workflow.edges if e.var_condition is not None]
+    assert [(c.name, c.op, c.value) for c in conditions] == [
+        ("exit:ecp", ">=", "1"),
+        ("exit:ecp", "<=", "3"),
+    ]
+
+
 def test_report_inventories_calendars_and_surfaces_u6b() -> None:
     """DL-25: the report inventories referenced calendars per job and
     surfaces U6b via the M24 row (DL-53: per-trigger timezone U6a resolved;

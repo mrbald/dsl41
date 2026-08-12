@@ -21,13 +21,12 @@ from test_viz import (
     _assert_ids_are_generated,
     _assert_subgraphs_balance,
     _mermaid_fences,
+    catalog_of,
     corpus_catalog,
-    graph_of,
     runner,
 )
 
 from dsl41.cli import app
-from dsl41.derive import derive_graph
 from dsl41.viz import to_markdown
 from dsl41.viz_html import to_html
 
@@ -76,9 +75,9 @@ def _charts(page: str) -> list[dict[str, str]]:
 
 
 def test_to_html_chart_count_matches_markdown_fences() -> None:
-    graph = derive_graph(corpus_catalog())
-    page_charts = _charts(to_html(graph))
-    fences = _mermaid_fences(to_markdown(graph))
+    catalog = corpus_catalog()
+    page_charts = _charts(to_html(catalog))
+    fences = _mermaid_fences(to_markdown(catalog))
     assert len(page_charts) == len(fences)  # both count legend + one per workflow
 
 
@@ -86,13 +85,13 @@ def test_to_html_escapes_the_json_but_round_trips_the_chart() -> None:
     # a scheduled job's label line-breaks with <br/>: the raw script block
     # must not contain "<", yet the decoded chart must get the tag back
     text = "insert_job: nightly\njob_type: c\ncommand: x\nmachine: m1\nstart_times: \"03:00\"\n"
-    page = to_html(graph_of(text), include_singletons=True)
+    page = to_html(catalog_of(text), include_singletons=True)
     decoded = "\n".join(c["src"] for c in _charts(page))
     assert "<br/>" in decoded
 
 
 def test_to_html_chart_bodies_are_structurally_valid() -> None:
-    for chart in _charts(to_html(derive_graph(corpus_catalog()))):
+    for chart in _charts(to_html(corpus_catalog())):
         assert not chart["src"].startswith("---")  # page config, not frontmatter
         _assert_subgraphs_balance(chart["src"])
         if chart["el"] != "c0":  # the hand-written legend has its own ids
@@ -100,7 +99,7 @@ def test_to_html_chart_bodies_are_structurally_valid() -> None:
 
 
 def test_to_html_embeds_each_vendor_payload_exactly_once() -> None:
-    page = to_html(graph_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    page = to_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     for name in ("mermaid.min.js", "mermaid-layout-elk.iife.min.js"):
         probe = _vendor_bytes(name).decode("utf-8")[:200]
         assert page.count(probe) == 1
@@ -111,7 +110,7 @@ def test_to_html_survives_marker_shaped_job_and_title() -> None:
     # splice the mermaid payload into the chart JSON (review finding:
     # single-pass substitution, replaced content never re-scanned)
     text = "insert_job: EVIL__DSL41_MERMAID_JS__X\njob_type: c\ncommand: x\nmachine: m1\n"
-    page = to_html(graph_of(text), title="x__DSL41_CHART_JSON__.jil", include_singletons=True)
+    page = to_html(catalog_of(text), title="x__DSL41_CHART_JSON__.jil", include_singletons=True)
     for name in ("mermaid.min.js", "mermaid-layout-elk.iife.min.js"):
         probe = _vendor_bytes(name).decode("utf-8")[:200]
         assert page.count(probe) == 1
@@ -121,7 +120,7 @@ def test_to_html_survives_marker_shaped_job_and_title() -> None:
 def test_to_html_pins_page_defaults() -> None:
     # maxEdges/maxTextSize are secure-listed: only initialize can raise them,
     # and the bank estate exceeds the 500-edge/50k-char defaults
-    page = to_html(graph_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    page = to_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     assert 'layout: "elk"' in page
     assert "useMaxWidth: false" in page
     assert "maxEdges: 10000" in page
@@ -132,9 +131,9 @@ def test_to_html_pins_page_defaults() -> None:
 
 
 def test_to_html_appendix_parity_with_markdown() -> None:
-    graph = derive_graph(corpus_catalog())
-    page = to_html(graph)
-    md = to_markdown(graph)
+    catalog = corpus_catalog()
+    page = to_html(catalog)
+    md = to_markdown(catalog)
     # Appendix B rows: one <tr> per markdown table row (same annotated edges)
     md_b_rows = re.search(r"## Appendix B.*?(?=\n## )", md, re.S).group(0).count("\n|") - 2
     html_b = re.search(r'<section id="appendix-b">.*?</section>', page, re.S).group(0)
@@ -148,7 +147,7 @@ def test_to_html_appendix_parity_with_markdown() -> None:
 def test_to_html_appendix_cells_are_escaped_and_ellipsised() -> None:
     long_cmd = "/bin/echo " + "&x" * 40  # standalone, >60 chars, needs escaping
     text = f"insert_job: solo\njob_type: c\ncommand: {long_cmd}\nmachine: m1\n"
-    page = to_html(graph_of(text))
+    page = to_html(catalog_of(text))
     cell = re.search(r"<code>(.*?)</code>", page.split('id="appendix-a"')[1]).group(1)
     assert cell.endswith("\N{HORIZONTAL ELLIPSIS}")
     assert "&amp;x" in cell
@@ -157,19 +156,19 @@ def test_to_html_appendix_cells_are_escaped_and_ellipsised() -> None:
 
 def test_to_html_include_singletons_adds_a_chart() -> None:
     text = "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"
-    without = _charts(to_html(graph_of(text)))
-    with_ = _charts(to_html(graph_of(text), include_singletons=True))
+    without = _charts(to_html(catalog_of(text)))
+    with_ = _charts(to_html(catalog_of(text), include_singletons=True))
     assert len(with_) == len(without) + 1
-    assert '<section id="standalone">' in to_html(graph_of(text), include_singletons=True)
+    assert '<section id="standalone">' in to_html(catalog_of(text), include_singletons=True)
 
 
 def test_to_html_is_deterministic() -> None:
-    graph = derive_graph(corpus_catalog())
-    assert to_html(graph) == to_html(graph)
+    catalog = corpus_catalog()
+    assert to_html(catalog) == to_html(catalog)
 
 
 def test_to_html_whole_graph_is_a_single_chart_page() -> None:
-    page = to_html(derive_graph(corpus_catalog()), whole_graph=True)
+    page = to_html(corpus_catalog(), whole_graph=True)
     assert [c["el"] for c in _charts(page)] == ["c0", "c1"]  # legend + the graph
     assert '<section id="appendix-a">' not in page  # (the legend prose may say "Appendix")
     assert '<nav class="toc">' not in page

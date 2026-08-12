@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from test_viz import CORPUS_DIR, corpus_catalog, graph_of, runner
+from test_viz import CORPUS_DIR, catalog_of, corpus_catalog, runner
 from test_viz_html import _vendor_bytes
 
 from dsl41.cli import app
@@ -40,7 +40,8 @@ def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
 
 
 def _corpus_elements(name: str) -> dict[str, list[dict[str, object]]]:
-    return _elements(graph_of((CORPUS_DIR / name).read_text(encoding="utf-8")))
+    catalog = catalog_of((CORPUS_DIR / name).read_text(encoding="utf-8"))
+    return _elements(catalog, derive_graph(catalog))
 
 
 def _node(els: dict[str, list[dict[str, object]]], node_id: str) -> dict[str, object]:
@@ -77,8 +78,9 @@ def test_elements_ext_global_class_iff_via_global() -> None:
 
 
 def test_elements_edges_carry_annotations_untruncated() -> None:
-    graph = graph_of((CORPUS_DIR / "sem12_external_gate.jil").read_text(encoding="utf-8"))
-    els = _elements(graph)
+    catalog = catalog_of((CORPUS_DIR / "sem12_external_gate.jil").read_text(encoding="utf-8"))
+    graph = derive_graph(catalog)
+    els = _elements(catalog, graph)
     by_source = {e["data"]["source"]: e["data"] for e in els["edges"]}  # type: ignore[index]
     gate = by_source["gate_outside_job"]
     assert gate["cls"] == "redesign"
@@ -102,14 +104,16 @@ def test_elements_edge_labels_reuse_dl35_thinning_grammar() -> None:
 
 
 def test_elements_edge_class_is_the_style_class() -> None:
-    graph = derive_graph(corpus_catalog())
-    els = _elements(graph)
+    catalog = corpus_catalog()
+    graph = derive_graph(catalog)
+    els = _elements(catalog, graph)
     assert [e["classes"] for e in els["edges"]] == [e.cls for e in graph.edges]
 
 
 def test_elements_cover_every_node_and_edge() -> None:
-    graph = derive_graph(corpus_catalog())
-    els = _elements(graph)
+    catalog = corpus_catalog()
+    graph = derive_graph(catalog)
+    els = _elements(catalog, graph)
     catalog_ids = [n["data"]["id"] for n in els["nodes"][: len(graph.nodes)]]  # type: ignore[index]
     assert catalog_ids == graph.nodes  # catalog nodes first, source order
     assert len(els["edges"]) == len(graph.edges)
@@ -127,7 +131,8 @@ def test_elements_edge_ids_never_collide_with_job_names() -> None:
         "insert_job: e0\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(feeder)\n\n"
         "insert_job: feeder\njob_type: c\ncommand: x\nmachine: m1\n"
     )
-    els = _elements(graph_of(text))
+    catalog = catalog_of(text)
+    els = _elements(catalog, derive_graph(catalog))
     ids = [n["data"]["id"] for n in els["nodes"]] + [e["data"]["id"] for e in els["edges"]]  # type: ignore[index]
     assert len(ids) == len(set(ids))
     assert els["edges"][0]["data"]["id"] == "_e0"  # type: ignore[index]
@@ -143,8 +148,8 @@ def test_elements_are_deterministic_across_hash_seeds() -> None:
         "from dsl41.derive import derive_graph\n"
         "from dsl41.ir import lower_source\n"
         "from dsl41.viz_explore import _elements\n"
-        "graph = derive_graph(lower_source(Path(sys.argv[1]).read_text(encoding='utf-8')))\n"
-        "sys.stdout.write(json.dumps(_elements(graph)))\n"
+        "catalog = lower_source(Path(sys.argv[1]).read_text(encoding='utf-8'))\n"
+        "sys.stdout.write(json.dumps(_elements(catalog, derive_graph(catalog))))\n"
     )
     pages = {
         subprocess.run(
@@ -173,12 +178,13 @@ def _page_elements(page: str) -> dict[str, list[dict[str, object]]]:
 
 
 def test_to_explore_html_escapes_the_json_but_round_trips_elements() -> None:
-    graph = derive_graph(corpus_catalog())
-    assert _page_elements(to_explore_html(graph)) == _elements(graph)
+    catalog = corpus_catalog()
+    graph = derive_graph(catalog)
+    assert _page_elements(to_explore_html(catalog, graph)) == _elements(catalog, graph)
 
 
 def test_to_explore_html_embeds_the_vendor_payload_exactly_once() -> None:
-    page = to_explore_html(graph_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     probe = _vendor_bytes("cytoscape-explore.iife.min.js").decode("utf-8")[:200]
     assert page.count(probe) == 1
 
@@ -189,7 +195,7 @@ def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
     # not duplicate the JSON into <title> (review finding: single-pass
     # substitution, replaced content never re-scanned)
     text = "insert_job: EVIL__DSL41_CYTOSCAPE_JS__X\njob_type: c\ncommand: x\nmachine: m1\n"
-    page = to_explore_html(graph_of(text), title="x__DSL41_ELEMENTS_JSON__.jil")
+    page = to_explore_html(catalog_of(text), title="x__DSL41_ELEMENTS_JSON__.jil")
     probe = _vendor_bytes("cytoscape-explore.iife.min.js").decode("utf-8")[:200]
     assert page.count(probe) == 1
     names = [n["data"]["id"] for n in _page_elements(page)["nodes"]]  # type: ignore[index]
@@ -198,22 +204,22 @@ def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
 
 
 def test_to_explore_html_maps_direction_to_elk() -> None:
-    graph = graph_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
-    assert 'DIRECTION = "RIGHT"' in to_explore_html(graph)
-    assert 'DIRECTION = "RIGHT"' in to_explore_html(graph, direction="LR")
-    assert 'DIRECTION = "DOWN"' in to_explore_html(graph, direction="TD")
+    catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
+    assert 'DIRECTION = "RIGHT"' in to_explore_html(catalog)
+    assert 'DIRECTION = "RIGHT"' in to_explore_html(catalog, direction="LR")
+    assert 'DIRECTION = "DOWN"' in to_explore_html(catalog, direction="TD")
 
 
 def test_to_explore_html_escapes_title_and_counts_summary() -> None:
-    graph = graph_of((CORPUS_DIR / "sem10_box_basic.jil").read_text(encoding="utf-8"))
-    page = to_explore_html(graph, title="a<b&c")
+    catalog = catalog_of((CORPUS_DIR / "sem10_box_basic.jil").read_text(encoding="utf-8"))
+    page = to_explore_html(catalog, title="a<b&c")
     assert "Explore: a&lt;b&amp;c</title>" in page
     assert "3 jobs \N{MIDDLE DOT} 1 edges \N{MIDDLE DOT} 1 boxes" in page
 
 
 def test_to_explore_html_singletons_always_present() -> None:
     # navigation replaces collapsing: search must find standalone jobs
-    page = to_explore_html(graph_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     assert [n["data"]["id"] for n in _page_elements(page)["nodes"]] == ["solo"]  # type: ignore[index]
 
 

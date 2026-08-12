@@ -275,10 +275,10 @@ class Oracle:
         #: references it. Keys: job names (incl. "name^INST"), "g:NAME".
         self._referencers: dict[str, list[str]] = {}
         for name, job_ir in catalog.jobs.items():
-            cond = job_ir.sem.condition
-            if cond is None:
+            attr = job_ir.sem.condition
+            if attr is None:
                 continue
-            for key in _entity_keys(cond):
+            for key in _entity_keys(attr.cond):
                 self._referencers.setdefault(key, []).append(name)
         # DL-50 resource/load buckets: capacity per contended entity, seeded
         # from the catalog (malformed -> skipped; preflight refuses the run).
@@ -716,7 +716,8 @@ class Oracle:
                         f"already ran in this {box!r} execution -- "
                         "rerun needs FORCE_STARTJOB (SEM-10)"
                     )
-            if job_ir.sem.condition is not None and not self._cond_true(job_ir.sem.condition, job):
+            gate = job_ir.sem.condition
+            if gate is not None and not self._cond_true(gate.cond, job):
                 # SEM-32 arm-and-wait (Q3 resolved, DL-58): the tick latches;
                 # condition edges may start the job later.
                 self._arm(job_ir, rt, scheduled, "condition false")
@@ -1020,11 +1021,11 @@ class Oracle:
         statuses = [self._runtime(m).status for m in members]
         if not members or not all(s in _TERMINAL for s in statuses):
             return
-        for cond, target in (
+        for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
         ):
-            if cond is not None and self._cond_true(cond, box):
+            if attr is not None and self._cond_true(attr.cond, box):
                 if self._runtime(box).status != target:
                     self._set_status(
                         box,
@@ -1043,12 +1044,13 @@ class Oracle:
     def _apply_box_overrides(self, box: str, box_ir: JobIR, member: str, new: str) -> bool:
         """Returns True if an override fired and set the box status."""
         member_completed = new in _TERMINAL
-        for cond, target in (
+        for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
         ):
-            if cond is None:
+            if attr is None:
                 continue
+            cond = attr.cond
             refs_member = member in _cond_job_names(cond)
             # internal ref: evaluate the moment the referenced job transitions;
             # external/global ref: evaluate only at member completion moments

@@ -56,6 +56,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
 from dsl41.equiv import catalog_hash
 from dsl41.ir import CatalogIR, tool_version
@@ -379,16 +380,12 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             excluded.append(f"{edge.mapping_row} edge {edge.src} -> {edge.dst} (R-class)")
             continue
         if edge.via == "global":
-            op_value = _split_global_edge(edge, catalog)
-            if op_value is None:
-                excluded.append(
-                    f"{edge.mapping_row} global gate ${edge.src} -> {edge.dst}"
-                    " (no recoverable op/value)"
-                )
-                continue
-            op, value = op_value
+            # via=="global" iff the edge's atom IS the GlobalAtom (derive's
+            # first pinned decision, enforced by DerivedEdge._via_matches_atom),
+            # so op/value come off the edge (DL-73)
+            assert isinstance(edge.atom, GlobalAtom)  # narrowing only
             global_gates.setdefault(edge.dst, []).append(
-                UcVarCondition(name=edge.src, op=op, value=value)
+                UcVarCondition(name=edge.src, op=edge.atom.op, value=edge.atom.value)
             )
             continue
         if edge.via == "notrunning":
@@ -398,13 +395,19 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             )
             continue
         if edge.via == "exitcode":
-            var_condition = _exitcode_var_condition(edge, catalog)
+            # via=="exitcode" iff ExitCodeAtom (_via_matches_atom); this edge's
+            # OWN op/value, not the first atom naming the producer (DL-73)
+            assert isinstance(edge.atom, ExitCodeAtom)  # narrowing only
             compiled.append(
                 UcEdge(
                     src=edge.src,
                     dst=edge.dst,
                     condition="done",
-                    var_condition=var_condition,
+                    var_condition=UcVarCondition(
+                        name=f"exit:{edge.src}",
+                        op=edge.atom.op,
+                        value=str(edge.atom.value),
+                    ),
                     mapping_row=edge.mapping_row,
                 )
             )
@@ -569,32 +572,6 @@ def _transitive_members(graph: DerivedGraph, box: str) -> list[str]:
             else:
                 out.append(member)
     return out
-
-
-def _split_global_edge(edge: DerivedEdge, catalog: CatalogIR) -> tuple[str, str] | None:
-    """Recover (op, value) for a via=global edge by finding the GlobalAtom in
-    the consumer's condition (derive keeps src=name only)."""
-    from dsl41.conditions import GlobalAtom, iter_atoms
-
-    consumer = catalog.jobs.get(edge.dst)
-    if consumer is None or consumer.sem.condition is None:
-        return None
-    for atom in iter_atoms(consumer.sem.condition):
-        if isinstance(atom, GlobalAtom) and atom.name == edge.src:
-            return atom.op, atom.value
-    return None
-
-
-def _exitcode_var_condition(edge: DerivedEdge, catalog: CatalogIR) -> UcVarCondition | None:
-    from dsl41.conditions import ExitCodeAtom, iter_atoms
-
-    consumer = catalog.jobs.get(edge.dst)
-    if consumer is None or consumer.sem.condition is None:
-        return None
-    for atom in iter_atoms(consumer.sem.condition):
-        if isinstance(atom, ExitCodeAtom) and atom.job.name == edge.src:
-            return UcVarCondition(name=f"exit:{edge.src}", op=atom.op, value=str(atom.value))
-    return None
 
 
 # ------------------------------------------- U3a base record emission (DL-55)

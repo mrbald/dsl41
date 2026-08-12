@@ -2703,7 +2703,7 @@ def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
     for name, job in catalog.jobs.items():
         preds: set[str] = set()
         if job.sem.condition is not None:
-            collect(job.sem.condition, preds)
+            collect(job.sem.condition.cond, preds)
         skeleton[name] = preds
     return skeleton
 
@@ -3457,9 +3457,10 @@ class ControlServer:
         from dsl41.dsl import cond_to_source  # heavyweight surface: load on demand
 
         oracle = self.engine.oracle
-        cond = oracle.catalog.jobs[job].sem.condition
-        if cond is None:
+        attr = oracle.catalog.jobs[job].sem.condition
+        if attr is None:
             return {"ok": True, "job": job, "condition": None, "satisfied": True, "atoms": []}
+        cond = attr.cond
         # oracle._cond_true is package-private on purpose: explain must use
         # the ORACLE's truth (ice bypass, lookback, instances), never a copy
         atoms: list[dict[str, Any]] = []
@@ -3517,7 +3518,7 @@ class ControlServer:
         upstream: set[str] = set()
         globals_: set[str] = set()
         if job_ir.sem.condition is not None:
-            for atom in iter_atoms(job_ir.sem.condition):
+            for atom in iter_atoms(job_ir.sem.condition.cond):
                 if isinstance(atom, GlobalAtom):
                     globals_.add(atom.name)
                 elif atom.job.instance is None:

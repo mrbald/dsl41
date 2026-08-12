@@ -348,13 +348,13 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   graph, dangling-name rules L016-L018)
 - src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes that produce edges, mutex
   pairs, box tree, same-cycle detection, M01-M36 mapping-row classification
-- src/dsl41/viz.py — IR-G -> Markdown report of per-workflow Mermaid charts (DL-35):
+- src/dsl41/viz.py — IR-F + IR-G -> Markdown report of per-workflow Mermaid charts (DL-35):
   component split, trigger/lock visual grammar, E/A/R edge-class arrows, collapse
   threshold, appendices for everything that the charts omit
 - src/dsl41/viz_html.py — the same report content as one self-contained offline HTML
   page (DL-70): vendored mermaid + ELK from src/dsl41/_vendor/, uniform chart scale,
   progressive in-browser rendering with pan/zoom
-- src/dsl41/viz_explore.py — IR-G -> cytoscape.js elements for the interactive
+- src/dsl41/viz_explore.py — IR-F + IR-G -> cytoscape.js elements for the interactive
   navigation page (DL-71): compound-node box tree, EXT-node synthesis, edge
   annotations in a click-details panel, ELK layout + focus/search in the browser
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven

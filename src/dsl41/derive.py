@@ -42,6 +42,17 @@ Decisions pinned here (each with a test):
 - DerivedEdge.source_atom is Optional (spans are Optional codebase-wide;
   the ss5 sketch's bare SourceSpan is read as "populated whenever lowering
   supplied one" -- derive always populates it for parsed catalogs).
+- DerivedEdge.atom carries the condition node itself (DL-73), so a consumer
+  that needs more than src/via/lookback -- the UC backend's op/value for
+  M08 exit codes and M09 globals -- reads it off the edge instead of
+  re-scanning the consumer's condition for a matching atom. It is a COPY:
+  IR-G must not alias IR-F's mutable AST nodes (the same pin
+  external_boundary carries), and `lookback` takes its copy the same way.
+- `via` and the atom's kind are two views of one derivation step, so the
+  model validates that they agree (global iff GlobalAtom, exitcode iff
+  ExitCodeAtom): the UC backend narrows on it to read op/value off the
+  edge (DL-73), and an invariant a reader depends on is enforced where it
+  is established, not assumed downstream.
 - assumption field: required for assumed, forbidden for exact, optional for
   redesign (ss5's "mandatory iff assumed" read as one-directional so R rows
   may carry context notes).
@@ -49,9 +60,6 @@ Decisions pinned here (each with a test):
   job->job edges of `condition` origin only: box-override edges describe
   completion folding, not flow, and would fabricate cycles out of normal
   box behavior.
-- node_meta (DL-35) carries per-node display facts verbatim from IR-F
-  (kind, trigger digest, command/watch path) so viz can distinguish
-  triggers without reaching back into the catalog; no analysis lives in it.
 - `components` is the one connectivity implementation every consumer uses
   (viz's workflow charts, the UC backend's workflow split). Whether box
   co-membership connects is its named argument, not a second function
@@ -64,7 +72,7 @@ import json
 from collections.abc import Iterable, Sequence
 from typing import Literal, NamedTuple, Protocol, cast
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from dsl41.ast_jil import SourceSpan
 from dsl41.conditions import (
@@ -97,11 +105,33 @@ class DerivedEdge(BaseModel):
     src: str  # producer job name, global name (via=="global"), or "name^INST"
     dst: str  # consumer: the job whose condition/box override references src
     via: Via
+    #: the IR-F condition node this edge was derived from; src/via/lookback
+    #: are read off it, and consumers needing what those three drop (an
+    #: exit-code or global comparison's op/value) read it instead of
+    #: re-scanning the consumer's condition (DL-73).
+    atom: StatusAtom | ExitCodeAtom | GlobalAtom
     lookback: Lookback | None = None
     cls: EdgeClass
     mapping_row: str  # "M01".."M36"
     assumption: str | None = None  # human-readable; required iff cls=="assumed"
     source_atom: SourceSpan | None = None  # provenance: owning attr's span
+
+    @field_validator("atom", "lookback", mode="after")
+    @classmethod
+    def _detach_from_ir_f(cls, node: BaseModel | None) -> BaseModel | None:
+        """IR-G must not alias IR-F's mutable condition AST nodes -- the pin
+        external_boundary carries; the edge takes its own copy."""
+        return node if node is None else node.model_copy(deep=True)
+
+    @model_validator(mode="after")
+    def _via_matches_atom(self) -> DerivedEdge:
+        """global iff GlobalAtom, exitcode iff ExitCodeAtom (every other via
+        is a StatusAtom's own status). The UC backend narrows on this to read
+        op/value off the edge (DL-73)."""
+        special = ("global", "exitcode")
+        if (self.via in special or self.atom.kind in special) and self.via != self.atom.kind:
+            raise ValueError(f"via {self.via!r} does not match atom kind {self.atom.kind!r}")
+        return self
 
     @model_validator(mode="after")
     def _assumption_matches_class(self) -> DerivedEdge:
@@ -156,23 +186,8 @@ class RedesignFlag(BaseModel):
     span: SourceSpan | None = None
 
 
-class NodeMeta(BaseModel):
-    """Display metadata for one catalog node (DL-35: viz/report consumers).
-
-    Carried verbatim from IR-F, no analysis: `kind` is the normalized
-    job_type; `schedule` is a human digest of the TRIGGER fields only
-    (run_window is a gate per SEM-33, must_* are alarms per SEM-34 -- both
-    excluded, mirroring _trigger_signature); `detail` is the command for CMD
-    jobs and the watched path for FW jobs."""
-
-    kind: str  # 'CMD' | 'BOX' | 'FW' + extensible, as JobIR.job_type
-    schedule: str | None = None
-    detail: str | None = None
-
-
 class DerivedGraph(BaseModel):
     nodes: list[str] = []  # catalog job names, source order
-    node_meta: dict[str, NodeMeta] = {}  # per-node display metadata (DL-35)
     edges: list[DerivedEdge] = []
     mutex_groups: list[list[str]] = []  # n() detector pairs (M07)
     or_shapes: list[OrShape] = []  # M12 classifier output
@@ -250,40 +265,6 @@ def _trigger_signature(schedule: ScheduleBlock) -> str:
     gate per SEM-33; must_* are alarms per SEM-34; both excluded)."""
     dump = schedule.model_dump(mode="json")
     return "sched:" + json.dumps({k: dump[k] for k in _TRIGGER_FIELDS}, sort_keys=True)
-
-
-def _schedule_digest(schedule: ScheduleBlock) -> str:
-    """Human one-liner over the same trigger fields as _trigger_signature."""
-    parts: list[str] = []
-    if schedule.start_times is not None:
-        parts.append(",".join(f"{t.hour:02d}:{t.minute:02d}" for t in schedule.start_times))
-    if schedule.start_mins is not None:
-        parts.append(",".join(f":{m:02d}" for m in schedule.start_mins))
-    if schedule.days_of_week is not None:
-        parts.append(",".join(schedule.days_of_week))
-    if schedule.run_calendar is not None:
-        parts.append(f"cal {schedule.run_calendar}")
-    if schedule.exclude_calendar is not None:
-        parts.append(f"excl {schedule.exclude_calendar}")
-    if schedule.timezone is not None:
-        parts.append(schedule.timezone)
-    return " ".join(parts) if parts else "scheduled"
-
-
-def _node_meta(catalog: CatalogIR) -> dict[str, NodeMeta]:
-    meta: dict[str, NodeMeta] = {}
-    for name, job in catalog.jobs.items():
-        detail: str | None = None
-        if isinstance(job.exec_, FwSpec):
-            detail = job.exec_.watch_file
-        elif job.exec_ is not None:
-            detail = job.exec_.command
-        meta[name] = NodeMeta(
-            kind=job.job_type,
-            schedule=None if job.schedule is None else _schedule_digest(job.schedule),
-            detail=detail,
-        )
-    return meta
 
 
 def _condition_pred_map(catalog: CatalogIR, refs: list[_RawRef]) -> dict[str, set[str]]:
@@ -368,6 +349,7 @@ def _classify_condition_edge(
             src=src,
             dst=ref.dst,
             via=via,
+            atom=atom,
             lookback=lookback,
             cls=cls,
             mapping_row=row,
@@ -457,6 +439,7 @@ def _edge_for_ref(
                 src=atom.name,
                 dst=ref.dst,
                 via="global",
+                atom=atom,
                 cls="redesign",
                 mapping_row="M16",
                 assumption=(
@@ -471,6 +454,7 @@ def _edge_for_ref(
             src=atom.name,
             dst=ref.dst,
             via="global",
+            atom=atom,
             cls="assumed",
             mapping_row="M09",
             assumption=(
@@ -501,6 +485,7 @@ def _edge_for_ref(
             src=f"{atom.job.name}^{atom.job.instance}",
             dst=ref.dst,
             via=via,
+            atom=atom,
             lookback=atom.lookback,
             cls="redesign",
             mapping_row=row,
@@ -517,6 +502,7 @@ def _edge_for_ref(
                 src=src,
                 dst=ref.dst,
                 via=via,
+                atom=atom,
                 lookback=atom.lookback,
                 cls="assumed",
                 mapping_row="M15",
@@ -532,6 +518,7 @@ def _edge_for_ref(
             src=src,
             dst=ref.dst,
             via=via,
+            atom=atom,
             lookback=atom.lookback,
             cls="redesign",
             mapping_row="M16",
@@ -887,7 +874,6 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
     cycles = _cycles(nodes, succs)  # pass 7
     return DerivedGraph(
         nodes=nodes,
-        node_meta=_node_meta(catalog),
         edges=edges,
         mutex_groups=mutex_groups,
         or_shapes=or_shapes,

@@ -665,7 +665,6 @@ def viz(
     per-workflow Mermaid charts (DL-35), one whole-graph chart
     (--whole-graph, DL-61), a self-contained offline HTML page
     (--html, DL-70), or an interactive navigation page (--explore, DL-71)."""
-    from dsl41.derive import derive_graph
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
     if direction not in ("auto", "LR", "TD"):
@@ -677,7 +676,7 @@ def viz(
         from dsl41.viz_explore import to_explore_html
 
         report = to_explore_html(
-            derive_graph(catalog),
+            catalog,
             title=", ".join(f.name for f in files),
             direction=direction,  # type: ignore[arg-type]  # validated above
         )
@@ -685,7 +684,7 @@ def viz(
         from dsl41.viz_html import to_html
 
         report = to_html(
-            derive_graph(catalog),
+            catalog,
             title=", ".join(f.name for f in files),
             collapse_threshold=threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
@@ -694,7 +693,7 @@ def viz(
         )
     elif whole_graph:
         report = to_mermaid(
-            derive_graph(catalog),
+            catalog,
             collapse_threshold=threshold,
             direction="LR" if direction == "auto" else direction,  # type: ignore[arg-type]
             elk=elk,
@@ -702,7 +701,7 @@ def viz(
         )
     else:
         report = to_markdown(
-            derive_graph(catalog),
+            catalog,
             title=", ".join(f.name for f in files),
             collapse_threshold=threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above

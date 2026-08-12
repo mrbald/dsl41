@@ -705,9 +705,9 @@ def _job_kwargs(
     if condition is not None:
         out.append(f"condition={_py(cond_to_source(condition))}")
     if sem.box_success is not None:
-        out.append(f"box_success={_py(cond_to_source(sem.box_success))}")
+        out.append(f"box_success={_py(cond_to_source(sem.box_success.cond))}")
     if sem.box_failure is not None:
-        out.append(f"box_failure={_py(cond_to_source(sem.box_failure))}")
+        out.append(f"box_failure={_py(cond_to_source(sem.box_failure.cond))}")
     if sem.max_exit_success:
         out.append(f"max_exit_success={sem.max_exit_success}")
     if sem.success_codes is not None:
@@ -1227,7 +1227,10 @@ def decompile(
     # mutex() AFTER sequence()/parallel() wiring. Stripping can never
     # invalidate derive's chains: bare n() atoms are mutex-classified and
     # contribute no edges (M07).
-    residual: dict[str, Cond | None] = {n: j.sem.condition for n, j in catalog.jobs.items()}
+    residual: dict[str, Cond | None] = {
+        n: j.sem.condition.cond if j.sem.condition is not None else None
+        for n, j in catalog.jobs.items()
+    }
     mutex_pairs, residual = _fold_mutex(catalog, residual, disabled)
     sequences, sequenced, split_chains, noted, notes = _fold_chains(graph, residual, disabled)
     parallels, paralleled = _fold_fanout(catalog, residual, disabled)

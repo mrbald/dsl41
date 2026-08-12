@@ -76,7 +76,7 @@ from dsl41.conditions import (
     iter_atoms,
 )
 from dsl41.derive import derive_graph
-from dsl41.ir import CatalogIR, JobIR, MachineIR, Time
+from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, Time
 from dsl41.oracle import Event, Oracle, TraceEntry
 
 STATE_CEILING = 2**18
@@ -163,6 +163,14 @@ def _map_cond(cond: Cond, rename: dict[str, str], case_fold: bool) -> Cond:
     return cond.model_copy(update={"job": job})
 
 
+def _canon_attr(attr: CondAttr | None, rename: dict[str, str], case_fold: bool) -> CondAttr | None:
+    """C() for one condition-bearing attr: renamed + canonicalized Cond, and
+    the attr's own file span dropped (spans are provenance, not semantics)."""
+    if attr is None:
+        return None
+    return CondAttr(cond=_canon(_map_cond(attr.cond, rename, case_fold)))
+
+
 def canonical_catalog(
     catalog: CatalogIR,
     *,
@@ -179,18 +187,9 @@ def canonical_catalog(
             raise RenameError(f"job name collision after rename/fold: {new_name!r}")
         sem = job.sem.model_copy(
             update={
-                "condition": _canon(_map_cond(job.sem.condition, rename, case_fold))
-                if job.sem.condition is not None
-                else None,
-                "box_success": _canon(_map_cond(job.sem.box_success, rename, case_fold))
-                if job.sem.box_success is not None
-                else None,
-                "box_failure": _canon(_map_cond(job.sem.box_failure, rename, case_fold))
-                if job.sem.box_failure is not None
-                else None,
-                "condition_span": None,
-                "box_success_span": None,
-                "box_failure_span": None,
+                "condition": _canon_attr(job.sem.condition, rename, case_fold),
+                "box_success": _canon_attr(job.sem.box_success, rename, case_fold),
+                "box_failure": _canon_attr(job.sem.box_failure, rename, case_fold),
             }
         )
         schedule = job.schedule
@@ -671,10 +670,12 @@ def equivalent_tier_b(
     too_large: list[str] = []
     for name in sorted(set(ca.jobs) & set(cb.jobs)):
         for attr in ("condition", "box_success", "box_failure"):
-            left: Cond | None = getattr(ca.jobs[name].sem, attr)
-            right: Cond | None = getattr(cb.jobs[name].sem, attr)
-            if left is None and right is None:
+            left_attr: CondAttr | None = getattr(ca.jobs[name].sem, attr)
+            right_attr: CondAttr | None = getattr(cb.jobs[name].sem, attr)
+            if left_attr is None and right_attr is None:
                 continue
+            left = left_attr.cond if left_attr is not None else None
+            right = right_attr.cond if right_attr is not None else None
             result = conds_equivalent(left, right)
             if result.verdict == "too_large":
                 too_large.append(f"{name}.{attr}")
@@ -807,9 +808,7 @@ def equiv_scripts(
     global_names: set[str] = set(catalog.globals_declared)
     global_values: set[str] = {"1", "0", "go", ""}
     for job_ir in catalog.jobs.values():
-        for cond in (job_ir.sem.condition, job_ir.sem.box_success, job_ir.sem.box_failure):
-            if cond is None:
-                continue
+        for _attr, cond, _span in job_ir.iter_conditions():
             for atom in iter_atoms(cond):
                 if isinstance(atom, GlobalAtom):
                     global_names.add(atom.name)

@@ -421,9 +421,11 @@ def test_tier_a_rename_map_propagates_into_box_name_links_and_box_success_refs()
     catalog = lower_source(text)
     renamed = canonical_catalog(catalog, rename={"producer": "prod2", "mybox": "boxB"})
     assert set(renamed.jobs) == {"prod2", "consumer", "boxB", "member"}
-    condition = renamed.jobs["consumer"].sem.condition
+    assert renamed.jobs["consumer"].sem.condition is not None
+    condition = renamed.jobs["consumer"].sem.condition.cond
     assert isinstance(condition, StatusAtom) and condition.job.name == "prod2"
-    box_success = renamed.jobs["boxB"].sem.box_success
+    assert renamed.jobs["boxB"].sem.box_success is not None
+    box_success = renamed.jobs["boxB"].sem.box_success.cond
     assert isinstance(box_success, StatusAtom) and box_success.job.name == "prod2"
     assert renamed.jobs["member"].box.box_name == "boxB"
 

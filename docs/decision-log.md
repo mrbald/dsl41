@@ -2581,3 +2581,73 @@
   an unspecified ordering is the UC backend's workflow order in (3), which
   no corpus output exercises. Tests 1808 -> 1812 (PYTHONSAFEPATH x2,
   component ordering x1, sys.path hygiene x1).
+- DL-73 IR-F carries conditions as (cond, span) pairs, IR-G edges carry
+  their atom, IR-G stops copying IR-F for the display layer; ir_version
+  0.1 -> 0.2 (2026-08-12). Problem: three places let a model's shape
+  push work onto its readers. (1) Semantics declared condition /
+  box_success / box_failure alongside condition_span / box_success_span /
+  box_failure_span, six fields rejoined at runtime by an
+  `f"{attr}_span"` getattr that no type checker can see -- and a reader
+  that wanted the pair had to know the convention. They are now three
+  fields of one CondAttr(cond, span) model; _CONDITION_ATTRS and the
+  getattr join are gone and JobIR.iter_conditions is an unrolled walk
+  over the three attrs (a plain loop needs a Literal-typed local, which
+  costs more than it saves). The provenance note stays on CondAttr: a
+  Cond node's CondSpan is a char offset into the parsed attribute text,
+  the CondAttr's SourceSpan locates the attribute in the file. (2)
+  DerivedEdge recorded via + lookback + the owning attr's span but not
+  the atom it was derived from, so the UC backend RE-SCANNED the
+  consumer's condition to recover an exit-code or global comparison's
+  op/value (_split_global_edge, _exitcode_var_condition) -- a search for
+  something derive had in hand. The edge now carries the atom; both
+  helpers are deleted, and with them the "no recoverable op/value"
+  exclusion branch, which can no longer occur. The atom is a deep COPY,
+  and `lookback` now takes its copy the same way: IR-G must not alias
+  IR-F's mutable AST nodes (the pin external_boundary already carried).
+  `via` stays a field (every consumer matches on it, and a property would
+  change model equality), as do lookback and source_atom; the model now
+  validates that via and the atom's kind agree (global iff GlobalAtom,
+  exitcode iff ExitCodeAtom) because that pairing is exactly what the
+  backend narrows on -- enforced where it is established rather than
+  assumed downstream. Two behaviour changes ride along, both fixes, and
+  neither reachable from the corpus (no output moves). (a) The old scan
+  matched by producer NAME, so a condition naming one global -- or one
+  producer's exit code -- twice with different comparands answered with
+  the FIRST occurrence for every edge; each edge now reads its own atom
+  (test_compile_twin_exit_code_edges_carry_their_own_comparison). (b) The
+  scan only ever looked at `condition`, so an exit-code atom of
+  box_success/box_failure origin (M15) compiled to an edge with
+  var_condition=None -- the comparison silently dropped -- and the global
+  equivalent was recorded as unrecoverable; both now carry their
+  comparison. Every M15 exit-code edge found is excluded downstream as
+  workflow-spanning and every box-override global is R-classified before
+  the branch, which is why no output moves; the loss was real all the
+  same. IR-G's serialized shape is free to move:
+  ir-design §1 forbids serializing it as authority, and the tree agrees --
+  nothing writes a DerivedGraph anywhere (the only model_dump_json is a
+  determinism assertion). (3) DerivedGraph.node_meta was a verbatim copy
+  of IR-F (job_type, a trigger digest, the command/watch path) carried
+  only so viz could take the graph without the catalog. IR-G is an
+  analysis product whose every loss is materialized as an annotation; a
+  copy is neither, and it made the analysis layer the place to add every
+  future display need. NodeMeta, _node_meta and the field are deleted;
+  viz.to_markdown / to_mermaid / viz_html.to_html /
+  viz_explore.to_explore_html now take (catalog, graph=None) -- the shape
+  lint, the UC backend and the decompiler already had -- and the display
+  facts are three small functions in viz (job_kind / job_schedule /
+  job_detail) that all three emitters share. _schedule_digest moved with
+  them (it is real derivation, but display's); _trigger_signature stays in
+  derive, where the cadence analysis uses it, and the digest cites it
+  rather than iterating its field list -- the digest formats each field
+  differently and in its own order, so driving it off the shared tuple
+  would need a formatter table to buy nothing. Consequence, accepted:
+  IR_VERSION and CatalogMeta.ir_version go 0.1 -> 0.2, which moves
+  catalog_hash, which is the resume gate of every existing run journal
+  (cli._write_manifest). In-flight journals become unresumable. The gate
+  already fails loudly with the mismatch named, and there is no live
+  estate. Verification: every corpus file's viz / --html / --explore /
+  --whole-graph / report / uc / decompile / lint output is byte-identical
+  before and after EXCEPT the catalog hash printed by report and uc.
+  Tests +3 (the via/atom-kind validator, the edge-atom copy pin, the
+  per-edge exit-code comparison); the seven node_meta tests moved from
+  test_derive to test_viz as display-facts tests.

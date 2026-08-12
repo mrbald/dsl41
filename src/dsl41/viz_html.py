@@ -33,13 +33,17 @@ import re
 from importlib.resources import files
 from typing import Literal
 
-from dsl41.derive import DerivedGraph
+from dsl41.derive import DerivedGraph, derive_graph
+from dsl41.ir import CatalogIR
 from dsl41.viz import (
     DEFAULT_COLLAPSE_THRESHOLD,
     LEGEND_CHART,
     LEGEND_PROSE,
     LOCKS_PROSE,
     Direction,
+    job_detail,
+    job_kind,
+    job_schedule,
     report_content,
     to_mermaid,
 )
@@ -96,7 +100,8 @@ def _viewport(chart_id: str) -> str:
 
 
 def to_html(
-    graph: DerivedGraph,
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
     *,
     title: str = "catalog",
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
@@ -106,6 +111,8 @@ def to_html(
 ) -> str:
     """One self-contained HTML page: report parity (summary, legend, charts,
     locks, appendices) or, with whole_graph, a single-chart page."""
+    if graph is None:
+        graph = derive_graph(catalog)
     charts: list[dict[str, str]] = [{"el": "c0", "src": LEGEND_CHART.rstrip("\n")}]
     toc: list[str] = []
     sections: list[str] = []
@@ -113,6 +120,7 @@ def to_html(
 
     if whole_graph:
         body = to_mermaid(
+            catalog,
             graph,
             collapse_threshold=collapse_threshold,
             direction="LR" if direction == "auto" else direction,
@@ -122,6 +130,7 @@ def to_html(
         sections.append(f'<section id="whole">\n{_viewport("c1")}\n</section>')
     else:
         content = report_content(
+            catalog,
             graph,
             collapse_threshold=collapse_threshold,
             direction=direction,
@@ -172,13 +181,13 @@ def to_html(
         if content.standalone:
             meta_rows = []
             for name in content.standalone:
-                meta = graph.node_meta.get(name)
+                job = catalog.jobs.get(name)
                 meta_rows.append(
                     [
                         _text(name),
-                        _text(meta.kind if meta else None),
-                        _text(meta.schedule if meta else None),
-                        _code(meta.detail if meta else None),
+                        _text(job_kind(job)),
+                        _text(job_schedule(job)),
+                        _code(job_detail(job)),
                     ]
                 )
             body_a = _table(["job", "kind", "schedule", "command / watched file"], meta_rows)

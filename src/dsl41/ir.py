@@ -158,7 +158,7 @@ _DAY_FULL = {
 #: must stay distinct (never matched here).
 _VAR_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
-IR_VERSION: Literal["0.1"] = "0.1"
+IR_VERSION: Literal["0.2"] = "0.2"
 
 
 # ---------------------------------------------------------------- entity models (ss4)
@@ -299,27 +299,35 @@ def exit_is_success(
     return exit_code <= max_exit_success
 
 
+class CondAttr(BaseModel):
+    """One condition-bearing attribute: its parsed Cond and the attribute's
+    own file span, carried together (DL-73 -- they were parallel fields
+    rejoined by a `{attr}_span` naming convention no type checker could see).
+
+    Provenance (ir-design ss4: every Cond keeps a pointer to its AST span).
+    Cond-node CondSpans are char offsets into the parsed text, which is
+    raw_value.strip(); the scanner never leaves leading whitespace in
+    raw_value, so offsets align with it. This SourceSpan locates the attr
+    in the source file.
+    """
+
+    cond: Cond
+    span: SourceSpan | None = None
+
+
 class Semantics(BaseModel):
     """Attributes with control-flow teeth (dossier ss5)."""
 
-    condition: Cond | None = None
+    condition: CondAttr | None = None
     max_exit_success: int = 0  # SEM-09
     success_codes: list[tuple[int, int]] | None = None  # SEM-09/DL-33; CMD-only
     fail_codes: list[tuple[int, int]] | None = None  # SEM-09/DL-33; CMD-only
     term_run_time_min: int | None = None
     n_retrys: int = 0
-    box_success: Cond | None = None  # box jobs only; SEM-12
-    box_failure: Cond | None = None
+    box_success: CondAttr | None = None  # box jobs only; SEM-12
+    box_failure: CondAttr | None = None
     auto_hold: bool = False
     initial_status: InitialStatus | None = None  # SEM-24 [A]: `status:` on insert
-    # Provenance (ir-design ss4: every Cond keeps a pointer to its AST span).
-    # Cond-node CondSpans are char offsets into the parsed text, which is
-    # raw_value.strip(); the scanner never leaves leading whitespace in
-    # raw_value, so offsets align with it. These SourceSpans locate the
-    # attr in the source file.
-    condition_span: SourceSpan | None = None
-    box_success_span: SourceSpan | None = None
-    box_failure_span: SourceSpan | None = None
 
     def exit_is_success(self, exit_code: int) -> bool:
         """SEM-09 verdict with this job's configured boundary (DL-33)."""
@@ -329,15 +337,6 @@ class Semantics(BaseModel):
             success_codes=self.success_codes,
             fail_codes=self.fail_codes,
         )
-
-
-#: The three condition-bearing Semantics attrs, each paired with a
-#: `{attr_name}_span` field; shared by JobIR.iter_conditions below.
-_CONDITION_ATTRS: tuple[Literal["condition", "box_success", "box_failure"], ...] = (
-    "condition",
-    "box_success",
-    "box_failure",
-)
 
 
 def _lookup_ci(mapping: dict[str, str], key: str) -> str | None:
@@ -440,10 +439,12 @@ class JobIR(BaseModel):
         this job (condition/box_success/box_failure). Canonical walker shared
         by lint's L001-family rules and derive's pass-1 extraction -- both
         used to carry their own copy of this loop."""
-        for attr_name in _CONDITION_ATTRS:
-            cond = getattr(self.sem, attr_name)
-            if cond is not None:
-                yield attr_name, cond, getattr(self.sem, f"{attr_name}_span")
+        if self.sem.condition is not None:
+            yield "condition", self.sem.condition.cond, self.sem.condition.span
+        if self.sem.box_success is not None:
+            yield "box_success", self.sem.box_success.cond, self.sem.box_success.span
+        if self.sem.box_failure is not None:
+            yield "box_failure", self.sem.box_failure.cond, self.sem.box_failure.span
 
     def job_load_units(self) -> int | None:
         """DL-50: `job_load` as the machine-load demand this job places on its
@@ -609,7 +610,7 @@ class CatalogIR(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True)
 
-    ir_version: Literal["0.1"] = IR_VERSION
+    ir_version: Literal["0.2"] = IR_VERSION
     jobs: dict[str, JobIR] = {}
     globals_declared: dict[str, str] = {}  # insert_global
     external_instances: dict[str, XinstIR] = {}  # insert_xinst (SEM-07), plumbing opaque (DL-28)
@@ -863,9 +864,9 @@ class _Lowerer:
             return None
         return sorted(ranges)
 
-    def _cond_attr(self, attr: RawAttr) -> Cond | None:
+    def _cond_attr(self, attr: RawAttr) -> CondAttr | None:
         try:
-            return parse_condition(attr.raw_value.strip())
+            return CondAttr(cond=parse_condition(attr.raw_value.strip()), span=attr.span)
         except ConditionParseError as exc:
             self.err(f"{attr.key}: {exc}", attr.span)
             return None
@@ -1060,13 +1061,10 @@ class _Lowerer:
         sem = Semantics()
         if (attr := attrs.pop("condition", None)) is not None:
             sem.condition = self._cond_attr(attr)
-            sem.condition_span = attr.span
         if (attr := attrs.pop("box_success", None)) is not None:
             sem.box_success = self._cond_attr(attr)
-            sem.box_success_span = attr.span
         if (attr := attrs.pop("box_failure", None)) is not None:
             sem.box_failure = self._cond_attr(attr)
-            sem.box_failure_span = attr.span
         if (attr := attrs.pop("max_exit_success", None)) is not None:
             sem.max_exit_success = self._int_attr(attr) or 0
         if (attr := attrs.pop("success_codes", None)) is not None:

@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from dsl41.ast_jil import parse, parse_file
 from dsl41.cli import app
-from dsl41.conditions import GlobalAtom, JobRef, Lookback, StatusAtom, parse_condition
+from dsl41.conditions import Cond, GlobalAtom, JobRef, Lookback, StatusAtom, parse_condition
 from dsl41.dsl import FOLDS, CatalogBuilder, DslError, cond_to_source, decompile
 from dsl41.equiv import (
     canonical_cond,
@@ -30,6 +30,7 @@ from dsl41.ir import (
     CatalogIR,
     ExecSpec,
     FwSpec,
+    JobIR,
     ScheduleBlock,
     Semantics,
     Time,
@@ -42,6 +43,17 @@ EXPECT_LOWER_ERROR = {"sem31_xor.jil"}
 LOWERABLE_CORPUS = [p for p in sorted(CORPUS_DIR.glob("*.jil")) if p.name not in EXPECT_LOWER_ERROR]
 
 runner = CliRunner()
+
+
+def cond_of(job: JobIR) -> Cond:
+    """A job's `condition` Cond, asserted present (CondAttr unwrap)."""
+    assert job.sem.condition is not None
+    return job.sem.condition.cond
+
+
+def cond_src(job: JobIR) -> str:
+    """A job's `condition` rendered back to condition-language source."""
+    return cond_to_source(cond_of(job))
 
 
 def roundtrip(catalog: CatalogIR, *, disable: Collection[str] = ()) -> CatalogIR:
@@ -182,12 +194,9 @@ def test_builder_four_combinators_end_to_end() -> None:
     c.parallel(["fan1", "fan2"], after="tail", then="join")
     catalog = c.build()
     assert catalog.jobs["m_a"].box.box_name == "bx"
-    assert cond_to_source(catalog.jobs["mid"].sem.condition) == "s(head)"  # type: ignore[arg-type]
-    assert cond_to_source(catalog.jobs["fan1"].sem.condition) == "s(tail)"  # type: ignore[arg-type]
-    assert (
-        cond_to_source(catalog.jobs["join"].sem.condition)  # type: ignore[arg-type]
-        == "s(fan1) & s(fan2)"
-    )
+    assert cond_src(catalog.jobs["mid"]) == "s(head)"
+    assert cond_src(catalog.jobs["fan1"]) == "s(tail)"
+    assert cond_src(catalog.jobs["join"]) == "s(fan1) & s(fan2)"
     assert catalog.globals_declared == {"FLAG": "go"}
 
 
@@ -826,10 +835,7 @@ def test_parallel_with_then_only_fans_in_without_fan_out() -> None:
     c.job("join", command="j", machine="m1")
     c.parallel(["m1j", "m2j"], then="join")
     catalog = c.build()
-    assert (
-        cond_to_source(catalog.jobs["join"].sem.condition)  # type: ignore[arg-type]
-        == "s(m1j) & s(m2j)"
-    )
+    assert cond_src(catalog.jobs["join"]) == "s(m1j) & s(m2j)"
 
 
 def test_sequence_of_exactly_two_is_the_minimum() -> None:
@@ -838,10 +844,7 @@ def test_sequence_of_exactly_two_is_the_minimum() -> None:
     c.job("tail", command="t", machine="m1")
     c.sequence("head", "tail")
     catalog = c.build()
-    assert (
-        cond_to_source(catalog.jobs["tail"].sem.condition)  # type: ignore[arg-type]
-        == "s(head)"
-    )
+    assert cond_src(catalog.jobs["tail"]) == "s(head)"
 
 
 def test_box_accepts_a_condition_kwarg() -> None:
@@ -852,10 +855,7 @@ def test_box_accepts_a_condition_kwarg() -> None:
     with c.box("bx", condition="s(gate)") as b:
         b.job("member", command="m", machine="m1")
     catalog = c.build()
-    assert (
-        cond_to_source(catalog.jobs["bx"].sem.condition)  # type: ignore[arg-type]
-        == "s(gate)"
-    )
+    assert cond_src(catalog.jobs["bx"]) == "s(gate)"
     assert catalog.jobs["member"].box.box_name == "bx"
 
 
@@ -1098,10 +1098,7 @@ def test_decompile_condition_with_crossinstance_colons_and_lookback_roundtrips()
         "insert_job: consumer\njob_type: c\nmachine: m1\ncommand: echo hi\n"
         "condition: s(JOB\\:WITH\\:COLONS^PRD, 01\\:30)\n"
     )
-    assert (
-        cond_to_source(catalog.jobs["consumer"].sem.condition)  # type: ignore[arg-type]
-        == r"s(JOB\:WITH\:COLONS^PRD, 01\:30)"
-    )
+    assert cond_src(catalog.jobs["consumer"]) == r"s(JOB\:WITH\:COLONS^PRD, 01\:30)"
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
 
 
@@ -1223,10 +1220,7 @@ def test_sequence_link_accepts_f_d_t_and_wires_the_named_letter() -> None:
         c.job("tail", command="t", machine="m1")
         c.sequence("head", "tail", link=link)
         catalog = c.build()
-        assert (
-            cond_to_source(catalog.jobs["tail"].sem.condition)  # type: ignore[arg-type]
-            == f"{link}(head)"
-        )
+        assert cond_src(catalog.jobs["tail"]) == f"{link}(head)"
 
 
 def test_sequence_refuses_an_unknown_link_letter() -> None:
@@ -1248,10 +1242,7 @@ def test_parallel_on_accepts_f_d_t_and_wires_the_named_letter() -> None:
         c.job("m2j", command="b", machine="m1")
         c.parallel(["m1j", "m2j"], after="seed", on=on)
         catalog = c.build()
-        assert (
-            cond_to_source(catalog.jobs["m1j"].sem.condition)  # type: ignore[arg-type]
-            == f"{on}(seed)"
-        )
+        assert cond_src(catalog.jobs["m1j"]) == f"{on}(seed)"
 
 
 def test_parallel_refuses_an_unknown_on_letter() -> None:
@@ -1270,10 +1261,7 @@ def test_parallel_then_any_fans_in_with_or() -> None:
     c.job("join", command="j", machine="m1")
     c.parallel(["m1j", "m2j"], then_any="join")
     catalog = c.build()
-    assert (
-        cond_to_source(catalog.jobs["join"].sem.condition)  # type: ignore[arg-type]
-        == "s(m1j) | s(m2j)"
-    )
+    assert cond_src(catalog.jobs["join"]) == "s(m1j) | s(m2j)"
 
 
 def test_parallel_then_any_refuses_a_join_that_already_has_a_condition() -> None:
@@ -1294,8 +1282,8 @@ def test_mutex_pairwise_conjoins_bare_n_onto_each_job() -> None:
     c.job("b", command="b", machine="m1")
     c.mutex("a", "b")
     catalog = c.build()
-    assert cond_to_source(catalog.jobs["a"].sem.condition) == "n(b)"  # type: ignore[arg-type]
-    assert cond_to_source(catalog.jobs["b"].sem.condition) == "n(a)"  # type: ignore[arg-type]
+    assert cond_src(catalog.jobs["a"]) == "n(b)"
+    assert cond_src(catalog.jobs["b"]) == "n(a)"
 
 
 def test_mutex_composes_with_an_existing_condition_and_canonicalizes() -> None:
@@ -1309,9 +1297,9 @@ def test_mutex_composes_with_an_existing_condition_and_canonicalizes() -> None:
     c.job("b", command="cb", machine="m1")
     c.mutex("a", "b")
     catalog = c.build()
-    assert cond_to_source(catalog.jobs["a"].sem.condition) == "(s(x)) & n(b)"  # type: ignore[arg-type]
+    assert cond_src(catalog.jobs["a"]) == "(s(x)) & n(b)"
     expected = parse_condition("n(b) & s(x)")
-    assert canonical_cond(catalog.jobs["a"].sem.condition) == canonical_cond(expected)  # type: ignore[arg-type]
+    assert canonical_cond(cond_of(catalog.jobs["a"])) == canonical_cond(expected)
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
 
 
@@ -1322,13 +1310,13 @@ def test_mutex_of_three_conjoins_every_pair() -> None:
     c.job("c", command="c", machine="m1")
     c.mutex("a", "b", "c")
     catalog = c.build()
-    assert canonical_cond(catalog.jobs["a"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+    assert canonical_cond(cond_of(catalog.jobs["a"])) == canonical_cond(
         parse_condition("n(b) & n(c)")
     )
-    assert canonical_cond(catalog.jobs["b"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+    assert canonical_cond(cond_of(catalog.jobs["b"])) == canonical_cond(
         parse_condition("n(a) & n(c)")
     )
-    assert canonical_cond(catalog.jobs["c"].sem.condition) == canonical_cond(  # type: ignore[arg-type]
+    assert canonical_cond(cond_of(catalog.jobs["c"])) == canonical_cond(
         parse_condition("n(a) & n(b)")
     )
 
@@ -1982,8 +1970,7 @@ def test_dl40_sequence_refuses_unwirable_prev_but_allows_final_follower() -> Non
     c.job("J^2", command="/bin/b", machine="m1")
     c.sequence("a", "J^2")  # J^2 only receives s(a) -- fine
     catalog = c.build()
-    cond = catalog.jobs["J^2"].sem.condition
-    assert cond is not None and cond_to_source(cond) == "s(a)"
+    assert cond_src(catalog.jobs["J^2"]) == "s(a)"
     c2 = CatalogBuilder()
     c2.job("J^2", command="/bin/a", machine="m1")
     c2.job("b", command="/bin/b", machine="m1")

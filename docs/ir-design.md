@@ -160,15 +160,19 @@ class ExecSpec(BaseModel):               # command jobs; FW/other types analogou
     std_err_file: str | None
     envvars: str | None                  # CMD-only; NAME=value list, verbatim (DL-32)
 
+class CondAttr(BaseModel):               # one condition-bearing attribute (DL-73)
+    cond: Cond
+    span: SourceSpan | None              # where the attr sits in the source file
+
 class Semantics(BaseModel):              # attributes with control-flow teeth (§5 of dossier)
-    condition: Cond | None
+    condition: CondAttr | None
     max_exit_success: int = 0            # SEM-09
     success_codes: list[tuple[int, int]] | None   # SEM-09/DL-33, CMD-only; verdict via
     fail_codes: list[tuple[int, int]] | None      #   ir.exit_is_success (Q7 cited, DL-58)
     term_run_time_min: int | None
     n_retrys: int = 0
-    box_success: Cond | None             # box jobs only; SEM-12
-    box_failure: Cond | None
+    box_success: CondAttr | None         # box jobs only; SEM-12
+    box_failure: CondAttr | None
     auto_hold: bool = False
 
 class JobIR(BaseModel):
@@ -202,7 +206,9 @@ Important lowering rules:
   loss of possibly-semantic content).
 - The box tree is implicit via `box.box_name`. A validator materializes the tree and validates
   it (acyclic, members exist, ≤ depth sanity). The tree itself is Layer-G derived data.
-- Every `Cond` keeps a pointer to its AST `SourceSpan` for end-to-end error reports.
+- Every `Cond` keeps a pointer to its AST `SourceSpan` for end-to-end error reports: the
+  owning attribute's span travels with the tree in `CondAttr` (DL-73), the per-node char
+  offsets in each `Cond`'s own `CondSpan`.
 
 ## 5. IR-G: derived graph
 
@@ -212,6 +218,7 @@ EdgeClass = Literal["exact","assumed","redesign"]      # E/A/R from mapping tabl
 class DerivedEdge(BaseModel):
     src: str; dst: str                    # dst's condition references src
     via: Literal["success","failure","done","terminated","notrunning","exitcode","global"]
+    atom: StatusAtom | ExitCodeAtom | GlobalAtom   # copy of the IR-F node it came from (DL-73)
     lookback: Lookback | None
     cls: EdgeClass
     mapping_row: str                      # "M01".."M36"
@@ -220,8 +227,6 @@ class DerivedEdge(BaseModel):
 
 class DerivedGraph(BaseModel):
     nodes: list[str]
-    node_meta: dict[str, NodeMeta]        # DL-35: kind + trigger digest + cmd/watch detail,
-                                          # verbatim from IR-F (no analysis) for viz/report
     edges: list[DerivedEdge]
     mutex_groups: list[list[str]]         # from n() detector (M07)
     or_shapes: list[OrShape]              # M12 classifier output, each with lowering choice
@@ -297,7 +302,7 @@ class Oracle(Protocol):
 ## 8. Serialization & identity
 
 - IR-F serializes as JSON (Pydantic `model_dump_json`, sorted keys, explicit version field
-  `ir_version: "0.1"`). One catalog is one file. The output is deterministic (diff-able
+  `ir_version: "0.2"`). One catalog is one file. The output is deterministic (diff-able
   in git).
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
