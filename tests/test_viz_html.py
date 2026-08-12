@@ -1,4 +1,4 @@
-"""Self-contained HTML report (dsl41 viz --html) and its vendored assets.
+"""Self-contained HTML report (dsl41 viz --format html) and its vendored assets.
 
 Validity strategy mirrors test_viz.py: no browser in the toolchain, so the
 page is pinned structurally -- chart parity with the Markdown report, the
@@ -167,20 +167,26 @@ def test_to_html_is_deterministic() -> None:
     assert to_html(catalog) == to_html(catalog)
 
 
-def test_to_html_whole_graph_is_a_single_chart_page() -> None:
-    page = to_html(corpus_catalog(), whole_graph=True)
-    assert [c["el"] for c in _charts(page)] == ["c0", "c1"]  # legend + the graph
-    assert '<section id="appendix-a">' not in page  # (the legend prose may say "Appendix")
-    assert '<nav class="toc">' not in page
-
-
 # --------------------------------------------------------------------------- CLI
+
+
+def test_cli_viz_names_the_deleted_single_chart_page() -> None:
+    # DL-75: --html --whole-graph composed a single-chart page (DL-70(4)).
+    # The enum has no spelling for it and the mode is gone, so the refusal
+    # says that instead of naming two formats that emit something else.
+    result = runner.invoke(
+        app, ["viz", "--html", "--whole-graph", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 2
+    assert "--html --whole-graph (the single-chart offline page, DL-70) was removed" in result.stderr
+    assert "--format explore" in result.stderr
 
 
 def test_cli_viz_html_writes_out_file(tmp_path: Path) -> None:
     target = tmp_path / "report.html"
     result = runner.invoke(
-        app, ["viz", "--html", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")]
+        app,
+        ["viz", "--format", "html", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")],
     )
     assert result.exit_code == 0
     assert target.read_text(encoding="utf-8").startswith("<!doctype html>")
@@ -189,25 +195,48 @@ def test_cli_viz_html_writes_out_file(tmp_path: Path) -> None:
 
 
 def test_cli_viz_html_stdout() -> None:
-    result = runner.invoke(app, ["viz", "--html", str(CORPUS_DIR / "sem10_box_basic.jil")])
+    result = runner.invoke(
+        app, ["viz", "--format", "html", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
     assert result.exit_code == 0
     assert result.stdout.startswith("<!doctype html>")
 
 
-def test_cli_viz_html_absorbs_elk_and_fixed_scale_and_composes_whole_graph() -> None:
-    # DL-61-style interactions: --elk/--fixed-scale are page defaults (no-op),
-    # --whole-graph composes into a single-chart page
+def test_cli_viz_html_stays_silent_on_elk_and_fixed_scale() -> None:
+    # DL-75: the page already lays out with ELK at natural scale, so both
+    # flags' asked-for effect happens -- silence, not a refusal
     result = runner.invoke(
         app,
         [
             "viz",
-            "--html",
+            "--format",
+            "html",
             "--elk",
             "--fixed-scale",
-            "--whole-graph",
             str(CORPUS_DIR / "sem10_box_basic.jil"),
         ],
     )
     assert result.exit_code == 0
-    assert result.stdout.startswith("<!doctype html>")
-    assert '<section id="whole">' in result.stdout
+    assert result.stderr == ""
+    assert result.stdout == runner.invoke(
+        app, ["viz", "--format", "html", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    ).stdout
+
+
+def test_cli_viz_html_shaping_flags_reach_the_charts() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "viz",
+            "--format",
+            "html",
+            "--collapse-threshold",
+            "1",
+            "--direction",
+            "TD",
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "box_a (2 members)" in result.stdout  # threshold 1 collapsed the box
+    assert "flowchart TD" in result.stdout

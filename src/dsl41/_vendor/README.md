@@ -1,8 +1,8 @@
 # Vendored browser assets
 
-Inlined verbatim into pages emitted by `dsl41 viz --html` (mermaid + elk
-payloads, DL-70) and `dsl41 viz --explore` (cytoscape payload, DL-71) so
-the pages render offline (`file://`, zero network). Dev-time regeneration
+Inlined verbatim into pages emitted by `dsl41 viz --format html` (mermaid +
+elk payloads, DL-70) and `dsl41 viz --format explore` (cytoscape payload,
+DL-71) so the pages render offline (`file://`, zero network). Dev-time regeneration
 only — users of the package never need node.
 
 | file | origin | license |

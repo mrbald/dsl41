@@ -2,11 +2,11 @@ Third-party licenses for vendored browser assets
 ================================================
 
 dsl41 vendors three JavaScript payloads under src/dsl41/_vendor/ and copies
-them verbatim into the HTML pages emitted by `dsl41 viz --html` (mermaid +
-layout-elk payloads) and `dsl41 viz --explore` (cytoscape payload), so the
-pages render offline, with no network access. Nothing below is linked
-with or derived from dsl41's own AGPL-3.0-only Python code; it is
-aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
+them verbatim into the HTML pages emitted by `dsl41 viz --format html`
+(mermaid + layout-elk payloads) and `dsl41 viz --format explore` (cytoscape
+payload), so the pages render offline, with no network access. Nothing
+below is linked with or derived from dsl41's own AGPL-3.0-only Python code;
+it is aggregated browser-side work. Regeneration: scripts/vendor_mermaid.sh.
 
 1. mermaid 11.16.1 -- MIT
    Source: https://github.com/mermaid-js/mermaid

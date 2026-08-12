@@ -127,7 +127,7 @@ def test_instance_launch_starts_every_source_task_not_just_the_named_one() -> No
         ("success", "TERMINATED", False),
         ("failure", "SUCCESS", False),
         ("failure", "FAILURE", True),
-        ("failure", "TERMINATED", False),  # review M-1: Cancelled is NOT Failed
+        ("failure", "TERMINATED", False),  # UCS-01/M06: Cancelled is NOT Failed
         ("cancelled", "SUCCESS", False),
         ("cancelled", "FAILURE", False),
         ("cancelled", "TERMINATED", True),
@@ -139,7 +139,7 @@ def test_instance_launch_starts_every_source_task_not_just_the_named_one() -> No
 def test_ucs01_edge_condition_truth_table(
     edge_condition: str, producer_status: str, should_run: bool
 ) -> None:
-    """UCS-01/M06 (review M-1): an edge's condition is matched against the
+    """UCS-01/M06: an edge's condition is matched against the
     predecessor's terminal status at completion -- done matches all three,
     but UC separates Cancelled from Failed: a failure edge stays unmatched
     on Cancelled (so M04's f() keeps its EXACT class), and the `cancelled`
@@ -358,7 +358,7 @@ def test_m20_hold_blocks_instance_completion_off_hold_starts_and_closes() -> Non
 
 
 def test_m23_killjob_cancels_and_only_the_cancelled_edge_matches() -> None:
-    """M23 + review M-1: KILLJOB completes a Running task as Cancelled; a
+    """M23 + UCS-01/M06: KILLJOB completes a Running task as Cancelled; a
     failure-condition edge does NOT match Cancelled (UC separates them,
     UCS-01/M06) -- only a `cancelled` edge does."""
     model = make_model(
@@ -377,7 +377,7 @@ def test_m23_killjob_cancels_and_only_the_cancelled_edge_matches() -> None:
 
 
 def test_m22_force_startjob_launches_then_forces_and_forces_within_open_instance() -> None:
-    """M22 + review E-1: FORCE_STARTJOB with no open instance launches the
+    """M22: FORCE_STARTJOB with no open instance launches the
     containing workflow first (UC's Launch-task analog), then clears the
     task's dependencies; inside an already-open instance it starts the task
     regardless of its unmet edge."""
@@ -619,7 +619,7 @@ def test_lookback_qualified_notrunning_edge_is_excluded() -> None:
 
 
 def test_terminated_via_folds_to_a_cancelled_condition_edge() -> None:
-    """M06 + review M-1: t() (TERMINATED) compiles to the `cancelled` edge
+    """M06: t() (TERMINATED) compiles to the `cancelled` edge
     condition -- UC separates Cancelled from Failed, so folding t() into
     `failure` would make f() fire on kills and break M04's EXACT class."""
     text = (
@@ -1068,10 +1068,10 @@ def test_convergence_box_fold_excludes_the_box_workflow_name_marker() -> None:
     workflow after the box; the box itself is never a member) --
     STARTJOB(box name) is a NO_WORKFLOW no-op on the UC side, so a fair
     launch now works with ONE script fired at the box name on both sides
-    (review M-2: the workflow is addressable by its own box name, UCS-0
-    "workflows are themselves tasks"), and the box name itself converges
-    (review C-1: INSTANCE->Running gives the workflow the same
-    RUNNING+terminal shape as the AutoSys box)."""
+    (UCS-0 "workflows are themselves tasks": the workflow is addressable
+    by its own box name), and the box name itself converges
+    (INSTANCE->Running gives the workflow the same RUNNING+terminal shape
+    as the AutoSys box)."""
     text = (
         "insert_job: fold_box\njob_type: b\n\n"
         "insert_job: fold_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: fold_box\n\n"

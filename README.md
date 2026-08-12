@@ -19,7 +19,8 @@ Read these documents in this order:
 3. [docs/ir-design.md](https://github.com/mrbald/dsl41/blob/main/docs/ir-design.md) - AST / IR-F / IR-G / oracle / equivalence design
 4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - statement scanner spec
 5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
-6. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - working agreement + implementation order
+6. [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md) - what every reference token in the sources means
+7. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - working agreement + implementation order
 
 Operating the runner on a server — install, systemd, web UI exposure,
 the JIL-update cycle, upgrades — is
@@ -84,10 +85,16 @@ dsl41 viz jobs.jil -o graph.md             # Markdown report of Mermaid charts
 dsl41 viz --direction TD --collapse-threshold 20 jobs.jil
 dsl41 viz --elk jobs.jil                   # ELK layout (VS Code; GitHub ignores it)
 dsl41 viz --elk --fixed-scale jobs.jil     # uniform chart scale (no fit-to-width)
-dsl41 viz --whole-graph jobs.jil           # one bare Mermaid chart, no report
-dsl41 viz --html jobs.jil -o graph.html    # self-contained HTML page, offline
-dsl41 viz --explore jobs.jil -o lens.html  # interactive navigation page, offline
+dsl41 viz --format chart jobs.jil          # one bare Mermaid chart, no report
+dsl41 viz --format html jobs.jil -o graph.html     # self-contained page, offline
+dsl41 viz --format explore jobs.jil -o lens.html   # navigation page, offline
 ```
+
+`--format` picks one of four exclusive outputs — `report` (the default),
+`chart`, `html`, `explore` (DL-75). The shaping options
+(`--collapse-threshold`, `--direction`, `--include-singletons`, `--elk`,
+`--fixed-scale`) apply wherever the chosen format can deliver their effect,
+and exit 2 naming the reason where it cannot.
 
 The report shows each independent workflow as its own chart (largest first).
 A legend and appendices list everything that the charts omit: standalone
@@ -99,13 +106,13 @@ triggers. Mutual exclusions appear as lock links or as a shared lock hub. If
 a box has more direct members than the collapse threshold (default 12), the
 box folds into a single node. Any Mermaid renderer works (GitHub,
 mermaid.live, IDE preview); `--fixed-scale` adds frontmatter that stops
-renderers from fit-to-width scaling each chart differently. `--whole-graph`
+renderers from fit-to-width scaling each chart differently. `--format chart`
 skips the report and emits the entire estate as one bare Mermaid chart,
-ready for mermaid-cli or a live editor. `--html` writes the whole report as
-one self-contained page (~5 MB: mermaid + ELK are embedded — see
+ready for mermaid-cli or a live editor. `--format html` writes the whole
+report as one self-contained page (~5 MB: mermaid + ELK are embedded — see
 THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
-pan/zoom, offline, straight from `file://`. `--explore` writes a different
-kind of page (~2 MB: cytoscape + ELK embedded): the whole graph as an
+pan/zoom, offline, straight from `file://`. `--format explore` writes a
+different kind of page (~2 MB: cytoscape + ELK embedded): the whole graph as an
 interactive map — substring search, click for full edge annotations, and a
 right-click menu that focuses a job's fan-in/fan-out (direct, tree, or
 both) by hiding everything else and re-laying-out what remains. It is a
@@ -448,6 +455,14 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   is the loud channel.
 - src/dsl41/__main__.py — `python -m dsl41`. It is needed because `serve` spawns
   the app of each session as `<sys.executable> -m dsl41 ui --socket <path>`.
+- scripts/arch_check.py — the DL-75 architecture gate CI runs alongside ruff and
+  mypy: stdlib-only, no LLM. Blocking checks are objective regressions (a body
+  duplicated across modules, a new private cross-module import in src/, a
+  citation token with no row in docs/citation-index.md, an IR-F schema change
+  without an
+  IR_VERSION bump); size checks are advisory and ratcheted against
+  scripts/arch_baseline.json. It also prints when a conceptual review is due —
+  on a trip, or on 800+ lines changed since the last `arch-review/<date>` tag.
 
 ### Tests
 
@@ -464,10 +479,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_viz.py — Mermaid render structure (balanced blocks, id-safety, one golden
   render), the DL-35 markdown report (components, appendices, mutex encodings) plus
   the viz CLI
-- tests/test_viz_html.py — the --html page: chart parity with the markdown report,
+- tests/test_viz_html.py — the --format html page: chart parity with the markdown report,
   JSON-embedding escape invariant, vendored-asset integrity, page defaults, appendix
   parity
-- tests/test_viz_explore.py — the --explore page: elements emission (box parents,
+- tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
   EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), the
   same escape invariant, cytoscape-bundle integrity, CLI flag absorption
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
@@ -539,6 +554,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_placeholders.py — the DL-19 templating preprocessor: every format
   decision in the docstring of placeholders.py pinned, plus the resolved-corpus
   end-to-end run through the ordinary pipeline
+- tests/test_arch_check.py — the DL-75 architecture gate: each blocking check
+  (duplicate bodies, private cross-module imports, unresolvable citations, an
+  IR-F schema change without an IR_VERSION bump) and the advisory size ratchet,
+  tripped and not-tripped over tiny synthesised trees
 
 ### What's not done
 

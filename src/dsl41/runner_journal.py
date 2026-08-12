@@ -7,7 +7,7 @@ Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 - Journal (ss7): inputs-only JSONL WAL, journal-first -- every injected
   event is WAL-appended (+fsync in the real domain) BEFORE feed(); emitted
   events and the trace replay from oracle determinism, never stored. The
-  input alphabet has TWO halves (DL-44 amendment, review B1): external
+  input alphabet has TWO halves (DL-44 amendment): external
   events (input records) and time observations (advance records, written
   before every Oracle.advance the engine performs) -- without the latter,
   an advance-fired term_run_time kill would vanish from replay and a late
@@ -67,7 +67,7 @@ class Journal:
     def __init__(self, path: Path | str, *, fsync_each: bool, start_seq: int = 0) -> None:
         self.path = Path(path)
         self._f = self.path.open("ab")
-        os.chmod(self.path, 0o600)  # sol #3: the WAL carries globals + every input
+        os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
         self._fsync_each = fsync_each
         self.seq = start_seq
         #: live feeds for ss10 subscribe: every appended record is fanned out

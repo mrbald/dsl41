@@ -835,8 +835,8 @@ class ControlClient:
                 # a CANCELLED exchange (an exclusive worker superseded
                 # mid-request) leaves the response unread on the stream;
                 # reusing the connection would hand that stale line to the
-                # NEXT request and offset every reply after it (DL-46
-                # review B1) -- drop the connection, reconnect lazily
+                # NEXT request and offset every reply after it (DL-46)
+                # -- drop the connection, reconnect lazily
                 await self._drop()
                 raise
             if not line:

@@ -63,7 +63,7 @@ def _local_identity(declared: frozenset[str] = frozenset()) -> frozenset[str]:
     the forward hostname (short + full) for zero-config, but NEVER reverse-DNS:
     `getfqdn()` can stall for tens of seconds and, worse, decides placement from
     what the OS resolver thinks this box is called -- a different namespace from
-    the estate's machine names (DL-52 replaces DL-45 M6's FQDN matching)."""
+    the estate's machine names (DL-52 replaces DL-45's FQDN matching)."""
     identity = {"localhost"}
     if declared:
         identity |= {d.strip().lower() for d in declared if d.strip()}
@@ -74,7 +74,7 @@ def _local_identity(declared: frozenset[str] = frozenset()) -> frozenset[str]:
 
 
 #: Machine `type:` values the resolver understands (DL-49). Anything else --
-#: including a missing type -- is refused, never guessed (Goal-1 plan).
+#: including a missing type -- is refused, never guessed.
 _KNOWN_MACHINE_TYPES = frozenset({"a", "r", "n", "v"})
 
 MachineVerdict = Literal["local", "foreign", "mixed", "error"]

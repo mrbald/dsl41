@@ -25,7 +25,7 @@ open with documented defaults:
   superseded abandon switch).
   Self-exclusion (n(self)) never reaches the mutex path v1: the one-open-
   instance-per-workflow rule already serializes successive runs (Instance
-  Wait, UCS-09) before a self-partner could be seen Running (review N-1).
+  Wait, UCS-09) before a self-partner could be seen Running.
 - UCS-13: all evaluation is within the workflow INSTANCE -- no latching, no
   lookback (the P-M01 divergence).
 
@@ -133,7 +133,7 @@ class UcOracle:
         self._exclusive_wait: deque[str] = deque()
         self._workflow_of: dict[str, str] = {}
         for workflow in model.workflows:
-            # UCS-0 "workflows are themselves tasks" (review M-2): the
+            # UCS-0 "workflows are themselves tasks": the
             # workflow launches by its own (box) name and by nested-box
             # aliases, so AutoSys-style STARTJOB(box) scripts work unchanged
             self._workflow_of[workflow.name] = workflow.name
@@ -239,7 +239,7 @@ class UcOracle:
         self._instances[workflow_name] = instance
         # "INSTANCE->Running" normalizes to the RUNNING milestone so a
         # box-named workflow compares cleanly against the AutoSys box's
-        # RUNNING+terminal shape (review C-1)
+        # RUNNING+terminal shape
         self._record(workflow_name, "INSTANCE->Running", f"trigger via {job!r}")
         for task in workflow.tasks:
             if not self._incoming(instance, task):
@@ -288,7 +288,7 @@ class UcOracle:
     def _force_start(self, task: str) -> None:
         instance = self._open_instance_of(task)
         if instance is None:
-            # M22/review E-1: UC's Launch-task analog -- open the containing
+            # M22: UC's Launch-task analog -- open the containing
             # workflow instance first, then clear the task's dependencies
             self._launch_workflow_for(task)
             instance = self._open_instance_of(task)
@@ -353,7 +353,7 @@ class UcOracle:
         self._close_if_done(instance)
 
     def _edge_matches(self, edge: UcEdge, uc_status: str) -> bool:
-        # UCS-01/M06 (review M-1): Cancelled is NOT Failed -- a failure edge
+        # UCS-01/M06: Cancelled is NOT Failed -- a failure edge
         # stays unsatisfied on Cancelled, matching AutoSys f() vs TERMINATED
         matched = (
             (edge.condition == "success" and uc_status == "Success")

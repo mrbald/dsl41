@@ -257,7 +257,7 @@ def main() -> int:
 
     def _open_append_0600(path: str):
         # vendor APPENDS; 0600 at create (job output may carry anything the
-        # command prints -- owner-only by default, sol #3)
+        # command prints -- owner-only by default)
         return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
 
     _test_pause("pre_spawn")

@@ -69,7 +69,7 @@ legally overwrite terminal statuses; oracle module docstring).
 
 Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 
-- Kill-wins gate ordering (DL-44 amendment, review B1): before gating a
+- Kill-wins gate ordering (DL-44 amendment): before gating a
   completion, the engine fires the oracle timers due at or before the
   completion's timestamp (feed() would fire exactly these anyway), so the
   gate sees every kill decision first and drops the late natural exit --
@@ -327,7 +327,7 @@ class Engine:
             if take_event:
                 _, _, ev, is_completion = heapq.heappop(self._queue)
                 if is_completion:
-                    # kill-wins gate ordering (DL-44 amendment, review B1):
+                    # kill-wins gate ordering (DL-44 amendment):
                     # fire the oracle timers due at or before the completion's
                     # instant FIRST -- feed() would fire exactly these anyway,
                     # but the gate must SEE every kill decision they carry
@@ -398,7 +398,7 @@ class Engine:
                     # nothing KNOWN this side of the horizon -- but a live
                     # adapter's completion has no due timestamp and can still
                     # land inside it, so with live tasks wait out the horizon
-                    # instead of abandoning them (DL-45 review T2; the
+                    # instead of abandoning them (DL-45; the
                     # completion-at-horizon contract predates 11c)
                     if not self._live or now >= horizon:
                         return emitted
@@ -567,8 +567,8 @@ def start_run(
             f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
         )
     run_root.mkdir(parents=True, exist_ok=True)
-    # sol #3: the run root holds the journal (global values, every control
-    # input), job output, and data -- owner-only, loudly, not umask-hopefully
+    # the run root holds the journal (global values, every control input),
+    # job output, and data -- owner-only, loudly, not umask-hopefully
     os.chmod(run_root, 0o700)
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
@@ -578,7 +578,7 @@ def start_run(
         clock_domain="virtual" if clock.virtual else "real",
         started_at=clock.now(),
     )
-    _fsync_dir(run_root)  # the journal's directory entry is a record too (review M5)
+    _fsync_dir(run_root)  # the journal's directory entry is a record too
     return Engine(
         catalog,
         clock=clock,
@@ -608,8 +608,8 @@ async def resume_run(
 
     A `scheduler` is re-anchored at the last journal instant INCLUSIVE and
     deduped against the journal's own scheduler ticks (a crash between
-    same-instant siblings' appends must lose none of them silently, review
-    B2); the unjournaled remainder of the window up to wall-now was missed
+    same-instant siblings' appends must lose none of them silently); the
+    unjournaled remainder of the window up to wall-now was missed
     across downtime and is dropped AND journaled -- reported on
     Engine.drops, never fired late (PENDING: E9; a live-but-stalled engine
     fires its backlog, downtime never does)."""
@@ -632,7 +632,7 @@ async def resume_run(
             f"journal is from the future ({last_at.isoformat()} > now): the machine"
             " clock moved backwards; refusing to feed non-decreasing time backwards"
         )
-    os.chmod(run_root, 0o700)  # sol #3: tighten pre-existing looser roots on resume
+    os.chmod(run_root, 0o700)  # tighten a pre-existing looser root (same reason as create)
     journal = Journal(
         run_root / "journal.jsonl",
         fsync_each=not clock.virtual,
@@ -661,7 +661,7 @@ async def resume_run(
         # journal actually holds: with several jobs scheduled at one instant,
         # a crash between the siblings' input appends leaves last_at == tick
         # with a sibling unjournaled -- an exclusive re-anchor would lose it
-        # silently, with no drop record (DL-45 review B2). Journaled ticks
+        # silently, with no drop record (DL-45). Journaled ticks
         # were fed by replay and are skipped; the rest of the due window is
         # dropped AND journaled, never fired late.
         replayed_ticks = {
@@ -764,7 +764,7 @@ async def _reconcile(
         if job_ir.job_type == "FW":
             adapter = engine.adapters.get("FW")
             if adapter is None:
-                raise EngineError(  # refuse loudly (review M4): never leave it hanging
+                raise EngineError(  # refuse loudly: never leave it hanging
                     f"incomplete FW run {job}.{run_number}: no FW adapter registered"
                     " to re-dispatch it"
                 )
@@ -909,7 +909,7 @@ class ControlServer:
             )
         except OSError as exc:
             # two engines racing past the probe: the loser's bind fails --
-            # same refusal class as the live-socket case (review M9)
+            # same refusal class as the live-socket case
             raise EngineError(f"cannot bind control socket {self.path}: {exc}") from exc
         finally:
             os.umask(old_umask)
@@ -919,7 +919,7 @@ class ControlServer:
         # cancel handlers BEFORE wait_closed(): since 3.12 wait_closed blocks
         # until every handler task finishes, and a subscribe handler is parked
         # on queue.get() until cancelled -- the reverse order deadlocks the
-        # engine's shutdown whenever any viewer is attached (DL-45 review B1)
+        # engine's shutdown whenever any viewer is attached (DL-45)
         if self._server is not None:
             self._server.close()
             # one tick: a connection accepted just before close spawns its
@@ -962,7 +962,7 @@ class ControlServer:
                     response = self._respond(request)
                 except Exception as exc:  # noqa: BLE001 -- a query bug must
                     # answer ok:false, never kill the connection unreplied
-                    # (the client would only see a timeout; DL-45 review M5)
+                    # (the client would only see a timeout; DL-45)
                     response = {"ok": False, "error": f"internal error: {exc!r}"}
                 await self._send(writer, response)
         except (ConnectionResetError, BrokenPipeError):
@@ -1325,7 +1325,7 @@ class ControlServer:
         try:
             # sample the seam BEFORE the ack yields: a record written during
             # the send bumps journal.seq and would be skipped as "covered"
-            # despite never being backfilled (DL-45 review M4)
+            # despite never being backfilled (DL-45)
             max_seq = since if since is not None else journal.seq
             await self._send(writer, {"ok": True, "subscribed": True})
             if since is not None:

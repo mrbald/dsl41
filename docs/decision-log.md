@@ -2729,3 +2729,95 @@
   test-docstring pointers whose "runner.py's own docstring" target moved,
   and test_resources.py's white-box reads of the capacity buckets, which
   now go through `o._pool`.
+- DL-75 user surface, citations, and a signal-driven architecture review
+  (2026-08-12). Four changes, one theme: a reader — of the CLI, of a
+  comment, of the tree — should not have to hold a rule in their head that
+  the artifact could have encoded. (1) `dsl41 viz` took three booleans,
+  `--whole-graph`, `--html` and `--explore`, for what are exclusive modes.
+  Eight combinations described five outcomes — report, bare chart, HTML
+  report, the HTML single-chart page `--html --whole-graph` composed
+  (DL-70(4)), and the explore page — so a precedence rule had to settle the
+  rest (`--explore` beat `--html`, `--html` beat `--whole-graph`), and each
+  flag's help carried prose about what it nullified. They are replaced by
+  one `--format {report|chart|html|explore}` (VizFormat enum): the
+  exclusivity is now structural, typer rejects a fifth value, and the
+  precedence rule is deleted because the state it arbitrated cannot be
+  expressed. The fifth outcome is DELETED, not renamed — this is the one
+  capability this unit removes, so it is recorded rather than left to be
+  discovered: an offline page wrapping a single whole-graph Mermaid chart
+  is the static hairball DL-71 built `--format explore` to replace, and
+  `--format chart` still emits that chart for any renderer. `to_html` loses
+  its `whole_graph` parameter and branch with it — an unreachable branch
+  standing in for a deleted mode is exactly the residue this unit exists to
+  remove — and passing the two flags together gets its own refusal naming
+  the removal, since routing that user to `--format chart` or `--format
+  html` would hand them something else without saying so. The three
+  booleans otherwise survive as hidden options for one purpose only —
+  passing one exits 2 naming its replacement, which beats a bare "no such
+  option" for anyone with the old command in a script. (2) The rule for the
+  shaping options
+  (`--collapse-threshold`, `--direction`, `--include-singletons`, `--elk`,
+  `--fixed-scale`) is now: refuse ONLY where the chosen format cannot
+  deliver the effect. `--elk` and `--fixed-scale` under `--format html`
+  stay silent, because that page already lays its charts out with ELK at
+  natural scale — the asked-for effect happens, so there is nothing to
+  refuse; under `--format explore` the four Mermaid-shaping options exit 2
+  with the reason (one interactive canvas, no Mermaid, no collapse), and
+  `--direction` is the one it can honor. Refusing a flag whose effect the
+  user is getting anyway teaches the user nothing except to distrust the
+  refusals. (3) The sources carry ~1600 citation tokens across eighteen
+  namespaces, which is the project's core discipline — but two of those
+  shapes pointed at review conversations with no in-repo index (`sol #3`
+  at five sites, `review X-n` at fifteen). A citation whose target is a
+  conversation is a note to the one person who was in the room, so every
+  one is deleted and the reason it stood for inlined (all five `sol #3`
+  sites meant "owner-only because of what this artifact holds"); where a
+  `review` token restated a dossier entry, the dossier citation replaced
+  it. The remaining eighteen namespaces get docs/citation-index.md: one row
+  per namespace with the token shape as a machine-read regex, plus the
+  three collision notes that a reader actually trips on (`Q\d` vs `Qr\d`,
+  `M\d{2}` the mapping row vs a review finding, `R\d` the risk register vs
+  `R-classified`). Adding a namespace means adding the row first. (4)
+  scripts/arch_check.py enforces that, and three more objective
+  regressions, in about a second of stdlib with no LLM in the loop: a
+  function body duplicated across two modules (the drift class DL-72
+  removed), a NEW private cross-module import in src/ (`from dsl41.x import
+  _y` — the 13 the tree already had are pinned in scripts/arch_baseline.json,
+  so the check catches additions, not history; tests/ is deliberately out of
+  scope, because a white-box test reaching into the module it tests is this
+  project's normal style rather than two modules coupling, and gating it
+  would red CI on an ordinary new test while the only remedy,
+  `--update-baseline`, re-blesses every src/ site added in the same commit),
+  a citation token that
+  resolves to no index row, and a CatalogIR JSON-schema change without an
+  IR_VERSION bump (the schema is hashed and pinned; bumping IR_VERSION is
+  what licenses a new hash). Those four block: each names a specific way
+  the tree got worse. Size — modules over 1200 lines, functions over 120
+  lines or 40 branches — is ADVISORY and ratcheted against the same
+  baseline, so only new or worsened entries are reported. Taste is not a
+  build failure, and a gate that bills you for the past gets muted. CI runs
+  it next to ruff and mypy. (5) The gate also prints when a conceptual
+  review is due — on any finding, or on more than 800 lines changed since
+  the most recent `arch-review/<date>` tag (the branch point if there is
+  none). That is the whole trigger: signal, not calendar. There is
+  deliberately NO cadence, because reviewing unchanged code on a schedule
+  is waste and trains everyone to skip it. The review itself is
+  `.claude/skills/arch-review/SKILL.md`, a lens rather than a procedure:
+  run the gate first, then look only for complexity the code ADDED —
+  duplicated concepts, parallel models, pass-through layers, abstractions
+  with one implementation, flag matrices encoding an enum, vocabulary
+  re-encoded per layer, data copied across a layer boundary — rank by
+  (cognitive load removed) / (cost to change), anchor every finding to
+  file:line, and ALWAYS name what is load-bearing and should be left
+  alone, because a review that only lists problems reads as "everything
+  here is too complex" and gets ignored. Declined findings become log
+  entries too, or the next review re-finds them. Verification: every corpus
+  file's report / uc / lint / decompile / viz output over all four formats
+  is byte-identical to the pre-unit capture except the one provenance
+  comment each emitted page carries, which names the flag that produced it
+  (`dsl41 viz --html` -> `dsl41 viz --format html`) — the flag spelling
+  moved, nothing else did; tests 1821 -> 1841, twenty of the new ones being
+  tests/test_arch_check.py — each blocking check and the advisory ratchet,
+  tripped and not-tripped over tiny synthesised trees, plus two deliberate
+  assertions on the real tree (the IR-F schema pin still matches, and the
+  citation index still parses into its namespace rows).

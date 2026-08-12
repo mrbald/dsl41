@@ -40,7 +40,7 @@ def durable_write(path: str, data: bytes) -> None:
     rename, fsync(directory). Requires a local filesystem."""
     directory = os.path.dirname(path) or "."
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # sol #3: owner-only
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # owner-only, not umask's call
     try:
         os.write(fd, data)
         os.fsync(fd)

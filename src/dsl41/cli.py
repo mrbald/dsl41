@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -600,10 +601,95 @@ def resolve(
         typer.echo(f"wrote {out}")
 
 
+class VizFormat(str, Enum):
+    """The four viz outputs, exclusive by construction (DL-75). They used to
+    be three booleans -- eight combinations for four modes, plus a precedence
+    rule (--explore beat --html) and per-flag prose about what each nullified."""
+
+    report = "report"
+    chart = "chart"
+    html = "html"
+    explore = "explore"
+
+
+def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> None:
+    """DL-75: the three mode booleans are gone. Naming the replacement beats
+    a bare "no such option" for anyone with the old command in a script --
+    and the one combination that has no replacement (DL-70(4)'s
+    --html --whole-graph single-chart page, deleted, not renamed) says so
+    itself rather than pointing at two formats that emit something else."""
+    if whole_graph and html:
+        typer.echo(
+            "--html --whole-graph (the single-chart offline page, DL-70) was removed,"
+            " not renamed: use --format explore for the whole graph in one offline"
+            " page, or --format chart for the bare chart (DL-75)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    removed = [
+        (flag, mode)
+        for flag, mode, passed in (
+            ("--whole-graph", "chart", whole_graph),
+            ("--html", "html", html),
+            ("--explore", "explore", explore),
+        )
+        if passed
+    ]
+    if removed:
+        for flag, mode in removed:
+            typer.echo(f"{flag} was replaced by --format {mode}", err=True)
+        raise typer.Exit(2)
+
+
+def _refuse_undeliverable_viz_flags(
+    *,
+    collapse_threshold: int | None,
+    include_singletons: bool,
+    elk: bool,
+    fixed_scale: bool,
+) -> None:
+    """DL-75: refuse a shaping flag only where the chosen format cannot
+    deliver its effect. --elk/--fixed-scale stay silent under --format html
+    because that page already lays its charts out with ELK at natural scale
+    -- the asked-for effect happens, so there is nothing to refuse. explore
+    renders no Mermaid at all and never collapses a box, so --direction is
+    the only shaping option it can honor."""
+    undeliverable = [
+        flag
+        for flag, passed in (
+            ("--collapse-threshold", collapse_threshold is not None),
+            ("--include-singletons", include_singletons),
+            ("--elk", elk),
+            ("--fixed-scale", fixed_scale),
+        )
+        if passed
+    ]
+    if undeliverable:
+        typer.echo(
+            f"{', '.join(undeliverable)} cannot shape --format explore: these options"
+            " shape Mermaid charts, and the page is one interactive canvas (the whole"
+            " graph, boxes uncollapsed, standalone jobs included). Drop them, or use"
+            " --format html for a shaped offline page.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+
 @app.command()
 def viz(
     files: list[Path] = typer.Argument(
         ..., help="JIL files / autocal calendar exports forming one catalog"
+    ),
+    output_format: VizFormat = typer.Option(
+        VizFormat.report,
+        "--format",
+        help="report: Markdown report of per-workflow charts (DL-35). "
+        "chart: one bare Mermaid chart of the whole graph, standalone jobs "
+        "included, --direction auto meaning LR (DL-61). "
+        "html: one self-contained offline page, charts rendering in-browser "
+        "with ELK layout at natural scale, ~5 MB of embedded JavaScript (DL-70). "
+        "explore: one self-contained interactive navigation page, ~2 MB of "
+        "embedded JavaScript (DL-71). -o is recommended for html and explore.",
     ),
     collapse_threshold: int = typer.Option(
         None,
@@ -621,31 +707,6 @@ def viz(
         "--include-singletons",
         help="Also chart standalone jobs (they are always listed in Appendix A).",
     ),
-    whole_graph: bool = typer.Option(
-        False,
-        "--whole-graph",
-        help="Emit one bare Mermaid chart of the entire graph instead of the Markdown "
-        "report (standalone jobs always included; --direction auto means LR).",
-    ),
-    html: bool = typer.Option(
-        False,
-        "--html",
-        help="Emit one self-contained HTML page (charts render in-browser, offline; "
-        "ELK layout and fixed scale are page defaults, so --elk/--fixed-scale are "
-        "implied; --direction/--collapse-threshold/--include-singletons shape the "
-        "charts as in the report; --whole-graph makes a single-chart page). "
-        "The page embeds ~5 MB of JavaScript; -o is recommended.",
-    ),
-    explore: bool = typer.Option(
-        False,
-        "--explore",
-        help="Emit one self-contained interactive navigation page (offline; wins "
-        "over --html). Always the whole graph at natural scale with ELK layout and "
-        "uncollapsed boxes, singletons included, so --whole-graph/--elk/"
-        "--fixed-scale/--collapse-threshold/--include-singletons are no-ops; "
-        "--direction sets the layout direction. "
-        "The page embeds ~2 MB of JavaScript; -o is recommended.",
-    ),
     elk: bool = typer.Option(
         False,
         "--elk",
@@ -661,38 +722,52 @@ def viz(
     out: Path = typer.Option(None, "--out", "-o", help="Write the report here, not stdout."),
     permit_unknown: bool = _PERMIT_UNKNOWN,
     properties: list[Path] = _PROPERTIES,
+    # Removed booleans (DL-75), kept hidden only so passing one names its
+    # replacement instead of dying with a bare "no such option".
+    whole_graph: bool = typer.Option(False, "--whole-graph", hidden=True),
+    html: bool = typer.Option(False, "--html", hidden=True),
+    explore: bool = typer.Option(False, "--explore", hidden=True),
 ) -> None:
-    """Render FILES' derived dependency graph as a Markdown report of
-    per-workflow Mermaid charts (DL-35), one whole-graph chart
-    (--whole-graph, DL-61), a self-contained offline HTML page
-    (--html, DL-70), or an interactive navigation page (--explore, DL-71)."""
+    """Render FILES' derived dependency graph in one of four exclusive
+    formats -- see --format. The shaping options (--collapse-threshold,
+    --direction, --include-singletons, --elk, --fixed-scale) apply wherever
+    the chosen format can deliver their effect, and are refused where it
+    cannot (DL-75)."""
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
+    _refuse_removed_viz_flags(whole_graph, html, explore)
     if direction not in ("auto", "LR", "TD"):
         typer.echo(f"--direction must be auto, LR, or TD, got {direction!r}", err=True)
         raise typer.Exit(2)
+    if output_format is VizFormat.explore:
+        _refuse_undeliverable_viz_flags(
+            collapse_threshold=collapse_threshold,
+            include_singletons=include_singletons,
+            elk=elk,
+            fixed_scale=fixed_scale,
+        )
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
-    if explore:
+    title = ", ".join(f.name for f in files)
+    if output_format is VizFormat.explore:
         from dsl41.viz_explore import to_explore_html
 
         report = to_explore_html(
             catalog,
-            title=", ".join(f.name for f in files),
+            title=title,
             direction=direction,  # type: ignore[arg-type]  # validated above
         )
-    elif html:
+    elif output_format is VizFormat.html:
         from dsl41.viz_html import to_html
 
         report = to_html(
             catalog,
-            title=", ".join(f.name for f in files),
+            title=title,
             collapse_threshold=threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
-            whole_graph=whole_graph,
         )
-    elif whole_graph:
+    elif output_format is VizFormat.chart:
         report = to_mermaid(
             catalog,
             collapse_threshold=threshold,
@@ -703,7 +778,7 @@ def viz(
     else:
         report = to_markdown(
             catalog,
-            title=", ".join(f.name for f in files),
+            title=title,
             collapse_threshold=threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
@@ -809,7 +884,7 @@ def _load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
 def _check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = None) -> None:
     """Preflight the run-level base zone: per-job zones gate in ss8, but the
     --timezone flag would otherwise surface as a raw traceback from the
-    Scheduler with the wrong exit code (DL-45 review M3)."""
+    Scheduler with the wrong exit code (DL-45)."""
     if timezone is None:
         return
     from dsl41.runner_scheduler import resolve_timezone

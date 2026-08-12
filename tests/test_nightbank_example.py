@@ -176,16 +176,18 @@ def test_readme_pipeline_claims_hold(props_file: Path) -> None:
     pinned above). Claims are CI-substantiated, not asserted (review)."""
     report = _cli("report", *SMALL, "-p", str(props_file))
     assert report.returncode == 0, report.stdout + report.stderr
-    viz = _cli("viz", "--whole-graph", *SMALL, "-p", str(props_file))
+    viz = _cli("viz", "--format", "chart", *SMALL, "-p", str(props_file))
     assert viz.returncode == 0, viz.stdout + viz.stderr
-    assert "flowchart" in viz.stdout  # --whole-graph emits the bare chart
+    assert "flowchart" in viz.stdout  # --format chart emits the bare chart
     page = Path(props_file).parent / "page.html"
-    html = _cli("viz", "--html", "-o", str(page), *SMALL, "-p", str(props_file))
+    html = _cli("viz", "--format", "html", "-o", str(page), *SMALL, "-p", str(props_file))
     assert html.returncode == 0, html.stdout + html.stderr
     assert page.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert page.stat().st_size > 4_000_000  # the vendor payloads really embedded
     lens = Path(props_file).parent / "explore.html"
-    explore = _cli("viz", "--explore", "-o", str(lens), *SMALL, "-p", str(props_file))
+    explore = _cli(
+        "viz", "--format", "explore", "-o", str(lens), *SMALL, "-p", str(props_file)
+    )
     assert explore.returncode == 0, explore.stdout + explore.stderr
     assert 'id="graph-data"' in lens.read_text(encoding="utf-8")
     assert lens.stat().st_size > 1_500_000  # the cytoscape payload really embedded

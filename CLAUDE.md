@@ -11,6 +11,10 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 4. `docs/stonebranch-semantics.md` — UCS entries + M01–M36 mapping table; the UC
    backend refuses R-rows and reports A-row assumptions (Part II requirements 1–3).
 5. `docs/decision-log.md` — do not relitigate DL entries; append new ones.
+6. `docs/citation-index.md` — what every reference token in the sources means
+   and which doc defines it (SEM/UCS/M/P-M/DL/L/T/F/ss/Q/Qr/U/E). A new
+   namespace needs a row there first; `scripts/arch_check.py` fails on a
+   citation that resolves to nothing.
 
 ## Non-negotiable disciplines
 - **No silent loss.** AST→IR-F lowering errors on unknown non-allow-listed
@@ -59,9 +63,10 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
   literally; CalendarRuleError is reserved for the genuinely
   uninterpretable (unknown/doc-defective tokens, missing deps, degenerate
   walks). A separate `# PENDING: Qr*` series in ir.py/oracle.py/runner.py
-  is unrelated — resource-manager questions (DL-49/50), no dossier, outside
-  this ledger. Do not guess-resolve any open question; implement the
-  documented default and keep the switch where one exists.
+  is a different namespace and outside this ledger — `docs/citation-index.md`
+  carries the row and the Q-vs-Qr collision note. Do not guess-resolve any
+  open question; implement the documented default and keep the switch where
+  one exists.
 
 ## Implementation order (DL-03) — one phase per PR-sized unit
 All ten phases are built and tested (README's implementation memo has the source
@@ -94,6 +99,11 @@ map); this list stays as the normative order and scope of each unit.
 - pytest + hypothesis; trace tests named `test_semXX_*` / pairs `test_pMxx_*`.
 - Every linter rule ships with a corpus fixture that triggers it and one that
   doesn't.
+- `python scripts/arch_check.py` is the DL-75 architecture gate, run by CI next
+  to ruff and mypy: blocking checks are objective regressions, size checks are
+  advisory against `scripts/arch_baseline.json`. When it says a review is due,
+  run `/arch-review` (`.claude/skills/arch-review/`) — that lens looks for
+  conceptual complexity, which no script can see.
 - Q1 is resolved (DL-53): `test_sem03_flat_left_to_right_precedence_pinned`
   (grammar, tests/test_condition_grammar.py) and
   `test_sem03_precedence_pinned_model_level` (Cond model,

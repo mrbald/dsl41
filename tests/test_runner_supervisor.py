@@ -493,7 +493,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
             finally:
                 # a handler that exits on EOF leaves the connection half-open;
                 # 3.12's Server.wait_closed() then waits for it FOREVER (the
-                # engine's ControlServer learned this as DL-45 review B1)
+                # engine's ControlServer learned this as DL-45)
                 writer.close()
 
         server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))

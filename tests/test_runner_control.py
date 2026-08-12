@@ -737,7 +737,7 @@ def test_live_socket_refuses_a_second_engine(short_root: Path) -> None:
 
 
 def test_fast_real_completion_processed_before_a_far_later_term_run_time_timer() -> None:
-    """DL-45 decision 1 + review T2 regression, two engine bugs in one net.
+    """DL-45 decision 1 regression, two engine bugs in one net.
     A job held RUNNING by an inert adapter arms a term_run_time timer 60s in
     the future; a second, scripted job completes after ~0.1s of real time.
     The pre-11c engine journaled the advance and slept UNINTERRUPTIBLY until

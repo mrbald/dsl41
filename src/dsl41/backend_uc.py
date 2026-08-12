@@ -284,7 +284,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
 # mutual exclusion, UCS-13 within-run evaluation.
 
 #: UCS-01/M06: UC separates Cancelled from Failed -- a `failure` edge must
-#: NOT fire on Cancelled (review M-1); `cancelled` carries the t() mapping.
+#: NOT fire on Cancelled; `cancelled` carries the t() mapping.
 UcEdgeCondition = Literal["success", "failure", "done", "cancelled"]
 
 
@@ -311,7 +311,7 @@ class UcWorkflow(BaseModel):
     edges: list[UcEdge] = []
     #: names that ALSO launch this workflow (UCS-0 "workflows are themselves
     #: tasks"): the box name is the workflow name; nested box names alias to
-    #: the flattened top workflow (review M-2)
+    #: the flattened top workflow
     aliases: list[str] = []
 
 
@@ -421,7 +421,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             )
         )
     # attach global gates to the consumer's edges; anything that cannot be
-    # carried is RECORDED -- never silently dropped (review M-3, DL-04)
+    # carried is RECORDED -- never silently dropped (DL-04)
     for consumer, conditions in sorted(global_gates.items()):
         edges_in = [e for e in compiled if e.dst == consumer]
         if not edges_in:

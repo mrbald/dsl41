@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Regenerate src/dsl41/_vendor/ -- the browser assets `dsl41 viz --html`
-# (mermaid bundle, DL-70) and `dsl41 viz --explore` (cytoscape bundle,
-# DL-71) inline into their emitted pages. Dev-time only: users never need
+# Regenerate src/dsl41/_vendor/ -- the browser assets `dsl41 viz --format
+# html` (mermaid bundle, DL-70) and `dsl41 viz --format explore` (cytoscape
+# bundle, DL-71) inline into their emitted pages. Dev-time only: users never need
 # node.
 #
 # Pins (bump deliberately, re-run, re-check the invariants below):

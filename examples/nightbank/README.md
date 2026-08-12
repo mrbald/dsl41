@@ -56,6 +56,6 @@ running processes.
   no real holidays that could collide with a training night (HOL_GLOBAL is
   Jan 1 / Dec 25 only — don't train on Christmas).
 - The estate doubles as a full-pipeline fixture: `lint` is clean on it, and
-  `viz --whole-graph`, `report`, `uc`, and `rehearse` all accept it
+  `viz --format chart`, `report`, `uc`, and `rehearse` all accept it
   (see `tests/test_nightbank_example.py`).
 - Repo-only; not part of the published package.

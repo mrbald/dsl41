@@ -324,10 +324,10 @@ variant rolls the *date*, not the day.
 - Whole-night dry run in seconds: `dsl41 rehearse` with the same files
   and a properties file from `nightbank props` (virtual clock, scripted
   adapters — see tests/test_nightbank_example.py for a scenario).
-- Pictures: `dsl41 viz --whole-graph <estate files> -p <props>`, or
-  `dsl41 viz --html <estate files> -p <props> -o graph.html` for a
+- Pictures: `dsl41 viz --format chart <estate files> -p <props>`, or
+  `dsl41 viz --format html <estate files> -p <props> -o graph.html` for a
   self-contained page that renders offline in any browser.
-- Navigation: `dsl41 viz --explore <estate files> -p <props> -o lens.html`
+- Navigation: `dsl41 viz --format explore <estate files> -p <props> -o lens.html`
   — the whole estate as an interactive offline map: search a job, then
   right-click it to see only what feeds it (fan-in/fan-out, direct or
   tree); click any edge for its full annotation. At bank scale this is

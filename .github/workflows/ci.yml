@@ -1,5 +1,6 @@
 # The project's quality gates on every push/PR: pytest (the CLAUDE.md suite,
-# bisimulation gate included), ruff check, mypy. No `ruff format --check`:
+# bisimulation gate included), ruff check, mypy, and the DL-75 architecture
+# gate (scripts/arch_check.py). No `ruff format --check`:
 # three pre-phase-11 files never adopted formatter output, so the formatter
 # is local discipline for touched files only until a repo-wide format lands.
 # README's "tests" brick badges this workflow.
@@ -31,4 +32,11 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
       - run: uv run mypy src
+      # DL-75: blocking checks only decide the exit code (duplicate bodies,
+      # new private cross-module imports in src/, unresolvable citations, an
+      # IR-F shape change without an IR_VERSION bump). The "review due" escalation
+      # it can also print is for the developer; checkout is shallow here, so
+      # the arch-review/<date> tags it measures from are usually absent and
+      # the diff half stays quiet in CI.
+      - run: uv run python scripts/arch_check.py
       - run: uv run pytest -q

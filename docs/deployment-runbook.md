@@ -149,7 +149,7 @@ re-check); it changes nothing live.
 ```sh
 dsl41 lint new-estate/*.jil -p site.properties        # gate on exit code
 dsl41 rehearse new-estate/*.jil -p rehearse.properties # whole night, virtual clock
-dsl41 viz --whole-graph new-estate/*.jil -p site.properties  # review the diff visually
+dsl41 viz --format chart new-estate/*.jil -p site.properties  # review the diff visually
 ```
 
 Rehearse is the cheap insurance: a full night in seconds, same oracle,

@@ -286,7 +286,7 @@ class LocalCommandAdapter:
                 )
             except OSError as exc:
                 # EMFILE/ENOMEM-class glitch: fail THIS job, not the engine
-                # (review M6; symmetric with the wrapper's own spawn_failed)
+                # (symmetric with the wrapper's own spawn_failed)
                 return Failed(f"wrapper spawn failed: {exc}")
             finally:
                 os.close(lifeline_r)  # our copy; the wrapper holds its own now

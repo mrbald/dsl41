@@ -890,8 +890,10 @@ def test_cli_viz_include_singletons_adds_a_section() -> None:
     assert "## Standalone jobs" in result.stdout
 
 
-def test_cli_viz_whole_graph_emits_one_bare_chart() -> None:
-    result = runner.invoke(app, ["viz", "--whole-graph", str(CORPUS_DIR / "sem10_box_basic.jil")])
+def test_cli_viz_format_chart_emits_one_bare_chart() -> None:
+    result = runner.invoke(
+        app, ["viz", "--format", "chart", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
     assert result.exit_code == 0
     assert result.stdout.startswith("flowchart LR")
     assert "# Workflow graph:" not in result.stdout
@@ -899,12 +901,13 @@ def test_cli_viz_whole_graph_emits_one_bare_chart() -> None:
     assert 'subgraph n0["box_a"]' in result.stdout
 
 
-def test_cli_viz_whole_graph_honors_direction_and_elk() -> None:
+def test_cli_viz_format_chart_honors_direction_and_elk() -> None:
     result = runner.invoke(
         app,
         [
             "viz",
-            "--whole-graph",
+            "--format",
+            "chart",
             "--direction",
             "TD",
             "--elk",
@@ -916,13 +919,50 @@ def test_cli_viz_whole_graph_honors_direction_and_elk() -> None:
     assert "flowchart TD" in result.stdout
 
 
-def test_cli_viz_whole_graph_includes_standalone_jobs() -> None:
+def test_cli_viz_format_chart_includes_standalone_jobs() -> None:
     # the report drops these two singletons to Appendix A; the whole graph
-    # has no appendices, so they render unconditionally
-    result = runner.invoke(app, ["viz", "--whole-graph", str(CORPUS_DIR / "sem30_schedule.jil")])
+    # has no appendices, so they render unconditionally -- which is also why
+    # --include-singletons stays silent here instead of being refused (DL-75)
+    result = runner.invoke(
+        app, ["viz", "--format", "chart", "--include-singletons", str(CORPUS_DIR / "sem30_schedule.jil")]
+    )
     assert result.exit_code == 0
     assert '"test_must_start_complete' in result.stdout
     assert '"quarter_past' in result.stdout
+
+
+def test_cli_viz_format_report_is_the_default() -> None:
+    plain = runner.invoke(app, ["viz", str(CORPUS_DIR / "sem10_box_basic.jil")])
+    named = runner.invoke(
+        app, ["viz", "--format", "report", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert plain.exit_code == named.exit_code == 0
+    assert plain.stdout == named.stdout
+    assert plain.stdout.startswith("# Workflow graph:")
+
+
+def test_cli_viz_unknown_format_exits_2() -> None:
+    result = runner.invoke(
+        app, ["viz", "--format", "poster", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 2
+
+
+def test_cli_viz_removed_booleans_name_their_replacement() -> None:
+    # DL-75: the three mode booleans are gone; each refusal says what to use
+    for flag, mode in (("--whole-graph", "chart"), ("--html", "html"), ("--explore", "explore")):
+        result = runner.invoke(app, ["viz", flag, str(CORPUS_DIR / "sem10_box_basic.jil")])
+        assert result.exit_code == 2, flag
+        assert f"{flag} was replaced by --format {mode}" in result.stderr
+
+
+def test_cli_viz_removed_booleans_report_every_one_passed() -> None:
+    result = runner.invoke(
+        app, ["viz", "--html", "--explore", str(CORPUS_DIR / "sem10_box_basic.jil")]
+    )
+    assert result.exit_code == 2
+    assert "--html was replaced by --format html" in result.stderr
+    assert "--explore was replaced by --format explore" in result.stderr
 
 
 def test_cli_viz_elk_prepends_frontmatter() -> None:

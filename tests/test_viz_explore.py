@@ -1,4 +1,4 @@
-"""Interactive exploration page (dsl41 viz --explore) and its vendored asset.
+"""Interactive exploration page (dsl41 viz --format explore) and its vendored asset.
 
 Validity strategy mirrors test_viz_html.py: no browser in the toolchain, so
 the page is pinned structurally -- the elements JSON (parent mapping, EXT
@@ -229,7 +229,8 @@ def test_to_explore_html_singletons_always_present() -> None:
 def test_cli_viz_explore_writes_out_file(tmp_path: Path) -> None:
     target = tmp_path / "explore.html"
     result = runner.invoke(
-        app, ["viz", "--explore", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")]
+        app,
+        ["viz", "--format", "explore", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")],
     )
     assert result.exit_code == 0
     assert target.read_text(encoding="utf-8").startswith("<!doctype html>")
@@ -237,29 +238,48 @@ def test_cli_viz_explore_writes_out_file(tmp_path: Path) -> None:
     assert "wrote" in result.stdout
 
 
-def test_cli_viz_explore_wins_over_html() -> None:
+def test_cli_viz_explore_stdout_is_the_navigation_page() -> None:
     result = runner.invoke(
-        app, ["viz", "--explore", "--html", str(CORPUS_DIR / "sem10_box_basic.jil")]
+        app, ["viz", "--format", "explore", str(CORPUS_DIR / "sem10_box_basic.jil")]
     )
     assert result.exit_code == 0
     assert 'id="graph-data"' in result.stdout  # the explore page...
-    assert 'id="chart-data"' not in result.stdout  # ...not the --html report
+    assert 'id="chart-data"' not in result.stdout  # ...not the --format html report
 
 
-def test_cli_viz_explore_absorbs_chart_shaping_flags() -> None:
-    # DL-61-style interactions: the page is always the whole graph, always
-    # ELK, natural scale, boxes never collapse, singletons always present
+def test_cli_viz_explore_refuses_chart_shaping_flags() -> None:
+    # DL-75: the page is one canvas -- no Mermaid frontmatter, boxes never
+    # collapse, singletons always present. None of these can be delivered,
+    # so each is refused instead of silently ignored.
+    for flag in ("--elk", "--fixed-scale", "--include-singletons"):
+        result = runner.invoke(
+            app, ["viz", "--format", "explore", flag, str(CORPUS_DIR / "sem10_box_basic.jil")]
+        )
+        assert result.exit_code == 2, flag
+        assert f"{flag} cannot shape --format explore" in result.stderr
     result = runner.invoke(
         app,
         [
             "viz",
-            "--explore",
-            "--whole-graph",
-            "--elk",
-            "--fixed-scale",
+            "--format",
+            "explore",
             "--collapse-threshold",
             "1",
-            "--include-singletons",
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--collapse-threshold" in result.stderr
+
+
+def test_cli_viz_explore_honors_direction() -> None:
+    # --direction is the one shaping option the canvas can deliver (DL-75)
+    result = runner.invoke(
+        app,
+        [
+            "viz",
+            "--format",
+            "explore",
             "--direction",
             "TD",
             str(CORPUS_DIR / "sem10_box_basic.jil"),
@@ -269,4 +289,4 @@ def test_cli_viz_explore_absorbs_chart_shaping_flags() -> None:
     assert result.stdout.startswith("<!doctype html>")
     assert 'DIRECTION = "DOWN"' in result.stdout
     page_nodes = _page_elements(result.stdout)["nodes"]
-    assert len(page_nodes) == 3  # threshold 1 did not collapse box_a's members
+    assert len(page_nodes) == 3  # boxes are never collapsed here

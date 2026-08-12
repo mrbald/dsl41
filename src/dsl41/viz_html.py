@@ -45,7 +45,6 @@ from dsl41.viz import (
     job_kind,
     job_schedule,
     report_content,
-    to_mermaid,
 )
 
 
@@ -107,10 +106,11 @@ def to_html(
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
     direction: Direction | Literal["auto"] = "auto",
     include_singletons: bool = False,
-    whole_graph: bool = False,
 ) -> str:
-    """One self-contained HTML page: report parity (summary, legend, charts,
-    locks, appendices) or, with whole_graph, a single-chart page."""
+    """One self-contained HTML page with report parity: summary, legend,
+    charts, locks, appendices. The single-chart variant DL-70(4) composed
+    from --whole-graph went with that flag (DL-75) -- --format explore is
+    the whole graph in one offline page now."""
     if graph is None:
         graph = derive_graph(catalog)
     charts: list[dict[str, str]] = [{"el": "c0", "src": LEGEND_CHART.rstrip("\n")}]
@@ -118,138 +118,127 @@ def to_html(
     sections: list[str] = []
     tables: list[str] = []
 
-    if whole_graph:
-        body = to_mermaid(
-            catalog,
-            graph,
-            collapse_threshold=collapse_threshold,
-            direction="LR" if direction == "auto" else direction,
+    content = report_content(
+        catalog,
+        graph,
+        collapse_threshold=collapse_threshold,
+        direction=direction,
+        include_singletons=include_singletons,
+    )
+    summary = content.summary
+
+    for i, sec in enumerate(content.sections, start=1):
+        chart_id = f"c{i}"
+        charts.append({"el": chart_id, "src": sec.chart.rstrip("\n")})
+        heading = f"{sec.wid} \N{EM DASH} {sec.comp_title} ({sec.count_label})"
+        toc.append(f'<li><a href="#w{i}">{_text(heading)}</a></li>')
+        prefix_note = (
+            f"<p>All names share the prefix <code>{html.escape(sec.prefix)}</code>"
+            " (stripped in the chart).</p>"
+            if sec.prefix
+            else ""
         )
-        charts.append({"el": "c1", "src": body.rstrip("\n")})
-        summary = f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(graph.edges)} edges"
-        sections.append(f'<section id="whole">\n{_viewport("c1")}\n</section>')
-    else:
-        content = report_content(
-            catalog,
-            graph,
-            collapse_threshold=collapse_threshold,
-            direction=direction,
-            include_singletons=include_singletons,
+        sections.append(
+            f'<section id="w{i}">\n<details open>\n'
+            f'<summary><span class="h2">{_text(heading)}</span></summary>\n'
+            f"{prefix_note}{_viewport(chart_id)}\n</details>\n</section>"
         )
-        summary = content.summary
 
-        for i, sec in enumerate(content.sections, start=1):
-            chart_id = f"c{i}"
-            charts.append({"el": chart_id, "src": sec.chart.rstrip("\n")})
-            heading = f"{sec.wid} \N{EM DASH} {sec.comp_title} ({sec.count_label})"
-            toc.append(f'<li><a href="#w{i}">{_text(heading)}</a></li>')
-            prefix_note = (
-                f"<p>All names share the prefix <code>{html.escape(sec.prefix)}</code>"
-                " (stripped in the chart).</p>"
-                if sec.prefix
-                else ""
-            )
-            sections.append(
-                f'<section id="w{i}">\n<details open>\n'
-                f'<summary><span class="h2">{_text(heading)}</span></summary>\n'
-                f"{prefix_note}{_viewport(chart_id)}\n</details>\n</section>"
-            )
+    if content.standalone_chart is not None:
+        chart_id = f"c{len(content.sections) + 1}"
+        charts.append({"el": chart_id, "src": content.standalone_chart.rstrip("\n")})
+        toc.append('<li><a href="#standalone">Standalone jobs</a></li>')
+        sections.append(
+            '<section id="standalone">\n<details open>\n'
+            f'<summary><span class="h2">Standalone jobs ({len(content.standalone)})'
+            f"</span></summary>\n{_viewport(chart_id)}\n</details>\n</section>"
+        )
 
-        if content.standalone_chart is not None:
-            chart_id = f"c{len(content.sections) + 1}"
-            charts.append({"el": chart_id, "src": content.standalone_chart.rstrip("\n")})
-            toc.append('<li><a href="#standalone">Standalone jobs</a></li>')
-            sections.append(
-                '<section id="standalone">\n<details open>\n'
-                f'<summary><span class="h2">Standalone jobs ({len(content.standalone)})'
-                f"</span></summary>\n{_viewport(chart_id)}\n</details>\n</section>"
-            )
-
-        if content.lock_rows:
-            toc.append('<li><a href="#locks">Locks</a></li>')
-            rows = [
-                [_text(joined), kind, _text(charts_col)]
-                for joined, kind, charts_col in content.lock_rows
-            ]
-            tables.append(
-                f'<section id="locks">\n<h2>Locks</h2>\n<p>{_text(LOCKS_PROSE)}</p>\n'
-                f"{_table(['lock', 'kind', 'charts'], rows)}\n</section>"
-            )
-
-        toc.append('<li><a href="#appendix-a">Appendix A</a></li>')
-        heading_a = "Appendix A \N{EM DASH} standalone jobs (not part of any workflow)"
-        if content.standalone:
-            meta_rows = []
-            for name in content.standalone:
-                job = catalog.jobs.get(name)
-                meta_rows.append(
-                    [
-                        _text(name),
-                        _text(job_kind(job)),
-                        _text(job_schedule(job)),
-                        _code(job_detail(job)),
-                    ]
-                )
-            body_a = _table(["job", "kind", "schedule", "command / watched file"], meta_rows)
-        else:
-            body_a = "<p>None.</p>"
+    if content.lock_rows:
+        toc.append('<li><a href="#locks">Locks</a></li>')
+        rows = [
+            [_text(joined), kind, _text(charts_col)]
+            for joined, kind, charts_col in content.lock_rows
+        ]
         tables.append(
-            f'<section id="appendix-a">\n<h2>{_text(heading_a)}</h2>\n{body_a}\n</section>'
+            f'<section id="locks">\n<h2>Locks</h2>\n<p>{_text(LOCKS_PROSE)}</p>\n'
+            f"{_table(['lock', 'kind', 'charts'], rows)}\n</section>"
         )
 
-        toc.append('<li><a href="#appendix-b">Appendix B</a></li>')
-        heading_b = "Appendix B \N{EM DASH} edge annotations"
-        if content.annotated:
-            edge_rows = [
+    toc.append('<li><a href="#appendix-a">Appendix A</a></li>')
+    heading_a = "Appendix A \N{EM DASH} standalone jobs (not part of any workflow)"
+    if content.standalone:
+        meta_rows = []
+        for name in content.standalone:
+            job = catalog.jobs.get(name)
+            meta_rows.append(
                 [
-                    _text(e.src),
-                    _text(e.dst),
-                    e.via,
-                    _text(e.lookback.raw if e.lookback is not None else ""),
-                    e.cls,
-                    _text(e.mapping_row),
-                    _text(e.assumption),
+                    _text(name),
+                    _text(job_kind(job)),
+                    _text(job_schedule(job)),
+                    _code(job_detail(job)),
                 ]
-                for e in content.annotated
-            ]
-            body_b = _table(
-                ["producer", "consumer", "via", "lookback", "class", "row", "assumption"],
-                edge_rows,
             )
-        else:
-            body_b = "<p>None \N{EM DASH} every edge maps exactly.</p>"
-        tables.append(
-            f'<section id="appendix-b">\n<h2>{_text(heading_b)}</h2>\n{body_b}\n</section>'
-        )
+        body_a = _table(["job", "kind", "schedule", "command / watched file"], meta_rows)
+    else:
+        body_a = "<p>None.</p>"
+    tables.append(
+        f'<section id="appendix-a">\n<h2>{_text(heading_a)}</h2>\n{body_a}\n</section>'
+    )
 
-        toc.append('<li><a href="#appendix-c">Appendix C</a></li>')
-        heading_c = "Appendix C \N{EM DASH} redesign flags, OR shapes, cycles"
-        parts_c: list[str] = []
-        if graph.redesign_flags:
-            flag_rows = [
-                [_text(f.job), _text(f.mapping_row), _text(f.reason)] for f in graph.redesign_flags
+    toc.append('<li><a href="#appendix-b">Appendix B</a></li>')
+    heading_b = "Appendix B \N{EM DASH} edge annotations"
+    if content.annotated:
+        edge_rows = [
+            [
+                _text(e.src),
+                _text(e.dst),
+                e.via,
+                _text(e.lookback.raw if e.lookback is not None else ""),
+                e.cls,
+                _text(e.mapping_row),
+                _text(e.assumption),
             ]
-            parts_c.append(
-                "<h3>Redesign flags</h3>\n" + _table(["job", "row", "reason"], flag_rows)
-            )
-        if graph.or_shapes:
-            shape_rows = [
-                [_text(s.job), _text(s.attr), _text(s.kind), _text(s.lowering)]
-                for s in graph.or_shapes
-            ]
-            parts_c.append(
-                "<h3>OR shapes (M12)</h3>\n"
-                + _table(["job", "attr", "kind", "suggested lowering"], shape_rows)
-            )
-        if graph.cycles:
-            items = "\n".join(
-                f"<li>{_text(' \N{RIGHTWARDS ARROW} '.join(cycle))}</li>" for cycle in graph.cycles
-            )
-            parts_c.append(f"<h3>Cycles (L010)</h3>\n<ul>\n{items}\n</ul>")
-        body_c = "\n".join(parts_c) if parts_c else "<p>None.</p>"
-        tables.append(
-            f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>'
+            for e in content.annotated
+        ]
+        body_b = _table(
+            ["producer", "consumer", "via", "lookback", "class", "row", "assumption"],
+            edge_rows,
         )
+    else:
+        body_b = "<p>None \N{EM DASH} every edge maps exactly.</p>"
+    tables.append(
+        f'<section id="appendix-b">\n<h2>{_text(heading_b)}</h2>\n{body_b}\n</section>'
+    )
+
+    toc.append('<li><a href="#appendix-c">Appendix C</a></li>')
+    heading_c = "Appendix C \N{EM DASH} redesign flags, OR shapes, cycles"
+    parts_c: list[str] = []
+    if graph.redesign_flags:
+        flag_rows = [
+            [_text(f.job), _text(f.mapping_row), _text(f.reason)] for f in graph.redesign_flags
+        ]
+        parts_c.append(
+            "<h3>Redesign flags</h3>\n" + _table(["job", "row", "reason"], flag_rows)
+        )
+    if graph.or_shapes:
+        shape_rows = [
+            [_text(s.job), _text(s.attr), _text(s.kind), _text(s.lowering)]
+            for s in graph.or_shapes
+        ]
+        parts_c.append(
+            "<h3>OR shapes (M12)</h3>\n"
+            + _table(["job", "attr", "kind", "suggested lowering"], shape_rows)
+        )
+    if graph.cycles:
+        items = "\n".join(
+            f"<li>{_text(' \N{RIGHTWARDS ARROW} '.join(cycle))}</li>" for cycle in graph.cycles
+        )
+        parts_c.append(f"<h3>Cycles (L010)</h3>\n<ul>\n{items}\n</ul>")
+    body_c = "\n".join(parts_c) if parts_c else "<p>None.</p>"
+    tables.append(
+        f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>'
+    )
 
     toc_html = '<nav class="toc"><ol>\n' + "\n".join(toc) + "\n</ol></nav>" if toc else ""
     payload = json.dumps({"charts": charts}).replace("<", "\\u003c")
