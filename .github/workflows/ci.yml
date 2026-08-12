@@ -1,6 +1,7 @@
 # The project's quality gates on every push/PR: pytest (the CLAUDE.md suite,
 # bisimulation gate included), ruff check, mypy, and the DL-75 architecture
-# gate (scripts/arch_check.py). No `ruff format --check`:
+# gate (scripts/arch_check.py), plus a second job that runs the emitted explore
+# page in three browser engines (DL-77). No `ruff format --check`:
 # three pre-phase-11 files never adopted formatter output, so the formatter
 # is local discipline for touched files only until a repo-wide format lands.
 # README's "tests" brick badges this workflow.
@@ -40,3 +41,23 @@ jobs:
       # the diff half stays quiet in CI.
       - run: uv run python scripts/arch_check.py
       - run: uv run pytest -q
+
+  # DL-77: the viz --format explore page's controls exist only in a browser, and
+  # byte assertions could not see a WebKit-fatal defect in them. Its own job, on
+  # one python: the engines are a ~200MB download the matrix above must not pay
+  # three times, and the tests are opt-in (DSL41_BROWSER_TESTS), so the fast
+  # suite stays browser-free. ~3 min wall clock, ~2 of it the browser install;
+  # it runs beside the matrix job, so the workflow is no slower.
+  explore-page:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --extra dev
+      - run: uv run playwright install --with-deps chromium webkit firefox
+      - run: uv run pytest -q tests/test_viz_explore_browser.py
+        env:
+          DSL41_BROWSER_TESTS: "1"

@@ -500,6 +500,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
   customElements polyfill), script order and the guarded context menu (DL-77),
   CLI flag absorption
+- tests/test_viz_explore_browser.py — the same page RUNNING, in chromium, webkit and
+  firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
+  re-layout toggle, details panel and context menu all respond, and nothing throws.
+  Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still
+  needs no browsers; CI's explore-page job is where it runs (DL-77)
 - tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
   cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
   T03/precedence is pinned at parse time in test_condition_grammar.py, not here).

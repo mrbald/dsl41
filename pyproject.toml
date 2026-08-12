@@ -44,12 +44,19 @@ dependencies = [
 # time.
 ui = ["textual>=8", "textual-serve>=1.1"]
 dev = [
-    "pytest>=8",
+    # pytest floor = 8.2, the release that took `reason=` on importorskip
+    # (tests/test_viz_explore_browser.py explains its skip with one).
+    "pytest>=8.2",
     "hypothesis>=6",
     "ruff>=0.6",
     "mypy>=1.10",
     "textual>=8",
     "textual-serve>=1.1",
+    # DL-77: the explore page's cross-engine smoke test drives a real chromium/
+    # webkit/firefox. Dev-only -- the package keeps its three runtime deps, and
+    # the browsers themselves are a separate `playwright install` (absent = the
+    # test skips), so a plain `pytest -q` needs neither.
+    "playwright>=1.50",
 ]
 
 [project.urls]
