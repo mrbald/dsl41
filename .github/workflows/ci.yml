@@ -58,6 +58,21 @@ jobs:
           python-version: "3.13"
       - run: uv sync --extra dev
       - run: uv run playwright install --with-deps chromium webkit firefox
-      - run: uv run pytest -q tests/test_viz_explore_browser.py
+      # The opt-in gate is a module-level skip, so a run that lost
+      # DSL41_BROWSER_TESTS prints "1 skipped" and exits 0 -- green while
+      # testing nothing, the same silent-success shape DL-77 was about.
+      # Collect first and refuse a run that found no tests.
+      - name: explore page in three engines
         env:
           DSL41_BROWSER_TESTS: "1"
+        run: |
+          set -euo pipefail
+          n=$(uv run pytest -q --collect-only tests/test_viz_explore_browser.py | grep -c '::' || true)
+          if [ "$n" -lt 9 ]; then
+            echo "collected $n browser tests (expected >= 9, one per control per engine):"
+            echo "the DSL41_BROWSER_TESTS opt-in is not reaching pytest, so this job would"
+            echo "have passed without running anything."
+            exit 1
+          fi
+          echo "collected $n browser tests"
+          uv run pytest -q tests/test_viz_explore_browser.py

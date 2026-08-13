@@ -2955,8 +2955,14 @@
   throw — layout, toolbar and search still work and the notice appears.
   (3) Edges route `curve-style: "taxi"` along a taxi-direction derived
   from DIRECTION (horizontal for RIGHT, vertical for DOWN) instead of
-  bezier, so the drawing keeps the layering ELK computed rather than
-  discarding its bend points for centre-to-centre splines. Documented
+  bezier, so the drawing reads as the layered graph ELK computed instead
+  of a centre-to-centre spline fan. To be precise about what this does
+  and does not do: a cytoscape layout assigns node POSITIONS only, so
+  ELK's own edge sections are discarded either way — taxi is cytoscape's
+  orthogonal router, not ELK's. What it buys is a picture whose visual
+  grammar matches the layering, not fidelity to ELK's routing (the
+  ac2d089 commit message overstates this; this entry is the correction).
+  Documented
   exception: taxi cannot draw an edge whose endpoints overlap, and a
   member's edge to its own ancestor box is exactly that — it would
   vanish from the picture entirely, which is silent loss, so those edges
