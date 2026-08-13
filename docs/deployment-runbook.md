@@ -19,13 +19,13 @@ Dedicated venv, pinned version, `[ui]` extra only where humans look:
 
 ```sh
 python3.12 -m venv /opt/dsl41/venv
-/opt/dsl41/venv/bin/pip install 'dsl41[ui]==0.8.0'   # headless host: dsl41==0.8.0
+/opt/dsl41/venv/bin/pip install 'dsl41[ui]==0.9.0'   # headless host: dsl41==0.9.0
 ln -s /opt/dsl41/venv/bin/dsl41 /usr/local/bin/dsl41  # or add the venv bin to PATH
 dsl41 --help                                          # smoke test
 python3.12 -c 'from importlib.metadata import version; print(version("dsl41"))'
 ```
 
-(`uv tool install 'dsl41[ui]==0.8.0'` is the equivalent one-liner where
+(`uv tool install 'dsl41[ui]==0.9.0'` is the equivalent one-liner where
 uv is the site convention — keep the pin there too.) The package installs no services, writes nothing
 outside the run roots you name, and has no runtime network dependencies —
 the engine is a foreground process you place under your init system.
