@@ -32,9 +32,10 @@ is also complete: 11a (engine core + bisimulation gate), 11b (process
 lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
 resume — spool contract frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)),
-11c (calendar scheduler, preflight, control socket, headless CLI), 11d
-(Textual TUI), 11e (`serve` via textual-serve), and 11f (the detached
-supervisor tier). The scheduler obeys AutoSys calendars (DL-56/57). It
+11c (calendar scheduler, preflight, control socket — protocol frozen in
+[docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md)
+— headless CLI), 11d (Textual TUI), 11e (`serve` via textual-serve), and
+11f (the detached supervisor tier). The scheduler obeys AutoSys calendars (DL-56/57). It
 applies standard calendar day sets directly. It applies extended
 (autocal-rule) calendars through a built-in interpreter of the doc-frozen
 SEM-36..39 semantics. The memo below has the source map.
@@ -405,11 +406,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the reference implementation that a live autocal is diffed against (Q8
   residue).
 - src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
-  (dispatch table, time-ordered event queue, stale-completion gate), the run
-  lifecycle (start/resume + the reconciliation ladder) and the control-socket
-  server (ss10: sendevent parity, status/trace/explain/plan, subscribe). DL-74
-  split its other four subsystems into the sibling modules below, with no
-  re-export facade: every consumer imports from the module that owns the name
+  (dispatch table, time-ordered event queue, stale-completion gate) and the run
+  lifecycle (start/resume + the reconciliation ladder). DL-74 split its other
+  subsystems into the sibling modules below, with no re-export facade: every
+  consumer imports from the module that owns the name
+- src/dsl41/runner_control.py — the ss10 control plane, both ends (DL-78): the
+  unix-socket server (sendevent parity, status/trace/explain/spec/deps/timers/
+  plan, subscribe), the wire vocabulary, and the two clients — a persistent
+  async one for the TUI and a one-shot blocking one for the CLI. The protocol
+  is frozen in
+  [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
+  the outer counterpart to the lifecycle tier's supervisor protocol; every
+  query handler is a pure projection of oracle state
 - src/dsl41/runner_clock.py — the ss9 time domains: the Clock protocol,
   VirtualClock (the engine drives time; adapters may block only on it) and
   RealClock (naive-UTC wall clock). It also holds EngineError, the shell's one

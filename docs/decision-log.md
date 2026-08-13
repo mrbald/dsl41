@@ -3010,3 +3010,60 @@
   behavior: README's viz section (taxi routing, the polyfill, the named
   degradation), its source and test maps, the vendor README, and the
   nightbank runbook's navigation bullet.
+
+- DL-78 the ss10 control plane becomes a module and a frozen document
+  (2026-08-13; opened by an architecture review of the whole tree ahead of
+  a prod-readiness / multihost push). Finding: the runner's OUTER protocol
+  — what operators, the ss11 TUI, the headless `query`/`sendevent` CLI and
+  any future non-local controller speak to a running engine — was the one
+  contract in the project with no owning module and no frozen spec, while
+  the INNER protocol of the deliberately dumb lifecycle tier has had both
+  since DL-42/DL-48 (docs/supervisor-protocol.md). The asymmetry showed up
+  three ways: 500 lines of ControlServer lived inside runner.py, whose
+  stated job (DL-74) is the single-writer loop and the run lifecycle; the
+  wire vocabulary was runner.py module-privates that runner_tui.py
+  imported ACROSS the module boundary (`_JOB_EVENT_VERBS`, `_STATUSES` —
+  two of the thirteen private cross-module imports pinned in
+  scripts/arch_baseline.json); and the two client implementations sat in
+  two further modules (an async one in runner_tui.py, a sync one inlined
+  in cli.py, each with its own framing and its own error handling).
+  Nothing was broken by this — every one of those pieces is tested — but
+  a protocol whose definition is spread over four modules cannot be
+  reviewed as a protocol, and the next work item that touches it is a
+  transport change. Decisions: (1) runner_control.py owns both ends —
+  vocabulary, server, async client, sync client. It continues DL-74's
+  split, and it takes the seam the tests already named:
+  tests/test_runner_control.py predates the module. Nothing is
+  re-exported, per DL-74: cli.py, runner_tui.py and the tests each import
+  from the owner. (2) docs/control-protocol.md freezes it, with the same
+  standing as docs/supervisor-protocol.md — a change to a frozen item
+  needs a DL entry. The doc records what the protocol IS, including four
+  gaps it deliberately does not fix in this unit: no version handshake
+  (adding a required field breaks every deployed client, and the first
+  non-local transport needs a handshake anyway — that is where it should
+  land), no authN/authZ beyond the socket's 0600 mode and file ownership
+  (the ss12 RBAC non-goal, made concrete), unix-domain only (so the
+  single-engine guarantee rests on a local bind(), which is exactly the
+  guarantee a second host removes), and prose errors rather than stable
+  codes. Naming them in the frozen doc is the point: the multihost track
+  has to answer each one, and an unwritten gap gets re-discovered instead
+  of designed. (3) Two names go public rather than move a private import
+  to a new file. `Engine.live_jobs()` replaces the control plane reaching
+  into `Engine._live` (a filewatch is ONLY an in-flight adapter task —
+  no registry, no status field — so the read model genuinely needs it),
+  and `runner_adapters.LINE_LIMIT` drops its underscore because three
+  modules need it and a constant imported through a private name is a
+  boundary that was never real. Net effect on the DL-75 gate: four of the
+  thirteen pinned private cross-module imports are gone and none is
+  added. (4) What deliberately did NOT change: the wire format (this is
+  an extraction, not a protocol revision — the full suite passes
+  unchanged at 1858 passed / 4 skipped); the absence of a controller
+  lease at this tier (DL-41a — sendevent is multi-writer by AutoSys
+  nature and the single-writer loop serializes it); and the two query
+  handlers that read oracle package-privates (`_cond_true`,
+  `_referencers`), because explain and deps must serve the ORACLE's
+  truth and a second evaluator is exactly the duplication this review
+  exists to prevent. runner.py 1352 -> 797 lines, which drops it below the
+  advisory module ceiling entirely; runner_tui.py 1757 -> 1652 and cli.py
+  1592 -> 1583 ratchet down but stay over it. The baseline is re-stamped so
+  the gate measures from the smaller tree.

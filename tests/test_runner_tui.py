@@ -37,12 +37,16 @@ import pytest
 pytest.importorskip("textual")
 
 from dsl41.ir import lower_source
-from dsl41.runner import ControlServer, Engine, _JOB_EVENT_VERBS, start_run
+from dsl41.runner import Engine, start_run
+from dsl41.runner_control import (
+    JOB_EVENT_VERBS,
+    ControlClient,
+    ControlClientError,
+    ControlServer,
+)
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import RealClock
 from dsl41.runner_tui import (
-    ControlClient,
-    ControlClientError,
     RunnerApp,
     SpecScreen,
     TriggersScreen,
@@ -159,7 +163,7 @@ def test_parse_job_verb_without_explicit_job_and_no_selection_errors() -> None:
     assert parse_console_command("STARTJOB", None) == "STARTJOB needs a job (none selected)"
 
 
-@pytest.mark.parametrize("verb", sorted(_JOB_EVENT_VERBS))
+@pytest.mark.parametrize("verb", sorted(JOB_EVENT_VERBS))
 def test_parse_every_job_verb_takes_at_most_one_job(verb: str) -> None:
     assert parse_console_command(f"{verb} a b", None) == f"{verb} takes at most one job"
 
@@ -299,7 +303,7 @@ def test_control_client_status_response_over_the_64k_default_readline_limit(
     asyncio's 64 KiB default readline() buffer -- a default-limit connection
     raises ValueError('Separator is not found, and chunk exceed the limit')
     on the very first TUI refresh. The client must open every connection
-    with an explicit limit (_LINE_LIMIT)."""
+    with an explicit limit (LINE_LIMIT)."""
     text = "".join(
         f"insert_job: bulk_{i:04d}\njob_type: c\ncommand: x\nmachine: m1\n\n" for i in range(400)
     )

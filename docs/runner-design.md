@@ -616,16 +616,22 @@ refusal — a distributed concern, DL-49 future track).
 
 ## 14. Module layout and phasing
 
-The house layout is flat — no `runner` subpackage — and the runner is six
+The house layout is flat — no `runner` subpackage — and the runner is seven
 sibling modules, split along the seams its own test files already used
-(DL-74): `runner.py` (the §4 engine loop, the run lifecycle, and the §10
-control server, which stays here because it shares the loop's single-writer
-invariant), `runner_clock.py` (the §9 clock domains, plus `EngineError` at
-the bottom of the import graph), `runner_scheduler.py` (the §5 scheduler and
-the SEM-35 timezone ladder that turns its ticks into UTC instants),
-`runner_adapters.py` (the §6/§6a adapter contract and every adapter),
-`runner_journal.py` (the §7 WAL and its replay), and `runner_preflight.py`
-(the §8 rules). Nothing is re-exported: every import site names the module
+(DL-74, continued by DL-78): `runner.py` (the §4 engine loop and the run
+lifecycle), `runner_control.py` (the §10 control plane — the socket server,
+its wire vocabulary, and both clients; frozen in
+`docs/control-protocol.md`, the outer counterpart to the lifecycle tier's
+`docs/supervisor-protocol.md`), `runner_clock.py` (the §9 clock domains,
+plus `EngineError` at the bottom of the import graph), `runner_scheduler.py`
+(the §5 scheduler and the SEM-35 timezone ladder that turns its ticks into
+UTC instants), `runner_adapters.py` (the §6/§6a adapter contract and every
+adapter), `runner_journal.py` (the §7 WAL and its replay), and
+`runner_preflight.py` (the §8 rules). The §10 server ran inside `runner.py`
+until DL-78 on the argument that it shares the loop's single-writer
+invariant; what it actually shares is the loop's *task*, and every query
+handler is a pure projection, so the protocol owns its own file and the
+engine keeps the invariant. Nothing is re-exported: every import site names the module
 that owns the symbol, so the split cannot decay into a second name for the
 one file it replaced. Beside them, `runner_wrapper.py` (the §6a Tier-0
 shim: stdlib-only, no third-party imports — its dumbness is a correctness

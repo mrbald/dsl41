@@ -108,15 +108,13 @@ its three runtime deps; this module needs `pip install 'dsl41[ui]'`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
-import json
 import os
 import re
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 try:
     from rich.cells import cell_len
@@ -139,8 +137,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
-from dsl41.runner import _JOB_EVENT_VERBS, _STATUSES
-from dsl41.runner_adapters import _LINE_LIMIT
+from dsl41.runner_control import (
+    JOB_EVENT_VERBS,
+    STATUSES,
+    ControlClient,
+    ControlClientError,
+)
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
 _STATUS_STYLE = {
@@ -307,9 +309,7 @@ def assemble_detail_trigger_lines(
         if watching.get("min_size") is not None:
             line += f", min_size {watching['min_size']}"
         lines.append(line)
-    dated = [
-        e for e in timers if e.get("job") == job and isinstance(e.get("due"), str)
-    ]
+    dated = [e for e in timers if e.get("job") == job and isinstance(e.get("due"), str)]
     if dated:
         first = min(dated, key=lambda e: str(e["due"]))
         try:
@@ -798,111 +798,6 @@ class _LogPane(Vertical):
         self.close_prompt()
 
 
-class ControlClientError(RuntimeError):
-    """The control socket is unreachable or hung up mid-exchange."""
-
-
-class ControlClient:
-    """JSON-lines client of the ss10 control socket. One persistent
-    request/response connection, serialized by a lock; subscribe() opens its
-    OWN connection because a subscription owns its connection until hangup
-    (ss10). Any transport error drops the connection so the next request
-    reconnects -- the client outlives engine restarts."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._reader: asyncio.StreamReader | None = None
-        self._writer: asyncio.StreamWriter | None = None
-        self._lock = asyncio.Lock()
-
-    async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        async with self._lock:
-            try:
-                if self._writer is None:
-                    # limit: one `status` response line covers every job and
-                    # overruns asyncio's 64 KiB default at ~300 jobs
-                    self._reader, self._writer = await asyncio.open_unix_connection(
-                        str(self.path), limit=_LINE_LIMIT
-                    )
-                assert self._reader is not None
-                self._writer.write(json.dumps(payload).encode("utf-8") + b"\n")
-                await self._writer.drain()
-                line = await self._reader.readline()
-            except OSError as exc:
-                await self._drop()
-                raise ControlClientError(str(exc)) from exc
-            except BaseException:
-                # a CANCELLED exchange (an exclusive worker superseded
-                # mid-request) leaves the response unread on the stream;
-                # reusing the connection would hand that stale line to the
-                # NEXT request and offset every reply after it (DL-46)
-                # -- drop the connection, reconnect lazily
-                await self._drop()
-                raise
-            if not line:
-                await self._drop()
-                raise ControlClientError("engine hung up")
-            try:
-                response = json.loads(line)
-            except ValueError as exc:
-                await self._drop()
-                raise ControlClientError(f"bad response line: {exc}") from exc
-            if not isinstance(response, dict):
-                await self._drop()
-                raise ControlClientError("response is not a JSON object")
-            return response
-
-    async def subscribe(self, since: int | None = None) -> AsyncIterator[dict[str, Any]]:
-        """Yield journal records until the engine hangs up. Raises
-        ControlClientError if the connection fails or the engine refuses
-        (e.g. a journal-less run)."""
-        try:
-            reader, writer = await asyncio.open_unix_connection(str(self.path), limit=_LINE_LIMIT)
-        except OSError as exc:
-            raise ControlClientError(str(exc)) from exc
-        try:
-            request: dict[str, Any] = {"cmd": "subscribe"}
-            if since is not None:
-                request["since"] = since
-            writer.write(json.dumps(request).encode("utf-8") + b"\n")
-            await writer.drain()
-            ack_line = await reader.readline()
-            if not ack_line:
-                raise ControlClientError("engine hung up before the subscribe ack")
-            ack = json.loads(ack_line)
-            if not ack.get("ok"):
-                raise ControlClientError(str(ack.get("error", "subscribe refused")))
-            while True:
-                line = await reader.readline()
-                if not line:
-                    return  # engine gone; the caller decides whether to retry
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue  # torn record: it is only a wake-up signal anyway
-                yield record
-        except OSError as exc:
-            raise ControlClientError(str(exc)) from exc
-        finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-    async def close(self) -> None:
-        async with self._lock:
-            await self._drop()
-
-    async def _drop(self) -> None:
-        # detach BEFORE the awaits: _drop runs on cancellation paths, and a
-        # re-delivered CancelledError mid-close must not leave a half-dead
-        # connection looking attached
-        writer, self._reader, self._writer = self._writer, None, None
-        if writer is not None:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
     """Parse an event-console line into a sendevent request, or return an
     error string. Grammar (ss11): `<JOB_VERB> [job]`, `SET_GLOBAL NAME=value`,
@@ -921,7 +816,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
             return f"{verb} needs a job (none selected)"
         return {"cmd": "sendevent", "event": verb, "job": job}
 
-    if verb in _JOB_EVENT_VERBS:
+    if verb in JOB_EVENT_VERBS:
         if len(args) > 1:
             return f"{verb} takes at most one job"
         return _job(args[0] if args else None)
@@ -933,7 +828,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
             return 'SET_GLOBAL expects "NAME=value"'
         return {"cmd": "sendevent", "event": verb, "name": name, "value": value}
     if verb == "CHANGE_STATUS":
-        if args and args[0].upper() in _STATUSES:
+        if args and args[0].upper() in STATUSES:
             job, status, rest = selected, args[0].upper(), args[1:]
             if job is None:
                 return "CHANGE_STATUS needs a job (none selected)"

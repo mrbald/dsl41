@@ -1056,7 +1056,8 @@ async def _serve_run(
 
     from datetime import datetime
 
-    from dsl41.runner import ControlServer, start_run
+    from dsl41.runner import start_run
+    from dsl41.runner_control import ControlServer
     from dsl41.runner import resume_run as _resume_run
     from dsl41.runner_adapters import (
         FileWatcherAdapter,
@@ -1296,24 +1297,14 @@ def rehearse(
 
 
 def _control_roundtrip(socket_path: Path, request: dict) -> dict:
-    import json as json_mod
-    import socket as socket_mod
+    """Exit-code shell around runner_control.roundtrip (DL-78): the protocol
+    client raises, the CLI decides that unreachable == exit 2."""
+    from dsl41.runner_control import ControlClientError, roundtrip
 
     try:
-        conn = socket_mod.socket(socket_mod.AF_UNIX)
-        conn.settimeout(10.0)
-        conn.connect(str(socket_path))
-        conn.sendall(json_mod.dumps(request).encode("utf-8") + b"\n")
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        conn.close()
-        return json_mod.loads(buf)
-    except (OSError, ValueError) as exc:
-        typer.echo(f"control socket {socket_path}: {exc}", err=True)
+        return roundtrip(socket_path, request)
+    except ControlClientError as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
 
 

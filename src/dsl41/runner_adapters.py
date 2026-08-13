@@ -67,8 +67,10 @@ _SUPERVISOR_PATH = Path(_supervisor.__file__)
 # both sides, supervisor client). One `status` response is one line covering
 # EVERY job (~220 bytes each), so asyncio's 64 KiB default readline() limit
 # overruns at ~300 jobs; 16 MiB clears any plausible estate while still
-# bounding a runaway peer.
-_LINE_LIMIT: int = 2**24
+# bounding a runaway peer. Public since DL-78: three modules need it
+# (this one, runner_control's server AND client) and a shared constant
+# imported through a private name is a boundary that was never real.
+LINE_LIMIT: int = 2**24
 
 
 @dataclass
@@ -484,7 +486,7 @@ class SupervisorClient:
             return False
         try:
             reader, writer = await asyncio.open_unix_connection(
-                str(self.sock_path), limit=_LINE_LIMIT
+                str(self.sock_path), limit=LINE_LIMIT
             )
         except ConnectionRefusedError:
             with contextlib.suppress(OSError):
