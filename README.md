@@ -595,6 +595,12 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   (duplicate bodies, private cross-module imports, unresolvable citations, an
   IR-F schema change without an IR_VERSION bump) and the advisory size ratchet,
   tripped and not-tripped over tiny synthesised trees
+- tests/test_model_harness.py — phase-12 stage H: the concurrency-model
+  obligations (CM-01..CM-14,
+  [docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  §9) that single-host code can be held to today, over tests/model_harness.py —
+  a spawn log that outlives an engine crash, so a resume-driven double run is
+  visible at all. The `test_harness_*` half pins that the checkers can fail
 
 ### What's not done
 

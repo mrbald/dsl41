@@ -3337,3 +3337,44 @@
   and both S2's admission and S5's effects depend on storage, election and
   relay contracts, which is why those are S0 text rather than S6
   discoveries.
+- DL-85 the model harness lands before the code it validates, and an
+  adapter call turns out not to be an effect application (2026-08-14;
+  stage H of the phase-12 programme, `tests/model_harness.py` +
+  `tests/test_model_harness.py`). The harness holds a spawn log that
+  OUTLIVES an engine incarnation, because a resume-driven double run is
+  invisible to any per-engine assertion -- each engine is individually
+  correct -- and the CM-14 safety property is checked by COUNTING work
+  that started, per (job, run_number), across the whole interleaving.
+  Two things came out of building it. (1) The observation point was
+  wrong on the first pass. Counting `adapter.run()` entries conflates
+  "the adapter was invoked" with "a process started", and reconciliation
+  invokes the adapter a SECOND time under the same run_number on two
+  legitimate paths: an FW re-dispatch (which runner._reconcile calls an
+  "idempotent read" -- re-arming a file watch executes nothing) and a
+  detached-resume REATTACH (the wrapper never stopped, so the adapter
+  awaits its exit push and spawns nothing). A naive counter reports both
+  as the double run it exists to catch. The log therefore classifies each
+  invocation exec/watch/attach and the checkers count execs -- which is
+  the frozen model's own distinction surfacing in the first thing built
+  against it, since DL-84 binds effects to `run_id`, the per-spawn uuid4,
+  and not to `run_number`. A probe that misclassifies FW proves the
+  classification is load-bearing rather than decoration. (2) Four of the
+  five obligation tests were VACUOUS on the first pass -- they passed
+  with their guard deleted -- and the probe is what said so. The
+  corrections are each a small lesson: the crash/resume test's guard is
+  reconciliation's own "never a silent re-run" rule and NOT the
+  `_dispatched` seeding that looked like the obvious candidate; the kill
+  test had to assert WHEN the process ended, because leaving the task to
+  run to its natural end and dropping the late completion by the ss4
+  stale gate also satisfies "it ended"; the restart test had to overwrite
+  a LIVE run, since a job that already finished has no stale task to
+  leak; and the duplicate-completion property turned out to be guarded
+  twice, so it keeps its end-to-end test explicitly labelled a
+  composition -- no single mutation reddens it -- with the stale gate and
+  the ghost-run gate each given a sibling test that isolates it. Six
+  mutations now turn their tests red: DL-81's live-job refusal,
+  reconcile's no-spool-trace FAILURE, the ghost-run gate, the ss4 stale
+  gate's run_number branch, _dispatch's terminal cancel, and the
+  harness's own FW classification. Partition, reroute and leader failover
+  are ABSENT rather than stubbed: a stub that always passes is the exact
+  failure mode a safety harness exists to prevent. 1871 -> 1884 passed.
