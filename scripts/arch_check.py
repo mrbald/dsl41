@@ -272,6 +272,27 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
                                     f" route it through {_STATE_OWNER} (DL-82)",
                                 )
                             )
+        if not defines_runtime:
+            continue
+        # setattr() is the hole an assignment walk cannot see: the attribute
+        # name is a runtime value, so no field-name check applies. The owner
+        # is the only place it is legitimate (and once JobRuntime is frozen it
+        # goes away there too, replaced by model_copy).
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "setattr"
+                and node.lineno not in exempt
+            ):
+                findings.append(
+                    Finding(
+                        _rel(path),
+                        node.lineno,
+                        f"setattr() outside {_STATE_OWNER} can reach a state field"
+                        " past the assignment gate (DL-82)",
+                    )
+                )
     return findings
 
 

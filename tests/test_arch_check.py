@@ -355,3 +355,23 @@ def test_reaching_through_the_store_containers_blocks(tmp_path: Path) -> None:
         "writes store.job directly",
         "writes store.globals_ directly",
     }
+
+
+def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
+    """The hole an assignment walk cannot see: setattr()'s attribute name is a
+    runtime value, so no field-name check applies to it. Legitimate only
+    inside the owner -- and once JobRuntime is frozen, not even there."""
+    mod = _write(
+        tmp_path / "oracle.py",
+        "class JobRuntime:\n    armed = False\n\n\n"
+        "class StatusStore:\n"
+        "    def update(self, job, **fields):\n"
+        "        for k, v in fields.items():\n"
+        "            setattr(self.job[job], k, v)\n\n\n"
+        "class Oracle:\n"
+        "    def sneak(self, rt, name, value):\n"
+        "        setattr(rt, name, value)\n",
+    )
+    findings = arch_check.state_owner_bypasses([mod])
+    assert len(findings) == 1
+    assert "setattr() outside StatusStore" in findings[0].message
