@@ -383,7 +383,16 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the customElements polyfill loads ahead of the cytoscape bundle and the context
   menu registers last, guarded, so no optional plugin can take the page (DL-77)
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
-  completion, edge-triggered re-evaluation, per-SEM-entry trace tests.
+  completion, edge-triggered re-evaluation, per-SEM-entry trace tests. Also holds
+  RuntimeState, the state owner: frozen entity rows behind read-only views, one
+  typed verb per kind of change, the timer heap with its ordering token, and the
+  per-input transaction that moves each entity's `state_rev` at most once
+  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  §3)
+- src/dsl41/capacity.py — the DL-50 capacity subsystem: sized buckets (machine
+  max_load, resource amounts) and the QUE_WAIT queue with its admission order. It
+  decides who may be admitted and in what order; every transition that decision
+  implies stays on the Oracle
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
   tier b (per-job state-space enumeration), tier c (oracle trace comparison)
 - src/dsl41/backend_uc.py and src/dsl41/uc_oracle.py — UC backend pair. backend_uc

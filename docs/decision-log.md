@@ -3487,3 +3487,25 @@
   `docs/citation-index.md` gains the `S\d[a-c]?` row: the stage names are
   a real namespace (ss10 defines S0-S7) and the DL-75 gate blocked on
   them until it existed, which is the gate working as designed.
+- DL-88 the capacity pool gets its own module (2026-08-14;
+  `src/dsl41/capacity.py`, extracted from `src/dsl41/oracle.py`). The
+  promised follow-up from DL-86, done as its own commit rather than as a
+  rider on the stage that caused the growth. `_CapacityPool` becomes
+  `CapacityPool` -- public in its own module, since a private
+  cross-module import is itself an arch_check block -- and takes its
+  three private helpers (`_safe_units`, `_release_policy`,
+  `_merge_policy`) with it; they had no other caller. It moves along the
+  line DL-74 already drew and needs no new seam: nothing in the pool
+  knows about statuses, events or time, which is exactly why it was the
+  piece to move first. No behaviour change, no test rewritten, 1916
+  passed either side.
+  oracle.py is 1637 -> 1472 lines. Still 107 above the DL-75 baseline
+  (1365) and the advisory still fires, deliberately: the remaining growth
+  IS the state owner, and moving it out is a real architectural decision
+  rather than a size trim -- `JobStatus` and `_TERMINAL` must move with
+  it (runner.py's allow-listed private import of `_TERMINAL` is a
+  baseline entry that would change), `Event` would have to become a
+  TYPE_CHECKING-only reference, and `OracleError` would have to pick a
+  side. That is what /arch-review is the lens for. Re-baselining now
+  would silence the one signal pointing at the question, which is the
+  failure mode the ratchet exists to prevent.
