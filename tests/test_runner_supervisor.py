@@ -127,12 +127,19 @@ class RawClient:
         self.sock.settimeout(10.0)
         self.sock.connect(str(run_root / "supervisor.sock"))
         self.buf = b""
+        #: DL-80: a real client pairs the incarnation with its token on every
+        #: request (SupervisorClient does it in _request), so the raw client
+        #: learns it the same way -- from any response that carries one. Tests
+        #: that need a WRONG one pass it explicitly and this leaves it alone.
+        self.incarnation: str | None = None
 
     def raw(self, payload: bytes) -> dict:
         self.sock.sendall(payload)
         return self._read()
 
     def send(self, obj: dict) -> dict:
+        if "incarnation" not in obj:
+            obj = {**obj, "incarnation": self.incarnation}
         self.sock.sendall(json.dumps(obj).encode("utf-8") + b"\n")
         return self._read()
 
@@ -147,6 +154,8 @@ class RawClient:
             obj = json.loads(line)
             if obj.get("push"):
                 continue
+            if isinstance(obj.get("incarnation"), str) and obj.get("error") is None:
+                self.incarnation = obj["incarnation"]
             return obj
 
     def close(self) -> None:
@@ -193,7 +202,7 @@ def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:
     proc = start_supervisor(short_root, env={**os.environ, "PYTHONSAFEPATH": "1"})
     cli = RawClient(short_root)
     try:
-        assert cli.send({"v": 1, "cmd": "PING"}) == {"ok": True, "version": 1}
+        assert cli.send({"v": 1, "cmd": "PING"})["ok"] is True
         token = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "t"})["token"]
         assert cli.send({"v": 1, "cmd": "SHUTDOWN", "token": token}) == {"ok": True}
     finally:
@@ -227,7 +236,9 @@ def test_ping_and_unknown_and_version(short_root: Path) -> None:
     proc = start_supervisor(short_root)
     cli = RawClient(short_root)
     try:
-        assert cli.send({"v": 1, "cmd": "PING"}) == {"ok": True, "version": 1}
+        ping = cli.send({"v": 1, "cmd": "PING"})
+        assert ping["ok"] is True and ping["version"] == 1
+        assert isinstance(ping["incarnation"], str) and ping["incarnation"]  # DL-80
         assert cli.send({"v": 1, "cmd": "NOPE"})["error"] == "unknown_verb"
         assert cli.send({"cmd": "PING"})["error"] == "unsupported_version"  # missing v
         assert cli.send({"v": 2, "cmd": "PING"})["error"] == "unsupported_version"
@@ -289,8 +300,9 @@ def test_live_lease_yields_only_to_the_token_holder(short_root: Path) -> None:
     try:
         r1 = a.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
         assert r1["ok"] and r1["token"] == 1
+        b.send({"v": 1, "cmd": "PING"})  # DL-80: the incarnation is public
 
-        # the impersonator: right label, no token -> refused (the DL-79 fix)
+        # the impersonator: right label, right incarnation, no token -> refused
         spoof = b.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
         assert spoof == {
             "ok": False,
@@ -320,6 +332,68 @@ def test_live_lease_yields_only_to_the_token_holder(short_root: Path) -> None:
         a.close()
         b.close()
         teardown_supervisor(short_root, proc)
+
+
+def test_fencing_survives_a_supervisor_restart_token_reuse(short_root: Path) -> None:
+    """DL-80, the cross-incarnation ABA. The fencing counter is in-memory, so a
+    restarted supervisor mints token 1 again. DL-79 made the token the
+    credential, which turned that reuse into a hole: a controller still holding
+    a token 1 from the PREVIOUS incarnation presents it to the new one, matches
+    the NEW holder's token 1 by coincidence, and takes the lease away from a
+    controller that legitimately owns it.
+
+    The `incarnation` id closes it. Note the two refusals are deliberately
+    DIFFERENT: `wrong_incarnation` tells a client its supervisor is gone (all
+    its wrappers died by lifeline -- re-acquire and reconcile from the spool),
+    while `stale_token` tells it someone else legitimately holds the lease and
+    it must NOT re-acquire. Collapsing them into one error loses that."""
+    proc = start_supervisor(short_root)
+    old = RawClient(short_root)
+    try:
+        r1 = old.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "old", "ttl_s": 60})
+        assert r1["ok"] and r1["token"] == 1
+        inc1 = r1["incarnation"]
+        old.close()
+    finally:
+        teardown_supervisor(short_root, proc)
+
+    proc2 = start_supervisor(short_root)
+    fresh = RawClient(short_root)
+    stale = RawClient(short_root)
+    try:
+        r2 = fresh.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "fresh", "ttl_s": 60})
+        # the counter really did reset -- this is the premise of the hole
+        assert r2["ok"] and r2["token"] == 1
+        inc2 = r2["incarnation"]
+        assert inc2 != inc1
+
+        # the stale controller replays its old (matching!) token
+        theft = stale.send(
+            {"v": 1, "cmd": "ACQUIRE", "controller_id": "old", "ttl_s": 60,
+             "token": 1, "incarnation": inc1}
+        )
+        assert theft == {
+            "ok": False,
+            "error": "lease_held",
+            "holder": "fresh",
+            "expires_at": r2["expires_at"],
+        }
+        # and it cannot mutate either -- a distinct error, not stale_token
+        spawned = stale.send({"v": 1, "cmd": "LIST"})
+        assert spawned["incarnation"] == inc2
+        sig = stale.send(
+            {"v": 1, "cmd": "SIGNAL", "token": 1, "incarnation": inc1,
+             "run_id": "whatever", "sig": "TERM"}
+        )
+        assert sig == {"ok": False, "error": "wrong_incarnation", "incarnation": inc2}
+        # the rightful holder is untouched
+        assert fresh.send(
+            {"v": 1, "cmd": "RENEW", "token": 1, "incarnation": inc2, "ttl_s": 60}
+        )["ok"]
+    finally:
+        fresh.close()
+        stale.close()
+        teardown_supervisor(short_root, proc2)
 
 
 def test_dead_holder_frees_the_lease_without_waiting_out_the_ttl(short_root: Path) -> None:
@@ -394,6 +468,13 @@ def test_mutating_verbs_require_a_token(short_root: Path) -> None:
     try:
         rd = short_root / "runs" / "j.1"
         rd.mkdir()
+        # DL-80: the incarnation is PUBLIC (PING/LIST hand it out) -- learn it
+        # so this test isolates the TOKEN gate, which is the secret half
+        cli.send({"v": 1, "cmd": "PING"})
+        # ... and omitting it is its own refusal, not a token failure
+        assert cli.send(
+            {"v": 1, "cmd": "SPAWN", "spec": _spec(rd, "true"), "incarnation": None}
+        )["error"] == "wrong_incarnation"
         # no lease held: SPAWN/SIGNAL/SHUTDOWN all refuse
         assert (
             cli.send({"v": 1, "cmd": "SPAWN", "spec": _spec(rd, "true")})["error"] == "stale_token"

@@ -3118,3 +3118,46 @@
   `test_lease_held_reacquire_and_fencing_monotonicity` pinned exactly the
   removed behaviour and now presents the token where it used to present
   the label alone.
+
+- DL-80 the supervisor lease carries an incarnation id (2026-08-14; raised
+  by the user reviewing DL-79 the same day, and it is a hole DL-79 itself
+  made reachable -- recorded that way deliberately). The fencing counter is
+  in-memory by design (spec ss5: "supervisor death kills all wrappers by
+  lifeline, so the counter cannot regress while any spawned run is alive"),
+  so a restarted supervisor mints token 1 again. That was harmless while
+  the credential was `controller_id`. DL-79 made the TOKEN the credential,
+  which turned counter reuse into a cross-incarnation ABA: supervisor S1
+  issues token 1 to controller C1; S1 dies and S2 starts on the same
+  socket; C2 acquires from S2 and is issued token 1 again; C1 reconnects,
+  replays its stored token 1, matches the new holder's token by
+  coincidence, and TAKES THE LEASE from the controller that legitimately
+  owns it. Verified by removing only the new gate: the theft ACQUIRE
+  returns `{ok: True, token: 2}`. Decisions: (1) The supervisor mints an
+  `incarnation` at every start (uuid4 hex) and returns it from PING, LIST
+  and ACQUIRE; the pid file carries it too. The fencing credential is the
+  PAIR (incarnation, token). (2) The refusal is `wrong_incarnation`, a
+  DISTINCT error from `stale_token`, and that distinction is the point:
+  they demand opposite client behaviour. wrong_incarnation means the
+  supervisor you knew is gone and every wrapper it held died by lifeline
+  -- re-acquire AND reconcile from the spool. stale_token means another
+  controller legitimately holds the lease -- do NOT re-acquire. A single
+  widened token (say a uuid instead of a counter) would close the ABA
+  just as well and was rejected for exactly this reason: it collapses two
+  conditions whose correct responses differ. (3) The incarnation is
+  PUBLIC -- any reader gets it from PING -- and the token is the secret
+  half. The pair is not an authentication mechanism (that remains the
+  same-uid peer-cred gate on accept); it identifies WHICH world a
+  credential belongs to. (4) SupervisorClient injects the incarnation in
+  `_request`, next to `"v": 1`, rather than each mutating verb naming it:
+  a fencing credential that a newly added verb can forget to carry is not
+  a credential. On `wrong_incarnation` the renew loop drops BOTH halves
+  before re-acquiring, so it takes the free path instead of replaying a
+  credential that can now collide. (5) Mutating verbs REQUIRE the field
+  (fail closed) rather than checking it only when present. The tier ships
+  as one wheel and the DL-42 extraction has not happened, so there are no
+  external adopters to break; `v` stays 1 and this is recorded as the
+  reason. Had adopters existed, this would have been a v2. The raw-client
+  test harness learns the incarnation from responses exactly as the real
+  client does, so the existing protocol tests keep their original intent;
+  `test_mutating_verbs_require_a_token` now pins both gates separately.
+  1860 -> 1861 passed, 4 skipped.

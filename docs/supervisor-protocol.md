@@ -187,6 +187,20 @@ line → one response line, except async pushes (below). Every request
 carries `"v": 1`. Responses are `{"ok": true, …}` or
 `{"ok": false, "error": "<code>", …}`.
 
+**Incarnation** (DL-80). The supervisor mints an `incarnation` id at every
+start and returns it from `PING`, `LIST` and `ACQUIRE`. Every **mutating**
+verb must carry it; a mismatch is `{"ok": false, "error":
+"wrong_incarnation", "incarnation": <current>}`. The reason it is not
+folded into the token: the fencing counter is in-memory, so a restarted
+supervisor mints token 1 again, and a controller still holding a token
+from the previous incarnation would match the new holder's token by
+coincidence. The two refusals must also stay distinct, because they demand
+opposite client behaviour — `wrong_incarnation` means the supervisor you
+knew is gone and every wrapper it held died by lifeline, so re-acquire
+**and** reconcile from the spool; `stale_token` means someone else
+legitimately holds the lease, so do **not** re-acquire. The incarnation is
+public (any reader gets it from `PING`); the token is the secret half.
+
 The supervisor ignores unknown fields (forward compatibility). An
 unknown verb → `unknown_verb`. A missing/wrong `v` →
 `unsupported_version`. A malformed line → `malformed_json` (the stream
@@ -194,25 +208,26 @@ is not desynced).
 
 **Read-only verbs** (any connection, no lease):
 
-- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, lease: {holder,
+- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, incarnation, lease: {holder,
   expires_at} | null, runs: [{run_id, job, run_number, run_dir, wrapper_pid,
   wrapper_alive, spawned_at, wrapper_rc}]}` — the response lists everything
   spawned since THIS supervisor started. A supervisor restart implies that
   all prior wrappers received EOF and recorded. The spool is the
   cross-restart truth, and LIST shows live state only. `wrapper_rc` is
   null while the wrapper is alive.
-- `PING` → `{ok, version: 1}`.
+- `PING` → `{ok, version: 1, incarnation}`.
 
 **Lease verbs** (single controller, observers are unlimited):
 
-- `ACQUIRE {controller_id, ttl_s, token?}` → `{ok, token, expires_at}`.
+- `ACQUIRE {controller_id, ttl_s, token?, incarnation?}` → `{ok, token,
+  expires_at, incarnation}`.
   `token` is a monotonically increasing fencing integer. The counter is
   in-memory only: supervisor death kills all wrappers by lifeline, so the
   counter cannot regress while any spawned run is alive.
 
   A lease is **live** when it is unexpired *and* its holder's connection
-  is still open. A live lease yields only to a claimant that presents the
-  **current token** in the request; everyone else gets
+  is still open. A live lease yields only to a claimant that presents both
+  the **current token** and **this incarnation**; everyone else gets
   `{ok: false, error: "lease_held", holder, expires_at}`. The incumbent
   re-keys this way (a fresh token, the old one dies), which is how a
   reconnect after a poisoned connection fences anything the old
@@ -241,7 +256,9 @@ is not desynced).
 - `RENEW {token, ttl_s}` → `{ok, expires_at}`. `RELEASE {token}` → `{ok}`.
 - Engine defaults: `ttl_s = 60`, with a renewal every 20 s.
 
-**Mutating verbs** (these require `token`, and a stale/expired token →
+**Mutating verbs** (these require `incarnation` and `token`; a foreign
+incarnation → `{ok: false, error: "wrong_incarnation", incarnation}`,
+checked first, and then a stale/expired token →
 `{ok: false, error: "stale_token"}`):
 
 - `SPAWN {token, spec}` — `spec` is the §2 frozen wrapper input spec MINUS

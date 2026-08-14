@@ -459,6 +459,13 @@ class SupervisorClient:
         # matching label (supervisor _h_acquire).
         self.controller_id = f"engine:{run_root.resolve()}#{uuid.uuid4().hex[:8]}"
         self.token: int | None = None
+        #: DL-80: the supervisor incarnation our token belongs to. _request
+        #: pairs it with EVERY request rather than each mutating verb naming
+        #: it -- a fencing credential that a new verb can forget to carry is
+        #: not a credential. A `wrong_incarnation` refusal means the
+        #: supervisor we knew is gone and our runs died with it (re-acquire
+        #: AND reconcile), which is the opposite of `stale_token`.
+        self.incarnation: str | None = None
         self.lost = asyncio.Event()
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -572,6 +579,7 @@ class SupervisorClient:
                 if not resp.get("ok"):
                     return False  # fenced out: another controller holds the lease
                 self.token = int(resp["token"])
+                self.incarnation = resp.get("incarnation")  # DL-80
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
@@ -584,7 +592,11 @@ class SupervisorClient:
             self._pending = fut
             try:
                 self._writer.write(
-                    json.dumps({**obj, "v": 1}, sort_keys=True).encode("utf-8") + b"\n"
+                    json.dumps(
+                        {**obj, "v": 1, "incarnation": self.incarnation},
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    + b"\n"
                 )
                 await self._writer.drain()
                 return await fut  # the reader resolves it, or _on_lost fails it
@@ -676,6 +688,7 @@ class SupervisorClient:
         if not resp.get("ok"):
             raise SupervisorUnavailable(f"lease acquire refused: {resp}")
         self.token = int(resp["token"])
+        self.incarnation = resp.get("incarnation")  # DL-80
         if self._renew_task is None:
             self._renew_task = asyncio.ensure_future(self._renew_loop(ttl))
         return self.token
@@ -699,6 +712,14 @@ class SupervisorClient:
                         {"cmd": "RENEW", "token": self.token, "ttl_s": ttl_s}
                     )
                     if not resp.get("ok"):
+                        if resp.get("error") == "wrong_incarnation":
+                            # DL-80: the supervisor restarted under us. Our token
+                            # belongs to a world that no longer exists, and every
+                            # wrapper it held died by lifeline. Drop the pair so
+                            # the re-ACQUIRE below takes the free path instead of
+                            # replaying a credential that can now COLLIDE with the
+                            # new incarnation's counter.
+                            self.token, self.incarnation = None, None
                         # stale_token (fenced by a reconnect's own re-ACQUIRE,
                         # or lapsed): same controller re-acquires, fresh token
                         resp = await self._request(
@@ -711,6 +732,7 @@ class SupervisorClient:
                         )
                         if resp.get("ok"):
                             self.token = int(resp["token"])
+                            self.incarnation = resp.get("incarnation")  # DL-80
                 except SupervisorUnavailable:
                     resp = {"ok": False}
                 if resp.get("ok"):

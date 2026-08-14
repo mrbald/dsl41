@@ -49,6 +49,7 @@ import socket
 import struct
 import sys
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -195,6 +196,15 @@ class Supervisor:
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
         self.boot_id = current_boot_id()
+        #: DL-80: identity of THIS supervisor process, minted per start. The
+        #: fencing counter below is in-memory (spec ss5), so a restart mints
+        #: token 1 again; once DL-79 made the token the credential, that reuse
+        #: let a controller holding a token from the PREVIOUS incarnation match
+        #: the new one by coincidence. Every mutating verb carries this, and a
+        #: mismatch is `wrong_incarnation` -- deliberately NOT `stale_token`,
+        #: because the two demand opposite client behaviour (re-acquire and
+        #: reconcile vs do not re-acquire, someone else holds it).
+        self.incarnation = uuid.uuid4().hex
         self.runs: dict[str, _Run] = {}
         self.lease: _Lease | None = None
         self._next_token = 1  # monotonic fencing counter (in-memory; ss5)
@@ -253,7 +263,12 @@ class Supervisor:
         self._listen.setblocking(False)
         durable_write_json(
             self.pid_path,
-            {"pid": os.getpid(), "boot_id": self.boot_id, "started_at": utc_now_iso()},
+            {
+                "pid": os.getpid(),
+                "boot_id": self.boot_id,
+                "incarnation": self.incarnation,
+                "started_at": utc_now_iso(),
+            },
         )
 
     def _install_signals(self) -> None:
@@ -387,7 +402,7 @@ class Supervisor:
         self._send(conn, handler(conn, req))
 
     def _h_ping(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "version": PROTOCOL_VERSION}
+        return {"ok": True, "version": PROTOCOL_VERSION, "incarnation": self.incarnation}
 
     def _h_list(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
         lease = None
@@ -399,6 +414,7 @@ class Supervisor:
             "version": PROTOCOL_VERSION,
             "supervisor_pid": os.getpid(),
             "boot_id": self.boot_id,
+            "incarnation": self.incarnation,
             "lease": lease,
             "runs": [
                 {
@@ -421,8 +437,14 @@ class Supervisor:
         return self.lease is not None and time.monotonic() < self.lease.deadline
 
     def _check_token(self, req: dict[str, Any]) -> dict[str, Any] | None:
-        """Every mutating verb: the token must match a live lease. A stale or
-        expired token is refused so a fenced-out controller cannot mutate."""
+        """Every mutating verb: the request must name THIS incarnation (DL-80)
+        and its token must match a live lease. Incarnation is checked first and
+        answers separately: a token from a dead supervisor is not a lost
+        election, it is a vanished world -- that controller's wrappers all died
+        by lifeline, so it must re-acquire AND reconcile from the spool, which
+        is the opposite of what stale_token asks for."""
+        if req.get("incarnation") != self.incarnation:
+            return {"ok": False, "error": "wrong_incarnation", "incarnation": self.incarnation}
         if not self._lease_active() or self.lease is None or self.lease.token != req.get("token"):
             return {"ok": False, "error": "stale_token"}
         return None
@@ -457,7 +479,10 @@ class Supervisor:
         # accept (ss1); a same-uid process is already inside the trust
         # boundary and can signal the engine directly.
         if self._lease_active() and self.lease is not None and self.lease.conn is not None:
-            if req.get("token") != self.lease.token:
+            incumbent = (
+                req.get("incarnation") == self.incarnation and req.get("token") == self.lease.token
+            )
+            if not incumbent:
                 return {
                     "ok": False,
                     "error": "lease_held",
@@ -468,7 +493,12 @@ class Supervisor:
         self._next_token += 1  # monotonic: never regresses while any run is alive
         expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
         self.lease = _Lease(controller_id, token, time.monotonic() + ttl_s, expires_at, conn)
-        return {"ok": True, "token": token, "expires_at": expires_at}
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires_at,
+            "incarnation": self.incarnation,  # DL-80: pair it with the token
+        }
 
     def _h_renew(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
         if (err := self._check_token(req)) is not None:
