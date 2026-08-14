@@ -205,15 +205,39 @@ is not desynced).
 
 **Lease verbs** (single controller, observers are unlimited):
 
-- `ACQUIRE {controller_id, ttl_s}` → `{ok, token, expires_at}`. While
-  another unexpired lease exists, the supervisor refuses with
-  `{ok: false, error: "lease_held", holder, expires_at}`. `token` is a
-  monotonically increasing fencing integer. The counter is in-memory
-  only: supervisor death kills all wrappers by lifeline, so the counter
-  cannot regress while any spawned run is alive. A re-acquire by the SAME
-  controller_id is allowed and mints a NEW token (the old one dies). Thus
-  a crashed engine's resume re-acquires and does not wait for the TTL to
-  expire.
+- `ACQUIRE {controller_id, ttl_s, token?}` → `{ok, token, expires_at}`.
+  `token` is a monotonically increasing fencing integer. The counter is
+  in-memory only: supervisor death kills all wrappers by lifeline, so the
+  counter cannot regress while any spawned run is alive.
+
+  A lease is **live** when it is unexpired *and* its holder's connection
+  is still open. A live lease yields only to a claimant that presents the
+  **current token** in the request; everyone else gets
+  `{ok: false, error: "lease_held", holder, expires_at}`. The incumbent
+  re-keys this way (a fresh token, the old one dies), which is how a
+  reconnect after a poisoned connection fences anything the old
+  connection had in flight.
+
+  A lease whose holder's connection is **gone** is freely grantable even
+  while unexpired. That is what lets a crashed engine's resume re-acquire
+  without waiting out the TTL. It is sound because the kernel closes this
+  AF_UNIX fd only when the holder process is gone, `kill -9` included, so
+  EOF is proof of death.
+
+  `controller_id` authorizes nothing (DL-79). It is a label for `LIST`
+  and for the `lease_held` refusal, and clients should make it unique per
+  incarnation so those two reads name a specific controller. Until DL-79
+  a *matching label* took a live lease, which was safe only because one
+  run_root had one engine and the orchestrator's own control-socket bind
+  enforced that on one machine.
+
+  The token proves **incumbency, not authenticity** — it is a small
+  monotone integer. Authentication is the same-uid peer-cred gate on
+  accept; a same-uid process is already inside the trust boundary.
+
+  **Constraint on any future non-local transport:** EOF stops being proof
+  of death. A relay must not close the supervisor-side connection while
+  its controller lives, or the orphan branch must become TTL-gated.
 - `RENEW {token, ttl_s}` → `{ok, expires_at}`. `RELEASE {token}` → `{ok}`.
 - Engine defaults: `ttl_s = 60`, with a renewal every 20 s.
 

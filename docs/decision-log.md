@@ -3067,3 +3067,54 @@
   advisory module ceiling entirely; runner_tui.py 1757 -> 1652 and cli.py
   1592 -> 1583 ratchet down but stay over it. The baseline is re-stamped so
   the gate measures from the smaller tree.
+
+- DL-79 the supervisor lease is fenced by incumbency, not by a label
+  (2026-08-14; found by the DL-78 architecture review while scoping the
+  multihost track, closed before any transport work). Defect: `_h_acquire`
+  handed a LIVE lease to any claimant whose `controller_id` matched the
+  holder's, and the engine's `controller_id` was
+  `f"engine:{run_root.resolve()}"` -- stable per run root by design, with
+  the comment "one run_root has one logical engine controller (the ss10
+  control-socket gate enforces it)". That reasoning is sound and it is
+  local: the gate is a `bind()` on a unix socket, so it enforces one
+  engine per run root ON ONE MACHINE. The moment a second host can serve
+  the same logical run, the label stops discriminating and the failure
+  inverts -- a partitioned OLD leader reconnects, presents the same label,
+  mints a HIGHER token, and fences out the leader that legitimately took
+  over. Nothing was broken today; this is a latent hole that step 2 of the
+  multihost track would have walked straight into, and it is much cheaper
+  to close first. Decisions: (1) A lease is LIVE when it is unexpired AND
+  its holder's connection is still open; a live lease yields only to a
+  claimant presenting the CURRENT token. controller_id authorizes nothing
+  and is now a label for LIST and for the lease_held refusal. The token
+  proves incumbency, not authenticity -- it is a small monotone integer,
+  and authentication remains the same-uid peer-cred gate on accept, inside
+  which a process can signal the engine directly anyway. (2) The resume
+  property is preserved by a DIFFERENT mechanism than before, and this is
+  the load-bearing half: a lease whose holder's CONNECTION is gone is
+  freely grantable even while unexpired, because the kernel closes an
+  AF_UNIX fd only when the holder process is gone (kill -9 included), so
+  EOF is proof of death. `_drop_conn` already nulled `lease.conn` for the
+  push path, so the discriminator existed and was simply not consulted.
+  This is strictly better than the old rule in both directions: the old
+  rule ALSO refused an orphaned lease to a differently-labelled claimant,
+  so a resume that changed its label would have had to wait out the TTL.
+  (3) The engine's controller_id becomes per-incarnation
+  (`engine:<run_root>#<uuid8>`). It is no longer load-bearing, but the old
+  value ENCODED the assumption multihost breaks, and leaving that
+  sentence in the identifier invites the bug back. All three ACQUIRE sites
+  in SupervisorClient (acquire, reconnect, the renew loop's re-acquire)
+  now carry `token`; the first acquire of a process sends null and takes
+  the free/orphaned path. (4) Recorded as a constraint on the multihost
+  transport rather than solved now: over a network, EOF stops being proof
+  of death, so a relay must not close the supervisor-side connection while
+  its controller lives, or the orphan branch must become TTL-gated.
+  docs/supervisor-protocol.md ss5 is amended (a frozen item, hence this
+  entry). Falsifiability, both new tests against the pre-fix rule:
+  `test_live_lease_yields_only_to_the_token_holder` fails (the spoofed
+  label takes the lease) and
+  `test_dead_holder_frees_the_lease_without_waiting_out_the_ttl` fails
+  ("orphaned lease never freed"); both pass after. The old
+  `test_lease_held_reacquire_and_fencing_monotonicity` pinned exactly the
+  removed behaviour and now presents the token where it used to present
+  the label alone.

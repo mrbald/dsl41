@@ -432,9 +432,32 @@ class Supervisor:
         if not isinstance(controller_id, str) or not controller_id:
             return {"ok": False, "error": "bad_controller_id"}
         ttl_s = float(req.get("ttl_s", 60))
-        if self._lease_active():
-            assert self.lease is not None
-            if self.lease.holder != controller_id:
+        # DL-79. A LIVE lease -- unexpired AND its holder's connection still
+        # open -- yields only to the holder itself, and the holder proves
+        # incumbency by presenting its CURRENT token. controller_id is a
+        # label, not a credential: any client may send any string, and until
+        # DL-79 a matching one took the lease away from a live holder. That
+        # was safe only because one run_root had one engine, which the
+        # engine's own control-socket bind enforced ON THIS MACHINE; the
+        # moment a second host can serve the same logical run, the label
+        # stops discriminating and the partitioned OLD leader fences out the
+        # new one.
+        #
+        # The ORPHANED case -- lease unexpired, holder's connection gone --
+        # stays freely grantable, and that is what lets a crashed engine's
+        # resume re-acquire without waiting out the TTL. It is sound here
+        # because the kernel closes this AF_UNIX fd only when the holder
+        # process is gone (kill -9 included), so EOF is proof of death.
+        # A NON-LOCAL transport breaks that inference: a relay must not close
+        # the supervisor-side connection while its controller lives, or this
+        # branch must become TTL-gated. Recorded, not yet needed.
+        #
+        # The token proves incumbency, not authenticity -- it is a small
+        # monotone integer. Authentication is the same-uid peer-cred gate on
+        # accept (ss1); a same-uid process is already inside the trust
+        # boundary and can signal the engine directly.
+        if self._lease_active() and self.lease is not None and self.lease.conn is not None:
+            if req.get("token") != self.lease.token:
                 return {
                     "ok": False,
                     "error": "lease_held",

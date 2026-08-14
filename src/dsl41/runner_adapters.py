@@ -438,7 +438,7 @@ class SupervisorClient:
     would be delivered to the NEXT request's future. On CancelledError
     mid-request the client fails the pending future, closes the socket, and
     re-raises; later calls lazily reconnect (connect-only, never spawning a
-    supervisor) and re-ACQUIRE with the stable controller_id, whose fresh
+    supervisor) and re-ACQUIRE presenting the CURRENT token (DL-79), whose fresh
     fencing token fences anything the poisoned connection had in flight."""
 
     #: engine defaults (spec ss2): 60s lease, renewed every 20s
@@ -448,12 +448,16 @@ class SupervisorClient:
     def __init__(self, run_root: Path) -> None:
         self.run_root = run_root
         self.sock_path = run_root / "supervisor.sock"
-        # STABLE per run_root, not per process: a crashed engine's lease is
-        # unexpired for up to ttl_s, and resume must re-ACQUIRE without waiting
-        # it out. Same controller_id => allowed, minting a fresh token that
-        # fences the dead engine's stale one (spec ss2). One run_root has one
-        # logical engine controller (the ss10 control-socket gate enforces it).
-        self.controller_id = f"engine:{run_root.resolve()}"
+        # Per-INCARNATION since DL-79, and deliberately not stable: the old
+        # value said "one run_root has one logical engine controller", which
+        # the ss10 control-socket bind enforces on THIS machine only, and the
+        # supervisor used that equality to hand a live lease to a second
+        # claimant. It no longer authorizes anything -- incumbency is proved
+        # with the current token -- so this string is now for humans: LIST and
+        # the lease_held refusal name WHICH engine holds it. Fast resume after
+        # a crash comes from the holder's connection dying, not from a
+        # matching label (supervisor _h_acquire).
+        self.controller_id = f"engine:{run_root.resolve()}#{uuid.uuid4().hex[:8]}"
         self.token: int | None = None
         self.lost = asyncio.Event()
         self._writer: asyncio.StreamWriter | None = None
@@ -559,6 +563,7 @@ class SupervisorClient:
                             "cmd": "ACQUIRE",
                             "controller_id": self.controller_id,
                             "ttl_s": self._TTL_S,
+                            "token": self.token,  # DL-79: prove incumbency
                         },
                         _connect=False,
                     )
@@ -661,7 +666,12 @@ class SupervisorClient:
     async def acquire(self, *, ttl_s: float | None = None) -> int:
         ttl = self._TTL_S if ttl_s is None else ttl_s
         resp = await self._request(
-            {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl}
+            {
+                "cmd": "ACQUIRE",
+                "controller_id": self.controller_id,
+                "ttl_s": ttl,
+                "token": self.token,
+            }
         )
         if not resp.get("ok"):
             raise SupervisorUnavailable(f"lease acquire refused: {resp}")
@@ -675,8 +685,10 @@ class SupervisorClient:
         (DL-48): a transient failure must not silently lapse a live engine's
         lease -- pushes would stop with only the adapters' status.json
         re-poll saving outcomes. Failed RENEWs retry on a short backoff; a
-        stale/lapsed token re-ACQUIREs with the stable controller_id (fresh
-        fencing token); connection loss heals via _request's lazy reconnect.
+        stale/lapsed token re-ACQUIREs presenting the current token (DL-79:
+        incumbency, not a label -- a lapsed lease is free, but one another
+        engine now holds refuses us, which is the fencing working); a fresh
+        token comes back; connection loss heals via _request's lazy reconnect.
         Only several consecutive failures give up -- loudly, once."""
         failures = 0
         try:
@@ -690,7 +702,12 @@ class SupervisorClient:
                         # stale_token (fenced by a reconnect's own re-ACQUIRE,
                         # or lapsed): same controller re-acquires, fresh token
                         resp = await self._request(
-                            {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl_s}
+                            {
+                                "cmd": "ACQUIRE",
+                                "controller_id": self.controller_id,
+                                "ttl_s": ttl_s,
+                                "token": self.token,  # DL-79
+                            }
                         )
                         if resp.get("ok"):
                             self.token = int(resp["token"])

@@ -254,8 +254,10 @@ def test_lease_held_reacquire_and_fencing_monotonicity(short_root: Path) -> None
             "holder": "A",
             "expires_at": r1["expires_at"],
         }
-        # re-acquire by the SAME controller mints a strictly greater token
-        r2 = a.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
+        # DL-79: the incumbent re-keys by presenting its CURRENT token, and
+        # gets a strictly greater one. The label alone no longer suffices --
+        # see test_live_lease_yields_only_to_the_token_holder below.
+        r2 = a.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60, "token": 1})
         assert r2["ok"] and r2["token"] == 2
         # the OLD token is now stale for mutating verbs (fencing)
         stale = a.send({"v": 1, "cmd": "SHUTDOWN", "token": 1})
@@ -266,6 +268,83 @@ def test_lease_held_reacquire_and_fencing_monotonicity(short_root: Path) -> None
         assert r3["ok"] and r3["token"] == 3
     finally:
         a.close()
+        b.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_live_lease_yields_only_to_the_token_holder(short_root: Path) -> None:
+    """DL-79, the multihost fencing hole. Until DL-79 a live lease was handed
+    to ANY claimant presenting a matching controller_id, which was safe only
+    because one run_root had one engine and the ss10 control-socket bind
+    enforced that ON ONE MACHINE. A second host serving the same logical run
+    breaks the label: the partitioned OLD leader re-ACQUIREs, mints a higher
+    token, and fences out the leader that legitimately took over.
+
+    The rule now: a live lease (unexpired, holder's connection open) yields
+    only to a claimant that presents the CURRENT token. The label decides
+    nothing -- proved here from both directions."""
+    proc = start_supervisor(short_root)
+    a = RawClient(short_root)
+    b = RawClient(short_root)
+    try:
+        r1 = a.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
+        assert r1["ok"] and r1["token"] == 1
+
+        # the impersonator: right label, no token -> refused (the DL-79 fix)
+        spoof = b.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
+        assert spoof == {
+            "ok": False,
+            "error": "lease_held",
+            "holder": "A",
+            "expires_at": r1["expires_at"],
+        }
+        # right label, STALE token -> still refused (a returning old leader)
+        assert (
+            b.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60, "token": 0})[
+                "error"
+            ]
+            == "lease_held"
+        )
+        # and A is untouched: its token still mutates
+        assert a.send({"v": 1, "cmd": "LIST"})["lease"]["holder"] == "A"
+
+        # the other direction: the CURRENT token re-keys regardless of label,
+        # because the token is the only thing the holder alone can have
+        r2 = b.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "B", "ttl_s": 60, "token": 1})
+        assert r2["ok"] and r2["token"] == 2
+        assert a.send({"v": 1, "cmd": "SHUTDOWN", "token": 1}) == {
+            "ok": False,
+            "error": "stale_token",
+        }
+    finally:
+        a.close()
+        b.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dead_holder_frees_the_lease_without_waiting_out_the_ttl(short_root: Path) -> None:
+    """The resume property DL-79 must not break: a crashed engine's lease is
+    unexpired for up to ttl_s, and resume has to re-ACQUIRE without waiting it
+    out. That no longer comes from a matching controller_id -- it comes from
+    the holder's CONNECTION dying, which on this AF_UNIX socket the kernel
+    does only when the holder process is gone (kill -9 included). A 60s TTL
+    with a 5s budget here: if the orphan path regressed, this cannot pass."""
+    proc = start_supervisor(short_root)
+    a = RawClient(short_root)
+    b = RawClient(short_root)
+    try:
+        assert a.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["ok"]
+        a.close()  # the holder "crashes": the kernel closes its fd
+        deadline = time.monotonic() + 5.0
+        while True:
+            r = b.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "B-resumed", "ttl_s": 60})
+            if r.get("ok"):
+                break
+            assert r["error"] == "lease_held"  # only the EOF has yet to land
+            assert time.monotonic() < deadline, "orphaned lease never freed"
+            time.sleep(0.05)
+        assert r["token"] == 2
+    finally:
         b.close()
         teardown_supervisor(short_root, proc)
 
@@ -461,7 +540,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
     -- delivered verbatim, it would resolve the NEXT request's future (the
     reviewer reproduced a cancelled SPAWN's reply landing in a later ACQUIRE).
     The client must POISON the connection on cancel, and the next call must
-    lazily reconnect + re-ACQUIRE (stable controller_id -> fresh fencing
+    lazily reconnect + re-ACQUIRE (current token as incumbency proof, DL-79 -> fresh fencing
     token) and receive ITS OWN reply, never the orphan. Driven against a fake
     supervisor that holds one LIST reply hostage."""
 
@@ -530,7 +609,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
 
 def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
     """DL-48 review fix 3: a lapsed lease (RENEW -> stale_token) must not end
-    renewal -- the loop re-ACQUIREs with the stable controller_id and the
+    renewal -- the loop re-ACQUIREs (the lapsed lease is free to take) and the
     client keeps a live, monotonically fenced token."""
     proc = start_supervisor(short_root)
     try:
