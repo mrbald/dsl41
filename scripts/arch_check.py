@@ -15,7 +15,10 @@ specific way the tree got worse, never a matter of taste:
 3. a citation token in src/dsl41/*.py that resolves to no namespace row in
    docs/citation-index.md (a citation nobody can follow is not a citation);
 4. an IR-F model shape change without an IR_VERSION bump -- the CatalogIR
-   JSON schema is hashed and pinned in IR_SCHEMA_PIN below.
+   JSON schema is hashed and pinned in IR_SCHEMA_PIN below;
+5. a JobRuntime field or a global assigned outside StatusStore (DL-82) --
+   the concurrency model needs one observable write path, and a test that
+   watches whole feeds cannot see a missed write site.
 
 Advisory checks (reported, exit 0) are measured against the baseline, so
 only NEW or WORSENED sizes surface: modules over 1200 lines, functions over
@@ -184,9 +187,99 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
     ]
 
 
+#: JobRuntime's fields (oracle.py). DL-82 made StatusStore their sole writer;
+#: this set is what the gate below watches. Kept literal on purpose -- importing
+#: dsl41 into the gate would make a stdlib-only ~1s check depend on the tree it
+#: is checking.
+_STATE_FIELDS = frozenset(
+    {
+        "status",
+        "status_at",
+        "last_end_at",
+        "exit_code",
+        "run_number",
+        "on_ice",
+        "on_hold",
+        "on_noexec",
+        "armed",
+        "started_by",
+    }
+)
+_STATE_OWNER = "StatusStore"
+
+
+def _owner_class_lines(tree: ast.Module) -> set[int]:
+    """Line numbers inside the state-owner class body."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == _STATE_OWNER:
+            end = node.end_lineno or node.lineno
+            return set(range(node.lineno, end + 1))
+    return set()
+
+
+def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
+    """Blocking (DL-82): a JobRuntime field or a global assigned anywhere but
+    StatusStore. Optimistic locking needs one place where "this entity
+    changed" is observable exactly once per applied input, and eighteen
+    scattered assignment sites was not that place. A property test cannot
+    replace this: `_run` mutates three fields and then sets status twice, so
+    one missed site stays invisible to any check that observes whole feeds
+    rather than writes -- which is precisely why the guard is structural.
+
+    Scoped to the module that DEFINES JobRuntime plus the `.store.` write
+    paths any other module would have to go through. It stops accidents, not
+    sabotage -- the same stance as the rest of this gate."""
+    findings: list[Finding] = []
+    for path in sorted(paths):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        defines_runtime = any(
+            isinstance(node, ast.ClassDef) and node.name == "JobRuntime" for node in ast.walk(tree)
+        )
+        exempt = _owner_class_lines(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign | ast.AugAssign):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if node.lineno in exempt:
+                    continue
+                if (
+                    defines_runtime
+                    and isinstance(target, ast.Attribute)
+                    and target.attr in _STATE_FIELDS
+                ):
+                    findings.append(
+                        Finding(
+                            _rel(path),
+                            node.lineno,
+                            f"assigns JobRuntime.{target.attr} directly:"
+                            f" route it through {_STATE_OWNER} (DL-82)",
+                        )
+                    )
+                # any module reaching in through the store's containers
+                if isinstance(target, ast.Subscript):
+                    inner = target.value
+                    if isinstance(inner, ast.Attribute) and inner.attr in ("job", "globals_"):
+                        owner = inner.value
+                        if isinstance(owner, ast.Attribute) and owner.attr == "store":
+                            findings.append(
+                                Finding(
+                                    _rel(path),
+                                    node.lineno,
+                                    f"writes store.{inner.attr} directly:"
+                                    f" route it through {_STATE_OWNER} (DL-82)",
+                                )
+                            )
+    return findings
+
+
 def private_import_keys(paths: Iterable[Path]) -> list[str]:
     """Baseline form of the sites above: path:module._name, sorted."""
-    return sorted({f"{rel}:{module}.{name}" for rel, _, module, name in _private_import_sites(paths)})
+    return sorted(
+        {f"{rel}:{module}.{name}" for rel, _, module, name in _private_import_sites(paths)}
+    )
 
 
 # ---------------------------------------------------------------- 3. citations
@@ -258,7 +351,9 @@ def _is_citation_shaped(token: str, text: str, start: int, end: int) -> bool:
     return prefix not in _NOT_NAMESPACES
 
 
-def unresolved_citations(paths: Iterable[Path], patterns: Iterable[re.Pattern[str]]) -> list[Finding]:
+def unresolved_citations(
+    paths: Iterable[Path], patterns: Iterable[re.Pattern[str]]
+) -> list[Finding]:
     """Blocking: a citation-shaped token whose namespace has no row in the
     index. Either the token is a typo, or the namespace is new and the index
     needs the row first."""
@@ -471,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     if patterns:
         blocking += unresolved_citations(src_files, patterns)
     blocking += ir_schema_findings(IR_SCHEMA_PIN)
+    blocking += state_owner_bypasses(src_files)
 
     advisories = size_advisories(measure_sizes(src_files), baseline)
 

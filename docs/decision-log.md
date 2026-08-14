@@ -3191,3 +3191,40 @@
   covered this branch (the whole suite passed with the reason returned),
   so the new record is genuinely new coverage rather than a re-pin.
   1861 -> 1863 passed.
+
+- DL-82 StatusStore owns every JobRuntime field and every global
+  (2026-08-14; the first buildable piece of the concurrency model, landed
+  ahead of the rest because it is a pure refactor that commits to none of
+  the decisions still under review). The optimistic-locking design needs
+  one place where "this entity changed" is observable exactly once per
+  applied input. Eighteen assignment sites scattered across the
+  interpreter is not that place. The first draft proposed proving
+  completeness with a before/after property test over fed events plus a
+  per-site deletion sweep; the adversarial review killed both with one
+  observation, and it is the reason this entry exists: `_run` mutates
+  armed, run_number and started_by and then sets status twice, so ONE
+  touch inside `_set_status` masks every missed site in that feed, the
+  property still passes, and deleting the missed touch does not turn the
+  suite red either. A check that observes whole feeds cannot see a missed
+  write. Decisions: (1) StatusStore gains runtime()/update()/seed()/
+  set_global() and is the sole writer; Oracle._runtime delegates to it.
+  Pydantic refuses an undeclared field name, so a typo in update() is loud
+  rather than a silently created attribute nothing reads. (2)
+  scripts/arch_check.py gains a BLOCKING structural check: a JobRuntime
+  field assigned outside StatusStore, or a write reaching through
+  store.job / store.globals_ from any module. It is scoped to the module
+  that defines JobRuntime plus those container paths -- the supervisor's
+  own _Run.run_number must not trip it -- and it stops accidents, not
+  sabotage, the same stance as the rest of the gate. Proven falsifiable:
+  reintroducing `rt.started_by = cause` blocks with exit 1. (3) The gate
+  immediately earned itself. It found a nineteenth site no field-name grep
+  could see: SEM-24 definition-time seeding in Oracle.__init__ assigned a
+  whole JobRuntime row through `store.job[name] = ...`, which is a
+  Subscript, not an Attribute. That site now routes through seed(), a name
+  distinct from update() only in intent so its one caller reads as "this
+  row starts here". (4) Behavior is unchanged and the bisimulation gate
+  over the whole SEM corpus is the proof: 1863 passed before, 1863 after,
+  plus 3 new tests for the gate itself = 1866. No wire change, no new
+  field, no protocol version bump -- state_rev, the envelope and
+  mandatory preconditions all land later and cite the frozen spec.
+  oracle.py 1326 -> 1365 lines, re-stamped.

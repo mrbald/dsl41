@@ -273,3 +273,85 @@ def test_main_escalates_on_accumulated_diff_alone(
     out = capsys.readouterr().out
     assert "arch_check: clean" in out
     assert f"{arch_check.REVIEW_DIFF_LINES + 1} lines changed since arch-review/x" in out
+
+
+# ------------------------------------------------------ 5. state-owner bypasses (DL-82)
+
+_OWNER_MODULE = """
+class JobRuntime:
+    status = "INACTIVE"
+    armed = False
+
+
+class StatusStore:
+    def update(self, job, **fields):
+        rt = self.job[job]
+        rt.status = fields["status"]   # the owner itself is exempt
+        rt.armed = fields["armed"]
+        self.job[job] = rt
+
+
+class Oracle:
+    def bad_field(self, job):
+        rt = self.store.runtime(job)
+        rt.armed = True
+
+    def bad_bump(self, job):
+        rt = self.store.runtime(job)
+        rt.run_number += 1
+
+    def good(self, job):
+        self.store.update(job, armed=True)
+"""
+
+
+def test_direct_state_assignment_outside_the_owner_blocks(tmp_path: Path) -> None:
+    """DL-82: the concurrency model needs one observable write path per
+    entity. A property test over feeds cannot enforce it -- one feed mutates
+    several fields, so a missed site hides behind a sibling's write -- which
+    is why this guard is structural and blocking."""
+    mod = _write(tmp_path / "oracle.py", _OWNER_MODULE)
+    findings = arch_check.state_owner_bypasses([mod])
+    messages = [f.message for f in findings]
+    assert len(findings) == 2, messages
+    assert any("JobRuntime.armed" in m for m in messages)
+    assert any("JobRuntime.run_number" in m for m in messages)  # AugAssign counts
+    assert all("StatusStore (DL-82)" in m for m in messages)
+
+
+def test_owner_body_and_unrelated_modules_do_not_block(tmp_path: Path) -> None:
+    """Two exemptions that must hold or the gate is unusable: the owner class
+    writes the fields by definition, and a module that does not define
+    JobRuntime may legitimately own an attribute of the same name (the
+    supervisor's _Run.run_number is the real instance)."""
+    owner_only = _write(
+        tmp_path / "oracle.py",
+        "class JobRuntime:\n    armed = False\n\n\n"
+        "class StatusStore:\n    def update(self, job):\n        self.job[job].armed = True\n",
+    )
+    assert arch_check.state_owner_bypasses([owner_only]) == []
+
+    elsewhere = _write(
+        tmp_path / "runner_supervisor.py",
+        "class _Run:\n    def __init__(self, run_number):\n        self.run_number = run_number\n",
+    )
+    assert arch_check.state_owner_bypasses([elsewhere]) == []
+
+
+def test_reaching_through_the_store_containers_blocks(tmp_path: Path) -> None:
+    """The escape hatch a field-name check alone would miss: another module
+    writing whole rows through store.job / store.globals_. The gate that found
+    the real one was this clause -- the SEM-24 seeding path in Oracle.__init__
+    assigned a whole JobRuntime and no field-name grep saw it."""
+    mod = _write(
+        tmp_path / "runner.py",
+        "def poke(engine, job):\n"
+        "    engine.oracle.store.job[job] = 1\n"
+        "    engine.oracle.store.globals_['X'] = 'y'\n",
+    )
+    findings = arch_check.state_owner_bypasses([mod])
+    assert len(findings) == 2
+    assert {f.message.split(":")[0] for f in findings} == {
+        "writes store.job directly",
+        "writes store.globals_ directly",
+    }
