@@ -590,28 +590,47 @@ class Supervisor:
         run = self.runs.get(run_id) if isinstance(run_id, str) else None
         if run is None:
             return {"ok": False, "error": "unknown_run"}
-        if self._signal_command(run, sig):
+        outcome = self._signal_command(run, sig)
+        if outcome == "sent":
             return {"ok": True}
+        if outcome == "not_ready":
+            # DL-83: SPAWN returns once the wrapper is FORKED, and the wrapper
+            # writes spawn.json a few syscalls later. A signal landing in that
+            # window used to answer noop -- indistinguishable from "the group
+            # is already gone" -- so a KILLJOB decided milliseconds after a
+            # start was silently dropped and the engine recorded TERMINATED
+            # for a job that ran to completion. The wrapper being ALIVE with
+            # no record yet is the discriminator, and it means retry, not
+            # nothing-to-do.
+            return {"ok": False, "error": "not_ready"}
         return {"ok": True, "noop": True}  # already-dead / unverifiable group
 
-    def _signal_command(self, run: _Run, sig: int) -> bool:
+    def _signal_command(self, run: _Run, sig: int) -> str:
         """Signal the recorded command PGID -- never the wrapper (the recorder
-        is untouchable) -- after the (pid, start-time) PID-reuse guard. Returns
-        False (noop) when spawn.json is absent or the group is already gone."""
+        is untouchable) -- after the (pid, start-time) PID-reuse guard.
+
+        Returns "sent", "noop" (nothing there to signal), or "not_ready"
+        (DL-83: the wrapper is alive but has not written spawn.json yet, so
+        the command may exist and simply not be addressable -- the caller must
+        retry rather than treat the kill as done). Collapsing those last two
+        into one answer is how a kill decided in the spawn window vanished."""
         spawn = _load_json(os.path.join(run.run_dir, "spawn.json"))
         if spawn is None:
-            return False
+            # wrapper_rc is None while the wrapper lives (set by _reap). A live
+            # wrapper with no record is mid-spawn; a dead one never recorded,
+            # and there is nothing this tier can still address.
+            return "not_ready" if run.wrapper_rc is None else "noop"
         if not (spawn.get("job") == run.job and spawn.get("run_number") == run.run_number):
-            return False  # spoofed/corrupt spawn record: never trust, never signal
+            return "noop"  # spoofed/corrupt spawn record: never trust, never signal
         pid = spawn.get("command_pid")
         pgid = spawn.get("command_pgid")
         token = spawn.get("command_start_time")
         if not (isinstance(pid, int) and isinstance(pgid, int) and isinstance(token, str)):
-            return False
+            return "noop"
         if not verify_alive(pid, token):  # the PID-reuse guard
-            return False
+            return "noop"
         killpg_quiet(pgid, sig)
-        return True
+        return "sent"
 
     # -- shutdown -----------------------------------------------------------
 

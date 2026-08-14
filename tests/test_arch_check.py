@@ -278,9 +278,10 @@ def test_main_escalates_on_accumulated_diff_alone(
 # ------------------------------------------------------ 5. state-owner bypasses (DL-82)
 
 _OWNER_MODULE = """
-class JobRuntime:
-    status = "INACTIVE"
-    armed = False
+class JobRuntime(BaseModel):
+    status: str = "INACTIVE"
+    armed: bool = False
+    run_number: int = 0
 
 
 class StatusStore:
@@ -326,7 +327,7 @@ def test_owner_body_and_unrelated_modules_do_not_block(tmp_path: Path) -> None:
     supervisor's _Run.run_number is the real instance)."""
     owner_only = _write(
         tmp_path / "oracle.py",
-        "class JobRuntime:\n    armed = False\n\n\n"
+        "class JobRuntime(BaseModel):\n    armed: bool = False\n\n\n"
         "class StatusStore:\n    def update(self, job):\n        self.job[job].armed = True\n",
     )
     assert arch_check.state_owner_bypasses([owner_only]) == []
@@ -363,7 +364,7 @@ def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
     inside the owner -- and once JobRuntime is frozen, not even there."""
     mod = _write(
         tmp_path / "oracle.py",
-        "class JobRuntime:\n    armed = False\n\n\n"
+        "class JobRuntime(BaseModel):\n    armed: bool = False\n\n\n"
         "class StatusStore:\n"
         "    def update(self, job, **fields):\n"
         "        for k, v in fields.items():\n"
@@ -375,3 +376,43 @@ def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
     findings = arch_check.state_owner_bypasses([mod])
     assert len(findings) == 1
     assert "setattr() outside StatusStore" in findings[0].message
+
+
+def test_gate_watches_fields_it_was_never_told_about(tmp_path: Path) -> None:
+    """DL-83: the watched set is DERIVED from the model's own AST. A
+    hard-coded list stops protecting the moment a field is added -- state_rev
+    is about to be one -- and a gate that quietly narrows is worse than none.
+    `future_field` appears in no list anywhere and must still be caught."""
+    mod = _write(
+        tmp_path / "oracle.py",
+        "class JobRuntime(BaseModel):\n    future_field: int = 0\n\n\n"
+        "class StatusStore:\n    pass\n\n\n"
+        "class Oracle:\n    def poke(self, rt):\n        rt.future_field = 1\n",
+    )
+    findings = arch_check.state_owner_bypasses([mod])
+    assert len(findings) == 1
+    assert "JobRuntime.future_field" in findings[0].message
+
+
+def test_the_wider_write_shapes_all_block(tmp_path: Path) -> None:
+    """Ordinary Python that an Assign/AugAssign walk alone misses: annotated
+    assignment, tuple destructuring, `del`, and mapping mutators on the owner's
+    containers. Each is a real way to change state, so each must block."""
+    mod = _write(
+        tmp_path / "oracle.py",
+        "class JobRuntime(BaseModel):\n    armed: bool = False\n    status: str = ''\n\n\n"
+        "class StatusStore:\n    pass\n\n\n"
+        "class Oracle:\n"
+        "    def annotated(self, rt):\n        rt.armed: bool = True\n"
+        "    def destructured(self, rt, other):\n        rt.armed, other.status = True, 'x'\n"
+        "    def deleted(self, rt):\n        del rt.armed\n"
+        "    def mapping(self, other):\n        self.store.job.update(other)\n"
+        "    def popped(self):\n        self.store.globals_.pop('X', None)\n",
+    )
+    kinds = sorted({f.message.split(":")[0] for f in arch_check.state_owner_bypasses([mod])})
+    assert kinds == [
+        "assigns JobRuntime.armed directly",
+        "assigns JobRuntime.status directly",
+        "mutates store.globals_ through .pop()",
+        "mutates store.job through .update()",
+    ]

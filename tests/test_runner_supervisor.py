@@ -369,8 +369,14 @@ def test_fencing_survives_a_supervisor_restart_token_reuse(short_root: Path) -> 
 
         # the stale controller replays its old (matching!) token
         theft = stale.send(
-            {"v": 1, "cmd": "ACQUIRE", "controller_id": "old", "ttl_s": 60,
-             "token": 1, "incarnation": inc1}
+            {
+                "v": 1,
+                "cmd": "ACQUIRE",
+                "controller_id": "old",
+                "ttl_s": 60,
+                "token": 1,
+                "incarnation": inc1,
+            }
         )
         assert theft == {
             "ok": False,
@@ -382,14 +388,20 @@ def test_fencing_survives_a_supervisor_restart_token_reuse(short_root: Path) -> 
         spawned = stale.send({"v": 1, "cmd": "LIST"})
         assert spawned["incarnation"] == inc2
         sig = stale.send(
-            {"v": 1, "cmd": "SIGNAL", "token": 1, "incarnation": inc1,
-             "run_id": "whatever", "sig": "TERM"}
+            {
+                "v": 1,
+                "cmd": "SIGNAL",
+                "token": 1,
+                "incarnation": inc1,
+                "run_id": "whatever",
+                "sig": "TERM",
+            }
         )
         assert sig == {"ok": False, "error": "wrong_incarnation", "incarnation": inc2}
         # the rightful holder is untouched
-        assert fresh.send(
-            {"v": 1, "cmd": "RENEW", "token": 1, "incarnation": inc2, "ttl_s": 60}
-        )["ok"]
+        assert fresh.send({"v": 1, "cmd": "RENEW", "token": 1, "incarnation": inc2, "ttl_s": 60})[
+            "ok"
+        ]
     finally:
         fresh.close()
         stale.close()
@@ -440,6 +452,86 @@ def test_lease_expiry_lets_a_new_holder_in(short_root: Path) -> None:
         teardown_supervisor(short_root, proc)
 
 
+def test_signal_in_the_spawn_window_is_not_ready_not_a_noop(short_root: Path) -> None:
+    """DL-83. SPAWN returns once the wrapper is FORKED; the wrapper writes
+    spawn.json a few syscalls later. A signal landing in that window used to
+    answer {ok, noop} -- indistinguishable from "the group is already gone" --
+    so a KILLJOB decided milliseconds after a start was silently dropped and
+    the engine recorded TERMINATED for a job that ran to completion.
+
+    The real window is a few milliseconds, so racing it would give a test that
+    passes vacuously whenever it loses the race. Instead the window is
+    RECREATED deterministically: wait for spawn.json, move it aside, and signal
+    while the wrapper is demonstrably alive. That is the exact state the engine
+    saw -- live wrapper, no record -- and the answer must be a retryable
+    not_ready, never a noop."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        rd = short_root / "runs" / "slowspawn.1"
+        rd.mkdir(parents=True)
+        spawned = cli.send(
+            {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(rd, "sleep 30", grace=0.5)}
+        )
+        assert spawned["ok"]
+        run_id = spawned["run_id"]
+        record = rd / "spawn.json"
+        wait_for(record.exists)
+        saved = record.read_bytes()
+        record.unlink()  # re-enter the spawn window, deterministically
+
+        assert _wrapper_alive(cli, tok, run_id), "the discriminator needs a LIVE wrapper"
+        r = cli.send({"v": 1, "cmd": "SIGNAL", "token": tok, "run_id": run_id, "sig": "TERM"})
+        assert r == {"ok": False, "error": "not_ready"}, "a live wrapper with no record must retry"
+
+        record.write_bytes(saved)  # addressable again: the same call now lands
+        assert cli.send(
+            {"v": 1, "cmd": "SIGNAL", "token": tok, "run_id": run_id, "sig": "TERM"}
+        ) == {"ok": True}
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def _wrapper_alive(cli: "RawClient", tok: int, run_id: str) -> bool:
+    for row in cli.send({"v": 1, "cmd": "LIST"})["runs"]:
+        if row["run_id"] == run_id:
+            return bool(row["wrapper_alive"])
+    return False
+
+
+def test_signal_for_a_dead_wrapper_with_no_record_is_a_noop(short_root: Path) -> None:
+    """The other side of DL-83's discriminator: a wrapper that exited without
+    ever writing spawn.json left nothing this tier can address, so noop is the
+    truthful answer and the caller must not spin retrying."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        rd = short_root / "runs" / "gone.1"
+        rd.mkdir(parents=True)
+        # a spec the wrapper rejects: it exits without a spawn record
+        bad = _spec(rd, "true")
+        bad["command"] = None  # spec error -> wrapper exits 2, writes nothing
+        spawned = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": bad})
+        assert spawned["ok"]
+        run_id = spawned["run_id"]
+        wait_for(lambda: not (rd / "spawn.json").exists() and _wrapper_done(cli, tok, run_id))
+        r = cli.send({"v": 1, "cmd": "SIGNAL", "token": tok, "run_id": run_id, "sig": "TERM"})
+        assert r == {"ok": True, "noop": True}
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def _wrapper_done(cli: "RawClient", tok: int, run_id: str) -> bool:
+    for row in cli.send({"v": 1, "cmd": "LIST"})["runs"]:
+        if row["run_id"] == run_id:
+            return row["wrapper_rc"] is not None
+    return False
+
+
 def test_spawn_idempotency_replay(short_root: Path) -> None:
     proc = start_supervisor(short_root)
     cli = RawClient(short_root)
@@ -472,9 +564,12 @@ def test_mutating_verbs_require_a_token(short_root: Path) -> None:
         # so this test isolates the TOKEN gate, which is the secret half
         cli.send({"v": 1, "cmd": "PING"})
         # ... and omitting it is its own refusal, not a token failure
-        assert cli.send(
-            {"v": 1, "cmd": "SPAWN", "spec": _spec(rd, "true"), "incarnation": None}
-        )["error"] == "wrong_incarnation"
+        assert (
+            cli.send({"v": 1, "cmd": "SPAWN", "spec": _spec(rd, "true"), "incarnation": None})[
+                "error"
+            ]
+            == "wrong_incarnation"
+        )
         # no lease held: SPAWN/SIGNAL/SHUTDOWN all refuse
         assert (
             cli.send({"v": 1, "cmd": "SPAWN", "spec": _spec(rd, "true")})["error"] == "stale_token"

@@ -3228,3 +3228,44 @@
   field, no protocol version bump -- state_rev, the envelope and
   mandatory preconditions all land later and cite the frozen spec.
   oracle.py 1326 -> 1365 lines, re-stamped.
+
+- DL-83 a signal in the spawn window is retryable, not a no-op; and the
+  state-owner gate derives what it watches (2026-08-14; two independent
+  fixes shipped together as the pre-work for the concurrency model, both
+  found by the fourth adversarial pass over the design spec). (1) SIGNAL.
+  `_h_spawn` returns as soon as the wrapper is FORKED, and the wrapper
+  writes spawn.json a few syscalls later. `_signal_command` answered False
+  when spawn.json was absent, which `_h_signal` reported as
+  `{ok, noop: true}` -- indistinguishable from "the group is already
+  gone". So a KILLJOB decided milliseconds after a start was silently
+  dropped: the oracle recorded TERMINATED and the process ran to
+  completion, with the late real record then discarded by the ss4 stale
+  gate. The window is a few milliseconds, which is exactly the class DL-41a
+  exists to close, and the same hazard was already found and fixed for
+  SHUTDOWN (DL-48 gave `_orderly_shutdown` a bounded wait for missing
+  spawn records) while the per-run path was left exposed. The
+  discriminator is information the supervisor already had: a wrapper that
+  is ALIVE with no record yet is mid-spawn (retry), one that has EXITED
+  without a record left nothing this tier can address (a truthful noop).
+  `_signal_command` now returns "sent"/"noop"/"not_ready"; `not_ready` is
+  `{ok: false, error: "not_ready"}` so a caller cannot mistake it for
+  success, and SupervisedCommandAdapter retries across a 5s spawn window
+  -- matching DL-48's own bound -- giving up loudly on stderr rather than
+  dropping the kill silently. Under the coming effect-dedup design this
+  mattered more: persisting that noop as an applied effect would have made
+  the kill unretryable forever. Falsifiable: collapsing the two answers
+  back into "noop" fails the new test. The window is milliseconds, so the
+  test does not race it -- it RECREATES the state deterministically by
+  moving spawn.json aside while the wrapper is demonstrably alive, because
+  a test that silently loses its race is the kind of coverage this project
+  does not count. (2) The DL-82 gate. Its watched field list was
+  hard-coded, so it would have stopped protecting the moment `state_rev`
+  was added -- a gate that quietly narrows is worse than none. The set is
+  now DERIVED from JobRuntime's own AST (annotated fields, stdlib-only, no
+  dsl41 import), and coverage widened past Assign/AugAssign/setattr to
+  AnnAssign, `del`, tuple/list destructuring including starred targets,
+  and mapping mutators on the owner's containers
+  (`store.job.update/setdefault/pop/clear/popitem`). The fixtures that
+  declared bare class attributes were unrepresentative -- a Pydantic field
+  is annotated -- and now match the model the gate really watches. 1867 ->
+  1871 passed.

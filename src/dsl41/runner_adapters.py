@@ -900,6 +900,38 @@ class SupervisedCommandAdapter:
         )
         return result
 
+    #: DL-83: the spawn window. SPAWN returns once the wrapper is FORKED and
+    #: the wrapper writes spawn.json a few syscalls later, so a kill decided in
+    #: between is not addressable yet. The supervisor now says `not_ready`
+    #: instead of reporting a no-op, and we retry until it becomes addressable,
+    #: the run ends, or this bound elapses. Matches the supervisor's own
+    #: shutdown wait (DL-48), which fixed this hazard for SHUTDOWN and left the
+    #: per-run signal path exposed.
+    _SPAWN_WINDOW_S = 5.0
+    _SPAWN_POLL_S = 0.02
+
+    async def _signal_when_addressable(
+        self, run_id: str, sig: str, fut: "asyncio.Future[dict[str, Any]]"
+    ) -> None:
+        """SIGNAL, retrying while the supervisor answers `not_ready`. Gives up
+        the moment the run reports its exit -- a completed run needs no
+        signal -- and after the spawn window, which is loud rather than a
+        silent drop."""
+        deadline = time.monotonic() + self._SPAWN_WINDOW_S
+        while True:
+            resp = await self.client.signal(run_id, sig)
+            if resp.get("error") != "not_ready":
+                return
+            if fut.done() or time.monotonic() >= deadline:
+                print(
+                    f"dsl41: {sig} for run {run_id} never became addressable"
+                    " within the spawn window; the wrapper's lifeline remains"
+                    " the backstop",
+                    file=sys.stderr,
+                )
+                return
+            await asyncio.sleep(self._SPAWN_POLL_S)
+
     async def _kill(self, run_id: str) -> None:
         """ss3 case a: the oracle said terminal. TERM the command group via the
         supervisor, grace, KILL, await the exit push so the wrapper records --
@@ -907,14 +939,14 @@ class SupervisedCommandAdapter:
         the terminal)."""
         fut = self.client.exit_future(run_id)
         try:
-            await self.client.signal(run_id, "TERM")
+            await self._signal_when_addressable(run_id, "TERM", fut)
         except SupervisorUnavailable:
             return  # supervisor gone: the wrapper's own lifeline handles it
         try:
             await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
         except (TimeoutError, asyncio.TimeoutError):
             with contextlib.suppress(SupervisorUnavailable):
-                await self.client.signal(run_id, "KILL")
+                await self._signal_when_addressable(run_id, "KILL", fut)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
         finally:

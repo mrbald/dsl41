@@ -187,25 +187,41 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
     ]
 
 
-#: JobRuntime's fields (oracle.py). DL-82 made StatusStore their sole writer;
-#: this set is what the gate below watches. Kept literal on purpose -- importing
-#: dsl41 into the gate would make a stdlib-only ~1s check depend on the tree it
-#: is checking.
-_STATE_FIELDS = frozenset(
-    {
-        "status",
-        "status_at",
-        "last_end_at",
-        "exit_code",
-        "run_number",
-        "on_ice",
-        "on_hold",
-        "on_noexec",
-        "armed",
-        "started_by",
-    }
-)
+#: DL-83: the watched fields are DERIVED from JobRuntime's own AST, not listed
+#: here. A hard-coded list silently stops protecting the moment a field is
+#: added -- state_rev is about to be one -- and a gate that quietly narrows is
+#: worse than no gate. Still stdlib-only: this reads the source, it does not
+#: import dsl41 (that would make a ~1s check depend on the tree it checks).
+_STATE_MODEL = "JobRuntime"
 _STATE_OWNER = "StatusStore"
+#: containers on the owner that a caller could reach through instead
+_STATE_MAPS = ("job", "globals_")
+
+
+def _model_fields(tree: ast.Module) -> frozenset[str]:
+    """Annotated field names declared on the state model, if this module
+    defines it."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == _STATE_MODEL:
+            return frozenset(
+                stmt.target.id
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+            )
+    return frozenset()
+
+
+def _assigned_attrs(node: ast.AST) -> Iterator[ast.Attribute]:
+    """Every attribute reached by an assignment target, unwrapping tuple and
+    list destructuring and starred targets -- `a.x, (b.y, *c.z) = ...` writes
+    all three."""
+    if isinstance(node, ast.Attribute):
+        yield node
+    elif isinstance(node, ast.Tuple | ast.List):
+        for element in node.elts:
+            yield from _assigned_attrs(element)
+    elif isinstance(node, ast.Starred):
+        yield from _assigned_attrs(node.value)
 
 
 def _owner_class_lines(tree: ast.Module) -> set[int]:
@@ -218,81 +234,92 @@ def _owner_class_lines(tree: ast.Module) -> set[int]:
 
 
 def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
-    """Blocking (DL-82): a JobRuntime field or a global assigned anywhere but
-    StatusStore. Optimistic locking needs one place where "this entity
-    changed" is observable exactly once per applied input, and eighteen
-    scattered assignment sites was not that place. A property test cannot
-    replace this: `_run` mutates three fields and then sets status twice, so
-    one missed site stays invisible to any check that observes whole feeds
-    rather than writes -- which is precisely why the guard is structural.
+    """Blocking (DL-82, widened DL-83): a state-model field or a global
+    assigned anywhere but the owner. Optimistic locking needs one place where
+    "this entity changed" is observable exactly once per applied input, and a
+    property test over fed events cannot enforce it -- one feed mutates several
+    fields, so a missed site hides behind a sibling's write.
 
-    Scoped to the module that DEFINES JobRuntime plus the `.store.` write
-    paths any other module would have to go through. It stops accidents, not
-    sabotage -- the same stance as the rest of this gate."""
+    Covers assignment, augmented assignment, ANNOTATED assignment, `del`,
+    tuple/list destructuring, `setattr`, subscript writes through the owner's
+    containers, and mapping mutators on them (`store.job.update(...)`).
+
+    Scoped to the module that DEFINES the model plus the container paths any
+    other module would go through. It stops accidents, not sabotage -- the same
+    stance as the rest of this gate; a determined caller can still alias a row
+    out and write it, which is what frozen models are for."""
     findings: list[Finding] = []
     for path in sorted(paths):
         tree = _parse(path)
         if tree is None:
             continue
-        defines_runtime = any(
-            isinstance(node, ast.ClassDef) and node.name == "JobRuntime" for node in ast.walk(tree)
-        )
+        fields = _model_fields(tree)
         exempt = _owner_class_lines(tree)
+
+        def _flag(line: int, message: str, path: Path = path) -> None:
+            findings.append(Finding(_rel(path), line, f"{message} (DL-82)"))
+
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign | ast.AugAssign):
+            if node.lineno in exempt if hasattr(node, "lineno") else False:
                 continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if node.lineno in exempt:
-                    continue
-                if (
-                    defines_runtime
-                    and isinstance(target, ast.Attribute)
-                    and target.attr in _STATE_FIELDS
-                ):
-                    findings.append(
-                        Finding(
-                            _rel(path),
-                            node.lineno,
-                            f"assigns JobRuntime.{target.attr} directly:"
-                            f" route it through {_STATE_OWNER} (DL-82)",
-                        )
-                    )
-                # any module reaching in through the store's containers
-                if isinstance(target, ast.Subscript):
-                    inner = target.value
-                    if isinstance(inner, ast.Attribute) and inner.attr in ("job", "globals_"):
-                        owner = inner.value
-                        if isinstance(owner, ast.Attribute) and owner.attr == "store":
-                            findings.append(
-                                Finding(
-                                    _rel(path),
-                                    node.lineno,
-                                    f"writes store.{inner.attr} directly:"
-                                    f" route it through {_STATE_OWNER} (DL-82)",
-                                )
-                            )
-        if not defines_runtime:
-            continue
-        # setattr() is the hole an assignment walk cannot see: the attribute
-        # name is a runtime value, so no field-name check applies. The owner
-        # is the only place it is legitimate (and once JobRuntime is frozen it
-        # goes away there too, replaced by model_copy).
-        for node in ast.walk(tree):
-            if (
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+                targets = [node.target]
+            elif isinstance(node, ast.Delete):
+                targets = list(node.targets)
+            elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "setattr"
-                and node.lineno not in exempt
+                and fields
             ):
-                findings.append(
-                    Finding(
-                        _rel(path),
-                        node.lineno,
-                        f"setattr() outside {_STATE_OWNER} can reach a state field"
-                        " past the assignment gate (DL-82)",
-                    )
+                _flag(
+                    node.lineno,
+                    f"setattr() outside {_STATE_OWNER} can reach a state field"
+                    " past the assignment gate",
                 )
+                continue
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                # store.job.update(...) / .setdefault(...) / .pop(...) / .clear()
+                container = node.func.value
+                if (
+                    node.func.attr in ("update", "setdefault", "pop", "clear", "popitem")
+                    and isinstance(container, ast.Attribute)
+                    and container.attr in _STATE_MAPS
+                    and isinstance(container.value, ast.Attribute)
+                    and container.value.attr == "store"
+                ):
+                    _flag(
+                        node.lineno,
+                        f"mutates store.{container.attr} through .{node.func.attr}():"
+                        f" route it through {_STATE_OWNER}",
+                    )
+                continue
+            else:
+                continue
+
+            for target in targets:
+                for attribute in _assigned_attrs(target):
+                    if fields and attribute.attr in fields:
+                        _flag(
+                            node.lineno,
+                            f"assigns {_STATE_MODEL}.{attribute.attr} directly:"
+                            f" route it through {_STATE_OWNER}",
+                        )
+                if isinstance(target, ast.Subscript):
+                    inner = target.value
+                    if (
+                        isinstance(inner, ast.Attribute)
+                        and inner.attr in _STATE_MAPS
+                        and isinstance(inner.value, ast.Attribute)
+                        and inner.value.attr == "store"
+                    ):
+                        _flag(
+                            node.lineno,
+                            f"writes store.{inner.attr} directly: route it through {_STATE_OWNER}",
+                        )
     return findings
 
 
