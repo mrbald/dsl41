@@ -249,6 +249,12 @@ class JobRuntime(BaseModel):
     #: current execution. Only a BOX row ever carries entries; it was the loose
     #: `_box_ran` map until DL-86 moved it onto the entity it describes.
     ran_members: frozenset[str] = frozenset()
+    #: DL-87: this entity's optimistic-locking revision. Incremented at most
+    #: once per committed input, and only when the SEMANTIC projection below
+    #: changed. Deliberately last, and deliberately excluded from that
+    #: projection -- a revision that counted itself would justify its own
+    #: next increment (concurrency-model ss3).
+    state_rev: int = 0
 
 
 class GlobalRuntime(BaseModel):
@@ -256,9 +262,27 @@ class GlobalRuntime(BaseModel):
     a bare string because the concurrency model gives globals their own
     identity and their own `state_rev` (concurrency-model ss2)."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     value: str
+    state_rev: int = 0
+
+
+#: The fields whose change makes an entity's revision move. DERIVED as
+#: "everything on the model except these", not enumerated, so a field added
+#: later is projected by DEFAULT -- over-approximating the projection costs a
+#: spurious revision, under-approximating loses a conflict (concurrency-model
+#: ss3, and the DL-83 discipline that a gate must not silently narrow).
+#:
+#: `state_rev` is the only exclusion the models carry today. The others ss3
+#: names -- `watching`, log locations, catalog metadata, `spec_drift` -- are
+#: effect or disk state that lives runner-side and never entered these rows;
+#: if one ever does, its name belongs here with a reason.
+_UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
+_PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
+    name for name in JobRuntime.model_fields if name not in _UNPROJECTED
+)
+_DEFAULT_JOB = JobRuntime()
 
 
 class RuntimeState:
@@ -295,8 +319,38 @@ class RuntimeState:
         self._globals: dict[str, GlobalRuntime] = {}
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
+        #: DL-87 input transaction: entity key -> its projection at FIRST
+        #: touch within the open input. Empty and inert outside one.
+        self._snapshots: dict[str, object] = {}
+        self._in_input = False
 
     # ------------------------------------------------------------------- reads
+
+    @staticmethod
+    def job_key(job: str) -> str:
+        """`expect` addresses entities by namespaced key (concurrency-model
+        ss6). The transaction uses the same key space, so S3's precondition
+        check is a dict lookup rather than a translation layer."""
+        return f"job:{job}"
+
+    @staticmethod
+    def global_key(name: str) -> str:
+        return f"global:{name}"
+
+    def revision(self, key: str) -> int:
+        """The revision an `expect` must name for `key`. An entity that does
+        not exist reads 0 -- which is what makes a conditional create
+        expressible: `expect {"global:X": 0}` means "still absent", because
+        anything that exists has been through an input and is at 1 or more
+        (the catalog seed is itself one input, see Oracle.__init__)."""
+        namespace, _, name = key.partition(":")
+        if namespace == "job":
+            row = self._jobs.get(name)
+            return 0 if row is None else row.state_rev
+        if namespace == "global":
+            grow = self._globals.get(name)
+            return 0 if grow is None else grow.state_rev
+        raise OracleError(f"unknown entity namespace in {key!r}")
 
     @property
     def job(self) -> Mapping[str, JobRuntime]:
@@ -320,6 +374,62 @@ class RuntimeState:
         row = self._globals.get(name)
         return None if row is None else row.value
 
+    # ------------------------------------------------ the input transaction (DL-87)
+
+    def _projection(self, key: str) -> object:
+        """An entity's SEMANTIC value: what a revision is a revision OF.
+
+        A job's is its projected fields plus its own timers WITH their
+        ordering tokens -- an armed deadline is state that no status field
+        records (concurrency-model ss3). A missing job projects as the
+        default row, so merely reading an entity into existence is not a
+        change; a missing global projects as None, so first-set IS one and
+        `revision() == 0` can mean "absent"."""
+        namespace, _, name = key.partition(":")
+        if namespace == "job":
+            row = self._jobs.get(name) or _DEFAULT_JOB
+            fields = tuple(getattr(row, field) for field in _PROJECTED_JOB_FIELDS)
+            return (fields, tuple(self.timers_for(name)))
+        grow = self._globals.get(name)
+        return None if grow is None else grow.value
+
+    def _touch(self, key: str) -> None:
+        """Record an entity's pre-input projection the first time an open
+        input reaches it. Snapshot-on-first-touch rather than snapshot-all:
+        the projection is a function of the rows and the heap, both of which
+        only move through the mutators below, so the touched set cannot be
+        under-approximated by construction -- which is the direction ss3
+        says must not be got wrong."""
+        if self._in_input and key not in self._snapshots:
+            self._snapshots[key] = self._projection(key)
+
+    def begin_input(self) -> None:
+        """Open one input's transaction. Inputs do not nest: the oracle's
+        cascade, its fired timers and its box folds are all consequences of
+        ONE input and share its revision, which is what makes `expect`
+        checkable -- a client that read revision 12 must be invalidated by
+        the whole of the next input, not by its first transition."""
+        if self._in_input:
+            raise OracleError("input already open: inputs do not nest")
+        self._in_input = True
+        self._snapshots = {}
+
+    def commit_input(self) -> list[str]:
+        """Close the transaction and increment each CHANGED entity exactly
+        once. Returns the changed keys in a stable order -- S2's outbox and
+        `ApplyResult` need the list, not just the effect."""
+        self._in_input = False
+        snapshots, self._snapshots = self._snapshots, {}
+        changed = [key for key, before in snapshots.items() if self._projection(key) != before]
+        for key in sorted(changed):
+            namespace, _, name = key.partition(":")
+            if namespace == "job":
+                self._replace(name, state_rev=self.runtime(name).state_rev + 1)
+            else:
+                row = self._globals[name]
+                self._globals[name] = GlobalRuntime(value=row.value, state_rev=row.state_rev + 1)
+        return sorted(changed)
+
     # ------------------------------------------------------------------ writes
 
     def _replace(self, job: str, **fields: object) -> None:
@@ -329,6 +439,7 @@ class RuntimeState:
         the model's own constructor. Pydantic refuses an undeclared field
         name, so a typo is loud rather than a silently created attribute
         nothing reads."""
+        self._touch(self.job_key(job))
         self._jobs[job] = JobRuntime.model_validate({**dict(self.runtime(job)), **fields})
 
     def transition(
@@ -390,7 +501,14 @@ class RuntimeState:
         self._replace(job, armed=armed)
 
     def set_global(self, name: str, value: str) -> None:
-        self._globals[name] = GlobalRuntime(value=value)
+        """Latch a global's value (SEM-06). The revision carries over: only
+        commit_input() moves it, and only if the value actually changed --
+        AutoSys's same-value SET_GLOBAL is a real and common input."""
+        self._touch(self.global_key(name))
+        row = self._globals.get(name)
+        self._globals[name] = GlobalRuntime(
+            value=value, state_rev=0 if row is None else row.state_rev
+        )
 
     # ------------------------------------------------------------------ timers
 
@@ -399,6 +517,9 @@ class RuntimeState:
         global counter, so equal-due timers keep their arming order ACROSS
         jobs -- which is what decides who starts when two deadlines land on
         the same instant."""
+        job = ev.payload.get("job")
+        if isinstance(job, str):
+            self._touch(self.job_key(job))  # the heap IS part of the projection
         self._timer_seq += 1
         heapq.heappush(self._timers, (due, self._timer_seq, ev))
         return self._timer_seq
@@ -410,6 +531,9 @@ class RuntimeState:
         """Pop the earliest timer due at or before `at`, or None."""
         if not self._timers or self._timers[0][0] > at:
             return None
+        job = self._timers[0][2].payload.get("job")
+        if isinstance(job, str):
+            self._touch(self.job_key(job))  # a timer LEAVING the heap is a change too
         due, _, ev = heapq.heappop(self._timers)
         return due, ev
 
@@ -565,6 +689,12 @@ class Oracle:
     def __init__(self, catalog: CatalogIR) -> None:
         self.catalog = catalog
         self.store = RuntimeState()
+        # DL-87: the catalog seed IS an input -- the genesis one. Not
+        # ceremony: it is what makes `revision(key) == 0` mean "absent" for a
+        # global, and therefore what makes a conditional create expressible.
+        # A declared global lands at revision 1 like anything else that has
+        # been through an input; a never-declared name stays at 0.
+        self.store.begin_input()
         for name, job_ir in catalog.jobs.items():
             # SEM-24: definition-time state seeds the SEM-20/21/22 flags
             initial = job_ir.sem.initial_status
@@ -576,6 +706,7 @@ class Oracle:
             )
         for name, value in catalog.globals_declared.items():
             self.store.set_global(name, value)
+        self.store.commit_input()
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
         self._queue: deque[Event] = deque()
@@ -611,12 +742,20 @@ class Oracle:
         if self._now is not None and ev.at < self._now:
             raise OracleError(f"feed time went backwards: {ev.at} < {self._now}")
         emitted_start = len(self._emitted)
-        # fire timers due at or before this event first, in time order
-        self._fire_timers_due(ev.at)
-        self._now = ev.at
-        self._lazy_clock_checks()
-        self._queue.append(ev)
-        self._drain()
+        self.store.begin_input()
+        try:
+            # fire timers due at or before this event first, in time order
+            self._fire_timers_due(ev.at)
+            self._now = ev.at
+            self._lazy_clock_checks()
+            self._queue.append(ev)
+            self._drain()
+        finally:
+            # DL-87: revisions commit even if the drain raised. The oracle has
+            # no rollback, so whatever DID change is durable and a reader that
+            # saw the old revision must be invalidated by it; swallowing the
+            # bump would hand that reader a stale success.
+            self.store.commit_input()
         return self._emitted[emitted_start:]
 
     def next_timer_due(self) -> datetime | None:
@@ -668,10 +807,14 @@ class Oracle:
         if self._now is not None and now < self._now:
             raise OracleError(f"advance time went backwards: {now} < {self._now}")
         emitted_start = len(self._emitted)
-        self._fire_timers_due(now)
-        self._now = now
-        self._lazy_clock_checks()
-        self._drain()  # checks-then-drain adjacency, same as feed()
+        self.store.begin_input()  # a standalone time observation is an input (ss4)
+        try:
+            self._fire_timers_due(now)
+            self._now = now
+            self._lazy_clock_checks()
+            self._drain()  # checks-then-drain adjacency, same as feed()
+        finally:
+            self.store.commit_input()
         return self._emitted[emitted_start:]
 
     def _fire_timers_due(self, at: datetime) -> None:

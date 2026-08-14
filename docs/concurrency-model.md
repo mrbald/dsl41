@@ -372,8 +372,8 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | # | obligation | cost |
 | --- | --- | --- |
 | CM-01 | structural owner gate | landed (DL-82/83) |
-| CM-02 | cardinality: one increment per entity per committed input | cheap–medium |
-| CM-03 | corroborating property, generator widened | expensive |
+| CM-02 | cardinality: one increment per entity per committed input | landed (DL-87) |
+| CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | cheap |
 | CM-05 | dedup precedes admission: a retry advances no logical time | cheap |
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | cheap–medium |

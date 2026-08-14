@@ -1,13 +1,14 @@
-"""RuntimeState: the state owner the concurrency model needs (DL-86, stage S1b).
+"""RuntimeState: the state owner and its revisions (DL-86/87, stages S1b+S1c).
 
-Normative spec: docs/concurrency-model.md ss3 (state ownership). S1b installs
-the OWNER; S1c adds `state_rev` and the input transaction on top of it. What is
-tested here is therefore structural -- who may write, what a write is, and
-whether the authoritative state outside the rows is accounted for -- not the
-AutoSys semantics, which the SEM trace tests and the bisimulation gate already
-pin and which this refactor leaves byte-identical.
+Normative spec: docs/concurrency-model.md ss3 (state ownership and
+`state_rev`) plus ss6 (reads). S1b installed the OWNER; S1c puts a revision on
+every entity and one input transaction around every input. What is tested here
+is therefore structural -- who may write, what a write is, what counts as a
+change, and whether the authoritative state outside the rows is accounted for
+-- not the AutoSys semantics, which the SEM trace tests and the bisimulation
+gate already pin and which both stages leave byte-identical.
 
-Three groups:
+Four groups:
 
   * **the owner holds.** Rows are frozen, the maps do not escape, and the
     rebuild path VALIDATES -- `model_copy(update=)` does not, and a store that
@@ -17,11 +18,16 @@ Three groups:
     fields it must change AND the fields it must leave alone; a verb that
     quietly clears a sibling field is the exact failure the generic
     `update(**fields)` it replaces made invisible.
-  * **the inventory is accounted for** (concurrency-model ss3). `_box_ran`
-    moved onto the box row and `_run_started_at` turned out to be write-only
-    and is gone, so what remains outside the rows is `_CapacityPool` and its
-    waiter order -- kept there deliberately, with the invariants that make the
-    projection sound tested here rather than asserted in prose.
+  * **the inventory is accounted for** (ss3). `_box_ran` moved onto the box row
+    and `_run_started_at` turned out to be write-only and is gone, so what
+    remains outside the rows is `_CapacityPool` and its waiter order -- kept
+    there deliberately, with the invariants that make the projection sound
+    tested here rather than asserted in prose.
+  * **the revision is the projection's** (CM-02/CM-03). One increment per
+    entity per input, and only when the SEMANTIC projection moved -- checked
+    both as worked cases and as a property over a widened generator, whose
+    expectation is recomputed from the PUBLIC row and heap so it is an
+    independent oracle rather than a restatement of `_projection`.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Event, GlobalRuntime, JobRuntime, Oracle, RuntimeState
+from dsl41.oracle import Event, GlobalRuntime, JobRuntime, Oracle, OracleError, RuntimeState
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -241,8 +247,15 @@ def test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all() -> None:
     assert [kind for _, _, kind in o.pending_timers()] == ["must_start"]
 
     o.feed(_ev("STARTJOB", 5, job="ms"))
-    assert dict(o.store.job["ms"]) == after_first  # the row is untouched -- ENTIRELY
+    fields = dict(o.store.job["ms"])
+    revision = fields.pop("state_rev")
+    assert fields == {k: v for k, v in after_first.items() if k != "state_rev"}
     assert [kind for _, _, kind in o.pending_timers()] == ["must_start", "must_start"]
+    # ...and the revision moved anyway (DL-87), because the HEAP is projected.
+    # Without the timer half of the projection this input would be invisible to
+    # an `expect`, and a client that read revision 1 would win a precondition
+    # against a run whose schedule it has never seen.
+    assert revision == after_first["state_rev"] + 1
 
 
 # -------------------------------------------------------------- the inventory
@@ -331,3 +344,287 @@ def test_box_membership_bookkeeping_lives_on_the_box_row() -> None:
     assert o.store.job["bx"].status == "SUCCESS"
     o.feed(_ev("FORCE_STARTJOB", 3, job="bx"))
     assert o.store.job["bx"].ran_members == frozenset({"m1"})  # fresh execution
+
+
+# --------------------------------------------------- the revision (CM-02, CM-03)
+
+
+def _independent_projection(o: Oracle, key: str) -> object:
+    """What the revision is a revision OF, recomputed from the PUBLIC surface.
+
+    Deliberately NOT `store._projection`: a property test that asks the
+    implementation what changed can only prove the implementation agrees with
+    itself. This reads the row through `store.job` and the heap through
+    `timers_for`, drops `state_rev` (a revision that counted itself would
+    justify its own next increment), and is otherwise field-complete by
+    construction -- so a field added to JobRuntime is projected here too, and
+    an implementation that forgot it fails."""
+    namespace, _, name = key.partition(":")
+    if namespace == "job":
+        row = o.store.job.get(name) or JobRuntime()
+        fields = {k: v for k, v in dict(row).items() if k != "state_rev"}
+        return (
+            tuple(sorted(fields.items(), key=lambda kv: kv[0])),
+            tuple(o.store.timers_for(name)),
+        )
+    grow = o.store.globals_.get(name)
+    return None if grow is None else grow.value
+
+
+def _all_keys(o: Oracle) -> list[str]:
+    return [f"job:{j}" for j in o.store.job] + [f"global:{g}" for g in o.store.globals_]
+
+
+def test_cm02_one_input_that_changes_many_things_increments_each_entity_once() -> None:
+    """The cardinality obligation. Starting a box drives a long cascade -- the
+    box transitions twice (STARTING then RUNNING), its members start, the box
+    row's ran set is rewritten once per member -- and every entity it touched
+    must come out exactly one revision higher. Per-write increments would put
+    the box at five or six and make `expect` unusable for anything but a
+    single-transition input."""
+    o = Oracle(
+        lower_source(
+            "insert_job: bx\njob_type: b\n\n"
+            "insert_job: m1\njob_type: c\ncommand: x\nbox_name: bx\n\n"
+            "insert_job: m2\njob_type: c\ncommand: y\nbox_name: bx\n\n"
+        )
+    )
+    before = {key: o.store.revision(key) for key in _all_keys(o)}
+    o.feed(_ev("STARTJOB", 0, job="bx"))
+    assert o.store.job["bx"].status == "RUNNING"
+    assert o.store.job["m1"].status == "RUNNING"  # the cascade really ran
+    after = {key: o.store.revision(key) for key in _all_keys(o)}
+    assert after == {key: rev + 1 for key, rev in before.items()}
+
+
+def test_cm02_an_input_that_changes_nothing_increments_nothing() -> None:
+    """The other half of cardinality, and the one a per-write implementation
+    gets wrong for free: a refused start and a same-value SET_GLOBAL are real
+    inputs that leave the state where it was. If they moved a revision, every
+    idle poll would invalidate every outstanding precondition."""
+    o = Oracle(
+        lower_source(
+            "insert_global: G\nvalue: go\n\n"
+            "insert_job: gated\njob_type: c\ncommand: x\ncondition: s(never_defined)\n\n"
+        )
+    )
+    before = {key: o.store.revision(key) for key in _all_keys(o)}
+    o.feed(_ev("STARTJOB", 0, job="gated"))  # condition false, no schedule -> no arm
+    o.feed(_ev("SET_GLOBAL", 1, name="G", value="go"))  # SEM-06 same-value edge
+    assert o.store.job["gated"].status == "INACTIVE"
+    assert {key: o.store.revision(key) for key in _all_keys(o)} == before
+
+
+def test_cm02_the_revision_is_not_part_of_its_own_projection() -> None:
+    """Two states that differ ONLY in their revision have the same projection.
+
+    ss3 excludes `state_rev` "else it justifies itself". Worth being exact
+    about what that buys today: with the bump applied AFTER the commit-time
+    comparison, a projected revision could not yet have moved within its own
+    input, so no self-justifying loop is reachable right now and this
+    exclusion is defensive, not load-bearing -- which is the honest claim,
+    and the reason the test is written against `_projection` directly rather
+    than dressed up as a behaviour it cannot actually produce.
+
+    It protects the NEXT reader. `_projection` is the natural semantic digest
+    for S2's ApplyResult, and a digest that moves for two semantically
+    identical states is a false conflict wherever it is compared."""
+    state = RuntimeState()
+    state.transition("j", "RUNNING", T0)
+    plain = state._projection("job:j")
+    state._replace("j", state_rev=41)
+    assert state.runtime("j").state_rev == 41  # the field moved...
+    assert state._projection("job:j") == plain  # ...and the projection did not
+
+
+def test_an_input_that_touches_another_entity_leaves_yours_alone() -> None:
+    """The revision is per ENTITY, not per input: a busy estate must not
+    invalidate every outstanding precondition on every unrelated event."""
+    o = Oracle(
+        lower_source(
+            "insert_job: mine\njob_type: c\ncommand: x\n\n"
+            "insert_job: theirs\njob_type: c\ncommand: y\n\n"
+        )
+    )
+    o.feed(_ev("STATUS", 0, job="mine", status="SUCCESS"))
+    settled = o.store.revision("job:mine")
+    o.feed(_ev("STATUS", 1, job="theirs", status="SUCCESS"))
+    o.feed(_ev("SET_GLOBAL", 2, name="UNRELATED", value="x"))
+    assert o.store.revision("job:mine") == settled
+    assert o.store.revision("job:theirs") == 1
+
+
+def test_a_global_is_absent_at_revision_zero_and_exists_from_one() -> None:
+    """ss6: a conditional create has to be able to condition on ABSENCE, and
+    `expect {"global:X": 0}` is how -- which only works if nothing that exists
+    is ever at 0. The catalog seed is an input for exactly this reason: a
+    DECLARED global is at 1 from genesis, not sharing 0 with the undeclared."""
+    o = Oracle(lower_source("insert_global: DECLARED\nvalue: go\n\n"))
+    assert o.store.revision("global:DECLARED") == 1
+    assert o.store.revision("global:NEVER_SET") == 0
+    o.feed(_ev("SET_GLOBAL", 0, name="NEVER_SET", value="now"))
+    assert o.store.revision("global:NEVER_SET") == 1
+    assert o.store.global_value("NEVER_SET") == "now"
+
+
+def test_inputs_do_not_nest() -> None:
+    """One input, one revision. A nested transaction would let an inner commit
+    publish half an input's changes at a revision no reader should ever see."""
+    state = RuntimeState()
+    state.begin_input()
+    with pytest.raises(OracleError, match="do not nest"):
+        state.begin_input()
+
+
+def test_commit_names_the_changed_entities() -> None:
+    """S2's outbox and ApplyResult need the changed SET, not just the effect
+    of having changed it, and stably ordered so a replay writes the same
+    record."""
+    state = RuntimeState()
+    state.begin_input()
+    state.transition("b", "RUNNING", T0)
+    state.set_global("G", "go")
+    state.set_armed("a", True)
+    state.set_armed("untouched", False)  # already False: written, but not CHANGED
+    assert state.commit_input() == ["global:G", "job:a", "job:b"]
+
+
+_WIDE_JIL = (
+    "insert_global: FLAG\nvalue: go\n\n"
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_job: wbox\njob_type: b\n\n"
+    "insert_job: wm1\njob_type: c\ncommand: x\nbox_name: wbox\nmachine: m1\n"
+    "resources: (R, QUANTITY=1)\nterm_run_time: 10\n\n"
+    "insert_job: wm2\njob_type: c\ncommand: y\nbox_name: wbox\nmachine: m1\n"
+    "resources: (R, QUANTITY=1)\ncondition: v(FLAG) = go\n\n"
+    "insert_job: wsolo\njob_type: c\ncommand: z\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    "must_start_times: +7\ncondition: s(wm1)\n\n"
+)
+_WIDE_JOBS = ["wbox", "wm1", "wm2", "wsolo"]
+
+
+@settings(max_examples=250, deadline=None)
+@given(data=st.data())
+def test_cm03_every_projection_change_moves_exactly_one_revision(data: st.DataObject) -> None:
+    """CM-03, with the generator widened past the STATUS / SET_GLOBAL focus
+    the earlier bisimulation property had: the full status vocabulary, the six
+    out-of-band verbs, forced and scheduled starts, kills, and standalone time
+    advances that fire real `term_run_time` and `must_start` timers -- over a
+    catalog with a box, a contended resource and a global-gated member, so
+    cascades, QUE_WAIT and box folds all occur.
+
+    After EVERY input, for EVERY entity: the revision moved by exactly one if
+    the independently recomputed projection moved, and not at all otherwise.
+    The safety direction (a change that moves no revision) is the one that
+    loses a conflict, and it is the reason this is a property and not a
+    handful of cases -- but the cardinality direction is asserted just as
+    hard, because a double increment is a false conflict forever."""
+    o = Oracle(lower_source(_WIDE_JIL))
+    minute = 0.0
+    for _ in range(data.draw(st.integers(min_value=1, max_value=14))):
+        minute += data.draw(st.integers(min_value=0, max_value=6))
+        kind = data.draw(
+            st.sampled_from(
+                [
+                    "STATUS",
+                    "SET_GLOBAL",
+                    "STARTJOB",
+                    "FORCE_STARTJOB",
+                    "KILLJOB",
+                    "ON_ICE",
+                    "OFF_ICE",
+                    "ON_HOLD",
+                    "OFF_HOLD",
+                    "ON_NOEXEC",
+                    "OFF_NOEXEC",
+                    "ADVANCE",
+                ]
+            )
+        )
+        keys = sorted(set(_all_keys(o)) | {"job:wbox", "global:FLAG"})
+        before = {key: (_independent_projection(o, key), o.store.revision(key)) for key in keys}
+
+        at = T0 + timedelta(minutes=minute)
+        if kind == "ADVANCE":
+            o.advance(at)
+        elif kind == "SET_GLOBAL":
+            value = data.draw(st.sampled_from(["go", "stop"]))
+            o.feed(_ev("SET_GLOBAL", minute, name="FLAG", value=value))
+        elif kind == "STATUS":
+            job = data.draw(st.sampled_from(_WIDE_JOBS))
+            status = data.draw(
+                st.sampled_from(
+                    ["SUCCESS", "FAILURE", "TERMINATED", "STARTING", "RUNNING", "INACTIVE"]
+                )
+            )
+            o.feed(_ev("STATUS", minute, job=job, status=status))
+        else:
+            o.feed(_ev(kind, minute, job=data.draw(st.sampled_from(_WIDE_JOBS))))
+
+        for key in sorted(set(_all_keys(o)) | set(keys)):
+            was_projection, was_revision = before.get(key, (_independent_projection(o, key), 0))
+            moved = _independent_projection(o, key) != was_projection
+            assert o.store.revision(key) == was_revision + (1 if moved else 0), (
+                f"{key} projection {'changed' if moved else 'did not change'}"
+                f" but its revision went {was_revision} -> {o.store.revision(key)}"
+            )
+
+
+def test_a_standalone_time_advance_is_an_input() -> None:
+    """ss4: "scheduler ticks, adapter completions, reconciliation injections
+    and standalone time observations feed the same state machine" -- so
+    `advance()` opens and closes a transaction exactly as `feed()` does. It
+    fires the term_run_time deadline here, which terminates a running job with
+    no external event at all, and that must move the job's revision once."""
+    o = Oracle(lower_source("insert_job: slow\njob_type: c\ncommand: x\nterm_run_time: 5\n\n"))
+    o.feed(_ev("STARTJOB", 0, job="slow"))
+    started = o.store.revision("job:slow")
+    o.advance(T0 + timedelta(minutes=6))
+    assert o.store.job["slow"].status == "TERMINATED"  # the deadline really fired
+    assert o.store.revision("job:slow") == started + 1
+
+
+def test_an_input_whose_only_effect_is_a_timer_leaving_the_heap_still_counts() -> None:
+    """The pop side of the heap's projection, isolated. A must_start deadline
+    armed by a tick is STALE once the job has run, so when it finally fires it
+    emits nothing and writes no field -- the entire effect of the input is one
+    entry leaving the heap. If that did not move the revision, a client could
+    hold a precondition across a schedule change it never saw."""
+    o = Oracle(
+        lower_source(
+            "insert_job: ms2\njob_type: c\ncommand: x\n"
+            'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+            "must_start_times: +30\n\n"
+        )
+    )
+    o.feed(_ev("STARTJOB", 0, job="ms2"))  # runs AND arms the deadline
+    assert o.store.job["ms2"].run_number == 1
+    o.feed(_ev("STATUS", 1, job="ms2", status="SUCCESS"))
+    before_row = dict(o.store.job["ms2"])
+    # still ON the heap, though pending_timers() already hides it: that verb
+    # reports what a fire would ACT on, and this one is destined to no-op
+    assert len(o.store.timers_for("ms2")) == 1
+    assert o.pending_timers() == []
+
+    o.advance(T0 + timedelta(minutes=31))  # the stale deadline pops, silently
+    after_row = dict(o.store.job["ms2"])
+    assert o.store.timers_for("ms2") == []
+    assert {k: v for k, v in after_row.items() if k != "state_rev"} == {
+        k: v for k, v in before_row.items() if k != "state_rev"
+    }
+    assert after_row["state_rev"] == before_row["state_rev"] + 1
+
+
+def test_a_globals_revision_accumulates_across_inputs() -> None:
+    """`set_global` rebuilds the row, so it has to carry the revision over --
+    a reset would park every global at 1 forever and silently make every
+    `expect` on a global succeed."""
+    o = Oracle(lower_source("insert_global: G\nvalue: a\n\n"))
+    assert o.store.revision("global:G") == 1
+    o.feed(_ev("SET_GLOBAL", 0, name="G", value="b"))
+    assert o.store.revision("global:G") == 2
+    o.feed(_ev("SET_GLOBAL", 1, name="G", value="b"))  # same value: not a change
+    assert o.store.revision("global:G") == 2
+    o.feed(_ev("SET_GLOBAL", 2, name="G", value="c"))
+    assert o.store.revision("global:G") == 3

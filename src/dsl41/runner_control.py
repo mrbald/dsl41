@@ -109,10 +109,17 @@ class ControlServer:
     parity set (job verbs carry "job"; SET_GLOBAL carries "name"/"value";
     CHANGE_STATUS carries "job"/"status" and optional int "exit_code" --
     injected as STATUS, keeping overwrite parity). Queries: status [job],
-    trace [since], explain job, spec job, deps job, timers, plan; and
-    subscribe [since]. Job arguments
+    trace [since], explain job, spec job, deps job, timers, plan,
+    global name, globals names; and subscribe [since]. Job arguments
     are validated against the catalog -- vendor sendevent errors on unknown
     jobs rather than queueing them.
+
+    Revision-bearing reads (DL-87, concurrency-model ss6): `status` carries
+    each job's `state_rev`, and `global` / `globals` answer
+    `{present, value, state_rev}` for NAMED globals and insert nothing. The
+    naming is the point -- a map of the globals that exist cannot express the
+    absence a conditional create has to condition on, so an unset name is
+    answered `{present: false, state_rev: 0}` rather than omitted.
 
     Injections go through Engine.inject (source=control), so the WAL
     journals every control input at feed time (ss10: the WAL is the audit
@@ -259,6 +266,13 @@ class ControlServer:
             return self._deps(request)
         if cmd == "timers":
             return self._timers()
+        if cmd == "global":
+            return self._globals([request.get("name")])
+        if cmd == "globals":
+            names = request.get("names")
+            if not isinstance(names, list):
+                return {"ok": False, "error": "globals requires a list of names"}
+            return self._globals(names)
         if cmd == "plan":
             return self._plan()
         return {"ok": False, "error": f"unknown cmd {cmd!r}"}
@@ -378,6 +392,10 @@ class ControlServer:
                 # DL-68: the trigger of the most recent start, trace-cause
                 # verbatim (null = never started)
                 "started_by": rt.started_by,
+                # DL-87: the revision an `expect` precondition names for this
+                # entity. Published on every read because a client that acts on
+                # what it saw must be able to say WHAT it saw.
+                "state_rev": rt.state_rev,
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,
                 "log_err": log_err,
@@ -394,6 +412,27 @@ class ControlServer:
                     # key is itself the "not watching" signal
                     jobs[name]["watching"] = watching
         return {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
+
+    def _globals(self, names: list[Any]) -> dict[str, Any]:
+        """DL-87 (concurrency-model ss6): answer NAMED globals with
+        `{present, value, state_rev}`, inserting nothing.
+
+        An unset name is answered rather than omitted, and at revision 0 --
+        which is exactly what a conditional create conditions on, since the
+        catalog seed is an input and so anything that exists is at 1 or more.
+        Absence you cannot name is absence you cannot lock against."""
+        store = self.engine.oracle.store
+        answers: dict[str, Any] = {}
+        for name in names:
+            if not isinstance(name, str):
+                return {"ok": False, "error": f"global name must be a string, got {name!r}"}
+            row = store.globals_.get(name)
+            answers[name] = {
+                "present": row is not None,
+                "value": None if row is None else row.value,
+                "state_rev": 0 if row is None else row.state_rev,
+            }
+        return {"ok": True, "globals": answers}
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)

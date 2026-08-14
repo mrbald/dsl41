@@ -3424,3 +3424,66 @@
   `_TERMINAL` must move with it or the import cycles, and that is a
   separate refactor with its own bisimulation run -- the cheap first move
   is extracting `_CapacityPool` (DL-74 already drew that line).
+- DL-87 every entity carries a revision, and one input moves it at most
+  once (2026-08-14; stage S1c of the phase-12 programme,
+  `src/dsl41/oracle.py` + `src/dsl41/runner_control.py` +
+  `tests/test_runtime_state.py` + `tests/test_runner_control.py`).
+  `state_rev` lands on `JobRuntime` and `GlobalRuntime`, and every input
+  runs inside a transaction that increments each entity exactly once and
+  only if its SEMANTIC projection moved. This closes CM-02 and CM-03.
+  Behaviour is otherwise unchanged; the bisimulation gate is again the
+  proof (1902 -> 1916 passed).
+  What one input IS, pinned: one `feed()` or one `advance()` (ss4 puts
+  standalone time observations on the same path as operator commands), so
+  the fired timers, the cascade and the box folds that follow are
+  consequences of ONE input and share its revision. A per-write bump would
+  make `expect` usable only for an input that changes a single field --
+  starting a box moves the box row four times before its members are
+  touched. The commit happens in a `finally`: the oracle has no rollback,
+  so whatever DID change is durable and a reader holding the old revision
+  must be invalidated by it; swallowing the bump on a raised input would
+  hand that reader a stale success.
+  The touched set is snapshot-on-first-touch inside `RuntimeState` rather
+  than a snapshot of everything. That is exact, not an optimisation: the
+  projection is a function of the rows and the heap, and both move only
+  through the owner's own mutators, so the set cannot be
+  under-approximated by construction -- which is the direction ss3 says
+  must not be got wrong. The heap half matters twice, and both are tested
+  in isolation: arming a timer touches its job (a second schedule tick
+  arms a second `must_start` deadline while finding the job already
+  armed, changing no field at all), and a timer LEAVING the heap touches
+  it too (a stale deadline that fires, emits nothing and writes nothing
+  is still a schedule change a client must not hold a precondition
+  across).
+  The catalog seed is treated as the genesis input. Not ceremony: it is
+  what makes `revision(key) == 0` mean "absent" for a global, and
+  therefore what makes a conditional create expressible -- a DECLARED
+  global lands at 1 like anything else that has been through an input, so
+  nothing that exists shares 0 with the undeclared. The ss6 read verbs
+  follow from that: `global name` / `globals names` answer NAMED entities
+  with `{present, value, state_rev}` and insert nothing, an unset name
+  answered rather than omitted, and `status` now carries each job's
+  `state_rev`. Absence you cannot name is absence you cannot lock
+  against.
+  One honesty correction, made because the probe forced it: a test
+  claiming that excluding `state_rev` from its own projection prevents a
+  self-justifying loop was VACUOUS -- the bump is applied AFTER the
+  commit-time comparison, so a projected revision could not yet have
+  moved and no loop is reachable. The exclusion stays (ss3 mandates it,
+  and `_projection` is the natural semantic digest for S2's ApplyResult,
+  where a value that differs for two identical states is a false
+  conflict) but the test now pins what is actually true: two rows
+  differing only in revision project identically.
+  Second probe lesson, on the probe rather than the code: three
+  mutations were guarded ONLY by the CM-03 hypothesis property, and one
+  of them reported falsifiable on the first run and VACUOUS on the
+  second, because catching a narrow mutation depended on the seed. Each
+  now has a deterministic sibling test -- `advance()` as an input, a
+  timer leaving the heap as the sole effect of an input, and a global's
+  revision accumulating across inputs -- and the property runs alongside
+  as corroboration, never alone. A probe whose verdict depends on a seed
+  will eventually lie in both directions.
+  Fourteen mutations turn their tests red, twice in a row.
+  `docs/citation-index.md` gains the `S\d[a-c]?` row: the stage names are
+  a real namespace (ss10 defines S0-S7) and the DL-75 gate blocked on
+  them until it existed, which is the gate working as designed.

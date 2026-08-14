@@ -1444,9 +1444,7 @@ def test_timers_synthesizes_a_filewatch_row_and_status_gains_watching_for_live_f
 
             async def both_running() -> bool:
                 r = await _control_call(server.path, {"cmd": "status"})
-                return all(
-                    r["jobs"][j]["status"] == "RUNNING" for j in ("fwv_cmd", "fwv_fw")
-                )
+                return all(r["jobs"][j]["status"] == "RUNNING" for j in ("fwv_cmd", "fwv_fw"))
 
             await _wait_for_async(both_running)
             resp = await _control_call(server.path, {"cmd": "timers"})
@@ -1654,3 +1652,118 @@ def test_cli_brief_flags_include_the_armed_latch_in_ihna_order() -> None:
     assert _brief_flags(all_on) == "IHNA"
     assert _brief_flags({"armed": True}) == "A"
     assert _brief_flags({"status": "INACTIVE"}) == ""
+
+
+# ---------------------------------------- revision-bearing reads (DL-87, ss6)
+
+
+def test_global_read_answers_named_absence_and_presence_with_revisions(
+    short_root: Path,
+) -> None:
+    """concurrency-model ss6: `global` / `globals` answer NAMED entities with
+    {present, value, state_rev} and insert nothing.
+
+    The naming is the whole point. A map of the globals that happen to exist
+    cannot express the absence a conditional create has to condition on, so an
+    unset name comes back present:false at revision 0 rather than missing --
+    and 0 means absent unambiguously, because the catalog seed is itself an
+    input and anything that exists is at 1 or more."""
+    text = (
+        "insert_global: DECLARED\nvalue: go\n\n"
+        "insert_job: gj\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "global", "name": "DECLARED"})
+            assert resp["ok"] is True
+            assert resp["globals"] == {"DECLARED": {"present": True, "value": "go", "state_rev": 1}}
+
+            resp = await _control_call(server.path, {"cmd": "global", "name": "NEVER_SET"})
+            assert resp["globals"]["NEVER_SET"] == {
+                "present": False,
+                "value": None,
+                "state_rev": 0,
+            }
+
+            # the read INSERTED nothing -- asking about a name must not create it
+            assert "NEVER_SET" not in engine.oracle.store.globals_
+
+            resp = await _control_call(
+                server.path,
+                {"cmd": "sendevent", "event": "SET_GLOBAL", "name": "NEVER_SET", "value": "now"},
+            )
+            assert resp["ok"] is True
+
+            async def landed() -> bool:
+                r = await _control_call(server.path, {"cmd": "global", "name": "NEVER_SET"})
+                return bool(r["globals"]["NEVER_SET"]["present"])
+
+            await _wait_for_async(landed)
+            resp = await _control_call(
+                server.path, {"cmd": "globals", "names": ["DECLARED", "NEVER_SET", "STILL_NOT"]}
+            )
+            assert resp["globals"] == {
+                "DECLARED": {"present": True, "value": "go", "state_rev": 1},
+                "NEVER_SET": {"present": True, "value": "now", "state_rev": 1},
+                "STILL_NOT": {"present": False, "value": None, "state_rev": 0},
+            }
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_globals_read_refuses_a_malformed_request(short_root: Path) -> None:
+    """`globals` needs a list and every name must be a string: a silent
+    coercion here would hand a client a confident answer about an entity it
+    never asked for."""
+    text = "insert_job: gj2\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            resp = await _control_call(server.path, {"cmd": "globals", "names": "DECLARED"})
+            assert resp["ok"] is False and "list of names" in resp["error"]
+            resp = await _control_call(server.path, {"cmd": "globals", "names": [7]})
+            assert resp["ok"] is False and "must be a string" in resp["error"]
+            resp = await _control_call(server.path, {"cmd": "global"})
+            assert resp["ok"] is False and "must be a string" in resp["error"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_status_publishes_the_revision_a_precondition_would_name(short_root: Path) -> None:
+    """DL-87: a client that acts on what it saw must be able to say what it
+    saw. The revision moves once per input that changed the job -- the whole
+    STARTJOB cascade here is one input, not one per transition."""
+    text = "insert_job: rev_j\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # park RUNNING: one input, then quiet
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            resp = await _control_call(server.path, {"cmd": "status", "job": "rev_j"})
+            before = resp["jobs"]["rev_j"]["state_rev"]
+
+            resp = await _control_call(
+                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "rev_j"}
+            )
+            assert resp["ok"] is True
+
+            async def running() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "rev_j"})
+                return r["jobs"]["rev_j"]["status"] == "RUNNING"
+
+            await _wait_for_async(running)
+            resp = await _control_call(server.path, {"cmd": "status", "job": "rev_j"})
+            # INACTIVE -> STARTING -> RUNNING plus the run_number bump, all one
+            # input: exactly one revision, or `expect` is unusable
+            assert resp["jobs"]["rev_j"]["state_rev"] == before + 1
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
