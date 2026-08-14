@@ -16,7 +16,7 @@ specific way the tree got worse, never a matter of taste:
    docs/citation-index.md (a citation nobody can follow is not a citation);
 4. an IR-F model shape change without an IR_VERSION bump -- the CatalogIR
    JSON schema is hashed and pinned in IR_SCHEMA_PIN below;
-5. a JobRuntime field or a global assigned outside StatusStore (DL-82) --
+5. a JobRuntime field or a global assigned outside RuntimeState (DL-82/86) --
    the concurrency model needs one observable write path, and a test that
    watches whole feeds cannot see a missed write site.
 
@@ -193,9 +193,12 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
 #: worse than no gate. Still stdlib-only: this reads the source, it does not
 #: import dsl41 (that would make a ~1s check depend on the tree it checks).
 _STATE_MODEL = "JobRuntime"
-_STATE_OWNER = "StatusStore"
-#: containers on the owner that a caller could reach through instead
-_STATE_MAPS = ("job", "globals_")
+_STATE_OWNER = "RuntimeState"
+#: Containers on the owner that a caller could reach through instead. Both the
+#: private maps and the read-only views over them (DL-86): the views raise at
+#: runtime, but a static name is the better error, and a caller who reaches for
+#: `_jobs` should be told the same thing as one who reaches for `job`.
+_STATE_MAPS = ("_jobs", "_globals", "_timers", "job", "globals_")
 
 
 def _model_fields(tree: ast.Module) -> frozenset[str]:

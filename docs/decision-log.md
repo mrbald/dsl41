@@ -3378,3 +3378,49 @@
   harness's own FW classification. Partition, reroute and leader failover
   are ABSENT rather than stubbed: a stub that always passes is the exact
   failure mode a safety harness exists to prevent. 1871 -> 1884 passed.
+- DL-86 the state owner: frozen rows, maps that cannot escape, and one
+  verb per kind of change (2026-08-14; stage S1b of the phase-12
+  programme, `src/dsl41/oracle.py` + `tests/test_runtime_state.py`).
+  `StatusStore` (DL-82) becomes `RuntimeState`, which is what
+  docs/concurrency-model.md ss3 asks for and S1c's `state_rev` needs
+  underneath it. Four changes of substance. (1) `JobRuntime` and the new
+  `GlobalRuntime` are FROZEN, so a change is a replacement rather than a
+  field write nobody watched, and an aliased row can no longer reach past
+  every gate; `store.job` / `store.globals_` publish read-only proxies
+  over private maps, so escape is now impossible at runtime instead of
+  merely detected in the source. (2) The generic `update(**fields)` is
+  gone, replaced by `transition`, `start_run`, `set_flags`, `set_armed`,
+  `set_global` and `enqueue_timer` -- each tested for what it must change
+  AND what it must leave alone, which is the failure the field dict made
+  invisible. Two traps surfaced in the rewrite and are pinned by tests:
+  `model_copy(update=)` does NOT validate (it will store the string
+  "seven" in `run_number`), so rows rebuild through the model's own
+  constructor; and rebuilding from a dict DEFAULTS to dropping an
+  unrecognised key, which would have silently retired DL-82's typo guard
+  -- `extra="forbid"` keeps it. (3) The timer heap moved onto the owner
+  WITH its ordering token, and `timers_for(job)` publishes the per-entity
+  half, because sorting the union of those views has to reproduce the
+  heap exactly and a per-job set digest cannot. (4) The ss3 state
+  inventory is settled: `_box_ran` MOVED onto the box row as
+  `ran_members`; `_run_started_at` was assigned on every start and read
+  NOWHERE, so it was never state and is deleted; `_CapacityPool` and its
+  waiter order STAYED, under the two invariants ss3 demands be tested
+  rather than asserted -- the waiter set is exactly the QUE_WAIT jobs and
+  only a starting or running job holds units, both held after every event
+  of a randomised contended schedule. The waiter order needs no token
+  because a waiter's rank is fixed at its QUE_WAIT transition, which is
+  itself a projected change; a timer does need one because a SECOND
+  schedule tick arms a second `must_start` deadline while finding the job
+  already armed, changing no row at all. The doc's op list named a
+  `cancel_timer`; it is not built, because the oracle discards a
+  superseded timer at FIRE time and a fire advances the clock and runs
+  the lazy checks on its way past, so an early drop is not
+  behaviour-preserving -- ss3 carries the amendment. Behaviour is
+  unchanged and the bisimulation gate over the whole SEM corpus is the
+  proof: 1884 -> 1902 passed with no test rewritten to fit. Fourteen
+  mutations turn their tests red. Accepted cost, on the record rather
+  than as drift: oracle.py is 1365 -> 1489 lines and now trips the DL-75
+  size advisory. The owner wants its own module, but `JobStatus` and
+  `_TERMINAL` must move with it or the import cycles, and that is a
+  separate refactor with its own bisimulation run -- the cheap first move
+  is extracting `_CapacityPool` (DL-74 already drew that line).

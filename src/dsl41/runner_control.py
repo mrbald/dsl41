@@ -440,7 +440,7 @@ class ControlServer:
                 # DL-66 (review): atom truth alone hides WHY -- serve the
                 # effective global value (null = never set); there is no
                 # standalone show-globals verb, explain is the read path
-                entry["actual"] = oracle.store.globals_.get(atom.name)
+                entry["actual"] = oracle.store.global_value(atom.name)
             atoms.append(entry)
         return {
             "ok": True,

@@ -543,7 +543,7 @@ def test_sem08_declared_insert_global_initial_value_satisfies_on_evaluation() ->
         "insert_job: dummy3\njob_type: c\ncommand: y\nmachine: m1\n"
     )
     o = oracle(text)
-    assert o.store.globals_["FLAG3"] == "go"
+    assert o.store.global_value("FLAG3") == "go"
     o.feed(ev("STATUS", 0, job="dummy3", status="SUCCESS"))  # unrelated: no wake
     assert transitions(o, "cons_flag3") == []
     o.feed(ev("SET_GLOBAL", 1, name="FLAG3", value="go"))  # same-value edge

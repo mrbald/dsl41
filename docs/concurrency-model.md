@@ -75,11 +75,18 @@ spec.
 
 **Owner.** `RuntimeState`: frozen `JobRuntime` / `GlobalRuntime` rows,
 private maps, typed operations (`transition`, `start_run`, `set_flags`,
-`set_armed`, `set_global`, `enqueue_timer`, `cancel_timer`). No mutable
-map escapes and no generic `setattr` reaches a row. `StatusStore` (DL-82)
-is the intermediate form and is replaced here — this evolves it, it does
-not undo it. Note that `model_copy(update=)` does **not** validate, so the
-owner needs a validating construction path.
+`set_armed`, `set_global`, `enqueue_timer`). No mutable map escapes and no
+generic `setattr` reaches a row. `StatusStore` (DL-82) is the intermediate
+form and is replaced here — this evolves it, it does not undo it. Note
+that `model_copy(update=)` does **not** validate, so the owner needs a
+validating construction path.
+
+*(Amended by DL-86, at build.* This paragraph listed a `cancel_timer`
+alongside `enqueue_timer`. There is no caller and cannot be one yet: the
+oracle discards a superseded timer at FIRE time, and a fire advances the
+clock and runs the lazy checks on its way past, so dropping the entry
+early is not behaviour-preserving. It arrives if S2's decision index needs
+it, with a trace test for the clock difference — not as dead code now.*)*
 
 **Cardinality.** One increment per entity per committed input, and only
 when that entity's semantic projection differs from its pre-input value.
@@ -107,6 +114,20 @@ frozen and **tested** invariant that every change to them necessarily
 accompanies a projected entity change: `_CapacityPool`, its waiter order,
 `_box_ran`, and `_run_started_at`. An untested invariant here is the
 thing this document exists to remove.
+
+*(Settled by DL-86, at build.* `_box_ran` MOVED — it is
+`JobRuntime.ran_members` on the box row, projected with the entity it
+describes. `_run_started_at` was write-only: assigned on every start and
+read nowhere, so it was never state and is deleted. `_CapacityPool` and
+its waiter order STAYED, under two tested invariants — the waiter set is
+exactly the QUE_WAIT jobs, and only a starting or running job holds units
+— so no pool change is constructible without a row change to carry it.
+The waiter ORDER needs no token of its own, unlike the timer heap: a
+waiter's rank is fixed at its QUE_WAIT transition, which is itself a
+projected change, so replaying the transitions replays the order. A timer
+can be armed by an input that changes no row at all — a second schedule
+tick arms a second `must_start` deadline and finds the job already armed —
+which is exactly why the heap carries a token and the queue does not.*)*
 
 **Completeness is structural, not statistical.** One feed mutates several
 fields, so a missed site hides behind a sibling's write — `_run` sets

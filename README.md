@@ -601,6 +601,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   §9) that single-host code can be held to today, over tests/model_harness.py —
   a spawn log that outlives an engine crash, so a resume-driven double run is
   visible at all. The `test_harness_*` half pins that the checkers can fail
+- tests/test_runtime_state.py — phase-12 stage S1b: the state owner
+  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  §3). Frozen rows, read-only map views, the validating rebuild path, each typed
+  verb for what it must and must not change, the timer ordering token, and the
+  two invariants that let the capacity pool stay outside the rows
 
 ### What's not done
 

@@ -145,10 +145,12 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, time as dtime, timedelta
+from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from dsl41.conditions import (
     And,
@@ -222,6 +224,17 @@ class TraceEntry(BaseModel):
 
 
 class JobRuntime(BaseModel):
+    """One job entity's authoritative runtime row. FROZEN (DL-86): a change
+    is a REPLACEMENT, so "this entity changed" is one observable act rather
+    than a field write nobody watched.
+
+    `extra="forbid"` keeps the DL-82 typo guard alive across that change: the
+    old store wrote fields with setattr, which raises on an undeclared name,
+    where rebuilding a row from a dict would DEFAULT to dropping one in
+    silence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     status: JobStatus = "INACTIVE"
     status_at: datetime | None = None
     last_end_at: datetime | None = None  # last transition into a terminal status (Q2 anchor)
@@ -232,52 +245,186 @@ class JobRuntime(BaseModel):
     on_noexec: bool = False
     armed: bool = False  # a scheduled tick latched at a releasable gate (Q3, DL-54)
     started_by: str | None = None  # trace cause of the most recent actual start (DL-68)
+    #: SEM-10 at-most-once bookkeeping: the members already run in THIS box's
+    #: current execution. Only a BOX row ever carries entries; it was the loose
+    #: `_box_ran` map until DL-86 moved it onto the entity it describes.
+    ran_members: frozenset[str] = frozenset()
 
 
-class StatusStore(BaseModel):
-    """SEM-01 latching store: current recorded status, regardless of age.
+class GlobalRuntime(BaseModel):
+    """One global entity's row (SEM-06 latching semantics). A row rather than
+    a bare string because the concurrency model gives globals their own
+    identity and their own `state_rev` (concurrency-model ss2)."""
 
-    DL-82: the store OWNS every JobRuntime field and every global. Nothing
-    outside these methods assigns one -- scripts/arch_check.py blocks it --
-    and this commit installs that boundary while changing no behavior (the
-    bisimulation gate over the whole SEM corpus is the proof).
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+
+
+class RuntimeState:
+    """The authoritative state of one Oracle: job rows, global rows, and the
+    timer heap. SEM-01 latching applies throughout -- a recorded status is
+    current regardless of age.
+
+    DL-82 made this the single write path; DL-86 makes escape IMPOSSIBLE
+    rather than merely detected. The rows are frozen, the maps are private
+    and published only as read-only views, and every write goes through a
+    verb that names what changed (`transition`, `start_run`, `set_flags`,
+    `set_armed`, `set_global`, `enqueue_timer`). No caller assembles a field
+    dict, so no caller can invent a field combination the verbs do not.
 
     The reason is the concurrency model, not tidiness. Optimistic locking
     needs one place where "this entity changed" is observable exactly once
-    per applied input; eighteen assignment sites scattered across the
-    interpreter is not that place, and a before/after property test cannot
-    substitute for it -- `_run` mutates armed, run_number and started_by and
-    then sets status twice, so a single missed site stays invisible to any
-    check that observes whole feeds rather than writes."""
+    per applied input; assignment sites scattered across the interpreter are
+    not that place, and a before/after property test cannot substitute for
+    it -- `_run` mutates armed, run_number and started_by and then sets
+    status twice, so a single missed site stays invisible to any check that
+    observes whole feeds rather than writes.
 
-    job: dict[str, JobRuntime] = {}
-    globals_: dict[str, str] = {}
+    **The timer heap lives here too** (concurrency-model ss3). It is
+    authoritative state that a status projection does not cover: an armed
+    must_start deadline on a REFUSED start changes no job row at all, so a
+    projection over rows alone would replay a different schedule. The heap
+    is ordered globally by `(due, insertion token)` and every job's own
+    timers carry that token, so the cross-job order of equal-time timers --
+    which decides resource release, box cascades and which job starts -- is
+    recoverable per entity rather than only in aggregate."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, JobRuntime] = {}
+        self._globals: dict[str, GlobalRuntime] = {}
+        self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
+        self._timer_seq = 0
+
+    # ------------------------------------------------------------------- reads
+
+    @property
+    def job(self) -> Mapping[str, JobRuntime]:
+        """Read-only view of the job rows. A proxy, not the map: an attempt
+        to write through it raises rather than diverging silently."""
+        return MappingProxyType(self._jobs)
+
+    @property
+    def globals_(self) -> Mapping[str, GlobalRuntime]:
+        return MappingProxyType(self._globals)
 
     def runtime(self, job: str) -> JobRuntime:
         """Read access. Creates the row on demand -- the oracle addresses
         entities with no catalog entry (pseudo-entries `name^INST`, and
         whatever a CHANGE_STATUS invents)."""
-        if job not in self.job:
-            self.job[job] = JobRuntime()
-        return self.job[job]
+        if job not in self._jobs:
+            self._jobs[job] = JobRuntime()
+        return self._jobs[job]
 
-    def update(self, job: str, **fields: object) -> None:
-        """The single write path for JobRuntime. Pydantic refuses an
-        undeclared field name, so a typo is loud rather than a silently
-        created attribute nothing reads."""
-        rt = self.runtime(job)
-        for name, value in fields.items():
-            setattr(rt, name, value)
+    def global_value(self, name: str) -> str | None:
+        row = self._globals.get(name)
+        return None if row is None else row.value
 
-    def seed(self, job: str, **fields: object) -> None:
-        """SEM-24 definition-time seeding. Distinct from update() only in
-        intent -- kept so the one caller reads as "this row starts here"
-        rather than "this row changes"."""
-        self.update(job, **fields)
+    # ------------------------------------------------------------------ writes
+
+    def _replace(self, job: str, **fields: object) -> None:
+        """The single write. `model_copy(update=)` does NOT validate -- it
+        would happily store a str in `run_number` and leave the corruption
+        to surface somewhere else entirely -- so the row is rebuilt through
+        the model's own constructor. Pydantic refuses an undeclared field
+        name, so a typo is loud rather than a silently created attribute
+        nothing reads."""
+        self._jobs[job] = JobRuntime.model_validate({**dict(self.runtime(job)), **fields})
+
+    def transition(
+        self, job: str, status: JobStatus, at: datetime | None, exit_code: int | None = None
+    ) -> None:
+        """Record a status change. `last_end_at` latches on every terminal
+        transition -- the Q2 anchor is the job's OWN last end (DL-54) -- and
+        an exit code is written only when one was reported."""
+        fields: dict[str, object] = {"status": status, "status_at": at}
+        if status in _TERMINAL:
+            fields["last_end_at"] = at
+        if exit_code is not None:
+            fields["exit_code"] = exit_code
+        self._replace(job, **fields)
+
+    def start_run(self, job: str, *, cause: str, box: str | None, is_box: bool) -> None:
+        """Everything one actual start changes, in one act: the run_number
+        bump, the arm it consumes (Q3/DL-54 -- the ACTUAL start consumes it,
+        FORCE included), the provenance of THIS run (DL-68), and the SEM-10
+        box bookkeeping on both sides -- the member joins its box's ran set,
+        and a box starting resets its own.
+
+        A box that is itself a member does both, to two different rows."""
+        self._replace(
+            job, armed=False, run_number=self.runtime(job).run_number + 1, started_by=cause
+        )
+        if box is not None:
+            self._replace(box, ran_members=self.runtime(box).ran_members | {job})
+        if is_box:
+            # Reset BEFORE the caller's RUNNING transition: that transition's
+            # own re-evaluation may already start members, and they must land
+            # in the fresh per-run set (SEM-10 at-most-once bookkeeping).
+            self._replace(job, ran_members=frozenset())
+
+    def set_flags(
+        self,
+        job: str,
+        *,
+        on_ice: bool | None = None,
+        on_hold: bool | None = None,
+        on_noexec: bool | None = None,
+    ) -> None:
+        """Set the SEM-20/21/22 out-of-band flags. `None` means unchanged, so
+        a caller naming one flag cannot silently clear the other two."""
+        fields = {
+            name: value
+            for name, value in (
+                ("on_ice", on_ice),
+                ("on_hold", on_hold),
+                ("on_noexec", on_noexec),
+            )
+            if value is not None
+        }
+        if fields:
+            self._replace(job, **fields)
+
+    def set_armed(self, job: str, armed: bool) -> None:
+        """Latch or consume a scheduled tick (SEM-32 arm-and-wait, DL-54)."""
+        self._replace(job, armed=armed)
 
     def set_global(self, name: str, value: str) -> None:
-        """The single write path for globals (SEM-06 latching semantics)."""
-        self.globals_[name] = value
+        self._globals[name] = GlobalRuntime(value=value)
+
+    # ------------------------------------------------------------------ timers
+
+    def enqueue_timer(self, due: datetime, ev: Event) -> int:
+        """Arm a timer and return its ordering token. The token is a single
+        global counter, so equal-due timers keep their arming order ACROSS
+        jobs -- which is what decides who starts when two deadlines land on
+        the same instant."""
+        self._timer_seq += 1
+        heapq.heappush(self._timers, (due, self._timer_seq, ev))
+        return self._timer_seq
+
+    def next_timer_due(self) -> datetime | None:
+        return self._timers[0][0] if self._timers else None
+
+    def pop_timer_due(self, at: datetime) -> tuple[datetime, Event] | None:
+        """Pop the earliest timer due at or before `at`, or None."""
+        if not self._timers or self._timers[0][0] > at:
+            return None
+        due, _, ev = heapq.heappop(self._timers)
+        return due, ev
+
+    def timers(self) -> list[tuple[datetime, int, Event]]:
+        """Every armed timer as (due, token, event), in FIRING order."""
+        return sorted(self._timers)
+
+    def timers_for(self, job: str) -> list[tuple[datetime, int]]:
+        """One job's armed timers as (due, token), in firing order: the
+        entity-local half of the global ordering (concurrency-model ss3).
+        Sorting the union of these across jobs reproduces the heap's firing
+        order exactly, which a per-job set digest cannot do."""
+        return sorted(
+            (due, token) for due, token, ev in self._timers if ev.payload.get("job") == job
+        )
 
 
 class OracleError(ValueError):
@@ -417,11 +564,11 @@ class Oracle:
 
     def __init__(self, catalog: CatalogIR) -> None:
         self.catalog = catalog
-        self.store = StatusStore()
+        self.store = RuntimeState()
         for name, job_ir in catalog.jobs.items():
             # SEM-24: definition-time state seeds the SEM-20/21/22 flags
             initial = job_ir.sem.initial_status
-            self.store.seed(
+            self.store.set_flags(
                 name,
                 on_hold=initial == "ON_HOLD",
                 on_ice=initial == "ON_ICE",
@@ -432,13 +579,7 @@ class Oracle:
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
         self._queue: deque[Event] = deque()
-        self._timers: list[tuple[datetime, int, Event]] = []  # heap
-        self._timer_seq = 0
         self._now: datetime | None = None
-        #: members already run in the current box execution (SEM-10)
-        self._box_ran: dict[str, set[str]] = {b: set() for b in self._boxes()}
-        #: jobs started via a box run whose run_number ties them to it
-        self._run_started_at: dict[str, datetime] = {}
         #: edge-trigger index (DL-13): entity key -> jobs whose `condition`
         #: references it. Keys: job names (incl. "name^INST"), "g:NAME".
         self._referencers: dict[str, list[str]] = {}
@@ -482,7 +623,7 @@ class Oracle:
         """Read-only peek at the timer heap (runner-design ss3): the earliest
         scheduled TIMER's due time, or None. Timers fire lazily inside feed()/
         advance(); a wall-clock shell uses this to know when to wake."""
-        return self._timers[0][0] if self._timers else None
+        return self.store.next_timer_due()
 
     def pending_timers(self) -> list[tuple[datetime, str, str]]:
         """Read-only snapshot of LIVE pending timers as (due, job, kind),
@@ -494,7 +635,7 @@ class Oracle:
         weight awaiting its lazy pop. The ss10 status query renders this for
         the ss11 jobs table; display truth must be the dispatch truth."""
         live: list[tuple[datetime, str, str]] = []
-        for due, _, ev in self._timers:
+        for due, _, ev in self.store.timers():
             job = ev.payload.get("job")
             if not isinstance(job, str):
                 continue
@@ -534,8 +675,8 @@ class Oracle:
         return self._emitted[emitted_start:]
 
     def _fire_timers_due(self, at: datetime) -> None:
-        while self._timers and self._timers[0][0] <= at:
-            due, _, timer_ev = heapq.heappop(self._timers)
+        while (popped := self.store.pop_timer_due(at)) is not None:
+            due, timer_ev = popped
             self._now = due
             self._lazy_clock_checks()
             self._queue.append(timer_ev)
@@ -559,8 +700,7 @@ class Oracle:
         self._trace.append(TraceEntry(at=self._now, job=job, transition=transition, cause=cause))
 
     def _schedule_timer(self, at: datetime, ev: Event) -> None:
-        self._timer_seq += 1
-        heapq.heappush(self._timers, (at, self._timer_seq, ev))
+        self.store.enqueue_timer(at, ev)
 
     # -------------------------------------------------------------- status store
 
@@ -570,14 +710,8 @@ class Oracle:
     def _set_status(
         self, job: str, status: JobStatus, cause: str, exit_code: int | None = None
     ) -> None:
-        rt = self._runtime(job)
-        old = rt.status
-        fields: dict[str, object] = {"status": status, "status_at": self._now}
-        if status in _TERMINAL:
-            fields["last_end_at"] = self._now  # Q2 anchor: the job's own last end (DL-54)
-        if exit_code is not None:
-            fields["exit_code"] = exit_code
-        self.store.update(job, **fields)
+        old = self._runtime(job).status
+        self.store.transition(job, status, self._now, exit_code)
         self._record(job, f"{old}->{status}", cause)
         self._emit("STATUS", job=job, status=status)
         self._after_transition(job, old, status)
@@ -599,7 +733,7 @@ class Oracle:
                 for member in self._members(job):
                     m_rt = self.store.job.get(member)
                     if m_rt is not None and m_rt.armed:
-                        self.store.update(member, armed=False)
+                        self.store.set_armed(member, False)
                         self._record(
                             member,
                             "SCHED_DISARM",
@@ -666,7 +800,7 @@ class Oracle:
                 self._pool.dequeue(job)
                 # Q3 (DL-54): the kill consumes a latched arm -- the queued
                 # attempt was the tick's run and it just got killed.
-                self.store.update(job, armed=False)
+                self.store.set_armed(job, False)
                 self._set_status(job, "TERMINATED", cause="KILLJOB (dequeued from QUE_WAIT, DL-50)")
         elif kind in ("ON_ICE", "OFF_ICE", "ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "OFF_NOEXEC"):
             self._handle_oob(kind, self._required_job(ev))
@@ -705,11 +839,13 @@ class Oracle:
         self._set_status(job, status, cause="injected STATUS", exit_code=code)
 
     def _handle_oob(self, kind: EventKind, job: str) -> None:
-        rt = self._runtime(job)
+        # the status BEFORE the flag change -- a flag never moves a status, but
+        # the rows are frozen (DL-86), so hold the value, not a stale row
+        status = self._runtime(job).status
         if kind == "ON_ICE":
-            self.store.update(job, on_ice=True)
+            self.store.set_flags(job, on_ice=True)
             self._record(job, "ON_ICE", "sendevent ON_ICE")
-            if rt.status == "QUE_WAIT":
+            if status == "QUE_WAIT":
                 # DL-50 (review NIT): an iced job never runs -- drop it from the
                 # queue and settle its status now, instead of lingering QUE_WAIT
                 # until a later release cancels it. _set_status wakes referencers,
@@ -720,7 +856,7 @@ class Oracle:
                 # SEM-20: downstream conditions now treat this job as satisfied
                 self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
-            self.store.update(job, on_ice=False)
+            self.store.set_flags(job, on_ice=False)
             self._record(job, "OFF_ICE", "sendevent OFF_ICE")
             # SEM-20: deliberately NO re-evaluation -- conditions must reoccur
             # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
@@ -730,21 +866,21 @@ class Oracle:
             # on ICE, clear rt.armed in the ON_ICE branch (SCHED_DISARM) and
             # amend SEM-20/32 -- protocol in docs/live-instance-runbook.md.
         elif kind == "ON_HOLD":
-            self.store.update(job, on_hold=True)
+            self.store.set_flags(job, on_hold=True)
             self._record(job, "ON_HOLD", "sendevent ON_HOLD")
         elif kind == "OFF_HOLD":
-            self.store.update(job, on_hold=False)
+            self.store.set_flags(job, on_hold=False)
             self._record(job, "OFF_HOLD", "sendevent OFF_HOLD")
-            if rt.status == "QUE_WAIT":
+            if status == "QUE_WAIT":
                 self._wake_waiters()  # DL-50: a held-while-queued job re-attempts
             else:
                 # SEM-21: if conditions are already satisfied, run immediately
                 self._attempt_start(job, force=False, scheduled=False, cause="OFF_HOLD")
         elif kind == "ON_NOEXEC":
-            self.store.update(job, on_noexec=True)
+            self.store.set_flags(job, on_noexec=True)
             self._record(job, "ON_NOEXEC", "sendevent ON_NOEXEC")
         elif kind == "OFF_NOEXEC":
-            self.store.update(job, on_noexec=False)
+            self.store.set_flags(job, on_noexec=False)
             self._record(job, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
 
     # -------------------------------------------------------- condition evaluation
@@ -813,7 +949,7 @@ class Oracle:
         if isinstance(cond, Paren):
             return self._cond_true(cond.inner, evaluator)
         if isinstance(cond, GlobalAtom):
-            actual = self.store.globals_.get(cond.name)
+            actual = self.store.global_value(cond.name)
             if actual is None:
                 return False
             return compare_value(actual, cond.op, cond.value)
@@ -867,7 +1003,7 @@ class Oracle:
                     # SEM-10: member needs its box RUNNING; member ticks only
                     # count while the box runs -- no arm (Q3 pin)
                     return f"box {box!r} is not RUNNING -- rerun needs FORCE_STARTJOB (SEM-10)"
-                if job in self._box_ran.get(box, set()):
+                if job in self._runtime(box).ran_members:
                     # SEM-10: at most once per box execution
                     return (
                         f"already ran in this {box!r} execution -- "
@@ -897,7 +1033,7 @@ class Oracle:
         box = job_ir.box.box_name
         if box is not None and self._runtime(box).status != "RUNNING":
             return  # member ticks only count while the box runs (Q3 pin)
-        self.store.update(job_ir.name, armed=True)
+        self.store.set_armed(job_ir.name, True)
         self._record(job_ir.name, "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32, DL-54/58)")
 
     def _run_window_permits(self, job_ir: JobIR, cause: str) -> bool:
@@ -926,7 +1062,7 @@ class Oracle:
             # not one per attempt (duplicate timers spammed pending_timers()).
             pending = any(
                 due == next_open and e.kind == "TIMER" and e.payload.get("job") == job_ir.name
-                for due, _, e in self._timers
+                for due, _, e in self.store.timers()
             )
             if not pending:
                 self._schedule_timer(
@@ -956,7 +1092,7 @@ class Oracle:
         if rt.on_noexec:
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
             # A bypassed job never runs, so it acquires no resources (DL-50).
-            self.store.update(job, armed=False)  # Q3: the bypass IS the tick's run (DL-54)
+            self.store.set_armed(job, False)  # Q3: the bypass IS the tick's run (DL-54)
             self._set_status(job, "SUCCESS", cause=f"ON_NOEXEC bypass ({cause})")
             return
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
@@ -973,25 +1109,17 @@ class Oracle:
         """Start tail once admission has passed: run_number bump, box
         bookkeeping, STARTING -> RUNNING, box member launch (SEM-10)."""
         job = job_ir.name
-        rt = self._runtime(job)
-        # Q3 (DL-54, review MINOR): the ACTUAL start consumes the arm, FORCE
-        # included -- a QUE_WAIT enqueue keeps it latched, so a cancelled
-        # queue attempt does not eat the tick.
-        self.store.update(job, armed=False)
         self._arm_sla_and_term(job_ir)  # reads run_number before the bump
-        self.store.update(job, run_number=rt.run_number + 1)
-        box = job_ir.box.box_name
-        if box is not None:
-            self._box_ran.setdefault(box, set()).add(job)
-        if job_ir.job_type == "BOX":
-            # Reset BEFORE the RUNNING transition: the transition's own
-            # re-evaluation may already start members, and they must land in
-            # the fresh per-run set (SEM-10 at-most-once bookkeeping).
-            self._box_ran[job] = set()
-        assert self._now is not None
-        self._run_started_at[job] = self._now
-        # DL-68: what triggered THIS run, trace-cause verbatim
-        self.store.update(job, started_by=cause)
+        # one act: the arm this start consumes (Q3/DL-54 -- the ACTUAL start
+        # consumes it, FORCE included; a QUE_WAIT enqueue keeps it latched, so
+        # a cancelled queue attempt does not eat the tick), the run_number
+        # bump, the DL-68 provenance of THIS run, and the SEM-10 box sets
+        self.store.start_run(
+            job,
+            cause=cause,
+            box=job_ir.box.box_name,
+            is_box=job_ir.job_type == "BOX",
+        )
         self._set_status(job, "STARTING", cause=cause)
         running_cause = (
             "admitted: resources acquired (DL-50)"
@@ -1056,7 +1184,7 @@ class Oracle:
             if member_ir.sem.auto_hold:
                 rt = self._runtime(member)
                 if not rt.on_hold:
-                    self.store.update(member, on_hold=True)
+                    self.store.set_flags(member, on_hold=True)
                     self._record(member, "ON_HOLD", "auto_hold on box start (dossier ss5)")
         # members with no conditions start immediately; others when theirs hold
         for member in self._members(box):
@@ -1087,7 +1215,7 @@ class Oracle:
 
     def _idle_box_recompute(self, box: str, box_ir: JobIR, cause: str) -> None:
         """Derived-status recompute for a non-running box (SEM-15): pure
-        function of current member statuses -- _box_ran does not apply
+        function of current member statuses -- ran_members does not apply
         outside a live run. Only fires when every member is terminal."""
         members = self._members(box)
         statuses = [self._runtime(m).status for m in members]
@@ -1144,7 +1272,7 @@ class Oracle:
         A member whose condition never fires inside the run -- or whose
         run_window deferred it -- keeps the box RUNNING: the hung-box
         pattern is real behavior, not a defect to smooth over."""
-        ran = self._box_ran.get(box, set())
+        ran = self._runtime(box).ran_members
         for member in self._members(box):
             rt = self._runtime(member)
             if rt.on_ice or rt.on_noexec:
@@ -1158,7 +1286,8 @@ class Oracle:
     def _fold_box_default(self, box: str, box_ir: JobIR) -> None:
         # SEM-12 third bullet: an unmet specified override suppresses the
         # corresponding default; if neither can fire the box stays RUNNING.
-        members = [m for m in self._members(box) if m in self._box_ran.get(box, set())]
+        ran = self._runtime(box).ran_members
+        members = [m for m in self._members(box) if m in ran]
         statuses = [self._runtime(m).status for m in members]
         any_failed = any(s in ("FAILURE", "TERMINATED") for s in statuses)
         if not any_failed and box_ir.sem.box_success is None:

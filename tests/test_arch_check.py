@@ -284,7 +284,7 @@ class JobRuntime(BaseModel):
     run_number: int = 0
 
 
-class StatusStore:
+class RuntimeState:
     def update(self, job, **fields):
         rt = self.job[job]
         rt.status = fields["status"]   # the owner itself is exempt
@@ -317,7 +317,7 @@ def test_direct_state_assignment_outside_the_owner_blocks(tmp_path: Path) -> Non
     assert len(findings) == 2, messages
     assert any("JobRuntime.armed" in m for m in messages)
     assert any("JobRuntime.run_number" in m for m in messages)  # AugAssign counts
-    assert all("StatusStore (DL-82)" in m for m in messages)
+    assert all("RuntimeState (DL-82)" in m for m in messages)
 
 
 def test_owner_body_and_unrelated_modules_do_not_block(tmp_path: Path) -> None:
@@ -328,7 +328,7 @@ def test_owner_body_and_unrelated_modules_do_not_block(tmp_path: Path) -> None:
     owner_only = _write(
         tmp_path / "oracle.py",
         "class JobRuntime(BaseModel):\n    armed: bool = False\n\n\n"
-        "class StatusStore:\n    def update(self, job):\n        self.job[job].armed = True\n",
+        "class RuntimeState:\n    def update(self, job):\n        self.job[job].armed = True\n",
     )
     assert arch_check.state_owner_bypasses([owner_only]) == []
 
@@ -358,14 +358,37 @@ def test_reaching_through_the_store_containers_blocks(tmp_path: Path) -> None:
     }
 
 
+def test_reaching_past_the_read_only_views_blocks(tmp_path: Path) -> None:
+    """DL-86 made `store.job` / `store.globals_` read-only PROXIES, so the
+    clause above now describes a write that raises at runtime. The way past a
+    proxy is the private map behind it, so the gate watches those names too --
+    otherwise hardening the public path would have quietly moved the hole
+    rather than closed it."""
+    mod = _write(
+        tmp_path / "runner.py",
+        "def poke(engine, job):\n"
+        "    engine.oracle.store._jobs[job] = 1\n"
+        "    engine.oracle.store._globals['X'] = 'y'\n"
+        "    engine.oracle.store._timers.clear()\n",
+    )
+    kinds = sorted({f.message.split(":")[0] for f in arch_check.state_owner_bypasses([mod])})
+    assert kinds == [
+        "mutates store._timers through .clear()",
+        "writes store._globals directly",
+        "writes store._jobs directly",
+    ]
+
+
 def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
     """The hole an assignment walk cannot see: setattr()'s attribute name is a
-    runtime value, so no field-name check applies to it. Legitimate only
-    inside the owner -- and once JobRuntime is frozen, not even there."""
+    runtime value, so no field-name check applies to it. Since DL-86 froze
+    JobRuntime it is not legitimate even inside the owner -- but the exemption
+    stays scoped to the owner class rather than removed, because the gate's job
+    is to say WHERE state may change, and pydantic already says how."""
     mod = _write(
         tmp_path / "oracle.py",
         "class JobRuntime(BaseModel):\n    armed: bool = False\n\n\n"
-        "class StatusStore:\n"
+        "class RuntimeState:\n"
         "    def update(self, job, **fields):\n"
         "        for k, v in fields.items():\n"
         "            setattr(self.job[job], k, v)\n\n\n"
@@ -375,7 +398,7 @@ def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
     )
     findings = arch_check.state_owner_bypasses([mod])
     assert len(findings) == 1
-    assert "setattr() outside StatusStore" in findings[0].message
+    assert "setattr() outside RuntimeState" in findings[0].message
 
 
 def test_gate_watches_fields_it_was_never_told_about(tmp_path: Path) -> None:
@@ -386,7 +409,7 @@ def test_gate_watches_fields_it_was_never_told_about(tmp_path: Path) -> None:
     mod = _write(
         tmp_path / "oracle.py",
         "class JobRuntime(BaseModel):\n    future_field: int = 0\n\n\n"
-        "class StatusStore:\n    pass\n\n\n"
+        "class RuntimeState:\n    pass\n\n\n"
         "class Oracle:\n    def poke(self, rt):\n        rt.future_field = 1\n",
     )
     findings = arch_check.state_owner_bypasses([mod])
@@ -401,7 +424,7 @@ def test_the_wider_write_shapes_all_block(tmp_path: Path) -> None:
     mod = _write(
         tmp_path / "oracle.py",
         "class JobRuntime(BaseModel):\n    armed: bool = False\n    status: str = ''\n\n\n"
-        "class StatusStore:\n    pass\n\n\n"
+        "class RuntimeState:\n    pass\n\n\n"
         "class Oracle:\n"
         "    def annotated(self, rt):\n        rt.armed: bool = True\n"
         "    def destructured(self, rt, other):\n        rt.armed, other.status = True, 'x'\n"
