@@ -3269,3 +3269,71 @@
   declared bare class attributes were unrepresentative -- a Pydantic field
   is annotated -- and now match the model the gate really watches. 1867 ->
   1871 passed.
+- DL-84 the concurrency model is frozen: mandatory optimistic locking,
+  globally at-most-once effects, and an operator-owned host lifecycle
+  (2026-08-14; `docs/concurrency-model.md`, stage S0 of the phase-12
+  programme). The trigger was a question about two operators sending START
+  to the same stopped job: the wanted answer is one winner and one
+  rejection *at the point of application*, on the version the caller read.
+  The scope is deliberately larger than that -- OCC covers every entity a
+  human can address, globals included (an operator setting a variable
+  while believing its value is X would otherwise silently overwrite
+  someone's Y), and it is unavoidable rather than opt-in, because an
+  optional precondition is one every careless caller omits. Four
+  adversarial passes over the design produced real KILLs each time; the
+  fourth returned nine freeze-blockers, and the four that changed the
+  design rather than merely sharpening it are worth recording. (i)
+  At-most-once was HOST-LOCAL. An effect identified only by a durable
+  `effect_id` is bound to no host, so after an uncertain SPAWN a takeover
+  could route the same id to a second relay, each host's dedup store would
+  correctly report "first application", and the same bank job would run
+  twice -- the exact failure the model exists to prevent. Effects are now
+  bound to `{effect_id, run_id, job, run_number, executor_id}` and retries
+  always go to that executor; rerouting demands a new run, a new effect,
+  and proof the old executor is dead. (ii) "Deduplicate and replay the
+  original result" is unimplementable: persist tombstone -> kill() ->
+  crash, and nothing can know whether the signal landed, so the states are
+  three (`pending` / `applied(result)` / `indeterminate`) and a retry
+  replays a result only when it is KNOWN. (iii) The supersession guard did
+  not fire for its own motivating scenario, because KILLJOB does not
+  advance `run_number` -- a delayed SPAWN for run N is still "current"
+  after run N is TERMINATED. Applicability is now exact desired state,
+  with TERM and KILL as distinct stages with distinct ids. (iv) Timers are
+  ordered GLOBALLY by `(due, insertion seq)`, so a per-job digest of the
+  heap misses the relative order of equal-time timers across jobs, which
+  decides resource release and box cascades; and four pieces of
+  authoritative state (`_CapacityPool`, its waiter order, `_box_ran`,
+  `_run_started_at`) had never been inventoried at all. Storage is frozen
+  rather than left as an implementation detail because admission needs two
+  atomic multi-record writes: Postgres-class, outbox IN the ledger, one
+  transaction. Kafka alone gives the ordered log and leaves election and
+  the outbox beside it -- two consistency stories where the model needs
+  one. On the host lifecycle: quarantining an unreachable host is safe but
+  insufficient, since one dead host would hold its jobs forever, so the
+  operator owns an explicit per-host routing state (active / passive /
+  quarantined / evicted) that is durable in the ledger so a failover
+  cannot undo a drain. Eviction is the only state that lets another host
+  run work bound to this one, and it is made PROVABLE rather than asserted
+  by an opt-in deadman: a supervisor with no live leaseholder for
+  `T_deadman` exits, killing its wrappers by lifeline EOF -- the mechanism
+  supervisor-protocol ss5 already depends on, so the tier learns one
+  number and no policy (DL-42's fence holds). The deadman is opt-in
+  because it costs the crash-resume behaviour DL-79 preserves, and a run
+  root without one is never reroutable except by an attributed
+  `evict --force`, which is recorded with its authenticated principal and
+  is the single path in the document that can produce a double run. It is
+  fenced on return: eviction bumps the host `generation`, and a returning
+  relay with a stale generation must self-fence before re-registering,
+  which cannot un-run a duplicate but stops it continuing and turns a
+  silent divergence into a recorded incident. Fourteen obligations
+  (CM-01..CM-14, new namespace row in the citation index, tests named
+  `test_cmNN_*`) replace the prose assertions of earlier revisions; CM-14
+  -- no `(job, run_number)` runs twice over seeded interleavings -- is the
+  point of the whole exercise, and it is checked by COUNTING spawns per
+  run across an injected-fault interleaving rather than by argument. The
+  build order puts the deterministic model harness (H) before the code it
+  validates, and corrects two inverted dependencies: S2 persists
+  `InputAttempt`, so the envelope and `ApplyResult` types freeze first,
+  and both S2's admission and S5's effects depend on storage, election and
+  relay contracts, which is why those are S0 text rather than S6
+  discoveries.

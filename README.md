@@ -35,7 +35,10 @@ resume — spool contract frozen in
 11c (calendar scheduler, preflight, control socket — protocol frozen in
 [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md)
 — headless CLI), 11d (Textual TUI), 11e (`serve` via textual-serve), and
-11f (the detached supervisor tier). The scheduler obeys AutoSys calendars (DL-56/57). It
+11f (the detached supervisor tier). Phase 12 — mandatory optimistic
+concurrency and multihost execution — is specified and under construction;
+its contract is frozen in
+[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md). The scheduler obeys AutoSys calendars (DL-56/57). It
 applies standard calendar day sets directly. It applies extended
 (autocal-rule) calendars through a built-in interpreter of the doc-frozen
 SEM-36..39 semantics. The memo below has the source map.
