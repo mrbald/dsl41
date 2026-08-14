@@ -798,8 +798,16 @@ class Oracle:
             return None  # starting an undefined job is a no-op for the oracle
         rt = self._runtime(job)
         if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
-            return None  # already starting/running, or queued for resources (DL-50);
-            # a tick on a live job does not arm (Q3 pin)
+            # already starting/running, or queued for resources (DL-50); a tick
+            # on a live job does not arm (Q3 pin). DL-81: this branch used to
+            # return a bare None, so an explicit STARTJOB against a live job was
+            # the one refusal that left NO record anywhere -- two operators
+            # racing a start both got ok, one silently did nothing, and the
+            # trace showed a single start with no sign the second was ever
+            # attempted. Only the explicit-event path surfaces this (the three
+            # internal probe callers discard the return), so box sweeps and
+            # condition edges stay silent exactly as before.
+            return f"already {rt.status} -- concurrent or repeated start request, no effect"
         if rt.on_ice:
             return None  # SEM-20: iced jobs never run (FORCE included -- DL-13);
             # never arms: conditions must REOCCUR after OFF_ICE

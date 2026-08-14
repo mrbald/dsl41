@@ -3161,3 +3161,33 @@
   client does, so the existing protocol tests keep their original intent;
   `test_mutating_verbs_require_a_token` now pins both gates separately.
   1860 -> 1861 passed, 4 skipped.
+
+- DL-81 an explicit start against a live job is no longer silent
+  (2026-08-14; DL-64's remaining corner, shipped standalone because it is
+  independent of the OCC design it was found by). Two operators racing a
+  STARTJOB on the same idle job both get `ok` from the control socket, one
+  start happens, and the OTHER used to vanish completely -- no transition,
+  no record, nothing in the trace to show a second attempt was ever made.
+  DL-64 gave both SEM-10 gates a START_REFUSED record for exactly this
+  reason ("an operator's STARTJOB dying without any visible
+  acknowledgement proved untrainable") and left this branch returning a
+  bare None. The arbitration itself was never wrong -- total order in the
+  single-writer loop, then re-evaluation against current state at the
+  point of application, so exactly one process runs and the ghost-run gate
+  is a second independent belt. Only the visibility was missing.
+  `_attempt_start`'s live-job branch now returns a reason naming the
+  status that beat the request. Two properties fall out of where the
+  branch sits, and both are pinned: it is ABOVE the force branch, so a
+  FORCE_STARTJOB against a running job records too (that case matters
+  more -- the operator explicitly forced and still got nothing), and only
+  the explicit-event path in `_dispatch` consumes the return value, so the
+  three internal probe callers (OFF_HOLD sweeps, box-start member launches,
+  condition-edge re-evaluation) stay silent exactly as before. This does
+  NOT solve operator concurrency: a caller still cannot express "start
+  this only if it is still the job I looked at", and it does nothing for
+  the CHANGE_STATUS overwrite, which is the dangerous lost-update surface.
+  Those need the optimistic-concurrency design and are deliberately not in
+  this entry. Verified before the change that no existing trace test
+  covered this branch (the whole suite passed with the reason returned),
+  so the new record is genuinely new coverage rather than a re-pin.
+  1861 -> 1863 passed.

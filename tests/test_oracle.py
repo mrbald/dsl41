@@ -34,7 +34,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Event, EventKind, Oracle, OracleError
+from dsl41.oracle import Event, EventKind, Oracle, OracleError, TraceEntry
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -698,6 +698,55 @@ def test_sem10b_member_does_not_start_when_its_box_is_not_running() -> None:
     o.feed(ev("STATUS", 0, job="trigger2", status="SUCCESS"))
     assert o.store.job["box_idle"].status == "INACTIVE"
     assert transitions(o, "mem_idle") == []
+
+
+def test_explicit_startjob_against_a_live_job_leaves_a_trace_record() -> None:
+    """DL-81, DL-64's remaining silent corner. Two operators racing a start on
+    the same idle job both get an ok from the control socket: one start
+    happens, and the other used to vanish -- no transition, no record, nothing
+    in the trace to show a second attempt was ever made. The engine's arbitration
+    (total order, then re-evaluation against current state) was right; only its
+    visibility was missing.
+
+    The live-job guard sits ABOVE the force branch in _attempt_start, so a
+    FORCE_STARTJOB against a running job records too -- that one matters more,
+    because the operator explicitly forced and still got nothing. Internal
+    probes stay silent: they discard the return value."""
+    text = (
+        "insert_job: solo81\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: down81\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(solo81)\n"
+    )
+
+    def refusals(o: Oracle | EngineHarness) -> list[TraceEntry]:
+        return [t for t in o.trace() if t.transition == "START_REFUSED"]
+
+    def statuses(o: Oracle | EngineHarness, job: str) -> list[str]:
+        return [t for t in transitions(o, job) if "->" in t]
+
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="solo81"))
+    assert statuses(o, "solo81") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert refusals(o) == []
+
+    # the loser of the race: recorded, and it names the state that beat it
+    o.feed(ev("STARTJOB", 0, job="solo81"))
+    assert [t.job for t in refusals(o)] == ["solo81"]
+    assert "already RUNNING" in refusals(o)[0].cause
+    assert "STARTJOB event" in refusals(o)[0].cause  # provenance survives (DL-68)
+    assert statuses(o, "solo81") == ["INACTIVE->STARTING", "STARTING->RUNNING"]  # no re-run
+
+    # FORCE is not exempt: the guard precedes the force branch
+    o.feed(ev("FORCE_STARTJOB", 1, job="solo81"))
+    assert [t.job for t in refusals(o)] == ["solo81", "solo81"]
+    assert "FORCE_STARTJOB event" in refusals(o)[1].cause
+
+    # an internal condition edge probing a live job stays silent: solo81's
+    # SUCCESS wakes down81, which starts; re-waking it records no refusal
+    o.feed(ev("STATUS", 2, job="solo81", status="SUCCESS"))
+    assert statuses(o, "down81") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 3, job="solo81", status="SUCCESS"))
+    assert [t.job for t in refusals(o)] == ["solo81", "solo81"]  # down81 never appears
 
 
 def test_sem10c_explicit_startjob_refused_at_a_sem10_gate_leaves_a_trace_record() -> None:
