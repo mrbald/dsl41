@@ -33,7 +33,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dsl41.ir import JobIR, lower_source
-from dsl41.oracle import Event, EventKind, Oracle, OracleError
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, EventKind, OracleError
 from dsl41.runner import Engine
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock

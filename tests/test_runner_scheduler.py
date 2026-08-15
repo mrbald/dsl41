@@ -23,7 +23,8 @@ from pathlib import Path
 import pytest
 
 from dsl41.ir import CatalogIR, JobIR, lower_source
-from dsl41.oracle import Event, Oracle
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event
 from dsl41.runner import Engine, resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
@@ -1420,7 +1421,7 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
     as a preflight ERROR item, never a crash."""
     import dsl41.runner_preflight as runner_mod
 
-    from dsl41.oracle import OracleError
+    from dsl41.oracle_state import OracleError
 
     def refuse(_catalog: CatalogIR) -> None:
         raise OracleError("injected construction refusal")

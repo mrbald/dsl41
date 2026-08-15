@@ -44,7 +44,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dsl41.ir import CatalogIR
-from dsl41.oracle import Event, Oracle
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event
 from dsl41.runner_admission import (
     INERT_EPOCH,
     ApplyResult,

@@ -158,7 +158,8 @@ from typing import Any
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.oracle import TERMINAL, Event, Oracle
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, TERMINAL
 from dsl41.runner_adapters import (
     AdapterContext,
     DetachSignal,

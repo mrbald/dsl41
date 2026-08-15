@@ -382,13 +382,17 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   annotations in a click-details panel, ELK layout + focus/search in the browser;
   the customElements polyfill loads ahead of the cytoscape bundle and the context
   menu registers last, guarded, so no optional plugin can take the page (DL-77)
+- src/dsl41/oracle_state.py — the oracle's state and the vocabulary of the
+  events that move it: JobStatus/TERMINAL/EventKind/Event/TraceEntry, the frozen
+  JobRuntime and GlobalRuntime rows with the semantic projection that decides
+  when a revision moves, RuntimeState (private maps, typed verbs, the timer heap
+  with its ordering token, the input transaction) and OracleError. It imports
+  nothing from the interpreter, which is why the split exists (DL-91)
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
-  completion, edge-triggered re-evaluation, per-SEM-entry trace tests. Also holds
-  RuntimeState, the state owner: frozen entity rows behind read-only views, one
-  typed verb per kind of change, the timer heap with its ordering token, and the
-  per-input transaction that moves each entity's `state_rev` at most once
+  completion, edge-triggered re-evaluation, per-SEM-entry trace tests, and
+  `InputBatch` — one admitted input as one store transaction
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §3)
+  §3). The state it moves lives next door in oracle_state.py
 - src/dsl41/capacity.py — the DL-50 capacity subsystem: sized buckets (machine
   max_load, resource amounts) and the QUE_WAIT queue with its admission order. It
   decides who may be admitted and in what order; every transition that decision

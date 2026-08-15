@@ -34,7 +34,8 @@ from dsl41.autocal import (
 )
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, JobIR, MachineIR, _unquote
-from dsl41.oracle import Oracle, OracleError
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES, _city_candidates, resolve_timezone
 
 

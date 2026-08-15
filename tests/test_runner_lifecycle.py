@@ -863,7 +863,7 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
         )
-        from dsl41.oracle import Event
+        from dsl41.oracle_state import Event
 
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "x"}))
         await engine.run_until_quiescent(T0)  # x RUNNING; deadline armed, unfired
@@ -910,7 +910,8 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
     without any reconcile injection."""
     from datetime import timedelta
 
-    from dsl41.oracle import Event, Oracle
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_state import Event
     from dsl41.runner import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
@@ -963,7 +964,7 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
     to the completion's instant first and then drops it as terminal."""
     from datetime import timedelta
 
-    from dsl41.oracle import Event
+    from dsl41.oracle_state import Event
     from dsl41.runner import Engine
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
@@ -1010,7 +1011,7 @@ def test_m3_malformed_status_records_map_truthfully() -> None:
 def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None:
     """Review M4: an incomplete FW run whose re-dispatch adapter is missing
     at resume must refuse loudly, never hang RUNNING forever."""
-    from dsl41.oracle import Event
+    from dsl41.oracle_state import Event
     from dsl41.runner import start_run
     from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
@@ -1053,7 +1054,7 @@ def test_m6_wrapper_spawn_failure_fails_job_not_engine(
     """Review M6: an EMFILE-class glitch spawning the WRAPPER fails that
     one job with a truthful FAILURE cause; the engine loop survives and
     other jobs complete normally."""
-    from dsl41.oracle import Event
+    from dsl41.oracle_state import Event
     from dsl41.runner import start_run
 
     jil = (

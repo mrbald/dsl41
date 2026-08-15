@@ -497,7 +497,8 @@ def journal(
     stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
     explicitly.
     """
-    from dsl41.oracle import Oracle, OracleError
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_state import OracleError
     from dsl41.runner_clock import EngineError
     from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
 
@@ -1230,7 +1231,7 @@ def rehearse(
 
     from datetime import UTC, datetime, timedelta
 
-    from dsl41.oracle import Event, OracleError
+    from dsl41.oracle_state import Event, OracleError
     from dsl41.runner import Engine, start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock

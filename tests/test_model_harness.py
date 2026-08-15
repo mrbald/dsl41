@@ -24,7 +24,7 @@ from model_harness import (
     cm14_double_spawns,
 )
 
-from dsl41.oracle import Event
+from dsl41.oracle_state import Event
 
 MODEL_JIL = """\
 insert_job: solo

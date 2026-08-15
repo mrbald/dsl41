@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 
 from dsl41.ir import CatalogIR
-from dsl41.oracle import Event, RuntimeState, TraceEntry
+from dsl41.oracle_state import Event, RuntimeState, TraceEntry
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock

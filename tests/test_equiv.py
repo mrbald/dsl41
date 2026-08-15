@@ -54,7 +54,7 @@ from dsl41.equiv import (
 )
 from dsl41.ir import CatalogIR, Time, lower_catalog, lower_source
 from dsl41.lint import rule_l006, rule_l007
-from dsl41.oracle import Event
+from dsl41.oracle_state import Event
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 CORPUS = sorted(CORPUS_DIR.glob("*.jil"))

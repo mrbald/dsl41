@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Event
+from dsl41.oracle_state import Event
 from dsl41.runner import start_run
 from dsl41.runner_control import ControlServer
 from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient

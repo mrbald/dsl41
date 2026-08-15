@@ -3714,6 +3714,11 @@
   with `Oracle` — it drives the interpreter's clock. No re-export shim:
   a re-export layer is a pass-through layer, so the ~30 import sites are
   updated. Its own commit, before S5 adds more importers.
+  *(Done, same day.* `src/dsl41/oracle_state.py`, 429 lines; `oracle.py`
+  falls to 1152 and off the advisory list. 28 files' imports updated. The
+  module name is `oracle_state` rather than `runtime` because two letters
+  from `runner` is not a distance, and rather than `oracle_model` because
+  the dominant thing in it is an owner with verbs, not a record.*)
   **4. `Engine.drops` holds two categories — DECLINED, one wording fix.**
   Since DL-89/DL-90 the vocabulary is refused (never admitted) / rejected
   (a decision) / missed (E9's scheduler ticks), and the fields are

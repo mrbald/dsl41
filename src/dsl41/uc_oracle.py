@@ -76,7 +76,7 @@ from pydantic import BaseModel
 from dsl41.backend_uc import UcEdge, UcModel, UcVarCondition
 from dsl41.conditions import CmpOp, compare_value
 from dsl41.ir import exit_is_success
-from dsl41.oracle import Event, TraceEntry
+from dsl41.oracle_state import Event, TraceEntry
 
 UcTaskStatus = Literal[
     "Defined",  # no open instance contains the task

@@ -33,7 +33,7 @@ from typer.testing import CliRunner
 
 from dsl41.cli import app
 from dsl41.ir import lower_source
-from dsl41.oracle import Event
+from dsl41.oracle_state import Event
 from dsl41.runner import Engine, start_run
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
 from dsl41.runner_control import ControlServer, command, read_for, revision_in

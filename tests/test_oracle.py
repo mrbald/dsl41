@@ -34,7 +34,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Event, EventKind, Oracle, OracleError, TraceEntry
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner_clock import EngineError
 
 T0 = datetime(2026, 7, 1, 8, 0)

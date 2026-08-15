@@ -46,7 +46,8 @@ import pytest
 from dsl41.ast_jil import parse_file
 from dsl41.backend_uc import UcEdge, UcModel, UcVarCondition, UcWorkflow, compile_twin
 from dsl41.ir import lower_catalog, lower_source
-from dsl41.oracle import Event, EventKind, Oracle, TraceEntry
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, EventKind, TraceEntry
 from dsl41.uc_oracle import (
     Divergence,
     UcOracle,

@@ -40,7 +40,8 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Event, GlobalRuntime, JobRuntime, Oracle, OracleError, RuntimeState
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, GlobalRuntime, JobRuntime, OracleError, RuntimeState
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

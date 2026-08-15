@@ -15,6 +15,11 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
                whole-graph chart alone as another (DL-70, DL-76)
   viz_explore - IR-G -> cytoscape.js elements for the interactive navigation
                page (DL-71)
+  oracle_state - the oracle's state and the vocabulary that moves it:
+               JobStatus/EventKind/Event/TraceEntry, the frozen JobRuntime
+               and GlobalRuntime rows, RuntimeState (the owner, its timer
+               heap and the input transaction) and OracleError. Depends on
+               nothing in the interpreter, which is the point (DL-91)
   oracle     - discrete-event AutoSys semantics interpreter (docs/ir-design.md ss7)
   equiv      - canonical form + equivalence tiers a/b/c (docs/ir-design.md ss6)
   backend_uc - UC twin model + edge classification + migration report +

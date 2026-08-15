@@ -77,7 +77,8 @@ from dsl41.conditions import (
 )
 from dsl41.derive import derive_graph
 from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, Time
-from dsl41.oracle import Event, Oracle, TraceEntry
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, TraceEntry
 
 STATE_CEILING = 2**18
 

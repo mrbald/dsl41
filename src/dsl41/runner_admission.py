@@ -84,7 +84,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from dsl41.oracle import TERMINAL, Event, Oracle, RuntimeState
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 
 #: The wire version of the ss6 envelope. There is no v1 to fall back to:

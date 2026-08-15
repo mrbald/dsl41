@@ -937,7 +937,7 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
         engine = __import__("dsl41.runner", fromlist=["start_run"]).start_run(
             catalog, run_root, clock=RealClock(), adapters=_adapters(client)
         )
-        from dsl41.oracle import Event
+        from dsl41.oracle_state import Event
 
         engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "slow"}))
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
@@ -986,7 +986,7 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
         await client.ensure_running()
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
-        from dsl41.oracle import Event
+        from dsl41.oracle_state import Event
         from dsl41.runner import start_run
 
         engine = start_run(catalog, run_root, clock=RealClock(), adapters=_adapters(client))

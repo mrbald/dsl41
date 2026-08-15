@@ -40,7 +40,7 @@ from dsl41.autocal import (
     standard_rows,
 )
 from dsl41.ir import CatalogIR, ScheduleBlock
-from dsl41.oracle import Event
+from dsl41.oracle_state import Event
 from dsl41.runner_clock import EngineError
 
 

@@ -96,7 +96,7 @@ from typing import Any, get_args
 
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.oracle import Event, EventKind, JobRuntime, JobStatus
+from dsl41.oracle_state import Event, EventKind, JobRuntime, JobStatus
 from dsl41.runner import Engine
 from dsl41.runner_adapters import LINE_LIMIT, job_log_paths
 from dsl41.runner_admission import (
