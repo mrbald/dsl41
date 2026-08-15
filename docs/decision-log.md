@@ -4744,3 +4744,56 @@
   for the same reason the IR-F schema pin and the citation index do: the tree
   is the artifact being protected. Mutation-tested -- citing an absent test
   from concurrency-model.md blocks with the file, line and name.
+- DL-111 the spec gets worked examples, and the examples find five things
+  the text was wrong about (2026-08-15; item 1 of the post-S7b plan, at the
+  user's request: "enrich it with representative examples, would be both
+  more readable and the proof of being real -- once example is possible").
+  Four sections gain one: ss4 an operator kill and the four lines it leaves,
+  ss5 the delayed spawn that outlives its own run plus the three-state kill,
+  ss7 one failover in order, ss8 the eviction bound in seconds. Every example
+  cites the tests that hold it, and DL-110's gate fails the build if one of
+  those names stops existing.
+  **The examples were GROUNDED by agents and WRITTEN by hand,** which is the
+  division that matters for a frozen document: four agents traced the code
+  and returned real values, real record shapes and real strings; four more
+  tried to refute each trace; every correction they found was applied, and
+  every value in the four examples was then reproduced here against the
+  shipped code before it went in. Voice and argument are not delegable in a
+  document whose value is its argument.
+  **What the exercise found, which is the answer to "proof of being real".**
+  (1) ss4 says the step-4 batch is "`TimeAdvanced(at)` + `InputAttempt`" --
+  two records. It is one, and one is STRONGER: a single line cannot be torn
+  in half by a crash. ss1's own DL-100 amendment already described it that
+  way; two code comments still asserted the two-record reading and are now
+  corrected. (2) ss5 enumerates three effect states; there are four, and
+  `retired` is the recorded outcome of the supersession rule the same
+  section states three paragraphs later. (3) ss5's "tombstones carry
+  fingerprints and reject collisions" is not built and was never amended --
+  named now rather than quietly dropped, with why it has not bitten
+  (`effect_id` is DERIVED, so a collision means an inconsistent log, not a
+  confused client) and what would make it real (an id that is minted, which
+  is what a relay needs). (4) DL-96's amendment defends dropping the
+  pre-attempt `run_id` binding with "the outbox records the process identity
+  the spool reports, when it reports it" -- on the live path it never does;
+  only the two resume paths populate it. (5) ss8 says `--force` is "recorded
+  with the AUTHENTICATED principal". It records `claimed_actor`, whose own
+  docstring calls it a claim and points at control-protocol ss7 gap 2. Force's
+  whole safety story rests on that word, so the word is now "claimed", and it
+  goes back when there is an authenticated principal to stamp.
+  **And one latent bug, fixed rather than documented.** `evict_host` left
+  `state_before_quarantine` set, while the field documents itself as non-null
+  only while the row is `quarantined` -- and a gated eviction can only start
+  FROM quarantined, so every gated eviction falsified it. Harmless today
+  (`reinstate_host` refuses a row that is not quarantined) and a loaded gun
+  for the next transition someone writes. Eviction clears it.
+  **A test whose name promised more than it held.**
+  `test_cm11_force_skips_the_preconditions_and_is_recorded_with_its_principal`
+  pinned the bypass and checked the attribution by hand-calling the store
+  with a principal -- never by letting a forced command supply one. So
+  `forced_by=actor if cmd.force else None` was exercised only on its `else`
+  side. There is now a test that goes through the verb rather than around it.
+  **The one-host table is why half of ss8 is unreproducible by CLI,** and the
+  section now says so: `register_host` has one caller, which has one caller,
+  and no startup path can set `executor_id`. Every rule in ss8 is implemented
+  and tested; what is missing is a second row to point them at.
+  2149 -> 2154 passed; 100% branch held; ruff, mypy, arch_check clean.

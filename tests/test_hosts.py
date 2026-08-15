@@ -1094,3 +1094,61 @@ def test_cm11_a_permitted_eviction_moves_the_row_and_bumps_the_generation() -> N
     assert row.generation == before.generation + 1  # the fence a return must clear
     assert row.forced_by is None  # gated, not forced: the bound is the reason
     assert not routes_new_effects(row)
+
+
+def test_eviction_clears_what_quarantine_interrupted(tmp_path: Path) -> None:
+    """`state_before_quarantine` documents itself as non-null only while the
+    row is `quarantined`, and a gated eviction can only START from
+    quarantined (ss8 precondition 1) -- so before DL-111 every gated
+    eviction left the invariant false. Harmless today, because
+    `reinstate_host` refuses to act on a row that is not quarantined; a
+    stale "put this back" on an evicted host is a loaded gun for whoever
+    writes the next transition."""
+    store = _table(h=HostRuntime())
+    store.begin_input()
+    store.quarantine_host("h")
+    store.commit_input()
+    assert store.host("h").state_before_quarantine == "active"  # type: ignore[union-attr]
+
+    store.begin_input()
+    apply_host_command(store, _cmd("evict", "h"), actor=None)
+    store.commit_input()
+
+    row = store.host("h")
+    assert row is not None
+    assert (row.state, row.generation) == ("evicted", 1)
+    assert row.state_before_quarantine is None
+
+
+def test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it() -> None:
+    """The other half of `--force`'s name, which its own test never held:
+    the bypass was pinned, but the ATTRIBUTION was checked by hand-calling
+    the store with a principal rather than by letting a forced command
+    supply one. So the branch that decides it -- `forced_by=actor if
+    cmd.force else None` -- was exercised only on its `else` side, and the
+    wiring from the envelope to the row had no test at all (DL-111).
+
+    ss8 rests force's whole safety story on this being recorded, so it is
+    worth a test that goes through the verb rather than around it."""
+    store = _table(h=HostRuntime(deadman_s=60.0, last_contact=T0))
+    forced = _cmd("evict", "h", force=True)
+    # every gated precondition unmet -- active, and in contact one second ago
+    assert host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(seconds=1)) is not None
+    assert host_rejection_reason(store, forced, T0 + timedelta(seconds=1)) is None
+
+    store.begin_input()
+    apply_host_command(store, forced, actor="alice@ops-laptop")
+    store.commit_input()
+
+    row = store.host("h")
+    assert row is not None
+    assert (row.state, row.generation) == ("evicted", 1)
+    assert row.forced_by == "alice@ops-laptop"  # who asked, on the record
+
+    # ...and the gated path records no one: there, the preconditions ARE the
+    # justification, and a principal beside them would suggest otherwise
+    gated = _table(g=_quarantined(deadman_s=1.0, last_contact=T0 - timedelta(hours=1)))
+    gated.begin_input()
+    apply_host_command(gated, _cmd("evict", "g"), actor="alice@ops-laptop")
+    gated.commit_input()
+    assert gated.host("g").forced_by is None  # type: ignore[union-attr]

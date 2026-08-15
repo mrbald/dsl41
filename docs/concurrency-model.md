@@ -228,6 +228,61 @@ For every input, in log order:
 
 Steps 5–7 must not yield to another state-changing input.
 
+**Worked example — one operator kill, four lines.** A job running at run 1,
+revision 1. An operator sends `KILLJOB` naming that revision. This is what
+the log gets, verbatim from a run of the shipped code:
+
+```jsonl
+{"rec":"input","seq":2,"at":"…T02:00:30","kind":"KILLJOB","payload":{"job":"nightly"},
+ "expect":{"job:nightly":1},"epoch":1,"request_id":"k1"}
+{"rec":"result","index":2,"request_id":"k1","decision":"applied","reason":null,
+ "revisions":{"job:nightly":2}}
+{"rec":"effect","effect_id":"e2:KILL:nightly.1","kind":"KILL","job":"nightly",
+ "run_number":1,"executor_id":"local","index":2,"at":"…T02:00:30"}
+{"rec":"effect_result","effect_id":"e2:KILL:nightly.1","state":"applied",
+ "run_id":null,"detail":null}
+```
+
+Three of those are step 4 and step 7 — the attempt, then the decision and
+what it implies, committed together. The fourth arrives on the dispatch
+that follows in the same loop iteration. Read them as the answers to four
+different questions: *what was asked* (with the revision it was asked
+against), *what was decided* (and which revisions moved), *what that
+implied* (before it was attempted), and *what came of it*.
+
+Now change one thing at a time:
+
+- **The same envelope again.** `request_id` and fingerprint both match, so
+  step 2 answers from the decision index: no index consumed, no clock
+  moved, the original `applied` returned
+  (`test_cm05_an_exact_retry_takes_no_index_and_moves_no_time`).
+- **The same `request_id`, a different command.** A fingerprint collision,
+  refused — and a refusal leaves *nothing* in the log, which is what makes
+  it different from a rejection
+  (`test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision`).
+- **`expect` naming revision 1 after something moved it to 2.** Rejected —
+  a decision, at an index, with `reason` set. It happened; it is in the
+  log; replay honours it rather than re-deciding
+  (`test_cm06_a_command_composed_against_a_stale_revision_is_rejected`).
+- **A `term_run_time` deadline due one second earlier.** It fires as its
+  own verbless input, takes the index, moves the revision — and the
+  operator's command, composed against the old one, is rejected on
+  arrival. Due at the *same* instant instead, it fires inside this input's
+  own batch and does not invalidate it (§0's amendment; both halves are
+  pinned).
+
+*(Amended by DL-111, at build.* Step 4 above says the batch is
+"`TimeAdvanced(at)` + `InputAttempt`" — two records. It is one: the `input`
+line's own `at` IS the time observation, and `Journal.admit` makes a single
+`_write` call. That is the stronger form of what step 4 asks for, and the
+code says so where it lives ("one line, so the batch it carries cannot be
+torn in half by a crash"); §1's own DL-100 amendment already describes it
+that way — "atomic multi-record commit IS the one-line attempt record".
+The `advance` record is a different thing and still exists: a time
+observation with no verb, which is the other half of the input alphabet
+(DL-44). Two code comments still assert the two-record reading and are
+wrong.*)*
+
 **Replay is two-pass.** `ApplyResult` is appended *after* `InputAttempt`,
 so replay cannot meet an attempt and skip it by kind: it builds the
 decision index first, then applies. An attempt durably admitted with **no
@@ -281,6 +336,90 @@ run N is still "current" after run N has been TERMINATED.
 Per-run effect ordering is mandatory. The SPAWN→SIGNAL race this depends
 on is already closed (DL-83): a live wrapper with no spawn record answers
 `not_ready`, so a kill can no longer be persisted as an applied no-op.
+
+**Worked example — the delayed spawn that outlives its own run.**
+Supersession by exact desired state reads as an arbitrary choice until you
+see the run where the obvious guard fails, so here is that run. Held by
+`test_a_held_spawn_whose_run_has_since_ended_is_retired_not_applied`.
+
+1. `drain local`. `routes_new_effects` is true only for `active`, so the
+   host now routes no new effect.
+2. `STARTJOB j` at 08:00:30. `start_run` takes `run_number` 0 → 1 and the
+   job reaches RUNNING. One effect is planned:
+   `e2:SPAWN:j.1` — the id is *derived*, `f"e{index}:{kind}:{job}.{run_number}"`,
+   not minted, so replay reconstructs it rather than trusting a uuid.
+3. Dispatch reaches `_apply_effect`, whose first gate is routing. The
+   effect is left **pending** — no outcome recorded — and that pending
+   entry *is* the held set. Nothing launched.
+4. `KILLJOB j`. The job goes TERMINATED. **`run_number` does not move**:
+   `transition` writes `status`, `status_at`, `last_end_at` and maybe
+   `exit_code`, and the only writer of `run_number` in the whole store is
+   `start_run`. The row is now TERMINATED at run 1 — the same 1 that
+   `e2:SPAWN:j.1` names. The kill plans no effect of its own, because a
+   terminal for a job with no *live* run needs no kill.
+5. `activate local`. The held effect now gets past the routing gate and
+   reaches `superseded_reason` — the first moment anything compares it to
+   the world.
+
+A guard that compared generations would be asked `1 != 1` and would say
+"still current". It is never even asked: the terminal arm short-circuits
+first, and *that* is the point — had the order been reversed, the
+comparison would have licensed the spawn. The effect retires with
+`j is already TERMINATED: the run this spawn was for has ended`, and the
+estate ends where it began: `live_jobs()` empty, `run_number` still 1,
+nothing re-ran.
+
+**Worked example — the third state, and why two would not do.** A
+different run root: an engine decided a kill, recorded the intent, and
+died before recording what came of it. At resume `_redrive_recorded_kills`
+finds the pending KILL, finds no live wrapper to ask, and falls through to
+the spool. `runs/j.1/status.json` decides it three ways, and only three
+ways (`test_a_recorded_kill_is_resolved_from_the_spool_three_ways`):
+
+| `status.json` | outcome | why |
+| --- | --- | --- |
+| `outcome: terminated` / `signaled` | `applied` | the signal landed |
+| `outcome: exited` | `retired` | the run ended on its own first |
+| absent | `indeterminate` | nothing observed it (E7) |
+
+The third row is the one two states cannot express. `state_of` reads back
+`indeterminate`, and `result_for` answers the caller `outcome_unavailable`
+rather than an outcome object — a retry is told "nobody can say", which is
+neither the success nor the failure a two-state model would have to
+invent. The effect leaves `pending()`, so no later drain re-drives it
+blindly: *nothing was tried* and *something was tried and cannot be
+reported on* stay different facts.
+
+*(Amended by DL-111, at build.* Writing those examples put three of this
+section's own sentences against the code, and the code won all three.
+
+**The states are FOUR, not three.** `EffectOutcome.state` is
+`applied | indeterminate | retired`, plus `pending` as the absence of one.
+`retired` is not an omission: it is the recorded outcome of the
+supersession rule this same section states three paragraphs above, and
+DL-98 declined renaming it precisely because "safe to forget" and "must
+not be forgotten" are different facts. The enumeration above was written
+before the rule below it had an implementation, and never caught up.
+
+**"Tombstones carry fingerprints and reject collisions" is not built.**
+Neither `Effect` nor `EffectOutcome` carries a fingerprint, and
+`Outbox.record` is silently idempotent on `effect_id` — a second, different
+effect under one id overwrites rather than collides. It is not obviously
+needed either, which is why it went unnoticed: DL-96 made `effect_id`
+*derived* from `(index, kind, job, run_number)`, so two different effects
+cannot share an id unless the log itself is inconsistent, which is a
+corruption case and not a client one. Left unbuilt, named here rather than
+quietly dropped; it becomes real if an id is ever minted rather than
+derived — which is exactly what the relay would need.
+
+**DL-96's amendment overstates the live path.** It defends dropping §5's
+pre-attempt `run_id` binding with "the outbox records the process identity
+the spool reports, when it reports it". On the live path it never does:
+`_apply_spawn` and `_apply_kill` both resolve with `run_id` left at its
+`None` default and never revise it. `run_id` is populated only on the two
+*resume* paths. The deviation still holds for the reason DL-96 gave — the
+run directory is the identity locally — but the sentence describes a
+recording that does not happen.*)*
 
 *(Amended by DL-96, at build — stage S5c.* Four deviations, each bounded and
 each because the thing it defers against does not exist yet.
@@ -406,6 +545,45 @@ the returning host must re-register at the new generation and self-fence
 first, which is the relay's act to perform — so what stands here is the rule
 and the refusal that names it, not an engine that kills someone else's
 wrappers on a hunch.*)*
+
+**Worked example — one failover, in order.** Engine A is running three
+jobs; `fast` has finished, `slow_one` and `slow_two` are mid-run. A dies by
+`SIGKILL` — no shutdown, no records written for what was in flight. Engine
+B starts on the same run root
+(`test_sigkill_engine_midrun_then_resume`):
+
+1. **ACQUIRE.** B `flock`s `leader.lock` and, after the lock is held,
+   checks that the name still points at the inode it locked — a lock on an
+   unlinked inode excludes nobody. Only then does it read the log. The
+   epoch is allocated by being *appended*: a `leader` record naming epoch 2,
+   so every input after it is attributable to B and every input before it
+   to A.
+2. **Reconcile every execution host.** The candidate set is the union of
+   the log's `dispatch` records, the `runs/` directory, and what the host
+   LISTs — three witnesses to one question, because concluding "never
+   spawned" from a missing directory alone would re-drive a run the host is
+   still holding.
+3. **Retire superseded, re-drive pending.** `slow_one` and `slow_two` each
+   have a run directory whose wrapper recorded `parent lost` when A's
+   lifeline closed, so their real endings are injected as completions —
+   through the §4 stale gate, like any adapter completion. Nothing is
+   re-driven here, because nothing was left pending: A recorded each
+   effect's outcome at dispatch.
+4. **Dispatch.** The barrier ends where it says it does. On this run there
+   is nothing left to drain; on the run where A died in the window *between*
+   recording an intent and acting on it, this is the step that delivers it
+   (`test_cm09_a_start_the_previous_leader_never_dispatched_is_re_driven`,
+   and its contrast, `test_a_start_with_no_recorded_intent_is_still_failed`).
+
+The ordering that matters is the one a reader is most likely to invert:
+**an effect is recorded `applied` before the work starts.** `_launch`
+creates a task and the outcome is written on the next statement, with no
+await between, so the WAL order on a real run is `effect` →
+`effect_result{applied}` → `dispatch`, and the wrapper's own `spawn.json`
+— written by the process that spawned, not by the engine — arrives later
+still. That is why a *pending* SPAWN means something so specific: not "a
+spawn that may or may not have run", but "an intent nothing ever acted on",
+which is the only reading under which step 3's re-drive is safe.
 
 **Timing is a bound, not a proof.** Safety is the successful ACQUIRE.
 `T_barrier = T_acquire + T_list + T_reconcile + T_redrive` is an
@@ -544,7 +722,8 @@ the standard lease argument and depends only on bounded drift. A refusal
 reports the remaining wait, so the operator waits rather than guesses.
 
 **Force is attributed, not forbidden.** `evict --force` skips the
-precondition, is recorded with the authenticated principal, and is the
+precondition, is recorded with the claimed principal (§6: the leader stamps
+an authenticated one when there is authentication to stamp), and is the
 one path in this document that can produce a double run. It exists
 because an operator with out-of-band knowledge — the machine is
 physically powered off, the disk is out — is sometimes right, and waiting
@@ -561,6 +740,71 @@ incident.
 
 Re-driving an evicted host's held jobs issues **new runs with new effect
 ids**, never retries of the old ones (§5).
+
+**Worked example — the bound, in seconds.** A host running a 60-second
+deadman, unreachable since 02:00:00, quarantined by the leader. `T_skew` is
+`max(interval × 200ppm, 1.0)`, so for this interval the floor wins and the
+bound is `60 + 30 + 1.0 = 91.0` seconds. An operator reaching for `evict`
+at 02:01:00 is told, verbatim:
+
+> host 'local' was in contact 60.0s ago and the ss8 bound is 91.0s (deadman
+> 60.0s + kill 30.0s + skew): wait 31.0s more, or --force with proof it is dead
+
+That is a **rejection**, not a refusal: it read mutable state, so it is a
+decision at a real log index and replay reaches the same verdict from the
+same row (`test_cm11_eviction_is_refused_before_the_bound_and_permitted_after`).
+At 02:02:00 the same command returns no reason at all and applies — the row
+becomes `evicted`, `generation` goes 0 → 1, and `forced_by` stays `None`,
+because on the gated path the preconditions *are* the justification.
+
+The other two preconditions fail with their own sentences, and which one an
+operator sees depends on the order they are checked in — precondition 1
+first, so a `passive` host with no deadman is told about the drain, not
+about the deadman:
+
+| row | what it is told |
+| --- | --- |
+| `passive`, no deadman | *"is passive: eviction needs the leader's own durable record that the host is unreachable (ss8 precondition 1)…"* |
+| `quarantined`, no deadman | *"runs no deadman (ss8 precondition 2): nothing bounds when its wrappers die…"* |
+| not in the table | *"a host joins it by registering, never by being addressed"* |
+
+`--force` on the same host one second after contact — two of the three
+preconditions unmet — returns no reason and writes
+`forced_by="alice@ops-laptop"` into the row
+(`test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it`).
+
+*(Amended by DL-111, at build.* Working that example through the shipped
+code corrected this section twice.
+
+**"Recorded with the authenticated principal" is not what happens, and
+cannot be yet.** What `forced_by` holds is the envelope's `claimed_actor` —
+whose own docstring calls it "a CLAIM: the control socket has no
+authentication (control-protocol §7 gap 2) … never an authorization". So
+force's safety story is *attributable* rather than *authenticated*: the row
+records who said they were asking, durably and loudly, and a socket anyone
+with the uid can reach is what stands behind that. §6 already says the
+leader stamps an authenticated principal and that no leader can do that
+yet; this section wrote the end state as though it were the current one.
+The word here is now "claimed", and it goes back when there is an
+authenticated principal to stamp.
+
+**A one-host table makes half this section unreproducible today,** which is
+worth saying plainly because the example above had to be written against
+`local`. `register_host` has exactly one caller (`seed_local_executor`),
+which has exactly one caller (`Engine.__init__`), and no CLI or startup path
+can set `executor_id`. So the routing table holds exactly one row, and
+`dsl41 host evict prod-a` answers "no host 'prod-a' in the routing table"
+rather than anything about a bound. Every rule in this section is
+implemented and tested; what is missing is a second row to point them at,
+which is the relay's business (DL-97, DL-103).
+
+**And one latent bug, fixed rather than documented.** `evict_host` left
+`state_before_quarantine` set, while the field documents itself as non-null
+only while the row is `quarantined` — and a gated eviction can only start
+FROM quarantined, so every gated eviction falsified the invariant. Harmless
+today, because `reinstate_host` refuses to act on a row that is not
+quarantined. It is a loaded gun for whoever writes the next transition, so
+eviction now clears it.*)*
 
 *(Amended by DL-94, at build — stage S5a.* Four things this section left
 implicit, settled by the code that implements it.

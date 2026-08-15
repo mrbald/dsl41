@@ -31,8 +31,10 @@ and each is here because the obvious arrangement is wrong:
   completion still carries a real observation of the clock, and the kill it
   let fire is a decision the estate has already acted on. Dropping the
   observation with the attempt would resurrect a killed job on the next
-  replay -- which is precisely why ss4 makes the batch two records and not
-  one field on one record.
+  replay. The batch carries both halves in ONE record -- the attempt's own
+  `at` IS the observation -- which is the stronger form of what ss4 asks
+  for: one line cannot be torn in half by a crash (DL-111 corrected the
+  two-record reading this comment used to assert).
 
 **The decision index** (`request_id` -> `ApplyResult`) is what makes a
 retry idempotent and what makes replay two-pass. `ApplyResult` is appended

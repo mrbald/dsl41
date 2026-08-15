@@ -137,8 +137,9 @@ def test_cm04_the_deadline_fires_before_the_gate_reads_the_status_it_gates_on() 
     assert rejected is not None and rejected.decision == "rejected"
     assert rejected.reason == "job already terminal"
     # the time half of that same batch is what killed x, so the input the
-    # gate rejected still moved a revision -- which is why ss4 makes the
-    # batch two records and not one field on one record
+    # gate rejected still moved a revision. Both halves ride ONE record --
+    # the attempt's own `at` is the observation -- so a crash cannot land
+    # between them (DL-111)
     assert rejected.revisions == {"job:x": engine.oracle.store.revision("job:x")}
 
 

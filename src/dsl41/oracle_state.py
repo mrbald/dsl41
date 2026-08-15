@@ -590,10 +590,21 @@ class RuntimeState:
         ANOTHER host run what was bound to this one, so it does two things
         no other transition does -- bump the `generation` a returning relay
         is fenced on, and record the actor of a `--force` that skipped the
-        proof (None when the ss8 preconditions were met)."""
+        proof (None when the ss8 preconditions were met).
+
+        It also CLEARS what quarantine interrupted. A gated eviction can only
+        start from `quarantined` (ss8 precondition 1), so leaving that field
+        set would make every gated eviction violate the invariant this row
+        documents -- non-null only while quarantined -- and would leave a
+        state to "put back" for a host whose whole point is that it is not
+        coming back at this generation (DL-111)."""
         row = self._require_host(host_id)
         self._replace_host(
-            host_id, state="evicted", generation=row.generation + 1, forced_by=forced_by
+            host_id,
+            state="evicted",
+            generation=row.generation + 1,
+            forced_by=forced_by,
+            state_before_quarantine=None,
         )
 
     # ------------------------------------------------------------------ timers
