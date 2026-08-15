@@ -1133,13 +1133,23 @@ async def _serve_run(
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.runner_scheduler import Scheduler
 
+    from dsl41.runner_ledger import acquire_run_root
+
     clock = RealClock()
+    # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
+    # own entry points would, because the next thing this function does is
+    # START a supervisor and take its lease -- an act on an estate this
+    # process may turn out not to lead.
+    try:
+        lock = acquire_run_root(run_root)
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        return 2
     # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
     # supervisor that owns the wrapper lifelines, so an engine restart does
     # not kill the jobs. FW stays in-engine (no process to survive).
     client: SupervisorClient | None = None
     if detached:
-        run_root.mkdir(parents=True, exist_ok=True)  # the supervisor needs it first
         client = SupervisorClient(run_root, deadman_s=deadman)
         try:
             await client.ensure_running()
@@ -1165,6 +1175,7 @@ async def _serve_run(
             hold_open=True,
             supervisor=client,
             deadman_s=running_deadman,
+            lock=lock,
         )
     else:
         engine = start_run(
@@ -1175,6 +1186,7 @@ async def _serve_run(
             scheduler=scheduler,
             hold_open=True,
             deadman_s=running_deadman,
+            lock=lock,
         )
     if client is not None:
         # ss8's "positive contact with this host": every confirmed lease

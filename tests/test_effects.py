@@ -373,7 +373,7 @@ def test_the_held_set_is_the_outbox(tmp_path: Path) -> None:
     async def scenario() -> None:
         drained = engine.submit_host(
             HostCommand(verb="drain", host_id="local"),
-            Envelope(request_id="r1", expect={"host:local": 1}, epoch=0),
+            Envelope(request_id="r1", expect={"host:local": 1}, epoch=engine.epoch),
         )
         await engine.run_until_quiescent(T0 + timedelta(seconds=10))
         assert (await drained).decision == "applied"

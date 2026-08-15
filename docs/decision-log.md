@@ -4261,3 +4261,58 @@
   "no election was held here", which is a distinction worth keeping rather
   than papering over with a fake epoch 1 on an engine that has no log to
   fence.
+- DL-100 election: the lock, the epoch, and the act that used to happen
+  before both (2026-08-15; stage S6a, DL-99's first slice). ss1 and ss7 carry
+  the amendments; this entry is the shape and the hole it closed.
+  **The hole was live.** `_serve_run` claimed the control socket AFTER
+  `resume_run` had replayed the log, reconciled the estate, re-driven
+  recorded kills and appended to the WAL. Two `dsl41 run --resume` processes
+  on one run root therefore both acted, in full, before either was refused --
+  and the refusal was a 0.2-second connect probe that UNLINKS a socket it
+  cannot reach, so an engine wedged past that timeout loses its socket to a
+  second engine. Both halves are now behind an `flock` taken before the log
+  is read. The probe stays, demoted to what it always was: cleanup of a stale
+  socket FILE, not an election.
+  **The mutex needs no liveness heuristic,** which is the whole reason to
+  prefer it. The kernel releases an `flock` when the holder dies, `kill -9`
+  included, so nothing decides whether the previous holder is alive. A test
+  spends a real subprocess on that -- acquire, SIGKILL, acquire again --
+  because it is the property the probe could not have.
+  **Acquire precedes every ACT, not every append,** and the CLI is where
+  that distinction earns its keep: `dsl41 run --detached` STARTS a supervisor
+  and takes its lease, so leadership is taken in `_serve_run` before the
+  supervisor exists and passed down, rather than inside the engine's own
+  entry points where it would already be too late. A refused `--detached`
+  resume now leaves no supervisor behind.
+  **The epoch is allocated by being appended.** A `leader` record, written
+  under the lock, so allocation and the log's account of it are one write --
+  the same argument ss1 makes for keeping the outbox in the ledger, one level
+  up. It also makes a failover reconstructible: every input between two
+  `leader` records was admitted by the incarnation the earlier one names.
+  **What the epoch is worth on one host, without inflation.** Not what stands
+  between the estate and a double run -- the lock is. What it buys today is
+  that ss4 step 2 stops being a rule pinned against a constant: `epoch` is in
+  the fingerprint, so an EXACT old-epoch retry (the identical envelope,
+  resent to a superseded leader) recovers its original result, while an
+  UNSEEN old-epoch request is refused. Both are now tested with a value that
+  moves, and their old test could not tell them apart. The corollary is
+  worth stating: a client that RE-COMPOSES at the new epoch is not retrying;
+  it is reusing an id for a different command, and it gets a collision
+  refusal. Retries resend bytes.
+  **`INERT_EPOCH` changed meaning rather than retiring.** 0 now means "no
+  election was held here" -- an Engine with no run root and no log, which is
+  what the bisimulation harness runs -- rather than "not implemented yet".
+  Forcing a fake epoch 1 on an engine with no ledger to fence would have lost
+  a real distinction.
+  **`STATE_MACHINE_VERSION` is ss7's second pin, and deliberately not
+  `dsl41_version`.** The package version moves for a docs typo, and refusing
+  to resume a live estate after a patch release would be an outage
+  manufactured by bookkeeping. This one moves when the derivation from inputs
+  to state moves, and nothing a replay cannot see; the bump rule is on the
+  constant. A header that pins none reads as 1. No mechanical gate detects a
+  missed bump -- unlike IR_VERSION, whose shape arch_check can hash -- so it
+  is a discipline, recorded here as one rather than dressed up as a guard.
+  2039 -> 2051 passed; ruff, mypy clean, arch_check blocking checks clean
+  (runner.py 1389 -> 1454 lines, over the advisory note, and DL-98 already
+  declined the same finding for cli.py on the same grounds: splitting it is
+  its own commit with its own seam argument).

@@ -491,10 +491,17 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   verdict without a live host to probe), the one predicate that says which
   states route new effects, and the genesis seed that puts this engine's own
   executor in the table
-- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
+- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/leader/input/
   advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
   gate written into the header
+- src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
+  the mutex (an flock held for the process lifetime, so nothing has to decide
+  whether the previous holder is alive), the epoch allocated by being appended to
+  the log under it, and ss7's eligibility gate on the header's two pins. Acquired
+  before the log is read and before the first side effect: `resume_run` replays,
+  reconciles and re-drives recorded kills, and a mutex taken after those is not
+  one
 - src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
   day sets and windowed extended-calendar generators, DL-56/57) and the SEM-35
   timezone ladder that turns its ticks into UTC instants (zoneinfo, the
@@ -609,6 +616,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
   catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
   `journal` CLI
+- tests/test_ledger.py — phase-12 stage S6a: one leader per run root (a second
+  engine refused, with the holder named), the ordering that makes it worth having
+  (a refused resume leaves the log, the estate and the spool untouched), the
+  monotone epoch across terms, ss7's eligibility gate, and a real SIGKILLed holder
+  whose lock the kernel releases with nothing left to clean up
 - tests/test_admission.py — phase-12 stage S2: the frozen admission order
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
   §4). CM-04 (the deadline fires before the gate reads the status it gates on),

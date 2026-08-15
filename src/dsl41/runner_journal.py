@@ -25,9 +25,17 @@ which is what makes replay two-pass: pass one indexes the decisions, pass
 two applies. An attempt whose result never landed is applied, through the
 same gate the live engine used (concurrency-model ss4, runner_admission).
 
+Stage S6a (concurrency-model ss1/ss7) makes it a LEDGER rather than only a
+log. A `leader` record allocates this incarnation's epoch by being
+appended -- allocation and the log's account of it are one write, so they
+cannot disagree -- under a lock on the run root that this object owns the
+release of (runner_ledger). The header gains ss7's second pin, the
+state-machine version, beside the catalog hash it already carried.
+
 A journal written before S2 replays unchanged. Its attempts have no
 results, so all of them apply -- exactly what the single-pass reader did,
-and the reason no format gate was needed.
+and the reason no format gate was needed. One written before S6a has no
+`leader` record either, so the first term over it is 1.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 import uuid
 
 from dataclasses import dataclass, field
@@ -58,6 +67,7 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.runner_hosts import HostCommand
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
@@ -91,7 +101,14 @@ class Journal:
     rehearse, fsync on close. macOS caveat, accepted: os.fsync does not
     force the drive cache (F_FULLFSYNC would, at a large cost)."""
 
-    def __init__(self, path: Path | str, *, fsync_each: bool, baseline_id: str = "") -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        fsync_each: bool,
+        baseline_id: str = "",
+        lock: LeaderLock | None = None,
+    ) -> None:
         self.path = Path(path)
         self._f = self.path.open("ab")
         os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
@@ -100,6 +117,13 @@ class Journal:
         #: fingerprint. Empty for a journal written before S2, and for the
         #: journal-less engines the bisimulation harness runs.
         self.baseline_id = baseline_id
+        #: S6a: the run root's mutex, acquired before this file was opened
+        #: and released when it is closed. The ledger is the log plus the
+        #: lock that says who may append to it, so closing one closes both --
+        #: an engine that dropped the file and kept the lock would exclude
+        #: its own successor. None for the journal-less and lock-less
+        #: engines the bisimulation harness runs.
+        self._lock = lock
         #: live feeds for ss10 subscribe: every appended record is fanned out
         #: post-write; queues are unbounded (a slow subscriber buffers, the
         #: WAL never blocks on one)
@@ -107,21 +131,51 @@ class Journal:
 
     @classmethod
     def create(
-        cls, path: Path | str, *, catalog: CatalogIR, clock_domain: str, started_at: datetime
+        cls,
+        path: Path | str,
+        *,
+        catalog: CatalogIR,
+        clock_domain: str,
+        started_at: datetime,
+        lock: LeaderLock | None = None,
     ) -> Journal:
         baseline_id = str(uuid.uuid4())
-        journal = cls(path, fsync_each=clock_domain == "real", baseline_id=baseline_id)
+        journal = cls(path, fsync_each=clock_domain == "real", baseline_id=baseline_id, lock=lock)
         journal._write(
             {
                 "rec": "header",
                 "baseline_id": baseline_id,
                 "catalog_hash": catalog_hash(catalog),
                 "dsl41_version": _dsl41_version(),
+                # ss7's other pin, gated where catalog_hash is (S6a,
+                # runner_ledger): what leader eligibility means is that these
+                # two match, and a pin nothing reads is not a pin
+                "state_machine_version": STATE_MACHINE_VERSION,
                 "clock_domain": clock_domain,
                 "started_at": started_at.isoformat(),
             }
         )
         return journal
+
+    def leader(self, *, epoch: int, at: datetime) -> None:
+        """One term of leadership over this run root (ss1's leader record,
+        S6a). Appended under the lock, immediately after acquiring it, which
+        is what makes the epoch MONOTONE: it is allocated by being written,
+        so no two terms can read the same log and choose the same number.
+
+        It is also what makes a failover reconstructible after the fact --
+        every input between two of these records was admitted by the
+        incarnation the earlier one names."""
+        self._write(
+            {
+                "rec": "leader",
+                "epoch": epoch,
+                "at": at.isoformat(),
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "dsl41_version": _dsl41_version(),
+            }
+        )
 
     def admit(self, attempt: Attempt) -> None:
         """Append one admitted input -- the concurrency-model ss4 step-4
@@ -269,6 +323,8 @@ class Journal:
         self._f.flush()
         os.fsync(self._f.fileno())
         self._f.close()
+        if self._lock is not None:
+            self._lock.release()  # the term ends where the log does (S6a)
 
 
 def read_journal(path: Path | str) -> list[dict[str, Any]]:

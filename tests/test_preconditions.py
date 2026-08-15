@@ -261,7 +261,7 @@ def test_cm06_a_command_composed_against_a_stale_revision_is_rejected() -> None:
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         assert engine.oracle.store.revision("job:j") == stale + 1
         result = await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale)
+            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
         )()
         assert result.decision == "rejected"
         assert result.reason == (
@@ -441,14 +441,21 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
         engine.inject(_ev("ON_ICE", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         rejected = await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("keeps-its-index", "job:j", stale)
+            engine,
+            _ev("ON_HOLD", 2, job="j"),
+            _envelope("keeps-its-index", "job:j", stale, epoch=engine.epoch),
         )()
         assert rejected.decision == "rejected"
 
         # and now a REFUSAL: the same id, a different command
         future = engine.submit(
             _ev("OFF_HOLD", 3, job="j"),
-            _envelope("keeps-its-index", "job:j", engine.oracle.store.revision("job:j")),
+            _envelope(
+                "keeps-its-index",
+                "job:j",
+                engine.oracle.store.revision("job:j"),
+                epoch=engine.epoch,
+            ),
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
         with pytest.raises(AdmissionRefused, match="different command"):
@@ -569,7 +576,7 @@ def test_a_rejected_precondition_replays_as_a_rejection(tmp_path: Path) -> None:
         engine.inject(_ev("ON_ICE", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         result = await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale)
+            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
         )()
         assert result.decision == "rejected"
         await engine.shutdown()
@@ -600,7 +607,9 @@ def test_an_admitted_precondition_with_no_result_re_runs_the_gate(tmp_path: Path
         stale = engine.oracle.store.revision("job:j")
         engine.inject(_ev("ON_ICE", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        await _submitted(engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale))()
+        await _submitted(
+            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
+        )()
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -718,7 +727,9 @@ def test_every_read_publishes_the_header_a_precondition_is_composed_from(
             for cmd in ({"cmd": "status"}, {"cmd": "timers"}, {"cmd": "global", "name": "X"}):
                 answer = await _call(server.path, cmd | {"v": PROTOCOL_VERSION})
                 assert answer["baseline_id"] == engine.baseline_id != ""
-                assert answer["epoch"] == 0
+                # the term this run root's ledger allocated, not a constant:
+                # a client composes against the leader it read from (S6a)
+                assert answer["epoch"] == engine.epoch == 1
                 assert answer["applied_index"] == engine.frontiers.applied_index
         finally:
             await _teardown(engine, server, loop_task)

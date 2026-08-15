@@ -42,9 +42,11 @@ from dsl41.oracle_state import Event
 from dsl41.runner import Engine, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
+    AdmissionRefused,
     ApplyResult,
     Attempt,
     DecisionIndex,
+    Envelope,
     Frontiers,
     RequestCollision,
     fingerprint,
@@ -537,7 +539,15 @@ def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Pat
     would re-admit under indices the log already used, and would apply a
     retry of a command it had already decided. The retry here crosses an
     engine incarnation, which is the case a per-process cache cannot
-    answer."""
+    answer.
+
+    It crosses a TERM too, now that S6a allocates one per incarnation, and
+    that is what makes it ss4 step 2's own sentence rather than a paraphrase
+    of it: an EXACT old-epoch retry -- the identical envelope, resent to a
+    leader that has since been superseded -- recovers its original result.
+    Exact is the load-bearing word. A client that re-composes at the new
+    epoch is not retrying; it is reusing an id for a different command, and
+    the next test is what happens to it."""
     from dsl41.runner import resume_run
 
     run_root = tmp_path / "run"
@@ -549,8 +559,15 @@ def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Pat
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter({("j", 1): (60.0, 0), ("j", 2): (60.0, 0)})},
         )
-        engine.inject(_ev("STARTJOB", 0, job="j"), request_id="start-j")
+        assert engine.epoch == 1  # genesis holds the first term
+        sent = Envelope(
+            request_id="start-j",
+            expect={"job:j": engine.oracle.store.revision("job:j")},
+            epoch=engine.epoch,
+        )
+        first = engine.submit(_ev("STARTJOB", 0, job="j"), sent)
         await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        assert (await first).decision == "applied"
         assert engine.journal is not None
         await engine.shutdown()
         engine.journal.close()
@@ -562,10 +579,12 @@ def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Pat
             clock=VirtualClock(start=T0 + timedelta(minutes=2)),
             adapters={"CMD": FakeAdapter({("j", 2): (60.0, 0)})},
         )
+        assert resumed.epoch == 2  # a new term over the same log
         assert resumed.frontiers.committed_index == admitted
         assert resumed.frontiers.applied_index == admitted
-        resumed.inject(_ev("STARTJOB", 3, job="j"), request_id="start-j")  # retried across a crash
+        again = resumed.submit(_ev("STARTJOB", 3, job="j"), sent)  # the same bytes, resent
         await resumed.run_until_quiescent(T0 + timedelta(minutes=3))
+        assert (await again).decision == "applied"  # the FIRST one's decision
         await resumed.shutdown()
         assert resumed.journal is not None
         resumed.journal.close()
@@ -575,3 +594,52 @@ def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Pat
     assert resumed.oracle.store.job["j"].run_number == 1  # answered, not re-run
     assert [request for request, _ in resumed.deduped] == ["start-j"]
     assert resumed.frontiers.committed_index == resumed.frontiers.applied_index
+
+
+def test_an_unseen_stale_epoch_is_refused_where_a_retry_of_one_is_not(tmp_path: Path) -> None:
+    """ss4 step 2's other half, and the reason the epoch check sits AFTER
+    the dedup rather than before it. Both requests here name a superseded
+    term; they get opposite answers, and the only thing separating them is
+    whether the log already holds a decision under that id."""
+    from dsl41.runner import resume_run
+
+    run_root = tmp_path / "run"
+
+    async def scenario() -> tuple[Engine, str]:
+        engine = start_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter({("j", 1): (60.0, 0)})},
+        )
+        stale_epoch = engine.epoch
+        expect = {"job:j": engine.oracle.store.revision("job:j")}
+        assert engine.journal is not None
+        await engine.shutdown()
+        engine.journal.close()
+
+        resumed = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+            adapters={"CMD": FakeAdapter({("j", 1): (60.0, 0)})},
+        )
+        assert resumed.epoch > stale_epoch
+        unseen = resumed.submit(
+            _ev("STARTJOB", 2, job="j"),
+            Envelope(request_id="never-seen", expect=expect, epoch=stale_epoch),
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=3))
+        with pytest.raises(AdmissionRefused) as refusal:
+            await unseen
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+        return resumed, str(refusal.value)
+
+    resumed, message = asyncio.run(scenario())
+    assert "is not this leader's" in message
+    assert resumed.oracle.store.job["j"].run_number == 0  # nothing started
+    # refused, not rejected: it never reached the log (control-protocol ss3)
+    records = read_journal(run_root / "journal.jsonl")
+    assert not [r for r in records if r.get("request_id") == "never-seen"]

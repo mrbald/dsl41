@@ -85,9 +85,14 @@ def _engine(jil: str = _SOLO_JIL, adapter: FakeAdapter | None = None) -> Engine:
     )
 
 
-def _expect(request_id: str, revision: int, host_id: str = LOCAL_EXECUTOR_ID) -> Envelope:
+def _expect(
+    request_id: str, revision: int, host_id: str = LOCAL_EXECUTOR_ID, *, epoch: int = 0
+) -> Envelope:
+    """Default 0 for the run-root-less engines above -- no ledger, no
+    election, so nothing allocated a term here (S6a). An engine over a run
+    root holds a real one and its callers name it."""
     return Envelope(
-        request_id=request_id, expect={RuntimeState.host_key(host_id): revision}, epoch=0
+        request_id=request_id, expect={RuntimeState.host_key(host_id): revision}, epoch=epoch
     )
 
 
@@ -466,7 +471,7 @@ def _host_request(engine: Engine, **fields: object) -> dict:
         "v": PROTOCOL_VERSION,
         "cmd": "host",
         "baseline_id": engine.baseline_id,
-        "epoch": 0,
+        "epoch": engine.epoch,  # the leader's, read back, not a constant (S6a)
         "request_id": "r1",
         "verb": "drain",
         "payload": {"id": LOCAL_EXECUTOR_ID},
@@ -581,7 +586,7 @@ def test_status_publishes_a_held_job(short_root: Path) -> None:
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": engine.baseline_id,
-                    "epoch": 0,
+                    "epoch": engine.epoch,
                     "request_id": "s1",
                     "verb": "STARTJOB",
                     "payload": {"job": "j"},
@@ -673,7 +678,7 @@ def test_a_held_job_survives_the_restart_the_drain_did(short_root: Path) -> None
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": engine.baseline_id,
-                    "epoch": 0,
+                    "epoch": engine.epoch,
                     "request_id": "s1",
                     "verb": "STARTJOB",
                     "payload": {"job": "j"},
@@ -701,7 +706,9 @@ def test_a_held_job_survives_the_restart_the_drain_did(short_root: Path) -> None
 
         loop_task = asyncio.ensure_future(resumed.run_until_quiescent(datetime.max))
         try:
-            back = resumed.submit_host(_cmd("activate"), _expect("r9", SEEDED + 1))
+            back = resumed.submit_host(
+                _cmd("activate"), _expect("r9", SEEDED + 1, epoch=resumed.epoch)
+            )
             assert (await asyncio.wait_for(back, 5)).decision == "applied"
             # not FAILURE: reconciliation's "never spawned" verdict was
             # enqueued, not applied, at the point checked above -- running the

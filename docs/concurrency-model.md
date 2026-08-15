@@ -80,6 +80,38 @@ Kafka alone does not satisfy this. It supplies the ordered log and leaves
 election and the outbox transaction beside it — two consistency stories
 where the model needs one.
 
+*(Amended by DL-100, at build — stage S6a.* What provides the contract
+today, and where that stops.
+
+**Two of these five landed with S2 without being named.** Decision lookup
+by `request_id` IS the `DecisionIndex`; atomic multi-record commit IS the
+one-line attempt record, a batch no crash can tear in half because it is a
+single append. S6a is the other three, on the substrate that exists: an
+`flock` on the run root held for the process lifetime, plus the fsync the
+WAL already pays. Monotone allocation and the linearizable read are the
+same act — the epoch is read from the log and written back to it under the
+lock, so the allocation and the log's account of it cannot disagree.
+
+**The leader record lives in the ledger,** which is this section's own
+argument about the outbox applied one level up. The lock file is the mutex
+and nothing else; the holder note it carries is what a refusal prints, and
+is never read as the fence, because a note can be stale and a held lock
+cannot.
+
+**Not a lease.** It has no expiry to renew: the kernel releases it when the
+holder dies, `kill -9` included. So nothing has to decide whether the
+previous holder is alive — which the control socket's 0.2-second connect
+probe did decide, and got wrong in both directions (an engine wedged past
+the timeout lost its socket; a socket left by a crash was unlinked on a
+guess). That probe stays, demoted to what it always was: cleanup of a stale
+socket file, not an election.
+
+**Where it stops is one host.** "Whatever provides it" is satisfied for one
+host and for nothing else: a lock on a local filesystem is not a
+linearizable leader record for a second machine, and on NFS it is not one
+at all. The relay DL-97 deferred still waits on the shared store this
+section describes. What it gets from S6a is a fencing token that moves.*)*
+
 ## 2. Identity
 
 | domain | unit | identity |
@@ -378,6 +410,29 @@ leader eligibility requires an exact match on both. Mixed builds derive
 different revisions from identical inputs, and the supervisor holds no
 job definitions — a SPAWN spec is a resolved literal command string — so
 nothing downstream can detect that two leaders disagree about the estate.
+
+*(Amended by DL-100, at build — stage S6a.* Two things this section left
+implicit, settled by the code that took its first ACQUIRE.
+
+**ACQUIRE precedes every act, not merely every append.** The barrier begins
+there for a reason that was live in this build: `dsl41 run --resume`
+replayed the log, reconciled the estate, re-drove recorded kills and
+appended — and only then claimed the control socket that was supposed to
+exclude a second engine. Two of them therefore both acted, in full, before
+either was refused. A mutex taken after the first side effect is not a
+mutex. The rule reaches further than the engine's own entry points: the CLI
+takes leadership before it starts a supervisor and takes its lease, because
+that is an act on an estate this process may turn out not to lead.
+
+**The state-machine version is a number of its own,** not `dsl41_version`.
+The package version moves for a docs typo, and refusing to resume a live
+estate after a patch release would be an outage manufactured by
+bookkeeping. What this section means is the version of the derivation from
+inputs to state — oracle transitions, condition evaluation, timer ordering,
+the §3 projection — bumped deliberately when one of those moves, and
+nothing a replay cannot see. A header that pins none was written before the
+gate existed and reads as version 1, on the courtesy S2 gave a journal with
+no `request_id`.*)*
 
 ## 8. Host lifecycle: active, passive, evicted
 

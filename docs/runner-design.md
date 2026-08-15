@@ -336,7 +336,17 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 The journal is an append-only JSONL WAL, one file per run. Record kinds:
 
-- `header` — catalog content hash, dsl41 version, clock domain, started_at.
+- `header` — catalog content hash, state-machine version, dsl41 version,
+  clock domain, started_at. The first two are what leader eligibility is an
+  exact match on (`docs/concurrency-model.md` §7, S6a); the dsl41 version is
+  advisory forensics and gates nothing.
+- `leader` — `{epoch, at, pid, host, dsl41_version}`: one term of leadership
+  over this run root (S6a, DL-100). Appended under the run root's lock
+  immediately after acquiring it, which is what makes the epoch monotone —
+  it is allocated by being written, so no two terms can read the same log
+  and choose the same number. Not an input: it is applied to nothing and
+  replay skips it. Every input between two of these records was admitted by
+  the incarnation the earlier one names.
 - `input` — `{seq, at, kind, payload, source, request_id, fingerprint,
   epoch}` plus `expect` and `claimed_actor` where the input was externally
   requested, source ∈ {scheduler, adapter, control, reconcile}.

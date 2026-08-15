@@ -213,6 +213,7 @@ from dsl41.runner_journal import (
     read_journal,
     replay_inputs,
 )
+from dsl41.runner_ledger import LeaderLock, check_leader_eligibility, next_epoch
 from dsl41.runner_scheduler import Scheduler
 
 
@@ -290,6 +291,7 @@ class Engine:
         hold_open: bool = False,
         executor_id: str = LOCAL_EXECUTOR_ID,
         deadman_s: float | None = None,
+        epoch: int = INERT_EPOCH,
     ) -> None:
         self.oracle = Oracle(catalog)
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
@@ -319,12 +321,14 @@ class Engine:
         #: from the log on resume -- an engine that forgot them would re-admit
         #: an input the log had already decided.
         self.baseline_id = journal.baseline_id if journal is not None else ""
-        #: concurrency-model ss2: the leader's fencing token, INERT on one
-        #: host -- ss6 ships it in v2 anyway rather than break the wire twice,
-        #: and S6 is where it is allocated and moves. The CHECK is already in
-        #: its ss4 place (after dedup), so the ordering that step 2 calls out
-        #: is pinned by a test rather than left as a note for S6 to get right.
-        self.epoch = INERT_EPOCH
+        #: concurrency-model ss2: the leader's fencing token, allocated by
+        #: the run root's ledger when this incarnation took the term (S6a,
+        #: runner_ledger). INERT_EPOCH means no election was held here at
+        #: all -- an Engine with no run root and no log, which is what the
+        #: bisimulation harness runs -- rather than "not implemented yet".
+        #: The CHECK sits in its ss4 place (after dedup), so an exact
+        #: old-epoch retry still recovers its original result.
+        self.epoch = epoch
         self.frontiers = Frontiers()
         self.decisions = DecisionIndex()
         #: retries answered from the index rather than re-applied (CM-05)
@@ -978,27 +982,46 @@ def start_run(
     scheduler: Scheduler | None = None,
     hold_open: bool = False,
     deadman_s: float | None = None,
+    lock: LeaderLock | None = None,
 ) -> Engine:
     """Create the run-root layout (journal.jsonl, runs/, logs/) and an
     Engine wired to it. Refuses a run_root that already holds a journal --
-    that is what --resume is for (no silent re-baselining)."""
-    journal_path = run_root / "journal.jsonl"
-    if journal_path.exists():
-        raise EngineError(
-            f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
-        )
+    that is what --resume is for (no silent re-baselining).
+
+    Leadership (S6a) is acquired BEFORE that refusal, not after: the
+    refusal reads the estate's state, and one leader per run root is the
+    rule under which any such read is meaningful. Genesis is epoch 1. A
+    `lock` already held by the caller is used as-is and stays theirs to
+    release -- `dsl41 run` takes it earlier still, before it starts a
+    supervisor."""
     run_root.mkdir(parents=True, exist_ok=True)
     # the run root holds the journal (global values, every control input),
     # job output, and data -- owner-only, loudly, not umask-hopefully
     os.chmod(run_root, 0o700)
+    owned = lock is None
+    if lock is None:
+        lock = LeaderLock(run_root)
+        lock.acquire()
+    journal_path = run_root / "journal.jsonl"
+    if journal_path.exists():
+        if owned:
+            lock.release()
+        raise EngineError(
+            f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
+        )
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
+    at = clock.now()
     journal = Journal.create(
         journal_path,
         catalog=catalog,
         clock_domain="virtual" if clock.virtual else "real",
-        started_at=clock.now(),
+        started_at=at,
+        lock=lock,
     )
+    epoch = next_epoch([])  # the first term over a log that has none
+    journal.leader(epoch=epoch, at=at)
+    lock.note(epoch=epoch, at=at)
     _fsync_dir(run_root)  # the journal's directory entry is a record too
     return Engine(
         catalog,
@@ -1009,6 +1032,7 @@ def start_run(
         scheduler=scheduler,
         hold_open=hold_open,
         deadman_s=deadman_s,
+        epoch=epoch,
     )
 
 
@@ -1024,6 +1048,7 @@ async def resume_run(
     grace_seconds: float = 10.0,
     supervisor: SupervisorClient | None = None,
     deadman_s: float | None = None,
+    lock: LeaderLock | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -1036,13 +1061,58 @@ async def resume_run(
     across downtime and is dropped AND journaled -- reported on
     Engine.drops, never fired late (PENDING: E9; a live-but-stalled engine
     fires its backlog, downtime never does)."""
+    os.chmod(run_root, 0o700)  # tighten a pre-existing looser root (same reason as create)
+    # ACQUIRE first (S6a, concurrency-model ss7): everything below this line
+    # reads or acts -- the log is replayed, the estate is reconciled,
+    # recorded kills are re-driven -- and a mutex taken after the first side
+    # effect is not a mutex. It also has to precede the READ, or another
+    # engine could append between the read and the acquire and this one would
+    # allocate an epoch the log already used.
+    owned = lock is None
+    if lock is None:
+        lock = LeaderLock(run_root)
+        lock.acquire()
+    try:
+        engine = await _resume_under_lock(
+            catalog,
+            run_root,
+            lock,
+            clock=clock,
+            adapters=adapters,
+            scheduler=scheduler,
+            hold_open=hold_open,
+            settle_seconds=settle_seconds,
+            grace_seconds=grace_seconds,
+            supervisor=supervisor,
+            deadman_s=deadman_s,
+        )
+    except BaseException:
+        if owned:
+            lock.release()  # a refused resume holds nothing: the next engine may lead
+        raise
+    return engine
+
+
+async def _resume_under_lock(
+    catalog: CatalogIR,
+    run_root: Path,
+    lock: LeaderLock,
+    *,
+    clock: Clock,
+    adapters: Mapping[str, JobAdapter],
+    scheduler: Scheduler | None,
+    hold_open: bool,
+    settle_seconds: float,
+    grace_seconds: float,
+    supervisor: SupervisorClient | None,
+    deadman_s: float | None,
+) -> Engine:
+    """The ss7 resume ladder proper, with leadership already held (S6a).
+    Split from `resume_run` so the acquire/release pairing is one readable
+    block rather than a `finally` wrapped around a hundred lines."""
     records = read_journal(run_root / "journal.jsonl")
     header = records[0]
-    if header.get("catalog_hash") != catalog_hash(catalog):
-        raise EngineError(
-            "catalog hash mismatch: the estate changed since this journal was written;"
-            " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
-        )
+    check_leader_eligibility(header, expected_catalog_hash=catalog_hash(catalog))
     domain = "virtual" if clock.virtual else "real"
     if header.get("clock_domain") != domain:
         raise EngineError(
@@ -1055,12 +1125,17 @@ async def resume_run(
             f"journal is from the future ({last_at.isoformat()} > now): the machine"
             " clock moved backwards; refusing to feed non-decreasing time backwards"
         )
-    os.chmod(run_root, 0o700)  # tighten a pre-existing looser root (same reason as create)
     journal = Journal(
         run_root / "journal.jsonl",
         fsync_each=not clock.virtual,
         baseline_id=baseline_id(records),
+        lock=lock,
     )
+    # the term is allocated by being appended (ss1), before the first input
+    # this incarnation admits, so every record after it names its author
+    epoch = next_epoch(records)
+    journal.leader(epoch=epoch, at=clock.now())
+    lock.note(epoch=epoch, at=clock.now())
     engine = Engine(
         catalog,
         clock=clock,
@@ -1070,6 +1145,7 @@ async def resume_run(
         scheduler=scheduler,
         hold_open=hold_open,
         deadman_s=deadman_s,
+        epoch=epoch,
     )
     replay = replay_inputs(engine.oracle, records)
     # the log's position comes back with its contents (concurrency-model
