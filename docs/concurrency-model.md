@@ -434,6 +434,33 @@ nothing a replay cannot see. A header that pins none was written before the
 gate existed and reads as version 1, on the courtesy S2 gave a journal with
 no `request_id`.*)*
 
+*(Amended by DL-101, at build — stage S6b.* Where the re-check goes, and
+what it can and cannot do.
+
+**Every append, and that is enough for every dispatch.** The re-check is
+one `stat` at the top of the WAL append, before the write, so a leader that
+cannot prove it leads admits nothing rather than admitting and then
+discovering it had no right to. It covers dispatch for free because §5 puts
+the outbox record *before* the attempt: an append this engine may not make
+is an effect it never applies. There is deliberately no background prober —
+an engine with nothing to append dispatches nothing, so the only proof that
+goes unchecked is proof nothing was about to rely on.
+
+**What losing proof means on this substrate.** Not a lapsed lease: the lock
+file was deleted or replaced under the holder. That is not hypothetical —
+delete the name and the next engine creates a fresh inode, `flock`s it
+happily, and two leaders run. The re-check does not prevent that; the
+second engine really does acquire. It ensures the first one stops, which is
+the same honest bargain §8 strikes for its sibling fence: it cannot un-run
+the duplicate, it stops it continuing and turns a silent divergence into a
+recorded incident.
+
+**Stopping is stopping, not self-fencing.** The engine raises and its
+existing tethered/detached contract decides what becomes of its wrappers.
+An engine that killed processes on losing proof would be reaching for the
+relay's act (§7, DL-97) from a position where it cannot know whether the
+new leader has already adopted them.*)*
+
 ## 8. Host lifecycle: active, passive, evicted
 
 Quarantine (§7) is safe and it is not sufficient on its own: one dead

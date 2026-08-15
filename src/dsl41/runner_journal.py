@@ -312,6 +312,19 @@ class Journal:
             self._subscribers.remove(queue)
 
     def _write(self, record: dict[str, Any]) -> None:
+        if self._lock is not None:
+            # ss1's epoch-conditional append, and ss7's "losing proof stops
+            # dispatch, not merely renewal" (S6b). BEFORE the write, so a
+            # leader that cannot prove it leads admits nothing rather than
+            # admitting and then discovering it had no right to.
+            #
+            # An append is also what precedes every effect -- the outbox
+            # records intent before the attempt -- so fencing appends fences
+            # dispatch without a second mechanism to keep in step with this
+            # one. An engine with nothing to append dispatches nothing, which
+            # is why there is no background prober: the only proof that goes
+            # unchecked is proof nothing was about to rely on.
+            self._lock.check()
         self._f.write(json.dumps(record, sort_keys=True).encode("utf-8") + b"\n")
         self._f.flush()
         if self._fsync_each:

@@ -4316,3 +4316,39 @@
   (runner.py 1389 -> 1454 lines, over the advisory note, and DL-98 already
   declined the same finding for cli.py on the same grounds: splitting it is
   its own commit with its own seam argument).
+- DL-101 the fence: every append re-proves leadership (2026-08-15; stage
+  S6b, DL-99's second slice). ss7 carries the amendment; this entry is the
+  shape.
+  **One check, at the append, before the write.** ss1's epoch-conditional
+  append and ss7's "losing proof stops dispatch, not merely renewal" are the
+  same requirement from two directions, and they cost one `stat` against the
+  `fsync` the real domain already pays per record. Before the write, so a
+  leader that cannot prove it leads admits nothing -- an engine that appended
+  and then noticed would have already admitted the input.
+  **Fencing appends fences dispatch, with no second mechanism.** S5c put the
+  outbox record BEFORE the attempt, so an append this engine may not make is
+  an effect it never applies. That is worth stating because the alternative
+  -- a fence on appends AND a fence on dispatch -- is two guards that have to
+  agree about a window, and this design has no window for them to disagree
+  about. The test asserts the spawn did not happen, not only that the record
+  did not.
+  **No background prober.** An engine with nothing to append dispatches
+  nothing, so the only proof that goes unchecked is proof nothing was about
+  to rely on. Adding a timer would buy a faster diagnosis of an idle engine's
+  irrelevance, at the cost of a mechanism that can itself be wrong.
+  **What losing proof means here is not a lapsed lease** -- there is no
+  expiry -- but a lock file deleted or replaced under the holder. Not
+  hypothetical: delete the name and the next engine creates a fresh inode,
+  flocks it happily, and two leaders run. The test does exactly that and
+  asserts the usurper SUCCEEDS, because a fence whose danger is not
+  demonstrable is a fence nobody can evaluate. The check does not prevent the
+  second engine; it stops the first. Same bargain ss8 strikes for its sibling
+  fence: it cannot un-run the duplicate, it stops it continuing and turns a
+  silent divergence into a recorded incident.
+  **Stopping is stopping, not self-fencing.** The engine raises and the
+  existing tethered/detached contract decides what becomes of its wrappers.
+  Killing them on losing proof would be reaching for the relay's act (DL-97)
+  from the one position that cannot know whether the new leader has already
+  adopted them.
+  Mutation-tested: with the check disabled all three fence tests red.
+  2051 -> 2054 passed; ruff, mypy, arch_check blocking checks clean.

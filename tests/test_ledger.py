@@ -279,7 +279,83 @@ def test_a_journal_written_before_s6a_takes_the_first_term() -> None:
     assert next_epoch([{"rec": "leader", "epoch": 4}, {"rec": "input", "epoch": 4}]) == 5
 
 
-# ------------------------------------------------------- 3. eligibility (ss7)
+# ------------------------------------------------------------- 3. the fence
+
+
+def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads(
+    tmp_path: Path,
+) -> None:
+    """ss7: proof is positive, and losing it stops dispatch rather than only
+    renewal. Losing it here means the lock file was replaced under us --
+    delete the name and the next engine creates a new inode, flocks it
+    happily, and two leaders run. The first half of this test proves that
+    danger is real rather than hypothetical; the second is the detector.
+
+    A detector, not a preventer, and ss8 already says so of its sibling
+    fence: it cannot un-run the duplicate, it stops it continuing and turns
+    a silent divergence into a recorded incident."""
+    run_root = tmp_path / "run"
+    engine = _start(run_root)
+    lock_path = run_root / LOCK_NAME
+
+    async def scenario() -> None:
+        engine.inject(_event("STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(seconds=30))  # lands: still the leader
+        before = (run_root / "journal.jsonl").read_bytes()
+
+        lock_path.unlink()
+        usurper = LeaderLock(run_root)
+        usurper.acquire()  # nothing stopped it: this is the failure being caught
+        try:
+            engine.inject(_event("KILLJOB", 1))
+            with pytest.raises(EngineError, match="was replaced"):
+                await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+            # refused BEFORE the write: an engine that appended and then
+            # noticed would have already admitted the input
+            assert (run_root / "journal.jsonl").read_bytes() == before
+        finally:
+            usurper.release()
+
+    asyncio.run(scenario())
+
+
+def test_a_deleted_lock_file_stops_it_too(tmp_path: Path) -> None:
+    """The same loss by the simpler route. Reported differently because an
+    operator meets them differently: a missing file is something they can go
+    and look for."""
+    run_root = tmp_path / "run"
+    engine = _start(run_root)
+
+    async def scenario() -> None:
+        (run_root / LOCK_NAME).unlink()
+        engine.inject(_event("STARTJOB", 0))
+        with pytest.raises(EngineError, match="was deleted"):
+            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+
+    asyncio.run(scenario())
+
+
+def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> None:
+    """Why fencing appends is enough. Every effect is recorded before it is
+    attempted (ss5), so an append this engine may not make is an effect it
+    never applies -- no second mechanism, and no window between the two in
+    which a fence could hold for one and not the other."""
+    run_root = tmp_path / "run"
+    engine = _start(run_root)
+    (run_root / LOCK_NAME).unlink()
+
+    async def scenario() -> None:
+        engine.inject(_event("STARTJOB", 0))
+        with pytest.raises(EngineError):
+            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+
+    asyncio.run(scenario())
+    assert engine.oracle.store.job["j"].run_number == 0
+    assert list((run_root / "runs").iterdir()) == []
+    assert engine.outbox.pending() == []
+
+
+# ------------------------------------------------------- 4. eligibility (ss7)
 
 
 def test_the_header_pins_the_state_machine_version(tmp_path: Path) -> None:
