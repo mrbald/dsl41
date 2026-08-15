@@ -439,3 +439,52 @@ def test_the_wider_write_shapes_all_block(tmp_path: Path) -> None:
         "mutates store.globals_ through .pop()",
         "mutates store.job through .update()",
     ]
+
+
+# ------------------------------------------------- 3b. cited tests exist (DL-110)
+
+
+def test_a_doc_citing_a_test_that_does_not_exist_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worked example's citation is what makes it a claim rather than a
+    story, and it breaks by ordinary means: renaming a test is a refactor
+    nobody thinks of as a documentation change."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    _write(tests_dir / "test_thing.py", "def test_one_that_is_real() -> None:\n    pass\n")
+    monkeypatch.setattr(arch_check, "TESTS", tests_dir)
+    doc = _write(
+        tmp_path / "spec.md",
+        "Held by `test_one_that_is_real`.\nAnd by `test_one_that_was_renamed_away`.\n",
+    )
+    findings = arch_check.unresolved_test_citations([doc])
+    assert len(findings) == 1
+    assert findings[0].line == 2
+    assert "`test_one_that_was_renamed_away`" in findings[0].message
+
+
+def test_family_patterns_and_prose_are_not_citations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The docs name conventions as often as they name functions --
+    `test_cmNN_*` is a naming rule, not a missing test. Blocking on those
+    would make the gate unusable in exactly the documents it exists for."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    _write(tests_dir / "test_thing.py", "def test_one_that_is_real() -> None:\n    pass\n")
+    monkeypatch.setattr(arch_check, "TESTS", tests_dir)
+    doc = _write(
+        tmp_path / "spec.md",
+        "Tests are named `test_cmNN_*`, on the house convention of `test_semXX_*`.\n"
+        "See also `test_sem09*` and `test_harness_*`, and `test_one_that_is_real`.\n"
+        "Prose mentioning test_one_that_was_renamed_away without backticks is not a citation.\n",
+    )
+    assert arch_check.unresolved_test_citations([doc]) == []
+
+
+def test_the_real_docs_cite_only_tests_that_exist() -> None:
+    """The pinned-artifact exception (module docstring): this one asserts on
+    the real tree on purpose, because the tree is what the gate protects."""
+    assert arch_check.unresolved_test_citations(arch_check.citing_doc_files()) == []
+    assert len(arch_check.defined_test_names()) > 500

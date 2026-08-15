@@ -4715,3 +4715,32 @@
   half of "the live-engine path is exercised manually" is now false. The
   real-PROCESS half stands and is S7c.
   2132 -> 2149 passed in +4s of suite time; 100% branch held.
+- DL-110 a doc that cites a test is held to it (2026-08-15; the gate that has
+  to exist before the worked examples do). `scripts/arch_check.py` gains a
+  fifth blocking check: a `test_...` named in backticks in `docs/`,
+  `CLAUDE.md` or `README.md` that no test defines fails the build.
+  **Why before the examples and not with them.** The examples this unblocks
+  are the documents' falsifiable half -- "this is what the code does, and
+  here is what holds it to that" -- and a citation that resolves to nothing
+  turns the strongest sentence in a frozen spec into its least trustworthy
+  one. Worse, it breaks by ordinary means: renaming a test is a refactor
+  nobody thinks of as a documentation change, so the rot is silent and
+  arrives through a commit that was right about everything else.
+  **It starts green, which is the point of doing it now.** Eight literal test
+  names are already cited across the docs (CLAUDE.md's precedence pins, the
+  supervisor-protocol lease tests, the autosys dossier's worked example) and
+  every one resolves today. The gate is a ratchet from a clean tree, not a
+  cleanup.
+  **Families are not citations, and the regex is the whole of that rule.**
+  `test_cmNN_*`, `test_semXX_*` and `test_sem09*` name a convention rather
+  than a function, and every family the docs use carries a `*` or an
+  uppercase placeholder -- neither of which can appear between `test_` and a
+  closing backtick. A first draft had a second filter for XX/NN placeholders;
+  it could not fire, and a second filter is a second thing to be wrong about.
+  **The pinned-artifact exception applies.** `tests/test_arch_check.py` builds
+  tiny trees under tmp_path for every other check, because a gate that
+  asserted on the real tree would red every time the real code legitimately
+  changed. This check gets a third test that DOES assert on the real tree,
+  for the same reason the IR-F schema pin and the citation index do: the tree
+  is the artifact being protected. Mutation-tested -- citing an absent test
+  from concurrency-model.md blocks with the file, line and name.

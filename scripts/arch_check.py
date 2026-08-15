@@ -13,7 +13,10 @@ specific way the tree got worse, never a matter of taste:
    style, not two modules coupling, and blocking it would red CI on an
    ordinary new test whose only remedy re-blesses src/ too;
 3. a citation token in src/dsl41/*.py that resolves to no namespace row in
-   docs/citation-index.md (a citation nobody can follow is not a citation);
+   docs/citation-index.md (a citation nobody can follow is not a citation),
+   and -- since DL-110 -- a doc naming a `test_...` that no test defines: a
+   worked example's citation is what makes it a claim rather than a story,
+   and renaming a test is a refactor nobody thinks of as a doc change;
 4. an IR-F model shape change without an IR_VERSION bump -- the CatalogIR
    JSON schema is hashed and pinned in IR_SCHEMA_PIN below;
 5. a JobRuntime field or a global assigned outside RuntimeState (DL-82/86) --
@@ -54,6 +57,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "dsl41"
 BASELINE_PATH = ROOT / "scripts" / "arch_baseline.json"
 INDEX_PATH = ROOT / "docs" / "citation-index.md"
+TESTS = ROOT / "tests"
+#: docs that may cite a test by name. A frozen spec's worked examples are
+#: claims, and a claim is only worth its citation.
+CITING_DOCS = (ROOT / "docs", ROOT / "CLAUDE.md", ROOT / "README.md")
 
 MAX_MODULE_LINES = 1200
 MAX_FUNCTION_LINES = 120
@@ -339,6 +346,60 @@ def private_import_keys(paths: Iterable[Path]) -> list[str]:
     )
 
 
+# ------------------------------------------------- 3b. cited tests exist
+
+#: A test named in a doc, in backticks. Literal names only, and the regex is
+#: the whole of that rule: a FAMILY (`test_cmNN_*`, `test_semXX_*`,
+#: `test_sem09*`) names a convention rather than a function, and every one
+#: the docs use carries a `*` or an uppercase placeholder -- neither of which
+#: can appear between `test_` and the closing backtick here. No second filter,
+#: because a second filter is a second thing to be wrong about.
+_CITED_TEST = re.compile(r"`(test_[a-z0-9_]+)`")
+
+
+def defined_test_names() -> set[str]:
+    names: set[str] = set()
+    for path in sorted(TESTS.rglob("*.py")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:  # pragma: no cover -- unreadable test file
+            continue
+        names |= set(re.findall(r"^\s*def (test_[A-Za-z0-9_]+)", text, re.M))
+    return names
+
+
+def unresolved_test_citations(paths: Iterable[Path]) -> list[Finding]:
+    """A doc naming a test that does not exist (DL-110).
+
+    Worked examples in a frozen spec are the document's falsifiable half:
+    they say "this is what the code does, and here is what holds it to
+    that". A citation that resolves to nothing turns the strongest sentence
+    in the document into the least trustworthy one -- and it happens by
+    ordinary means, because renaming a test is a refactor nobody thinks of
+    as a documentation change.
+
+    Literal names only. The docs also cite FAMILIES (`test_cmNN_*`), which
+    name a convention rather than a function."""
+    defined = defined_test_names()
+    findings: list[Finding] = []
+    for path in paths:
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for name in _CITED_TEST.findall(line):
+                if name in defined:
+                    continue
+                findings.append(
+                    Finding(_rel(path), index, f"cites `{name}`, which no test defines")
+                )
+    return findings
+
+
+def citing_doc_files() -> list[Path]:
+    files: list[Path] = []
+    for target in CITING_DOCS:
+        files += sorted(target.rglob("*.md")) if target.is_dir() else [target]
+    return [f for f in files if f.exists()]
+
+
 # ---------------------------------------------------------------- 3. citations
 
 #: Candidate citation shapes. Uppercase-led because every real namespace is
@@ -622,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
         blocking.append(Finding(_rel(INDEX_PATH), 0, "citation index is missing"))
     if patterns:
         blocking += unresolved_citations(src_files, patterns)
+    blocking += unresolved_test_citations(citing_doc_files())
     blocking += ir_schema_findings(IR_SCHEMA_PIN)
     blocking += state_owner_bypasses(src_files)
 
