@@ -109,11 +109,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import getpass
 import os
 import re
-import socket as socket_mod
-import uuid
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,17 +144,11 @@ from dsl41.runner_control import (
     STATUSES,
     ControlClient,
     ControlClientError,
+    claimed_actor,
+    command,
+    read_for,
+    revision_in,
 )
-
-
-def _claimed_actor() -> str:
-    """What this viewer says it is (concurrency-model ss6). A CLAIM: the
-    control socket has no authentication (control-protocol ss7 gap 2)."""
-    try:
-        user = getpass.getuser()
-    except Exception:  # no passwd entry (containers): the claim is still useful
-        user = f"uid{os.getuid()}"
-    return f"{user}@{socket_mod.gethostname()}"
 
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
@@ -951,7 +942,7 @@ class RunnerApp(App[None]):
         #: table cannot silently name a number from a re-baselined run root
         self._baseline = ""
         self._epoch = 0
-        self._claimed_actor = _claimed_actor()
+        self._claimed_actor = claimed_actor()
         self._filter = ""  # space-separated substrings, AND'd, case-insensitive
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
@@ -1668,8 +1659,18 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"{label}: {exc}", style="red"))
             return
         try:
-            envelope = await self._precondition(key)
-            response = await self._client.request(request | envelope)
+            baseline, epoch, revision = await self._precondition(key)
+            response = await self._client.request(
+                command(
+                    str(request.get("verb")),
+                    payload,
+                    key=key,
+                    revision=revision,
+                    baseline_id=baseline,
+                    epoch=epoch,
+                    claimed_actor=self._claimed_actor,
+                )
+            )
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
             self._console_write(Text(f"{label}: not sent ({exc})", style="red"))
@@ -1683,34 +1684,21 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"{label}: {response.get('error', 'refused')}", style="red"))
         await self._refresh()
 
-    async def _precondition(self, key: str) -> dict[str, Any]:
-        """The rest of the ss6 envelope for a command addressing `key`."""
+    async def _precondition(self, key: str) -> tuple[str, int, int]:
+        """The ss6 read header and the revision to name for `key`.
+
+        For a job the table is already showing, that revision is the one the
+        OPERATOR was looking at -- which is the honest reading of ss0 and the
+        thing a terminal can do that a shell script cannot. Anything the
+        table does not hold (a global, a `JOB^INST` ghost) is read first."""
         namespace, _, name = key.partition(":")
         row = self._jobs_snapshot.get(name) if namespace == "job" else None
         if row is not None and isinstance(row.get("state_rev"), int):
-            revision, baseline, epoch = row["state_rev"], self._baseline, self._epoch
-        else:
-            read = await self._client.request(
-                {"cmd": "global", "name": name}
-                if namespace == "global"
-                else {"cmd": "status", "job": name}
-            )
-            baseline = str(read.get("baseline_id") or "")
-            epoch = int(read.get("epoch") or 0)
-            if namespace == "global" and read.get("ok"):
-                revision = int(read["globals"][name]["state_rev"])
-            else:
-                # a job with neither a catalog entry nor a row reads 0, the
-                # revision a not-yet-invented entity is at; the server's own
-                # catalog check still refuses a typo
-                revision = 0
-        return {
-            "baseline_id": baseline,
-            "epoch": epoch,
-            "request_id": str(uuid.uuid4()),
-            "expect": {key: revision},
-            "claimed_actor": self._claimed_actor,
-        }
+            return self._baseline, self._epoch, row["state_rev"]
+        read = await self._client.request(read_for(key))
+        return str(read.get("baseline_id") or ""), int(read.get("epoch") or 0), revision_in(
+            read, key
+        )
 
     def _console_write(self, text: Text) -> None:
         try:

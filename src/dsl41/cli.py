@@ -1105,7 +1105,11 @@ async def _serve_run(
         engine = start_run(
             catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler, hold_open=True
         )
-    for ev, reason in engine.drops:  # resume's missed-tick sweep (PENDING: E9)
+    # everything resume did not apply: E9's missed scheduler ticks, plus any
+    # reconciliation completion the ss4 gate rejected. Both are on `drops`
+    # (DL-91 finding 4 declined splitting them); the wording no longer claims
+    # they are only the tick sweep.
+    for ev, reason in engine.drops:
         typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
     if warns and engine.journal is not None:
         engine.journal.preflight(warns)
@@ -1316,21 +1320,6 @@ _SOCKET_OPT = typer.Option(
 )
 
 
-def _claimed_actor() -> str:
-    """What this invocation says it is (concurrency-model ss6). A CLAIM: the
-    control socket has no authentication (control-protocol ss7 gap 2), so
-    this is a breadcrumb in the log, never an authorization."""
-    import getpass
-    import os
-    import socket as socket_mod
-
-    try:
-        user = getpass.getuser()
-    except Exception:  # no passwd entry (containers): the claim is still useful
-        user = f"uid{os.getuid()}"
-    return f"{user}@{socket_mod.gethostname()}"
-
-
 def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
     """The ss6 read header (`baseline_id`, `epoch`) and the current revision
     of `key` -- the read half of a read-then-write, for an operator who did
@@ -1341,26 +1330,14 @@ def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
     saw, and a number this process fetched a millisecond ago is only a very
     recent guess about that. Whoever looked at a status page and then chose
     to act should pass --expect with the revision they looked at."""
-    namespace, _, name = key.partition(":")
-    verb = {"cmd": "global", "name": name} if namespace == "global" else {
-        "cmd": "status",
-        "job": name,
-    }
-    response = _control_roundtrip(socket_path, verb)
+    from dsl41.runner_control import read_for, revision_in
+
+    response = _control_roundtrip(socket_path, read_for(key))
     baseline, epoch = response.get("baseline_id"), response.get("epoch")
     if not isinstance(baseline, str) or not isinstance(epoch, int):
         typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
         raise typer.Exit(2)
-    if not response.get("ok"):
-        # `status` refuses a job it has neither a catalog entry nor a row for,
-        # which is the right answer to a typo and the wrong one here: an
-        # entity with no row IS at revision 0 -- exactly what a SEM-07
-        # CHANGE_STATUS on a not-yet-invented "JOB^INST" must name. The typo
-        # is still caught, by the catalog check on the command itself.
-        return baseline, epoch, 0
-    if namespace == "global":
-        return baseline, epoch, int(response["globals"][name]["state_rev"])
-    return baseline, epoch, int(response["jobs"][name]["state_rev"])
+    return baseline, epoch, revision_in(response, key)
 
 
 @app.command()
@@ -1395,10 +1372,10 @@ def sendevent(
     first. Journaled by the engine either way -- a rejection is a decision
     with an index, not an absence."""
     import json as json_mod
-    import uuid
 
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_clock import EngineError
+    from dsl41.runner_control import claimed_actor, command
 
     verb = event.upper()
     payload: dict = {}
@@ -1422,16 +1399,15 @@ def sendevent(
     baseline, epoch, current = _read_revision(socket_path, key)
     response = _control_roundtrip(
         socket_path,
-        {
-            "cmd": "sendevent",
-            "baseline_id": baseline,
-            "epoch": epoch,
-            "request_id": str(uuid.uuid4()),
-            "verb": verb,
-            "payload": payload,
-            "expect": {key: current if expect is None else expect},
-            "claimed_actor": _claimed_actor(),
-        },
+        command(
+            verb,
+            payload,
+            key=key,
+            revision=current if expect is None else expect,
+            baseline_id=baseline,
+            epoch=epoch,
+            claimed_actor=claimed_actor(),
+        ),
     )
     typer.echo(json_mod.dumps(response, sort_keys=True))
     raise typer.Exit(0 if response.get("ok") else 2)
@@ -1583,40 +1559,6 @@ def query(
         pass
 
 
-class _SupervisorConn:
-    """One persistent connection to a supervisor socket, request/response with
-    async exit PUSHes skipped (the CLI is not a data-channel consumer)."""
-
-    def __init__(self, sock_path: Path) -> None:
-        import socket as socket_mod
-
-        self.conn = socket_mod.socket(socket_mod.AF_UNIX)
-        # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
-        # which spans the spawn-record wait plus per-run grace windows
-        self.conn.settimeout(60.0)
-        self.conn.connect(str(sock_path))
-        self.buf = b""
-
-    def send(self, request: dict) -> dict:
-        import json as json_mod
-
-        self.conn.sendall(json_mod.dumps({**request, "v": 1}).encode("utf-8") + b"\n")
-        while True:
-            while b"\n" not in self.buf:
-                chunk = self.conn.recv(65536)
-                if not chunk:
-                    raise OSError("supervisor closed the connection")
-                self.buf += chunk
-            line, self.buf = self.buf.split(b"\n", 1)
-            obj = json_mod.loads(line)
-            if isinstance(obj, dict) and obj.get("push"):
-                continue  # notifications are droppable (supervisor-protocol ss5)
-            return obj
-
-    def close(self) -> None:
-        self.conn.close()
-
-
 @app.command()
 def supervise(
     action: str = typer.Argument(..., help="list|shutdown"),
@@ -1633,6 +1575,8 @@ def supervise(
     import json as json_mod
     import os
 
+    from dsl41.runner_adapters import SupervisorConn
+
     verb = action.lower()
     if verb not in ("list", "shutdown"):
         typer.echo(f"unknown supervise action {action!r} (list|shutdown)", err=True)
@@ -1642,7 +1586,7 @@ def supervise(
         typer.echo(f"no supervisor at {sock_path}", err=True)
         raise typer.Exit(2)
     try:
-        conn = _SupervisorConn(sock_path)
+        conn = SupervisorConn(sock_path)
     except OSError as exc:
         typer.echo(f"supervisor {sock_path}: {exc}", err=True)
         raise typer.Exit(2) from exc

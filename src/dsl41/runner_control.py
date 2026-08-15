@@ -81,12 +81,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import graphlib
 import hashlib
 import json
 import os
 import socket as socket_mod
 import time
+import uuid
 
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -804,6 +806,83 @@ def _versioned(request: dict[str, Any]) -> dict[str, Any]:
     repeat the version would be noise -- but a caller that names one keeps
     it, which is what makes the server's refusal testable from here."""
     return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
+
+
+# ------------------------------------------------ composing a command (ss6)
+#
+# The client half of the protocol lives here for the reason the server half
+# does (DL-78): the wire vocabulary gets exactly one definition. S3 gave a
+# mutation a shape a caller has to BUILD -- read the addressed entity, name
+# its revision -- and that rule was briefly written once in the CLI, once in
+# the TUI and twice in the tests. Four copies of "which query answers a
+# `global:` key, and where the revision sits in its answer" is four places
+# to fix when the answer's shape moves.
+#
+# The round trip itself stays at the call site: `ControlClient` and
+# `roundtrip` are two transports for one protocol, and these functions are
+# what both of them send and read.
+
+
+def read_for(key: str) -> dict[str, Any]:
+    """The query that answers the revision of an ss6-namespaced `key`."""
+    namespace, _, name = key.partition(":")
+    if namespace == "global":
+        return {"cmd": "global", "name": name}
+    return {"cmd": "status", "job": name}
+
+
+def revision_in(response: Mapping[str, Any], key: str) -> int:
+    """The revision `key` sits at, read out of the answer to `read_for(key)`.
+
+    A REFUSED read answers 0. `status` refuses a job it has neither a catalog
+    entry nor a row for, which is the right answer to a typo and the wrong
+    one here: an entity with no row is at revision 0 -- exactly what a SEM-07
+    CHANGE_STATUS on a not-yet-invented "JOB^INST" has to name. The typo is
+    still caught, by the catalog check on the command itself."""
+    namespace, _, name = key.partition(":")
+    if not response.get("ok"):
+        return 0
+    if namespace == "global":
+        return int(response["globals"][name]["state_rev"])
+    return int(response["jobs"][name]["state_rev"])
+
+
+def command(
+    verb: str,
+    payload: Mapping[str, Any],
+    *,
+    key: str,
+    revision: int,
+    baseline_id: str,
+    epoch: int,
+    request_id: str | None = None,
+    claimed_actor: str | None = None,
+) -> dict[str, Any]:
+    """One ss6 command envelope, complete. `request_id` defaults to a fresh
+    uuid4 -- a caller that wants to RETRY passes the original's."""
+    request: dict[str, Any] = {
+        "cmd": "sendevent",
+        "baseline_id": baseline_id,
+        "epoch": epoch,
+        "request_id": request_id or str(uuid.uuid4()),
+        "verb": verb,
+        "payload": dict(payload),
+        "expect": {key: revision},
+    }
+    if claimed_actor is not None:
+        request["claimed_actor"] = claimed_actor
+    return request
+
+
+def claimed_actor() -> str:
+    """What this process says it is (concurrency-model ss6). A CLAIM: the
+    control socket has no authentication (control-protocol ss7 gap 2), so
+    this is a breadcrumb in the log, never an authorization."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # no passwd entry (containers): the claim is still useful
+        user = f"uid{os.getuid()}"
+    return f"{user}@{socket_mod.gethostname()}"
 
 
 class ControlClient:

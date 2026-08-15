@@ -25,7 +25,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -37,7 +36,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Event
 from dsl41.runner import Engine, start_run
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
-from dsl41.runner_control import ControlServer
+from dsl41.runner_control import ControlServer, command, read_for, revision_in
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_journal import read_journal
@@ -119,18 +118,12 @@ async def _control_call(sock_path: Path, request: dict) -> dict:
 
 async def _read_revision(sock_path: Path, key: str) -> tuple[str, int, int]:
     """The read half of a read-then-write: the ss6 header this log answers
-    with, and the revision the addressed entity is at right now."""
-    namespace, _, name = key.partition(":")
-    read = await _control_call(
-        sock_path,
-        {"cmd": "global", "name": name} if namespace == "global" else {"cmd": "status", "job": name},
-    )
-    header = (str(read.get("baseline_id") or ""), int(read.get("epoch") or 0))
-    if not read.get("ok"):
-        return *header, 0  # no row yet: the revision an absent entity is at
-    if namespace == "global":
-        return *header, int(read["globals"][name]["state_rev"])
-    return *header, int(read["jobs"][name]["state_rev"])
+    with, and the revision the addressed entity is at right now. The rule for
+    WHICH query answers a key, and where the revision sits in its answer,
+    comes from runner_control -- the tests are a third client of it, not a
+    third place that knows it (DL-91)."""
+    read = await _control_call(sock_path, read_for(key))
+    return str(read.get("baseline_id") or ""), int(read.get("epoch") or 0), revision_in(read, key)
 
 
 def _body(response: dict, engine: Engine) -> dict:
@@ -153,29 +146,17 @@ def _body(response: dict, engine: Engine) -> dict:
 def _sync_sendevent(sock_path: Path, verb: str, **payload: object) -> dict:
     """The blocking twin of `_sendevent`, for the subprocess test."""
     key = addressed_key(verb, payload)
-    namespace, _, name = key.partition(":")
-    read = _sync_control_call(
-        sock_path,
-        {"cmd": "global", "name": name} if namespace == "global" else {"cmd": "status", "job": name},
-    )
-    revision = 0
-    if read.get("ok"):
-        revision = int(
-            read["globals"][name]["state_rev"]
-            if namespace == "global"
-            else read["jobs"][name]["state_rev"]
-        )
+    read = _sync_control_call(sock_path, read_for(key))
     return _sync_control_call(
         sock_path,
-        {
-            "cmd": "sendevent",
-            "baseline_id": str(read.get("baseline_id") or ""),
-            "epoch": int(read.get("epoch") or 0),
-            "request_id": str(uuid.uuid4()),
-            "verb": verb,
-            "payload": payload,
-            "expect": {key: revision},
-        },
+        command(
+            verb,
+            payload,
+            key=key,
+            revision=revision_in(read, key),
+            baseline_id=str(read.get("baseline_id") or ""),
+            epoch=int(read.get("epoch") or 0),
+        ),
     )
 
 
@@ -190,16 +171,15 @@ async def _sendevent(
     baseline, epoch, current = await _read_revision(sock_path, key)
     return await _control_call(
         sock_path,
-        {
-            "cmd": "sendevent",
-            "baseline_id": baseline,
-            "epoch": epoch,
-            "request_id": str(uuid.uuid4()),
-            "verb": verb,
-            "payload": payload,
-            "expect": {key: current if expect is None else expect},
-            "claimed_actor": "tests@localhost",
-        },
+        command(
+            verb,
+            payload,
+            key=key,
+            revision=current if expect is None else expect,
+            baseline_id=baseline,
+            epoch=epoch,
+            claimed_actor="tests@localhost",
+        ),
     )
 
 

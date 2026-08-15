@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import socket
 import os
 import signal
 import subprocess
@@ -419,6 +420,44 @@ class SupervisorUnavailable(RuntimeError):
     """The supervisor socket is gone (never came up, refused, or died
     mid-run). The engine survives it: pending runs resolve from the spool
     ladder (spec ss3), the tethered fallback for the detached path."""
+
+
+class SupervisorConn:
+    """Blocking one-shot client of the same ss6a socket, for callers with no
+    event loop -- the `dsl41 supervise` verb. Async exit PUSHes are skipped:
+    this end is not a data-channel consumer (supervisor-protocol ss5 makes
+    them droppable notifications).
+
+    It lives beside `SupervisorClient` for the reason `roundtrip` lives
+    beside `ControlClient` (DL-78, DL-91): two transports for ONE protocol,
+    not two protocols. The framing rule below -- stamp `"v": 1`, read
+    newline-delimited JSON, drop pushes -- was written once here and once in
+    cli.py, which is one place too many for a rule a frozen document owns."""
+
+    def __init__(self, sock_path: Path) -> None:
+        self.conn = socket.socket(socket.AF_UNIX)
+        # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
+        # which spans the spawn-record wait plus per-run grace windows
+        self.conn.settimeout(60.0)
+        self.conn.connect(str(sock_path))
+        self.buf = b""
+
+    def send(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.conn.sendall(json.dumps({**request, "v": 1}).encode("utf-8") + b"\n")
+        while True:
+            while b"\n" not in self.buf:
+                chunk = self.conn.recv(65536)
+                if not chunk:
+                    raise OSError("supervisor closed the connection")
+                self.buf += chunk
+            line, self.buf = self.buf.split(b"\n", 1)
+            obj = json.loads(line)
+            if isinstance(obj, dict) and obj.get("push"):
+                continue  # notifications are droppable (supervisor-protocol ss5)
+            return obj
+
+    def close(self) -> None:
+        self.conn.close()
 
 
 class SupervisorClient:

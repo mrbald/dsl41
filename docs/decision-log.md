@@ -3671,3 +3671,88 @@
   failing — delete the line that answers a parked caller and nothing ever
   answers — which is a finding about the probe as much as the code: its
   runs are bounded now, and a hang is reported as red.
+- DL-91 architecture review (2026-08-15; the `/arch-review` lens, first
+  since DL-75 built the gate). `scripts/arch_check.py` reports three size
+  advisories and nothing blocking; what follows is the half it cannot
+  see. Findings ranked by cognitive load removed over cost to change,
+  with the declines recorded so they are not re-found next time.
+  **1. The client half of the protocol had no home — FIXED.** DL-78 moved
+  the §10 server, its vocabulary and both clients into
+  `runner_control.py` so the wire had exactly one definition. S3 (DL-90)
+  then gave a mutation a shape a caller must BUILD — read the addressed
+  entity, name its revision — and left that rule at the call sites: which
+  query answers a `global:` key versus a `job:` one, where the revision
+  sits in each answer, and that a refused read means revision 0. Four
+  copies (`cli.py`, `runner_tui.py`, two in the tests), and
+  `_claimed_actor` was duplicated verbatim in two modules. Now
+  `read_for`, `revision_in`, `command` and `claimed_actor` live beside
+  the clients, and all four call sites use them. The round trip stays at
+  the call site, because `ControlClient` and `roundtrip` are two
+  transports for one protocol — that part was always right.
+  **2. Two clients of the supervisor protocol, one of them in `cli.py` —
+  FIXED.** `runner_adapters.SupervisorClient` is the engine's; `dsl41
+  supervise` had its own `_SupervisorConn`, and both knew the same
+  framing rule (stamp `"v": 1`, newline-delimited JSON, drop `push`
+  notifications) for a socket `docs/supervisor-protocol.md` owns. Moved
+  to `runner_adapters.SupervisorConn`, beside its twin, on DL-78's
+  argument exactly: two transports for one protocol, not two protocols.
+  **3. `oracle.py` holds two concepts — ACCEPTED, sequenced next.** The
+  standing advisory (1523 lines) is not a size problem, and the earlier
+  note that a split is "a real architectural decision" was right about
+  the difficulty and wrong about the seam. The cut is not "extract the
+  state owner" — `RuntimeState`'s timer heap holds `Event`s, so `Event`
+  goes with it and drags `EventKind`, and what is left over is not a
+  fragment but the other half of a pair: **the model and the interpreter
+  that moves it.** The import table says the same thing from outside: ten
+  modules import from `oracle`, eight of them want `Event` and only six
+  want `Oracle`, so `runner_scheduler` currently drags an 854-line
+  interpreter in to name a timestamped event. Splitting puts `JobStatus`,
+  `TERMINAL`, `EventKind`, `Event`, `TraceEntry`, `JobRuntime`,
+  `GlobalRuntime`, the projection constants, `OracleError` and
+  `RuntimeState` in one module with no dependency on the interpreter, and
+  takes `oracle.py` under the threshold on the way. `InputBatch` stays
+  with `Oracle` — it drives the interpreter's clock. No re-export shim:
+  a re-export layer is a pass-through layer, so the ~30 import sites are
+  updated. Its own commit, before S5 adds more importers.
+  **4. `Engine.drops` holds two categories — DECLINED, one wording fix.**
+  Since DL-89/DL-90 the vocabulary is refused (never admitted) / rejected
+  (a decision) / missed (E9's scheduler ticks), and the fields are
+  `drops` (rejected + missed) and `refusals` (refused). The seam is in
+  the wrong place, but renaming the in-memory list without renaming the
+  `drop` WAL record — frozen in runner-design §7, and already narrowed
+  once by DL-89 — would create a second vocabulary for one concept, which
+  is the disease rather than the cure. What was actually wrong is that
+  `_serve_run` prints every drop under a comment claiming they are the
+  resume missed-tick sweep, which stopped being true when reconciliation
+  rejections started landing there; the label is fixed, the list is not
+  split. Revisit if a third category appears.
+  **5. No name for the failed-status set — DECLINED.** `("FAILURE",
+  "TERMINATED")` is spelled inline at five sites. Three are the oracle's
+  own box-fold rules, where the tuple IS the SEM rule; the other two are
+  UI policy (`is-failed`, the TUI's problem highlight). A shared constant
+  across that boundary would let an edit made for the UI change the
+  semantics, which is a worse failure than the repetition. `TERMINAL` is
+  shared because every user of it means the same thing.
+  **A limitation of the gate, for the record.** The duplicate-body check
+  compares normalised ASTs, and `_claimed_actor` escaped it because
+  `cli.py` defers its imports into the function body while `runner_tui.py`
+  imports at module level — the same function, two different statement
+  lists. Deferred imports are a real and deliberate style in `cli.py`
+  (startup cost), so this is a class of duplicate the script structurally
+  cannot see, which is the argument for the review existing rather than a
+  bug to fix in the script.
+  **Load-bearing — leave alone.** The citation density and the SEM/UCS
+  cross-references: that is the project's core discipline, not clutter.
+  The viz trio, which already shares correctly (`viz_html` imports
+  `to_mermaid` and formats one `ReportContent`; `viz_explore` imports
+  `edge_label`/`job_detail`/`job_kind`/`job_schedule` from `viz` and
+  `substitute` from `viz_html`) — three renderers, one grammar. The
+  `Clock`, `JobAdapter` and `EdgeEnds` protocols, each with two or more
+  implementations and a documented reason. `apply_attempt` as the one
+  function the live engine and replay both take: that is not indirection,
+  it is the reason the log records anything. `on_ice`/`on_hold`/
+  `on_noexec`/`armed` as four independent booleans — they are not an enum
+  in disguise, AutoSys lets a job be iced and held at once. And
+  `runner_admission` as its own module rather than part of the WAL: S6
+  replaces the storage under a stable admission layer, which is the
+  argument DL-89 made and it still holds.
