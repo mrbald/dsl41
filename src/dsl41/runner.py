@@ -1240,6 +1240,13 @@ async def _reconcile(
             job, dot, num = entry.name.rpartition(".")
             if entry.is_dir() and dot and num.isdigit():
                 candidates.setdefault((job, int(num)), entry)
+    # ...and what the HOST says it is running (S6c). ss7 reconciles every
+    # execution host, not every local directory: the sweep below concludes
+    # "never spawned" from absence here, and absence that only means "the
+    # run directory is gone" would let it re-drive a start the supervisor is
+    # still running -- the double run the whole model exists to prevent.
+    for key in supervised_live:
+        candidates.setdefault(key, None)
 
     def _inject(job: str, run_number: int, extras: dict[str, object], at: datetime) -> None:
         engine._enqueue(
@@ -1298,9 +1305,10 @@ async def _reconcile(
             extras["ended_at"] = ended_at.isoformat()  # true end time (ss7)
         _inject(job, run_number, extras, ended_at or last_at)
 
-    # starts with no spool trace at all (crash between feed and spawn):
-    # provably never spawned a wrapper -- FAILURE, never a silent re-run
-    routing = routes_new_effects(engine.oracle.store.host(engine.executor_id))
+    # Starts with no trace anywhere -- no run directory, no dispatch record,
+    # and nothing the host admits to running. ss7's barrier says "retire
+    # superseded, re-drive pending", and S6c is where that stops being two
+    # words and becomes the two cases below (DL-96 deferred it here).
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in ("STARTING", "RUNNING") or (job, rt.run_number) in candidates:
             continue
@@ -1318,13 +1326,20 @@ async def _reconcile(
             continue
         if job_ir.job_type not in engine.adapters:
             continue  # no dispatch row live either: parity with the running engine
-        if not routing:
-            # HELD, not lost (module docstring, concurrency-model ss8): there
-            # was no crash to lose this to, only a drain doing its job. Its
-            # pending SPAWN effect stays pending and IS the held record, so
-            # nothing here has to reconstruct one (S5c).
+        if engine.outbox.pending_for(job, "SPAWN"):
+            # RE-DRIVEN. The log holds an intent to spawn that was never
+            # resolved, and nothing anywhere ran: the previous leader died in
+            # the window between recording what it meant to do and doing it.
+            # Left pending, which is all re-driving takes -- `_dispatch`
+            # drains the outbox the moment the loop runs, through the same
+            # gates a fresh effect passes, so a drained or quarantined host
+            # still HOLDS it (ss8) and this sweep does not need to know that.
             continue
-        _retire_lost_spawns(engine, job)
+        # FAILED. No pending intent, so the log never said a spawn was meant
+        # to happen -- a journal written before the outbox existed (S5c), or
+        # an effect already resolved whose spool has since gone. That is the
+        # case runner-design ss7 was reasoning about when it chose to fail a
+        # start rather than silently re-run it, and it still does.
         _inject(
             job,
             rt.run_number,
@@ -1332,6 +1347,17 @@ async def _reconcile(
             last_at,
         )
     await _redrive_recorded_kills(engine, supervised_live)
+    # ss7's barrier ends where it says it does: ACQUIRE -> reconcile -> retire
+    # superseded, re-drive pending -> DISPATCH. Without this the outbox is
+    # drained only after the next admitted input (the loop dispatches on the
+    # way out of `_admit_and_apply`), so a re-driven start would wait on
+    # unrelated traffic to arrive -- hours, on a quiet estate, and never on
+    # one whose only remaining work is the run that was lost. Everything
+    # still pending here is a SPAWN nothing applied: the kills above are
+    # resolved, and a SPAWN whose run reached the host was reconciled from
+    # its trace. Superseded ones retire on the way through, and a drained or
+    # quarantined host holds its own, in the one gate that owns that call.
+    engine._dispatch()
 
 
 def _reconcile_applied_spawns(
@@ -1356,23 +1382,6 @@ def _reconcile_applied_spawns(
                 state="applied",
                 run_id=(spawned or {}).get("run_id"),
                 detail="reconciled from the spool: the run reached the host",
-            )
-        )
-
-
-def _retire_lost_spawns(engine: Engine, job: str) -> None:
-    """Retire a start that was decided and never applied.
-
-    runner-design ss7 fails such a start rather than re-running it, so the
-    effect must be retired as well -- an outbox entry left pending would be
-    drained by the next dispatch and would do the very thing that rule
-    exists to refuse."""
-    for effect in engine.outbox.pending_for(job, "SPAWN"):
-        engine._resolve_effect(
-            EffectOutcome(
-                effect_id=effect.effect_id,
-                state="retired",
-                detail="dispatch lost to engine crash: ss7 fails a start with no spool trace",
             )
         )
 

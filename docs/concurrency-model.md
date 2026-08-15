@@ -461,6 +461,37 @@ An engine that killed processes on losing proof would be reaching for the
 relay's act (§7, DL-97) from a position where it cannot know whether the
 new leader has already adopted them.*)*
 
+*(Amended by DL-102, at build — stage S6c.* The barrier's four steps, as
+built, and the one question this section deferred to it.
+
+**"Re-drive pending" is the answer DL-96 sent here.** `docs/runner-design.md`
+§7 fails a start with no spool trace rather than re-running it, and that was
+one rule because the log held one kind of evidence. It now holds two. A
+start whose SPAWN is still *pending* is an intent the previous leader
+recorded and never delivered — nothing anywhere ran — so the barrier
+re-drives it at the run_number the oracle already decided. A start with no
+pending intent is failed exactly as before: a journal written before the
+outbox existed, or an effect already resolved whose spool has since gone.
+The rule was not overturned; it was split at the seam the outbox put there.
+
+**Re-driving needs no mechanism.** Leaving the effect pending is the whole
+of it: dispatch drains the outbox through the same gates a fresh effect
+passes, so a drained or quarantined host holds it (§8) and the sweep does
+not have to know that. Two rules that each knew about routing would be one
+too many.
+
+**Reconcile every execution HOST is load-bearing, not a turn of phrase.**
+What the host LISTs joins the sweep's candidate set beside what the disk
+shows. "Never spawned" is concluded from absence, and absence that only
+meant "the run directory is gone" would re-drive a start the host is still
+running — the double run this document exists to prevent. The test asserts
+no second process, and the guard is mutation-tested.
+
+**The barrier ends in a dispatch,** as written. Without it the outbox is
+drained only on the way out of the next admitted input, so a re-driven start
+would wait on unrelated traffic to arrive: hours on a quiet estate, and
+never on one whose only remaining work was the run that was lost.*)*
+
 ## 8. Host lifecycle: active, passive, evicted
 
 Quarantine (§7) is safe and it is not sufficient on its own: one dead
@@ -610,7 +641,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
-| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); remote delivery waits on the relay |
+| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); remote delivery waits on the relay |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
 | CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | landed (DL-94/95/97): every precondition now produced rather than built by hand |
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |

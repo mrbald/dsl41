@@ -473,6 +473,34 @@ umask-hopeful.
    exists, jobs survive engine restarts by *reattachment* — their parent
    never died. Then this step reduces to the supervisor's LIST.
 
+*(Amended by DL-102, stage S6c.* This ladder is the middle of
+`docs/concurrency-model.md` §7's takeover barrier — ACQUIRE, reconcile every
+execution host, retire superseded and re-drive pending, dispatch — and two
+of its steps read differently once it is named that way.
+
+**The sweep is over every host, not every local directory.** What the
+supervisor LISTs joins the union above. The step below concludes "never
+spawned" from absence, and absence that only meant "the run directory is
+gone" would let the barrier start a second process for a run the host is
+still holding.
+
+**A start with no trace anywhere splits in two.** "Fails a start with no
+spool trace rather than re-running it" was one rule because the log held one
+kind of evidence. With the outbox (S5c) it holds two. A start whose SPAWN is
+still PENDING is an intent the previous leader recorded and did not deliver;
+it is re-driven, at the run_number the oracle already decided, which is §7's
+"re-drive pending" and needs no new mechanism — leaving the effect pending
+is enough, because dispatch drains the outbox through the same gates a fresh
+effect passes (so a drained host still holds it). A start with no pending
+intent — a journal written before the outbox existed, or an effect already
+resolved whose spool has since gone — is FAILED exactly as before. That is
+the case this sentence was reasoning about, and it keeps it.
+
+**The barrier ends in a dispatch,** because §7 says so and because without
+it the outbox is drained only on the way out of the next admitted input: a
+re-driven start would wait on unrelated traffic, which on a quiet estate is
+hours and on one whose only remaining work was the lost run is forever.*)
+
 ## 8. Preflight — refuse loudly, run honestly
 
 This is the backend_uc R/A discipline applied to execution: ERROR refuses

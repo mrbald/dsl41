@@ -4352,3 +4352,43 @@
   adopted them.
   Mutation-tested: with the check disabled all three fence tests red.
   2051 -> 2054 passed; ruff, mypy, arch_check blocking checks clean.
+- DL-102 the takeover barrier, and the start that gets re-driven rather than
+  failed (2026-08-15; stage S6c, DL-99's third slice, closing S6). ss7 and
+  runner-design ss7 carry the amendments; this entry is the shape. Closes
+  CM-09's local delivery half.
+  **The question DL-96 sent here, answered.** runner-design ss7 fails a start
+  with no spool trace rather than re-running it, and DL-41a decided that
+  deliberately. It was ONE rule because the log held one kind of evidence.
+  It now holds two, so the rule splits at the seam the outbox put there: a
+  start whose SPAWN is still PENDING is an intent the previous leader
+  recorded and never delivered -- nothing anywhere ran -- and is re-driven at
+  the run_number the oracle already decided; a start with no pending intent
+  is failed exactly as before. The second case is a journal written before
+  S5c, or an effect already resolved whose spool has since gone, and it is
+  the case DL-41a was reasoning about. Not overturned, split.
+  **Why failing all of them was a real cost.** A crash between deciding a
+  start and dispatching it failed a job for a reason that had nothing to do
+  with the job -- and FAILURE is not inert here, it routes the estate's
+  f()-recovery paths and satisfies failure conditions downstream. On a busy
+  estate one crash could do that to every start in flight.
+  **Re-driving needed no mechanism, which is the tell that the seam is
+  right.** Leaving the effect pending IS the re-drive: dispatch drains the
+  outbox through the same gates a fresh effect passes, so a drained or
+  quarantined host holds it and this sweep does not have to know that. The
+  routing check the sweep used to carry is deleted, and `_retire_lost_spawns`
+  with it -- its only caller was the branch that no longer exists. Two rules
+  that each knew about routing were one too many.
+  **"Reconcile every execution host" is load-bearing, not a turn of phrase.**
+  What the supervisor LISTs now joins the sweep's candidate set beside what
+  the disk shows. The sweep concludes "never spawned" from ABSENCE, and
+  absence that only meant "the run directory is gone" would re-drive a start
+  the host is still running -- the double run the model exists to prevent.
+  Mutation-tested: without it the test's second process is launched.
+  **The barrier ends in a dispatch, and did not before.** `_dispatch` runs on
+  the way out of `_admit_and_apply`, so the outbox was drained only when the
+  NEXT input arrived. A re-driven start would have waited on unrelated
+  traffic -- hours on a quiet estate, forever on one whose only remaining
+  work was the run that was lost. The same latency was already there for a
+  drain's held work and nobody had met it, because the `activate` that
+  released it was itself an input. Also mutation-tested.
+  2054 -> 2057 passed; ruff, mypy, arch_check blocking checks clean.

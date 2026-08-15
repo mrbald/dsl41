@@ -616,11 +616,15 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
   catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
   `journal` CLI
-- tests/test_ledger.py — phase-12 stage S6a: one leader per run root (a second
+- tests/test_ledger.py — phase-12 stage S6: one leader per run root (a second
   engine refused, with the holder named), the ordering that makes it worth having
   (a refused resume leaves the log, the estate and the spool untouched), the
   monotone epoch across terms, ss7's eligibility gate, and a real SIGKILLed holder
-  whose lock the kernel releases with nothing left to clean up
+  whose lock the kernel releases with nothing left to clean up (S6a); the fence,
+  which deletes the lock file and shows the usurper ACQUIRING before checking that
+  the first engine stops (S6b); and the takeover barrier — a start the previous
+  leader recorded and never dispatched is re-driven, one with no recorded intent
+  is still failed, and one the host says it is running is neither (S6c)
 - tests/test_admission.py — phase-12 stage S2: the frozen admission order
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
   §4). CM-04 (the deadline fires before the gate reads the status it gates on),

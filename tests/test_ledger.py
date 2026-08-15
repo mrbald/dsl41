@@ -389,6 +389,131 @@ def test_a_header_that_pins_no_version_reads_as_the_one_that_defined_it() -> Non
         check_leader_eligibility({"catalog_hash": "h"}, expected_catalog_hash="other")
 
 
+# ------------------------------------------------- 5. the takeover barrier
+
+
+def _log_without_spawn_result(run_root: Path) -> None:
+    """Cut the SPAWN's outcome record: the previous leader died in the window
+    between recording what it meant to do and doing it. The same technique
+    DL-96 used for the undelivered kill, and the only honest way to build a
+    crash window -- racing for one would test the scheduler, not the rule."""
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    kept = [
+        r
+        for r in records
+        if not (r.get("rec") == "effect_result" and str(r.get("effect_id", "")).find(":SPAWN:") > 0)
+    ]
+    assert len(kept) == len(records) - 1
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in kept))
+
+
+def _crash_after_deciding_a_start(run_root: Path) -> None:
+    async def scenario() -> None:
+        engine = _start(run_root)
+        engine.inject(_event("STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(seconds=30))
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_a_start_the_previous_leader_never_dispatched_is_re_driven(tmp_path: Path) -> None:
+    """ss7's "re-drive pending", and the question DL-96 deferred to this
+    barrier. A pending SPAWN with no trace anywhere -- no run directory, no
+    dispatch record, nothing the host admits to running -- is an intent the
+    previous leader recorded and did not get to. Nothing ran, so re-driving
+    starts the run once, at the run_number the oracle already decided.
+
+    Re-driving takes no code: leaving the effect pending is enough, because
+    `_dispatch` drains the outbox through the same gates a fresh effect
+    passes. A drained host therefore still holds it, and this sweep does not
+    have to know that."""
+    run_root = tmp_path / "run"
+    _crash_after_deciding_a_start(run_root)
+    _log_without_spawn_result(run_root)
+
+    async def scenario():
+        resumed = await _resume(run_root, T0 + timedelta(minutes=1))
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=2))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    assert resumed.oracle.store.job["j"].status == "RUNNING"  # not FAILURE
+    assert resumed.live_jobs() == frozenset({"j"})
+    assert resumed.oracle.store.job["j"].run_number == 1  # the same run, not a second
+    assert resumed.outbox.pending() == []  # the intent was discharged, not left over
+    _close(resumed)
+
+
+def test_a_start_with_no_recorded_intent_is_still_failed(tmp_path: Path) -> None:
+    """The contrast, and the half of runner-design ss7 that stands. Same
+    estate, same missing spool, one record different: the log says the spawn
+    was applied, so nothing here is an intent waiting to be delivered. A
+    journal written before the outbox existed reaches this branch too, and
+    gets the behaviour it was written under."""
+    run_root = tmp_path / "run"
+    _crash_after_deciding_a_start(run_root)  # the effect_result stays
+
+    async def scenario():
+        resumed = await _resume(run_root, T0 + timedelta(minutes=1))
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=2))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    assert resumed.oracle.store.job["j"].status == "FAILURE"
+    assert resumed.live_jobs() == frozenset()
+    _close(resumed)
+
+
+def test_a_run_the_host_admits_to_is_never_re_driven(tmp_path: Path) -> None:
+    """The guard that keeps the re-drive above from being the double run.
+    "Never spawned" is concluded from ABSENCE, and absence that meant only
+    "the run directory is gone" would let the barrier start a second process
+    for a run the supervisor is still holding. ss7 reconciles every
+    execution HOST, so what the host says it is running joins the sweep's
+    candidate set beside what the disk shows."""
+    run_root = tmp_path / "run"
+    _crash_after_deciding_a_start(run_root)
+    _log_without_spawn_result(run_root)
+
+    class _HostWithTheRun:
+        """A reachable supervisor that reports the run as live -- the state
+        the disk cannot show once its directory is gone."""
+
+        async def list_runs(self) -> dict:
+            return {
+                "runs": [{"job": "j", "run_number": 1, "run_id": "rid-1", "wrapper_alive": True}]
+            }
+
+    async def scenario():
+        resumed = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            supervisor=_HostWithTheRun(),  # type: ignore[arg-type]
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=2))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    # nothing was launched: the barrier concluded the run had reached the
+    # host and did not start a second one. (Reattaching to it is the
+    # supervised adapter's job; a FakeAdapter has nothing to reattach to,
+    # which is why the run ends up reported rather than resumed here.)
+    assert resumed.live_jobs() == frozenset()
+    assert resumed.oracle.store.job["j"].run_number == 1
+    [outcome] = [r for r in resumed.outbox.effects() if r.kind == "SPAWN"]
+    result = resumed.outbox.result_for(outcome.effect_id)
+    assert result is not None and result.state == "applied"
+    assert "reached the host" in (result.detail or "")
+    _close(resumed)
+
+
 def _event(kind: str, minutes: float):
     from dsl41.oracle_state import Event
 
