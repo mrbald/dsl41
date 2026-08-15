@@ -265,17 +265,24 @@ class ControlServer:
                     if not isinstance(request, dict):
                         raise ValueError("request must be a JSON object")
                 except (json.JSONDecodeError, ValueError) as exc:
-                    await self._send(writer, {"ok": False, "error": f"bad request: {exc}"})
+                    await self._send(
+                        writer, {"ok": False, "error": f"bad request: {exc}", "refused": True}
+                    )
                     continue
                 if request.get("v") != PROTOCOL_VERSION:
                     # ss0 refuses a caller that does not name a version, and it
                     # is checked HERE so that subscribe -- which owns its
                     # connection and never reaches _respond -- cannot be the
-                    # one unversioned door left open (DL-90)
+                    # one unversioned door left open (DL-90). It carries
+                    # `refused` for the reason the envelope doors do: this is
+                    # a door a MUTATION can hit, and every ok:false a mutation
+                    # can be answered with, other than the no-decision
+                    # timeout, has to say that nothing was admitted (DL-92)
                     await self._send(
                         writer,
                         {
                             "ok": False,
+                            "refused": True,
                             "error": f"protocol version {request.get('v')!r}: this engine"
                             f' speaks v{PROTOCOL_VERSION} -- name it as {{"v":'
                             f" {PROTOCOL_VERSION}}}",
@@ -345,7 +352,7 @@ class ControlServer:
             return self._globals(names)
         if cmd == "plan":
             return self._plan()
-        return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+        return {"ok": False, "error": f"unknown cmd {cmd!r}", "refused": True}
 
     def _check_job(self, job: object) -> dict[str, Any] | None:
         if isinstance(job, str) and job in self.engine.oracle.catalog.jobs:
@@ -390,6 +397,9 @@ class ControlServer:
             # not a decision and not a refusal: we do not know. Saying so is
             # the only honest answer -- the input may be durably admitted and
             # about to apply, so a client must re-read rather than assume.
+            # This is the ONE ok:false a mutation can be answered with that
+            # does not carry `refused`, which is what lets `outcome_of` read
+            # the absence as uncertainty rather than as a fourth kind of no.
             return {
                 "ok": False,
                 "error": f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is"
@@ -845,6 +855,45 @@ def revision_in(response: Mapping[str, Any], key: str) -> int:
     if namespace == "global":
         return int(response["globals"][name]["state_rev"])
     return int(response["jobs"][name]["state_rev"])
+
+
+#: The four things a v2 command answer can mean -- not two. `ok: False`
+#: covers three outcomes that call for three different next moves by the
+#: caller, and a client that cannot tell them apart has to guess at exactly
+#: the moment guessing is most expensive (DL-92).
+APPLIED, REFUSED, REJECTED, UNKNOWN = "applied", "refused", "rejected", "unknown"
+
+
+def outcome_of(response: Mapping[str, Any]) -> str:
+    """Classify one `sendevent` answer (control-protocol ss3, ss6).
+
+    ``applied``   the oracle applied it; `revisions` says what moved.
+    ``refused``   nothing was admitted, no index consumed, and the log says
+                  NOTHING about it (DL-90). Safe to fix and send again --
+                  and safe to send again *unchanged*, since it never
+                  happened once.
+    ``rejected``  a DECISION went against it. It took an index and its
+                  batch's time half fired, so it is in the log and the
+                  world moved underneath it. Re-READ and re-decide;
+                  resending the same envelope loses the same race, because
+                  `expect` is part of it.
+    ``unknown``   no decision arrived within the server's window. This is
+                  not a failure and must not be treated as one: the command
+                  may be durably admitted and about to apply. Re-read, and
+                  if it must be retried, retry under the SAME `request_id`
+                  -- the one path that cannot apply it twice.
+
+    The rule is here rather than at the two call sites because it is a
+    reading of the protocol, not of a screen: the CLI turns it into an exit
+    code and the TUI into a sentence, and those may differ. What the answer
+    MEANS may not."""
+    if response.get("ok"):
+        return APPLIED
+    if response.get("refused"):
+        return REFUSED
+    if response.get("decision") == REJECTED:
+        return REJECTED
+    return UNKNOWN
 
 
 def command(

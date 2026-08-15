@@ -67,7 +67,7 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import RealClock, VirtualClock
-from dsl41.runner_control import ControlServer
+from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
 from dsl41.runner_journal import read_journal, replay_inputs
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -637,9 +637,15 @@ def short_root():
 
 
 async def _call(sock_path: Path, request: dict) -> dict:
+    return await _call_line(sock_path, json.dumps(request))
+
+
+async def _call_line(sock_path: Path, line: str) -> dict:
+    """One raw request line, so a test can send something the framing itself
+    rejects -- which `_call` cannot, since it composes the line."""
     reader, writer = await asyncio.open_unix_connection(str(sock_path))
     try:
-        writer.write(json.dumps(request).encode("utf-8") + b"\n")
+        writer.write(line.encode("utf-8") + b"\n")
         await writer.drain()
         return json.loads(await reader.readline())
     finally:
@@ -890,11 +896,14 @@ def _sendevent_cli(socket_path: Path, *args: str):
     )
 
 
-def test_cli_sendevent_reads_then_writes_and_a_stale_expect_exits_2(short_root: Path) -> None:
+def test_cli_sendevent_reads_then_writes_and_a_stale_expect_exits_3(short_root: Path) -> None:
     """The shell surface of ss0. Omitted, `--expect` is read immediately
     before the write -- which narrows the race to one round trip and does
     not close it, so `--expect` is how an operator names the revision they
-    actually looked at, and a losing command exits 2 rather than applying."""
+    actually looked at, and a losing command exits nonzero rather than
+    applying. It exits 3, not 2, since DL-92: it lost a race that was
+    DECIDED and journaled, which is a different fact from never having been
+    admitted, and the two call for different next moves."""
     run_root = short_root / "run"
 
     async def scenario() -> None:
@@ -908,7 +917,7 @@ def test_cli_sendevent_reads_then_writes_and_a_stale_expect_exits_2(short_root: 
             stale = await asyncio.to_thread(
                 _sendevent_cli, server.path, "OFF_HOLD", "--job", "j", "--expect", "0"
             )
-            assert stale.returncode == 2
+            assert stale.returncode == 3
             assert "precondition failed" in json.loads(stale.stdout)["error"]
             assert engine.oracle.store.job["j"].on_hold is True  # unchanged
         finally:
@@ -969,6 +978,304 @@ def test_a_caller_parked_on_a_decision_is_told_when_the_engine_stops() -> None:
         await engine.shutdown()  # without ever running the loop
         with pytest.raises(AdmissionRefused, match="shut down before this input was admitted"):
             await future
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------- 8. the four outcomes (S4, DL-92)
+
+
+def _query_cli(socket_path: Path, *args: str):
+    import subprocess
+
+    return subprocess.run(
+        [sys.executable, "-m", "dsl41", "query", *args, "--socket", str(socket_path)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
+    short_root: Path,
+) -> None:
+    """`outcome_of` reads the ABSENCE of `refused` as uncertainty, so that
+    absence has to mean exactly one thing on the wire. This sweeps every
+    ok:false answer a sendevent can be given -- including the two doors it
+    shares with the queries, which is where an unmarked refusal would
+    otherwise hide -- and pins that each one says nothing was admitted."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run")
+        try:
+            read = await _call(server.path, {"cmd": "status", "job": "j", "v": PROTOCOL_VERSION})
+            rev = read["jobs"]["j"]["state_rev"]
+
+            def envelope(**over: object) -> dict:
+                return {
+                    "v": PROTOCOL_VERSION,
+                    "cmd": "sendevent",
+                    "baseline_id": read["baseline_id"],
+                    "epoch": read["epoch"],
+                    "request_id": "sweep-1",
+                    "verb": "ON_HOLD",
+                    "payload": {"job": "j"},
+                    "expect": {"job:j": rev},
+                } | over
+
+            refusals = {
+                "unversioned": envelope(v=None),
+                "unknown cmd": envelope(cmd="nonsense"),
+                "unknown job": envelope(payload={"job": "ghost"}),
+                "no expect": envelope(expect=None),
+                "foreign baseline": envelope(baseline_id="someone-elses-run"),
+                "stale epoch": envelope(epoch=read["epoch"] - 1, request_id="sweep-2"),
+                "bad status": envelope(verb="CHANGE_STATUS", payload={"job": "j", "status": "?"}),
+            }
+            for label, request in refusals.items():
+                answer = await _call(server.path, request)
+                assert answer["ok"] is False, label
+                assert answer["refused"] is True, label
+                assert outcome_of(answer) == REFUSED, label
+
+            # the framing door, which no composed request can reach: it is
+            # the one most easily forgotten, and an unmarked answer here
+            # would tell a client its command MIGHT have been admitted
+            for line in ("{not json", '["a list, not an object"]'):
+                answer = await _call_line(server.path, line)
+                assert answer["ok"] is False, line
+                assert answer["refused"] is True, line
+                assert outcome_of(answer) == REFUSED, line
+
+            # a decision that goes against the caller is NOT one of these: it
+            # took an index, so it says which one, and never says `refused`
+            lost = await _call(server.path, envelope(expect={"job:j": rev + 99}))
+            assert lost["ok"] is False
+            assert "refused" not in lost
+            assert outcome_of(lost) == REJECTED
+            assert isinstance(lost["index"], int)
+
+            applied = await _call(server.path, envelope(request_id="sweep-3"))
+            assert outcome_of(applied) == APPLIED
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_a_command_with_no_decision_is_the_only_unmarked_no(short_root: Path) -> None:
+    """The uncertain answer is the one thing `refused` must never appear on,
+    and it is what the absence of that flag is reserved to mean. A client
+    that read it as a refusal would resend a command that may be applying."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run")
+        loop_task.cancel()  # the writer stops; the socket keeps serving
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop_task
+        server.DECISION_TIMEOUT_S = 0.2
+        try:
+            read = await _call(server.path, {"cmd": "status", "job": "j", "v": PROTOCOL_VERSION})
+            answer = await _call(
+                server.path,
+                {
+                    "v": PROTOCOL_VERSION,
+                    "cmd": "sendevent",
+                    "baseline_id": read["baseline_id"],
+                    "epoch": read["epoch"],
+                    "request_id": "no-answer",
+                    "verb": "ON_HOLD",
+                    "payload": {"job": "j"},
+                    "expect": {"job:j": read["jobs"]["j"]["state_rev"]},
+                },
+            )
+            assert outcome_of(answer) == UNKNOWN
+        finally:
+            await server.close()
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_shell_spends_a_different_exit_code_on_each_outcome(short_root: Path) -> None:
+    """A script's whole view of a command is its exit status, so the three
+    failures have to be three of them: 2 says re-send, 3 says re-read, 4
+    says look before you touch anything. Collapsing them into one nonzero
+    would make the shell the one client that cannot act on the distinction
+    the protocol exists to draw."""
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            applied = await asyncio.to_thread(_sendevent_cli, server.path, "ON_HOLD", "--job", "j")
+            assert applied.returncode == 0, applied.stderr
+
+            refused = await asyncio.to_thread(
+                _sendevent_cli, server.path, "ON_HOLD", "--job", "ghost"
+            )
+            assert refused.returncode == 2
+            assert json.loads(refused.stdout)["refused"] is True
+
+            rejected = await asyncio.to_thread(
+                _sendevent_cli, server.path, "OFF_HOLD", "--job", "j", "--expect", "0"
+            )
+            assert rejected.returncode == 3
+            assert json.loads(rejected.stdout)["decision"] == "rejected"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_the_shell_is_told_the_id_that_makes_its_retry_safe(short_root: Path) -> None:
+    """Exit 4 is the outcome whose recovery a shell cannot improvise. The
+    engine can recognise a retry only by `request_id`, and the answer that
+    would have carried this one never arrived -- so the CLI prints the id it
+    sent, and takes it back through `--request-id`. Without both halves the
+    only available retry is a NEW command, which is the double apply the
+    dedup path exists to prevent."""
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root)
+        loop_task.cancel()  # nothing will be decided while the writer is down
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop_task
+        server.DECISION_TIMEOUT_S = 0.2
+        try:
+            lost = await asyncio.to_thread(
+                _sendevent_cli, server.path, "ON_HOLD", "--job", "j", "--request-id", "operator-1"
+            )
+            assert lost.returncode == 4
+            assert "--request-id operator-1" in lost.stderr
+            assert "no decision within" in json.loads(lost.stdout)["error"]
+        finally:
+            await server.close()
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_retry_under_the_original_id_applies_nothing_twice(short_root: Path) -> None:
+    """The other half: an id carried back is answered from the ORIGINAL
+    decision. Two invocations, one index, one journal record -- and the
+    second answer is the first one, not a second decision that happened to
+    agree."""
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            first = await asyncio.to_thread(
+                _sendevent_cli,
+                server.path,
+                "CHANGE_STATUS",
+                "--job",
+                "j",
+                "--status",
+                "SUCCESS",
+                "--request-id",
+                "operator-2",
+            )
+            assert first.returncode == 0, first.stderr
+            body = json.loads(first.stdout)
+            run_after_first = engine.oracle.store.job["j"].run_number
+
+            # the same command again, under the same id and the SAME expect
+            # (the revision the first one was composed against, now stale --
+            # which is what makes this a retry rather than a fresh command)
+            retry = await asyncio.to_thread(
+                _sendevent_cli,
+                server.path,
+                "CHANGE_STATUS",
+                "--job",
+                "j",
+                "--status",
+                "SUCCESS",
+                "--expect",
+                str(body["revisions"]["job:j"] - 1),
+                "--request-id",
+                "operator-2",
+            )
+            assert retry.returncode == 0, retry.stderr
+            assert json.loads(retry.stdout)["index"] == body["index"]
+            assert engine.oracle.store.job["j"].run_number == run_after_first
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+    records = [
+        r for r in read_journal(run_root / "journal.jsonl") if r.get("request_id") == "operator-2"
+    ]
+    # one admission and one decision -- the retry added neither
+    assert [r["rec"] for r in records] == ["input", "result"]
+
+
+def test_the_shell_can_read_the_revision_its_expect_has_to_name(short_root: Path) -> None:
+    """The read half of ss0, at the shell. `global` was on the wire from
+    S1c and reachable only from the TUI, which left `SET_GLOBAL` as the one
+    mutation a script could not compose honestly: its precondition is a
+    revision it had no verb to read. An unset name answers at 0 rather than
+    vanishing, because 0 is what a conditional create locks against."""
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            before = await asyncio.to_thread(_query_cli, server.path, "global", "--name", "gate")
+            assert before.returncode == 0, before.stderr
+            assert json.loads(before.stdout)["globals"]["gate"] == {
+                "present": False,
+                "value": None,
+                "state_rev": 0,
+            }
+
+            created = await asyncio.to_thread(
+                _sendevent_cli, server.path, "SET_GLOBAL", "--global", "gate=open", "--expect", "0"
+            )
+            assert created.returncode == 0, created.stderr
+
+            # the conditional create, run a second time against the same
+            # "still absent" precondition: rejected, not silently overwritten
+            again = await asyncio.to_thread(
+                _sendevent_cli, server.path, "SET_GLOBAL", "--global", "gate=shut", "--expect", "0"
+            )
+            assert again.returncode == 3
+            assert engine.oracle.store.globals_["gate"].value == "open"
+
+            after = await asyncio.to_thread(
+                _query_cli, server.path, "globals", "--name", "gate", "--name", "absent"
+            )
+            answers = json.loads(after.stdout)["globals"]
+            assert answers["gate"]["present"] is True
+            assert answers["gate"]["state_rev"] > 0
+            assert answers["absent"] == {"present": False, "value": None, "state_rev": 0}
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_the_estate_skim_carries_the_revision_it_is_read_before_acting(short_root: Path) -> None:
+    """`--brief` is what an operator reads immediately before deciding to
+    act, so it is where the revision has to be: an `--expect` composed from
+    a number this process fetched a moment ago names what the CLI saw, and
+    one composed from the skim names what the OPERATOR saw."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run")
+        try:
+            skim = await asyncio.to_thread(_query_cli, server.path, "status", "--brief")
+            assert skim.returncode == 0, skim.stderr
+            line = next(ln for ln in skim.stdout.splitlines() if ln.startswith("j "))
+            rev = engine.oracle.store.job["j"].state_rev
+            assert f"rev {rev}" in line
+        finally:
+            await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
 

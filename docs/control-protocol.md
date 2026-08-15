@@ -136,15 +136,24 @@ about itself and is never treated as a principal.
  "request_id": "…", "revisions": {"job:nightly": 13}, …header…}
 ```
 
-`ok` is true only for `decision: "applied"`. A **rejection** — over this
-verb, always because the precondition lost its race — answers `ok: false`
-with `decision: "rejected"` and the reason in `error`; it is a decision
-with an index, journaled as one, and its batch's time observation
-applied. A **refusal** answers `ok: false` with `refused: true` and
-nothing in the log to point at. The distinction matters to a machine
-client: a refusal is safe to re-compose and send again unchanged, a
-rejection means the world moved and the command has to be re-decided
-against what it moved to.
+`ok` is true only for `decision: "applied"`. The other three outcomes are
+three different facts, not one failure, and a client must be able to tell
+them apart from the answer alone:
+
+| outcome | on the wire | what happened | the caller's next move |
+|---|---|---|---|
+| applied | `ok: true` | the oracle applied it | — |
+| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the log** | fix and re-send; unchanged is safe, since it never happened once |
+| **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Journaled, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
+| **unknown** | `ok: false`, and neither marker | no decision arrived within the window below | re-read. Retry **only** under the same `request_id` |
+
+`refused: true` is therefore load-bearing in its absence: it appears on
+every `ok: false` a mutation can meet — including the shared doors, a
+malformed frame and a wrong `v` — so that the one answer without it means
+uncertainty rather than a fourth kind of no. `dsl41 sendevent` spends a
+distinct exit code on each (0/2/3/4) and prints its `request_id` on
+stderr when the answer is `unknown`, which is the only thing that makes
+that retry safe.
 
 The server waits for the decision rather than acknowledging admission,
 because a precondition whose outcome the caller cannot see is not a
@@ -252,6 +261,18 @@ a file, not a clock.
 the AND-success skeleton. Refuses with `ok: false` naming the cycle when
 the skeleton is cyclic; cycles are legal AutoSys (DL-13), so this is a
 query refusal, not a run refusal.
+
+### `global <name>` / `globals <names>`
+
+`{"ok": true, "globals": {<name>: {"present": bool, "value": <string>|null,
+"state_rev": int}}}` — the read a `SET_GLOBAL` precondition is composed
+from (`docs/concurrency-model.md` §6). Named entities only, and an unset
+name is **answered**, at revision `0`, rather than omitted: absence you
+cannot name is absence you cannot lock against, and `0` is exactly what a
+conditional create conditions on. Neither verb inserts a row.
+
+A map of every global would not do instead — it can report what exists,
+never that a particular name does not.
 
 ## 5. Streaming verb: subscribe
 

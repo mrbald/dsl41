@@ -66,6 +66,8 @@ dsl41 query timers --socket $S              # everything due next, estate-wide
 dsl41 query plan   --socket $S              # topological waves
 dsl41 query subscribe --socket $S           # live journal stream (Ctrl-C)
 dsl41 query is-success --socket $S -J APAC_EOD_B && echo done  # shell glue
+dsl41 query global --socket $S -N RECON_EMEA   # value + state_rev of one global
+dsl41 query status --socket $S --brief      # estate skim, with each job's rev
 
 ```
 
@@ -81,8 +83,31 @@ dsl41 sendevent KILLJOB -J EMEA_MKT_MARKS_C --expect 41 --socket $S
 ```
 
 If the job moved in between — it completed, a deadline killed it, someone
-else acted — the command exits 2 with `precondition failed` and changes
+else acted — the command exits 3 with `precondition failed` and changes
 nothing. That is the intended outcome: re-read and decide again.
+
+A `sendevent` fails in three different ways and says which by exit code,
+because the right next move differs (`docs/control-protocol.md` §3):
+
+| code | meaning | what to do |
+|---|---|---|
+| 0 | applied | — |
+| 2 | **refused** — nothing admitted, nothing in the log | fix it and send again; unchanged is safe too |
+| 3 | **rejected** — a decision, at an index, against you | re-read and decide again |
+| 4 | **no decision** — it may yet apply | re-read. If you must send it again, send it with the `--request-id` printed on stderr; a retry under that id is answered from the original decision and cannot apply twice |
+
+Exit 4 is the one to slow down on. It is not a failure — the engine may be
+applying the command right now — and re-issuing it without its id would be
+a second command, not a retry.
+
+For a global, the revision to name comes from `query global`, and `0` is a
+real answer meaning "still unset" — which is how a conditional create is
+expressed:
+
+```sh
+dsl41 query global --socket $S -N RECON_EMEA           # {"present": false, "state_rev": 0}
+dsl41 sendevent SET_GLOBAL --global RECON_EMEA=CLEAN --expect 0 --socket $S
+```
 
 `explain` is the money view: it shows each atom of a condition and whether
 it is currently true. Use it on `SOD_B` early in the night — you'll see

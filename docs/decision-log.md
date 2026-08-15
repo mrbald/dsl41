@@ -3772,3 +3772,71 @@
   `run_until_quiescent` 161 → 135 lines and `_reconcile` 124 → 123, from
   pulling the admission order out into `_admit_and_apply`. The gate now
   measures drift from here.
+- DL-92 the operator gets the vocabulary S3 built (2026-08-15; stage S4
+  of `docs/concurrency-model.md` §10, the CLI/TUI half of the only
+  file-disjoint pair). S3 gave the engine four answers and gave its
+  clients two: `ok` and not-`ok`. This closes that gap. Nothing here is
+  new machinery — it is the machinery becoming reachable.
+  **Four outcomes, one classifier.** `applied` / `refused` (nothing
+  admitted, no index, nothing in the log) / `rejected` (a decision, at an
+  index, against you) / `unknown` (no decision arrived; it may yet
+  apply). They call for four different next moves — send it again, fix
+  it and send it again, re-READ and decide again, and *look before you
+  touch anything* — so a client that cannot tell them apart has to guess
+  at the one moment guessing is most expensive. `outcome_of` lives in
+  `runner_control.py` beside the other client-half functions (DL-91
+  finding 1, applied the same day it was written): what an answer MEANS
+  is a reading of the protocol, while what a surface DOES with it is not
+  — the CLI turns it into an exit code and the TUI into a sentence, and
+  those may legitimately differ.
+  **`refused` becomes load-bearing in its absence,** so it had to become
+  exhaustive. The classifier reads a missing marker as uncertainty, which
+  is only safe if every `ok: false` a mutation can meet carries one —
+  including the two doors it shares with the queries (a malformed frame,
+  a wrong `v`) and `unknown cmd`. Those three now say `refused: true`.
+  The no-decision timeout is the one deliberate exception and the test
+  sweeps every other door to prove it is the only one. An `internal
+  error` from a handler bug also carries no marker and classifies as
+  `unknown`, which is correct: a crashed handler genuinely does not know
+  what it did.
+  **Exit codes 2/3/4.** A script's entire view of a command is its exit
+  status. 2 keeps its established meaning (nothing happened — the
+  "never started" family), 3 is rejected and 4 is unknown; 1 is
+  untouched and no other verb uses 3 or 4. `--expect`'s help changed
+  from "refused" to "rejected" in the same pass: it was describing the
+  outcome with the wrong word, which is exactly the confusion this
+  entry removes.
+  **`--request-id`, and why exit 4 prints it.** The engine has
+  recognised an exact retry since S3, and no shell could reach that:
+  `command()` mints a fresh uuid4 per invocation, so a retry after a lost
+  answer was a NEW command — the double-apply the dedup path exists to
+  prevent, arriving through the recovery path. The flag carries an id
+  back in; exit 4 prints the id it sent to stderr, because the answer
+  that would have carried it is precisely the one that never came. Both
+  halves are needed and neither is useful alone.
+  **`query global` / `globals`.** On the wire since S1c (DL-87), reachable
+  only from the TUI, which left `SET_GLOBAL` as the one mutation a script
+  could not compose honestly — its precondition is a revision it had no
+  verb to read. `global` names one and `globals` a list, as the server
+  has them: asking for one through the plural would make a client that
+  wants a single revision unwrap a map to find it. Also documented in
+  control-protocol §4, which had been referring to verbs it never
+  defined.
+  **`status --brief` carries the revision.** The skim is what an operator
+  reads immediately before acting, so it is where the number has to be:
+  an `--expect` read by the CLI a millisecond earlier names what the CLI
+  saw, and one taken off the skim names what the OPERATOR saw. That
+  distinction is the whole content of §0's "the version the caller read".
+  **Not done, deliberately: no `state_rev` column in the TUI table.** It
+  is the one cell that changes on every input to its job, so it would be
+  the most frequently redrawn cell in the table — and DL-46's whole
+  reason for the (text, style) cell diff is that pushing changed cells at
+  estate scale is what froze the UI. The table already USES the revision
+  it holds (the `expect` comes from the row the operator was looking at,
+  DL-90); the number itself belongs where it is read deliberately, which
+  is `--brief` and `query`.
+  1971 → 1982 passed; ruff, mypy and arch_check clean. `cli.py` 1612 →
+  1683 and `runner_tui.py` 1712 → 1744 keep both files on the advisory
+  list; they are the surface this stage is about, and DL-91's re-baseline
+  was six commits ago, so the next review inherits them rather than a
+  fresh baseline.

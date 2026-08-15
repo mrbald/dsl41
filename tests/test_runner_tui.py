@@ -52,6 +52,7 @@ from dsl41.runner_tui import (
     TriggersScreen,
     _LogPane,
     _LogTail,
+    _outcome_line,
     assemble_detail_trigger_lines,
     assemble_trigger_rows,
     compile_search,
@@ -265,6 +266,45 @@ def test_parse_unknown_verb_errors() -> None:
 @pytest.mark.parametrize("text", ["", "   "])
 def test_parse_empty_input_errors(text: str) -> None:
     assert parse_console_command(text, None) == "empty command"
+
+
+# --------------------------------------------- 1b. the four outcomes (S4, DL-92)
+
+
+def test_the_console_says_where_an_applied_command_landed() -> None:
+    line = _outcome_line("> ON_HOLD j", {"ok": True, "decision": "applied", "index": 7})
+    assert line.plain == "> ON_HOLD j: applied @ #7"
+    assert line.style == "green"
+
+
+def test_the_console_says_a_refusal_left_nothing_to_look_up() -> None:
+    """The operator's next move after a refusal is to send it again, and the
+    line has to support that: nothing was written down, so there is no index
+    and no journal entry to go looking for."""
+    line = _outcome_line("> ON_HOLD j", {"ok": False, "refused": True, "error": "no expect"})
+    assert line.plain == "> ON_HOLD j: not sent, nothing logged: no expect"
+    assert line.style == "red"
+
+
+def test_the_console_separates_a_rejection_from_a_refusal() -> None:
+    """A rejection IS in the log, at an index, and re-sending it unchanged
+    loses the same race -- so it must not read like the refusal above."""
+    line = _outcome_line(
+        "> OFF_HOLD j",
+        {"ok": False, "decision": "rejected", "index": 9, "error": "precondition failed: ..."},
+    )
+    assert line.plain == "> OFF_HOLD j: rejected @ #9: precondition failed: ..."
+    assert line.style == "red"
+
+
+def test_the_console_does_not_paint_an_undecided_command_as_a_failure() -> None:
+    """The one outcome that has not failed. Red would teach the operator to
+    press the key again, which is exactly what must not happen while the
+    engine may be applying the first press."""
+    line = _outcome_line("> KILLJOB j", {"ok": False, "error": "no decision within 5.0s"})
+    assert line.style == "yellow"
+    assert "NO DECISION" in line.plain and "do not resend" in line.plain
+    assert "no decision within 5.0s" in line.plain
 
 
 # ------------------------------------------------------------- 2. ControlClient

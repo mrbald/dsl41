@@ -815,6 +815,14 @@ def viz(
 # quiescent; sendevent/query: ok response), 1 the engine/estate failed while
 # running (EngineError, oracle refusal mid-run), 2 the run never started
 # (preflight ERROR, resume gate, unreadable scenario, unreachable socket).
+#
+# `sendevent` splits 2 further, because since S3 a command can fail in three
+# ways that call for three different next moves and a script that cannot tell
+# them apart has to guess exactly where guessing costs most (DL-92): 2 stays
+# REFUSED (nothing admitted, nothing logged -- the "never started" reading of
+# 2, unchanged), 3 is REJECTED (a decision, with an index; the world moved)
+# and 4 is UNKNOWN (no decision arrived; it may yet apply). 1 keeps its
+# meaning and no other verb uses 3 or 4.
 
 
 def _preflight_or_exit(
@@ -1359,24 +1367,41 @@ def sendevent(
         None,
         "--expect",
         help="The state_rev you read for the target (from `query status`/`global`)."
-        " The command is refused if it moved since. Omitted, this reads it first --"
+        " The command is rejected if it moved since. Omitted, this reads it first --"
         " which narrows the race to one round trip, not to nothing. 0 means"
         " 'still absent' (SET_GLOBAL's conditional create).",
+    ),
+    request_id: str = typer.Option(
+        None,
+        "--request-id",
+        help="RETRY the command that carried this id, rather than issuing a new one."
+        " An exact retry -- same id, same envelope -- is answered from the original"
+        " decision and applies nothing twice, which is the only safe response to"
+        " exit 4. A fresh uuid4 otherwise.",
     ),
 ) -> None:
     """Vendor-parity sendevent against a running engine (runner-design ss10),
     over the v2 protocol (concurrency-model ss6).
 
     Every mutation names the revision it was composed against and is
-    answered with its DECISION: exit 0 means the oracle applied it, exit 2
-    means it was refused at the door or rejected because the target moved
-    first. Journaled by the engine either way -- a rejection is a decision
-    with an index, not an absence."""
+    answered with its DECISION, in four kinds that call for four different
+    next moves -- so they get four exit codes rather than one failure
+    (control-protocol ss3):
+
+      0  applied.
+      2  REFUSED: nothing admitted, no index consumed, and the log says
+         nothing about it. Fix it and send it again; unchanged is safe too.
+      3  REJECTED: a decision went against it -- the target moved between
+         the read and the write. It IS in the log. Re-read and re-decide;
+         resending the same envelope loses the same race.
+      4  UNKNOWN: no decision arrived. NOT a failure -- the command may be
+         durably admitted and about to apply. Re-read; if it must be sent
+         again, send it with --request-id and the id printed on stderr."""
     import json as json_mod
 
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_control import claimed_actor, command
+    from dsl41.runner_control import REFUSED, REJECTED, UNKNOWN, claimed_actor, command, outcome_of
 
     verb = event.upper()
     payload: dict = {}
@@ -1398,20 +1423,29 @@ def sendevent(
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
     baseline, epoch, current = _read_revision(socket_path, key)
-    response = _control_roundtrip(
-        socket_path,
-        command(
-            verb,
-            payload,
-            key=key,
-            revision=current if expect is None else expect,
-            baseline_id=baseline,
-            epoch=epoch,
-            claimed_actor=claimed_actor(),
-        ),
+    request = command(
+        verb,
+        payload,
+        key=key,
+        revision=current if expect is None else expect,
+        baseline_id=baseline,
+        epoch=epoch,
+        request_id=request_id,
+        claimed_actor=claimed_actor(),
     )
+    response = _control_roundtrip(socket_path, request)
     typer.echo(json_mod.dumps(response, sort_keys=True))
-    raise typer.Exit(0 if response.get("ok") else 2)
+    outcome = outcome_of(response)
+    if outcome == UNKNOWN:
+        # the id is on stderr because it is the only thing that makes the
+        # retry safe, and a caller that lost the round trip has nowhere else
+        # to get it: the answer that would have carried it never came
+        typer.echo(
+            f"no decision: this command may still apply. Re-read, then retry ONLY as"
+            f" --request-id {request['request_id']}",
+            err=True,
+        )
+    raise typer.Exit({REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0))
 
 
 @app.command()
@@ -1480,17 +1514,22 @@ def _brief_flags(row: dict[str, object]) -> str:
 @app.command()
 def query(
     what: str = typer.Argument(
-        ..., help="status|trace|explain|spec|deps|timers|plan|subscribe|is-success|is-failed"
+        ...,
+        help="status|trace|explain|spec|deps|timers|plan|global|globals"
+        "|subscribe|is-success|is-failed",
     ),
     socket_path: Path = _SOCKET_OPT,
     job: str = typer.Option(
         None, "--job", "-J", help="status: filter; explain/spec/deps/is-*: the job."
     ),
+    name: list[str] = typer.Option(
+        None, "--name", "-N", help="global/globals: the global(s) to read. Repeatable."
+    ),
     since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
     brief: bool = typer.Option(
         False,
         "--brief",
-        help="status: one line per job (name, status, at, run, exit, flags)"
+        help="status: one line per job (name, status, at, run, exit, flags, rev)"
         " instead of the JSON document -- the estate-scale skim (DL-66).",
     ),
 ) -> None:
@@ -1499,12 +1538,29 @@ def query(
     autorep analog -- the ss11 TUI consumes the same verbs. `is-success` /
     `is-failed` are scriptable predicates (DL-65): print the current status
     and exit 0 when it matches (SUCCESS; FAILURE or TERMINATED), 1 when it
-    does not -- shell glue's `systemctl is-active` analog."""
+    does not -- shell glue's `systemctl is-active` analog.
+
+    `status` and `global`/`globals` are the reads a `sendevent --expect` is
+    composed from (concurrency-model ss6): both publish the `state_rev` of a
+    NAMED entity, and `global` answers an unset name at revision 0 rather
+    than omitting it, because absence you cannot name is absence you cannot
+    lock against."""
     import json as json_mod
     import socket as socket_mod
 
     verb = what.lower()
-    known = ("status", "trace", "explain", "spec", "deps", "timers", "plan", "subscribe")
+    known = (
+        "status",
+        "trace",
+        "explain",
+        "spec",
+        "deps",
+        "timers",
+        "plan",
+        "global",
+        "globals",
+        "subscribe",
+    )
     predicates = {"is-success": ("SUCCESS",), "is-failed": ("FAILURE", "TERMINATED")}
     if verb not in known and verb not in predicates:
         typer.echo(f"unknown query {what!r} ({'|'.join([*known, *predicates])})", err=True)
@@ -1523,23 +1579,38 @@ def query(
     if brief and verb != "status":
         typer.echo("--brief applies to status only", err=True)
         raise typer.Exit(2)
+    if verb in ("global", "globals") and not name:
+        typer.echo(f"{verb} requires --name (repeat it for several)", err=True)
+        raise typer.Exit(2)
+    if verb == "global" and len(name or ()) > 1:
+        typer.echo("global names one; use `globals` for several", err=True)
+        raise typer.Exit(2)
     request: dict = {"cmd": verb}
     if job is not None:
         request["job"] = job
     if since is not None:
         request["since"] = since
+    if name:
+        # one verb per shape, as the server has them: `global` names one and
+        # `globals` a list, and asking for one through the plural would make
+        # a client that wants a single revision unwrap a map to find it
+        request.update({"name": name[0]} if verb == "global" else {"names": list(name)})
     if verb != "subscribe":
         response = _control_roundtrip(socket_path, request)
         if brief and response.get("ok"):
-            for name in sorted(response.get("jobs", {})):
-                row = response["jobs"][name]
+            for job_name in sorted(response.get("jobs", {})):
+                row = response["jobs"][job_name]
                 flags = _brief_flags(row)
                 exit_code = row.get("exit_code")
                 typer.echo(
-                    f"{name:<44} {row.get('status', ''):<10}"
+                    f"{job_name:<44} {row.get('status', ''):<10}"
                     f" {(row.get('status_at') or '-'):<26}"
                     f" run {row.get('run_number', 0):<4}"
-                    f" exit {'-' if exit_code is None else exit_code:<4} {flags}".rstrip()
+                    f" exit {'-' if exit_code is None else exit_code:<4}"
+                    # the revision goes on the skim because the skim is what
+                    # an operator reads immediately before acting: --expect
+                    # is only honest when it names what they LOOKED at
+                    f" rev {row.get('state_rev', 0):<4} {flags}".rstrip()
                 )
             if response.get("spec_drift"):
                 typer.echo("SPEC DRIFT: estate files changed on disk", err=True)

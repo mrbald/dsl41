@@ -223,6 +223,8 @@ result against the original.
 dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
 dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
 dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
+dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
+dsl41 query global -N GATE -S ./run1/control.sock   # a global's value and rev
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
 dsl41 rehearse jobs.jil --hours 24              # virtual clock: a day in seconds
@@ -587,7 +589,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   batch does not invalidate it, refused-vs-rejected in the log, the retry and
   epoch ordering of §4 step 2, replay of a rejected precondition, and the wire:
   every door versioned, every read carrying its header, and a sendevent answered
-  with its decision rather than its receipt
+  with its decision rather than its receipt. Then stage S4, the operator's half
+  of the same contract: every `ok: false` a mutation can meet says whether it
+  was admitted, the shell spends a different exit code on each outcome and is
+  told the `request_id` that makes its retry safe, and `query global` gives a
+  script the read its `--expect` has to be composed from
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping

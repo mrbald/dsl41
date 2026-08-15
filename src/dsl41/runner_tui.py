@@ -112,6 +112,7 @@ import functools
 import os
 import re
 from collections import deque
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -140,12 +141,16 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
+    APPLIED,
     JOB_EVENT_VERBS,
+    REFUSED,
+    REJECTED,
     STATUSES,
     ControlClient,
     ControlClientError,
     claimed_actor,
     command,
+    outcome_of,
     read_for,
     revision_in,
 )
@@ -803,6 +808,38 @@ class _LogPane(Vertical):
             event.input.border_title = Text(error, style="bold red")
             return
         self.close_prompt()
+
+
+#: what the console says about each ss3 outcome, and why each says it:
+#: applied  -- the index, so the operator can find it in the journal.
+#: refused  -- "not sent" is the operator-facing truth: no index, no log
+#:             entry, nothing to look up later. Sending it again is safe.
+#: rejected -- the table they typed against had already moved. It IS in the
+#:             log, and the refresh below the line is the re-read.
+#: unknown  -- yellow, not red: this is the one that has not failed. The
+#:             engine may be applying it right now, so the instruction is to
+#:             look, never to press the key again.
+_OUTCOME_STYLE = {APPLIED: "green", REFUSED: "red", REJECTED: "red"}
+
+
+def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
+    """One console line for one command answer, by ss3 outcome (DL-92).
+
+    The TUI is where the distinction is cheapest to act on and easiest to
+    lose: three different failures rendered as one red `error` string teach
+    an operator that red means "press it again", which is right for a
+    refusal, wasted for a rejection and wrong for an unknown."""
+    outcome = outcome_of(response)
+    error = str(response.get("error", "")).strip()
+    if outcome == APPLIED:
+        body = f"applied @ #{response.get('index', '?')}"
+    elif outcome == REFUSED:
+        body = f"not sent, nothing logged: {error or 'refused'}"
+    elif outcome == REJECTED:
+        body = f"rejected @ #{response.get('index', '?')}: {error or 'the target moved'}"
+    else:
+        body = f"NO DECISION -- may still apply, do not resend: {error or 'no answer'}"
+    return Text(f"{label}: {body}", style=_OUTCOME_STYLE.get(outcome, "yellow"))
 
 
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
@@ -1676,12 +1713,7 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"{label}: not sent ({exc})", style="red"))
             return
         self._set_connected(True)
-        if response.get("ok"):
-            self._console_write(
-                Text(f"{label}: applied @ #{response.get('index', '?')}", style="green")
-            )
-        else:
-            self._console_write(Text(f"{label}: {response.get('error', 'refused')}", style="red"))
+        self._console_write(_outcome_line(label, response))
         await self._refresh()
 
     async def _precondition(self, key: str) -> tuple[str, int, int]:
