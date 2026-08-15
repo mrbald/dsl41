@@ -21,6 +21,7 @@ report for anything that surprised us or contradicted the design doc.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,7 +36,13 @@ from dsl41.runner import Engine, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_journal import Journal, catalog_hash, read_journal, replay_inputs
+from dsl41.runner_journal import (
+    Journal,
+    _dsl41_version,
+    catalog_hash,
+    read_journal,
+    replay_inputs,
+)
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -587,3 +594,73 @@ def test_cli_journal_exits_2_on_catalog_hash_mismatch(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
     assert result.exit_code == 2
     assert "catalog hash mismatch" in result.output
+
+
+# ------------------------------------ the WAL's own edges (DL-105)
+
+
+def test_the_preflight_caveats_a_run_started_under_are_in_the_log(tmp_path: Path) -> None:
+    """ss8's "prints, JOURNALS, and runs" made literal (DL-45). A WARN that
+    only reached the terminal would be gone by the time anyone asks why a run
+    behaved the way it did; replay ignores the record, because it is not an
+    input -- it is the caveat list the inputs were admitted under."""
+    from dsl41.runner_preflight import PreflightItem
+
+    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal.close()
+    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    items = [
+        PreflightItem(severity="WARN", code="machine", job="j", message="pool split; local"),
+        PreflightItem(severity="WARN", code="timezone", job="k", message="no base tz"),
+    ]
+    journal.preflight(items)
+    journal.close()
+
+    [record] = [json.loads(line) for line in (tmp_path / "j.jsonl").read_text().splitlines()][-1:]
+    assert record["rec"] == "preflight"
+    assert [i["code"] for i in record["items"]] == ["machine", "timezone"]
+    assert [i["severity"] for i in record["items"]] == ["WARN", "WARN"]
+
+
+def test_unsubscribing_something_that_never_subscribed_is_a_no_op(tmp_path: Path) -> None:
+    """ss10 viewers come and go, and a double `unsubscribe` -- a viewer that
+    drops while its handler is being cancelled -- must not take the WAL down
+    with it. The fan-out never blocks on a subscriber and never dies of one."""
+    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    queue = journal.subscribe()
+    journal.unsubscribe(queue)
+    journal.unsubscribe(queue)  # already gone
+    journal.unsubscribe(asyncio.Queue())  # never here
+    journal.drop(Event(at=T0, kind="STARTJOB", payload={"job": "j"}), "for the fan-out")
+    assert queue.empty()  # unsubscribed means unsubscribed
+    journal.close()
+
+
+def test_an_empty_interior_line_is_corruption_not_a_torn_tail(tmp_path: Path) -> None:
+    """A torn FINAL line is a crash mid-append and is dropped -- write-ahead
+    means the feed it preceded never happened. An empty line with records
+    AFTER it cannot be that: something wrote past it, so the log is not what
+    it claims to be and reading on would silently skip an input."""
+    path = tmp_path / "j.jsonl"
+    path.write_text(
+        '{"rec": "header", "catalog_hash": "x", "clock_domain": "virtual",'
+        ' "dsl41_version": "0", "started_at": "2026-07-01T08:00:00"}\n'
+        "\n"
+        '{"rec": "advance", "seq": 2, "at": "2026-07-01T08:01:00"}\n'
+    )
+    with pytest.raises(EngineError, match="empty interior line 2"):
+        read_journal(path)
+
+
+def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> None:
+    """The header's `dsl41_version` is advisory forensics and gates nothing
+    (ss7 gates the state-machine version instead), so a src-tree run with no
+    installed distribution records what it knows rather than refusing to
+    start."""
+    import importlib.metadata
+
+    def no_such_distribution(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError("dsl41")
+
+    monkeypatch.setattr(importlib.metadata, "version", no_such_distribution)
+    assert _dsl41_version() == "0+unknown"

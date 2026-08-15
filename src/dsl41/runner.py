@@ -871,9 +871,13 @@ class Engine:
     def _apply_spawn(self, effect: Effect) -> None:
         job_ir = self.oracle.catalog.jobs.get(effect.job)
         adapter = self.adapters.get(job_ir.job_type) if job_ir is not None else None
-        if job_ir is None or adapter is None:
-            # unreachable through planning (`_dispatchable` filters both), so
-            # meeting it means the catalog and the log disagree
+        if job_ir is None or adapter is None:  # pragma: no cover -- see below
+            # Unreachable through planning: `_dispatchable` filters both, and
+            # a log's effects can only name jobs its own catalog had (the
+            # ss7 hash gate refuses a resume against a changed estate). It is
+            # kept, not deleted, because what it guards is a DISAGREEMENT
+            # between catalog and log -- the one thing that would make the
+            # alternative a KeyError in the middle of dispatch.
             self._resolve_effect(
                 EffectOutcome(
                     effect_id=effect.effect_id,
@@ -884,9 +888,14 @@ class Engine:
             return
         self._dispatched[effect.job] = effect.run_number
         stale = self._live.pop(effect.job, None)
-        if stale is not None:
-            # one live attempt per job; a report from the old task would be
-            # gate-dropped anyway (run_number mismatch) -- cancel is tidier
+        if stale is not None:  # pragma: no cover -- see below
+            # One live attempt per job. Unreachable while the ORACLE refuses to
+            # start a job that is STARTING/RUNNING/QUE_WAIT (DL-81), which is
+            # what stops run_number advancing under a live task; the guard is
+            # kept because that refusal lives two modules away, and a change to
+            # it would otherwise leak a task rather than fail. A report from
+            # the old task would be gate-dropped anyway (run_number mismatch)
+            # -- cancelling is the tidy half, not the safety half.
             stale.task.cancel()
             self._reaping.append(stale.task)
         self._launch(job_ir, effect.run_number, adapter)
@@ -901,7 +910,13 @@ class Engine:
         delivered to a live run, which is the whole of what this tier can
         promise; the wrapper records what became of the process."""
         live = self._live.pop(effect.job, None)
-        if live is None:
+        if live is None:  # pragma: no cover -- see below
+            # Unreachable through planning, and deliberately so: `plan_effects`
+            # refuses to plan a KILL for a job with no live run, because such
+            # an effect could only ever be superseded (its own docstring, and
+            # a test pins it). Re-driven kills at resume take
+            # `_redrive_recorded_kills` instead, which resolves every pending
+            # KILL before the barrier's dispatch reaches this.
             self._resolve_effect(
                 EffectOutcome(
                     effect_id=effect.effect_id,
@@ -1265,7 +1280,13 @@ async def _reconcile(
                 cmd_adapter.reattach[(job, run_number)] = str(reattach["run_id"])
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
-        if job_ir.job_type == "FW":
+        if job_ir.job_type == "FW":  # pragma: no cover -- see below
+            # Unreachable: this candidate set is built from dispatch records
+            # and run directories, and an FW watch spawns no process, so it
+            # produces neither. A job's TYPE changing between runs would be
+            # the only way in, and the ss7 hash gate refuses that resume. The
+            # reachable FW case is `_resume_untraced_starts`, which is where
+            # a watch with nothing on disk actually lands, and it is tested.
             adapter = engine.adapters.get("FW")
             if adapter is None:
                 raise EngineError(  # refuse loudly: never leave it hanging

@@ -455,3 +455,54 @@ def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path)
     finished = _kill_outcome_from_spool(short_root, effect)
     assert finished.state == "retired"
     assert "ended on its own" in (finished.detail or "")
+
+
+# ------------------------------- the three arms of _apply_effect (DL-105)
+
+
+def test_a_held_spawn_whose_run_has_since_ended_is_retired_not_applied() -> None:
+    """ss5's supersession, delivered rather than merely decided. Held work is
+    the case that makes it reachable on one host: the drain parks a SPAWN in
+    the outbox, the operator kills the job while it waits, and the effect is
+    still sitting there when the host comes back. Dispatching it then would
+    start a run the estate has already ended.
+
+    `superseded_reason` is proven as a function elsewhere; this is the wiring
+    that acts on it, which is a different claim (DL-105)."""
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand
+
+    engine = _engine()
+
+    async def scenario() -> None:
+        drained = engine.submit_host(
+            HostCommand(verb="drain", host_id="local"),
+            Envelope(request_id="r1", expect={"host:local": 1}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=10))
+        assert (await drained).decision == "applied"
+
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        [held] = engine.outbox.pending()
+        assert (held.kind, held.job, held.run_number) == ("SPAWN", "j", 1)
+        assert engine.live_jobs() == frozenset()  # held: no process behind it
+
+        engine.inject(_ev("KILLJOB", 2, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        assert engine.oracle.store.job["j"].status == "TERMINATED"
+
+        back = engine.submit_host(
+            HostCommand(verb="activate", host_id="local"),
+            Envelope(request_id="r2", expect={"host:local": 2}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=4))
+        assert (await back).decision == "applied"
+
+    asyncio.run(scenario())
+    assert engine.live_jobs() == frozenset()  # the routing came back, the run did not
+    assert engine.oracle.store.job["j"].run_number == 1  # and nothing re-ran it
+    result = engine.outbox.result_for("e2:SPAWN:j.1")
+    assert result is not None and result.state == "retired"
+    assert result.detail == "j is already TERMINATED: the run this spawn was for has ended"
+    assert engine.outbox.pending() == []

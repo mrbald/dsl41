@@ -138,9 +138,6 @@ class Outbox:
         #: mandatory: a KILL decided after a SPAWN must not overtake it.
         self._order: list[str] = []
 
-    def __len__(self) -> int:
-        return len(self._effects)
-
     def record(self, effect: Effect) -> None:
         """Note an intended effect. Idempotent on `effect_id`, because replay
         meets the same record the live engine wrote."""

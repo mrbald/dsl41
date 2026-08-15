@@ -48,6 +48,10 @@ dev = [
     # (tests/test_viz_explore_browser.py explains its skip with one).
     "pytest>=8.2",
     "hypothesis>=6",
+    # branch coverage over the concurrency tier, enforced at 100% ([tool.
+    # coverage.report] says which modules and why). `[toml]` extra so the
+    # config can live in pyproject with its reasoning beside it.
+    "coverage[toml]>=7",
     "ruff>=0.6",
     "mypy>=1.10",
     "textual>=8",
@@ -83,3 +87,44 @@ testpaths = ["tests"]
 # a wedged test dumps every thread's stack instead of hanging silently (the
 # whole suite runs in ~30s; the v0.2.0 release hang burned a 6h CI slot mute)
 faulthandler_timeout = 120
+
+[tool.coverage.run]
+# BRANCH coverage, not line: the concurrency tier is mostly decisions, and a
+# guard whose false arm nothing takes is exactly the untested wiring this
+# gate exists to find. Line coverage calls such a guard covered.
+branch = true
+source = ["src/dsl41"]
+
+[tool.coverage.report]
+# The gate is scoped, and the scope is an argument rather than a convenience.
+# These are the modules that implement docs/concurrency-model.md: the state
+# owner, admission, the ledger and its lock, the outbox, the routing table,
+# and the engine loop that drives them. A missed branch here is a rule the
+# code states and no test holds it to -- which is how `superseded_reason`
+# came to be proven as a function while the wiring that acts on it was never
+# once exercised (DL-105).
+#
+# Deliberately NOT listed: runner_supervisor.py and runner_wrapper.py run as
+# separate PROCESSES, so in-process coverage reads them at ~18% however well
+# tested they are (31 subprocess tests drive the supervisor); the CLI, TUI,
+# viz and compiler tiers are not concurrency and get the suite's ordinary
+# scrutiny, not this one.
+include = [
+    "src/dsl41/oracle_state.py",
+    "src/dsl41/runner.py",
+    "src/dsl41/runner_admission.py",
+    "src/dsl41/runner_effects.py",
+    "src/dsl41/runner_hosts.py",
+    "src/dsl41/runner_journal.py",
+    "src/dsl41/runner_ledger.py",
+]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    # a guard that fires only if this module's own invariants are already
+    # broken. Every one carries a comment saying which invariant, because
+    # "unreachable" is a claim and the comment is where it is made.
+    "raise AssertionError",
+]

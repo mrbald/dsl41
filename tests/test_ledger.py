@@ -29,6 +29,7 @@ Two properties carry the rest of the file:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import signal
@@ -39,13 +40,15 @@ import time
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from dsl41.ir import lower_source
 from dsl41.runner import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from dsl41.runner_effects import OUTCOME_UNAVAILABLE
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -419,7 +422,7 @@ def _crash_after_deciding_a_start(run_root: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_a_start_the_previous_leader_never_dispatched_is_re_driven(tmp_path: Path) -> None:
+def test_cm09_a_start_the_previous_leader_never_dispatched_is_re_driven(tmp_path: Path) -> None:
     """ss7's "re-drive pending", and the question DL-96 deferred to this
     barrier. A pending SPAWN with no trace anywhere -- no run directory, no
     dispatch record, nothing the host admits to running -- is an intent the
@@ -518,3 +521,350 @@ def _event(kind: str, minutes: float):
     from dsl41.oracle_state import Event
 
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload={"job": "j"})
+
+
+# ---------------------------------- 6. what the lock says when it cannot lead
+
+
+def test_a_lock_file_replaced_during_the_acquire_excludes_nobody(tmp_path: Path) -> None:
+    """The race S6b's `check` covers at steady state, met at the acquire
+    itself: between opening the file and locking it, the name can be pointed
+    at a different inode. The lock then succeeds on an inode nothing else
+    will ever open, so it excludes nobody -- and an engine that ran on it
+    would believe it led a run root another engine could take."""
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    lock = LeaderLock(run_root)
+    real_flock = fcntl.flock
+    replaced: list[bool] = []
+
+    def replace_then_lock(fd: int, op: int) -> None:
+        real_flock(fd, op)
+        if lock.path.exists():  # once, during the acquire we are testing
+            lock.path.unlink()
+            if replaced:
+                lock.path.touch()  # pointed at a new inode...
+            replaced.append(True)  # ...and, the first time, at nothing at all
+
+    with mock.patch.object(fcntl, "flock", replace_then_lock):
+        # gone entirely, then pointed at a different inode: both are "the name
+        # we locked is not the name we hold" and both must refuse
+        for _ in range(2):
+            with pytest.raises(EngineError, match="was replaced while acquiring it"):
+                lock.acquire()
+            assert not lock.held  # and it did not keep the fd it could not use
+
+
+def test_the_refusal_stays_useful_when_the_holder_note_is_not(tmp_path: Path) -> None:
+    """The note is diagnostics, and diagnostics have to survive their own
+    absence. A holder that acquired and died before writing one, or a
+    truncated write, must still produce a refusal an operator can act on --
+    the note is never the fence, so an unreadable one costs a name, not
+    safety."""
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    holder = LeaderLock(run_root)
+    holder.acquire()
+    try:
+        for garbage in (b"", b"{not json", b'"a string, not an object"'):
+            holder.path.write_bytes(garbage)
+            with pytest.raises(EngineError, match="held by another engine .holder unknown."):
+                LeaderLock(run_root).acquire()
+    finally:
+        holder.release()
+
+
+def test_using_a_lock_that_was_never_acquired_is_a_loud_error(tmp_path: Path) -> None:
+    """Both are invariant guards on this class's own use, and they are loud
+    rather than silent because the quiet versions are worse: a `note` that
+    did nothing would leave the next refusal naming a stale holder, and a
+    `check` that passed would be a fence that always says yes."""
+    lock = LeaderLock(tmp_path)
+    with pytest.raises(EngineError, match="not held"):
+        lock.note(epoch=1, at=T0)
+    with pytest.raises(EngineError, match="leadership was never acquired"):
+        lock.check()
+
+
+# ------------------------- 7. the ladder's remaining arms (DL-105)
+
+
+def _resume_with(run_root: Path, at: datetime, jil: str, adapters: dict):
+    return resume_run(
+        lower_source(jil),
+        run_root,
+        clock=VirtualClock(start=at),
+        adapters=adapters,
+        settle_seconds=0.0,
+        grace_seconds=0.0,
+    )
+
+
+def test_a_journal_stamped_in_the_future_refuses_to_resume(tmp_path: Path) -> None:
+    """The machine clock moved backwards. Feeding a log whose instants are
+    ahead of `now` would either feed time backwards -- which the oracle
+    forbids -- or silently fast-forward every timer in the estate."""
+    run_root = tmp_path / "run"
+    engine = start_run(
+        lower_source(_SOLO_JIL),
+        run_root,
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter(default=None)},
+    )
+    _close(engine)
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    records[0]["started_at"] = "2099-01-01T00:00:00"
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+
+    async def scenario() -> None:
+        with pytest.raises(EngineError, match="journal is from the future"):
+            await resume_run(
+                lower_source(_SOLO_JIL),
+                run_root,
+                clock=RealClock(),
+                adapters={"CMD": FakeAdapter(default=None)},
+            )
+
+    asyncio.run(scenario())
+
+
+def test_the_sweep_reads_what_is_there_and_ignores_what_is_not(tmp_path: Path) -> None:
+    """The candidate sweep is a union over things that may each be missing or
+    malformed: a run root with no `runs/` at all (nothing ever dispatched, or
+    an operator cleaned up), and entries in it that are not run directories.
+    Neither is corruption, so neither may raise -- reconciliation has to
+    survive the state of a directory it does not own."""
+    run_root = tmp_path / "run"
+    _close(_start(run_root))
+    (run_root / "runs").rmdir()  # gone entirely
+
+    async def no_runs_dir() -> None:
+        _close(await _resume(run_root, T0 + timedelta(minutes=1)))
+
+    asyncio.run(no_runs_dir())
+
+    (run_root / "runs").mkdir()
+    (run_root / "runs" / "j.1").write_text("a file where a directory would be")
+    (run_root / "runs" / "no-run-number").mkdir()
+    (run_root / "runs" / "j.notanumber").mkdir()
+
+    async def junk_in_runs_dir() -> None:
+        _close(await _resume(run_root, T0 + timedelta(minutes=2)))
+
+    asyncio.run(junk_in_runs_dir())
+
+
+def test_a_run_this_catalog_has_no_job_for_is_left_alone(tmp_path: Path) -> None:
+    """The log and the catalog disagreeing is not supposed to happen -- ss7's
+    hash gate refuses a resume against a changed estate -- but the oracle
+    invents a runtime row for any job it is TOLD about, so a log can carry a
+    status for a name the catalog never had. Reconciliation cannot resolve
+    such a run (there is no command to have run), so it leaves it rather than
+    inventing a verdict about it."""
+    run_root = tmp_path / "run"
+    _close(_start(run_root))
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    next_seq = max((int(r["seq"]) for r in records if "seq" in r), default=0) + 1
+    records.append(
+        {
+            "rec": "input",
+            "seq": next_seq,
+            "at": T0.isoformat(),
+            "request_id": "ghost-1",
+            "fingerprint": "f",
+            "epoch": 1,
+            "kind": "STATUS",
+            "payload": {"job": "ghost", "status": "RUNNING"},
+            "source": "control",
+        }
+    )
+    records.append(
+        {
+            "rec": "dispatch",
+            "job": "ghost",
+            # the run_number the oracle actually holds for it: an injected
+            # STATUS never advances one (the ghost-run gate), so this is the
+            # only pair that reaches the catalog lookup rather than stopping
+            # at the run-number check above it
+            "run_number": 0,
+            "wrapper_pid": None,
+            "run_dir": None,
+            "started_at": T0.isoformat(),
+        }
+    )
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+
+    async def scenario():
+        resumed = await _resume(run_root, T0 + timedelta(minutes=1))
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=2))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    assert resumed.oracle.store.job["ghost"].status == "RUNNING"  # untouched, not failed
+    _close(resumed)
+
+
+_FW_JIL = "insert_job: watcher\njob_type: f\nwatch_file: /tmp/dsl41-never-appears\n"
+
+
+def test_an_incomplete_watch_with_no_adapter_to_re_arm_it_refuses_loudly(tmp_path: Path) -> None:
+    """An FW run is re-dispatched at resume because polling is an idempotent
+    read -- so an engine resumed without the adapter that would do it has an
+    incomplete watch it can neither finish nor honestly report. It refuses to
+    start rather than leaving one hanging silently."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            lower_source(_FW_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FakeAdapter(default=None)},
+        )
+        engine.inject(_event_for("watcher", "STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["watcher"].status == "RUNNING"
+        await engine.shutdown()
+        _close(engine)
+
+        with pytest.raises(EngineError, match="no FW adapter registered"):
+            await _resume_with(run_root, T0 + timedelta(minutes=2), _FW_JIL, {})
+
+    asyncio.run(scenario())
+
+
+def test_a_job_whose_type_this_engine_cannot_dispatch_is_left_alone(tmp_path: Path) -> None:
+    """Parity with the running engine, which would not have dispatched it
+    either: an engine with no adapter for a job's type has no dispatch row
+    for it live, so reconciliation must not invent a verdict about a run it
+    could never have started. Not a failure -- an absence."""
+    run_root = tmp_path / "run"
+
+    async def scenario():
+        engine = _start(run_root)
+        engine.inject(_event("STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        await engine.shutdown()
+        _close(engine)
+
+        resumed = await _resume_with(
+            run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=3))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    assert resumed.oracle.store.job["j"].status == "RUNNING"  # not FAILURE
+    _close(resumed)
+
+
+def _event_for(job: str, kind: str, minutes: float):
+    from dsl41.oracle_state import Event
+
+    return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload={"job": job})
+
+
+def test_a_kill_nobody_can_report_on_is_resolved_from_the_spool_as_indeterminate(
+    tmp_path: Path,
+) -> None:
+    """ss5's third state, reached the way production reaches it. A kill was
+    decided and its outcome never recorded; at resume there is no live
+    wrapper to ask and no `status.json` to read. Nothing observed whether the
+    signal landed, so `indeterminate` is the only honest answer -- reporting
+    it either way would invent a fact about a process nothing watched (E7).
+    Two states would have to call this one of the two things it is not."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter({("j", 1): (3600.0, 0)})},
+        )
+        engine.inject(_event("STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.live_jobs() == frozenset({"j"})
+        engine.inject(_event("KILLJOB", 2))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(scenario())
+
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    kept = [
+        r
+        for r in records
+        if not (r.get("rec") == "effect_result" and ":KILL:" in str(r.get("effect_id", "")))
+    ]
+    assert len(kept) == len(records) - 1  # the crash landed between deciding and recording
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in kept))
+
+    async def after():
+        resumed = await _resume(run_root, T0 + timedelta(minutes=5))
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=6))
+        return resumed
+
+    resumed = asyncio.run(after())
+    [kill] = [e for e in resumed.outbox.effects() if e.kind == "KILL"]
+    assert resumed.outbox.state_of(kill.effect_id) == "indeterminate"
+    # and what an exact retry of it is told, which is the reason the third
+    # state exists: not a failure, not a success, an answer nobody can give
+    assert resumed.outbox.result_for(kill.effect_id) == OUTCOME_UNAVAILABLE
+    assert resumed.outbox.pending() == []  # answered, not left hanging
+    _close(resumed)
+
+
+_BOX_JIL = """\
+insert_job: bx
+job_type: b
+
+insert_job: member
+job_type: c
+command: x
+box_name: bx
+"""
+
+
+def test_a_running_box_is_not_a_start_the_barrier_can_have_lost(tmp_path: Path) -> None:
+    """A box is RUNNING with no dispatch trace by design -- it has no command
+    and nothing ever spawned for it; its status folds from its members. The
+    sweep looks for decisions that left no trace, so a box matches its shape
+    exactly while being the one thing that is not a lost start. Failing it
+    would take the box down and, with it, every member still to run."""
+    run_root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            lower_source(_BOX_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        engine.inject(_event_for("bx", "STARTJOB", 0))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["bx"].status == "RUNNING"
+        await engine.shutdown()
+        _close(engine)
+
+        resumed = await _resume_with(
+            run_root, T0 + timedelta(minutes=2), _BOX_JIL, {"CMD": FakeAdapter(default=None)}
+        )
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=3))
+        return resumed
+
+    resumed = asyncio.run(scenario())
+    _close(resumed)
+    # the MEMBER's start was lost and is failed; the box is never addressed by
+    # the sweep at all. Its status follows from its members afterwards, which
+    # is the fold doing its job rather than a verdict about the box.
+    reconciled = {
+        r["payload"]["job"]
+        for r in read_journal(run_root / "journal.jsonl")
+        if r.get("rec") == "input" and r.get("source") == "reconcile"
+    }
+    assert reconciled == {"member"}

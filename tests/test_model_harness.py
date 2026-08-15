@@ -145,10 +145,14 @@ def test_cm14_a_run_lost_to_an_engine_crash_is_failed_not_rerun(tmp_path: Path) 
     is RUNNING. Each engine is individually correct; only a log that
     outlives the crash shows whether the process started twice.
 
-    The guard is reconciliation's own rule -- a start with no spool trace
-    is FAILURE, "never a silent re-run" -- and the resumed engine is a
-    plausible place to break it, because everything it knows says the job
-    ought to be running."""
+    The guard is reconciliation's rule for a start whose SPAWN the log
+    already resolved: no intent is left waiting, so there is nothing to
+    deliver and the run is FAILED rather than silently re-run. DL-102
+    narrowed that from "any start with no spool trace" -- a start still
+    PENDING in the outbox is re-driven instead, which is a different case
+    and has its own test (tests/test_ledger.py). The resumed engine is a
+    plausible place to break either, because everything it knows says the
+    job ought to be running."""
 
     async def scenario() -> None:
         run = ModelRun(MODEL_JIL, tmp_path / "run", script={("solo", 1): (600.0, 0)})

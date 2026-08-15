@@ -257,9 +257,19 @@ class ModelRun:
 
     Faults available today are the ones today's code can actually suffer:
     engine death mid-run, resume, duplicated and dropped completions.
-    Partition, reroute and leader failover arrive with S5/S6 -- they are
-    absent here rather than stubbed, because a stub that always passes is
-    the failure mode this harness exists to prevent.
+
+    Partition, reroute and leader failover are still absent, and the earlier
+    wording here ("they arrive with S5/S6") was a promise two landed stages
+    did not keep -- S5 and S6 built the routing table, the outbox, election
+    and the barrier, and each was tested by targeted scenarios rather than
+    through this harness. What is missing is bigger than a fault list: this
+    models ONE run root across SEQUENTIAL engine incarnations, where ss9
+    asks for N concurrent engines over seeded interleavings. That is S7's
+    subject, and the six test_cm14_* cases below are hand-built scenarios
+    standing in for it, not the matrix itself.
+
+    They are absent rather than stubbed, because a stub that always passes is
+    the failure mode this harness exists to prevent (DL-105).
     """
 
     def __init__(

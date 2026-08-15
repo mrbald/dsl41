@@ -15,3 +15,7 @@ dist/
 
 # nightbank sandbox run artifacts (journals, logs, data)
 examples/nightbank/runs/
+
+# branch-coverage data (DL-105); the report is the artifact, not this
+.coverage
+.coverage.*

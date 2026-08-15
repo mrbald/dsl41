@@ -681,3 +681,70 @@ def test_a_globals_revision_accumulates_across_inputs() -> None:
     assert o.store.revision("global:G") == 2
     o.feed(_ev("SET_GLOBAL", 2, name="G", value="c"))
     assert o.store.revision("global:G") == 3
+
+
+# ---------------------------------------- the owner's own no-op paths (DL-105)
+
+
+def test_set_flags_with_nothing_to_set_touches_nothing() -> None:
+    """`set_flags` takes three optional flags, so "none of them" is a
+    reachable call -- and it must not rebuild the row, or an input that
+    asked for nothing would move a revision somebody is holding an `expect`
+    on (ss3's cardinality rule reaches the empty case too)."""
+    store = RuntimeState()
+    store.begin_input()
+    store.transition("j", "INACTIVE", None)
+    store.commit_input()
+    before = store.revision("job:j")
+
+    store.begin_input()
+    store.set_flags("j", on_ice=None, on_hold=None, on_noexec=None)
+    assert store.commit_input() == []
+    assert store.revision("job:j") == before
+
+
+def test_a_timer_with_no_job_in_its_payload_arms_and_fires_without_touching_one() -> None:
+    """The heap is part of the projection through the job a timer names, and
+    `Event.payload` is a free dict -- so a timer that names no job has no
+    entity to touch. Both ends of its life have to survive that: arming and
+    popping (ss3, oracle_state.enqueue_timer / pop_timer_due)."""
+    store = RuntimeState()
+    due = T0 + timedelta(minutes=5)
+    store.begin_input()
+    token = store.enqueue_timer(due, Event(at=due, kind="TIMER", payload={}))
+    assert store.commit_input() == []  # no job named, so no entity moved
+    assert token == 1
+
+    store.begin_input()
+    popped = store.pop_timer_due(due)
+    assert popped is not None and popped[0] == due
+    assert store.commit_input() == []
+
+
+def test_quarantine_and_reinstate_are_each_idempotent() -> None:
+    """Repeated unreachability is ONE fact, and the producer is a retry loop
+    that gives up five times over (S5d) -- a second quarantine that moved a
+    revision would make a host's `expect` unholdable exactly while an
+    operator is trying to use it. Reinstating a host that was never
+    quarantined is the same no-op from the other side."""
+    store = RuntimeState()
+    store.begin_input()
+    store.register_host("h", deadman_s=None, at=None)
+    store.commit_input()
+
+    store.begin_input()
+    store.quarantine_host("h")
+    assert store.commit_input() == ["host:h"]
+    after_first = store.revision("host:h")
+
+    store.begin_input()
+    store.quarantine_host("h")  # still unreachable: one fact, not two
+    assert store.commit_input() == []
+    assert store.revision("host:h") == after_first
+
+    store.begin_input()
+    store.reinstate_host("h")
+    assert store.commit_input() == ["host:h"]
+    store.begin_input()
+    store.reinstate_host("h")  # already back: nothing to put back
+    assert store.commit_input() == []

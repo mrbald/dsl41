@@ -56,6 +56,7 @@ from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
     T_KILL_S,
     HostCommand,
+    apply_host_command,
     host_rejection_reason,
     routes_new_effects,
     seed_local_executor,
@@ -1051,3 +1052,44 @@ def test_the_engine_seeds_its_own_executor_without_spending_a_log_index() -> Non
     assert oracle.store.host(LOCAL_EXECUTOR_ID) is None
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=T0)
     assert oracle.store.revision(f"host:{LOCAL_EXECUTOR_ID}") == SEEDED
+
+
+# ------------------------------ the gate's last arm, and eviction applied (DL-105)
+
+
+def test_cm11_a_host_that_has_never_been_in_contact_cannot_be_evicted() -> None:
+    """ss8's bound is measured FROM a contact, so a host that has never made
+    one has no start for it. Registered-and-never-heard-from is a real state
+    -- a relay that registers and dies before its first lease exchange -- and
+    it is the one row where the arithmetic below has nothing to subtract."""
+    store = _table(h=HostRuntime(state="quarantined", deadman_s=30.0, last_contact=None))
+    reason = host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(hours=1))
+    assert reason is not None
+    assert "never been in contact" in reason
+    assert "the ss8 bound has no" in reason
+
+
+def test_cm11_a_permitted_eviction_moves_the_row_and_bumps_the_generation() -> None:
+    """The gated path, applied rather than merely permitted. Eviction is the
+    only state that lets another host run work bound to this one, so what it
+    writes is the fence a returning relay meets: the new state, and the
+    generation it must present. No principal is recorded -- on the gated path
+    the preconditions ARE the justification, and naming who asked would
+    suggest the eviction rested on that."""
+    store = _table(
+        h=HostRuntime(state="quarantined", deadman_s=1.0, last_contact=T0 - timedelta(hours=1))
+    )
+    before = store.host("h")
+    assert before is not None and before.generation == 0
+    assert host_rejection_reason(store, _cmd("evict", "h"), T0) is None
+
+    store.begin_input()
+    apply_host_command(store, _cmd("evict", "h"), actor="alice@host")
+    assert store.commit_input() == ["host:h"]
+
+    row = store.host("h")
+    assert row is not None
+    assert row.state == "evicted"
+    assert row.generation == before.generation + 1  # the fence a return must clear
+    assert row.forced_by is None  # gated, not forced: the bound is the reason
+    assert not routes_new_effects(row)

@@ -814,8 +814,15 @@ pushed. Then run the same gates as CI:
 ```sh
 uv run ruff check src tests
 uv run mypy src
-uv run pytest -q
+uv run python scripts/arch_check.py
+uv run coverage run -m pytest -q
+uv run coverage report
 ```
+
+The last two are one gate: the suite runs under branch coverage and the
+concurrency tier is held at **100%** of it. `[tool.coverage.report]` in
+`pyproject.toml` names the seven modules and argues the scope — a missed
+branch there is a rule the code states that no test holds it to (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
 This command writes the same version into `uv.lock`. Commit both files and push

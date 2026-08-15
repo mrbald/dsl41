@@ -633,20 +633,20 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 
 | # | obligation | cost |
 | --- | --- | --- |
-| CM-01 | structural owner gate | landed (DL-82/83) |
+| CM-01 | structural owner gate | landed (DL-82/83). Enforced by `scripts/arch_check.py`, not by a `test_cm01_*` -- a gate over the model's AST is the only form this obligation has |
 | CM-02 | cardinality: one increment per entity per committed input | landed (DL-87) |
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
 | CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
-| CM-08 | bisimulation unchanged | cheap |
+| CM-08 | bisimulation unchanged | landed: the phase-11a gate, which every SEM trace already runs through both interpreters. No `test_cm08_*` of its own -- the obligation is that the existing suite stays green |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); remote delivery waits on the relay |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
 | CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | landed (DL-94/95/97): every precondition now produced rather than built by hand |
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
-| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | expensive — **the point** |
+| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | S7. Six `test_cm14_*` scenarios exist in the model harness and are NOT this obligation: they are hand-built cases over one run root and sequential incarnations. The matrix — N concurrent engines, injected partitions, seeded replay — is what remains, and the harness needs both before it can carry it (DL-105) |
 
 Pause, drift and thundering-herd tests are **not mandatory** until their
 clock model, client count, attempt limits and pass criteria are

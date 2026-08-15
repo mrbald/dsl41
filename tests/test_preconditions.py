@@ -65,8 +65,10 @@ from dsl41.runner_admission import (
     addressed_key,
     fingerprint,
     parse_envelope,
+    stale_reason,
 )
 from dsl41.runner_clock import RealClock, VirtualClock
+from dsl41.runner_hosts import HostCommand
 from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
 from dsl41.runner_journal import read_journal, replay_inputs
 
@@ -1311,3 +1313,57 @@ def test_an_attempt_carries_its_envelope_into_the_log_and_back() -> None:
     assert attempt.expect == {"job:j": 12}
     with pytest.raises(ValueError, match="extra_forbidden|Extra inputs"):
         Attempt(index=1, at=T0, request_id="r", fingerprint="f", nonsense=1)  # type: ignore[call-arg]
+
+
+# ------------------------------- the gates' own refusals and no-ops (DL-105)
+
+
+def test_a_verb_that_addresses_nothing_is_refused_at_the_door() -> None:
+    """ss6's `expect` names the ONE entity a verb addresses, so a verb that
+    names no entity has no precondition it could carry. Refused where the
+    envelope is parsed, not applied and then puzzled over -- and the message
+    names the shape, because a caller who cannot see what was wrong retries
+    the same thing."""
+    with pytest.raises(EnvelopeError, match="SET_GLOBAL addresses a global by name"):
+        addressed_key("SET_GLOBAL", {"value": "go"})
+    with pytest.raises(EnvelopeError, match="SET_GLOBAL addresses a global by name"):
+        addressed_key("SET_GLOBAL", {"name": ""})
+    with pytest.raises(EnvelopeError, match="KILLJOB addresses a job by name"):
+        addressed_key("KILLJOB", {"run_number": 3})
+    with pytest.raises(EnvelopeError, match="KILLJOB addresses a job by name"):
+        addressed_key("KILLJOB", {"job": 7})
+
+
+def test_a_claimed_actor_that_is_not_a_string_is_refused() -> None:
+    """It is a client HINT and it still has a type: the leader stamps it into
+    the admitted record and the fingerprint hashes it, so a caller that sends
+    a dict here would make its own retries un-dedupable."""
+    request = _request(claimed_actor="alice@host")
+    request["claimed_actor"] = {"name": "alice"}
+    with pytest.raises(EnvelopeError, match="claimed_actor must be a string"):
+        parse_envelope(request, addressed="job:j", baseline_id="the-log")
+
+
+def test_an_attempt_carries_a_verb_or_a_host_command_never_both() -> None:
+    """The two shapes of an admitted input are exclusive by construction
+    (S5a): a host command carries no oracle event, and an attempt that
+    claimed both would be fed AND applied to the routing table."""
+    with pytest.raises(ValueError, match="never both"):
+        Attempt(
+            index=1,
+            at=T0,
+            request_id="r",
+            fingerprint="f",
+            kind="ON_HOLD",
+            payload={"job": "j"},
+            host=HostCommand(verb="drain", host_id="local"),
+        )
+
+
+def test_the_stale_gate_passes_a_completion_that_names_no_job() -> None:
+    """The gate reads a completion's job to find the run it reports on. An
+    event with none addresses nothing it could be stale about, so it passes
+    -- refusing would turn a malformed report into a decision, and the gate
+    is a precondition, not a validator."""
+    oracle = Oracle(lower_source(_SOLO_JIL))
+    assert stale_reason(oracle, Event(at=T0, kind="STATUS", payload={"status": "SUCCESS"})) is None

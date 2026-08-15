@@ -40,7 +40,13 @@ jobs:
       # the arch-review/<date> tags it measures from are usually absent and
       # the diff half stays quiet in CI.
       - run: uv run python scripts/arch_check.py
-      - run: uv run pytest -q
+      # DL-105: the suite runs under branch coverage, and the concurrency tier
+      # is held at 100% of it ([tool.coverage.report] in pyproject names the
+      # modules and argues the scope). `coverage run` replaces the bare pytest
+      # rather than joining it -- running the suite twice to measure it once is
+      # a minute of CI for nothing. The report step is what fails the build.
+      - run: uv run coverage run -m pytest -q
+      - run: uv run coverage report
 
   # DL-77: the viz --format explore page's controls exist only in a browser, and
   # byte assertions could not see a WebKit-fatal defect in them. Its own job, on

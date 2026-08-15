@@ -4467,3 +4467,73 @@
   lock cannot); `candidates` carrying `Path | None` from three witnesses (one
   question, three ways to know the answer); and every ss/DL citation comment.
   2057 passed; ruff, mypy clean; the `_reconcile` size note cleared.
+- DL-105 branch coverage over the concurrency tier, and what asking for it
+  found (2026-08-15; an audit before S7, at the user's request: "confirm we
+  have tests for all concurrent functionality we manufacture"). The answer
+  was "mostly, and here is the list" -- which is not an answer anyone should
+  accept from a reading, so the reading was replaced with a gate.
+  **The gate.** `coverage` joins the dev extra; CI's bare `pytest -q` becomes
+  `coverage run -m pytest -q` plus `coverage report` (running the suite twice
+  to measure it once is a minute of CI for nothing). BRANCH coverage, not
+  line: this tier is mostly decisions, and a guard whose false arm nothing
+  takes is exactly the untested wiring the audit was looking for -- line
+  coverage calls such a guard covered. Scope is seven modules, named in
+  `[tool.coverage.report]` with the argument beside them: the state owner,
+  admission, the ledger, the outbox, the routing table, the journal and the
+  engine loop. `runner_supervisor.py` and `runner_wrapper.py` are excluded
+  because they run as separate PROCESSES -- in-process coverage reads the
+  supervisor at 18% however well its 31 subprocess tests drive it, and a
+  number that cannot be true is worse than no number.
+  **What it found that the reading did not.** `superseded_reason` was proven
+  as a function while the wiring that ACTS on it had never once run: no test
+  reached the arm of `_apply_effect` that retires a superseded effect. That
+  is ss5's own headline and CM-09's "superseded effects retired", and it was
+  green because the decision and the delivery were tested at different
+  levels. It has a test now, through the case that makes it reachable on one
+  host -- a drain parks a SPAWN, the operator kills the job while it waits,
+  and the effect is still there when routing returns.
+  **Also closed:** the resume path that resolves an undelivered kill from the
+  spool (the function was tested, its only production call site was not); an
+  applied eviction (every CM-11 test drove the REJECTION or built an evicted
+  row by hand, so `apply_host_command`'s evict arm -- the state change and
+  the generation bump a returning relay must clear -- had never run); the
+  eviction gate's never-been-in-contact arm; quarantine and reinstate
+  idempotence; the envelope's three refusals; the WAL's preflight record,
+  double-unsubscribe and empty-interior-line corruption; and six arms of the
+  ss7 reconciliation ladder. Plus the two S6a error paths this session's own
+  code shipped without: a lock file that vanishes or is replaced DURING the
+  acquire, and a refusal whose holder note is unreadable.
+  **Four guards are unreachable by construction and now say so.** Each keeps
+  a `# pragma: no cover` and a comment naming the invariant that makes it
+  unreachable and what would have to break for it to fire -- which is worth
+  more than the test would have been, because the invariants live in other
+  modules: the oracle refusing to start a live job (DL-81) is what stops
+  `_apply_spawn` meeting a stale task; `plan_effects` refusing to plan a KILL
+  for a job with no live run is what stops `_apply_kill` meeting one; ss7's
+  hash gate is what stops the catalog and the log disagreeing; and an FW
+  watch spawning no process is what keeps it out of a candidate set built
+  from dispatch records and run directories. A pragma that says only "no
+  cover" would have hidden exactly these dependencies.
+  **Two accessors were dead and are deleted.** `DecisionIndex.__len__` and
+  `Outbox.__len__` had no callers. Coverage is a decent dead-code detector
+  when the target is 100%: the honest way to cover an unused method is to
+  remove it.
+  **What the audit found that no gate can.** The model harness (stage H)
+  promised in its own docstring that "partition, reroute and leader failover
+  arrive with S5/S6". Both stages have landed and it has none of them: it
+  models ONE run root across SEQUENTIAL incarnations, and the six
+  `test_cm14_*` cases in it are hand-built scenarios, not ss9's matrix over N
+  concurrent engines and seeded interleavings. The docstring now says that
+  instead of promising it, and CM-14's row says it too -- S7 starts by paying
+  a debt two stages deep, and finding that out at the start of S7 is worth
+  more than finding it out in the middle.
+  Two smaller ones: `test_cm14_a_run_lost_to_an_engine_crash_is_failed_not_rerun`
+  still cited the pre-DL-102 rule as its guard (the test was right, its stated
+  reason was a rule that had since narrowed), and DL-102's re-drive test did
+  not carry the `cm09` name the obligation table credits it under. CM-01 and
+  CM-08 have no `test_cmNN_*` and correctly cannot: one is the arch_check
+  gate over the model's AST, the other is "the bisimulation suite stays
+  green". The table now says where each is enforced rather than leaving a
+  reader to grep for tests that were never going to exist.
+  2057 -> 2081 passed; 100% branch on all seven modules; ruff, mypy,
+  arch_check blocking checks clean.

@@ -425,9 +425,6 @@ class DecisionIndex:
         self._by_index: dict[int, ApplyResult] = {}
         self._fingerprints: dict[str, str] = {}
 
-    def __len__(self) -> int:
-        return len(self._results)
-
     def note(self, attempt: Attempt) -> None:
         self._fingerprints[attempt.request_id] = attempt.fingerprint
 
