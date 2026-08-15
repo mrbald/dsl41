@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 from model_harness import (
+    FAULT_MENU,
+    FaultSchedule,
     ModelRun,
     Spawn,
     SpawnLog,
@@ -368,3 +370,96 @@ def test_cm14_a_kill_stops_the_process_at_the_kill_instant(tmp_path: Path) -> No
         await run.close()
 
     asyncio.run(scenario())
+
+
+# ------------------------------------ CM-14 over seeded interleavings (S7a)
+
+#: Enough seeds that every fault in the menu fires and the combinations
+#: overlap; small enough that the sweep stays a second of the suite. The
+#: test below asserts the first half rather than trusting it.
+SEEDS = range(48)
+_STEPS = 6
+
+
+async def _interleaving(run_root: Path, schedule: FaultSchedule) -> ModelRun:
+    """One scenario, driven through `_STEPS` boundaries with the schedule's
+    faults fired at each. The estate is small and cascading on purpose: a
+    box whose second member waits on the first is where a double run would
+    show up as a second cascade rather than as a second spawn."""
+    run = ModelRun(MODEL_JIL, run_root, script={("solo", 1): (30.0, 0), ("alpha", 1): (20.0, 0)})
+    run.start()
+    at = run.clock.now()
+    run.inject(Event(at=at, kind="STARTJOB", payload={"job": "solo"}))
+    run.inject(Event(at=at, kind="STARTJOB", payload={"job": "bx"}))
+    for step in range(_STEPS):
+        await run.run_to(at + timedelta(seconds=10 * step))
+        await schedule.at(run, step)
+    await run.settle(at + timedelta(hours=1))
+    return run
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_cm14_no_run_executes_twice_over_seeded_interleavings(tmp_path: Path, seed: int) -> None:
+    """CM-14's single-host half (DL-107): no `(job, run_number)` runs twice
+    under engine death, message loss, duplication, quarantine, drain or a
+    leader that died between acting and recording -- over interleavings the
+    seed chooses rather than ones an author thought of.
+
+    ss0's sentence also says "host reroute", and that half waits on a host
+    to reroute TO. What is checked here is everything one host can suffer.
+
+    The failure message carries the schedule, so a violation is reproducible
+    by number: the seed IS the repro."""
+
+    schedule = FaultSchedule.build(seed, steps=_STEPS)
+
+    async def scenario() -> ModelRun:
+        return await _interleaving(tmp_path / "run", schedule)
+
+    run = asyncio.run(scenario())
+    try:
+        run.check()
+    except AssertionError as violation:  # pragma: no cover -- only on a real bug
+        raise AssertionError(f"{violation}\n  schedule: {schedule.describe()}") from violation
+    assert run.log.execs(), "a sweep whose runs never dispatched would pass without testing"
+
+
+def test_the_sweep_plans_every_fault_in_the_menu() -> None:
+    """Half the teeth of the sweep above: the seeds must reach the whole
+    menu, or a fault could be deleted from the code and nothing would
+    notice. A pure function of the seed, so no run is needed to check it."""
+    planned = [
+        fault for seed in SEEDS for fault in FaultSchedule.build(seed, steps=_STEPS).plan.values()
+    ]
+    assert set(planned) == set(FAULT_MENU), sorted(set(FAULT_MENU) - set(planned))
+    assert len(planned) > len(SEEDS), "faults are meant to be common, not rare"
+
+
+def test_every_fault_in_the_menu_actually_happens(tmp_path: Path) -> None:
+    """The other half, and the one that catches rot. Planning a fault is not
+    firing it: every fault here returns False when its precondition is
+    absent, so a driver whose faults had all quietly become no-ops -- a
+    changed status vocabulary, a renamed verb, a `_a_live_run` that stopped
+    finding one -- would still schedule the full menu and still report
+    forty-eight green runs of an ordinary happy path.
+
+    That is the specific way a safety harness rots, and it is the reason
+    this costs a second of the suite instead of being asserted on the plan."""
+    fired: set[str] = set()
+
+    async def sweep() -> None:
+        for seed in range(24):
+            schedule = FaultSchedule.build(seed, steps=_STEPS)
+            await _interleaving(tmp_path / f"run{seed}", schedule)
+            fired.update(entry.split(":", 1)[1] for entry in schedule.fired)
+
+    asyncio.run(sweep())
+    assert fired == set(FAULT_MENU), sorted(set(FAULT_MENU) - fired)
+
+
+def test_a_schedule_is_reproducible_from_its_seed_alone() -> None:
+    """ss9 asks for "every interleaving reproducible from a seed", and the
+    schedule is built up front for exactly that reason: it cannot drift with
+    how many random draws the engine happens to make on the way."""
+    assert FaultSchedule.build(7, steps=_STEPS).plan == FaultSchedule.build(7, steps=_STEPS).plan
+    assert FaultSchedule.build(7, steps=_STEPS).plan != FaultSchedule.build(8, steps=_STEPS).plan

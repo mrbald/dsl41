@@ -646,7 +646,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | landed (DL-94/95/97): every precondition now produced rather than built by hand |
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
-| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | S7. Six `test_cm14_*` scenarios exist in the model harness and are NOT this obligation: they are hand-built cases over one run root and sequential incarnations. The matrix — N concurrent engines, injected partitions, seeded replay — is what remains, and the harness needs both before it can carry it (DL-105) |
+| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a, DL-108): 48 seeded interleavings over failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
 
 Pause, drift and thundering-herd tests are **not mandatory** until their
 clock model, client count, attempt limits and pass criteria are

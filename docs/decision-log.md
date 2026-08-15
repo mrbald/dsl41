@@ -4626,3 +4626,51 @@
   drew for the relay and DL-103 confirmed S6 did not move. The obligation
   table will say which half is which, because a CM-14 marked done that only
   covered one host would be the most expensive kind of wrong.
+- DL-108 the seeded sweep, and the model that was wrong about the engine
+  (2026-08-15; stage S7a, DL-107's first slice). Closes CM-14's single-host
+  half. The harness gains `FaultSchedule` -- what goes wrong and when,
+  decided from a seed -- and six more faults, all of them things one host can
+  actually suffer: leader failover at an arbitrary point, a spawn decided and
+  never acted on, duplicated and stale completions, quarantine, and a drain
+  under in-flight work.
+  **It found a bug on its first afternoon, and the bug was in the model.**
+  Twelve of forty-eight seeds reported `alpha run 1 ran twice`, across a
+  failover that lost the effect's outcome record. The engine was right: it
+  re-drove a SPAWN that was still pending with no trace anywhere, which is
+  exactly what DL-102 says to do. The harness's adapter was wrong -- it ran
+  work without leaving the run DIRECTORY every real adapter creates, so a
+  spawn that had happened looked to the barrier like one that never did.
+  **What that dependency actually is, now that it is written down.**
+  `runner_adapters` creates `runs/<job>.<run_number>` with
+  `mkdir(parents=True)` and no `exist_ok`, before anything runs, commented "a
+  collision is a bug: run_numbers never repeat". TWO rules rest on it and
+  neither is visible from the engine: DL-96 deviated from ss5's "bind run_id
+  before the attempt" BECAUSE that mkdir makes a second spawn of one run fail
+  loudly rather than double; and DL-102's re-drive is sound only because
+  anything that ran left the directory behind, so "no trace anywhere" really
+  does mean "nothing ran". A model that omitted it was a model of a different
+  system -- and the omission was invisible until a seed put a failover in the
+  one window where it mattered. The harness now creates the directory the
+  same way, with the two rules named in the comment.
+  **Adding the trace then hid the branch it exposed,** which is the sort of
+  thing a sweep quietly does: with every exec leaving a trace, no seed could
+  ever produce a pending SPAWN with nothing on disk, so DL-102's re-drive --
+  the newest rule in the barrier -- would never have fired. `lost_dispatch`
+  is the fault that restores it: the next exec parks before leaving any
+  trace, then the engine dies and its outcome record is cut, which from disk
+  and from the spawn log is indistinguishable from dying a moment earlier.
+  **Two tests keep the sweep honest, and they are not the same test.** One
+  asserts the seeds PLAN every fault in the menu -- a pure function of the
+  seed, no runs needed. The other asserts every fault actually FIRES, which
+  costs a second of suite time and is the one that catches rot: every fault
+  returns False when its precondition is absent, so a driver whose faults had
+  all quietly become no-ops would still schedule the full menu and still
+  report forty-eight green runs of an ordinary happy path. Mutation-tested --
+  making one fault silently no-op reds it.
+  **What CM-14 closes, and what it does not.** Landed: no `(job,
+  run_number)` runs twice under everything one host can suffer, over
+  interleavings a seed chooses. Not landed: ss0's "host reroute", which needs
+  a host to reroute TO. The obligation table says which half is which,
+  because a CM-14 marked done that covered one host would be the most
+  expensive kind of wrong.
+  2081 -> 2132 passed; 100% branch held; ruff, mypy, arch_check clean.

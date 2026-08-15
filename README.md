@@ -727,12 +727,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   (duplicate bodies, private cross-module imports, unresolvable citations, an
   IR-F schema change without an IR_VERSION bump) and the advisory size ratchet,
   tripped and not-tripped over tiny synthesised trees
-- tests/test_model_harness.py — phase-12 stage H: the concurrency-model
+- tests/test_model_harness.py — phase-12 stages H and S7a: the concurrency-model
   obligations (CM-01..CM-14,
   [docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
   §9) that single-host code can be held to today, over tests/model_harness.py —
   a spawn log that outlives an engine crash, so a resume-driven double run is
-  visible at all. The `test_harness_*` half pins that the checkers can fail
+  visible at all. The `test_harness_*` half pins that the checkers can fail.
+  S7a added the seeded sweep: `FaultSchedule` picks what goes wrong and when
+  from a seed, and CM-14 is checked over 48 interleavings of failover, a spawn
+  decided and never acted on, duplicated and stale completions, quarantine and
+  drain. Two tests keep it honest — every fault must be planned, and every
+  fault must actually FIRE, because a driver whose faults had quietly become
+  no-ops would still report 48 green runs of a happy path
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
