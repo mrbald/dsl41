@@ -213,7 +213,12 @@ from dsl41.runner_journal import (
     read_journal,
     replay_inputs,
 )
-from dsl41.runner_ledger import LeaderLock, check_leader_eligibility, next_epoch
+from dsl41.runner_ledger import (
+    LeaderLock,
+    acquire_run_root,
+    check_leader_eligibility,
+    next_epoch,
+)
 from dsl41.runner_scheduler import Scheduler
 
 
@@ -991,21 +996,18 @@ def start_run(
     Leadership (S6a) is acquired BEFORE that refusal, not after: the
     refusal reads the estate's state, and one leader per run root is the
     rule under which any such read is meaningful. Genesis is epoch 1. A
-    `lock` already held by the caller is used as-is and stays theirs to
-    release -- `dsl41 run` takes it earlier still, before it starts a
-    supervisor."""
+    caller that already holds the run root passes its `lock` -- `dsl41 run`
+    takes leadership earlier still, before it starts a supervisor. Either
+    way a failure here releases it, because a caller that got this far and
+    was refused is on its way out."""
     run_root.mkdir(parents=True, exist_ok=True)
     # the run root holds the journal (global values, every control input),
     # job output, and data -- owner-only, loudly, not umask-hopefully
     os.chmod(run_root, 0o700)
-    owned = lock is None
-    if lock is None:
-        lock = LeaderLock(run_root)
-        lock.acquire()
+    lock = lock or acquire_run_root(run_root)
     journal_path = run_root / "journal.jsonl"
     if journal_path.exists():
-        if owned:
-            lock.release()
+        lock.release()
         raise EngineError(
             f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
         )
@@ -1068,10 +1070,7 @@ async def resume_run(
     # effect is not a mutex. It also has to precede the READ, or another
     # engine could append between the read and the acquire and this one would
     # allocate an epoch the log already used.
-    owned = lock is None
-    if lock is None:
-        lock = LeaderLock(run_root)
-        lock.acquire()
+    lock = lock or acquire_run_root(run_root)
     try:
         engine = await _resume_under_lock(
             catalog,
@@ -1087,8 +1086,7 @@ async def resume_run(
             deadman_s=deadman_s,
         )
     except BaseException:
-        if owned:
-            lock.release()  # a refused resume holds nothing: the next engine may lead
+        lock.release()  # a refused resume holds nothing: the next engine may lead
         raise
     return engine
 
@@ -1248,16 +1246,6 @@ async def _reconcile(
     for key in supervised_live:
         candidates.setdefault(key, None)
 
-    def _inject(job: str, run_number: int, extras: dict[str, object], at: datetime) -> None:
-        engine._enqueue(
-            Event(
-                at=max(at, last_at),  # feed times are non-decreasing (ss7)
-                kind="STATUS",
-                payload={"job": job, "run_number": run_number, **extras},
-            ),
-            source="reconcile",  # a COMPLETION: the ss4 gate applies, replay may know better
-        )
-
     _reconcile_applied_spawns(engine, candidates)
 
     for (job, run_number), run_dir in sorted(candidates.items()):
@@ -1303,12 +1291,56 @@ async def _reconcile(
             extras = {"status": "FAILURE", "cause": result.cause}
         if ended_at is not None:
             extras["ended_at"] = ended_at.isoformat()  # true end time (ss7)
-        _inject(job, run_number, extras, ended_at or last_at)
+        _inject_completion(engine, job, run_number, extras, at=ended_at or last_at, last_at=last_at)
 
-    # Starts with no trace anywhere -- no run directory, no dispatch record,
-    # and nothing the host admits to running. ss7's barrier says "retire
-    # superseded, re-drive pending", and S6c is where that stops being two
-    # words and becomes the two cases below (DL-96 deferred it here).
+    _resume_untraced_starts(engine, candidates, last_at)
+    await _redrive_recorded_kills(engine, supervised_live)
+    # ss7's barrier ends where it says it does: ACQUIRE -> reconcile -> retire
+    # superseded, re-drive pending -> DISPATCH. Without this the outbox is
+    # drained only after the next admitted input (the loop dispatches on the
+    # way out of `_admit_and_apply`), so a re-driven start would wait on
+    # unrelated traffic to arrive -- hours, on a quiet estate, and never on
+    # one whose only remaining work is the run that was lost. Everything
+    # still pending here is a SPAWN nothing applied: the kills above are
+    # resolved, and a SPAWN whose run reached the host was reconciled from
+    # its trace. Superseded ones retire on the way through, and a drained or
+    # quarantined host holds its own, in the one gate that owns that call.
+    engine._dispatch()
+
+
+def _inject_completion(
+    engine: Engine,
+    job: str,
+    run_number: int,
+    extras: dict[str, object],
+    *,
+    at: datetime,
+    last_at: datetime,
+) -> None:
+    """One reconciliation verdict, as an input. `source="reconcile"` is what
+    makes it a COMPLETION and therefore subject to the ss4 stale gate -- a
+    verdict this engine reached about a run the log may already know the end
+    of."""
+    engine._enqueue(
+        Event(
+            at=max(at, last_at),  # feed times are non-decreasing (ss7)
+            kind="STATUS",
+            payload={"job": job, "run_number": run_number, **extras},
+        ),
+        source="reconcile",
+    )
+
+
+def _resume_untraced_starts(
+    engine: Engine, candidates: dict[tuple[str, int], Path | None], last_at: datetime
+) -> None:
+    """Starts with no trace anywhere -- no run directory, no dispatch record,
+    and nothing the host admits to running (S6c).
+
+    ss7's barrier says "retire superseded, re-drive pending", and this is
+    where those four words become two cases. It is a separate question from
+    the ladder above, which asks how runs that DID leave a trace ended; this
+    one asks what to do about a decision that left none."""
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in ("STARTING", "RUNNING") or (job, rt.run_number) in candidates:
             continue
@@ -1340,24 +1372,14 @@ async def _reconcile(
         # an effect already resolved whose spool has since gone. That is the
         # case runner-design ss7 was reasoning about when it chose to fail a
         # start rather than silently re-run it, and it still does.
-        _inject(
+        _inject_completion(
+            engine,
             job,
             rt.run_number,
             {"status": "FAILURE", "cause": "dispatch lost to engine crash (never spawned)"},
-            last_at,
+            at=last_at,
+            last_at=last_at,
         )
-    await _redrive_recorded_kills(engine, supervised_live)
-    # ss7's barrier ends where it says it does: ACQUIRE -> reconcile -> retire
-    # superseded, re-drive pending -> DISPATCH. Without this the outbox is
-    # drained only after the next admitted input (the loop dispatches on the
-    # way out of `_admit_and_apply`), so a re-driven start would wait on
-    # unrelated traffic to arrive -- hours, on a quiet estate, and never on
-    # one whose only remaining work is the run that was lost. Everything
-    # still pending here is a SPAWN nothing applied: the kills above are
-    # resolved, and a SPAWN whose run reached the host was reconciled from
-    # its trace. Superseded ones retire on the way through, and a drained or
-    # quarantined host holds its own, in the one gate that owns that call.
-    engine._dispatch()
 
 
 def _reconcile_applied_spawns(

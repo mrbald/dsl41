@@ -4422,3 +4422,48 @@
   the way out of the next admitted input, so held or re-driven work waited on
   unrelated traffic (DL-102). None of the three was visible before the stage
   that named them.
+- DL-104 architecture review after S6 (2026-08-15; the DL-75 gate asked, at
+  ~2400 lines changed since arch-review/2026-08-15). Subject: what S6 ADDED
+  that did not need adding. Three findings acted on, two declined with
+  reasons so the next review does not re-find them.
+  **Acted (1): an ownership rule with no caller that exercises it.**
+  `start_run` and `resume_run` each carried `owned = lock is None` and
+  released only what they had acquired themselves -- three states for a
+  reader to hold, in two places, guarding a case that does not occur. The
+  only caller that passes a lock is `_serve_run`, and every path where the
+  release matters ends in an EngineError that the CLI prints before exiting;
+  the lock object is never touched again. One rule now: a failed start or
+  resume releases the lock, because a caller that got that far and was
+  refused is on its way out.
+  **Acted (2): three spellings of "take leadership of this run root".**
+  `acquire_run_root` existed for the CLI (which must mkdir first), and both
+  engine entry points built and acquired a `LeaderLock` inline. One name for
+  one act now, `lock = lock or acquire_run_root(run_root)`, which also puts
+  the mkdir where the acquire is rather than trusting each caller to have
+  done it.
+  **Acted (3): `_reconcile` had absorbed a second question.** The ladder asks
+  how runs that DID leave a trace ended; the sweep at its foot asks what to
+  do about a start that left none. S6c grew the second one, and 160 lines
+  with a closure shared between them is where a reader stops being able to
+  tell which question a line answers. Now `_resume_untraced_starts`, with the
+  injector promoted from a closure to `_inject_completion` -- named, because
+  "this is a completion and therefore subject to the ss4 stale gate" is the
+  fact that makes it correct.
+  **Declined (1): cli.py at 1842 lines, `_serve_run` at 182.** Real, unchanged
+  in kind since DL-98 declined it, and S6 added eight lines of it. Splitting
+  the CLI is its own commit with its own seam argument.
+  **Declined (2): `Journal` holds the lock and releases it on close.** It
+  reads like a module knowing something it should not. It is the definition:
+  ss1's ledger is the log plus the mutex that says who may append to it, so
+  closing one closes both. An engine that dropped the file and kept the lock
+  would exclude its own successor, and splitting the two would need a rule
+  to keep them in step -- which is the coupling, spelled out longhand.
+  Load-bearing, leave alone: `STATE_MACHINE_VERSION` beside `_ASSUMED_VERSION`
+  (not a duplicate -- they diverge the moment the first is bumped, and the
+  second is what a pre-S6a header MEANS); the fence in `_write` rather than a
+  second guard at dispatch (ss5 records intent before the attempt, so there
+  is no window for two guards to disagree about); `LeaderLock.check` reading
+  inode identity rather than the holder note (a note can be stale, a held
+  lock cannot); `candidates` carrying `Path | None` from three witnesses (one
+  question, three ways to know the answer); and every ss/DL citation comment.
+  2057 passed; ruff, mypy clean; the `_reconcile` size note cleared.
