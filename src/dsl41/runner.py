@@ -175,6 +175,7 @@ from dsl41.runner_adapters import (
     Terminated,
     _fsync_dir,
     load_json,
+    outcome_from_status,
     _resolve_spool,
 )
 from dsl41.runner_admission import (
@@ -1174,26 +1175,7 @@ async def _reconcile(
             source="reconcile",  # a COMPLETION: the ss4 gate applies, replay may know better
         )
 
-    # ss5, and the classic outbox window: `_apply_spawn` launches and THEN
-    # records the outcome, so an engine that died between the two left a
-    # pending effect for a run that may well have started. The spool is the
-    # record (DL-93) -- a run directory means it reached the host -- so the
-    # effect is reconciled from it rather than re-driven. Without this the
-    # next dispatch would drain a pending SPAWN into a second `mkdir()` of a
-    # run directory that already exists.
-    for effect in [e for e in engine.outbox.pending() if e.kind == "SPAWN"]:
-        spool = candidates.get((effect.job, effect.run_number))
-        if (effect.job, effect.run_number) not in candidates:
-            continue
-        spawned = load_json(spool / "spawn.json") if spool is not None else None
-        engine._resolve_effect(
-            EffectOutcome(
-                effect_id=effect.effect_id,
-                state="applied",
-                run_id=(spawned or {}).get("run_id"),
-                detail="reconciled from the spool: the run reached the host",
-            )
-        )
+    _reconcile_applied_spawns(engine, candidates)
 
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
@@ -1266,18 +1248,7 @@ async def _reconcile(
             # pending SPAWN effect stays pending and IS the held record, so
             # nothing here has to reconstruct one (S5c).
             continue
-        # decided and never applied. ss7 fails such a start rather than
-        # re-running it, so the effect is RETIRED first -- an outbox entry
-        # left pending would be drained by the next dispatch and would do the
-        # very thing this branch exists to refuse.
-        for effect in engine.outbox.pending_for(job, "SPAWN"):
-            engine._resolve_effect(
-                EffectOutcome(
-                    effect_id=effect.effect_id,
-                    state="retired",
-                    detail="dispatch lost to engine crash: ss7 fails a start with no spool trace",
-                )
-            )
+        _retire_lost_spawns(engine, job)
         _inject(
             job,
             rt.run_number,
@@ -1285,6 +1256,49 @@ async def _reconcile(
             last_at,
         )
     await _redrive_recorded_kills(engine, supervised_live)
+
+
+def _reconcile_applied_spawns(
+    engine: Engine, candidates: dict[tuple[str, int], Path | None]
+) -> None:
+    """Resolve the pending SPAWNs whose runs DID reach the host (ss5).
+
+    The classic outbox window: `_apply_spawn` launches and THEN records the
+    outcome, so an engine that died between the two left a pending effect
+    for a run that may well have started. The spool is the record (DL-93) --
+    a run directory means it reached the host -- so the effect is reconciled
+    from it rather than re-driven. Without this the next dispatch would drain
+    a pending SPAWN into a second `mkdir()` of a directory that exists."""
+    for effect in [e for e in engine.outbox.pending() if e.kind == "SPAWN"]:
+        spool = candidates.get((effect.job, effect.run_number))
+        if (effect.job, effect.run_number) not in candidates:
+            continue
+        spawned = load_json(spool / "spawn.json") if spool is not None else None
+        engine._resolve_effect(
+            EffectOutcome(
+                effect_id=effect.effect_id,
+                state="applied",
+                run_id=(spawned or {}).get("run_id"),
+                detail="reconciled from the spool: the run reached the host",
+            )
+        )
+
+
+def _retire_lost_spawns(engine: Engine, job: str) -> None:
+    """Retire a start that was decided and never applied.
+
+    runner-design ss7 fails such a start rather than re-running it, so the
+    effect must be retired as well -- an outbox entry left pending would be
+    drained by the next dispatch and would do the very thing that rule
+    exists to refuse."""
+    for effect in engine.outbox.pending_for(job, "SPAWN"):
+        engine._resolve_effect(
+            EffectOutcome(
+                effect_id=effect.effect_id,
+                state="retired",
+                detail="dispatch lost to engine crash: ss7 fails a start with no spool trace",
+            )
+        )
 
 
 async def _redrive_recorded_kills(
@@ -1346,7 +1360,14 @@ async def _redrive_recorded_kills(
 
 
 def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
-    """What the spool can say about an undelivered kill (ss5's three states)."""
+    """What the spool can say about an undelivered kill (ss5's three states).
+
+    The record is read through `outcome_from_status`, the one mapping the
+    live adapter path and reconciliation already share, rather than by
+    reaching into the record here. Its `Terminated` IS "this run ended by a
+    kill", which is the question -- and the first draft of this function
+    asked a different one, reading `observed`, which the wrapper writes as
+    FORENSICS about how the group died rather than as its verdict."""
     run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
     status = load_json(run_dir / "status.json")
     if status is None:
@@ -1355,15 +1376,14 @@ def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
             state="indeterminate",
             detail="no status record and no live wrapper: nothing can say whether it landed",
         )
-    observed = status.get("observed")
-    signalled = isinstance(observed, dict) and observed.get("outcome") == "signaled"
+    killed = isinstance(outcome_from_status(status), Terminated)
     return EffectOutcome(
         effect_id=effect.effect_id,
-        state="applied" if signalled else "retired",
+        state="applied" if killed else "retired",
         run_id=status.get("run_id"),
         detail=(
-            "the spool records the command as signalled"
-            if signalled
+            "the spool records the run as killed"
+            if killed
             else "the run ended on its own before the kill was delivered"
         ),
     )

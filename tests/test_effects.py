@@ -427,14 +427,30 @@ def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path)
     assert unobserved.state == "indeterminate"
     assert "nothing can say whether it landed" in (unobserved.detail or "")
 
+    # the record's own verdict is the TOP-LEVEL `outcome`; `observed` is the
+    # wrapper's forensics about how the group died (supervisor-protocol ss3),
+    # and this fixture named it in its first draft -- which is how DL-98
+    # found the engine reading it as the verdict too
     (run_dir / "status.json").write_text(
-        json.dumps({"run_id": "r9", "observed": {"outcome": "signaled", "signal": 15}})
+        json.dumps(
+            {
+                "run_id": "r9",
+                "outcome": "terminated",
+                "cause": "parent lost",
+                "observed": {"outcome": "signaled", "signal": 15},
+            }
+        )
     )
     landed = _kill_outcome_from_spool(short_root, effect)
     assert (landed.state, landed.run_id) == ("applied", "r9")
 
     (run_dir / "status.json").write_text(
-        json.dumps({"run_id": "r9", "observed": {"outcome": "exited", "exit_code": 0}})
+        json.dumps({"run_id": "r9", "outcome": "signaled", "signal": 9})
+    )
+    assert _kill_outcome_from_spool(short_root, effect).state == "applied"
+
+    (run_dir / "status.json").write_text(
+        json.dumps({"run_id": "r9", "outcome": "exited", "exit_code": 0})
     )
     finished = _kill_outcome_from_spool(short_root, effect)
     assert finished.state == "retired"

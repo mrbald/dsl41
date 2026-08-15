@@ -996,15 +996,15 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
 def test_m3_malformed_status_records_map_truthfully() -> None:
     """Review M3: a lying or truncated record can only make things worse,
     never better -- and the cause must say what was actually wrong."""
-    from dsl41.runner_adapters import _outcome_from_status
+    from dsl41.runner_adapters import outcome_from_status
 
-    malformed_exit = _outcome_from_status({"outcome": "exited"})
+    malformed_exit = outcome_from_status({"outcome": "exited"})
     assert isinstance(malformed_exit, Failed) and "malformed" in malformed_exit.cause
-    stringly = _outcome_from_status({"outcome": "exited", "exit_code": "7"})
+    stringly = outcome_from_status({"outcome": "exited", "exit_code": "7"})
     assert isinstance(stringly, Failed) and "'7'" in stringly.cause
-    unsigned = _outcome_from_status({"outcome": "signaled"})
+    unsigned = outcome_from_status({"outcome": "signaled"})
     assert unsigned == Terminated("killed by signal (unrecorded)")
-    unknown = _outcome_from_status({"outcome": "gremlins"})
+    unknown = outcome_from_status({"outcome": "gremlins"})
     assert isinstance(unknown, Failed) and "unrecognized" in unknown.cause
 
 

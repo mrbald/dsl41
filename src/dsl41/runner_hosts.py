@@ -29,26 +29,25 @@ Three things live here and the fourth deliberately does not:
 
 **One host, for now.** This engine's own executor is seeded into the table
 at genesis and every job routes to it: machine names resolve to a relay
-through this table (ss5), and there is no relay until S5d, so a resolution
-step here would be an indirection with one possible answer. What S5a makes
-real is the STATE -- draining that one host holds new work and lets running
-work finish, which is CM-13 and is the operation an operator actually
-performs before maintenance.
+through this table (ss5), and there is no relay (DL-97 records why, and its
+trigger), so a resolution step here would be an indirection with one
+possible answer. What S5a made real is the STATE -- draining that one host
+holds new work and lets running work finish, which is CM-13 and is the
+operation an operator actually performs before maintenance.
 
-**What S5a cannot close, and does not pretend to.** `quarantined` has no
-producer until S5d's unreachability detector, and nothing keeps
-`last_contact` fresh until S5b's deadman. So `evict` in a real estate today
-always rejects -- which is precisely CM-11's refusal half, and it is the
-honest answer: a host nobody can prove dead may not have its work rerouted.
-The permitted side of that bound is written and unit-tested here over rows
-the tests build directly, and gets its live path when the two producers
-land.
+**Every input to the ss8 bound is now produced, not assumed.** `deadman_s`
+is what the supervisor reports it runs and `last_contact` is stamped by the
+lease exchange (S5b); `quarantined` is set when the leader gives up reaching
+the host and cleared when it answers again (S5d), remembering the state it
+interrupted so a blip cannot undo a drain. What is still refused rather than
+automated is the return of an EVICTED host: it must re-register at its new
+generation and self-fence first, and self-fencing is the relay's act.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict
 
@@ -72,7 +71,12 @@ LOCAL_EXECUTOR_ID = "local"
 #: nothing about whether the host is answering.
 HostVerb = Literal["activate", "drain", "evict", "quarantine", "reinstate"]
 HOST_VERBS: frozenset[str] = frozenset(("activate", "drain", "evict"))
-LEADER_VERBS: frozenset[str] = frozenset(("quarantine", "reinstate"))
+#: DERIVED, not listed again (DL-98): the two sets partition the verb type,
+#: and three hand-kept spellings of one vocabulary is three places for a new
+#: verb to be forgotten. Deriving also fails SAFE -- a verb added to the type
+#: and not to `HOST_VERBS` is a leader verb, so it is not reachable from the
+#: wire until someone says it should be.
+LEADER_VERBS: frozenset[str] = frozenset(get_args(HostVerb)) - HOST_VERBS
 
 #: The state each simple verb moves a host to. `evict`, `quarantine` and
 #: `reinstate` are not here because none is a plain state assignment -- each

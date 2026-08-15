@@ -180,7 +180,7 @@ def _naive_utc(iso: str) -> datetime:
     return parsed.astimezone(UTC).replace(tzinfo=None)
 
 
-def _outcome_from_status(status: dict[str, Any]) -> AdapterResult:
+def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     """Map a wrapper status.json record (docs/supervisor-protocol.md ss3) to
     an adapter result. Shared by the live adapter path and reconciliation so
     live and resumed runs can never diverge on the same record. A malformed
@@ -324,7 +324,7 @@ class LocalCommandAdapter:
                     f"exit_status_unobservable (wrapper exited rc={proc.returncode}"
                     " without a status record)"
                 )
-            return _outcome_from_status(status)
+            return outcome_from_status(status)
         finally:
             os.close(lifeline_w)
 
@@ -877,7 +877,7 @@ class SupervisorClient:
 class SupervisedCommandAdapter:
     """ss6 CMD adapter, detached variant: SPAWN through the supervisor (which
     owns the wrapper lifeline), await the exit push, read status.json --
-    the same outcome channel and `_outcome_from_status` mapping as
+    the same outcome channel and `outcome_from_status` mapping as
     LocalCommandAdapter, so tethered and detached runs never diverge. Shares
     run_dir/log/spec construction via `_build_run_spec` (no duplication).
 
@@ -961,7 +961,7 @@ class SupervisedCommandAdapter:
                     break  # the supervisor itself is unreachable -> spool below
                 status = load_json(status_path)
                 if status is not None:
-                    return _outcome_from_status(status)
+                    return outcome_from_status(status)
                 lost_wait = asyncio.ensure_future(self.client.lost.wait())
                 exit_wait = asyncio.ensure_future(asyncio.shield(fut))
                 try:
@@ -976,7 +976,7 @@ class SupervisedCommandAdapter:
                 if fut.done() and not fut.cancelled():
                     status = load_json(status_path)
                     if status is not None:
-                        return _outcome_from_status(status)
+                        return outcome_from_status(status)
                     rc = (fut.result() or {}).get("wrapper_rc")
                     return Failed(  # PENDING: E7
                         f"exit_status_unobservable (wrapper exited rc={rc} without a status record)"
@@ -1119,7 +1119,7 @@ async def _resolve_spool(
     if status is not None:
         ended_at = status.get("ended_at")
         return (
-            _outcome_from_status(status),
+            outcome_from_status(status),
             _naive_utc(ended_at) if isinstance(ended_at, str) else None,
         )
     return Failed("exit_status_unobservable"), None  # PENDING: E7

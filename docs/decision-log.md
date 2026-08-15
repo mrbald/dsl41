@@ -4133,3 +4133,54 @@
   supervisor reports (S5b), the contact from a lease exchange (S5b), the
   quarantine from the leader losing the host (here).
   2033 -> 2039 passed; ruff, mypy, arch_check blocking checks clean.
+- DL-98 architecture review after S5 (2026-08-15; the DL-75 gate asked, at
+  ~5100 lines changed since arch-review/2026-08-15). Subject: what S5 ADDED
+  that did not need adding. Three findings acted on, three declined with
+  reasons so the next review does not re-find them.
+  **Acted (1): the engine had grown a second reader of the spool format,
+  and it read the wrong field.** `_kill_outcome_from_spool` decided whether
+  a kill landed by looking at `status["observed"]["outcome"]` -- which the
+  wrapper writes as FORENSICS about how the command group died, not as its
+  verdict. The verdict is the top-level `outcome`, and a mapping for it
+  already existed next door and is shared by the live adapter path and
+  reconciliation so those two can never diverge. Now `isinstance(
+  outcome_from_status(status), Terminated)`, which is the same question
+  asked once. The mapping went public for it, as `load_json` did in DL-96 --
+  arch_check blocked the private cross-module import both times, correctly.
+  The test fixture had encoded the same misreading, which is how a wrong
+  reading survives review; it now uses real record shapes and says why.
+  **Acted (2): one verb vocabulary, spelled three times.** `HostVerb`,
+  `HOST_VERBS` and `LEADER_VERBS` were three hand-kept lists that nothing
+  made agree. `LEADER_VERBS` is now derived (`get_args(HostVerb) -
+  HOST_VERBS`), which also fails SAFE: a verb added to the type and not to
+  the operator set is a leader verb, so it is not reachable from the wire
+  until someone says it should be.
+  **Acted (3): `_reconcile` had absorbed two outbox concerns.** 164 lines
+  and 41 branches, doing supervisor listing, candidate collection, spool
+  ladder, never-spawned sweep AND two effect resolutions. The two effect
+  halves are now `_reconcile_applied_spawns` and `_retire_lost_spawns` --
+  named, because each answers a question a reader asks separately.
+  **Declined (1): `_dispatched` and the outbox both record what was
+  dispatched.** They look like a parallel model and are not: the outbox is
+  exact and durable, `_dispatched` is deliberately OVER-approximated at
+  resume (seeded from every job's run_number, not from applied effects), so
+  a journal written before the outbox existed, or a run whose effect was
+  retired, still refuses a re-dispatch. Collapsing them would trade a
+  conservative gate for an exact one, and the exact one is wrong for exactly
+  the inputs that are hardest to test.
+  **Declined (2): `EffectOutcome.state` has four members where ss5 names
+  three.** `retired` is ss7's word ("retire superseded"), not a fourth
+  outcome of an attempt: it means the effect was never attempted because
+  the world moved past it. Renaming it would lose the distinction that
+  matters -- `retired` is safe to forget, `indeterminate` is not.
+  **Declined (3): cli.py at 1830 lines, `run` at 129.** Real, and not S5's
+  to fix: the growth is one typer option per stage, and splitting the CLI is
+  its own commit with its own seam argument. Recorded here so the next
+  review sees it was seen.
+  Load-bearing, leave alone: the four-state host row (ss8's frozen
+  vocabulary, not a flag matrix); `superseded_reason` beside `stale_reason`
+  (two gates over two domains -- effects and completions -- that happen to
+  rhyme); the derived `held_jobs` projection (one line, but it names what
+  the control plane publishes); and every ss/DL citation comment, which is
+  this project's core discipline and not noise.
+  2039 passed; ruff, mypy, arch_check blocking checks clean.
