@@ -47,7 +47,8 @@ import pytest
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, HostRuntime, OracleError, RuntimeState
-from dsl41.runner import Engine, resume_run, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter, SupervisorClient
 from dsl41.runner_admission import PROTOCOL_VERSION, Envelope
 from dsl41.runner_clock import RealClock, VirtualClock

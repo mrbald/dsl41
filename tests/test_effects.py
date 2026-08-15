@@ -44,7 +44,8 @@ import pytest
 
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event, JobRuntime
-from dsl41.runner import Engine, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_effects import (
     OUTCOME_UNAVAILABLE,
@@ -417,7 +418,7 @@ def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path)
     `indeterminate` is the only honest answer (E7). The three-way split is
     the point: two of these would report a signal that did land as one that
     did not."""
-    from dsl41.runner import _kill_outcome_from_spool
+    from dsl41.runner_startup import _kill_outcome_from_spool
 
     run_dir = short_root / "runs" / "j.1"
     run_dir.mkdir(parents=True)

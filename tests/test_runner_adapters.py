@@ -36,7 +36,8 @@ import pytest
 from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle_state import Event
-from dsl41.runner import Engine, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import (
     AdapterContext,
     AdapterResult,

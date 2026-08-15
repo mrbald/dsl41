@@ -32,7 +32,8 @@ from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind
-from dsl41.runner import Engine, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock

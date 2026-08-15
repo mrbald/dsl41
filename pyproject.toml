@@ -117,6 +117,7 @@ include = [
     "src/dsl41/runner_hosts.py",
     "src/dsl41/runner_journal.py",
     "src/dsl41/runner_ledger.py",
+    "src/dsl41/runner_startup.py",
 ]
 fail_under = 100
 show_missing = true

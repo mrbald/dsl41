@@ -4537,3 +4537,45 @@
   reader to grep for tests that were never going to exist.
   2057 -> 2081 passed; 100% branch on all seven modules; ruff, mypy,
   arch_check blocking checks clean.
+- DL-106 the engine loop and the run lifecycle stop sharing a file
+  (2026-08-15; taken before S7 rather than during it). `runner.py` had grown
+  to 1517 lines and the DL-75 gate had been asking about it since S5; the
+  size is the prompt, not the argument.
+  **The seam was already in the file, and in the docstring.** A comment bar
+  reading `run lifecycle (ss7)` sat at line 993, and DL-74's own sentence has
+  said "what stays here is the engine loop AND the run lifecycle" ever since
+  the first split. Two things joined by "and". The Engine is the single-
+  writer loop over a LIVE estate -- admission, dispatch, effects, all of it
+  reacting to inputs as they arrive. What moved runs ONCE per incarnation,
+  before that loop exists: create or claim a run root, take leadership,
+  replay the log, reconcile the estate against the world, hand back an
+  Engine. They share exactly one object, and it is the one the moved half
+  constructs. 1517 -> 968 + 605.
+  **Not `runner_lifecycle`.** DL-42 spent "lifecycle" on the wrapper and
+  supervisor tier, and that meaning is load-bearing across
+  docs/supervisor-protocol.md and the counter-fence argument. Two meanings of
+  one word in one codebase is how a reader learns to check which is meant.
+  `runner_startup` says when it runs, which is the thing that distinguishes
+  it from the loop.
+  **`start_run` is the barrier's degenerate case,** which is why it belongs
+  here rather than staying beside the Engine it builds: ss7's sequence is
+  acquire, replay, reconcile, re-drive, dispatch, and over an empty log every
+  step but the first has nothing to do. Genesis and takeover are one
+  procedure with a different amount of history behind them.
+  **No re-export facade** (DL-74's rule, and an arch-review smell in its own
+  right): the fourteen call sites -- the CLI, the harnesses, eleven test
+  modules -- import from the module that owns the name.
+  **The gate found the seam's real cost, twice.** Moving the code turned
+  three private helpers into cross-module imports: `_resolve_spool` and
+  `_fsync_dir` from runner_adapters, `_last_journal_at` from runner_journal.
+  arch_check blocked all three, correctly and for the fourth and fifth time
+  in this programme (DL-96's `load_json`, DL-98's `outcome_from_status`).
+  They are public now, where they live. A split that had smuggled them
+  through would have left the DL-74 DAG intact on paper only.
+  **The coverage gate had to be told,** and that is worth recording as a
+  hazard rather than a footnote: `[tool.coverage.report]` names its modules
+  explicitly (DL-105), so a new module is outside the 100% branch requirement
+  until someone adds it. A split is exactly the operation that silently moves
+  code out of a gate's scope. Added in the same commit; 100% held.
+  2081 passed either side of the move -- no test changed except its import
+  line, which is the only evidence a pure move can offer.

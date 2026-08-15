@@ -1119,9 +1119,9 @@ async def _serve_run(
 
     from datetime import datetime
 
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_control import ControlServer
-    from dsl41.runner import resume_run as _resume_run
+    from dsl41.runner_startup import resume_run as _resume_run
     from dsl41.runner_adapters import (
         FileWatcherAdapter,
         JobAdapter,
@@ -1324,7 +1324,8 @@ def rehearse(
     from datetime import UTC, datetime, timedelta
 
     from dsl41.oracle_state import Event, OracleError
-    from dsl41.runner import Engine, start_run
+    from dsl41.runner import Engine
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
     from dsl41.runner_scheduler import Scheduler

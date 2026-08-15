@@ -505,7 +505,7 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
     return replay
 
 
-def _last_journal_at(records: list[dict[str, Any]]) -> datetime:
+def last_journal_at(records: list[dict[str, Any]]) -> datetime:
     """max time the journal proves the run reached (ss7 'last journal at')."""
     stamps = [datetime.fromisoformat(records[0]["started_at"])]
     for record in records:

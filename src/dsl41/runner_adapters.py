@@ -153,7 +153,7 @@ class FakeAdapter:
         return exit_code
 
 
-def _fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -234,8 +234,8 @@ def _build_run_spec(
         command = f". {spec_ir.profile} && {command}"  # PENDING: E5
     run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
     run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
-    _fsync_dir(run_dir)
-    _fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
+    fsync_dir(run_dir)
+    fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
     (ctx.run_root / "logs").mkdir(exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
@@ -987,7 +987,7 @@ class SupervisedCommandAdapter:
         # (kill -9 of the supervisor): the wrappers EOF'd and are killing+
         # recording -- resolve via the ss7 spool ladder, the same reading the
         # tethered resume path uses (spec ss3)
-        result, _ended = await _resolve_spool(
+        result, _ended = await resolve_spool(
             job,
             run_number,
             run_dir,
@@ -1055,7 +1055,7 @@ class SupervisedCommandAdapter:
             self.client.forget_exit(run_id)
 
 
-async def _resolve_spool(
+async def resolve_spool(
     job: str,
     run_number: int,
     run_dir: Path | None,

@@ -39,7 +39,8 @@ from pydantic import ValidationError
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
-from dsl41.runner import Engine, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     AdmissionRefused,
@@ -548,7 +549,7 @@ def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Pat
     Exact is the load-bearing word. A client that re-composes at the new
     epoch is not retrying; it is reusing an id for a different command, and
     the next test is what happens to it."""
-    from dsl41.runner import resume_run
+    from dsl41.runner_startup import resume_run
 
     run_root = tmp_path / "run"
 
@@ -601,7 +602,7 @@ def test_an_unseen_stale_epoch_is_refused_where_a_retry_of_one_is_not(tmp_path: 
     the dedup rather than before it. Both requests here name a superseded
     term; they get opposite answers, and the only thing separating them is
     whether the log already holds a decision under that id."""
-    from dsl41.runner import resume_run
+    from dsl41.runner_startup import resume_run
 
     run_root = tmp_path / "run"
 

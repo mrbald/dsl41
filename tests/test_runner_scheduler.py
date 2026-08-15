@@ -25,7 +25,8 @@ import pytest
 from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
-from dsl41.runner import Engine, resume_run, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_journal import read_journal

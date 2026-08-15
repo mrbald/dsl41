@@ -446,11 +446,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   schedules). The runner's scheduler and preflight consume it. It is also
   the reference implementation that a live autocal is diffed against (Q8
   residue).
-- src/dsl41/runner.py — phase-11 engine: single-writer loop over the oracle
-  (dispatch table, time-ordered event queue, stale-completion gate) and the run
-  lifecycle (start/resume + the reconciliation ladder). DL-74 split its other
-  subsystems into the sibling modules below, with no re-export facade: every
-  consumer imports from the module that owns the name
+- src/dsl41/runner.py — phase-11 engine: the single-writer loop over the oracle
+  (dispatch table, time-ordered event queue, stale-completion gate, admission and
+  the effect outbox's dispatch). DL-74 split its other subsystems into the sibling
+  modules below, with no re-export facade: every consumer imports from the module
+  that owns the name
+- src/dsl41/runner_startup.py — taking possession of a run root (DL-106): genesis,
+  resume, and concurrency-model ss7's takeover barrier — acquire, replay,
+  reconcile every execution host, retire superseded and re-drive pending, dispatch.
+  Runs once per incarnation, before the loop exists; `start_run` is the barrier's
+  degenerate case, where an empty log leaves nothing but the acquire. Split from
+  the loop because they share exactly one object, and it is the one this half
+  constructs
 - src/dsl41/runner_control.py — the ss10 control plane, both ends (DL-78): the
   unix-socket server (sendevent parity, status/trace/explain/spec/deps/timers/
   plan, subscribe), the wire vocabulary, and the two clients — a persistent

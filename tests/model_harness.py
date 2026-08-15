@@ -40,7 +40,8 @@ from typing import TYPE_CHECKING
 
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle_state import Event
-from dsl41.runner import Engine, resume_run, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_clock import VirtualClock
 

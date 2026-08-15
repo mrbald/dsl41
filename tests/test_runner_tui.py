@@ -37,7 +37,8 @@ import pytest
 pytest.importorskip("textual")
 
 from dsl41.ir import lower_source
-from dsl41.runner import Engine, start_run
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     ControlClient,

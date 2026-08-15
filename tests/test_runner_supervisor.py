@@ -37,7 +37,7 @@ from test_runner_lifecycle import module_imports, procid_import_branches
 
 from dsl41 import runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner import resume_run
+from dsl41.runner_startup import resume_run
 from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
 from dsl41.runner_clock import RealClock
 from dsl41.runner_journal import read_journal
@@ -1174,7 +1174,7 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
         await client.ensure_running()
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
-        engine = __import__("dsl41.runner", fromlist=["start_run"]).start_run(
+        engine = __import__("dsl41.runner_startup", fromlist=["start_run"]).start_run(
             catalog, run_root, clock=RealClock(), adapters=_adapters(client)
         )
         from dsl41.oracle_state import Event
@@ -1227,7 +1227,7 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
         from dsl41.oracle_state import Event
-        from dsl41.runner import start_run
+        from dsl41.runner_startup import start_run
 
         engine = start_run(catalog, run_root, clock=RealClock(), adapters=_adapters(client))
         engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "slow"}))

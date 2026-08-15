@@ -5,7 +5,7 @@ docs/supervisor-protocol.md (the frozen spool format). DL-42 item 8 pins
 the phase-boundary kill matrix exercised here via the wrapper's
 DSL41_WRAPPER_TEST_PAUSE scaffolding: the wrapper SIGSTOPs itself at a
 named boundary, the test SIGKILLs (or SIGCONTs) it there, and the
-reconciliation ladder (`runner._resolve_spool`) must report what actually
+reconciliation ladder (`runner.resolve_spool`) must report what actually
 happened -- truthfully, never guessed. The "post-fork pre-exec" boundary
 from DL-42 is covered by post_spawn_pre_record: from the recorder's point
 of view both mean "command pid exists, spawn.json does not" (wrapper
@@ -13,7 +13,7 @@ docstring).
 
 House style: process-level tests spawn the wrapper BY FILE PATH exactly as
 the engine does; ladder-level tests fabricate spool directories and call
-the private `_resolve_spool` directly (white-box, like test_runner.py's
+the private `resolve_spool` directly (white-box, like test_runner.py's
 gate tests). The crash-recovery integration test drives a real engine
 subprocess (tests/runner_crash_driver.py) and SIGKILLs it mid-run --
 that single test also proves the lifeline fd-hygiene invariant through
@@ -42,8 +42,8 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner import resume_run
-from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, _resolve_spool
+from dsl41.runner_startup import resume_run
+from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resolve_spool
 from dsl41.runner_clock import RealClock
 from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
 
@@ -446,7 +446,7 @@ def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
 
 def _resolve(run_dir: Path, job: str = "j1", run_number: int = 1, **kw):
     return asyncio.run(
-        _resolve_spool(
+        resolve_spool(
             job,
             run_number,
             run_dir,
@@ -547,7 +547,7 @@ def test_live_wrapper_gets_a_settle_window(tmp_path: Path) -> None:
             os.kill(proc.pid, signal.SIGCONT)
 
         releaser = asyncio.get_running_loop().create_task(release())
-        result = await _resolve_spool(
+        result = await resolve_spool(
             "j1",
             1,
             run_dir,
@@ -730,7 +730,7 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
 
     from runner_crash_driver import CRASH_JIL
 
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
 
@@ -767,7 +767,7 @@ def test_resume_refuses_clock_domain_flip(tmp_path: Path) -> None:
     from runner_crash_driver import CRASH_JIL
     from datetime import datetime
 
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
 
@@ -849,7 +849,7 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     TERMINATED without needing the reconciliation to happen again."""
     from datetime import timedelta
 
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
 
@@ -912,7 +912,7 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
 
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import Event
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
     from dsl41.runner_journal import replay_inputs
@@ -1012,7 +1012,7 @@ def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None
     """Review M4: an incomplete FW run whose re-dispatch adapter is missing
     at resume must refuse loudly, never hang RUNNING forever."""
     from dsl41.oracle_state import Event
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
 
@@ -1055,7 +1055,7 @@ def test_m6_wrapper_spawn_failure_fails_job_not_engine(
     one job with a truthful FAILURE cause; the engine loop survives and
     other jobs complete normally."""
     from dsl41.oracle_state import Event
-    from dsl41.runner import start_run
+    from dsl41.runner_startup import start_run
 
     jil = (
         "insert_job: doomed\njob_type: c\ncommand: true\n\n"
