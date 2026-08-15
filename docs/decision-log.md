@@ -3840,3 +3840,60 @@
   list; they are the surface this stage is about, and DL-91's re-baseline
   was six commits ago, so the next review inherits them rather than a
   fresh baseline.
+- DL-93 how S5 is built, and where host state lives (2026-08-15;
+  sequencing decision, taken before the code so the four commits do not
+  re-derive it). `docs/concurrency-model.md` §10 names S5 as one stage —
+  *relay + host identity, effects, barrier, deadman, host states +
+  evict* — and it is the largest in the programme: five CM obligations
+  (09, 10, 11, 12, 13) plus the half of CM-06 that S3 left open. It is
+  built in four slices, in this order, each landing on its own with its
+  own tests.
+  **S5a host identity, the routing table, host states, the `host` verb.**
+  First because `executor_id` has to name something before an effect can
+  bind to it. Closes CM-13 (drain: `passive` routes nothing new and
+  finishes what is running) and the refusal half of CM-11 — a host with
+  no deadman can never be evicted, which is §8's first precondition and
+  is testable the day the state exists.
+  **S5b the deadman.** One interval and one exit in the Tier-1
+  supervisor, on the mechanism supervisor-protocol §5 already relies on
+  (supervisor death kills every wrapper by lifeline EOF), so it adds no
+  policy to the tier and does not breach DL-42's counter-fence. Closes
+  CM-10 and completes CM-11: the eviction bound is only checkable once
+  something produces `last_contact` and `T_deadman`.
+  **S5c the effect outbox.** `effect_id` bound to `executor_id`, the
+  three states (`pending` → `applied(result)` | `indeterminate`),
+  supersession by exact desired state, per-run ordering. Closes CM-06's
+  remainder (`outcome_unavailable`) and CM-09's application half. Local
+  executor throughout — none of it needs a network, which is why it
+  comes before one.
+  **S5d the relay and the takeover barrier.** Quarantine, epoch
+  re-checking on dispatch, the fenced return of an evicted host. CM-12
+  and CM-09's delivery half.
+  **The outbox is built ON the spool, not beside it.** The lifecycle
+  tier already records durably what a naive outbox would re-invent:
+  `spawn.json` says a spawn happened and with what process identity,
+  `status.json` says how it ended, and the ABSENCE of status.json is
+  already the unobservable case (E7). §5's `indeterminate` IS that
+  absence. What the engine lacks and S5c adds is the layer above:
+  intent recorded before the attempt, keyed by an id that binds to an
+  executor, and a kill that is an effect with an id rather than a
+  `task.cancel()` with none. A second durable record of "did this run
+  start" would be the parallel-model smell DL-91 exists to catch.
+  **Host routing state is admitted input, not a side table.** It gets a
+  third `expect` namespace, `host:<id>`, beside `job:` and `global:`,
+  and its rows live in the one published-state owner (§3's
+  `RuntimeState`). That is not a convenience: durability, replay, the
+  §3 one-increment-per-input rule, the §0 precondition check and the
+  read verbs are all machinery that already exists and works on
+  namespaced keys, and a routing table with its own revision counter
+  would be the same concept spelled a second way. §8 requires the state
+  to survive a failover, which is exactly what being an input buys.
+  **The oracle must never read a host row,** and the split DL-91 made is
+  what keeps that honest: `HostRuntime` belongs in `oracle_state.py`,
+  which the interpreter does not depend on, and `HOST` is NOT an oracle
+  `EventKind` — a job's condition truth cannot depend on where its
+  machine routes. The verb is applied by the engine inside the input's
+  batch, on the seam §4 already has for an input that carries no oracle
+  event (`Attempt.kind is None`, today the standalone time observation).
+  A test pins that `oracle.py` never names the row type; the exact
+  encoding of the attempt is the slice's business, not this entry's.
