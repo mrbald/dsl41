@@ -354,6 +354,7 @@ no journal"}`.
 
 Delivery guarantees, exactly as implemented:
 
+- unsequenced records now also include `effect` and `effect_result` (S5c).
 - seq'd records (`input`, `advance`, `host`) are **exactly once** across the
   backfill/live seam. The seam is sampled *before* the ack is written,
   because a record appended during the send would otherwise be skipped as

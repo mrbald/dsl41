@@ -477,6 +477,14 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   a pure function of state so replay reaches the same verdict the live engine
   did — plus the v2 envelope (parse_envelope) that makes preconditions
   mandatory, in one function rather than one per transport
+- src/dsl41/runner_effects.py — phase-12 stage S5c: the ss5 effect outbox —
+  what the shell INTENDS to do to an execution host, recorded before it is
+  attempted, bound to the executor it is for. The three states (pending,
+  applied, indeterminate) with `outcome_unavailable` for an attempt nothing
+  can report on, supersession by exact desired state rather than by
+  generation (KILLJOB does not advance run_number, so a version check never
+  fires for the case that motivates it), and the planner that turns what the
+  oracle emitted into what the shell will do
 - src/dsl41/runner_hosts.py — phase-12 stage S5a: the ss8 execution-host
   routing table's vocabulary — the HostCommand an operator sends, eviction's
   three preconditions as a pure function of the row (so replay reaches the same
@@ -484,7 +492,7 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   states route new effects, and the genesis seed that puts this engine's own
   executor in the table
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
-  advance/host/result/dispatch/drop/preflight records, append+fsync before every
+  advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
   gate written into the header
 - src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
@@ -634,6 +642,13 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   revision or a log record, the recorded interval is what the supervisor
   reports rather than what the flag asked for, and the ss8 bound computed
   from both
+- tests/test_effects.py — phase-12 stage S5c: the outbox. The three states and
+  `outcome_unavailable`, supersession by exact desired state (a delayed SPAWN
+  for a run KILLJOB already ended — the case a generation check waves through),
+  admission order, at-most-once application over repeated drains, a drain that
+  holds spawns while letting kills through, and the held set that is now the
+  outbox itself. The leak it closes is tested where the processes are real, in
+  tests/test_runner_supervisor.py
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping
@@ -666,7 +681,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   SHUTDOWN, detach-stop SIGINT → reattach SUCCESS, oracle KILLJOB detached).
   Plus stage S5b's deadman (CM-10): an unwatched supervisor exits and its
   wrappers die with it, a live leaseholder reprieves it over the same
-  interval, and one started without the flag outlives its controller
+  interval, and one started without the flag outlives its controller. Plus
+  stage S5c's headline: a kill the engine decided and died before delivering is
+  re-driven at resume and the detached run stops — against the contrast of the
+  same journal without the effect record, where it is orphaned
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report + uc CLIs,

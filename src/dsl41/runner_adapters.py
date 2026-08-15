@@ -161,7 +161,7 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _load_json(path: Path) -> dict[str, Any] | None:
+def load_json(path: Path) -> dict[str, Any] | None:
     """Tolerant spool read: missing or unparseable -> None (an unreadable
     record can never be trusted for signaling; the ladder falls through)."""
     try:
@@ -316,7 +316,7 @@ class LocalCommandAdapter:
             except asyncio.CancelledError:
                 await self._kill(run_dir, proc)
                 raise
-            status = _load_json(run_dir / "status.json")
+            status = load_json(run_dir / "status.json")
             if status is None:
                 # the recorder exited without a record (rc 2/3: spec error,
                 # ENOSPC): observability is gone -- report it, never guess
@@ -337,7 +337,7 @@ class LocalCommandAdapter:
         spawn = None
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            spawn = _load_json(run_dir / "spawn.json")
+            spawn = load_json(run_dir / "spawn.json")
             if spawn is not None or proc.returncode is not None:
                 break
             await asyncio.sleep(0.05)
@@ -902,29 +902,38 @@ class SupervisedCommandAdapter:
             # the run never stopped (its parent is the supervisor); just await
             # its outcome -- no reconciliation injection (E4 dissolved, ss3)
             run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
-            return await self._await_outcome(reattach_id, run_dir, job_ir.name, run_number)
-        run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
-        run_id = spec["run_id"]
-        self.client.exit_future(run_id)  # register BEFORE spawn so no push is missed
-        try:
-            reply = await self.client.spawn(spec)
-        except SupervisorUnavailable as exc:
-            self.client.forget_exit(run_id)
-            return Failed(f"wrapper spawn failed: supervisor unavailable ({exc})")
-        if ctx.journal is not None:
-            ctx.journal.dispatch(
-                job_ir.name,
-                run_number,
-                wrapper_pid=reply.get("wrapper_pid"),
-                run_dir=str(run_dir),
-                started_at=ctx.clock.now(),
+            run_id = reattach_id
+        else:
+            run_dir, spec = _build_run_spec(
+                job_ir, run_number, ctx, grace_seconds=self.grace_seconds
             )
+            run_id = spec["run_id"]
+            self.client.exit_future(run_id)  # register BEFORE spawn so no push is missed
+            try:
+                reply = await self.client.spawn(spec)
+            except SupervisorUnavailable as exc:
+                self.client.forget_exit(run_id)
+                return Failed(f"wrapper spawn failed: supervisor unavailable ({exc})")
+            if ctx.journal is not None:
+                ctx.journal.dispatch(
+                    job_ir.name,
+                    run_number,
+                    wrapper_pid=reply.get("wrapper_pid"),
+                    run_dir=str(run_dir),
+                    started_at=ctx.clock.now(),
+                )
+        # ONE await-and-cancel path for both (DL-96). The reattach branch used
+        # to return directly, outside this handler, so a cancellation never
+        # reached the kill ladder: KILLJOB against a REATTACHED detached run
+        # stopped the adapter task and left the process running. A kill is the
+        # one side effect resume is allowed to have, and it was the one the
+        # reattached run could not receive.
         try:
             return await self._await_outcome(run_id, run_dir, job_ir.name, run_number)
         except asyncio.CancelledError:
             if ctx.detach is not None and ctx.detach.stopping:
                 raise  # ss3 case b: the job continues under the supervisor
-            await self._kill(run_id)  # ss3 case a: the oracle decided terminal
+            await self.kill(run_id)  # ss3 case a: the oracle decided terminal
             raise
 
     async def _await_outcome(
@@ -940,7 +949,7 @@ class SupervisedCommandAdapter:
                 # detached run whose wrapper is simply still running
                 if self.client.lost.is_set() and not await self.client.reconnect():
                     break  # the supervisor itself is unreachable -> spool below
-                status = _load_json(status_path)
+                status = load_json(status_path)
                 if status is not None:
                     return _outcome_from_status(status)
                 lost_wait = asyncio.ensure_future(self.client.lost.wait())
@@ -955,7 +964,7 @@ class SupervisedCommandAdapter:
                     lost_wait.cancel()
                     exit_wait.cancel()  # cancels the shield, never fut
                 if fut.done() and not fut.cancelled():
-                    status = _load_json(status_path)
+                    status = load_json(status_path)
                     if status is not None:
                         return _outcome_from_status(status)
                     rc = (fut.result() or {}).get("wrapper_rc")
@@ -1010,11 +1019,16 @@ class SupervisedCommandAdapter:
                 return
             await asyncio.sleep(self._SPAWN_POLL_S)
 
-    async def _kill(self, run_id: str) -> None:
+    async def kill(self, run_id: str) -> None:
         """ss3 case a: the oracle said terminal. TERM the command group via the
         supervisor, grace, KILL, await the exit push so the wrapper records --
         the cancelled adapter itself never reports (the oracle already emitted
-        the terminal)."""
+        the terminal).
+
+        Public because resume drives it directly (DL-96): a recorded kill met
+        at resume has a live wrapper but no adapter task to cancel, and
+        creating one only to cancel it would not work -- a task cancelled
+        before its first step never enters the handler that calls this."""
         fut = self.client.exit_future(run_id)
         try:
             await self._signal_when_addressable(run_id, "TERM", fut)
@@ -1045,12 +1059,12 @@ async def _resolve_spool(
     if run_dir is None or not run_dir.is_dir():
         return Failed("dispatch lost to engine crash (run directory missing)"), None
     status_path = run_dir / "status.json"
-    spawn = _load_json(run_dir / "spawn.json")
+    spawn = load_json(run_dir / "spawn.json")
     if spawn is not None and not (
         spawn.get("job") == job and spawn.get("run_number") == run_number
     ):
         spawn = None  # spoofed/corrupt spawn record: never trust, never signal
-    status = _load_json(status_path)
+    status = load_json(status_path)
     if status is None and spawn is not None and spawn.get("boot_id") == boot_now:
         # same boot: liveness checks mean something (DL-42 item 5)
         wrapper_pid = spawn.get("wrapper_pid")
@@ -1064,11 +1078,11 @@ async def _resolve_spool(
             # give its status.json a settle window
             deadline = time.monotonic() + settle_seconds + grace_seconds
             while time.monotonic() < deadline:
-                status = _load_json(status_path)
+                status = load_json(status_path)
                 if status is not None:
                     break
                 if not _procid.verify_alive(wrapper_pid, wrapper_token):
-                    status = _load_json(status_path)  # one last read after death
+                    status = load_json(status_path)  # one last read after death
                     break
                 await asyncio.sleep(0.1)
         if status is None:

@@ -243,6 +243,39 @@ Per-run effect ordering is mandatory. The SPAWN→SIGNAL race this depends
 on is already closed (DL-83): a live wrapper with no spawn record answers
 `not_ready`, so a kill can no longer be persisted as an applied no-op.
 
+*(Amended by DL-96, at build — stage S5c.* Four deviations, each bounded and
+each because the thing it defers against does not exist yet.
+
+**`run_id` is not bound before the attempt.** This section binds it
+atomically for a reason a RELAY has and a local engine does not: a relay
+sees only ids. Locally `(job, run_number)` IS the identity —
+`runs/<job>.<run_number>` is created with `mkdir()` and no `exist_ok`, so a
+second spawn of one run fails loudly rather than doubling — so the outbox
+records the process identity the spool reports, when it reports it. Binding
+it earlier arrives with the relay that needs it.
+
+**TERM and KILL are one effect, not two staged ids.** The split exists so a
+relay can tell a retried TERM from a retried KILL. The adapter's ladder
+never yields to the engine between its stages, so there is no
+engine-visible state between them for a second id to name; a re-driven kill
+re-runs the whole ladder, and TERM to a dead group is a no-op.
+
+**SHUTDOWN is not an effect yet.** It binds to a supervisor incarnation and
+a scheduler epoch, and neither is allocated until S6.
+
+**A pending SPAWN is not re-driven at resume.** `docs/runner-design.md` §7
+fails a start with no spool trace rather than re-running it, which DL-41a
+decided deliberately. The outbox makes re-driving expressible; whether §7's
+takeover barrier should re-drive rather than fail is that barrier's
+question, and it belongs where leader election gives it a context. A
+pending SPAWN that DOES have a spool trace is reconciled as applied — the
+engine died in the window between launching and recording, and the spool is
+the record.
+
+A recorded KILL, by contrast, IS re-driven at resume, and that is not a new
+licence: §7 of runner-design already permits exactly one side effect there,
+and names it "recorded kills".*)*
+
 ## 6. The envelope and reads
 
 ```json
@@ -459,10 +492,10 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
 | CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
-| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); eviction and `outcome_unavailable` with S5 |
+| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
-| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | expensive |
+| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); delivery and quarantine with S5d |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
 | CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | refusals landed (DL-94); the bound computable from a real deadman and a real contact (DL-95); the last precondition needs S5d's quarantine |
 | CM-12 | a returning evicted host is refused and self-fences | medium |

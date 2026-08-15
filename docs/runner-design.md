@@ -353,6 +353,16 @@ The journal is an append-only JSONL WAL, one file per run. Record kinds:
   event — the interpreter never reads a host row, so this one is applied to
   the state owner rather than fed. Under its own key rather than
   `payload`, so no record shape spells one field name two ways.
+- `effect` — `{effect_id, kind, job, run_number, executor_id, index, at}`: an
+  act on an execution host that the engine INTENDS, appended with the §4
+  step-7 batch that decided it (S5c, DL-96). Before the attempt, which is
+  the whole content of an outbox: an engine that dies between deciding and
+  acting leaves the record that it meant to act.
+- `effect_result` — `{effect_id, state, run_id, detail}`: what became of one
+  attempt — `applied`, `indeterminate`, or `retired` (superseded before it
+  ran). Its ABSENCE means `pending`, which is the crash window, and is
+  exactly the distinction `indeterminate` exists to keep separate: nothing
+  was tried, versus something was tried and cannot be reported on.
 - `result` — `{index, request_id, decision, reason, revisions}`: the
   decision the attempt at `index` got, appended after it. `index`, not
   `seq`, because it shares its attempt's number and `seq` is the §10
@@ -383,6 +393,14 @@ the log has to keep — which inputs were externally requested and
 therefore had to name a revision. Replay reads `expect` back, because an
 attempt admitted without a result is re-decided through the same gate,
 and the revision it named is half of what that gate reads.*)
+*(Amended by DL-96, stage S5c.* The two `effect` records are new here, and
+one sentence above narrowed with them. "No side effects on resume beyond
+recorded kills" used to be aspirational for the DETACHED path: a kill was a
+`task.cancel()` with no id, so an engine that decided TERMINATED and died
+before cancelling left a run whose parent is the supervisor still going,
+and the sweep below walked past it — its job is already TERMINAL, which
+reads as "its completion was already replayed". A recorded kill is now
+re-driven, which is that sentence made literal rather than widened.*)*
 - `preflight` — the §8 WARN items that the run started under (DL-45:
   "prints, journals, and runs" made literal). This record is not an
   input, and replay ignores it.

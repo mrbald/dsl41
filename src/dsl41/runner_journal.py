@@ -56,6 +56,7 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import EngineError
+from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.runner_hosts import HostCommand
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
@@ -186,6 +187,24 @@ class Journal:
                 "revisions": result.revisions,
             }
         )
+
+    def effect(self, effect: Effect) -> None:
+        """One intended effect, appended with the ss4 step-7 batch that
+        decided it (concurrency-model ss1: the outbox lives IN the ledger, so
+        the decision and what it implies cannot be torn apart by a crash).
+
+        BEFORE the attempt, which is the whole content of an outbox: an
+        engine that dies between deciding and acting leaves a record that it
+        meant to act, and a recorded kill is re-driven at resume rather than
+        lost with the task that would have delivered it."""
+        self._write({"rec": "effect", **effect.model_dump(mode="json")})
+
+    def effect_result(self, outcome: EffectOutcome) -> None:
+        """What came of one attempt (concurrency-model ss5). Absent means
+        `pending` -- the crash window -- which is exactly the distinction
+        `indeterminate` exists to keep separate from it: nothing was tried
+        vs something was tried and cannot be reported on."""
+        self._write({"rec": "effect_result", **outcome.model_dump(mode="json")})
 
     def dispatch(
         self,
@@ -355,6 +374,24 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
     return index
 
 
+def read_outbox(records: list[dict[str, Any]]) -> Outbox:
+    """The effects this log intended, and what became of them (ss5).
+
+    One pass, in file order, because an outcome always follows the effect it
+    resolves -- the two are written by the same engine in that order, and an
+    outcome for an unknown effect would mean the log lost the record that
+    said what was meant."""
+    outbox = Outbox()
+    for record in records:
+        if record.get("rec") == "effect":
+            outbox.record(Effect.model_validate({k: v for k, v in record.items() if k != "rec"}))
+        elif record.get("rec") == "effect_result":
+            outbox.resolve(
+                EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
+            )
+    return outbox
+
+
 @dataclass
 class Replay:
     """Where the log left the state machine (concurrency-model ss2/ss4)."""
@@ -364,6 +401,11 @@ class Replay:
     #: attempts admitted with no durable result -- the crash window, decided
     #: here by re-running the gate rather than guessed at
     recovered: list[ApplyResult] = field(default_factory=list)
+    #: the effects this log intended and what became of them (ss5). Read from
+    #: the records rather than re-planned: an effect the previous engine
+    #: decided is a fact, and re-deriving it would let a changed planner
+    #: silently disagree with the log about what was meant to happen.
+    outbox: Outbox = field(default_factory=Outbox)
 
 
 def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
@@ -383,7 +425,7 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
     resurrect a killed job -- the case DL-44's amendment added the advance
     record for, now decided by record rather than by absence."""
     decisions = read_decisions(records)
-    replay = Replay(decisions=decisions)
+    replay = Replay(decisions=decisions, outbox=read_outbox(records))
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
         applied = apply_attempt(oracle, attempt, decided=durable)

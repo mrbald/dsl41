@@ -934,12 +934,12 @@ def _adapters(client: SupervisorClient) -> dict:
     }
 
 
-async def _resume_and_finish(run_root: Path) -> tuple[str, list]:
+async def _resume_and_finish(run_root: Path, catalog=None) -> tuple[str, list]:
     client = SupervisorClient(run_root)
     await client.ensure_running()
     await client.acquire()
     engine = await resume_run(
-        CATALOG,
+        catalog if catalog is not None else CATALOG,
         run_root,
         clock=RealClock(),
         adapters=_adapters(client),
@@ -948,6 +948,11 @@ async def _resume_and_finish(run_root: Path) -> tuple[str, list]:
         grace_seconds=2.0,
     )
     await engine.run_until_quiescent(datetime.max)
+    # what `dsl41 run --detached` does before teardown (spec ss3 case b): a
+    # stop must not kill, or every detached shutdown becomes a mass kill. It
+    # matters here because a reattached run now honours cancellation (DL-96);
+    # before that it ignored it, and this line was invisible.
+    engine.detach.stopping = True
     await engine.shutdown()
     status = engine.oracle.store.job["slow"].status
     if engine.journal is not None:
@@ -987,6 +992,146 @@ def test_sigkill_engine_detached_survives_and_reattaches(short_root: Path) -> No
             driver.kill()
             driver.wait()
         _kill_group(run_root)
+
+
+def _append_records(run_root: Path, records: list[dict]) -> None:
+    with (run_root / "journal.jsonl").open("a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _decided_kill(run_root: Path, *, with_effect: bool) -> None:
+    """Put the log in the state an engine leaves when it decides a kill and
+    dies before delivering it (concurrency-model ss5).
+
+    Constructed rather than raced: a live engine cancels the adapter task in
+    the same loop turn that applies the input, so the window is microseconds
+    wide and a test that raced it would pass vacuously whenever it lost. This
+    is the same technique DL-83's spawn-window test uses -- recreate the
+    exact state, then assert on the answer.
+
+    No `result` record: an attempt admitted without one IS the crash window
+    (ss4), and replay re-decides it through the gate, so nothing here has to
+    guess the revisions the decision moved."""
+    records = read_journal(run_root / "journal.jsonl")
+    seq = max(r["seq"] for r in records if "seq" in r) + 1
+    at = max(r["at"] for r in records if "at" in r)
+    appended: list[dict] = [
+        {
+            "rec": "input",
+            "seq": seq,
+            "at": at,
+            "request_id": f"kill-{seq}",
+            "fingerprint": "",  # absent/empty: read_attempts synthesizes it
+            "epoch": 0,
+            "kind": "KILLJOB",
+            "payload": {"job": "slow"},
+            "source": "control",
+        }
+    ]
+    if with_effect:
+        appended.append(
+            {
+                "rec": "effect",
+                "effect_id": f"e{seq}:KILL:slow.1",
+                "kind": "KILL",
+                "job": "slow",
+                "run_number": 1,
+                "executor_id": "local",
+                "index": seq,
+                "at": at,
+            }
+        )
+    _append_records(run_root, appended)
+
+
+async def _resume_and_watch(run_root: Path, command_pid: int) -> bool:
+    """Resume, let the loop settle, and answer whether the command SURVIVED.
+
+    Liveness is sampled before any teardown, deliberately. Both teardowns
+    here would kill it for reasons that have nothing to do with the question:
+    the engine's shutdown cancels live adapter tasks, and the supervisor's
+    SHUTDOWN escalates TERM to every command group it holds. A test that
+    sampled afterwards would report "the kill was delivered" no matter what
+    the outbox did."""
+    catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 300; exit 0\n")
+    client = SupervisorClient(run_root)
+    await client.ensure_running()
+    await client.acquire()
+    engine = await resume_run(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters=_adapters(client),
+        supervisor=client,
+        settle_seconds=1.0,
+        grace_seconds=2.0,
+    )
+    try:
+        await engine.run_until_quiescent(datetime.now())
+        deadline = time.monotonic() + 10.0
+        while pid_alive(command_pid) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        return pid_alive(command_pid)
+    finally:
+        engine.detach.stopping = True  # a stop must not kill (spec ss3 case b)
+        await engine.shutdown()
+        if engine.journal is not None:
+            engine.journal.close()
+        with contextlib.suppress(Exception):
+            await client.shutdown()
+        await client.close()
+
+
+def _kill_decided_before_the_crash(short_root: Path, *, with_effect: bool) -> bool:
+    """Run the scenario; answer whether the command survived the resume."""
+    run_root = short_root / "run"
+    driver = subprocess.Popen(
+        [sys.executable, str(DRIVER), str(run_root), "300"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert driver.stdout is not None
+        assert driver.stdout.readline().strip() == "DRIVER-READY"
+        spawn_path = run_root / "runs" / "slow.1" / "spawn.json"
+        spawn = json.loads(wait_for(lambda: spawn_path.exists() and spawn_path.read_text()))
+        os.kill(driver.pid, signal.SIGKILL)  # -9 the engine ONLY
+        driver.wait()
+        assert pid_alive(spawn["command_pid"]), "the supervisor holds the tether"
+
+        _decided_kill(run_root, with_effect=with_effect)
+        return asyncio.run(_resume_and_watch(run_root, spawn["command_pid"]))
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+            driver.wait()
+        _kill_group(run_root)
+
+
+def test_a_recorded_kill_is_delivered_after_the_engine_that_decided_it_died(
+    short_root: Path,
+) -> None:
+    """concurrency-model ss5, and the leak that made the outbox worth its
+    weight (DL-96).
+
+    A kill used to be a `task.cancel()` with no id and no record. An engine
+    that decided TERMINATED and died before cancelling left a DETACHED run --
+    whose parent is the supervisor, so it survives -- and reconciliation
+    walked straight past it, because its job is already TERMINAL, which reads
+    as "its completion was already replayed". Nothing looked again and the
+    process ran on orphaned.
+
+    With the effect in the log the next engine re-drives it, which is the one
+    side effect runner-design ss7 already permits at resume."""
+    assert _kill_decided_before_the_crash(short_root, with_effect=True) is False
+
+
+def test_without_the_recorded_kill_the_run_is_orphaned(short_root: Path) -> None:
+    """The contrast that makes the test above non-vacuous, and the exact
+    behaviour before the outbox: identical journal, identical resume, minus
+    the one record that says a kill was meant. The process survives."""
+    assert _kill_decided_before_the_crash(short_root, with_effect=False) is True
 
 
 def test_detach_stop_sigint_then_resume_reattaches(short_root: Path) -> None:

@@ -4026,3 +4026,59 @@
   two validations. Extraction is an architecture change and gets its own
   commit — `_running_deadman` came out of `_serve_run` because it names a
   concern, not to buy back lines.
+- DL-96 the effect outbox: intent before the attempt, and the orphaned run
+  that proves why (2026-08-15; stage S5c, DL-93's third slice). Closes
+  CM-09's application half and CM-06's `outcome_unavailable`. §5's four
+  deviations are recorded there as an amendment; this entry is the shape and
+  the two bugs it found.
+  **The leak that makes it worth its weight.** A kill was a `task.cancel()`
+  with no id and no record. An engine that decided TERMINATED and died
+  before cancelling left a DETACHED run — whose parent is the supervisor, so
+  it survives — and reconciliation walked straight past it, because its job
+  is already TERMINAL, which reads as "its completion was already replayed".
+  Nothing looked again and the process ran on orphaned, forever. With the
+  intent in the log the next engine re-drives it. That is not a new licence:
+  runner-design §7 already permits exactly one side effect at resume and
+  names it "recorded kills" — the sentence was aspirational for the detached
+  path and is now literal. The test pins it against its own contrast: the
+  same journal minus the one effect record, and the process survives.
+  **A second bug, found by trying to use the first fix.** The reattach
+  branch of `SupervisedCommandAdapter.run` returned OUTSIDE the
+  cancel handler, so a cancellation never reached the kill ladder: KILLJOB
+  against a REATTACHED detached run stopped the adapter task and left the
+  process running. One await-and-cancel path for both branches now. It also
+  makes `engine.detach.stopping` load-bearing on that path for the first
+  time — the CLI already set it, so the production stop is unchanged, but a
+  test harness that did not was silently relying on the gap.
+  **Built ON the spool, not beside it** (DL-93). Nothing here re-records
+  what the lifecycle tier already knows. A pending SPAWN with a run
+  directory WAS applied — the engine died in the window between launching
+  and recording — so it is reconciled from the spool rather than re-driven,
+  which is also what stops the next dispatch from `mkdir()`ing a run
+  directory that exists. And an undelivered kill met with no live wrapper is
+  resolved three ways from `status.json`: signalled means it landed, exited
+  means the run finished first and the kill is retired, and NO record at all
+  means `indeterminate`. That third branch is where §5's third state earns
+  its keep — two states would report a signal that did land as one that did
+  not.
+  **The outbox subsumes the derived held set.** DL-94 derived held-ness from
+  the oracle's status and said S5c is where intent becomes durable; it is,
+  so `held_jobs` is now "the pending SPAWNs" and DL-94's special case in
+  reconciliation is deleted. A held start survives a restart as a pending
+  effect, which the derivation could not do.
+  **Routing gates SPAWN only.** §8's column is about NEW work: `passive`
+  says running work continues to completion, and a kill is how running work
+  ends. Holding kills during a drain would make KILLJOB stop working exactly
+  while an operator is most likely to reach for it.
+  **The ghost-run gate moved to planning.** It has always meant "a
+  CHANGE_STATUS-parity STARTING overwrite launches nothing"; it now decides
+  whether an EFFECT exists rather than whether a task is created, which is
+  the honest place — the shell never intended to act, so nothing belongs in
+  the log.
+  `effect_id` is DERIVED (`e<index>:<KIND>:<job>.<run>`), not minted: one
+  admitted input decides at most one effect of each kind per job, so replay
+  reconstructs the same outbox without a uuid the log would have to be
+  trusted for. `load_json` became public in runner_adapters — the spool
+  reader is now used from two modules, and arch_check blocked the private
+  cross-module import, correctly.
+  2014 -> 2033 passed; ruff, mypy, arch_check blocking checks clean.

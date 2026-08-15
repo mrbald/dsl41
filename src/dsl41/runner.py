@@ -174,6 +174,7 @@ from dsl41.runner_adapters import (
     SupervisorUnavailable,
     Terminated,
     _fsync_dir,
+    load_json,
     _resolve_spool,
 )
 from dsl41.runner_admission import (
@@ -185,10 +186,18 @@ from dsl41.runner_admission import (
     Envelope,
     Frontiers,
     RequestCollision,
+    Applied,
     apply_attempt,
     fingerprint,
 )
 from dsl41.runner_clock import Clock, EngineError
+from dsl41.runner_effects import (
+    Effect,
+    EffectOutcome,
+    Outbox,
+    plan_effects,
+    superseded_reason,
+)
 from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
     HostCommand,
@@ -339,6 +348,11 @@ class Engine:
         #: cancelled tasks awaiting collection; _settle re-raises any
         #: non-CancelledError they die with (fail loudly, never swallow)
         self._reaping: list[asyncio.Task[None]] = []
+        #: concurrency-model ss5: what this engine intends to do to its
+        #: execution hosts, and what came of it. Restored from the log on
+        #: resume -- an engine that forgot a kill it had decided would leave a
+        #: detached run orphaned for the rest of its life.
+        self.outbox = Outbox()
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host
@@ -351,45 +365,17 @@ class Engine:
         self.oracle.store.touch_host(self.executor_id, self.clock.now())
 
     def held_jobs(self) -> frozenset[str]:
-        """Jobs the oracle has started and this shell has not dispatched,
+        """Jobs with a start this shell intended and has not dispatched,
         because their executor routes no new effects (concurrency-model ss8).
 
-        DERIVED from two facts that already exist -- the oracle's status and
-        the ghost-run gate's record of the last run_number actually
-        dispatched -- rather than stored. A held set of its own would be a
-        second record of intent, and S5c's outbox is where intent becomes
-        durable; two of them is the parallel model DL-91 exists to catch.
-
-        The status set is STARTING *and* RUNNING: the oracle walks a start
-        through both inside one feed (`_run`), so a job whose spawn the shell
-        held is left RUNNING with no process. The run_number comparison is
-        what makes that unambiguous -- only an oracle-decided start advances
-        it, so a CHANGE_STATUS-parity overwrite (which advances nothing) is
-        inert rather than held.
-
-        The job_type filter is `_spawn`'s: a BOX or an unregistered type has
-        no dispatch row, so it is not waiting on one."""
-        return frozenset(
-            job
-            for job, rt in self.oracle.store.job.items()
-            if rt.status in ("STARTING", "RUNNING")
-            and rt.run_number > self._dispatched.get(job, 0)
-            and (job_ir := self.oracle.catalog.jobs.get(job)) is not None
-            and job_ir.job_type in self.adapters
-        )
-
-    def _redrive_held(self) -> None:
-        """Dispatch what a routing change unblocked (concurrency-model ss7's
-        "re-drive pending", scoped to this engine's own executor).
-
-        A drain is REVERSIBLE -- ss8 says so, and it is the whole reason
-        `passive` exists rather than only `evicted`. Nothing else would ever
-        start these jobs: the oracle decided their start once and will not
-        decide it again, so without this an `activate` would leave every job
-        the drain caught STARTING forever, which is a worse failure than the
-        one draining avoids."""
-        for job in sorted(self.held_jobs()):
-            self._spawn(job)
+        The outbox IS the held set (S5c): a pending SPAWN is exactly an
+        intent recorded and not yet applied. DL-94 derived this from the
+        oracle's status because intent had nowhere durable to live; now it
+        does, and deriving it a second way would be the parallel model DL-91
+        exists to catch. It also survives a restart, which the derivation
+        could not -- a held job used to need a special case in reconciliation
+        to avoid being failed as never-spawned."""
+        return frozenset(e.job for e in self.outbox.pending() if e.kind == "SPAWN")
 
     def live_jobs(self) -> frozenset[str]:
         """Jobs with an in-flight adapter task. The ss10 read model needs it
@@ -554,7 +540,7 @@ class Engine:
                 _, _, pending = heapq.heappop(self._queue)
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
-                self._dispatch(out)
+                self._dispatch()
             elif take_sched:
                 # the calendar tick is next: enqueue its STARTJOB(s), stamped
                 # at the tick, and let the next iteration take them like any
@@ -573,7 +559,7 @@ class Engine:
                 # no verb (concurrency-model ss4)
                 out = await self._admit_and_apply(_Pending(at=eff_due, request_id=None))
                 emitted.extend(out)
-                self._dispatch(out)
+                self._dispatch()
             elif self.clock.virtual or (
                 not self.hold_open
                 and not self._live
@@ -712,18 +698,45 @@ class Engine:
         applied = apply_attempt(self.oracle, attempt)
         self.decisions.record(applied.result)
         self.frontiers = self.frontiers.record(attempt.index)
+        # step 7 commits the decision and the outbox entries it implies as ONE
+        # batch (concurrency-model ss1): an engine that dies between deciding
+        # and acting must leave behind the record that it MEANT to act, or a
+        # kill it decided vanishes with the task that would have delivered it
+        effects = self._plan_effects(applied, attempt.index)
         if self.journal is not None:
             self.journal.result(applied.result)
+            for effect in effects:
+                self.journal.effect(effect)
+        for effect in effects:
+            self.outbox.record(effect)
         if applied.result.decision == "rejected" and ev is not None:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
-        if attempt.host is not None and applied.result.decision == "applied":
-            # a routing change can only ever ADD routes, so the one thing it
-            # may unblock is work the drain caught. Before the answer, so an
-            # `activate` returns once the estate is moving again
-            self._redrive_held()
         self._answer(pending, applied.result)
         return applied.emitted
+
+    def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
+        """ss4 step 7's other half: what the shell now intends to do about
+        what the oracle just decided."""
+        return plan_effects(
+            applied.emitted,
+            index=index,
+            executor_id=self.executor_id,
+            runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
+            dispatched=self._dispatched,
+            live={job: run.run_number for job, run in self._live.items()},
+            dispatchable=self._dispatchable(),
+        )
+
+    def _dispatchable(self) -> frozenset[str]:
+        """Jobs this engine has a dispatch row for: a catalog entry whose
+        job_type has a registered adapter. Boxes fold from members and
+        pseudo-entries have no definition, so neither is ever an effect."""
+        return frozenset(
+            name
+            for name, job_ir in self.oracle.catalog.jobs.items()
+            if job_ir.job_type in self.adapters
+        )
 
     @staticmethod
     def _answer(pending: _Pending, result: ApplyResult) -> None:
@@ -756,59 +769,111 @@ class Engine:
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
         )
 
-    def _dispatch(self, emitted: list[Event]) -> None:
-        for ev in emitted:
-            if ev.kind != "STATUS":
-                continue  # alarms: journal + UI surface only (ss4)
-            job = ev.job()
-            if job is None:
-                continue
-            status = ev.payload.get("status")
-            if status == "STARTING":
-                self._spawn(job)
-            elif status in TERMINAL:
-                live = self._live.pop(job, None)
-                if live is not None:
-                    live.task.cancel()  # the oracle decided; the shell kills
-                    self._reaping.append(live.task)
+    def _dispatch(self) -> None:
+        """Drain the outbox: apply every pending effect, in admission order
+        (concurrency-model ss5).
 
-    def _spawn(self, job: str) -> None:
-        job_ir = self.oracle.catalog.jobs.get(job)
-        if job_ir is None:
-            return  # pseudo-entries (name^INST) have no definition to run
-        adapter = self.adapters.get(job_ir.job_type)
-        if adapter is None:
-            return  # boxes and unregistered job_types have no dispatch row
-        run_number = self.oracle.store.job[job].run_number
-        if run_number <= self._dispatched.get(job, 0):
-            # STARTING emitted without a run_number bump: an injected
-            # CHANGE_STATUS-parity overwrite, not an oracle-decided start.
-            # Vendor parity: sendevent CHANGE_STATUS rewrites the DB status
-            # and launches nothing -- neither do we (ghost-run gate)
+        The shell's whole dispatch surface, and the only place an effect is
+        applied. Ordering is not decoration -- ss5 makes per-run effect
+        ordering mandatory, because a KILL decided after a SPAWN that
+        overtook it would stop a run that had not started."""
+        for effect in self.outbox.pending():
+            self._apply_effect(effect)
+
+    def _apply_effect(self, effect: Effect) -> None:
+        """One effect, at-most-once (concurrency-model ss5, CM-09).
+
+        Three gates before anything happens, and each keeps out a different
+        wrong act: a host that routes nothing leaves the effect PENDING (ss8
+        -- held, not failed and not rerouted); an effect the world has moved
+        past is RETIRED rather than applied; and only then is it attempted.
+        The outcome is recorded either way, because "attempted and we cannot
+        say" is a fact that has to survive a crash (ss5's third state)."""
+        if effect.kind == "SPAWN" and not routes_new_effects(
+            self.oracle.store.host(effect.executor_id)
+        ):
+            # ss8: a drained or quarantined host routes no NEW effect. Left
+            # pending, which IS the held set -- rerouting without proof the old
+            # executor is dead is the double run this model exists to prevent
+            # (ss7), and failing it would turn a maintenance window into an
+            # estate-wide incident.
+            #
+            # SPAWN only. ss8's column is about NEW work: `passive` says
+            # running work continues to completion, and a kill is how running
+            # work ends. Holding kills during a drain would make KILLJOB stop
+            # working exactly while an operator is most likely to reach for it.
             return
-        if not routes_new_effects(self.oracle.store.host(self.executor_id)):
-            # concurrency-model ss8: a drained (or quarantined) host routes no
-            # NEW effect. The job is HELD, not rerouted and not failed --
-            # rerouting without proof the old executor is dead is the double
-            # run this whole model exists to prevent (ss7), and failing it
-            # would turn a maintenance window into an estate-wide incident.
-            # Nothing is recorded: held is DERIVED from the oracle's status
-            # and the gate below, so there is no second record of intent to
-            # fall out of step with the first (`held_jobs`).
+        reason = superseded_reason(
+            effect,
+            self.oracle.store.job.get(effect.job),
+            self._live[effect.job].run_number if effect.job in self._live else None,
+        )
+        if reason is not None:
+            self._resolve_effect(
+                EffectOutcome(effect_id=effect.effect_id, state="retired", detail=reason)
+            )
             return
-        self._dispatched[job] = run_number
-        stale = self._live.pop(job, None)
+        if effect.kind == "SPAWN":
+            self._apply_spawn(effect)
+        else:
+            self._apply_kill(effect)
+
+    def _resolve_effect(self, outcome: EffectOutcome) -> None:
+        self.outbox.resolve(outcome)
+        if self.journal is not None:
+            self.journal.effect_result(outcome)
+
+    def _apply_spawn(self, effect: Effect) -> None:
+        job_ir = self.oracle.catalog.jobs.get(effect.job)
+        adapter = self.adapters.get(job_ir.job_type) if job_ir is not None else None
+        if job_ir is None or adapter is None:
+            # unreachable through planning (`_dispatchable` filters both), so
+            # meeting it means the catalog and the log disagree
+            self._resolve_effect(
+                EffectOutcome(
+                    effect_id=effect.effect_id,
+                    state="retired",
+                    detail=f"{effect.job} has no dispatch row in this catalog",
+                )
+            )
+            return
+        self._dispatched[effect.job] = effect.run_number
+        stale = self._live.pop(effect.job, None)
         if stale is not None:
             # one live attempt per job; a report from the old task would be
             # gate-dropped anyway (run_number mismatch) -- cancel is tidier
             stale.task.cancel()
             self._reaping.append(stale.task)
-        self._launch(job_ir, run_number, adapter)
+        self._launch(job_ir, effect.run_number, adapter)
+        self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
+
+    def _apply_kill(self, effect: Effect) -> None:
+        """The oracle decided terminal; the shell stops the run.
+
+        Cancelling the adapter task IS the effect at this tier -- the
+        adapter's TERM/grace/KILL ladder is the lifecycle tier's business and
+        runs on the way out. `applied` therefore means the cancellation was
+        delivered to a live run, which is the whole of what this tier can
+        promise; the wrapper records what became of the process."""
+        live = self._live.pop(effect.job, None)
+        if live is None:
+            self._resolve_effect(
+                EffectOutcome(
+                    effect_id=effect.effect_id,
+                    state="retired",
+                    detail=f"{effect.job} has no live run: nothing to cancel",
+                )
+            )
+            return
+        live.task.cancel()
+        self._reaping.append(live.task)
+        self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
 
     def _launch(self, job_ir: JobIR, run_number: int, adapter: JobAdapter) -> None:
-        """Create the adapter task, bypassing the ghost-run gate. Reached
-        from _spawn (oracle-decided starts) and from resume's FW re-dispatch
-        (module docstring), where the seeded gate must not refuse."""
+        """Create the adapter task. Reached from `_apply_spawn` (an outbox
+        effect) and from resume's FW re-dispatch and detached reattach
+        (module docstring), neither of which goes through an effect: one is
+        an idempotent re-read and the other is a run that never stopped."""
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._run_adapter(job_ir, run_number, adapter))
         task.add_done_callback(lambda _t: self._activity.set())
@@ -977,6 +1042,11 @@ async def resume_run(
     # than applied a second time
     engine.frontiers = replay.frontiers
     engine.decisions = replay.decisions
+    # ss5: the effects the previous engine intended, and what became of them.
+    # An engine that forgot a kill it had decided would leave a detached run
+    # orphaned for the rest of its life -- its job is already TERMINAL, so
+    # reconciliation skips it, and nothing else would ever look again.
+    engine.outbox = replay.outbox
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -1069,6 +1139,27 @@ async def _reconcile(
             source="reconcile",  # a COMPLETION: the ss4 gate applies, replay may know better
         )
 
+    # ss5, and the classic outbox window: `_apply_spawn` launches and THEN
+    # records the outcome, so an engine that died between the two left a
+    # pending effect for a run that may well have started. The spool is the
+    # record (DL-93) -- a run directory means it reached the host -- so the
+    # effect is reconciled from it rather than re-driven. Without this the
+    # next dispatch would drain a pending SPAWN into a second `mkdir()` of a
+    # run directory that already exists.
+    for effect in [e for e in engine.outbox.pending() if e.kind == "SPAWN"]:
+        spool = candidates.get((effect.job, effect.run_number))
+        if (effect.job, effect.run_number) not in candidates:
+            continue
+        spawned = load_json(spool / "spawn.json") if spool is not None else None
+        engine._resolve_effect(
+            EffectOutcome(
+                effect_id=effect.effect_id,
+                state="applied",
+                run_id=(spawned or {}).get("run_id"),
+                detail="reconciled from the spool: the run reached the host",
+            )
+        )
+
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
         if rt is None or rt.run_number != run_number or rt.status in TERMINAL:
@@ -1136,14 +1227,108 @@ async def _reconcile(
             continue  # no dispatch row live either: parity with the running engine
         if not routing:
             # HELD, not lost (module docstring, concurrency-model ss8): there
-            # was no crash to lose this to, only a drain doing its job. Un-seed
-            # the ghost-run gate, set above from the run_number alone, so the
-            # job reads as held again and an `activate` re-drives it.
-            engine._dispatched.pop(job, None)
+            # was no crash to lose this to, only a drain doing its job. Its
+            # pending SPAWN effect stays pending and IS the held record, so
+            # nothing here has to reconstruct one (S5c).
             continue
+        # decided and never applied. ss7 fails such a start rather than
+        # re-running it, so the effect is RETIRED first -- an outbox entry
+        # left pending would be drained by the next dispatch and would do the
+        # very thing this branch exists to refuse.
+        for effect in engine.outbox.pending_for(job, "SPAWN"):
+            engine._resolve_effect(
+                EffectOutcome(
+                    effect_id=effect.effect_id,
+                    state="retired",
+                    detail="dispatch lost to engine crash: ss7 fails a start with no spool trace",
+                )
+            )
         _inject(
             job,
             rt.run_number,
             {"status": "FAILURE", "cause": "dispatch lost to engine crash (never spawned)"},
             last_at,
         )
+    await _redrive_recorded_kills(engine, supervised_live)
+
+
+async def _redrive_recorded_kills(
+    engine: Engine, supervised_live: dict[tuple[str, int], dict[str, Any]]
+) -> None:
+    """Deliver the kills the previous engine decided and did not get to
+    (concurrency-model ss5; S5c).
+
+    This closes a real leak. A kill used to be a `task.cancel()` with no id
+    and no record: an engine that decided TERMINATED and died before
+    cancelling left a DETACHED run whose parent is the supervisor, and
+    reconciliation skipped it on the way past -- its job is already TERMINAL,
+    which reads as "its completion was already replayed". Nothing looked
+    again, and the process ran on orphaned.
+
+    Re-driving is not a new licence: runner-design ss7 already permits
+    exactly this side effect at resume, and only this one ("no side effects
+    on resume beyond recorded kills").
+
+    A kill whose run is NOT alive is resolved from the spool, three ways --
+    which is where ss5's third state earns its keep. `status.json` saying the
+    command was signalled means the kill landed; saying it exited means it
+    finished first and the kill is retired, superseded by the truth. No
+    status record at all and no live wrapper means nobody can say whether the
+    signal landed, and `indeterminate` is the only honest answer: reporting
+    it either way would invent a fact about a process nothing observed
+    (E7)."""
+    assert engine.run_root is not None
+    for effect in [e for e in engine.outbox.pending() if e.kind == "KILL"]:
+        listing = supervised_live.get((effect.job, effect.run_number))
+        job_ir = engine.oracle.catalog.jobs.get(effect.job)
+        adapter = engine.adapters.get(job_ir.job_type) if job_ir is not None else None
+        if (
+            job_ir is not None
+            and listing is not None
+            and listing.get("wrapper_alive")
+            and isinstance(adapter, SupervisedCommandAdapter)
+        ):
+            # the adapter's own TERM/grace/KILL ladder, driven directly. Not
+            # through a reattached task and a cancel: a task cancelled before
+            # its first step never enters the handler that runs the ladder, so
+            # that route would resolve the effect while stopping nothing.
+            # `_live` is empty here anyway -- the supervisor's LIST is what
+            # says this run is alive, which is why `_apply_effect`'s
+            # supersession check (which reads `_live`) is not the right gate
+            # at resume.
+            run_id = str(listing["run_id"])
+            await adapter.kill(run_id)
+            engine._resolve_effect(
+                EffectOutcome(
+                    effect_id=effect.effect_id,
+                    state="applied",
+                    run_id=run_id,
+                    detail="re-driven at resume: the wrapper was still alive",
+                )
+            )
+            continue
+        engine._resolve_effect(_kill_outcome_from_spool(engine.run_root, effect))
+
+
+def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
+    """What the spool can say about an undelivered kill (ss5's three states)."""
+    run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
+    status = load_json(run_dir / "status.json")
+    if status is None:
+        return EffectOutcome(
+            effect_id=effect.effect_id,
+            state="indeterminate",
+            detail="no status record and no live wrapper: nothing can say whether it landed",
+        )
+    observed = status.get("observed")
+    signalled = isinstance(observed, dict) and observed.get("outcome") == "signaled"
+    return EffectOutcome(
+        effect_id=effect.effect_id,
+        state="applied" if signalled else "retired",
+        run_id=status.get("run_id"),
+        detail=(
+            "the spool records the command as signalled"
+            if signalled
+            else "the run ended on its own before the kill was delivered"
+        ),
+    )
