@@ -34,7 +34,6 @@
   "private_cross_module_imports": [
     "src/dsl41/cli.py:dsl41.runner_journal._dsl41_version",
     "src/dsl41/lint.py:dsl41.ir._unquote",
-    "src/dsl41/runner.py:dsl41.oracle._TERMINAL",
     "src/dsl41/runner.py:dsl41.runner_adapters._fsync_dir",
     "src/dsl41/runner.py:dsl41.runner_adapters._resolve_spool",
     "src/dsl41/runner.py:dsl41.runner_journal._last_journal_at",

@@ -183,7 +183,7 @@ JobStatus = Literal[
 #: TRUE for it -- and every status/exitcode atom reads false (it never ran).
 _N_FALSE_STATUSES: frozenset[str] = frozenset({"STARTING", "RUNNING"})
 
-_TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
+TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
 
 EventKind = Literal[
     "STATUS",
@@ -450,7 +450,7 @@ class RuntimeState:
         transition -- the Q2 anchor is the job's OWN last end (DL-54) -- and
         an exit code is written only when one was reported."""
         fields: dict[str, object] = {"status": status, "status_at": at}
-        if status in _TERMINAL:
+        if status in TERMINAL:
             fields["last_end_at"] = at
         if exit_code is not None:
             fields["exit_code"] = exit_code
@@ -556,6 +556,74 @@ class OracleError(ValueError):
     pass
 
 
+class InputBatch:
+    """One admitted input, applied as ONE store transaction.
+
+    The frozen admission order (concurrency-model ss4) commits a batch --
+    the time observation `TimeAdvanced(at)` and the attempt itself -- as a
+    unit, and ss3 puts one revision on that unit: an entity moves at most
+    once per COMMITTED INPUT, which is not the same as once per call into
+    the oracle. Doing the two halves as two calls would let one command bump
+    an entity twice and make `expect` name a revision no client ever read.
+
+    Entering applies the time half; timers due at or before `at` fire HERE,
+    which is what puts them ahead of the shell's gate (ss4 step 5 -- a
+    term_run_time firing between the gate and the apply would defeat the
+    precondition it just passed). `feed` applies the attempt. Leaving
+    commits, whether or not the attempt was fed and whether or not the drain
+    raised: the oracle has no rollback, so whatever DID change is durable
+    and a reader holding the old revision must be invalidated by it (DL-87).
+
+    Hold one open only when a decision sits between the halves -- the
+    engine's stale-completion gate does, and S3's preconditions will.
+    """
+
+    def __init__(self, oracle: Oracle, at: datetime) -> None:
+        self._oracle = oracle
+        self._at = at
+        #: events emitted across the whole batch, in order; set at commit
+        self.emitted: list[Event] = []
+        #: entity key -> its revision after this input -- the ss4 step-7
+        #: record of what the input moved, and the only place the changed set
+        #: leaves the owner
+        self.revisions: dict[str, int] = {}
+        self._emitted_start = 0
+
+    def __enter__(self) -> InputBatch:
+        oracle = self._oracle
+        if oracle._now is not None and self._at < oracle._now:
+            raise OracleError(f"input time went backwards: {self._at} < {oracle._now}")
+        self._emitted_start = len(oracle._emitted)
+        oracle.store.begin_input()
+        try:
+            # fire timers due at or before this input first, in time order
+            oracle._fire_timers_due(self._at)
+            oracle._now = self._at
+            oracle._lazy_clock_checks()
+            oracle._drain()  # checks-then-drain adjacency
+        except BaseException:
+            self._commit()
+            raise
+        return self
+
+    def feed(self, ev: Event) -> None:
+        """Apply the attempt half. Its stamp IS the batch's time observation,
+        so a mismatch is a caller bug, not a second observation."""
+        if ev.at != self._at:
+            raise OracleError(f"attempt stamped {ev.at} in a batch opened at {self._at}")
+        self._oracle._queue.append(ev)
+        self._oracle._drain()
+
+    def __exit__(self, *exc: object) -> None:
+        self._commit()
+
+    def _commit(self) -> None:
+        oracle = self._oracle
+        changed = oracle.store.commit_input()
+        self.revisions = {key: oracle.store.revision(key) for key in changed}
+        self.emitted = oracle._emitted[self._emitted_start :]
+
+
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
 
@@ -609,27 +677,20 @@ class Oracle:
     def trace(self) -> list[TraceEntry]:
         return [entry.model_copy() for entry in self._trace]  # no aliasing out
 
+    def batch(self, at: datetime) -> InputBatch:
+        """Open one admitted input at `at` (concurrency-model ss4). Use this
+        only when a decision sits BETWEEN the two halves of the batch -- the
+        time observation and the attempt -- as the engine's gate does. With
+        no such decision, feed() and advance() are the same thing said in one
+        line."""
+        return InputBatch(self, at)
+
     def feed(self, ev: Event) -> list[Event]:
         """Process one injected event (+ due timers + cascade); return events
         emitted during this call. Feed times must be non-decreasing."""
-        if self._now is not None and ev.at < self._now:
-            raise OracleError(f"feed time went backwards: {ev.at} < {self._now}")
-        emitted_start = len(self._emitted)
-        self.store.begin_input()
-        try:
-            # fire timers due at or before this event first, in time order
-            self._fire_timers_due(ev.at)
-            self._now = ev.at
-            self._lazy_clock_checks()
-            self._queue.append(ev)
-            self._drain()
-        finally:
-            # DL-87: revisions commit even if the drain raised. The oracle has
-            # no rollback, so whatever DID change is durable and a reader that
-            # saw the old revision must be invalidated by it; swallowing the
-            # bump would hand that reader a stale success.
-            self.store.commit_input()
-        return self._emitted[emitted_start:]
+        with self.batch(ev.at) as batch:
+            batch.feed(ev)
+        return batch.emitted
 
     def next_timer_due(self) -> datetime | None:
         """Read-only peek at the timer heap (runner-design ss3): the earliest
@@ -672,23 +733,13 @@ class Oracle:
 
     def advance(self, now: datetime) -> list[Event]:
         """Fire timers due <= now without an external event (runner-design
-        ss3): factored from feed()'s drain, same non-decreasing time
-        discipline. The clock is considered to have reached `now`, so a later
-        feed()/advance() before `now` errors. Bisimulation (runner-design
-        ss13) pins that feed-only and advance+feed schedules trace
-        identically."""
-        if self._now is not None and now < self._now:
-            raise OracleError(f"advance time went backwards: {now} < {self._now}")
-        emitted_start = len(self._emitted)
-        self.store.begin_input()  # a standalone time observation is an input (ss4)
-        try:
-            self._fire_timers_due(now)
-            self._now = now
-            self._lazy_clock_checks()
-            self._drain()  # checks-then-drain adjacency, same as feed()
-        finally:
-            self.store.commit_input()
-        return self._emitted[emitted_start:]
+        ss3): the same input as feed(), with the attempt absent. The clock is
+        considered to have reached `now`, so a later feed()/advance() before
+        `now` errors. Bisimulation (runner-design ss13) pins that feed-only
+        and advance+feed schedules trace identically."""
+        with self.batch(now) as batch:
+            pass  # a standalone time observation is an input (concurrency-model ss4)
+        return batch.emitted
 
     def _fire_timers_due(self, at: datetime) -> None:
         while (popped := self.store.pop_timer_due(at)) is not None:
@@ -738,7 +789,7 @@ class Oracle:
             box = job_ir.box.box_name
             if box is not None:
                 self._on_member_transition(box, job, old, new)
-            if job_ir.job_type == "BOX" and new in _TERMINAL:
+            if job_ir.job_type == "BOX" and new in TERMINAL:
                 # PENDING: Q3c -- a member's arm is scoped to the box run
                 # that armed it (DL-54 review MAJOR): an unconsumed arm dies
                 # with the run, BEFORE any wake can ride it (nested boxes
@@ -761,7 +812,7 @@ class Oracle:
         # the FREED capacity, not overwrite its own still-held record and strand
         # a unit (adversarial review BLOCKER). Waiters then wake after condition
         # referencers -- the documented deterministic order.
-        released = new in _TERMINAL and self._pool.holds(job)
+        released = new in TERMINAL and self._pool.holds(job)
         if released:
             self._pool.release(job, new)
         # SEM-01/dossier ss0: the transition wakes exactly the jobs whose
@@ -920,7 +971,7 @@ class Oracle:
         wanted = atom.status
         actual = rt.status
         if wanted == "DONE":
-            hit = actual in _TERMINAL
+            hit = actual in TERMINAL
         elif wanted == "NOTRUNNING":
             hit = actual not in _N_FALSE_STATUSES
         else:
@@ -1219,12 +1270,12 @@ class Oracle:
         if box_rt.status == "TERMINATED":
             return  # SEM-13: sticky until the next box start
         # SEM-12 gating: overrides are evaluated on member transitions
-        if box_rt.status == "RUNNING" and new in _TERMINAL | {"RUNNING"}:
+        if box_rt.status == "RUNNING" and new in TERMINAL | {"RUNNING"}:
             if self._apply_box_overrides(box, box_ir, member, new):
                 return
         if box_rt.status == "RUNNING" and self._all_members_done(box):
             self._fold_box_default(box, box_ir)
-        elif box_rt.status not in ("RUNNING", "STARTING") and new in _TERMINAL:
+        elif box_rt.status not in ("RUNNING", "STARTING") and new in TERMINAL:
             # SEM-15 [C]: a member change on a non-running box re-derives the
             # box's status (TERMINATED already returned above, SEM-13 sticky)
             self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
@@ -1235,7 +1286,7 @@ class Oracle:
         outside a live run. Only fires when every member is terminal."""
         members = self._members(box)
         statuses = [self._runtime(m).status for m in members]
-        if not members or not all(s in _TERMINAL for s in statuses):
+        if not members or not all(s in TERMINAL for s in statuses):
             return
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
@@ -1259,7 +1310,7 @@ class Oracle:
 
     def _apply_box_overrides(self, box: str, box_ir: JobIR, member: str, new: str) -> bool:
         """Returns True if an override fired and set the box status."""
-        member_completed = new in _TERMINAL
+        member_completed = new in TERMINAL
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
@@ -1295,7 +1346,7 @@ class Oracle:
                 continue  # bypassed members do not block completion
             if member not in ran:
                 return False  # not yet run this box execution (incl. held)
-            if rt.status not in _TERMINAL:
+            if rt.status not in TERMINAL:
                 return False  # still STARTING/RUNNING
         return True
 

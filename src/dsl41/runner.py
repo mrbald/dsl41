@@ -102,7 +102,7 @@ Phase 11c (ss5, ss8; DL-45 pins the decisions):
   completion arriving mid-wait re-plans the iteration. 11b journaled the
   advance and then slept uninterruptibly, so a completion stamped inside
   the sleep fed behind the already-advanced oracle clock and crashed the
-  engine (feed time went backwards); regression-pinned. Virtual-domain
+  engine (input time went backwards); regression-pinned. Virtual-domain
   jumps never yield mid-move, so the 11a determinism pins are unchanged.
 
 The ss10 control plane -- the socket server, its wire vocabulary, and both
@@ -130,7 +130,7 @@ from typing import Any
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.oracle import _TERMINAL, Event, Oracle
+from dsl41.oracle import TERMINAL, Event, Oracle
 from dsl41.runner_adapters import (
     AdapterContext,
     DetachSignal,
@@ -433,7 +433,7 @@ class Engine:
         rt = self.oracle.store.job.get(job)
         if rt is None or rt.run_number != ev.payload.get("run_number"):
             return "run_number mismatch"
-        if rt.status in _TERMINAL:
+        if rt.status in TERMINAL:
             return "job already terminal"
         return None
 
@@ -447,7 +447,7 @@ class Engine:
             status = ev.payload.get("status")
             if status == "STARTING":
                 self._spawn(job)
-            elif status in _TERMINAL:
+            elif status in TERMINAL:
                 live = self._live.pop(job, None)
                 if live is not None:
                     live.task.cancel()  # the oracle decided; the shell kills
@@ -727,7 +727,7 @@ async def _reconcile(
 
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
-        if rt is None or rt.run_number != run_number or rt.status in _TERMINAL:
+        if rt is None or rt.run_number != run_number or rt.status in TERMINAL:
             continue  # superseded run, or its completion already replayed
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:

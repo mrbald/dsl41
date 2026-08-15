@@ -397,6 +397,58 @@ def test_cm02_one_input_that_changes_many_things_increments_each_entity_once() -
     assert after == {key: rev + 1 for key, rev in before.items()}
 
 
+_TERM_JIL = "insert_job: x\njob_type: c\ncommand: sleep 300\nterm_run_time: 1\n"
+
+
+def test_cm02_a_batch_is_one_input_even_though_it_has_two_halves() -> None:
+    """The committed input of ss3's cardinality rule is the ss4 BATCH -- the
+    time observation and the attempt together -- not one call into the oracle.
+
+    Here the deadline fires and the attempt lands on the same job, so a shell
+    that applied the halves as two calls would put x two revisions on for one
+    admitted input, and a client's `expect` would name a revision that no read
+    of that job ever returned. The paired assertion below is the contrast:
+    advance()-then-feed() really does move it twice, so the batch is doing
+    work rather than restating the default."""
+    o = Oracle(lower_source(_TERM_JIL))
+    o.feed(_ev("STARTJOB", 0, job="x"))
+    before = o.store.revision("job:x")
+
+    at = T0 + timedelta(minutes=1)
+    with o.batch(at) as batch:
+        assert o.store.job["x"].status == "TERMINATED"  # the deadline fired on entry
+        batch.feed(Event(at=at, kind="STATUS", payload={"job": "x", "status": "SUCCESS"}))
+    assert o.store.job["x"].status == "SUCCESS"  # and the attempt landed after it
+    assert o.store.revision("job:x") == before + 1
+    assert batch.revisions == {"job:x": before + 1}  # the ss4 step-7 record
+
+    twice = Oracle(lower_source(_TERM_JIL))
+    twice.feed(_ev("STARTJOB", 0, job="x"))
+    base = twice.store.revision("job:x")
+    twice.advance(at)
+    twice.feed(Event(at=at, kind="STATUS", payload={"job": "x", "status": "SUCCESS"}))
+    assert twice.store.revision("job:x") == base + 2
+
+
+def test_a_batch_that_raises_mid_attempt_still_commits_what_it_changed() -> None:
+    """DL-87's no-rollback rule, now that the commit sits in a context
+    manager: the oracle cannot undo what the time half already did, so a
+    failing attempt must not take the deadline's revision down with it. A
+    reader still holding the pre-input revision has to be invalidated by the
+    kill that really happened."""
+    o = Oracle(lower_source(_TERM_JIL))
+    o.feed(_ev("STARTJOB", 0, job="x"))
+    before = o.store.revision("job:x")
+    at = T0 + timedelta(minutes=1)
+    with pytest.raises(OracleError):
+        with o.batch(at) as batch:
+            batch.feed(Event(at=at + timedelta(minutes=1), kind="STATUS", payload={"job": "x"}))
+    assert o.store.job["x"].status == "TERMINATED"
+    assert o.store.revision("job:x") == before + 1
+    o.store.begin_input()  # the transaction really was closed, not left open
+    o.store.commit_input()
+
+
 def test_cm02_an_input_that_changes_nothing_increments_nothing() -> None:
     """The other half of cardinality, and the one a per-write implementation
     gets wrong for free: a refused start and a same-value SET_GLOBAL are real
