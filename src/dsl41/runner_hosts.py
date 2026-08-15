@@ -60,16 +60,23 @@ from dsl41.oracle_state import HostRuntime, HostState, RuntimeState
 #: configured name until S5d gives remote relays ids of their own.
 LOCAL_EXECUTOR_ID = "local"
 
-#: The operator's three ss8 verbs. `quarantine` is deliberately absent: ss8
-#: assigns it to the leader, automatically, on unreachability, and the
-#: detector that decides that is S5d's. Giving an operator a verb for it
-#: would blur it with `drain`, which asserts nothing about reachability.
-HostVerb = Literal["activate", "drain", "evict"]
+#: ss8's verbs, in two sets that are deliberately not one.
+#:
+#: `HOST_VERBS` is the OPERATOR's, and it is what the wire accepts: an
+#: operator asserts intent about routing. `quarantine` and `reinstate` are
+#: the LEADER's, set automatically from what it can and cannot reach, and
+#: they arrive through the engine's own door (`Engine.inject_host`) with no
+#: `expect` -- ss0's mandate is on externally requested mutations, and an
+#: observation the leader makes about reachability is not one. Giving an
+#: operator a verb for quarantine would blur it with `drain`, which asserts
+#: nothing about whether the host is answering.
+HostVerb = Literal["activate", "drain", "evict", "quarantine", "reinstate"]
 HOST_VERBS: frozenset[str] = frozenset(("activate", "drain", "evict"))
+LEADER_VERBS: frozenset[str] = frozenset(("quarantine", "reinstate"))
 
-#: The state each verb moves a host to. `evict` is not here because it is
-#: not a state assignment (it fences and attributes as well) -- see
-#: `RuntimeState.evict_host`.
+#: The state each simple verb moves a host to. `evict`, `quarantine` and
+#: `reinstate` are not here because none is a plain state assignment -- each
+#: carries bookkeeping (a fence, an attribution, or the state it interrupted).
 _TARGET_STATE: dict[str, HostState] = {"activate": "active", "drain": "passive"}
 
 #: ss8's `T_kill`: how long after a deadman fires until the host's wrappers
@@ -184,6 +191,20 @@ def host_rejection_reason(store: RuntimeState, cmd: HostCommand, at: datetime) -
         )
     if cmd.verb == "evict":
         return _evict_reason(row, cmd, at)
+    if cmd.verb in LEADER_VERBS:
+        # the leader's own observation. Refused against an EVICTED host and
+        # nothing else: eviction is a decision about the host's work, and a
+        # leader that quietly un-evicted a host by reaching it again would
+        # undo the one state an operator took deliberately. Such a host
+        # returns by re-registering at its new generation (ss8), which is
+        # where the fence is checked.
+        if row.state == "evicted":
+            return (
+                f"host {cmd.host_id!r} was evicted at generation {row.generation}:"
+                " reaching it again does not un-evict it, and it may not be routed"
+                " to until it re-registers at that generation and self-fences (ss8)"
+            )
+        return None
     if row.state == "quarantined":
         return (
             f"host {cmd.host_id!r} is quarantined: the leader set that because the host"
@@ -246,5 +267,11 @@ def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | No
         # preconditions are the justification, and naming a principal beside
         # them would suggest the eviction rested on who asked for it
         store.evict_host(cmd.host_id, forced_by=actor if cmd.force else None)
+        return
+    if cmd.verb == "quarantine":
+        store.quarantine_host(cmd.host_id)
+        return
+    if cmd.verb == "reinstate":
+        store.reinstate_host(cmd.host_id)
         return
     store.set_host_state(cmd.host_id, _TARGET_STATE[cmd.verb])

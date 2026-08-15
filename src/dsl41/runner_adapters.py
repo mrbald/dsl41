@@ -507,6 +507,10 @@ class SupervisorClient:
         #: engine's state; what it stamps is deliberately UNPROJECTED, so a
         #: heartbeat costs no revision and no log record.
         self.on_contact = on_contact
+        #: called once when this client GIVES UP reaching the supervisor --
+        #: ss8's unreachability, which the leader turns into a quarantine.
+        #: Deliberately not per-failure: see the renewal loop.
+        self.on_unreachable: Callable[[], None] | None = None
         self.sock_path = run_root / "supervisor.sock"
         # Per-INCARNATION since DL-79, and deliberately not stable: the old
         # value said "one run_root has one logical engine controller", which
@@ -818,6 +822,12 @@ class SupervisorClient:
                     continue
                 failures += 1
                 if failures >= 5:
+                    # ss8: the leader has lost contact with this host. Signalled
+                    # HERE and not on the first failure -- one refused
+                    # connection is a blip, and a quarantine per blip would
+                    # hold work for no reason
+                    if self.on_unreachable is not None:
+                        self.on_unreachable()
                     print(
                         "dsl41: supervisor lease renewal failed 5 times; giving up"
                         " (job outcomes still resolve from the spool)",

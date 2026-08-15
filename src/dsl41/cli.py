@@ -1182,6 +1182,10 @@ async def _serve_run(
         # engine exists, which is why the first ACQUIRE above does not -- the
         # genesis seed stamps that same instant anyway.
         client.on_contact = engine.note_executor_contact
+        # ss8: a host the leader cannot reach is quarantined, so new work is
+        # HELD until it answers rather than failing against a supervisor that
+        # is not there. The reinstate rides on the next confirmed contact.
+        client.on_unreachable = engine.note_executor_unreachable
     # everything resume did not apply: E9's missed scheduler ticks, plus any
     # reconciliation completion the ss4 gate rejected. Both are on `drops`
     # (DL-91 finding 4 declined splitting them); the wording no longer claims

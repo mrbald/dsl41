@@ -637,7 +637,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   derived rather than stored, CM-11's refusals (a host with no deadman is never
   evictable, the bound reports the wait it has left, `--force` is attributed on the
   row), the four outcomes over the `host` verb, a drain that survives a resume, and
-  the DL-93 pin that `oracle.py` never names a host row. Then stage S5b's
+  the DL-93 pin that `oracle.py` never names a host row. Then stage S5d's
+  quarantine — a host the leader cannot reach holds new work instead of failing
+  it, clearing quarantine puts back the state it interrupted, and reaching an
+  evicted host again does not un-evict it — and the whole ss8 eviction bound
+  end to end. Then stage S5b's
   engine half: a lease heartbeat refreshes the routing row without costing a
   revision or a log record, the recorded interval is what the supervisor
   reports rather than what the flag asked for, and the ss8 bound computed

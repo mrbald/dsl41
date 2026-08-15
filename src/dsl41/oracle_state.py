@@ -204,6 +204,14 @@ class HostRuntime(BaseModel):
     #: is "loud, durable and attributable", and a fact you have to grep a
     #: WAL for is not loud.
     forced_by: str | None = None
+    #: what quarantine interrupted, so that clearing it restores the
+    #: OPERATOR's intent rather than overriding it (DL-97). ss8 gives
+    #: `quarantined` to the leader and the other states to the operator, and
+    #: a host that was drained before it stopped answering must still be
+    #: drained when it answers again -- otherwise a network blip silently
+    #: undoes a maintenance window. Non-null only while `state` is
+    #: `quarantined`.
+    state_before_quarantine: HostState | None = None
     #: DL-94: this entity's revision, on the same rule as the rows above.
     state_rev: int = 0
 
@@ -552,6 +560,30 @@ class RuntimeState:
         makes it the one state that can cause a double run."""
         self._require_host(host_id)
         self._replace_host(host_id, state=state)
+
+    def quarantine_host(self, host_id: str) -> None:
+        """ss8: the leader's own state, set when a host stops answering.
+
+        Remembers what it interrupted. A drained host that goes unreachable
+        and comes back must still be drained -- the operator's intent is not
+        the leader's to revoke, and a blip that silently ended a maintenance
+        window would be the worst kind of automation."""
+        row = self._require_host(host_id)
+        if row.state == "quarantined":
+            return  # idempotent: repeated unreachability is one fact
+        self._replace_host(host_id, state="quarantined", state_before_quarantine=row.state)
+
+    def reinstate_host(self, host_id: str) -> None:
+        """ss8: the leader clears quarantine when the host answers again,
+        putting back exactly the state it took away."""
+        row = self._require_host(host_id)
+        if row.state != "quarantined":
+            return
+        self._replace_host(
+            host_id,
+            state=row.state_before_quarantine or "active",
+            state_before_quarantine=None,
+        )
 
     def evict_host(self, host_id: str, *, forced_by: str | None) -> None:
         """ss8: declare a host's work rerouteable. The only state that lets

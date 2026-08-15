@@ -196,9 +196,13 @@ particular vocabulary, so `expect` is mandatory here too and names
 is the same decision shape and the same four outcomes, with `kind` carrying
 the host verb.
 
-`quarantine` is **not** an operator verb. §8 assigns that state to the
-leader, automatically, on unreachability; an operator verb for it would
-blur it with `drain`, which asserts nothing about reachability.
+`quarantine` and `reinstate` are **not** operator verbs, and the wire
+refuses them by name. §8 assigns that state to the leader, automatically,
+from what it can and cannot reach; those two arrive through the engine's own
+door with no `expect`, because §0's mandate is on externally *requested*
+mutations and an observation about reachability is not one. An operator verb
+for quarantine would also blur it with `drain`, which asserts nothing about
+whether the host is answering.
 
 What is refused and what is rejected divides on one line — whether the
 check reads mutable state:

@@ -4082,3 +4082,54 @@
   reader is now used from two modules, and arch_check blocked the private
   cross-module import, correctly.
   2014 -> 2033 passed; ruff, mypy, arch_check blocking checks clean.
+- DL-97 quarantine gets a producer; the relay does not get built, and why
+  (2026-08-15; stage S5d, DL-93's fourth slice — closing the S5 programme
+  at the boundary where honest work stops). §7 carries the deferral as an
+  amendment with its trigger; this entry is the shape.
+  **What the relay would have cost, and why it is not paid now.** Every
+  remaining part of §7 rests on one of two things that do not exist.
+  The takeover barrier begins at ACQUIRE, and there is no election until
+  S6. The relay is a network transport with mutually authenticated
+  principals, and §7 does not say — because it could not usefully — how
+  those principals are named, issued or rotated. That design wants one real
+  deployment to answer it; freezing it now would freeze the least informed
+  version, which is DL-42's own argument against premature extraction
+  applied to the same seam from the other side. There is also no second
+  machine to test one against, and a loopback relay proves the handshake,
+  not the thing a relay exists for. Trigger recorded: build it when there
+  is a second execution host to route to, which in practice means alongside
+  S6, since a leader that can be superseded is what makes a second host's
+  fencing mean anything.
+  **Quarantine landed, because on ONE host it is worth having on its own
+  account.** A supervisor the engine cannot reach used to fail every spawn
+  against it, so an outage that had nothing to do with the estate's jobs
+  marked real jobs FAILURE. Quarantined, that work is HELD and resumes when
+  the host answers. The producer is the point where the supervisor client
+  GIVES UP — five consecutive renewal failures, already loud — not any
+  single failure: one refused connection is a blip, and a quarantine per
+  blip would hold work for no reason.
+  **The leader's verbs take the leader's door.** `quarantine` and
+  `reinstate` go through `Engine.inject_host` with no envelope and no
+  `expect`, and the wire refuses them outright. §0's mandate is on
+  externally REQUESTED mutations; a leader reporting what it cannot reach
+  is making an observation, and an operator asserting unreachability would
+  be asserting something they cannot know. They are still admitted inputs —
+  journaled, replayed — because a quarantine that did not survive a restart
+  would let the next engine route work at a host that is not answering.
+  **Quarantine remembers what it interrupted.** A host drained for
+  maintenance that then stops answering must still be drained when it
+  answers again. The operator's intent is not the leader's to revoke, and a
+  blip that silently ended a maintenance window would be the worst kind of
+  automation. One nullable field, written by one transition and read by one.
+  **CM-12 lands as a refusal, not as an automated kill.** Reaching an
+  evicted host again does not un-evict it: the returning host must
+  re-register at its new generation and self-fence first. The self-fencing
+  is the RELAY's act. With no relay, the honest thing is the rule and the
+  refusal that names it — an engine that shut down someone else's
+  supervisor on a generation mismatch, on a single host where eviction is
+  meaningless anyway, would be a destructive automation nobody asked for.
+  With quarantine produced, CM-11's permitted half is now reachable with
+  every input produced rather than built by hand: the deadman from what the
+  supervisor reports (S5b), the contact from a lease exchange (S5b), the
+  quarantine from the leader losing the host (here).
+  2033 -> 2039 passed; ruff, mypy, arch_check blocking checks clean.

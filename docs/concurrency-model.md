@@ -335,6 +335,39 @@ inference, and with the relay in place that is the only context in which
 it is still used (supervisor-protocol §5's own constraint on any
 non-local transport).
 
+*(Amended by DL-97, at build — stage S5d.* The **relay is not built**, and
+the reason is worth recording rather than leaving as an omission.
+
+Every remaining part of this section rests on one of two things that do not
+exist yet. The barrier begins at ACQUIRE, and there is no election until S6.
+The relay is a network transport with mutually authenticated principals, and
+this section does not say — because it could not usefully — how those
+principals are named, issued or rotated; that design wants one real
+deployment to answer it, and freezing it now would freeze the least
+informed version, which is DL-42's argument against premature extraction
+applied to the same seam from the other side. There is also no second
+machine to test one against, and a loopback relay proves the handshake, not
+the thing the relay exists for.
+
+**Trigger**: build it when there is a second execution host to route to —
+which in practice means alongside S6, since a leader that can be superseded
+is what makes a second host's fencing meaningful.
+
+What DID land, because it is real on one host: quarantine with a producer,
+and the fence stated as a refusal. A host the leader cannot reach is
+quarantined, so new work is HELD rather than failing against a supervisor
+that is not there — which is worth having on a single host on its own
+account, and is what makes §8's first eviction precondition reachable. The
+leader's two verbs (`quarantine`, `reinstate`) take the engine's own door
+with no `expect`: §0's mandate is on externally *requested* mutations, and
+an observation about reachability is not one. Quarantine remembers the state
+it interrupted, so clearing it restores the operator's intent rather than
+overriding it. And reaching an evicted host again does **not** un-evict it:
+the returning host must re-register at the new generation and self-fence
+first, which is the relay's act to perform — so what stands here is the rule
+and the refusal that names it, not an engine that kills someone else's
+wrappers on a hunch.*)*
+
 **Timing is a bound, not a proof.** Safety is the successful ACQUIRE.
 `T_barrier = T_acquire + T_list + T_reconcile + T_redrive` is an
 operational SLO, and it is **not** a mandatory test until workload bounds
@@ -495,10 +528,10 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
-| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); delivery and quarantine with S5d |
+| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); remote delivery waits on the relay |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
-| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | refusals landed (DL-94); the bound computable from a real deadman and a real contact (DL-95); the last precondition needs S5d's quarantine |
-| CM-12 | a returning evicted host is refused and self-fences | medium |
+| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | landed (DL-94/95/97): every precondition now produced rather than built by hand |
+| CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
 | CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | expensive — **the point** |
 
@@ -518,6 +551,9 @@ S2  typed frontiers, atomic admission, decision index, two-pass replay
 S3  mandatory preconditions + protocol v2
 S4  CLI / TUI          ∥   S5  relay + host identity, effects, barrier,
                               deadman, host states + evict
+                              (S5a-c landed; the relay and the barrier moved
+                               to S6 by DL-97 -- both rest on election or on
+                               a second host, and neither exists before it)
 S6  ledger + election
 S7  failover / partition / double-run matrix over nightbank
 ```

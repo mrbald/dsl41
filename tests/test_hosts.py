@@ -848,7 +848,170 @@ def test_cm11_a_real_deadman_and_a_real_contact_make_the_bound_computable() -> N
     assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is not None
 
 
-# ------------------------------------------------------------- 7. the DL-93 pin
+# ------------------------------------------- 7. quarantine, and what it unlocks
+
+
+def test_quarantine_holds_new_work_instead_of_failing_it() -> None:
+    """ss8's leader-set state, with the value it has on ONE host: a
+    supervisor the engine cannot reach used to fail every spawn against it,
+    marking real jobs FAILURE for an outage that had nothing to do with them.
+    Quarantined, the work is HELD and resumes when the host answers."""
+    engine = _engine()
+
+    async def scenario() -> None:
+        engine.note_executor_unreachable()
+        await engine.run_until_quiescent(T0 + timedelta(seconds=10))
+        row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+        assert row is not None and row.state == "quarantined"
+
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.held_jobs() == frozenset({"j"})
+        assert engine.live_jobs() == frozenset()
+
+        engine.note_executor_contact()  # the host answers again
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        assert engine.live_jobs() == frozenset({"j"})
+
+    asyncio.run(scenario())
+
+
+def test_clearing_quarantine_puts_back_what_it_interrupted() -> None:
+    """The operator's intent is not the leader's to revoke. A host drained
+    for maintenance that then stops answering must still be drained when it
+    answers again -- a blip that silently ended a maintenance window would be
+    the worst kind of automation."""
+    engine = _engine()
+
+    async def scenario() -> None:
+        drained = engine.submit_host(_cmd("drain"), _expect("r1", SEEDED))
+        await engine.run_until_quiescent(T0 + timedelta(seconds=10))
+        assert (await drained).decision == "applied"
+
+        engine.note_executor_unreachable()
+        await engine.run_until_quiescent(T0 + timedelta(seconds=20))
+        row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+        assert row is not None
+        assert (row.state, row.state_before_quarantine) == ("quarantined", "passive")
+
+        engine.note_executor_contact()
+        await engine.run_until_quiescent(T0 + timedelta(seconds=30))
+        row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+        assert row is not None
+        assert (row.state, row.state_before_quarantine) == ("passive", None)
+
+    asyncio.run(scenario())
+
+
+def test_quarantine_is_the_leaders_door_not_the_operators(short_root: Path) -> None:
+    """ss0's mandate is on externally REQUESTED mutations. The leader
+    reporting what it cannot reach is an observation, so it takes the
+    engine's own door with no `expect` -- and the wire refuses the verb
+    outright, because an operator asserting unreachability would be asserting
+    something they cannot know."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run")
+        try:
+            for verb in ("quarantine", "reinstate"):
+                answer = await _call(server.path, _host_request(engine, verb=verb))
+                assert answer["refused"] is True
+                assert "unknown host verb" in answer["error"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_cm11_the_whole_eviction_bound_end_to_end() -> None:
+    """CM-11's permitted half, with every input now produced rather than
+    built by hand: the deadman comes from what the supervisor reports, the
+    contact from a lease exchange, and the quarantine from the leader losing
+    the host. Refused while the bound has time left, permitted after it."""
+    engine = Engine(
+        lower_source(_SOLO_JIL),
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        deadman_s=60.0,
+    )
+
+    async def scenario() -> None:
+        engine.note_executor_contact()
+        engine.note_executor_unreachable()
+        await engine.run_until_quiescent(T0 + timedelta(seconds=10))
+        row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+        assert row is not None and row.state == "quarantined"
+
+        cmd = _cmd("evict")
+        bound = 60.0 + T_KILL_S
+        bound += skew_allowance(bound)
+        store = engine.oracle.store
+        early = host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound - 5))
+        assert early is not None and "wait 5.0s more" in early
+        assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is None
+
+    asyncio.run(scenario())
+
+
+def test_cm12_reaching_an_evicted_host_again_does_not_un_evict_it() -> None:
+    """ss8's fence, as the refusal it is. Eviction is the one state that lets
+    another host run work bound to this one, so a leader that quietly
+    reinstated a host by reaching it again would undo the operator's decision
+    with a network event.
+
+    A returning host re-registers at the new generation and self-fences
+    first. That self-fencing is the RELAY's act, and there is no relay yet
+    (DL-97), so what stands here is the rule and the refusal that names it --
+    not an engine that kills someone else's wrappers on a hunch."""
+    store = _table(h=HostRuntime())
+    store.begin_input()
+    store.evict_host("h", forced_by=None)
+    store.commit_input()
+
+    for verb in ("quarantine", "reinstate"):
+        reason = host_rejection_reason(store, _cmd(verb, "h"), T0)
+        assert reason is not None
+        assert "does not un-evict it" in reason and "self-fences" in reason
+    row = store.host("h")
+    assert row is not None and (row.state, row.generation) == ("evicted", 1)
+
+
+def test_a_quarantine_survives_the_engine_that_set_it(short_root: Path) -> None:
+    """It is admitted input, not a live flag, for this reason: the next
+    engine must not route work at a host the last one could not reach. It
+    finds out by the host answering, not by forgetting."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            engine.note_executor_unreachable()
+            await asyncio.sleep(0.2)
+            row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+            assert row is not None and row.state == "quarantined"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+        resumed = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        try:
+            row = resumed.oracle.store.host(LOCAL_EXECUTOR_ID)
+            assert row is not None and row.state == "quarantined"
+        finally:
+            await resumed.shutdown()
+            assert resumed.journal is not None
+            resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------------------------- 8. the DL-93 pin
 
 
 def test_the_oracle_never_names_a_host_row() -> None:

@@ -361,8 +361,11 @@ class Engine:
         from the host, which is exactly what the eviction bound counts from.
 
         Costs nothing per beat -- `last_contact` is outside the ss3 semantic
-        projection, so this moves no revision and writes no log record."""
+        projection, so this moves no revision and writes no log record. The
+        quarantine it may clear is a different matter and IS an input, which
+        is why that is a separate call and not folded in here."""
         self.oracle.store.touch_host(self.executor_id, self.clock.now())
+        self.note_executor_reachable()
 
     def held_jobs(self) -> frozenset[str]:
         """Jobs with a start this shell intended and has not dispatched,
@@ -444,6 +447,38 @@ class Engine:
             )
         )
         return future
+
+    def inject_host(self, cmd: HostCommand) -> None:
+        """The LEADER's own routing observation (concurrency-model ss8).
+
+        `submit_host`'s sibling on the other side of ss0's boundary. An
+        operator asserts intent about routing and must name the revision they
+        read; the leader reports what it can and cannot reach, which is not
+        an externally requested mutation of state the caller was looking at
+        -- it is the same trust domain the scheduler and the adapters inject
+        from. So: no envelope, no `expect`, and no future to resolve. It is
+        still an admitted input, journaled and replayed like any other,
+        because a quarantine that did not survive a restart would let the
+        next engine route work at a host that is not answering."""
+        self._push(_Pending(at=self.clock.now(), request_id=None, host=cmd, source="reconcile"))
+
+    def note_executor_unreachable(self) -> None:
+        """The leader has lost contact with its own execution host (ss8).
+
+        Wired to the point where the supervisor client gives up rather than
+        to any single failure: one refused connection is a blip, and a
+        quarantine per blip would hold work for no reason. What it buys
+        locally is worth having on its own -- new work is HELD until the host
+        answers again, instead of every spawn failing against a supervisor
+        that is not there and every job being marked FAILURE for it."""
+        self.inject_host(HostCommand(verb="quarantine", host_id=self.executor_id))
+
+    def note_executor_reachable(self) -> None:
+        """Contact restored: the leader clears what it set, putting back the
+        state it interrupted (a drained host stays drained)."""
+        row = self.oracle.store.host(self.executor_id)
+        if row is not None and row.state == "quarantined":
+            self.inject_host(HostCommand(verb="reinstate", host_id=self.executor_id))
 
     def _enqueue(
         self,
