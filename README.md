@@ -341,6 +341,13 @@ night plays in ~15 real minutes on the real engine. Start with
 [RUNBOOK](examples/nightbank/RUNBOOK.md) of operator exercises
 (`uv run examples/nightbank/bin/nightbank up`). Repo-only; not packaged.
 
+It is also the concurrency model's proving ground
+([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+§9): CI drives this night through seeded interleavings of leader failover, a
+spawn decided and never acted on, duplicated and stale completions,
+quarantine and drain, and checks that no `(job, run_number)` ever runs twice
+across them (S7b).
+
 ## Implementation memo
 
 All ten phases from the implementation order in CLAUDE.md are implemented and

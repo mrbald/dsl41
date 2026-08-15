@@ -36,7 +36,7 @@ import json
 import random
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
+from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_admission import Envelope
@@ -307,31 +308,54 @@ class ModelRun:
 
     def __init__(
         self,
-        jil: str,
+        estate: str | CatalogIR,
         run_root: Path,
         *,
         script: dict[tuple[str, int], tuple[float, int]] | None = None,
+        default: tuple[float, int] | None = None,
+        start: datetime | None = None,
+        scheduler: Callable[[datetime], Scheduler] | None = None,
     ) -> None:
-        self.catalog: CatalogIR = lower_source(jil)
+        # an estate, however the caller got one: JIL for the small fixtures
+        # here, a lowered catalog for nightbank, which needs placeholder
+        # substitution across five files before it is one (S7b)
+        self.catalog: CatalogIR = estate if isinstance(estate, CatalogIR) else lower_source(estate)
+        #: built fresh per incarnation, because resume RE-ANCHORS it at the
+        #: last journal instant and dedups against the ticks the log holds --
+        #: a scheduler carried across a crash would be one that never
+        #: noticed the crash (ss7, DL-45)
+        self.new_scheduler = scheduler
         self.run_root = run_root
         self.script = dict(script or {})
+        #: what an UNSCRIPTED job does. None parks it forever, which is what
+        #: the small fixtures want (a job that never ends is a run a resume
+        #: must not duplicate); an estate driven end to end wants a duration
+        #: and an exit code, or its cascades never advance (S7b).
+        self.default = default
         self.log = SpawnLog()
-        self.clock = VirtualClock()
+        self.clock = VirtualClock(start=start) if start else VirtualClock()
         self.engine: Engine | None = None
         #: faults that persist until `settle` puts them back
         self.quarantined = False
         self.drained = False
 
     def _adapters(self) -> dict[str, JobAdapter]:
-        inner = FakeAdapter(self.script, default=None)  # unscripted == inert park
+        inner = FakeAdapter(self.script, default=self.default)
         self.adapter = RecordingAdapter(inner, self.log)
         return {"CMD": self.adapter, "FW": self.adapter}
 
     def start(self) -> Engine:
         self.engine = start_run(
-            self.catalog, self.run_root, clock=self.clock, adapters=self._adapters()
+            self.catalog,
+            self.run_root,
+            clock=self.clock,
+            adapters=self._adapters(),
+            scheduler=self._scheduler(),
         )
         return self.engine
+
+    def _scheduler(self) -> Scheduler | None:
+        return None if self.new_scheduler is None else self.new_scheduler(self.clock.now())
 
     @property
     def live(self) -> Engine:
@@ -530,6 +554,7 @@ class ModelRun:
             self.run_root,
             clock=self.clock,
             adapters=self._adapters(),
+            scheduler=self._scheduler(),
             **kwargs,  # type: ignore[arg-type]
         )
         return self.engine

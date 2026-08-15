@@ -4674,3 +4674,44 @@
   because a CM-14 marked done that covered one host would be the most
   expensive kind of wrong.
   2081 -> 2132 passed; 100% branch held; ruff, mypy, arch_check clean.
+- DL-109 the matrix moves onto the proving ground (2026-08-15; stage S7b,
+  DL-107's second slice). ss9 names `examples/nightbank` as the estate the
+  model's properties are properties OF -- "under injected faults, not an
+  assertion in prose" -- and quotes that file's own admission as the gap the
+  programme closes. S7a held CM-14 over a four-job fixture; this holds it
+  over the real 81-job night.
+  **What a real estate adds that size does not describe.** Boxes whose
+  members cascade, a resource mutex that makes jobs queue, cross-region
+  conditions, a scheduler firing start_times, and a human approval in the
+  middle. So a double run does not show up as a second spawn in a log of
+  four -- it shows up as a second CASCADE, and a resume that mishandled the
+  scheduler shows up as a job that runs twice a quarter-hour apart. 16 seeds,
+  44-66 execs each, dispatch continuing across as many as seven engine
+  incarnations in one night.
+  **The harness needed three things it did not have,** each of which is
+  about faithfulness rather than convenience. It takes a lowered CATALOG,
+  because nightbank is five files and placeholder substitution before it is
+  an estate. It takes a SCHEDULER factory, built fresh per incarnation --
+  carrying one across a crash would model a scheduler that never noticed the
+  crash, where the real one re-anchors at the last journal instant and dedups
+  against the ticks the log holds (DL-45). And it takes what an UNSCRIPTED
+  job does: the small fixtures want a job that parks forever (a run a resume
+  must not duplicate), an estate driven end to end wants a duration and an
+  exit code, or its cascades never advance.
+  **A baseline, because `execs > 10` is a weak guard.** A driver that stalled
+  the night at its first box would still dispatch more than ten jobs and
+  still pass every seed. So one fault-free run asserts the night reaches the
+  SOD flip -- the same end state the CLI rehearsal test asserts, reached
+  through the engine the sweep perturbs. The seeded runs are then a
+  perturbation of something known to work rather than of something unknown.
+  **The estate mostly SURVIVES,** which is worth recording because it was not
+  the expected shape: across sixteen fault-injected nights, 1142 jobs reached
+  SUCCESS and two reached FAILURE. Failover mid-night, a spawn decided and
+  never acted on, a drained host and a quarantined one do not, on this
+  estate, cost the night -- they cost the runs that were in flight, and the
+  barrier picks the rest up. That is the behaviour the programme was built
+  for, observed rather than argued.
+  ss9's proving-ground paragraph carries the amendment: the virtual-clock
+  half of "the live-engine path is exercised manually" is now false. The
+  real-PROCESS half stands and is S7c.
+  2132 -> 2149 passed in +4s of suite time; 100% branch held.
