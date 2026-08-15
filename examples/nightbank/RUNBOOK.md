@@ -69,6 +69,21 @@ dsl41 query is-success --socket $S -J APAC_EOD_B && echo done  # shell glue
 
 ```
 
+Every mutation below names the revision it was composed against
+(`docs/concurrency-model.md` §0). `dsl41 sendevent` reads it for you
+immediately before writing, so nothing here needs an extra flag — but if
+you read a status page, thought about it, and then acted, pass the
+`state_rev` you actually looked at:
+
+```sh
+dsl41 query status --socket $S --job EMEA_MKT_MARKS_C   # note state_rev
+dsl41 sendevent KILLJOB -J EMEA_MKT_MARKS_C --expect 41 --socket $S
+```
+
+If the job moved in between — it completed, a deadline killed it, someone
+else acted — the command exits 2 with `precondition failed` and changes
+nothing. That is the intended outcome: re-read and decide again.
+
 `explain` is the money view: it shows each atom of a condition and whether
 it is currently true. Use it on `SOD_B` early in the night — you'll see
 the three `v(RECON_*)` atoms false until the recon gates run.

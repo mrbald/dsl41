@@ -56,6 +56,25 @@ TUI drives; `roundtrip` is the one-shot blocking client the typer CLI
 drives from outside an event loop. They are two transports for one
 protocol, not two protocols -- both raise ControlClientError and neither
 knows anything about typer or textual.
+
+Protocol v2 (stage S3, DL-90; docs/control-protocol.md is the frozen text).
+Two changes, taken as ONE wire break because taking them as two would break
+every client twice:
+
+- **Every request names `"v": 2`** -- the version handshake that
+  control-protocol ss7 recorded as a known gap. There is no v1 fallback:
+  concurrency-model ss0 refuses a caller that does not name a version, and
+  "accept it unversioned for compatibility" is exactly the opt-out ss0
+  forbids. The check sits in `_handle`, ahead of the subscribe branch, so
+  no door is left unversioned.
+- **A mutation carries the ss6 envelope and is answered with its
+  decision.** The flat `event`/`job`/`name` fields became `verb` +
+  `payload`; `request_id` and `expect` joined them and are required. The
+  handler now awaits: ss4 emits `command_committed` at step 4 and
+  `oracle_applied` at step 7, and a request/response transport that
+  answered with the first would tell an operator their kill was written
+  down, not that it landed. A precondition nobody can see the outcome of is
+  not a precondition.
 """
 
 from __future__ import annotations
@@ -78,6 +97,13 @@ from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.oracle import Event, EventKind, JobRuntime, JobStatus
 from dsl41.runner import Engine
 from dsl41.runner_adapters import LINE_LIMIT, job_log_paths
+from dsl41.runner_admission import (
+    PROTOCOL_VERSION,
+    AdmissionRefused,
+    EnvelopeError,
+    addressed_key,
+    parse_envelope,
+)
 from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal
 from dsl41.runner_preflight import and_success_skeleton
@@ -105,32 +131,45 @@ class ControlServer:
     object per line ({"ok": bool, ...}), except `subscribe`, which streams
     journal records until the client hangs up.
 
-    Verbs: {"cmd": "sendevent", "event": <verb>, ...} for the sendevent
-    parity set (job verbs carry "job"; SET_GLOBAL carries "name"/"value";
-    CHANGE_STATUS carries "job"/"status" and optional int "exit_code" --
-    injected as STATUS, keeping overwrite parity). Queries: status [job],
-    trace [since], explain job, spec job, deps job, timers, plan,
-    global name, globals names; and subscribe [since]. Job arguments
-    are validated against the catalog -- vendor sendevent errors on unknown
-    jobs rather than queueing them.
+    Every request names `"v": 2` (DL-90). Queries: status [job], trace
+    [since], explain job, spec job, deps job, timers, plan, global name,
+    globals names; and subscribe [since]. Every answer carries the ss6 read
+    header -- `baseline_id`, `epoch`, `applied_index` -- so a client can
+    tell which log a revision it holds was read from.
+
+    A mutation is `{"cmd": "sendevent"}` plus the ss6 envelope: `verb`,
+    `payload`, `request_id`, `expect`, optional `claimed_actor`. Job
+    arguments are validated against the catalog -- vendor sendevent errors
+    on an unknown job rather than queueing it -- and `expect` is MANDATORY
+    (concurrency-model ss0), naming the addressed entity's revision and
+    nothing else. The answer is the DECISION, not the receipt.
 
     Revision-bearing reads (DL-87, concurrency-model ss6): `status` carries
     each job's `state_rev`, and `global` / `globals` answer
     `{present, value, state_rev}` for NAMED globals and insert nothing. The
     naming is the point -- a map of the globals that exist cannot express the
     absence a conditional create has to condition on, so an unset name is
-    answered `{present: false, state_rev: 0}` rather than omitted.
+    answered `{present: false, state_rev: 0}` rather than omitted. These are
+    the reads a caller composes an `expect` from.
 
-    Injections go through Engine.inject (source=control), so the WAL
-    journals every control input at feed time (ss10: the WAL is the audit
-    trail; there is no second log) and the single-writer loop serializes
-    them -- deliberately no controller lease at this tier (DL-41a).
-    Queries read the oracle store directly: feed() never yields, so a
-    handler task can never observe a half-applied event."""
+    Mutations go through Engine.submit (source=control), so the WAL journals
+    every control input at admission (ss10: the WAL is the audit trail;
+    there is no second log) and the single-writer loop serializes them --
+    deliberately no controller lease at this tier (DL-41a). Queries read the
+    oracle store directly: feed() never yields, so a handler task can never
+    observe a half-applied event."""
 
     #: seconds between on-disk re-checks of the estate fingerprint (the
     #: drift hint below); reads happen lazily inside a status query
     DRIFT_CHECK_INTERVAL_S = 15.0
+
+    #: how long a sendevent waits for its decision before answering "I do not
+    #: know" (S3). Applying one input is microseconds, so anything near this
+    #: means the single-writer loop is not running -- and the diagnosis is
+    #: worth more than the wait. Deliberately below `roundtrip`'s client
+    #: timeout so the caller gets this sentence instead of a bare socket
+    #: timeout, which would say only that something did not answer.
+    DECISION_TIMEOUT_S = 5.0
 
     def __init__(
         self,
@@ -226,11 +265,26 @@ class ControlServer:
                 except (json.JSONDecodeError, ValueError) as exc:
                     await self._send(writer, {"ok": False, "error": f"bad request: {exc}"})
                     continue
+                if request.get("v") != PROTOCOL_VERSION:
+                    # ss0 refuses a caller that does not name a version, and it
+                    # is checked HERE so that subscribe -- which owns its
+                    # connection and never reaches _respond -- cannot be the
+                    # one unversioned door left open (DL-90)
+                    await self._send(
+                        writer,
+                        {
+                            "ok": False,
+                            "error": f"protocol version {request.get('v')!r}: this engine"
+                            f' speaks v{PROTOCOL_VERSION} -- name it as {{"v":'
+                            f" {PROTOCOL_VERSION}}}",
+                        },
+                    )
+                    continue
                 if request.get("cmd") == "subscribe":
                     await self._subscribe(writer, request)
                     break  # a subscription owns its connection until hangup
                 try:
-                    response = self._respond(request)
+                    response = await self._respond(request)
                 except Exception as exc:  # noqa: BLE001 -- a query bug must
                     # answer ok:false, never kill the connection unreplied
                     # (the client would only see a timeout; DL-45)
@@ -250,10 +304,24 @@ class ControlServer:
         writer.write(json.dumps(obj, sort_keys=True).encode("utf-8") + b"\n")
         await writer.drain()
 
-    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Route one already-versioned request and stamp the ss6 read
+        header onto its answer."""
+        response = await self._dispatch(request)
+        # ss6: every read publishes where the log has reached and which log it
+        # is, so a client can tell a revision it may name from one it may not.
+        # Leader-only in v2 -- one engine per run root IS the leader (ss7's
+        # election arrives in S6), enforced by the socket probe in start().
+        return response | {
+            "baseline_id": self.engine.baseline_id,
+            "epoch": self.engine.epoch,
+            "applied_index": self.engine.frontiers.applied_index,
+        }
+
+    async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         cmd = request.get("cmd")
         if cmd == "sendevent":
-            return self._sendevent(request)
+            return await self._sendevent(request)
         if cmd == "status":
             return self._status(request)
         if cmd == "trace":
@@ -282,23 +350,90 @@ class ControlServer:
             return None
         return {"ok": False, "error": f"unknown job {job!r}"}
 
-    def _sendevent(self, request: dict[str, Any]) -> dict[str, Any]:
-        verb = request.get("event")
+    async def _sendevent(self, request: dict[str, Any]) -> dict[str, Any]:
+        """One externally requested mutation, through the ss4 admission
+        order, answered with its DECISION rather than its receipt.
+
+        The order below is the ss4 order: framing first (the verb and its
+        payload, which is what says WHICH entity is addressed), then the
+        envelope -- `expect` cannot be validated before the addressed key is
+        known. Both refuse; nothing is admitted. Past that, the engine owns
+        the outcome, and a precondition that lost its race comes back as a
+        recorded rejection, not a refusal: it consumed an index and its time
+        half fired timers, so it happened."""
+        payload_ev = self._event_for(request)
+        if isinstance(payload_ev, dict):
+            return payload_ev | {"refused": True}
+        ev = payload_ev
+        try:
+            envelope = parse_envelope(
+                request,
+                addressed=addressed_key(ev.kind, ev.payload),
+                baseline_id=self.engine.baseline_id,
+            )
+        except EnvelopeError as exc:
+            # every ok:false this handler produces BEFORE submitting is a
+            # refusal, and says so in one field: a machine client must be able
+            # to tell "nothing happened and nothing was written" from "a
+            # decision went against you", because only the first is safe to
+            # re-compose and send again unchanged
+            return {"ok": False, "error": str(exc), "refused": True}
+        try:
+            result = await asyncio.wait_for(
+                self.engine.submit(ev, envelope), timeout=self.DECISION_TIMEOUT_S
+            )
+        except AdmissionRefused as exc:
+            return {"ok": False, "error": str(exc), "refused": True}
+        except TimeoutError:
+            # not a decision and not a refusal: we do not know. Saying so is
+            # the only honest answer -- the input may be durably admitted and
+            # about to apply, so a client must re-read rather than assume.
+            return {
+                "ok": False,
+                "error": f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is"
+                " not draining. The command may still be admitted -- re-read before retrying.",
+            }
+        # deliberately no `at`: v1 answered with the receipt, whose timestamp
+        # was the one this request had just been stamped with. A v2 answer is
+        # a DECISION, and a retry's answer is the ORIGINAL decision -- echoing
+        # the retry's own stamp beside it would make two answers to one
+        # command differ in a field that is not about the command. `index` is
+        # the handle; the leader timestamp lives in the log next to it.
+        answer: dict[str, Any] = {
+            "ok": result.decision == "applied",
+            "kind": ev.kind,
+            "decision": result.decision,
+            "index": result.index,
+            "request_id": result.request_id,
+            "revisions": result.revisions,
+        }
+        if result.reason is not None:
+            answer["error"] = result.reason
+        return answer
+
+    def _event_for(self, request: dict[str, Any]) -> Event | dict[str, Any]:
+        """The verb half of framing: the Event a well-formed request names,
+        or the refusal it earns. Job arguments are catalog-checked here --
+        vendor sendevent errors on an unknown job rather than queueing it."""
+        verb = request.get("verb")
+        payload = request.get("payload")
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": f'payload must be an object, got {payload!r}'}
         at = self.engine.clock.now()
         if verb in JOB_EVENT_VERBS:
-            job = request.get("job")
+            job = payload.get("job")
             if (error := self._check_job(job)) is not None:
                 return error
             ev = Event(at=at, kind=verb, payload={"job": job})
         elif verb == "SET_GLOBAL":
-            name, value = request.get("name"), request.get("value")
+            name, value = payload.get("name"), payload.get("value")
             if not (isinstance(name, str) and name):
                 return {"ok": False, "error": "SET_GLOBAL requires a global name"}
             if not isinstance(value, str):
                 return {"ok": False, "error": "SET_GLOBAL requires a string value"}
             ev = Event(at=at, kind="SET_GLOBAL", payload={"name": name, "value": value})
         elif verb == "CHANGE_STATUS":
-            job, status = request.get("job"), request.get("status")
+            job, status = payload.get("job"), payload.get("status")
             if (error := self._check_job(job)) is not None:
                 # SEM-07 (DL-65 review): "JOB^INST" with INST a declared
                 # insert_xinst is a legal CHANGE_STATUS target even though
@@ -316,16 +451,15 @@ class ControlServer:
                     "ok": False,
                     "error": f"unknown status {status!r} (one of {sorted(STATUSES)})",
                 }
-            payload: dict[str, object] = {"job": job, "status": status}
-            if "exit_code" in request:
-                if not isinstance(request["exit_code"], int):
+            status_payload: dict[str, object] = {"job": job, "status": status}
+            if "exit_code" in payload:
+                if not isinstance(payload["exit_code"], int):
                     return {"ok": False, "error": "exit_code must be an integer"}
-                payload["exit_code"] = request["exit_code"]
-            ev = Event(at=at, kind="STATUS", payload=payload)
+                status_payload["exit_code"] = payload["exit_code"]
+            ev = Event(at=at, kind="STATUS", payload=status_payload)
         else:
-            return {"ok": False, "error": f"unknown event {verb!r}"}
-        self.engine.inject(ev, source="control")
-        return {"ok": True, "kind": ev.kind, "at": at.isoformat()}
+            return {"ok": False, "error": f"unknown verb {verb!r}"}
+        return ev
 
     def _spec_drift(self) -> bool | None:
         """None = no fingerprint to check against (embedders). Lazy re-read
@@ -664,6 +798,14 @@ class ControlClientError(RuntimeError):
     """The control socket is unreachable or hung up mid-exchange."""
 
 
+def _versioned(request: dict[str, Any]) -> dict[str, Any]:
+    """Stamp `v` unless the caller already did. The clients are part of this
+    protocol's implementation, not callers of it, so making every query site
+    repeat the version would be noise -- but a caller that names one keeps
+    it, which is what makes the server's refusal testable from here."""
+    return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
+
+
 class ControlClient:
     """JSON-lines client of the ss10 control socket. One persistent
     request/response connection, serialized by a lock; subscribe() opens its
@@ -678,6 +820,7 @@ class ControlClient:
         self._lock = asyncio.Lock()
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = _versioned(payload)
         async with self._lock:
             try:
                 if self._writer is None:
@@ -723,7 +866,7 @@ class ControlClient:
         except OSError as exc:
             raise ControlClientError(str(exc)) from exc
         try:
-            request: dict[str, Any] = {"cmd": "subscribe"}
+            request: dict[str, Any] = {"cmd": "subscribe", "v": PROTOCOL_VERSION}
             if since is not None:
                 request["since"] = since
             writer.write(json.dumps(request).encode("utf-8") + b"\n")
@@ -776,7 +919,7 @@ def roundtrip(
         conn = socket_mod.socket(socket_mod.AF_UNIX)
         conn.settimeout(timeout)
         conn.connect(str(socket_path))
-        conn.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = conn.recv(65536)

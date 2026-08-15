@@ -3580,3 +3580,94 @@
   validator had no test at all. Re-ran S1b and S1c after the refactor:
   14/14 each, with three anchors re-pointed at code DL-88 and this entry
   moved.
+- DL-90 preconditions become mandatory, and the wire breaks once
+  (2026-08-15; stage S3 of `docs/concurrency-model.md` §10, closing
+  CM-06). §0's invariant — *no externally requested direct mutation of
+  published oracle state is applied without checking the version the
+  caller read* — is enforced from here on. There is no opt-out and no
+  `"any"`: a mutation that names no revision is refused.
+  **Where the mandate lives.** In `parse_envelope`
+  (`runner_admission.py`), not in the socket server, because §0 admits no
+  exception and a rule written once per transport is a rule that one
+  transport will eventually write differently — the relay S5 adds must
+  reach the same verdict. `Engine.inject` is deliberately NOT behind it:
+  the scheduler, the adapters, reconciliation and every test script are
+  in-process and inside the trust boundary, and §0's subject is what
+  crosses it. `Engine.submit` is the external door and the only one that
+  takes an envelope.
+  **Refused and rejected are different facts.** A refusal (steps 1–2 —
+  bad framing, absent `expect`, a `baseline_id` from another run, a
+  reused `request_id`, a stale `epoch`) consumes no index, moves no
+  clock, and leaves NOTHING in the log; it is recorded only on
+  `Engine.refusals`, which exists because otherwise a caller that asked
+  for no decision would watch a command vanish. A rejection (step 6 — the
+  entity moved) took an index and fired its batch's timers, so it is a
+  decision and is journaled as one. Collapsing them would make "your
+  command did nothing" indistinguishable from "the engine crashed before
+  deciding", which is precisely the distinction S2 built the ledger for.
+  A reused `request_id` stopped raising through the loop: a client error
+  must not take the estate down.
+  **`expect` is part of the command.** It is in the fingerprint, so "kill
+  the run I saw at 12" and "kill whatever is running now" are two
+  commands. Hashing them alike would let a retry of the first be answered
+  by the second's decision — the confusion optimistic concurrency exists
+  to prevent, arriving through the dedup path instead. `claimed_actor` is
+  in it for the same reason, and is named a claim because there is no
+  authentication at this tier (control-protocol §7 gap 2): the log
+  records what the client said about itself, which is a breadcrumb, never
+  attribution.
+  **The boundary of the check, found by a test and worth stating.** A
+  timer firing inside an input's OWN batch does not invalidate that
+  input's precondition. §3 gives one input one increment, applied at
+  commit, so everything an input causes shares its revision — a revision
+  that moved because of the caller's own input is not one they could have
+  read beforehand, and requiring them to name it would make every
+  precondition unsatisfiable. The same deadline firing as its own input
+  (due strictly earlier) does invalidate it, which is the case an
+  operator actually meets. What still stands between an operator and a
+  job that ended a moment ago is the semantics, not concurrency control.
+  Both halves are pinned; the first sketch asserted the opposite and was
+  wrong.
+  **Protocol v2** (`docs/control-protocol.md` re-frozen). One break, two
+  changes, taken together because taking them apart would break every
+  client twice. Every request names `"v": 2` — the handshake §7 recorded
+  as a known gap, checked ahead of the subscribe branch so no door is
+  left unversioned. A mutation carries the §6 envelope (`verb`,
+  `payload`, `request_id`, `expect`, optional `claimed_actor`) instead of
+  the flat `event`/`job`/`name` fields, and is answered with its
+  DECISION: §4 emits `command_committed` at step 4 and `oracle_applied`
+  at step 7, and answering with the first would tell an operator their
+  kill was written down, not that it landed. A precondition whose outcome
+  the caller cannot see is not a precondition. The answer therefore
+  carries `decision`, `index`, `request_id` and the revisions the input
+  moved, and drops `at` — a retry's answer is the ORIGINAL decision, and
+  echoing the retry's own stamp beside it would make two answers to one
+  command differ in a field that is not about the command. Every read
+  answer carries `baseline_id`, `epoch` and `applied_index` (§6), since a
+  revision is meaningless without the log it came from. A sendevent that
+  gets no decision within 5 s answers "I do not know" and says re-read
+  before retrying — deliberately shorter than the client timeout, so the
+  caller gets a diagnosis rather than a bare socket timeout.
+  **`epoch` is required, not defaulted, and is checked in its §4 place**
+  — after dedup, not before — even though it is inert on one host. An
+  exact old-epoch retry recovers its original result (it was decided by
+  the leader that held that epoch); an unseen old-epoch request is
+  refused. Implementing the ordering now costs one comparison and pins it
+  with a test, rather than leaving S6 to rediscover why it is
+  counter-intuitive. Requiring the field is the same argument one level
+  up: §6 ships it in v2 so that clients CARRY it, and a field that may be
+  omitted is a field nobody sends — S6 would then be the second wire
+  break that shipping it early was meant to avoid. It costs nothing to
+  send, since every read publishes the current epoch beside the revision.
+  **Clients.** `dsl41 sendevent` reads the addressed entity's revision
+  and names it; `--expect N` names one by hand. The auto-read narrows the
+  race to one round trip and does not close it, and the docstring says
+  so: an operator who looked at a status page and then chose to act
+  should pass the revision they looked at. The §11 TUI does exactly that
+  for free — `expect` comes from the row the table was SHOWING — which is
+  the thing a terminal can do that a shell script cannot.
+  1938 → 1971 passed; ruff, mypy and arch_check clean. Twenty-five
+  mutations turn their tests red, three of them by HANGING rather than
+  failing — delete the line that answers a parked caller and nothing ever
+  answers — which is a finding about the probe as much as the code: its
+  runs are bounded now, and a hang is reported as red.

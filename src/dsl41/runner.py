@@ -84,6 +84,18 @@ property DL-44's advance record was added for. The engine holds the log's
 position in `frontiers` and the decisions it has already made in
 `decisions`, both restored from the log on resume.
 
+Stage S3 (concurrency-model ss0/ss6, DL-90) made preconditions MANDATORY
+for externally requested mutations, and split the engine's two input doors
+apart to say so. `submit` is the external door: it takes an ss6 envelope
+carrying the revision the caller read, and hands back the DECISION -- the
+loop resolves its future at step 7, because a precondition whose outcome
+the caller cannot see is not a precondition. `inject` is the engine's own
+door and stays as it was: the scheduler, the adapters, reconciliation and
+every test script are inside the trust boundary, and ss0's rule is about
+what crosses it. A refusal (steps 1-2) and a rejection (step 6) are
+different facts here too -- the first never entered the log and is recorded
+only on `refusals`, the second is a decision with an index.
+
 Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 
 - Kill-wins gate ordering (DL-44 amendment): before gating a
@@ -138,7 +150,7 @@ import contextlib
 import heapq
 import os
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -160,10 +172,14 @@ from dsl41.runner_adapters import (
     _resolve_spool,
 )
 from dsl41.runner_admission import (
+    INERT_EPOCH,
+    AdmissionRefused,
     ApplyResult,
     Attempt,
     DecisionIndex,
+    Envelope,
     Frontiers,
+    RequestCollision,
     apply_attempt,
     fingerprint,
 )
@@ -192,6 +208,14 @@ class _Pending:
     BEFORE it stamps or indexes anything -- an id minted at admission could
     never answer a retry.
 
+    `envelope` present marks an EXTERNALLY REQUESTED input -- one that
+    crossed the ss10 socket and therefore had to name the revision it was
+    composed against (concurrency-model ss0). Absent marks the engine's own:
+    a timer, a scheduler tick, an adapter completion, a reconciliation.
+    `future` is how the requester learns its decision; ss4 emits two signals
+    for one input and this transport answers with the second, because a
+    precondition whose outcome the caller cannot see is not a precondition.
+
     None is an input the engine raised itself: a timer firing, a scheduler
     tick, an adapter completion. It still takes an identity in the log,
     because the decision index indexes by one, but that identity comes from
@@ -206,6 +230,8 @@ class _Pending:
     at: datetime
     request_id: str | None
     ev: Event | None = None
+    envelope: Envelope | None = None
+    future: asyncio.Future[ApplyResult] | None = None
 
 
 def _raise_if_failed(task: asyncio.Task[None]) -> None:
@@ -252,10 +278,19 @@ class Engine:
         #: from the log on resume -- an engine that forgot them would re-admit
         #: an input the log had already decided.
         self.baseline_id = journal.baseline_id if journal is not None else ""
+        #: concurrency-model ss2: the leader's fencing token, INERT on one
+        #: host -- ss6 ships it in v2 anyway rather than break the wire twice,
+        #: and S6 is where it is allocated and moves. The CHECK is already in
+        #: its ss4 place (after dedup), so the ordering that step 2 calls out
+        #: is pinned by a test rather than left as a note for S6 to get right.
+        self.epoch = INERT_EPOCH
         self.frontiers = Frontiers()
         self.decisions = DecisionIndex()
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
+        #: refused at ss4 steps 1-2 -- never admitted, so unlike `drops` these
+        #: leave no trace in the log and this list is the only record of them
+        self.refusals: list[tuple[str, str]] = []
         #: time-ordered input queue: (at, arrival seq, pending); provenance
         #: rides on Event.source (DL-68); see the module docstring for why
         #: FIFO alone is wrong here
@@ -296,13 +331,49 @@ class Engine:
         the log indexes decisions by one."""
         self._enqueue(ev, source=source, request_id=request_id)
 
+    def submit(self, ev: Event, envelope: Envelope, *, source: str = "control") -> Awaitable[
+        ApplyResult
+    ]:
+        """Queue one EXTERNALLY REQUESTED mutation and hand back its
+        decision (concurrency-model ss0/ss4).
+
+        The envelope carries the precondition, so this is the only entry
+        point that satisfies ss0's mandate -- `inject` is the engine's own
+        trust domain and stays ungated. The awaitable resolves when step 7
+        records the result, or raises `AdmissionRefused` if steps 1-2 refuse
+        it. It never resolves before the decision exists: ss4 emits
+        `command_committed` too, but "your envelope is durable" is not an
+        answer to "did my kill land"."""
+        future: asyncio.Future[ApplyResult] = asyncio.get_running_loop().create_future()
+        self._enqueue(
+            ev,
+            source=source,
+            request_id=envelope.request_id,
+            envelope=envelope,
+            future=future,
+        )
+        return future
+
     def _enqueue(
-        self, ev: Event, *, source: str | None = "adapter", request_id: str | None = None
+        self,
+        ev: Event,
+        *,
+        source: str | None = "adapter",
+        request_id: str | None = None,
+        envelope: Envelope | None = None,
+        future: asyncio.Future[ApplyResult] | None = None,
     ) -> None:
         ev.source = source  # DL-68: the event carries its own provenance
         self._queue_seq += 1
         heapq.heappush(
-            self._queue, (ev.at, self._queue_seq, _Pending(at=ev.at, request_id=request_id, ev=ev))
+            self._queue,
+            (
+                ev.at,
+                self._queue_seq,
+                _Pending(
+                    at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future
+                ),
+            ),
         )
         self._activity.set()
 
@@ -489,17 +560,43 @@ class Engine:
         moved (7). Steps 5-7 do not yield: `wait_until` is done with, and
         nothing else in this process writes the oracle."""
         ev = pending.ev
+        envelope = pending.envelope
         fp = fingerprint(
             baseline_id=self.baseline_id,
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
             source=ev.source if ev is not None else None,
+            epoch=envelope.epoch if envelope is not None else self.epoch,
+            expect=envelope.expect if envelope is not None else None,
+            claimed_actor=envelope.claimed_actor if envelope is not None else None,
         )
         if pending.request_id is not None:
-            prior = self.decisions.lookup(pending.request_id, fp)
+            try:
+                prior = self.decisions.lookup(pending.request_id, fp)
+            except RequestCollision as exc:
+                # a client error, not an engine one: refuse the request and
+                # keep serving. Raising here would let one confused caller
+                # take the estate down.
+                self._refuse(pending, exc)
+                return []
             if prior is not None:
                 self.deduped.append((pending.request_id, prior))
+                self._answer(pending, prior)
                 return []  # a retry advances no logical time (CM-05)
+        if envelope is not None and envelope.epoch != self.epoch:
+            # ss4 step 2, and it is AFTER the dedup above on purpose: an exact
+            # old-epoch retry recovers its original result (it was decided by
+            # the leader that held that epoch), while an UNSEEN old-epoch
+            # request is refused -- it was composed by a client still talking
+            # to a leader that has been superseded.
+            self._refuse(
+                pending,
+                AdmissionRefused(
+                    f"epoch {envelope.epoch} is not this leader's {self.epoch}:"
+                    " re-read and re-compose against the current leader"
+                ),
+            )
+            return []
         self.frontiers = self.frontiers.admit(pending.at)
         index = self.frontiers.committed_index
         attempt = self._attempt(pending, index, fp)
@@ -515,10 +612,26 @@ class Engine:
         if applied.result.decision == "rejected":
             assert ev is not None and applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
+        self._answer(pending, applied.result)
         return applied.emitted
+
+    @staticmethod
+    def _answer(pending: _Pending, result: ApplyResult) -> None:
+        if pending.future is not None and not pending.future.done():
+            pending.future.set_result(result)
+
+    def _refuse(self, pending: _Pending, exc: AdmissionRefused) -> None:
+        """Steps 1-2's other outcome. Recorded on `refusals` as well as
+        answered, because a refusal leaves NOTHING in the log -- no index, no
+        record -- so without this list an in-process caller that asked for no
+        decision would see a command vanish silently."""
+        self.refusals.append((pending.request_id or f"engine:{pending.at.isoformat()}", str(exc)))
+        if pending.future is not None and not pending.future.done():
+            pending.future.set_exception(exc)
 
     def _attempt(self, pending: _Pending, index: int, fp: str) -> Attempt:
         ev = pending.ev
+        envelope = pending.envelope
         return Attempt(
             index=index,
             at=pending.at,
@@ -527,6 +640,9 @@ class Engine:
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
             source=ev.source if ev is not None else None,
+            expect=dict(envelope.expect) if envelope is not None else None,
+            epoch=envelope.epoch if envelope is not None else self.epoch,
+            claimed_actor=envelope.claimed_actor if envelope is not None else None,
         )
 
     def _dispatch(self, emitted: list[Event]) -> None:
@@ -582,7 +698,17 @@ class Engine:
         re-raising anything a task died with OTHER than the cancellation
         itself (fail loudly -- a teardown bug must not vanish). 11a: orderly
         harness/rehearse teardown; the tethered-kill semantics (wrapper
-        records the outcome, ss6a) arrive with real adapters in 11b."""
+        records the outcome, ss6a) arrive with real adapters in 11b.
+
+        Anyone parked on a decision is told first (S3), and told the truth:
+        their input never reached admission, so nothing in the log refers to
+        it. Left alone they would wait out their own transport timeout and
+        learn only that something did not answer."""
+        for _, _, pending in self._queue:
+            if pending.future is not None and not pending.future.done():
+                pending.future.set_exception(
+                    AdmissionRefused("engine shut down before this input was admitted")
+                )
         tasks = [run.task for run in self._live.values()] + self._reaping
         self._live.clear()
         self._reaping = []

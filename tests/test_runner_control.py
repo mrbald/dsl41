@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Event
 from dsl41.runner import Engine, start_run
+from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
 from dsl41.runner_control import ControlServer
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
@@ -76,13 +78,20 @@ def wait_for(predicate, timeout_s: float = 5.0, interval_s: float = 0.02):
     raise AssertionError(f"timed out after {timeout_s}s waiting for {predicate}")
 
 
+def _v2(request: dict) -> dict:
+    """Stamp the protocol version unless the caller named one itself -- the
+    same rule the shipped clients follow, so a test that DOES name one can
+    still exercise the server's refusal (DL-90)."""
+    return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
+
+
 def _sync_control_call(sock_path: Path, request: dict, timeout: float = 5.0) -> dict:
     """Blocking control-socket round trip -- ONLY for the subprocess test,
     where the engine lives in a different process/loop."""
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     conn.settimeout(timeout)
     conn.connect(str(sock_path))
-    conn.sendall(json.dumps(request).encode("utf-8") + b"\n")
+    conn.sendall(json.dumps(_v2(request)).encode("utf-8") + b"\n")
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = conn.recv(65536)
@@ -98,7 +107,7 @@ async def _control_call(sock_path: Path, request: dict) -> dict:
     spec: 'Connect with asyncio.open_unix_connection')."""
     reader, writer = await asyncio.open_unix_connection(str(sock_path))
     try:
-        writer.write(json.dumps(request).encode("utf-8") + b"\n")
+        writer.write(json.dumps(_v2(request)).encode("utf-8") + b"\n")
         await writer.drain()
         line = await reader.readline()
         return json.loads(line)
@@ -106,6 +115,92 @@ async def _control_call(sock_path: Path, request: dict) -> dict:
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
+
+
+async def _read_revision(sock_path: Path, key: str) -> tuple[str, int, int]:
+    """The read half of a read-then-write: the ss6 header this log answers
+    with, and the revision the addressed entity is at right now."""
+    namespace, _, name = key.partition(":")
+    read = await _control_call(
+        sock_path,
+        {"cmd": "global", "name": name} if namespace == "global" else {"cmd": "status", "job": name},
+    )
+    header = (str(read.get("baseline_id") or ""), int(read.get("epoch") or 0))
+    if not read.get("ok"):
+        return *header, 0  # no row yet: the revision an absent entity is at
+    if namespace == "global":
+        return *header, int(read["globals"][name]["state_rev"])
+    return *header, int(read["jobs"][name]["state_rev"])
+
+
+def _body(response: dict, engine: Engine) -> dict:
+    """Split the ss6 read header off an answer, checking it on the way.
+
+    Every answer publishes `baseline_id`, `epoch` and `applied_index` -- so a
+    whole-response assertion that spelled them out would repeat the same
+    three lines in every test that pins a shape. This says it once, for all
+    of them, and the tests below keep asserting exact shapes rather than
+    softening to subset checks."""
+    header = {key: response.pop(key, None) for key in ("baseline_id", "epoch", "applied_index")}
+    assert header == {
+        "baseline_id": engine.baseline_id,
+        "epoch": engine.epoch,
+        "applied_index": engine.frontiers.applied_index,
+    }
+    return response
+
+
+def _sync_sendevent(sock_path: Path, verb: str, **payload: object) -> dict:
+    """The blocking twin of `_sendevent`, for the subprocess test."""
+    key = addressed_key(verb, payload)
+    namespace, _, name = key.partition(":")
+    read = _sync_control_call(
+        sock_path,
+        {"cmd": "global", "name": name} if namespace == "global" else {"cmd": "status", "job": name},
+    )
+    revision = 0
+    if read.get("ok"):
+        revision = int(
+            read["globals"][name]["state_rev"]
+            if namespace == "global"
+            else read["jobs"][name]["state_rev"]
+        )
+    return _sync_control_call(
+        sock_path,
+        {
+            "cmd": "sendevent",
+            "baseline_id": str(read.get("baseline_id") or ""),
+            "epoch": int(read.get("epoch") or 0),
+            "request_id": str(uuid.uuid4()),
+            "verb": verb,
+            "payload": payload,
+            "expect": {key: revision},
+        },
+    )
+
+
+async def _sendevent(
+    sock_path: Path, verb: str, *, expect: int | None = None, **payload: object
+) -> dict:
+    """One mutation, composed the way ss0 requires: read the addressed
+    entity's revision, then NAME it. `expect=` pins a revision by hand, which
+    is what a test of a LOST race needs -- an auto-read can only ever agree
+    with itself."""
+    key = addressed_key(verb, payload)
+    baseline, epoch, current = await _read_revision(sock_path, key)
+    return await _control_call(
+        sock_path,
+        {
+            "cmd": "sendevent",
+            "baseline_id": baseline,
+            "epoch": epoch,
+            "request_id": str(uuid.uuid4()),
+            "verb": verb,
+            "payload": payload,
+            "expect": {key: current if expect is None else expect},
+            "claimed_actor": "tests@localhost",
+        },
+    )
 
 
 async def _wait_for_async(predicate, timeout_s: float = 3.0, interval_s: float = 0.02):
@@ -171,9 +266,7 @@ def test_sendevent_startjob_drives_a_job_to_success(short_root: Path) -> None:
         adapter = FakeAdapter({("sv_job", 1): (0.05, 0)}, default=None)
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "sv_job"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="sv_job")
             assert resp["ok"] is True
 
             async def succeeded() -> bool:
@@ -193,9 +286,7 @@ def test_sendevent_unknown_job_is_rejected(short_root: Path) -> None:
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "does-not-exist"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="does-not-exist")
             assert resp["ok"] is False
         finally:
             await _teardown(engine, server, loop_task)
@@ -210,10 +301,7 @@ def test_set_global_then_a_value_conditioned_job_fires(short_root: Path) -> None
         adapter = FakeAdapter(default=(0.05, 0))
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            resp = await _control_call(
-                server.path,
-                {"cmd": "sendevent", "event": "SET_GLOBAL", "name": "FLAG", "value": "go"},
-            )
+            resp = await _sendevent(server.path, "SET_GLOBAL", name="FLAG", value="go")
             assert resp["ok"] is True
 
             async def started() -> bool:
@@ -233,22 +321,13 @@ def test_change_status_bad_status_rejected_valid_status_updates_the_store(short_
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            bad = await _control_call(
-                server.path,
-                {"cmd": "sendevent", "event": "CHANGE_STATUS", "job": "cs_job", "status": "BOGUS"},
-            )
+            bad = await _sendevent(server.path, "CHANGE_STATUS", job="cs_job", status="BOGUS")
             assert bad["ok"] is False
 
-            good = await _control_call(
-                server.path,
-                {
-                    "cmd": "sendevent",
-                    "event": "CHANGE_STATUS",
-                    "job": "cs_job",
-                    "status": "SUCCESS",
-                    "exit_code": 0,
-                },
-            )
+            good = await _sendevent(server.path, "CHANGE_STATUS", job="cs_job",
+                    status="SUCCESS",
+                    exit_code=0,
+                )
             assert good["ok"] is True
 
             async def updated() -> bool:
@@ -269,16 +348,9 @@ def test_every_accepted_control_event_is_journaled_with_source_control(short_roo
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "ON_HOLD", "job": "jr_job"}
-            )
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "OFF_HOLD", "job": "jr_job"}
-            )
-            await _control_call(
-                server.path,
-                {"cmd": "sendevent", "event": "SET_GLOBAL", "name": "G1", "value": "v1"},
-            )
+            await _sendevent(server.path, "ON_HOLD", job="jr_job")
+            await _sendevent(server.path, "OFF_HOLD", job="jr_job")
+            await _sendevent(server.path, "SET_GLOBAL", name="G1", value="v1")
 
             async def all_seen() -> bool:
                 records = read_journal(run_root / "journal.jsonl")
@@ -306,9 +378,7 @@ def test_on_hold_off_hold_roundtrip_visible_in_status_flags(short_root: Path) ->
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "ON_HOLD", "job": "hold_job"}
-            )
+            await _sendevent(server.path, "ON_HOLD", job="hold_job")
 
             async def held() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "hold_job"})
@@ -316,9 +386,7 @@ def test_on_hold_off_hold_roundtrip_visible_in_status_flags(short_root: Path) ->
 
             await _wait_for_async(held)
 
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "OFF_HOLD", "job": "hold_job"}
-            )
+            await _sendevent(server.path, "OFF_HOLD", job="hold_job")
 
             async def released() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "hold_job"})
@@ -372,9 +440,7 @@ def test_startjob_via_control_socket_tags_cause_and_started_by_control(short_roo
             before = await _control_call(server.path, {"cmd": "status", "job": "prov_job"})
             assert before["jobs"]["prov_job"]["started_by"] is None
 
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "prov_job"}
-            )
+            await _sendevent(server.path, "STARTJOB", job="prov_job")
 
             async def done() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "prov_job"})
@@ -410,9 +476,7 @@ def test_force_startjob_via_control_socket_tags_cause_and_started_by_control(
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "FORCE_STARTJOB", "job": "force_job"}
-            )
+            resp = await _sendevent(server.path, "FORCE_STARTJOB", job="force_job")
             assert resp["ok"] is True
 
             async def done() -> bool:
@@ -441,9 +505,7 @@ def test_trace_query_since_filtering(short_root: Path) -> None:
         adapter = FakeAdapter({("tr_job", 1): (0.05, 0)}, default=None)
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "tr_job"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="tr_job")
             assert resp["ok"] is True
 
             async def has_three() -> bool:
@@ -475,7 +537,7 @@ def test_explain_null_condition_and_status_atom_truth_before_and_after(short_roo
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
             none_resp = await _control_call(server.path, {"cmd": "explain", "job": "ex_a"})
-            assert none_resp == {
+            assert _body(none_resp, engine) == {
                 "ok": True,
                 "job": "ex_a",
                 "condition": None,
@@ -489,10 +551,7 @@ def test_explain_null_condition_and_status_atom_truth_before_and_after(short_roo
             assert before["satisfied"] is False
             assert before["atoms"] == [{"atom": "s(ex_a)", "true": False}]
 
-            resp = await _control_call(
-                server.path,
-                {"cmd": "sendevent", "event": "CHANGE_STATUS", "job": "ex_a", "status": "SUCCESS"},
-            )
+            resp = await _sendevent(server.path, "CHANGE_STATUS", job="ex_a", status="SUCCESS")
             assert resp["ok"] is True
 
             async def satisfied() -> bool:
@@ -524,7 +583,7 @@ def test_plan_waves_for_a_chain_and_a_cycle_refuses(short_root: Path) -> None:
         engine, server, loop_task = await _serve(short_root / "run_chain", chain_text)
         try:
             resp = await _control_call(server.path, {"cmd": "plan"})
-            assert resp == {"ok": True, "waves": [["pl_a"], ["pl_b"], ["pl_c"]]}
+            assert _body(resp, engine) == {"ok": True, "waves": [["pl_a"], ["pl_b"], ["pl_c"]]}
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -555,7 +614,7 @@ def test_spec_serves_the_rendered_block_and_nulls_without_texts(short_root: Path
         )
         try:
             resp = await _control_call(server.path, {"cmd": "spec", "job": "sp_a"})
-            assert resp == {
+            assert _body(resp, engine) == {
                 "ok": True,
                 "job": "sp_a",
                 "job_type": "CMD",
@@ -615,9 +674,7 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            r1 = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "ON_HOLD", "job": "sub_job"}
-            )
+            r1 = await _sendevent(server.path, "ON_HOLD", job="sub_job")
             assert r1["ok"] is True
 
             async def journaled() -> bool:
@@ -628,7 +685,7 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
 
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             try:
-                writer.write(json.dumps({"cmd": "subscribe", "since": 0}).encode() + b"\n")
+                writer.write(json.dumps(_v2({"cmd": "subscribe", "since": 0})).encode() + b"\n")
                 await writer.drain()
                 ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
                 assert ack == {"ok": True, "subscribed": True}
@@ -647,9 +704,7 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
                 assert sum(1 for r in backfilled if r.get("kind") == "ON_HOLD") == 1
 
                 # a NEW live event, sent only after the backfill is fully drained
-                r2 = await _control_call(
-                    server.path, {"cmd": "sendevent", "event": "OFF_HOLD", "job": "sub_job"}
-                )
+                r2 = await _sendevent(server.path, "OFF_HOLD", job="sub_job")
                 assert r2["ok"] is True
                 # every admitted input is now followed by its ss4 result
                 # record, which streams like any other record -- drain past
@@ -936,9 +991,7 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         wait_for(lambda: sock_path.exists(), timeout_s=5.0)
 
         resp = wait_for(
-            lambda: _sync_control_call(
-                sock_path, {"cmd": "sendevent", "event": "STARTJOB", "job": "proc_job"}
-            ),
+            lambda: _sync_sendevent(sock_path, "STARTJOB", job="proc_job"),
             timeout_s=5.0,
         )
         assert resp["ok"] is True
@@ -965,10 +1018,7 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         assert mismatched.stdout.strip() == "SUCCESS"
 
         # flip the job to FAILURE over the wire; the predicates swap branches
-        flip = _sync_control_call(
-            sock_path,
-            {"cmd": "sendevent", "event": "CHANGE_STATUS", "job": "proc_job", "status": "FAILURE"},
-        )
+        flip = _sync_sendevent(sock_path, "CHANGE_STATUS", job="proc_job", status="FAILURE")
         assert flip["ok"] is True
 
         def failed() -> bool:
@@ -1010,9 +1060,7 @@ def test_status_pending_timers_visible_while_running_then_gone_after_completion(
         adapter = FakeAdapter({("pte_job", 1): (0.3, 0)}, default=None)
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "pte_job"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="pte_job")
             assert resp["ok"] is True
 
             async def running() -> bool:
@@ -1050,9 +1098,7 @@ def test_status_log_paths_default_shape_for_a_ran_cmd_job(short_root: Path) -> N
         adapter = FakeAdapter({("ple_job", 1): (0.05, 0)}, default=None)
         engine, server, loop_task = await _serve(run_root, text, adapter=adapter)
         try:
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "ple_job"}
-            )
+            await _sendevent(server.path, "STARTJOB", job="ple_job")
 
             async def dispatched() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "ple_job"})
@@ -1085,9 +1131,7 @@ def test_status_log_paths_explicit_std_out_file_honored_per_stream(
         adapter = FakeAdapter({("pls_job", 1): (0.05, 0)}, default=None)
         engine, server, loop_task = await _serve(run_root, text, adapter=adapter)
         try:
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "pls_job"}
-            )
+            await _sendevent(server.path, "STARTJOB", job="pls_job")
 
             async def dispatched() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "pls_job"})
@@ -1137,9 +1181,7 @@ def test_status_log_paths_non_cmd_jobs_are_null(short_root: Path, tmp_path: Path
         adapter = FakeAdapter({("plb_mem", 1): (0.05, 0)}, default=None)
         engine, server, loop_task = await _serve(box_root, box_text, adapter=adapter)
         try:
-            await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "plb_box"}
-            )
+            await _sendevent(server.path, "STARTJOB", job="plb_box")
 
             async def box_running() -> bool:
                 r = await _control_call(server.path, {"cmd": "status", "job": "plb_box"})
@@ -1194,7 +1236,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
             mid = await _control_call(server.path, {"cmd": "deps", "job": "dp_b"})
-            assert mid == {
+            assert _body(mid, engine) == {
                 "ok": True,
                 "job": "dp_b",
                 "upstream": ["dp_a"],
@@ -1205,7 +1247,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
             }
 
             head = await _control_call(server.path, {"cmd": "deps", "job": "dp_a"})
-            assert head == {
+            assert _body(head, engine) == {
                 "ok": True,
                 "job": "dp_a",
                 "upstream": [],
@@ -1216,7 +1258,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
             }
 
             tail = await _control_call(server.path, {"cmd": "deps", "job": "dp_c"})
-            assert tail == {
+            assert _body(tail, engine) == {
                 "ok": True,
                 "job": "dp_c",
                 "upstream": ["dp_b"],
@@ -1227,7 +1269,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
             }
 
             solo = await _control_call(server.path, {"cmd": "deps", "job": "dp_d"})
-            assert solo == {
+            assert _body(solo, engine) == {
                 "ok": True,
                 "job": "dp_d",
                 "upstream": [],
@@ -1288,26 +1330,14 @@ def test_change_status_on_declared_xinst_ghost_satisfies_a_cross_instance_atom(
         adapter = FakeAdapter(default=(0.05, 0))
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            refused = await _control_call(
-                server.path,
-                {
-                    "cmd": "sendevent",
-                    "event": "CHANGE_STATUS",
-                    "job": "FEED^NOPE",
-                    "status": "SUCCESS",
-                },
-            )
+            refused = await _sendevent(server.path, "CHANGE_STATUS", job="FEED^NOPE",
+                    status="SUCCESS",
+                )
             assert refused["ok"] is False
 
-            resp = await _control_call(
-                server.path,
-                {
-                    "cmd": "sendevent",
-                    "event": "CHANGE_STATUS",
-                    "job": "FEED^PRD",
-                    "status": "SUCCESS",
-                },
-            )
+            resp = await _sendevent(server.path, "CHANGE_STATUS", job="FEED^PRD",
+                    status="SUCCESS",
+                )
             assert resp["ok"] is True
 
             async def dep_fired() -> bool:
@@ -1347,9 +1377,7 @@ def test_timers_oracle_deadlines_due_ordered_no_schedule_entries_without_schedul
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
             for job in ("tm_one", "tm_two"):
-                resp = await _control_call(
-                    server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": job}
-                )
+                resp = await _sendevent(server.path, "STARTJOB", job=job)
                 assert resp["ok"] is True
 
             async def both_running() -> bool:
@@ -1392,9 +1420,7 @@ def test_timers_merges_scheduler_next_ticks_due_ordered(short_root: Path) -> Non
             short_root / "run", text, adapter=adapter, scheduler=scheduler
         )
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "tm_run"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="tm_run")
             assert resp["ok"] is True
 
             async def running() -> bool:
@@ -1442,9 +1468,7 @@ def test_timers_synthesizes_a_filewatch_row_and_status_gains_watching_for_live_f
             assert resp["timers"] == []
 
             for job in ("fwv_cmd", "fwv_fw"):
-                resp = await _control_call(
-                    server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": job}
-                )
+                resp = await _sendevent(server.path, "STARTJOB", job=job)
                 assert resp["ok"] is True
 
             async def both_running() -> bool:
@@ -1495,9 +1519,7 @@ def test_timers_and_status_drop_the_filewatch_row_once_the_fw_run_completes(
         adapter = FakeAdapter({("fwc_fw", 1): (0.05, 0)})  # completes fast, then quiet
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "fwc_fw"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="fwc_fw")
             assert resp["ok"] is True
 
             async def running() -> bool:
@@ -1695,10 +1717,7 @@ def test_global_read_answers_named_absence_and_presence_with_revisions(
             # the read INSERTED nothing -- asking about a name must not create it
             assert "NEVER_SET" not in engine.oracle.store.globals_
 
-            resp = await _control_call(
-                server.path,
-                {"cmd": "sendevent", "event": "SET_GLOBAL", "name": "NEVER_SET", "value": "now"},
-            )
+            resp = await _sendevent(server.path, "SET_GLOBAL", name="NEVER_SET", value="now")
             assert resp["ok"] is True
 
             async def landed() -> bool:
@@ -1754,9 +1773,7 @@ def test_status_publishes_the_revision_a_precondition_would_name(short_root: Pat
             resp = await _control_call(server.path, {"cmd": "status", "job": "rev_j"})
             before = resp["jobs"]["rev_j"]["state_rev"]
 
-            resp = await _control_call(
-                server.path, {"cmd": "sendevent", "event": "STARTJOB", "job": "rev_j"}
-            )
+            resp = await _sendevent(server.path, "STARTJOB", job="rev_j")
             assert resp["ok"] is True
 
             async def running() -> bool:

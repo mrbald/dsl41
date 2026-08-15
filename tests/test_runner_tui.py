@@ -138,24 +138,24 @@ async def _wait_for_ui(pilot, predicate, timeout_s: float = 5.0, interval_s: flo
 def test_parse_job_verb_with_explicit_job() -> None:
     assert parse_console_command("STARTJOB myjob", None) == {
         "cmd": "sendevent",
-        "event": "STARTJOB",
-        "job": "myjob",
+        "verb": "STARTJOB",
+        "payload": {"job": "myjob"},
     }
 
 
 def test_parse_job_verb_is_case_insensitive() -> None:
     assert parse_console_command("startjob myjob", None) == {
         "cmd": "sendevent",
-        "event": "STARTJOB",
-        "job": "myjob",
+        "verb": "STARTJOB",
+        "payload": {"job": "myjob"},
     }
 
 
 def test_parse_job_verb_without_explicit_job_defaults_to_the_selected_row() -> None:
     assert parse_console_command("KILLJOB", "selected_job") == {
         "cmd": "sendevent",
-        "event": "KILLJOB",
-        "job": "selected_job",
+        "verb": "KILLJOB",
+        "payload": {"job": "selected_job"},
     }
 
 
@@ -171,9 +171,8 @@ def test_parse_every_job_verb_takes_at_most_one_job(verb: str) -> None:
 def test_parse_set_global_name_equals_value() -> None:
     assert parse_console_command("SET_GLOBAL FLAG=go", None) == {
         "cmd": "sendevent",
-        "event": "SET_GLOBAL",
-        "name": "FLAG",
-        "value": "go",
+        "verb": "SET_GLOBAL",
+        "payload": {"name": "FLAG", "value": "go"},
     }
 
 
@@ -182,9 +181,8 @@ def test_parse_set_global_value_may_itself_contain_an_equals_sign() -> None:
     more of them untouched."""
     assert parse_console_command("SET_GLOBAL FLAG=a=b", None) == {
         "cmd": "sendevent",
-        "event": "SET_GLOBAL",
-        "name": "FLAG",
-        "value": "a=b",
+        "verb": "SET_GLOBAL",
+        "payload": {"name": "FLAG", "value": "a=b"},
     }
 
 
@@ -203,9 +201,8 @@ def test_parse_set_global_malformed_variants(text: str) -> None:
 def test_parse_change_status_status_first_with_selected_job() -> None:
     assert parse_console_command("CHANGE_STATUS SUCCESS", "jobx") == {
         "cmd": "sendevent",
-        "event": "CHANGE_STATUS",
-        "job": "jobx",
-        "status": "SUCCESS",
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "jobx", "status": "SUCCESS"},
     }
 
 
@@ -219,29 +216,24 @@ def test_parse_change_status_status_first_without_selection_errors() -> None:
 def test_parse_change_status_job_first() -> None:
     assert parse_console_command("CHANGE_STATUS jobx SUCCESS", None) == {
         "cmd": "sendevent",
-        "event": "CHANGE_STATUS",
-        "job": "jobx",
-        "status": "SUCCESS",
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "jobx", "status": "SUCCESS"},
     }
 
 
 def test_parse_change_status_job_first_with_exit_code() -> None:
     assert parse_console_command("CHANGE_STATUS jobx FAILURE 1", None) == {
         "cmd": "sendevent",
-        "event": "CHANGE_STATUS",
-        "job": "jobx",
-        "status": "FAILURE",
-        "exit_code": 1,
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "jobx", "status": "FAILURE", "exit_code": 1},
     }
 
 
 def test_parse_change_status_status_first_with_exit_code_and_selected_job() -> None:
     assert parse_console_command("CHANGE_STATUS SUCCESS 0", "jobx") == {
         "cmd": "sendevent",
-        "event": "CHANGE_STATUS",
-        "job": "jobx",
-        "status": "SUCCESS",
-        "exit_code": 0,
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "jobx", "status": "SUCCESS", "exit_code": 0},
     }
 
 
@@ -363,7 +355,18 @@ def test_control_client_subscribe_yields_a_record_for_an_injected_event(short_ro
         engine, server, loop_task = await _serve(short_root / "run", text)
         client = ControlClient(server.path)
         try:
-            resp = await client.request({"cmd": "sendevent", "event": "ON_HOLD", "job": "sub_job"})
+            read = await client.request({"cmd": "status", "job": "sub_job"})
+            resp = await client.request(
+                {
+                    "cmd": "sendevent",
+                    "baseline_id": read["baseline_id"],
+                    "epoch": read["epoch"],
+                    "request_id": "tui-sub-1",
+                    "verb": "ON_HOLD",
+                    "payload": {"job": "sub_job"},
+                    "expect": {"job:sub_job": read["jobs"]["sub_job"]["state_rev"]},
+                }
+            )
             assert resp["ok"] is True
 
             async def held() -> bool:
@@ -507,7 +510,11 @@ def test_pilot_explain_pane_atoms_and_console_change_status_echo(short_root: Pat
                 cmdline.value = "CHANGE_STATUS tp_ea SUCCESS 0"
                 await pilot.press("enter")
 
-                await _wait_for_ui(pilot, lambda: any("ok @" in ln.text for ln in console.lines))
+                # "applied @ #N": a v2 answer is a DECISION with an index, not
+                # a receipt with a timestamp (DL-90)
+                await _wait_for_ui(
+                    pilot, lambda: any("applied @ #" in ln.text for ln in console.lines)
+                )
                 await _wait_for_ui(pilot, lambda: "✔ s(tp_ea)" in str(pane.content))
         finally:
             await _teardown(engine, server, loop_task)

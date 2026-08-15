@@ -120,6 +120,9 @@ def test_input_record_carries_seq_at_kind_payload_source_and_the_admission_field
         "source": "control",
         "request_id": "r1",
         "fingerprint": first.fingerprint,
+        # the leader's, not the caller's: S6 fences on it, so every record
+        # carries it even while it is inert on one host (concurrency-model ss6)
+        "epoch": 0,
     }
     assert inputs[1]["seq"] == 2
     assert inputs[1]["source"] == "adapter"
@@ -154,8 +157,13 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         "at": (T0 + timedelta(minutes=1)).isoformat(),
         "request_id": "r1",
         "fingerprint": advance["fingerprint"],
+        "epoch": 0,
     }
     assert "kind" not in advance and "payload" not in advance
+    # and no `expect`: ss0's mandate is on EXTERNALLY REQUESTED mutations, and
+    # a time observation is the engine's own. Writing a null for it would blur
+    # the one distinction this record has to keep.
+    assert "expect" not in advance and "claimed_actor" not in advance
     result = next(r for r in records if r["rec"] == "result")
     # `index`, not `seq`: a result shares its attempt's number, and the ss10
     # subscribe cursor is keyed on seq -- two records under one cursor value

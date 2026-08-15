@@ -200,12 +200,18 @@ def test_cm05_an_exact_retry_takes_no_index_and_moves_no_time() -> None:
     assert engine.oracle.store.job["j"].run_number == 2  # the contrast really runs
 
 
-def test_one_request_id_for_two_different_commands_is_refused_loudly() -> None:
+def test_one_request_id_for_two_different_commands_is_refused_not_applied() -> None:
     """A reused id cannot be answered from the first decision -- the second
     command would apply neither -- so it is a collision, not a retry. The
-    fingerprint is what tells them apart (ss6)."""
+    fingerprint is what tells them apart (ss6).
 
-    async def scenario() -> None:
+    It is refused, and the engine keeps serving (S3): a collision is a client
+    error, and letting one confused caller raise through the single-writer
+    loop would take the estate down with it. The second command's effect must
+    still be absent -- a refusal that quietly applied would be worse than a
+    crash."""
+
+    async def scenario() -> Engine:
         engine = Engine(
             lower_source(_SOLO_JIL),
             clock=VirtualClock(start=T0),
@@ -214,11 +220,21 @@ def test_one_request_id_for_two_different_commands_is_refused_loudly() -> None:
         engine.inject(_ev("ON_HOLD", 0, job="j"), request_id="same")
         await engine.run_until_quiescent(T0)
         engine.inject(_ev("OFF_HOLD", 1, job="j"), request_id="same")
-        with pytest.raises(RequestCollision, match="different command"):
-            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        # the loop survived it and still applies well-formed inputs
+        engine.inject(_ev("ON_ICE", 2, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
         await engine.shutdown()
+        return engine
 
-    asyncio.run(scenario())
+    engine = asyncio.run(scenario())
+    assert [reason for _, reason in engine.refusals] == [
+        "request_id 'same' was admitted for a different command (fingerprint mismatch):"
+        " reuse an id only for an exact retry"
+    ]
+    assert engine.oracle.store.job["j"].on_hold is True  # the OFF_HOLD never applied
+    assert engine.oracle.store.job["j"].on_ice is True
+    assert engine.frontiers.committed_index == 2  # ON_HOLD and ON_ICE; the collision took no index
 
 
 def test_the_fingerprint_separates_the_logs_and_the_commands() -> None:

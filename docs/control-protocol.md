@@ -1,9 +1,15 @@
 # Control protocol — the engine's public contract
 
-Status: frozen (2026-08-13, DL-78). This document is normative for the
-runner's §10 control plane in the same way `docs/supervisor-protocol.md`
-is normative for the §6a lifecycle tier. Each change to a frozen item
-requires a decision-log entry.
+Status: frozen at **v2** (2026-08-15, DL-90; first frozen 2026-08-13,
+DL-78). This document is normative for the runner's §10 control plane in
+the same way `docs/supervisor-protocol.md` is normative for the §6a
+lifecycle tier. Each change to a frozen item requires a decision-log
+entry.
+
+**v1 is gone, not deprecated.** `docs/concurrency-model.md` §0 refuses a
+caller that does not name a version, and accepting unversioned requests
+"for compatibility" is exactly the opt-out it forbids. An engine at this
+version answers a v1 client with a refusal naming the version it speaks.
 
 The two protocols sit on opposite sides of the engine:
 
@@ -44,8 +50,17 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
   overruns asyncio's 64 KiB default at roughly 300 jobs.
+- **Every request carries `"v": 2`**, including queries and `subscribe`.
+  The check runs before the request is routed at all, so `subscribe` —
+  which owns its connection and never reaches the response path — is not
+  the one unversioned door left open. A refusal does not close the
+  connection: the next line on it may be well-formed.
 - Responses are `{"ok": true, …}` or `{"ok": false, "error": "<message>"}`.
   Errors are human-readable strings, **not** stable codes.
+- Every response also carries the **read header**: `baseline_id`, `epoch`
+  and `applied_index` (`docs/concurrency-model.md` §6). A revision means
+  nothing without the log it was read from, and a client that cannot name
+  the log cannot be told it is holding a stale one.
 - A malformed line answers `{"ok": false, "error": "bad request: …"}` and
   the stream stays in sync. A handler that raises answers
   `{"ok": false, "error": "internal error: …"}` rather than dying
@@ -59,11 +74,10 @@ crashed run's leftover, which is unlinked and claimed. Two engines racing
 past the probe are separated by the bind itself. This probe is the *only*
 mechanism enforcing one engine per run root — see §7.
 
-**No version handshake.** Unlike the supervisor protocol's `"v": 1`, a
-control request carries no version field. Recorded as a known gap, not an
-oversight (DL-78): adding a required field would break every deployed
-client, and the natural place to introduce a handshake is the first
-non-local transport, which needs one anyway.
+**The version handshake** is `"v": 2` on every request (DL-90). This was
+listed here as a known gap through v1; it closed in the same break that
+made preconditions mandatory, because two wire breaks would have cost
+every client twice.
 
 **No controller lease.** Deliberate (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
@@ -72,21 +86,77 @@ semantics.
 
 ## 3. Mutating verb: sendevent
 
-`{"cmd": "sendevent", "event": "<VERB>", …}` — the parity set maps 1:1
-onto oracle `EventKind`. Every injection is journaled with
-`source=control`; the WAL is the audit trail, and there is no second log.
+```json
+{"cmd": "sendevent", "v": 2, "baseline_id": "…", "epoch": 0,
+ "request_id": "…", "verb": "CHANGE_STATUS",
+ "payload": {"job": "nightly", "status": "SUCCESS"},
+ "expect": {"job:nightly": 12}, "claimed_actor": "alice@host"}
+```
 
-| shape | fields | notes |
+The `verb` set maps 1:1 onto oracle `EventKind`. Every admitted command is
+journaled with `source=control`; the WAL is the audit trail, and there is
+no second log.
+
+| verb | `payload` | notes |
 |---|---|---|
 | job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC` |
 | `SET_GLOBAL` | `name`, `value` (both non-empty strings) | |
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
-Response: `{"ok": true, "kind": "<EventKind>", "at": "<iso8601>"}`.
+**`expect` is mandatory** (`docs/concurrency-model.md` §0). It names the
+addressed entity — `job:<name>` for a job verb, `global:<name>` for
+`SET_GLOBAL` — and nothing else, at the revision the caller read from a
+§4 query. `0` means the entity has no row yet, which is how a conditional
+create is expressed. A command with no `expect`, a malformed one, or one
+naming any other key is **refused**: nothing is admitted, no index is
+consumed, and the log says nothing about it.
+
+`request_id` is required. Without one a timed-out command cannot be
+retried safely, because nothing could recognise the retry as one. An
+exact retry — same id, same fingerprint — is answered from its original
+decision and takes no second index. A reused id under a *different*
+command is refused as a collision. `expect` participates in the
+fingerprint, so the same verb at two revisions is two commands.
+
+`baseline_id` must match the engine's. A revision read from another
+baseline names nothing here.
+
+`epoch` is required and inert on a single host; it is checked **after**
+deduplication, so an exact old-epoch retry recovers its original result
+while an unseen old-epoch request is refused.
+
+`claimed_actor` is optional and is exactly what it says: there is no
+authentication at this tier (§7), so it is recorded as the caller's claim
+about itself and is never treated as a principal.
+
+**The response is the decision, not the receipt:**
+
+```json
+{"ok": true, "kind": "ON_HOLD", "decision": "applied", "index": 12,
+ "request_id": "…", "revisions": {"job:nightly": 13}, …header…}
+```
+
+`ok` is true only for `decision: "applied"`. A **rejection** — over this
+verb, always because the precondition lost its race — answers `ok: false`
+with `decision: "rejected"` and the reason in `error`; it is a decision
+with an index, journaled as one, and its batch's time observation
+applied. A **refusal** answers `ok: false` with `refused: true` and
+nothing in the log to point at. The distinction matters to a machine
+client: a refusal is safe to re-compose and send again unchanged, a
+rejection means the world moved and the command has to be re-decided
+against what it moved to.
+
+The server waits for the decision rather than acknowledging admission,
+because a precondition whose outcome the caller cannot see is not a
+precondition. If none arrives within 5 s it answers that it does not
+know, and says to re-read before retrying — the command may be durably
+admitted and about to apply.
 
 Job arguments are validated against the catalog — vendor `sendevent`
-errors on an unknown job rather than queueing it. `CHANGE_STATUS` carries
-one deliberate exception (SEM-07): `"JOB^INST"` where `INST` is a declared
+errors on an unknown job rather than queueing it — and that check
+necessarily precedes the `expect` check, since the payload is what says
+which entity is addressed. `CHANGE_STATUS` carries one deliberate
+exception (SEM-07): `"JOB^INST"` where `INST` is a declared
 `insert_xinst` is a legal target even though no such job is in the
 catalog. Overwriting the store's pseudo-entity is exactly how an operator
 satisfies a cross-instance atom the sandbox cannot see. Other job verbs
@@ -100,6 +170,13 @@ lists them.
 Every query is a **pure projection**. None mutates, none inserts a store
 row. They are safe to serve from the engine's task because `feed()` never
 yields, so a handler can never observe a half-applied event.
+
+Every response carries the read header (§2) in addition to the fields
+listed below. These are the reads an `expect` is composed from:
+per-job `state_rev` in `status`, and `global`/`globals` for a named
+global. Revision-bearing reads are leader-only in v2 — one engine per run
+root *is* the leader until S6 introduces election, and the socket probe
+in §2 is what enforces it.
 
 ### `status [job]`
 
@@ -216,11 +293,14 @@ Delivery guarantees, exactly as implemented:
 These are honest limits of the frozen protocol, listed because the
 multihost track (`docs/decision-log.md` DL-78) has to address each one.
 
-1. **No version handshake** (§2).
+1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2).
 2. **No authentication or authorization.** The socket's `0600` mode plus
    filesystem ownership is the entire access-control model. Any process
    running as the invoking user has full `sendevent` authority. This is
-   the §12 RBAC non-goal made concrete.
+   the §12 RBAC non-goal made concrete, and it is why the envelope's
+   actor field is named `claimed_actor`: the log records an assertion, and
+   `docs/concurrency-model.md` §6's "the leader stamps the authenticated
+   principal" waits on a leader that can authenticate one.
 3. **Unix-domain only.** No network transport, so the single-engine
    guarantee rests on a local `bind()`. A non-local controller would need
    both a transport and a replacement for that guarantee.

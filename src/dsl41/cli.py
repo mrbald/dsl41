@@ -1316,6 +1316,53 @@ _SOCKET_OPT = typer.Option(
 )
 
 
+def _claimed_actor() -> str:
+    """What this invocation says it is (concurrency-model ss6). A CLAIM: the
+    control socket has no authentication (control-protocol ss7 gap 2), so
+    this is a breadcrumb in the log, never an authorization."""
+    import getpass
+    import os
+    import socket as socket_mod
+
+    try:
+        user = getpass.getuser()
+    except Exception:  # no passwd entry (containers): the claim is still useful
+        user = f"uid{os.getuid()}"
+    return f"{user}@{socket_mod.gethostname()}"
+
+
+def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
+    """The ss6 read header (`baseline_id`, `epoch`) and the current revision
+    of `key` -- the read half of a read-then-write, for an operator who did
+    not carry a revision in by hand.
+
+    It narrows the race to one round trip; it does not remove it, and it
+    cannot: the value of a precondition is that it names what the DECIDER
+    saw, and a number this process fetched a millisecond ago is only a very
+    recent guess about that. Whoever looked at a status page and then chose
+    to act should pass --expect with the revision they looked at."""
+    namespace, _, name = key.partition(":")
+    verb = {"cmd": "global", "name": name} if namespace == "global" else {
+        "cmd": "status",
+        "job": name,
+    }
+    response = _control_roundtrip(socket_path, verb)
+    baseline, epoch = response.get("baseline_id"), response.get("epoch")
+    if not isinstance(baseline, str) or not isinstance(epoch, int):
+        typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
+        raise typer.Exit(2)
+    if not response.get("ok"):
+        # `status` refuses a job it has neither a catalog entry nor a row for,
+        # which is the right answer to a typo and the wrong one here: an
+        # entity with no row IS at revision 0 -- exactly what a SEM-07
+        # CHANGE_STATUS on a not-yet-invented "JOB^INST" must name. The typo
+        # is still caught, by the catalog check on the command itself.
+        return baseline, epoch, 0
+    if namespace == "global":
+        return baseline, epoch, int(response["globals"][name]["state_rev"])
+    return baseline, epoch, int(response["jobs"][name]["state_rev"])
+
+
 @app.command()
 def sendevent(
     event: str = typer.Argument(
@@ -1330,25 +1377,62 @@ def sendevent(
     exit_code: int = typer.Option(
         None, "--exit-code", help="CHANGE_STATUS: optional exit code to record."
     ),
+    expect: int = typer.Option(
+        None,
+        "--expect",
+        help="The state_rev you read for the target (from `query status`/`global`)."
+        " The command is refused if it moved since. Omitted, this reads it first --"
+        " which narrows the race to one round trip, not to nothing. 0 means"
+        " 'still absent' (SET_GLOBAL's conditional create).",
+    ),
 ) -> None:
-    """Vendor-parity sendevent against a running engine (runner-design ss10).
-    Every accepted event is journaled by the engine (source=control)."""
-    import json as json_mod
+    """Vendor-parity sendevent against a running engine (runner-design ss10),
+    over the v2 protocol (concurrency-model ss6).
 
-    request: dict = {"cmd": "sendevent", "event": event.upper()}
+    Every mutation names the revision it was composed against and is
+    answered with its DECISION: exit 0 means the oracle applied it, exit 2
+    means it was refused at the door or rejected because the target moved
+    first. Journaled by the engine either way -- a rejection is a decision
+    with an index, not an absence."""
+    import json as json_mod
+    import uuid
+
+    from dsl41.runner_admission import addressed_key
+    from dsl41.runner_clock import EngineError
+
+    verb = event.upper()
+    payload: dict = {}
     if job is not None:
-        request["job"] = job
+        payload["job"] = job
     if status is not None:
-        request["status"] = status.upper()
+        payload["status"] = status.upper()
     if global_kv is not None:
         name, sep, value = global_kv.partition("=")
         if not sep or not name:
             typer.echo('--global expects "NAME=value"', err=True)
             raise typer.Exit(2)
-        request["name"], request["value"] = name, value
+        payload["name"], payload["value"] = name, value
     if exit_code is not None:
-        request["exit_code"] = exit_code
-    response = _control_roundtrip(socket_path, request)
+        payload["exit_code"] = exit_code
+    try:
+        key = addressed_key(verb, payload)
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    baseline, epoch, current = _read_revision(socket_path, key)
+    response = _control_roundtrip(
+        socket_path,
+        {
+            "cmd": "sendevent",
+            "baseline_id": baseline,
+            "epoch": epoch,
+            "request_id": str(uuid.uuid4()),
+            "verb": verb,
+            "payload": payload,
+            "expect": {key: current if expect is None else expect},
+            "claimed_actor": _claimed_actor(),
+        },
+    )
     typer.echo(json_mod.dumps(response, sort_keys=True))
     raise typer.Exit(0 if response.get("ok") else 2)
 

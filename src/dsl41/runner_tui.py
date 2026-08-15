@@ -109,8 +109,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import getpass
 import os
 import re
+import socket as socket_mod
+import uuid
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -137,12 +140,25 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
+from dsl41.runner_admission import addressed_key
+from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     STATUSES,
     ControlClient,
     ControlClientError,
 )
+
+
+def _claimed_actor() -> str:
+    """What this viewer says it is (concurrency-model ss6). A CLAIM: the
+    control socket has no authentication (control-protocol ss7 gap 2)."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # no passwd entry (containers): the claim is still useful
+        user = f"uid{os.getuid()}"
+    return f"{user}@{socket_mod.gethostname()}"
+
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
 _STATUS_STYLE = {
@@ -799,11 +815,16 @@ class _LogPane(Vertical):
 
 
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
-    """Parse an event-console line into a sendevent request, or return an
-    error string. Grammar (ss11): `<JOB_VERB> [job]`, `SET_GLOBAL NAME=value`,
-    `CHANGE_STATUS [job] STATUS [exit_code]`; an omitted job targets the
-    selected row. Pure function so the parser is testable without a
-    terminal."""
+    """Parse an event-console line into the VERB HALF of a sendevent request,
+    or return an error string. Grammar (ss11): `<JOB_VERB> [job]`,
+    `SET_GLOBAL NAME=value`, `CHANGE_STATUS [job] STATUS [exit_code]`; an
+    omitted job targets the selected row. Pure function so the parser is
+    testable without a terminal.
+
+    The ss6 envelope is NOT built here (DL-90). `expect` names the revision
+    the operator was looking at when they typed, which is a fact about the
+    app's last refresh, not about the line; a pure parser cannot know it and
+    should not pretend to."""
     tokens = text.split()
     if not tokens:
         return "empty command"
@@ -814,7 +835,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
         job = explicit if explicit is not None else selected
         if job is None:
             return f"{verb} needs a job (none selected)"
-        return {"cmd": "sendevent", "event": verb, "job": job}
+        return {"cmd": "sendevent", "verb": verb, "payload": {"job": job}}
 
     if verb in JOB_EVENT_VERBS:
         if len(args) > 1:
@@ -826,7 +847,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
         name, _, value = args[0].partition("=")
         if not name:
             return 'SET_GLOBAL expects "NAME=value"'
-        return {"cmd": "sendevent", "event": verb, "name": name, "value": value}
+        return {"cmd": "sendevent", "verb": verb, "payload": {"name": name, "value": value}}
     if verb == "CHANGE_STATUS":
         if args and args[0].upper() in STATUSES:
             job, status, rest = selected, args[0].upper(), args[1:]
@@ -836,20 +857,15 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
             job, status, rest = args[0], args[1].upper(), args[2:]
         else:
             return "CHANGE_STATUS expects [job] STATUS [exit_code]"
-        request: dict[str, Any] = {
-            "cmd": "sendevent",
-            "event": verb,
-            "job": job,
-            "status": status,
-        }
+        payload: dict[str, Any] = {"job": job, "status": status}
         if rest:
             if len(rest) > 1:
                 return "CHANGE_STATUS expects at most one exit_code"
             try:
-                request["exit_code"] = int(rest[0])
+                payload["exit_code"] = int(rest[0])
             except ValueError:
                 return f"exit_code must be an integer, got {rest[0]!r}"
-        return request
+        return {"cmd": "sendevent", "verb": verb, "payload": payload}
     return f"unknown verb {verb!r} (sendevent verbs only)"
 
 
@@ -930,6 +946,12 @@ class RunnerApp(App[None]):
         self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
         # DL-65 navigation state
         self._jobs_snapshot: dict[str, dict[str, Any]] = {}  # last status response
+        #: the ss6 read header from the last answer: which log the revisions in
+        #: `_jobs_snapshot` were read from, so an `expect` composed off the
+        #: table cannot silently name a number from a re-baselined run root
+        self._baseline = ""
+        self._epoch = 0
+        self._claimed_actor = _claimed_actor()
         self._filter = ""  # space-separated substrings, AND'd, case-insensitive
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
@@ -1023,6 +1045,9 @@ class RunnerApp(App[None]):
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):
+                    # ss6 read header: the revisions below belong to THIS log
+                    self._baseline = str(status.get("baseline_id") or "")
+                    self._epoch = int(status.get("epoch") or 0)
                     self._set_drift(bool(status.get("spec_drift")))
                     self._update_table(status.get("jobs", {}))
                 await self._update_explain()
@@ -1625,20 +1650,67 @@ class RunnerApp(App[None]):
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
     async def _do_sendevent(self, request: dict[str, Any]) -> None:
-        target = request.get("job") or request.get("name") or ""
-        label = f"> {request.get('event')} {target}".rstrip()
+        """Complete the ss6 envelope and send it (DL-90).
+
+        `expect` comes from `_jobs_snapshot` -- the revision this table was
+        SHOWING when the operator acted. That is the honest reading of ss0
+        and it is what a terminal can do that a shell script cannot: if the
+        job moved between the refresh they read and the key they pressed,
+        their command is refused and they are told, instead of acting on a
+        picture that had already gone stale. Anything the table does not
+        hold (a global, a `JOB^INST` ghost) is read first."""
+        payload = dict(request.get("payload") or {})
+        target = payload.get("job") or payload.get("name") or ""
+        label = f"> {request.get('verb')} {target}".rstrip()
         try:
-            response = await self._client.request(request)
+            key = addressed_key(str(request.get("verb")), payload)
+        except EngineError as exc:
+            self._console_write(Text(f"{label}: {exc}", style="red"))
+            return
+        try:
+            envelope = await self._precondition(key)
+            response = await self._client.request(request | envelope)
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
             self._console_write(Text(f"{label}: not sent ({exc})", style="red"))
             return
         self._set_connected(True)
         if response.get("ok"):
-            self._console_write(Text(f"{label}: ok @ {response.get('at', '')}", style="green"))
+            self._console_write(
+                Text(f"{label}: applied @ #{response.get('index', '?')}", style="green")
+            )
         else:
             self._console_write(Text(f"{label}: {response.get('error', 'refused')}", style="red"))
         await self._refresh()
+
+    async def _precondition(self, key: str) -> dict[str, Any]:
+        """The rest of the ss6 envelope for a command addressing `key`."""
+        namespace, _, name = key.partition(":")
+        row = self._jobs_snapshot.get(name) if namespace == "job" else None
+        if row is not None and isinstance(row.get("state_rev"), int):
+            revision, baseline, epoch = row["state_rev"], self._baseline, self._epoch
+        else:
+            read = await self._client.request(
+                {"cmd": "global", "name": name}
+                if namespace == "global"
+                else {"cmd": "status", "job": name}
+            )
+            baseline = str(read.get("baseline_id") or "")
+            epoch = int(read.get("epoch") or 0)
+            if namespace == "global" and read.get("ok"):
+                revision = int(read["globals"][name]["state_rev"])
+            else:
+                # a job with neither a catalog entry nor a row reads 0, the
+                # revision a not-yet-invented entity is at; the server's own
+                # catalog check still refuses a typo
+                revision = 0
+        return {
+            "baseline_id": baseline,
+            "epoch": epoch,
+            "request_id": str(uuid.uuid4()),
+            "expect": {key: revision},
+            "claimed_actor": self._claimed_actor,
+        }
 
     def _console_write(self, text: Text) -> None:
         try:

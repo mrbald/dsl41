@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Event, Oracle
 from dsl41.runner_admission import (
+    INERT_EPOCH,
     ApplyResult,
     Attempt,
     DecisionIndex,
@@ -131,16 +132,28 @@ class Journal:
         control, reconcile} (ss7); None marks an unattributed script
         injection and never occurs in a real run. It is persisted because
         replay must re-derive the same causes and the same gate verdict
-        from it (DL-68)."""
+        from it (DL-68).
+
+        S3 adds the rest of the ss6 envelope. `epoch` rides on every record
+        because it is the leader's, not the caller's, and S6 fences on it.
+        `expect` and `claimed_actor` ride only where they exist: an input
+        the ENGINE raised has neither, and writing nulls for them would blur
+        the one distinction the log has to keep -- which inputs were
+        externally requested and therefore had to name a revision."""
         record: dict[str, Any] = {
             "rec": "input" if attempt.kind is not None else "advance",
             "seq": attempt.index,
             "at": attempt.at.isoformat(),
             "request_id": attempt.request_id,
             "fingerprint": attempt.fingerprint,
+            "epoch": attempt.epoch,
         }
         if attempt.kind is not None:
             record |= {"kind": attempt.kind, "payload": attempt.payload, "source": attempt.source}
+        if attempt.expect is not None:
+            record["expect"] = attempt.expect
+        if attempt.claimed_actor is not None:
+            record["claimed_actor"] = attempt.claimed_actor
         self._write(record)
 
     def result(self, result: ApplyResult) -> None:
@@ -273,6 +286,9 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
         kind = record.get("kind") if rec == "input" else None
         payload = record.get("payload") or {}
         source = record.get("source")
+        expect = record.get("expect")
+        actor = record.get("claimed_actor")
+        epoch = int(record.get("epoch", INERT_EPOCH))
         attempts.append(
             Attempt(
                 index=int(record["seq"]),
@@ -280,11 +296,25 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
                 request_id=str(record.get("request_id") or f"log:{record['seq']}"),
                 fingerprint=str(
                     record.get("fingerprint")
-                    or fingerprint(baseline_id=base, kind=kind, payload=payload, source=source)
+                    or fingerprint(
+                        baseline_id=base,
+                        kind=kind,
+                        payload=payload,
+                        source=source,
+                        epoch=epoch,
+                        expect=expect,
+                        claimed_actor=actor,
+                    )
                 ),
                 kind=kind,
                 payload=payload,
                 source=source,
+                # the precondition replays with the attempt: an input admitted
+                # without a result is re-decided through the same gate, and the
+                # revision it named is half of what that gate reads
+                expect=expect,
+                epoch=epoch,
+                claimed_actor=actor,
             )
         )
     return sorted(attempts, key=lambda a: a.index)

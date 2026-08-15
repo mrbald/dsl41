@@ -441,12 +441,13 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   detach-stop vs oracle-kill cancellation, resume-time reattachment) and the ss7
   spool ladder through which both the detached adapter and resume resolve an
   interrupted run's outcome
-- src/dsl41/runner_admission.py — phase-12 stage S2: the one order every input
-  takes (dedup, stamp, append, apply the time half, decide, record), the record
-  types it leaves (Attempt, ApplyResult), the typed Frontiers, the DecisionIndex
-  that answers a retry, the envelope fingerprint, and the stale-completion gate
-  as a pure function of state so replay reaches the same verdict the live engine
-  did
+- src/dsl41/runner_admission.py — phase-12 stages S2+S3: the one order every
+  input takes (dedup, stamp, append, apply the time half, decide, record), the
+  record types it leaves (Attempt, ApplyResult), the typed Frontiers, the
+  DecisionIndex that answers a retry, the envelope fingerprint, and the gate as
+  a pure function of state so replay reaches the same verdict the live engine
+  did — plus the v2 envelope (parse_envelope) that makes preconditions
+  mandatory, in one function rather than one per transport
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
   advance/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
@@ -573,6 +574,16 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   re-decided, and an attempt with no result is applied through the gate), plus
   the frontier invariants, the decision index, and the pre-S2 journal that
   replays unchanged
+- tests/test_preconditions.py — phase-12 stage S3: mandatory preconditions and
+  protocol v2
+  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  §0/§6). The refusals that make the mandate real (no `expect`, no version, a
+  revision from another baseline, an `expect` naming anything but the addressed
+  entity), the check itself and the boundary where a timer inside an input's own
+  batch does not invalidate it, refused-vs-rejected in the log, the retry and
+  epoch ordering of §4 step 2, replay of a rejected precondition, and the wire:
+  every door versioned, every read carrying its header, and a sendevent answered
+  with its decision rather than its receipt
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping

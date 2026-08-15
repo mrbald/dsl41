@@ -337,9 +337,10 @@ at reconciliation (§7) and reported truthfully, not guessed.
 The journal is an append-only JSONL WAL, one file per run. Record kinds:
 
 - `header` — catalog content hash, dsl41 version, clock domain, started_at.
-- `input` — `{seq, at, kind, payload, source, request_id, fingerprint}`,
-  source ∈ {scheduler, adapter, control, reconcile}.
-- `advance` — `{seq, at, request_id, fingerprint}`: a time observation that
+- `input` — `{seq, at, kind, payload, source, request_id, fingerprint,
+  epoch}` plus `expect` and `claimed_actor` where the input was externally
+  requested, source ∈ {scheduler, adapter, control, reconcile}.
+- `advance` — `{seq, at, request_id, fingerprint, epoch}`: a time observation that
   the engine acted on (`Oracle.advance`), written before the advance (DL-44
   amendment). The input alphabet has two halves: external events and time
   observations. Without the latter, an advance-fired term_run_time kill
@@ -366,6 +367,15 @@ told apart from a crash. It is now admitted like every other input and its
 rejection is that attempt's `result`, which replay can honour rather than
 guess at. `docs/concurrency-model.md` §4 is normative for the order; this
 section stays normative for what the records hold.*)
+
+*(Amended by DL-90, stage S3.* `epoch` rides on every attempt because it
+is the LEADER's, not the caller's, and S6 fences on it. `expect` and
+`claimed_actor` ride only where they exist: an input the engine raised
+has neither, and writing nulls for them would blur the one distinction
+the log has to keep — which inputs were externally requested and
+therefore had to name a revision. Replay reads `expect` back, because an
+attempt admitted without a result is re-decided through the same gate,
+and the revision it named is half of what that gate reads.*)
 - `preflight` — the §8 WARN items that the run started under (DL-45:
   "prints, journals, and runs" made literal). This record is not an
   input, and replay ignores it.

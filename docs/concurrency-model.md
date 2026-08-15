@@ -29,6 +29,27 @@ observations are ordered *consequences* of applying an input, not
 independent writes, and are outside the rule by design — an operator
 cannot hold a revision on a state that only the semantics may change.
 
+*(Amended by DL-90, at build.* The consequence sentence above has a
+sharper edge than it reads. A timer firing inside an input's **own**
+batch — a `term_run_time` deadline due at exactly that input's timestamp
+— does not invalidate that input's precondition: §3 gives one input one
+increment, applied at commit, so everything an input causes shares its
+revision. That is the rule working, not a hole in it. A revision that
+moved because of the caller's own input is not one they could have read
+beforehand, and requiring them to name it would make every precondition
+unsatisfiable. The same deadline due strictly earlier fires as its own
+input, bumps the revision, and does invalidate them — which is the case
+an operator meets. What stands between an operator and a job that ended a
+moment ago is the semantics, not concurrency control. Both halves are
+tested.*)*
+
+**Enforcement point.** The mandate is one function
+(`runner_admission.parse_envelope`), not a rule each transport
+re-implements — the §7 relay must reach the same verdict as the §10
+socket. In-process callers holding the `Engine` object are not external
+and do not pass through it; they are the trust domain the scheduler and
+the adapters inject from.
+
 **The safety property, stated once:**
 
 > No `(job, run_number)` ever executes twice, under any interleaving of
@@ -376,7 +397,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
 | CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
-| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | cheap–medium |
+| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); eviction and `outcome_unavailable` with S5 |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | expensive |
