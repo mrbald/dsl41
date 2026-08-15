@@ -4579,3 +4579,50 @@
   code out of a gate's scope. Added in the same commit; 100% held.
   2081 passed either side of the move -- no test changed except its import
   line, which is the only evidence a pure move can offer.
+- DL-107 how S7 is built, and what CM-14 can honestly close on one host
+  (2026-08-15; sequencing decision before the code, as DL-93 was for S5 and
+  DL-99 for S6). `docs/concurrency-model.md` ss10 names S7 as *failover /
+  partition / double-run matrix over nightbank*, and ss9 says what the matrix
+  is: N engines, the ledger, relays and execution hosts over the virtual
+  clock, with injected partitions, pauses, message loss and duplication,
+  every interleaving reproducible from a seed, and the ss0 safety property
+  checked by COUNTING spawns per `(job, run_number)`.
+  **S7 starts in debt, and the debt is named.** The model harness (stage H)
+  exists, its checkers have teeth, and its docstring promised that
+  "partition, reroute and leader failover arrive with S5/S6". Both stages
+  landed with none of them (DL-105). What it models today is one run root
+  across SEQUENTIAL engine incarnations, with hand-built scenarios standing
+  in for the matrix. So the first slice is not new ground -- it is the ground
+  two stages walked past.
+  **What one host can actually suffer, and therefore what gets injected.**
+  Engine death at an arbitrary point; a completion delivered twice or not at
+  all; an effect whose outcome was never recorded (the crash window S5c gave
+  a name to); a supervisor the engine cannot reach, and the quarantine that
+  follows; a routing state changing under in-flight work; leadership lost
+  mid-run. Every one of those is producible today and every one has a rule
+  it is supposed to obey. Partition BETWEEN leaders and reroute to a second
+  host are not injectable, because the second host does not exist -- they are
+  absent rather than stubbed, on the harness's own standing principle that a
+  stub which always passes is the failure mode it exists to prevent.
+  **Seeds, not scenarios.** A hand-built case tests the interleaving its
+  author thought of. The driver takes a seed, decides at each step whether to
+  fire a fault, and reports the seed on failure -- so a violation is
+  reproducible by number and the suite explores rather than illustrates.
+  Fixed seeds over a range rather than hypothesis: the run root is real
+  filesystem state and the loop is asyncio, so a shrinking search would spend
+  its time on setup, and "every seed in 0..N" is already the property.
+  **Three slices.** S7a: the harness grows seeds, a fault schedule and the
+  fault vocabulary S5/S6 added, and CM-14 is checked over every interleaving
+  rather than over six chosen ones. S7b: the same sweep over `nightbank`,
+  which ss9 names as the proving ground and whose own test file records the
+  gap this programme closes. S7c: the real-process tier, where nightbank's
+  manual RUNBOOK path becomes automated -- ss9 calls it a separate tier, and
+  it is the only slice whose cost is not obvious in advance.
+  **What CM-14 closes here, stated before the work rather than after.** The
+  single-host half: no `(job, run_number)` runs twice under engine death,
+  message loss, duplication, quarantine, drain or lost leadership, over
+  seeded interleavings. ss0's sentence also says "host reroute", and that
+  half closes when there is a host to reroute TO -- the same boundary DL-97
+  drew for the relay and DL-103 confirmed S6 did not move. The obligation
+  table will say which half is which, because a CM-14 marked done that only
+  covered one host would be the most expensive kind of wrong.
