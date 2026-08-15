@@ -65,9 +65,14 @@ the same way:
   an event in the estate's history -- it consumed an index and its time
   half fired timers -- so it is recorded as a decision.
 
-Not here yet: the outbox and `executor_id` binding (S5), and epoch
-allocation (S6). `epoch` is carried at 0 because ss6 ships it inert rather
-than break the wire twice; the check for it is already in its ss4 place,
+S5a adds a second shape of verbless attempt beside the time observation: a
+routing-table command (`docs/concurrency-model.md` ss8). It is admitted by
+this same order and gated in this same place, and it is applied to the ss3
+owner rather than fed, because the oracle must never read a host row.
+
+Not here yet: the outbox and the `effect_id`-to-`executor_id` binding
+(S5c), and epoch allocation (S6). `epoch` is carried at 0 because ss6 ships
+it inert rather than break the wire twice; the check for it is in its ss4 place,
 AFTER dedup, so an exact old-epoch retry recovers its original result while
 an unseen old-epoch request is refused.
 """
@@ -87,6 +92,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
+from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
 #: The wire version of the ss6 envelope. There is no v1 to fall back to:
 #: ss0 refuses a caller that does not name a version, and accepting an
@@ -116,6 +122,7 @@ def fingerprint(
     epoch: int = INERT_EPOCH,
     expect: Mapping[str, int] | None = None,
     claimed_actor: str | None = None,
+    host: HostCommand | None = None,
 ) -> str:
     """The complete semantic envelope, hashed (concurrency-model ss6).
 
@@ -131,6 +138,16 @@ def fingerprint(
     now". Hashing them alike would let a retry of the first be answered by
     the second's decision -- which is the confusion optimistic concurrency
     exists to prevent, arriving through the dedup path instead.
+
+    `host` is the S5a attempt that carries no oracle event (ss8). It gets a
+    key of its own rather than being folded into `payload`, so no host
+    command can ever hash equal to a verb whose payload happens to look like
+    one -- and it is OMITTED when absent rather than hashed as null, so
+    every fingerprint an earlier build wrote is still the fingerprint this
+    build computes. A hash function that quietly changed would turn an exact
+    retry across a resume into a `RequestCollision`, which is the ss7
+    mixed-build hazard arriving through the one door that has no version
+    gate yet.
     """
     return hashlib.sha256(
         json.dumps(
@@ -142,6 +159,7 @@ def fingerprint(
                 "source": source,
                 "expect": dict(expect) if expect is not None else None,
                 "claimed_actor": claimed_actor,
+                **({"host": host.wire()} if host is not None else {}),
             },
             sort_keys=True,
             default=str,
@@ -266,8 +284,9 @@ def _parse_expect(expect: Any, *, addressed: str) -> dict[str, int]:
 class Attempt(BaseModel):
     """One admitted input, as it goes into the log (concurrency-model ss4
     step 4). `at` is the leader timestamp and doubles as the batch's
-    `TimeAdvanced`; `kind` absent means an attempt with no verb -- a
-    standalone time observation, which ss4 admits like everything else.
+    `TimeAdvanced`; `kind` absent means an attempt with no ORACLE verb --
+    either a routing-table command (`host` below) or, with neither, a
+    standalone time observation. ss4 admits all three by one rule.
 
     `expect` absent means an input the engine raised itself -- a timer, a
     scheduler tick, an adapter completion. ss0's mandate is on EXTERNALLY
@@ -287,6 +306,18 @@ class Attempt(BaseModel):
     expect: dict[str, int] | None = None
     epoch: int = INERT_EPOCH
     claimed_actor: str | None = None
+    #: S5a: a routing-table change (concurrency-model ss8). It is an input
+    #: like any other -- index, journal, `expect` -- and it carries no oracle
+    #: event, because a job's condition truth cannot depend on where its
+    #: machine routes (DL-93). So it rides the seam ss4 already had for an
+    #: attempt with no verb, beside the standalone time observation.
+    host: HostCommand | None = None
+
+    @model_validator(mode="after")
+    def _one_kind_of_input(self) -> Attempt:
+        if self.kind is not None and self.host is not None:
+            raise ValueError("an attempt carries an oracle verb or a host command, never both")
+        return self
 
     def event(self) -> Event | None:
         if self.kind is None:
@@ -490,17 +521,20 @@ def apply_attempt(
     """
     ev = attempt.event()
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
-        if ev is None:
-            decision, reason = "applied", None
-        elif decided is not None:
+        if decided is not None:
             decision, reason = decided.decision, decided.reason
-            if decision == "applied":
-                batch.feed(ev)
         else:
             reason = _gate(oracle, attempt, ev)  # step 6
             decision = "rejected" if reason is not None else "applied"
-            if reason is None:
+        if decision == "applied":
+            if ev is not None:
                 batch.feed(ev)
+            elif attempt.host is not None:
+                # ss8's routing state is admitted input, applied HERE rather
+                # than fed: the oracle must never read a host row, so this
+                # writes the ss3 owner directly, inside the same batch, and
+                # takes that input's single revision like any other entity
+                apply_host_command(oracle.store, attempt.host, actor=attempt.claimed_actor)
     if decided is not None and decided.revisions != batch.revisions:
         # concurrency-model ss7's mixed-build hazard, caught where it is
         # cheap: identical inputs that derive different revisions mean this
@@ -524,11 +558,18 @@ def apply_attempt(
     )
 
 
-def _gate(oracle: Oracle, attempt: Attempt, ev: Event) -> str | None:
+def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None) -> str | None:
     if attempt.expect is not None:
         reason = precondition_reason(oracle, attempt.expect)
         if reason is not None:
             return reason  # ss0, and it outranks everything below
-    if attempt.source not in COMPLETION_SOURCES:
+    if attempt.host is not None:
+        # ss8's own preconditions sit HERE for the reason `expect` does: they
+        # read mutable state, so a verdict reached at the door would answer
+        # against a table that had moved by the time it applied -- and replay,
+        # which has no live host to probe, must reach the same verdict from
+        # the same row.
+        return host_rejection_reason(oracle.store, attempt.host, attempt.at)
+    if ev is None or attempt.source not in COMPLETION_SOURCES:
         return None  # CHANGE_STATUS parity: an external event is never gated
     return stale_reason(oracle, ev)

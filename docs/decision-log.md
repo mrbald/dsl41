@@ -3897,3 +3897,77 @@
   event (`Attempt.kind is None`, today the standalone time observation).
   A test pins that `oracle.py` never names the row type; the exact
   encoding of the attempt is the slice's business, not this entry's.
+- DL-94 the routing table lands: four states, three operator verbs, and a
+  drain that holds work instead of losing it (2026-08-15; stage S5a,
+  building DL-93's first slice). `docs/concurrency-model.md` §8 becomes
+  reachable: `HostRuntime` under §3's owner, a `host:<id>` namespace beside
+  `job:` and `global:`, a `host` verb on the control plane, and
+  `dsl41 host`. Closes CM-13 and the refusal half of CM-11. §8 carries the
+  four findings the build produced, as an amendment; this entry is the
+  shape.
+  **A drain HOLDS.** `passive` routes no new effect, so `_spawn` dispatches
+  nothing — and the job is held, not failed and not rerouted. Rerouting
+  without proof the old executor is dead is the double run the whole model
+  exists to prevent (§7), and failing it would turn a maintenance window
+  into an estate-wide incident. Held-ness is DERIVED — the oracle has the
+  job live at a run_number the ghost-run gate never dispatched — so there
+  is no second record of intent to fall out of step with the first. S5c's
+  outbox is where intent becomes durable, and building a held set now would
+  be that concept twice.
+  **Which means `activate` re-drives.** §8 calls `passive` reversible and
+  that has to mean something: the oracle decided those starts once and will
+  not decide them again, so an `activate` that left them RUNNING forever
+  would be a worse failure than the one draining avoids. One loop over the
+  derived set, on the applied-host-command seam.
+  **And a held job survives the restart the drain survives.** The half that
+  was nearly lost: the routing row replays on its own, but the work it was
+  protecting goes through reconciliation, where a start with no spool trace
+  is a crash between feed and spawn and is FAILED rather than silently
+  re-run. On a host that routes nothing that inference is simply wrong —
+  there was no crash — so the sweep leaves those jobs alone and un-seeds the
+  ghost-run gate that `resume_run` had set from the run_number. A drain
+  whose state survived a failover while its work was failed would be a drain
+  in name only.
+  **`held` is published because a held job reads RUNNING.** `_run` walks a
+  start through STARTING to RUNNING inside one feed, so a drained estate is
+  indistinguishable from a working one by status alone. That is a silent
+  hang, and a drain is precisely the operation an operator has to be able to
+  watch, so `status` carries a derived `held` per job. Deliberately not on
+  the TUI table: DL-92's reasoning about the most-redrawn cell applies
+  unchanged, and the drain view is `hosts`.
+  **Eviction's gate is written in full and rejects in full.** All three §8
+  preconditions, as a pure function of the row: the honest consequence is
+  that `evict` in a real estate today always rejects, because nothing
+  produces `quarantined` until S5d and nothing keeps `last_contact` fresh
+  until S5b. That IS CM-11's refusal half — a host nobody can prove dead may
+  not have its work rerouted — and the permitted side of the bound is
+  unit-tested over rows the tests build, which is available precisely
+  because the gate reads a row rather than probing a host. `T_kill` is two
+  wrapper graces at the 10 s default (supervisor-protocol §4 step 5) and
+  `T_skew` is 200 ppm of the interval over a 1 s floor: both are added to a
+  wait `--force` can always skip, so erring long costs patience and erring
+  short costs a double run.
+  **The fingerprint gained a key that is OMITTED when absent.** `host`
+  hashes under its own key so no host command can collide with a verb whose
+  payload happens to look like one — but a null-valued key would have
+  changed every fingerprint an earlier build wrote, turning an exact retry
+  across a resume into a `RequestCollision`. That is §7's mixed-build hazard
+  arriving through the one door with no version gate yet.
+  **`dsl41 journal` had to learn the genesis.** It replays a log onto a bare
+  `Oracle` to reconstruct the trace, and a routing input needs the table the
+  engine seeded — so it calls the same `seed_local_executor`. Reproducing a
+  log means reproducing the genesis it was replayed onto, not only the
+  catalog.
+  Also: `scripts/arch_check.py`'s state-owner gate now derives its watched
+  fields from the owner's whole model SET rather than one model — a gate
+  that protected only `JobRuntime` would have been narrower the day after it
+  was written, which is the DL-83 discipline applied to its own author. And
+  `docs/citation-index.md`'s `S\d[a-c]?` widened to `[a-d]`: DL-93 named
+  S5d and the gate correctly refused to resolve it.
+  1982 -> 2007 passed; ruff, mypy, arch_check blocking checks clean. Two
+  advisory notes are inherited (cli.py and runner_tui.py over 1200 lines,
+  the latter from DL-92) and one is this stage's: `_reconcile` was already
+  over the 120-line advisory at 123 and is now 131. It is not extracted
+  here — the sweep that grew is a distinct concern and pulling it out is an
+  architecture change, which gets its own commit rather than riding inside
+  a slice.

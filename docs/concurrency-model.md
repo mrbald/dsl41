@@ -376,6 +376,47 @@ incident.
 Re-driving an evicted host's held jobs issues **new runs with new effect
 ids**, never retries of the old ones (§5).
 
+*(Amended by DL-94, at build — stage S5a.* Four things this section left
+implicit, settled by the code that implements it.
+
+**Precondition 1 is the `quarantined` state, not a probe.** "Unreachable
+from the leader" has exactly one durable form, and it is the row the leader
+writes when a host stops answering. The gate must be a pure function of the
+row: replay has no live host to ask, so a gate that asked one would decide
+differently the second time and make the log a record of nothing. A
+`passive` host is therefore not evictable — draining asserts nothing about
+reachability, which is why the two states are separate.
+
+**A failed precondition is a rejection, not a refusal.** Every check here
+reads mutable state, so it belongs where `expect`'s does — inside the
+input's own batch, in log order. It consumed an index and it is in the log;
+an operator who was told to wait 40 more seconds re-reads and re-decides,
+which is what `rejected` means (control-protocol §3).
+
+**Registration never resets a routing state.** "Durable so that a failover
+does not undo a drain" has to bind the registering relay too, or it gives
+back with one hand what it takes with the other. Registration creates a row
+`active`; re-registration refreshes identity (`deadman`, `last_contact`)
+and leaves the state alone.
+
+**This engine's own executor is seeded at genesis, not admitted.** The
+row's existence is a fact about how the process was launched, identical on
+every replay of the same run root; admitting it would spend a log index per
+start recording what every reader of that log already knows. What §8
+requires to survive a failover is the STATE, and every change to that is an
+admitted input.
+
+**Held work survives the failover the drain survives.** Making the routing
+state durable is only half of "a failover does not undo a drain". The other
+half is reconciliation: a start with no spool trace is normally a crash
+between feed and spawn, and §7 of `docs/runner-design.md` fails it rather
+than silently re-running it. On a host that routes nothing that inference
+is wrong — there was no crash — so those jobs stay held. A drain whose
+state survived while its work was failed would be a drain in name only.
+
+The three operator verbs are `activate`, `drain` and `evict`.
+`quarantined` is the leader's, and its producer is S5d.*)*
+
 ## 9. The proving ground
 
 A **deterministic model harness** comes before the code it validates: N
@@ -402,9 +443,9 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-08 | bisimulation unchanged | cheap |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | expensive |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | cheap (virtual clock) |
-| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | cheap |
+| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | refusals landed (DL-94); the live permitted path needs S5b's `last_contact` and S5d's quarantine |
 | CM-12 | a returning evicted host is refused and self-fences | medium |
-| CM-13 | drain: `passive` routes nothing new and finishes what is running | cheap |
+| CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
 | CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | expensive — **the point** |
 
 Pause, drift and thundering-herd tests are **not mandatory** until their

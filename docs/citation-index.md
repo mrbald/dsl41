@@ -28,7 +28,7 @@ Two rules follow from it:
 | `DL-\d{1,3}[a-z]?` | Decision log | A settled decision. Append-only: never edit or renumber an entry. | `docs/decision-log.md` |
 | `L\d{3}` | Linter rule | One linter rule, L001–L019, with its stable code and severity. Each ships a corpus fixture that trips it and one that does not. | `docs/ir-design.md` §9 |
 | `CM-\d{2}` | Concurrency obligation | One obligation of the frozen concurrency model, CM-01–CM-14 — a property the multihost design must be *tested* to hold, not asserted to. Tests are named `test_cmNN_*`. | `docs/concurrency-model.md` §9 |
-| `S\d[a-c]?` | Concurrency stage | One build stage of the frozen concurrency model, S0–S7 (S1 split into S1b/S1c). The stage order is normative: it fixes what must be frozen before what, and which single owner holds which file while a stage is open. | `docs/concurrency-model.md` §10 |
+| `S\d[a-d]?` | Concurrency stage | One build stage of the frozen concurrency model, S0–S7 (S1 split into S1b/S1c; S5 into S5a–S5d by DL-93). The stage order is normative: it fixes what must be frozen before what, and which single owner holds which file while a stage is open. | `docs/concurrency-model.md` §10 |
 | `T-\d{3}` | Decompiler fold | One fold in the closed decompiler registry, T-001–T-007 (DL-38). The registry itself is `FOLDS` in `src/dsl41/dsl.py`. | `docs/decision-log.md` DL-38 |
 | `D\d` | Open design decision | One deliberately deferred IR/design decision, D1–D4. | `docs/ir-design.md` §10 |
 | `F[1-4]` | Fidelity test | One of the four scanner fidelity tests (preserve identity, canonical fixpoint, fuzz, corpus). | `docs/jil-statement-syntax.md` |

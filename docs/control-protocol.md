@@ -84,7 +84,7 @@ by AutoSys nature, and the engine's single-writer loop serializes every
 injection. The lease guards the supervisor tier, which spawns without
 semantics.
 
-## 3. Mutating verb: sendevent
+## 3. Mutating verbs: sendevent, host
 
 ```json
 {"cmd": "sendevent", "v": 2, "baseline_id": "…", "epoch": 0,
@@ -174,6 +174,47 @@ stay catalog-only — starting or killing a ghost is meaningless.
 `status` must be one of the oracle's `JobStatus` values; the refusal
 lists them.
 
+### `host` (S5a, DL-94)
+
+```json
+{"cmd": "host", "v": 2, "baseline_id": "…", "epoch": 0,
+ "request_id": "…", "verb": "drain", "payload": {"id": "local"},
+ "expect": {"host:local": 1}, "claimed_actor": "alice@host"}
+```
+
+One change to `docs/concurrency-model.md` §8's routing table: which
+execution hosts take new work. `verb` is `activate` | `drain` | `evict`,
+and `payload` is `{id, force?}`.
+
+A **separate `cmd`** because the verb sets are separate things. `sendevent`'s
+map 1:1 onto oracle `EventKind`; a host verb deliberately maps onto none,
+because a job's condition truth cannot depend on where its machine routes
+(DL-93). The **envelope is the same envelope**, parsed by the same
+function: §0's mandate is on externally requested mutations, not on a
+particular vocabulary, so `expect` is mandatory here too and names
+`host:<id>` — the third namespace, beside `job:` and `global:`. The answer
+is the same decision shape and the same four outcomes, with `kind` carrying
+the host verb.
+
+`quarantine` is **not** an operator verb. §8 assigns that state to the
+leader, automatically, on unreachability; an operator verb for it would
+blur it with `drain`, which asserts nothing about reachability.
+
+What is refused and what is rejected divides on one line — whether the
+check reads mutable state:
+
+| refused (nothing in the log) | rejected (a decision, at an index) |
+|---|---|
+| an unknown verb, a missing or non-string `id`, a non-boolean `force`, a bad envelope | the host is not in the table; the state forbids this verb; an `evict` whose §8 preconditions do not hold |
+
+The eviction preconditions are §8's three, and the refusal reports the
+remaining wait so the operator waits rather than guesses. `force: true`
+skips them, is recorded with the caller's claimed actor on the row as well
+as in the log, and is the one path in the concurrency model that can
+produce a double run. Every one of these checks is a pure function of the
+row: replay has no live host to probe, so a gate that probed one would
+decide differently the second time.
+
 ## 4. Query verbs (frozen response shapes)
 
 Every query is a **pure projection**. None mutates, none inserts a store
@@ -182,10 +223,10 @@ yields, so a handler can never observe a half-applied event.
 
 Every response carries the read header (§2) in addition to the fields
 listed below. These are the reads an `expect` is composed from:
-per-job `state_rev` in `status`, and `global`/`globals` for a named
-global. Revision-bearing reads are leader-only in v2 — one engine per run
-root *is* the leader until S6 introduces election, and the socket probe
-in §2 is what enforces it.
+per-job `state_rev` in `status`, `global`/`globals` for a named
+global, and `hosts` for a routing row. Revision-bearing reads are
+leader-only in v2 — one engine per run root *is* the leader until S6
+introduces election, and the socket probe in §2 is what enforces it.
 
 ### `status [job]`
 
@@ -202,6 +243,14 @@ append targets of the CURRENT run, resolved by the same `job_log_paths`
 the wrapper spec uses, so the tail and the writer can never diverge; CMD
 only), `job_type` and `box_name` (catalog placement, so a tree renders
 without a second query; null for ghosts).
+
+`held` (DL-94) is true when the oracle started the job and this engine
+dispatched no process, because its executor routes no new effects
+(`docs/concurrency-model.md` §8). Derived, never stored. It is published
+because a held job reads RUNNING — the oracle walks a start through
+STARTING to RUNNING in one feed — so status alone cannot tell a drained
+estate from a working one, and a drain is an operation an operator has to
+be able to watch.
 
 `watching` — `{file, interval, min_size}` — is present **only** for a
 live FW run. Absence of the key is itself the "not watching" signal
@@ -274,6 +323,25 @@ conditional create conditions on. Neither verb inserts a row.
 A map of every global would not do instead — it can report what exists,
 never that a particular name does not.
 
+### `hosts [ids]`
+
+`{"ok": true, "executor": "<this engine's host id>", "hosts": {<id>:
+{"present": bool, "state", "generation", "deadman_s", "last_contact",
+"forced_by", "state_rev"}}}` — `docs/concurrency-model.md` §8's routing
+table, and the read a `host` command's `expect` is composed from. An
+absent row answers `{"present": false, "state_rev": 0}`.
+
+Unlike `globals`, omitting `ids` answers the **whole table**. That is not
+an inconsistency: §7's takeover barrier has to reconcile every host in the
+table, so a complete enumeration is a meaningful answer here in a way it
+is not for globals, where a map of what exists can never express the
+absence a conditional create conditions on. Named `ids` are still answered
+individually, for exactly that case.
+
+`forced_by` non-null is an incident marker, not decoration: this host's
+work was declared rerouteable without proof its executor was dead (§8's
+`--force`).
+
 ## 5. Streaming verb: subscribe
 
 `{"cmd": "subscribe", "since": <int>?}`. A subscription **owns its
@@ -286,7 +354,7 @@ no journal"}`.
 
 Delivery guarantees, exactly as implemented:
 
-- seq'd records (`input`, `advance`) are **exactly once** across the
+- seq'd records (`input`, `advance`, `host`) are **exactly once** across the
   backfill/live seam. The seam is sampled *before* the ack is written,
   because a record appended during the send would otherwise be skipped as
   "covered" despite never being backfilled.

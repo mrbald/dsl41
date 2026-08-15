@@ -16,14 +16,23 @@ What is here:
 - **The vocabulary.** `JobStatus`, `TERMINAL`, `EventKind`, `Event`,
   `TraceEntry`. `Event` is the oracle's input alphabet and, with `source`,
   its provenance (DL-68).
-- **The rows.** `JobRuntime` and `GlobalRuntime`, both FROZEN (DL-86), and
-  the semantic projection that decides when a revision moves.
+- **The rows.** `JobRuntime`, `GlobalRuntime` and `HostRuntime`, all FROZEN
+  (DL-86, DL-94), and the semantic projection that decides when a revision
+  moves.
 - **The owner.** `RuntimeState`: private maps, typed verbs, the timer heap
   with its ordering token, and the input transaction that gives one
   committed input exactly one revision per changed entity
   (concurrency-model ss3).
+
 - **`OracleError`**, raised on both sides of the split, so it is defined on
   the side that has no dependencies.
+
+`HostRuntime` is here and NOT in `oracle.py` for a reason the split makes
+enforceable (DL-93): a job's condition truth cannot depend on where its
+machine routes, so the interpreter must never read a host row. It lives
+under the same owner because it is published state with a `state_rev` that
+an `expect` names -- a routing table with a revision counter of its own
+would be the same concept spelled a second way.
 
 `InputBatch` stayed with `Oracle`: it drives the interpreter's clock and
 drain, which is the interpreter's business, not the state's.
@@ -46,8 +55,6 @@ from pydantic import BaseModel, ConfigDict
 
 class OracleError(ValueError):
     pass
-
-
 
 
 JobStatus = Literal[
@@ -146,6 +153,61 @@ class GlobalRuntime(BaseModel):
     state_rev: int = 0
 
 
+#: concurrency-model ss8's four routing states, in the order that table
+#: lists them. `quarantined` is the leader's own, set automatically on
+#: unreachability (ss7); the other three are the operator's.
+HostState = Literal["active", "passive", "quarantined", "evicted"]
+
+
+class HostRuntime(BaseModel):
+    """One execution host's routing row (concurrency-model ss8). FROZEN, for
+    the reason the other two rows are: a change is a REPLACEMENT, so "this
+    entity changed" is one observable act.
+
+    A host is a RELAY, not a machine -- ss2 gives it `host_id` and
+    `generation`, and machine names resolve TO one. The row therefore holds
+    only what decides routing and what proves an eviction. What the host is
+    RUNNING is not here: that is the outbox's business (S5c), and a second
+    durable record of "did this run start" is exactly the parallel model
+    DL-91 exists to catch.
+
+    The oracle never reads this row (DL-93). It is published state and it
+    carries a `state_rev`, so it belongs to ss3's owner; it is not oracle
+    vocabulary, so `HOST` is not an `EventKind` and `oracle.py` does not
+    name this class."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    state: HostState = "active"
+    #: ss8's eviction fence. Eviction bumps it; a returning relay presenting
+    #: a stale one is refused registration and must self-fence before it may
+    #: re-register (CM-12, stage S5d).
+    generation: int = 0
+    #: ss8's deadman interval, in seconds. OPT-IN PER RUN ROOT, because it
+    #: costs something real: a supervisor tolerating an absent controller
+    #: indefinitely is what lets an engine crash and resume with its runs
+    #: intact (DL-79). None = this host runs no deadman, so nothing bounds
+    #: when its wrappers die and it is never reroutable except by force.
+    #: S5b supplies the mechanism; the refusal it justifies is checkable the
+    #: day this field exists.
+    deadman_s: float | None = None
+    #: when the leader last had positive contact with this host. Stamped at
+    #: registration and kept fresh by the S5b deadman's own traffic. It is
+    #: the only clock in ss8's eviction bound, so a host that never reports
+    #: is never evictable on time -- which is the correct direction.
+    last_contact: datetime | None = None
+    #: non-null iff the CURRENT `evicted` state was reached by `--force`,
+    #: carrying the actor that claimed it. Not a copy of the log's actor
+    #: field: the log records who sent every command, this records the one
+    #: fact that changes how the whole estate must be read -- work was
+    #: rerouted without proof the old executor was dead. ss8 promises that
+    #: is "loud, durable and attributable", and a fact you have to grep a
+    #: WAL for is not loud.
+    forced_by: str | None = None
+    #: DL-94: this entity's revision, on the same rule as the rows above.
+    state_rev: int = 0
+
+
 #: The fields whose change makes an entity's revision move. DERIVED as
 #: "everything on the model except these", not enumerated, so a field added
 #: later is projected by DEFAULT -- over-approximating the projection costs a
@@ -159,6 +221,9 @@ class GlobalRuntime(BaseModel):
 _UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
 _PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
     name for name in JobRuntime.model_fields if name not in _UNPROJECTED
+)
+_PROJECTED_HOST_FIELDS: tuple[str, ...] = tuple(
+    name for name in HostRuntime.model_fields if name not in _UNPROJECTED
 )
 _DEFAULT_JOB = JobRuntime()
 
@@ -195,6 +260,11 @@ class RuntimeState:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRuntime] = {}
         self._globals: dict[str, GlobalRuntime] = {}
+        #: DL-94: the ss8 routing table. Under this owner rather than beside
+        #: it because durability, replay, the one-increment-per-input rule,
+        #: the ss0 precondition check and the read verbs are all machinery
+        #: that already exists here and works on namespaced keys.
+        self._hosts: dict[str, HostRuntime] = {}
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: DL-87 input transaction: entity key -> its projection at FIRST
@@ -215,6 +285,13 @@ class RuntimeState:
     def global_key(name: str) -> str:
         return f"global:{name}"
 
+    @staticmethod
+    def host_key(host_id: str) -> str:
+        """The third ss6 namespace (DL-93). A drain is an externally
+        requested mutation of published state like any other, so it names
+        the revision it was composed against in the same key space."""
+        return f"host:{host_id}"
+
     def revision(self, key: str) -> int:
         """The revision an `expect` must name for `key`. An entity that does
         not exist reads 0 -- which is what makes a conditional create
@@ -228,6 +305,9 @@ class RuntimeState:
         if namespace == "global":
             grow = self._globals.get(name)
             return 0 if grow is None else grow.state_rev
+        if namespace == "host":
+            hrow = self._hosts.get(name)
+            return 0 if hrow is None else hrow.state_rev
         raise OracleError(f"unknown entity namespace in {key!r}")
 
     @property
@@ -239,6 +319,18 @@ class RuntimeState:
     @property
     def globals_(self) -> Mapping[str, GlobalRuntime]:
         return MappingProxyType(self._globals)
+
+    @property
+    def hosts(self) -> Mapping[str, HostRuntime]:
+        return MappingProxyType(self._hosts)
+
+    def host(self, host_id: str) -> HostRuntime | None:
+        """Read one routing row, or None. Deliberately NOT create-on-demand,
+        unlike `runtime()`: the oracle addresses job entities that no catalog
+        declares, but a host the table does not know is a host the ss7
+        takeover barrier would never reconcile, so it must read as absent
+        rather than spring into existence at its default `active`."""
+        return self._hosts.get(host_id)
 
     def runtime(self, job: str) -> JobRuntime:
         """Read access. Creates the row on demand -- the oracle addresses
@@ -261,13 +353,20 @@ class RuntimeState:
         ordering tokens -- an armed deadline is state that no status field
         records (concurrency-model ss3). A missing job projects as the
         default row, so merely reading an entity into existence is not a
-        change; a missing global projects as None, so first-set IS one and
-        `revision() == 0` can mean "absent"."""
+        change; a missing global or host projects as None, so first-set IS
+        one and `revision() == 0` can mean "absent"."""
         namespace, _, name = key.partition(":")
         if namespace == "job":
             row = self._jobs.get(name) or _DEFAULT_JOB
             fields = tuple(getattr(row, field) for field in _PROJECTED_JOB_FIELDS)
             return (fields, tuple(self.timers_for(name)))
+        if namespace == "host":
+            hrow = self._hosts.get(name)
+            return (
+                None
+                if hrow is None
+                else tuple(getattr(hrow, field) for field in _PROJECTED_HOST_FIELDS)
+            )
         grow = self._globals.get(name)
         return None if grow is None else grow.value
 
@@ -303,6 +402,8 @@ class RuntimeState:
             namespace, _, name = key.partition(":")
             if namespace == "job":
                 self._replace(name, state_rev=self.runtime(name).state_rev + 1)
+            elif namespace == "host":
+                self._replace_host(name, state_rev=self._hosts[name].state_rev + 1)
             else:
                 row = self._globals[name]
                 self._globals[name] = GlobalRuntime(value=row.value, state_rev=row.state_rev + 1)
@@ -386,6 +487,61 @@ class RuntimeState:
         row = self._globals.get(name)
         self._globals[name] = GlobalRuntime(
             value=value, state_rev=0 if row is None else row.state_rev
+        )
+
+    # ------------------------------------------------------------------- hosts
+
+    def _replace_host(self, host_id: str, **fields: object) -> None:
+        """The single host write, on `_replace`'s rule and for its reason:
+        rebuilt through the model's own constructor, because
+        `model_copy(update=)` does not validate and an undeclared field name
+        must be loud."""
+        self._touch(self.host_key(host_id))
+        current = self._hosts.get(host_id) or HostRuntime()
+        self._hosts[host_id] = HostRuntime.model_validate({**dict(current), **fields})
+
+    def _require_host(self, host_id: str) -> HostRuntime:
+        row = self._hosts.get(host_id)
+        if row is None:
+            raise OracleError(f"no host {host_id!r} in the routing table")
+        return row
+
+    def register_host(
+        self, host_id: str, *, deadman_s: float | None = None, at: datetime | None = None
+    ) -> None:
+        """Put a host in the routing table, or refresh the identity of one
+        already in it (concurrency-model ss8).
+
+        A NEW host lands `active` -- ss8's table says registration is one of
+        the two things that sets that state. An EXISTING one keeps its
+        routing state: ss8 makes the state durable precisely so that a
+        failover does not undo a drain, and a relay that could undo one by
+        re-registering would give back with one hand what that sentence
+        takes with the other. What re-registration does refresh is identity
+        -- the deadman it now runs, and the contact it just made."""
+        row = self._hosts.get(host_id)
+        self._replace_host(
+            host_id,
+            deadman_s=deadman_s,
+            last_contact=at if at is not None else (row.last_contact if row else None),
+        )
+
+    def set_host_state(self, host_id: str, state: HostState) -> None:
+        """Move a host between ss8's routing states. Eviction is NOT this
+        verb: it carries a fence and an attribution, which is exactly what
+        makes it the one state that can cause a double run."""
+        self._require_host(host_id)
+        self._replace_host(host_id, state=state)
+
+    def evict_host(self, host_id: str, *, forced_by: str | None) -> None:
+        """ss8: declare a host's work rerouteable. The only state that lets
+        ANOTHER host run what was bound to this one, so it does two things
+        no other transition does -- bump the `generation` a returning relay
+        is fenced on, and record the actor of a `--force` that skipped the
+        proof (None when the ss8 preconditions were met)."""
+        row = self._require_host(host_id)
+        self._replace_host(
+            host_id, state="evicted", generation=row.generation + 1, forced_by=forced_by
         )
 
     # ------------------------------------------------------------------ timers

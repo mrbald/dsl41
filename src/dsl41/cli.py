@@ -497,9 +497,12 @@ def journal(
     stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
     explicitly.
     """
+    from datetime import datetime as datetime_mod
+
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
     from dsl41.runner_clock import EngineError
+    from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
     from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
@@ -517,6 +520,16 @@ def journal(
         )
         raise typer.Exit(2)
     oracle = Oracle(catalog)
+    # reproducing a log means reproducing the genesis the engine replayed it
+    # onto, not only the catalog: a routing-table input lands on a table that
+    # already holds this engine's own executor (concurrency-model ss8), and a
+    # replay without it would decide "no such host" where the run decided
+    # otherwise. The stamp only reaches `last_contact`, which no input reads.
+    seed_local_executor(
+        oracle.store,
+        LOCAL_EXECUTOR_ID,
+        at=datetime_mod.fromisoformat(str(header["started_at"])),
+    )
     try:
         replay_inputs(oracle, records)
     except OracleError as exc:
@@ -1440,6 +1453,81 @@ def sendevent(
         # the id is on stderr because it is the only thing that makes the
         # retry safe, and a caller that lost the round trip has nowhere else
         # to get it: the answer that would have carried it never came
+        typer.echo(
+            f"no decision: this command may still apply. Re-read, then retry ONLY as"
+            f" --request-id {request['request_id']}",
+            err=True,
+        )
+    raise typer.Exit({REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0))
+
+
+@app.command()
+def host(
+    action: str = typer.Argument(..., help="list|drain|activate|evict"),
+    host_id: str = typer.Argument(None, help="The host id (all but `list`)."),
+    socket_path: Path = _SOCKET_OPT,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="evict: skip the ss8 preconditions. Recorded with the actor that"
+        " claimed it, and the one path in the concurrency model that can produce"
+        " a double run -- use it with out-of-band proof the machine is dead.",
+    ),
+    expect: int = typer.Option(
+        None,
+        "--expect",
+        help="The state_rev you read for the host (from `host list`). The command"
+        " is rejected if it moved since. Omitted, this reads it first.",
+    ),
+    request_id: str = typer.Option(
+        None, "--request-id", help="RETRY the command that carried this id (see `sendevent`)."
+    ),
+) -> None:
+    """The ss8 routing table: which execution hosts take new work
+    (concurrency-model ss8).
+
+      list      the table, with each host's revision.
+      drain     stop routing NEW work here; running work finishes. Reversible,
+                asserts nothing, and is the tool for planned maintenance.
+      activate  route here again, and re-dispatch what the drain held.
+      evict     declare this host's work rerouteable. The only state that lets
+                another host run what was bound to this one, so it is refused
+                unless the leader has recorded the host unreachable, the host
+                runs a deadman, and the kill bound has passed.
+
+    Mutations take `sendevent`'s four exit codes (0 applied / 2 refused /
+    3 rejected / 4 unknown) for the same reason: four outcomes, four next
+    moves."""
+    import json as json_mod
+
+    from dsl41.oracle_state import RuntimeState
+    from dsl41.runner_control import REFUSED, REJECTED, UNKNOWN, claimed_actor, command, outcome_of
+
+    verb = action.lower()
+    if verb == "list":
+        response = _control_roundtrip(socket_path, {"cmd": "hosts"})
+        typer.echo(json_mod.dumps(response, sort_keys=True))
+        raise typer.Exit(0 if response.get("ok") else 2)
+    if not host_id:
+        typer.echo(f"`host {verb}` needs a host id", err=True)
+        raise typer.Exit(2)
+    key = RuntimeState.host_key(host_id)
+    baseline, epoch, current = _read_revision(socket_path, key)
+    request = command(
+        verb,
+        {"id": host_id, "force": force},
+        key=key,
+        revision=current if expect is None else expect,
+        baseline_id=baseline,
+        epoch=epoch,
+        request_id=request_id,
+        claimed_actor=claimed_actor(),
+        cmd="host",
+    )
+    response = _control_roundtrip(socket_path, request)
+    typer.echo(json_mod.dumps(response, sort_keys=True))
+    outcome = outcome_of(response)
+    if outcome == UNKNOWN:
         typer.echo(
             f"no decision: this command may still apply. Re-read, then retry ONLY as"
             f" --request-id {request['request_id']}",

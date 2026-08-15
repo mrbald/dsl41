@@ -187,31 +187,37 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
     ]
 
 
-#: DL-83: the watched fields are DERIVED from JobRuntime's own AST, not listed
-#: here. A hard-coded list silently stops protecting the moment a field is
-#: added -- state_rev is about to be one -- and a gate that quietly narrows is
-#: worse than no gate. Still stdlib-only: this reads the source, it does not
+#: DL-83: the watched fields are DERIVED from each state model's own AST, not
+#: listed here. A hard-coded list silently stops protecting the moment a field
+#: is added -- state_rev is about to be one -- and a gate that quietly narrows
+#: is worse than no gate. Still stdlib-only: this reads the source, it does not
 #: import dsl41 (that would make a ~1s check depend on the tree it checks).
-_STATE_MODEL = "JobRuntime"
+#:
+#: DL-94 widened it from one model to the owner's whole set, for the same
+#: reason: a second frozen row arrived (`HostRuntime`, the ss8 routing table)
+#: and a gate that protected only the first would have been narrower the day
+#: after it was written.
+_STATE_MODELS = ("JobRuntime", "HostRuntime")
 _STATE_OWNER = "RuntimeState"
 #: Containers on the owner that a caller could reach through instead. Both the
 #: private maps and the read-only views over them (DL-86): the views raise at
 #: runtime, but a static name is the better error, and a caller who reaches for
 #: `_jobs` should be told the same thing as one who reaches for `job`.
-_STATE_MAPS = ("_jobs", "_globals", "_timers", "job", "globals_")
+_STATE_MAPS = ("_jobs", "_globals", "_timers", "_hosts", "job", "globals_", "hosts")
 
 
-def _model_fields(tree: ast.Module) -> frozenset[str]:
-    """Annotated field names declared on the state model, if this module
-    defines it."""
+def _model_fields(tree: ast.Module) -> dict[str, str]:
+    """Field name -> the state model that declares it, for the models this
+    module defines. A name on two models reports the first: the message says
+    which field to route through the owner, and the answer is the same either
+    way."""
+    fields: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == _STATE_MODEL:
-            return frozenset(
-                stmt.target.id
-                for stmt in node.body
-                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
-            )
-    return frozenset()
+        if isinstance(node, ast.ClassDef) and node.name in _STATE_MODELS:
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    fields.setdefault(stmt.target.id, node.name)
+    return fields
 
 
 def _assigned_attrs(node: ast.AST) -> Iterator[ast.Attribute]:
@@ -305,10 +311,10 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
 
             for target in targets:
                 for attribute in _assigned_attrs(target):
-                    if fields and attribute.attr in fields:
+                    if attribute.attr in fields:
                         _flag(
                             node.lineno,
-                            f"assigns {_STATE_MODEL}.{attribute.attr} directly:"
+                            f"assigns {fields[attribute.attr]}.{attribute.attr} directly:"
                             f" route it through {_STATE_OWNER}",
                         )
                 if isinstance(target, ast.Subscript):

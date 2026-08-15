@@ -225,6 +225,9 @@ dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
 dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
 dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
 dsl41 query global -N GATE -S ./run1/control.sock   # a global's value and rev
+dsl41 host list -S ./run1/control.sock          # the routing table, with revs
+dsl41 host drain local -S ./run1/control.sock   # stop routing new work here
+dsl41 host activate local -S ./run1/control.sock    # route again; re-dispatch held
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
 dsl41 rehearse jobs.jil --hours 24              # virtual clock: a day in seconds
@@ -240,6 +243,14 @@ log tail (`m`) turns it into a less-style pager — `/` search, `&` filter,
 `t` opens a read-only triggers view — every pending timer, calendar tick,
 and live filewatch with countdowns — and the jobs table marks the armed
 latch (SEM-32) as flag `A`.
+
+`host drain` is the maintenance verb: new work stops being dispatched to
+that execution host and work already running finishes. Held jobs are not
+failed and not moved — a job is only ever rerun elsewhere after the host
+is *evicted*, which needs proof the old executor is dead
+([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+§8). `query status` marks a held job, because a held job otherwise reads
+RUNNING with no process behind it.
 
 The scheduler obeys `run_calendar`/`exclude_calendar` (DL-56/57). Standard
 calendar day sets apply on the job's local day (run minus exclude, SEM-31).
@@ -386,10 +397,12 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   menu registers last, guarded, so no optional plugin can take the page (DL-77)
 - src/dsl41/oracle_state.py — the oracle's state and the vocabulary of the
   events that move it: JobStatus/TERMINAL/EventKind/Event/TraceEntry, the frozen
-  JobRuntime and GlobalRuntime rows with the semantic projection that decides
-  when a revision moves, RuntimeState (private maps, typed verbs, the timer heap
-  with its ordering token, the input transaction) and OracleError. It imports
-  nothing from the interpreter, which is why the split exists (DL-91)
+  JobRuntime, GlobalRuntime and HostRuntime rows with the semantic projection
+  that decides when a revision moves, RuntimeState (private maps, typed verbs,
+  the timer heap with its ordering token, the input transaction) and OracleError.
+  It imports nothing from the interpreter, which is why the split exists (DL-91)
+  — and why the routing table can live under the same owner without the
+  interpreter being able to read it (DL-93/94)
 - src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
   completion, edge-triggered re-evaluation, per-SEM-entry trace tests, and
   `InputBatch` — one admitted input as one store transaction
@@ -454,8 +467,14 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   a pure function of state so replay reaches the same verdict the live engine
   did — plus the v2 envelope (parse_envelope) that makes preconditions
   mandatory, in one function rather than one per transport
+- src/dsl41/runner_hosts.py — phase-12 stage S5a: the ss8 execution-host
+  routing table's vocabulary — the HostCommand an operator sends, eviction's
+  three preconditions as a pure function of the row (so replay reaches the same
+  verdict without a live host to probe), the one predicate that says which
+  states route new effects, and the genesis seed that puts this engine's own
+  executor in the table
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
-  advance/result/dispatch/drop/preflight records, append+fsync before every
+  advance/host/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
   gate written into the header
 - src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
@@ -594,6 +613,13 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   was admitted, the shell spends a different exit code on each outcome and is
   told the `request_id` that makes its retry safe, and `query global` gives a
   script the read its `--expect` has to be composed from
+- tests/test_hosts.py — phase-12 stage S5a: the ss8 routing table. CM-13 in one
+  scenario (a drain routes nothing new AND finishes what is running — either half
+  alone is easy and wrong), the re-drive that makes `passive` reversible, held-ness
+  derived rather than stored, CM-11's refusals (a host with no deadman is never
+  evictable, the bound reports the wait it has left, `--force` is attributed on the
+  row), the four outcomes over the `host` verb, a drain that survives a resume, and
+  the DL-93 pin that `oracle.py` never names a host row
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping

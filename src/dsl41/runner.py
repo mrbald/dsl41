@@ -116,7 +116,11 @@ Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
   engine crash" -- provably-never-ran is still never re-executed silently
   (measure-seven-times: no side effects on resume beyond recorded kills).
   FW watchers are the exception: polling is an idempotent read, so
-  incomplete FW runs are re-dispatched instead. Reconciliation completions
+  incomplete FW runs are re-dispatched instead. A start with no spool trace
+  on a host that routes nothing is a second exception (DL-94): there was no
+  crash to lose it to, only a drain doing its job, and the drain is durable
+  -- so it stays HELD rather than being failed, or the routing state would
+  survive a failover while the work it protected did not. Reconciliation completions
   go through the ss4 stale gate like any adapter completion: if replay
   already reached a terminal state (say a term_run_time TERMINATED), the
   late real record is dropped AND journaled -- never a silent overwrite.
@@ -185,6 +189,12 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import Clock, EngineError
+from dsl41.runner_hosts import (
+    LOCAL_EXECUTOR_ID,
+    HostCommand,
+    routes_new_effects,
+    seed_local_executor,
+)
 from dsl41.runner_journal import (
     Journal,
     _last_journal_at,
@@ -225,12 +235,19 @@ class _Pending:
     the previous incarnation left in the log the moment a resume replayed
     them.
 
-    `ev` absent is an attempt with no verb: a standalone time observation,
-    which ss4 admits by the same rule as everything else."""
+    `ev` absent is an attempt with no oracle verb: either a routing-table
+    command (`host`) or, with neither, a standalone time observation. ss4
+    admits all three by the same rule.
+
+    `source` is read only when `ev` is absent -- an event carries its own
+    (DL-68), and one field holding what another already holds is one field
+    too many."""
 
     at: datetime
     request_id: str | None
     ev: Event | None = None
+    host: HostCommand | None = None
+    source: str | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
 
@@ -261,8 +278,17 @@ class Engine:
         run_root: Path | None = None,
         scheduler: Scheduler | None = None,
         hold_open: bool = False,
+        executor_id: str = LOCAL_EXECUTOR_ID,
     ) -> None:
         self.oracle = Oracle(catalog)
+        #: concurrency-model ss2/ss8: the execution host this engine dispatches
+        #: to. One engine per run root owns one local executor; machine names
+        #: resolve to a relay through the routing table (ss5) and there is no
+        #: relay until S5d, so every job routes here. Seeded into the table at
+        #: genesis rather than admitted, so no log index is spent recording a
+        #: fact about how this process was launched (see seed_local_executor).
+        self.executor_id = executor_id
+        seed_local_executor(self.oracle.store, executor_id, at=clock.now())
         self.clock = clock
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
@@ -310,6 +336,47 @@ class Engine:
         #: non-CancelledError they die with (fail loudly, never swallow)
         self._reaping: list[asyncio.Task[None]] = []
 
+    def held_jobs(self) -> frozenset[str]:
+        """Jobs the oracle has started and this shell has not dispatched,
+        because their executor routes no new effects (concurrency-model ss8).
+
+        DERIVED from two facts that already exist -- the oracle's status and
+        the ghost-run gate's record of the last run_number actually
+        dispatched -- rather than stored. A held set of its own would be a
+        second record of intent, and S5c's outbox is where intent becomes
+        durable; two of them is the parallel model DL-91 exists to catch.
+
+        The status set is STARTING *and* RUNNING: the oracle walks a start
+        through both inside one feed (`_run`), so a job whose spawn the shell
+        held is left RUNNING with no process. The run_number comparison is
+        what makes that unambiguous -- only an oracle-decided start advances
+        it, so a CHANGE_STATUS-parity overwrite (which advances nothing) is
+        inert rather than held.
+
+        The job_type filter is `_spawn`'s: a BOX or an unregistered type has
+        no dispatch row, so it is not waiting on one."""
+        return frozenset(
+            job
+            for job, rt in self.oracle.store.job.items()
+            if rt.status in ("STARTING", "RUNNING")
+            and rt.run_number > self._dispatched.get(job, 0)
+            and (job_ir := self.oracle.catalog.jobs.get(job)) is not None
+            and job_ir.job_type in self.adapters
+        )
+
+    def _redrive_held(self) -> None:
+        """Dispatch what a routing change unblocked (concurrency-model ss7's
+        "re-drive pending", scoped to this engine's own executor).
+
+        A drain is REVERSIBLE -- ss8 says so, and it is the whole reason
+        `passive` exists rather than only `evicted`. Nothing else would ever
+        start these jobs: the oracle decided their start once and will not
+        decide it again, so without this an `activate` would leave every job
+        the drain caught STARTING forever, which is a worse failure than the
+        one draining avoids."""
+        for job in sorted(self.held_jobs()):
+            self._spawn(job)
+
     def live_jobs(self) -> frozenset[str]:
         """Jobs with an in-flight adapter task. The ss10 read model needs it
         (a filewatch is ONLY an in-flight task -- no registry, no status
@@ -332,9 +399,9 @@ class Engine:
         the log indexes decisions by one."""
         self._enqueue(ev, source=source, request_id=request_id)
 
-    def submit(self, ev: Event, envelope: Envelope, *, source: str = "control") -> Awaitable[
-        ApplyResult
-    ]:
+    def submit(
+        self, ev: Event, envelope: Envelope, *, source: str = "control"
+    ) -> Awaitable[ApplyResult]:
         """Queue one EXTERNALLY REQUESTED mutation and hand back its
         decision (concurrency-model ss0/ss4).
 
@@ -355,6 +422,29 @@ class Engine:
         )
         return future
 
+    def submit_host(
+        self, cmd: HostCommand, envelope: Envelope, *, source: str = "control"
+    ) -> Awaitable[ApplyResult]:
+        """Queue one routing-table change and hand back its decision
+        (concurrency-model ss8).
+
+        `submit`'s sibling, not a second path: the same envelope, the same
+        admission order, the same four outcomes. What differs is only that
+        the attempt carries no oracle event, so nothing is fed -- the ss3
+        owner is written directly inside the batch (DL-93)."""
+        future: asyncio.Future[ApplyResult] = asyncio.get_running_loop().create_future()
+        self._push(
+            _Pending(
+                at=self.clock.now(),
+                request_id=envelope.request_id,
+                host=cmd,
+                source=source,
+                envelope=envelope,
+                future=future,
+            )
+        )
+        return future
+
     def _enqueue(
         self,
         ev: Event,
@@ -365,17 +455,16 @@ class Engine:
         future: asyncio.Future[ApplyResult] | None = None,
     ) -> None:
         ev.source = source  # DL-68: the event carries its own provenance
-        self._queue_seq += 1
-        heapq.heappush(
-            self._queue,
-            (
-                ev.at,
-                self._queue_seq,
-                _Pending(
-                    at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future
-                ),
-            ),
+        self._push(
+            _Pending(at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future)
         )
+
+    def _push(self, pending: _Pending) -> None:
+        """Put one input on the time-ordered queue and wake the loop. The
+        arrival counter breaks ties, so two inputs stamped alike keep the
+        order they were raised in."""
+        self._queue_seq += 1
+        heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
 
     async def run_until_quiescent(self, horizon: datetime) -> list[Event]:
@@ -566,10 +655,11 @@ class Engine:
             baseline_id=self.baseline_id,
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
-            source=ev.source if ev is not None else None,
+            source=ev.source if ev is not None else pending.source,
             epoch=envelope.epoch if envelope is not None else self.epoch,
             expect=envelope.expect if envelope is not None else None,
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
+            host=pending.host,
         )
         if pending.request_id is not None:
             try:
@@ -610,9 +700,14 @@ class Engine:
         self.frontiers = self.frontiers.record(attempt.index)
         if self.journal is not None:
             self.journal.result(applied.result)
-        if applied.result.decision == "rejected":
-            assert ev is not None and applied.result.reason is not None
+        if applied.result.decision == "rejected" and ev is not None:
+            assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
+        if attempt.host is not None and applied.result.decision == "applied":
+            # a routing change can only ever ADD routes, so the one thing it
+            # may unblock is work the drain caught. Before the answer, so an
+            # `activate` returns once the estate is moving again
+            self._redrive_held()
         self._answer(pending, applied.result)
         return applied.emitted
 
@@ -640,7 +735,8 @@ class Engine:
             fingerprint=fp,
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
-            source=ev.source if ev is not None else None,
+            host=pending.host,
+            source=ev.source if ev is not None else pending.source,
             expect=dict(envelope.expect) if envelope is not None else None,
             epoch=envelope.epoch if envelope is not None else self.epoch,
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
@@ -675,6 +771,16 @@ class Engine:
             # CHANGE_STATUS-parity overwrite, not an oracle-decided start.
             # Vendor parity: sendevent CHANGE_STATUS rewrites the DB status
             # and launches nothing -- neither do we (ghost-run gate)
+            return
+        if not routes_new_effects(self.oracle.store.host(self.executor_id)):
+            # concurrency-model ss8: a drained (or quarantined) host routes no
+            # NEW effect. The job is HELD, not rerouted and not failed --
+            # rerouting without proof the old executor is dead is the double
+            # run this whole model exists to prevent (ss7), and failing it
+            # would turn a maintenance window into an estate-wide incident.
+            # Nothing is recorded: held is DERIVED from the oracle's status
+            # and the gate below, so there is no second record of intent to
+            # fall out of step with the first (`held_jobs`).
             return
         self._dispatched[job] = run_number
         stale = self._live.pop(job, None)
@@ -992,6 +1098,7 @@ async def _reconcile(
 
     # starts with no spool trace at all (crash between feed and spawn):
     # provably never spawned a wrapper -- FAILURE, never a silent re-run
+    routing = routes_new_effects(engine.oracle.store.host(engine.executor_id))
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in ("STARTING", "RUNNING") or (job, rt.run_number) in candidates:
             continue
@@ -1009,6 +1116,13 @@ async def _reconcile(
             continue
         if job_ir.job_type not in engine.adapters:
             continue  # no dispatch row live either: parity with the running engine
+        if not routing:
+            # HELD, not lost (module docstring, concurrency-model ss8): there
+            # was no crash to lose this to, only a drain doing its job. Un-seed
+            # the ghost-run gate, set above from the run_number alone, so the
+            # job reads as held again and an `activate` re-drives it.
+            engine._dispatched.pop(job, None)
+            continue
         _inject(
             job,
             rt.run_number,

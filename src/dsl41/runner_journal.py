@@ -56,6 +56,7 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import EngineError
+from dsl41.runner_hosts import HostCommand
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
@@ -126,14 +127,15 @@ class Journal:
         batch -- as ONE line, so no crash can leave its time observation
         without its attempt or the reverse.
 
-        The two record names are the two shapes of an attempt, not two
-        paths: `input` has a verb, `advance` is the standalone time
-        observation (DL-44's other half of the input alphabet), and both
-        carry the same admission fields. `source` in {scheduler, adapter,
-        control, reconcile} (ss7); None marks an unattributed script
-        injection and never occurs in a real run. It is persisted because
-        replay must re-derive the same causes and the same gate verdict
-        from it (DL-68).
+        The three record names are the three shapes of an attempt, not three
+        paths: `input` has an oracle verb, `host` carries a routing-table
+        command (S5a, concurrency-model ss8), `advance` is the standalone
+        time observation (DL-44's other half of the input alphabet), and all
+        three carry the same admission fields. `source` in {scheduler,
+        adapter, control, reconcile} (ss7); None marks an unattributed
+        script injection and never occurs in a real run. It is persisted
+        because replay must re-derive the same causes and the same gate
+        verdict from it (DL-68).
 
         S3 adds the rest of the ss6 envelope. `epoch` rides on every record
         because it is the leader's, not the caller's, and S6 fences on it.
@@ -142,7 +144,9 @@ class Journal:
         the one distinction the log has to keep -- which inputs were
         externally requested and therefore had to name a revision."""
         record: dict[str, Any] = {
-            "rec": "input" if attempt.kind is not None else "advance",
+            "rec": "input"
+            if attempt.kind is not None
+            else ("host" if attempt.host is not None else "advance"),
             "seq": attempt.index,
             "at": attempt.at.isoformat(),
             "request_id": attempt.request_id,
@@ -151,6 +155,10 @@ class Journal:
         }
         if attempt.kind is not None:
             record |= {"kind": attempt.kind, "payload": attempt.payload, "source": attempt.source}
+        elif attempt.host is not None:
+            # under its own key, not `payload`: two record shapes that spell
+            # one field name two ways is how a reader learns to guess
+            record |= {"host": attempt.host.wire(), "source": attempt.source}
         if attempt.expect is not None:
             record["expect"] = attempt.expect
         if attempt.claimed_actor is not None:
@@ -282,10 +290,11 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
     attempts: list[Attempt] = []
     for record in records:
         rec = record.get("rec")
-        if rec not in ("input", "advance"):
+        if rec not in ("input", "advance", "host"):
             continue
         kind = record.get("kind") if rec == "input" else None
         payload = record.get("payload") or {}
+        host = HostCommand.from_wire(record["host"]) if rec == "host" else None
         source = record.get("source")
         expect = record.get("expect")
         actor = record.get("claimed_actor")
@@ -305,10 +314,12 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
                         epoch=epoch,
                         expect=expect,
                         claimed_actor=actor,
+                        host=host,
                     )
                 ),
                 kind=kind,
                 payload=payload,
+                host=host,
                 source=source,
                 # the precondition replays with the attempt: an input admitted
                 # without a result is re-decided through the same gate, and the

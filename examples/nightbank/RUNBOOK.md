@@ -242,6 +242,31 @@ uv run dsl41 supervise list --run-root <run>/engine   # what's still alive
 # restart with --resume --detached: the engine reattaches to live jobs
 ```
 
+**Planned maintenance — drain instead of Ctrl-C.** A restart drill kills
+running work. A drain does not: it stops *new* work being dispatched to
+this execution host and lets what is running finish.
+
+```sh
+uv run dsl41 host list -S <run>/engine/control.sock       # note the state_rev
+uv run dsl41 host drain local -S <run>/engine/control.sock
+uv run dsl41 query status --brief -S <run>/engine/control.sock  # watch it empty
+uv run dsl41 host activate local -S <run>/engine/control.sock   # work resumes
+```
+
+Start a job while drained and watch what does *not* happen: the oracle
+starts it — a job's semantics do not depend on where its machine routes —
+and `query status` reports it RUNNING with `"held": true` and no process
+behind it. It is held, not failed and not moved: a job is only ever rerun
+somewhere else after its host is **evicted**, and eviction needs proof the
+old executor is dead. Try it and read the refusal:
+
+```sh
+uv run dsl41 host evict local -S <run>/engine/control.sock   # exit 3, and why
+```
+
+`activate` re-dispatches everything the drain held, which is what makes a
+drain reversible and a Ctrl-C not.
+
 ## 11. Changing a job spec
 
 There is no mid-run reload, by design: resume gates on the exact catalog

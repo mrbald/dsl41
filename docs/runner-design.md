@@ -346,6 +346,13 @@ The journal is an append-only JSONL WAL, one file per run. Record kinds:
   observations. Without the latter, an advance-fired term_run_time kill
   vanishes from replay, and a late natural-exit record can resurrect the
   job.
+- `host` — `{seq, at, host: {verb, id, force}, source, request_id,
+  fingerprint, epoch}` plus `expect` and `claimed_actor`: a change to the
+  §8 routing table of `docs/concurrency-model.md` (S5a, DL-94). An admitted
+  input like the two above and gated in the same place, carrying no oracle
+  event — the interpreter never reads a host row, so this one is applied to
+  the state owner rather than fed. Under its own key rather than
+  `payload`, so no record shape spells one field name two ways.
 - `result` — `{index, request_id, decision, reason, revisions}`: the
   decision the attempt at `index` got, appended after it. `index`, not
   `seq`, because it shares its attempt's number and `seq` is the §10
