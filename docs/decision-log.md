@@ -3509,3 +3509,74 @@
   side. That is what /arch-review is the lens for. Re-baselining now
   would silence the one signal pointing at the question, which is the
   failure mode the ratchet exists to prevent.
+- DL-89 admission lands: one order for every input, and the log becomes a
+  ledger (2026-08-15; stage S2 of `docs/concurrency-model.md` §10, closing
+  CM-04, CM-05 and CM-07). New module `src/dsl41/runner_admission.py`
+  holds the record types (`Attempt`, `ApplyResult`), the typed
+  `Frontiers`, the `DecisionIndex`, the fingerprint, the stale gate as a
+  pure function, and `apply_attempt` — the one function the live engine
+  and replay both go through, because two paths that could disagree make
+  the log a record of nothing. It is its own module rather than part of
+  the WAL because S6 replaces the storage under a stable admission layer;
+  that is where the seam goes.
+  **The order, and why each step is where it is.** Dedup precedes
+  admission, so a retry consumes no index and assigns no leader timestamp
+  — admitting first and deduplicating after would let a retry storm walk
+  the clock forward. The batch's time observation applies before the
+  gate, so a `term_run_time` kill lands before the gate reads the status
+  it gates on. And the time half applies even when the attempt is
+  REJECTED: a rejected completion still observed the clock, and the kill
+  that observation let fire is a decision the estate has already acted
+  on. That last one is why §4 makes the batch two records rather than one
+  field on one record — a design detail that read as ceremony until the
+  first sketch collapsed them and turned DL-44's kill-survives-replay
+  property red.
+  **One batch is one store transaction.** Split out as its own commit
+  first (`Oracle.batch` / `InputBatch`): the shell has to fire timers
+  before deciding whether to feed, and doing that as `advance()` then
+  `feed()` moved every touched entity TWICE for one admitted input, which
+  would make `expect` name a revision no read ever returned. `feed()` and
+  `advance()` are now that object with the attempt present or absent.
+  `_TERMINAL` became `TERMINAL` in the same commit: admission must know
+  which statuses end a run, and the engine's allow-listed private import
+  of it was already the standing admission that the shell needs the
+  constant, so this removes an allow-list exception rather than adding
+  one.
+  **The log.** An `input`/`advance` record IS the `InputAttempt` — one
+  line, so a crash cannot tear the batch in half — and now names its
+  `request_id` and `fingerprint`. A new `result` record carries the
+  decision, appended after the attempt, which is what makes replay
+  two-pass: pass one indexes the decisions, pass two applies. A durable
+  decision is authoritative and is never recomputed; an attempt with no
+  result is applied, through the gate, because admission is the commit
+  point and a decision is exactly what it is missing. The `result` index
+  rides under `index` rather than `seq` because a result shares its
+  attempt's number and `seq` is the §10 subscribe cursor — two records
+  under one cursor value would leave the second undeliverable to a
+  resuming subscriber. `drop` narrows to pre-admission refusals, which
+  today means only the E9 missed scheduler ticks: a gated completion is
+  now a recorded rejection, and the difference is that absence cannot be
+  told apart from a crash.
+  **No format gate, and that is a claim, not an omission.** A journal
+  written before this build carries no results, so every attempt in it
+  applies — exactly what the single-pass reader did — and its attempts
+  get the ids they would have been admitted under, named by their
+  position in the log. Tested.
+  Cost, stated: one extra append (and, in the real domain, one extra
+  fsync) per input. Recording a result only for rejections would halve it
+  and destroy the design — the absence of a result is how replay
+  recognises the crash window, so an absence that also meant "nothing
+  happened" would make that window unreadable.
+  A ss7 mixed-build detector came free: applying an attempt whose durable
+  result disagrees with the revisions this build derives raises rather
+  than continuing, since every precondition checked from there on would
+  be checked against a number the log never produced.
+  1919 -> 1937 passed; ruff, mypy and arch_check clean. Twenty mutations
+  turn their tests red, and the probe found two tests that could not
+  fail: the fingerprint's "excludes the stamp" half compared two
+  identical calls (`at` is not a parameter, so the claim is structural —
+  it is now tested where it BITES, in the CM-05 retry stamped five
+  minutes after its original), and `ApplyResult`'s reason/decision
+  validator had no test at all. Re-ran S1b and S1c after the refactor:
+  14/14 each, with three anchors re-pointed at code DL-88 and this entry
+  moved.

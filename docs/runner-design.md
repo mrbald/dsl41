@@ -337,21 +337,35 @@ at reconciliation (§7) and reported truthfully, not guessed.
 The journal is an append-only JSONL WAL, one file per run. Record kinds:
 
 - `header` — catalog content hash, dsl41 version, clock domain, started_at.
-- `input` — `{seq, at, kind, payload, source}`,
+- `input` — `{seq, at, kind, payload, source, request_id, fingerprint}`,
   source ∈ {scheduler, adapter, control, reconcile}.
-- `advance` — `{seq, at}`: a time observation that the engine acted on
-  (`Oracle.advance`), written before the advance (DL-44 amendment). The
-  input alphabet has two halves: external events and time observations.
-  Without the latter, an advance-fired term_run_time kill vanishes from
-  replay, and a late natural-exit record can resurrect the job.
+- `advance` — `{seq, at, request_id, fingerprint}`: a time observation that
+  the engine acted on (`Oracle.advance`), written before the advance (DL-44
+  amendment). The input alphabet has two halves: external events and time
+  observations. Without the latter, an advance-fired term_run_time kill
+  vanishes from replay, and a late natural-exit record can resurrect the
+  job.
+- `result` — `{index, request_id, decision, reason, revisions}`: the
+  decision the attempt at `index` got, appended after it. `index`, not
+  `seq`, because it shares its attempt's number and `seq` is the §10
+  subscribe cursor.
 - `dispatch` — `{job, run_number, wrapper_pid, run_dir, started_at}`
   (audit/ordering only). The wrapper's `spawn.json` is the authoritative
   spawn record, written by the process that did the spawn. This closes
   the crash window between spawn and journal append. The pgid is the
   wrapper's child's business — the engine never observes it (DL-44).
-- `drop` — stale completions that the §4 gate dropped. Also scheduler
-  ticks missed across downtime, skipped-and-recorded at resume (E9,
-  DL-45).
+- `drop` — an input refused BEFORE admission, which today means only
+  scheduler ticks missed across downtime, skipped-and-recorded at resume
+  (E9, DL-45).
+
+*(Amended by DL-89, stage S2.* The three admission fields and the `result`
+record are new here, and `drop` narrowed. A completion the §4 gate drops
+used to be a `drop` record — the input was refused before it was
+journaled, so its refusal was an ABSENCE in the log, and absence cannot be
+told apart from a crash. It is now admitted like every other input and its
+rejection is that attempt's `result`, which replay can honour rather than
+guess at. `docs/concurrency-model.md` §4 is normative for the order; this
+section stays normative for what the records hold.*)
 - `preflight` — the §8 WARN items that the run started under (DL-45:
   "prints, journals, and runs" made literal). This record is not an
   input, and replay ignores it.

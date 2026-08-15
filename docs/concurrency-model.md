@@ -374,10 +374,10 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-01 | structural owner gate | landed (DL-82/83) |
 | CM-02 | cardinality: one increment per entity per committed input | landed (DL-87) |
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
-| CM-04 | timers fire before the gate (`term_run_time` fixture) | cheap |
-| CM-05 | dedup precedes admission: a retry advances no logical time | cheap |
+| CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
+| CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | cheap–medium |
-| CM-07 | two-pass replay, incl. admitted-without-result | medium |
+| CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | expensive |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | cheap (virtual clock) |

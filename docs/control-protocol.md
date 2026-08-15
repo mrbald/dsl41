@@ -192,8 +192,11 @@ Delivery guarantees, exactly as implemented:
   backfill/live seam. The seam is sampled *before* the ack is written,
   because a record appended during the send would otherwise be skipped as
   "covered" despite never being backfilled.
-- unsequenced records (`dispatch`, `drop`) are **at-least-once** inside
-  the backfill race window.
+- unsequenced records (`dispatch`, `drop`, `result`) are
+  **at-least-once** inside the backfill race window. `result` carries its
+  attempt's number under `index` rather than `seq` for exactly this
+  reason: two records sharing one cursor value would leave the second
+  undeliverable to a resuming subscriber (DL-89).
 - `since` cuts positionally: everything after the last record whose seq is
   at or below it.
 

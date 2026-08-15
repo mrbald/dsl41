@@ -45,7 +45,7 @@ from dsl41.ir import lower_source
 from dsl41.runner import resume_run
 from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, _resolve_spool
 from dsl41.runner_clock import RealClock
-from dsl41.runner_journal import catalog_hash, read_journal
+from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -839,7 +839,14 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     recorded a natural exit 0 (a SIGTERM-trapping command). At resume the
     replayed timer is still armed and due before the record's timestamp:
     the kill-wins gate must fire it first, drop the late exit record
-    (journaled), and downstream s(x) must never run."""
+    (journaled), and downstream s(x) must never run.
+
+    Since S2 the drop is journaled as the REJECTION of an admitted attempt
+    rather than as a `drop` record (concurrency-model ss4), and the time
+    observation that let the deadline fire rides on that same attempt --
+    which is the point of admitting the batch before deciding it. The
+    attempt is in the log either way, so a replay of this journal reaches
+    TERMINATED without needing the reconciliation to happen again."""
     from datetime import timedelta
 
     from dsl41.runner import start_run
@@ -882,9 +889,18 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     statuses, records = asyncio.run(scenario())
     assert statuses["x"] == "TERMINATED"  # the kill stands
     assert statuses["y"] == "INACTIVE"  # s(x) never satisfied
-    drops = [r for r in records if r.get("rec") == "drop"]
-    assert len(drops) == 1 and drops[0]["payload"]["exit_code"] == 0  # loud, not silent
-    assert any(r.get("rec") == "advance" for r in records)  # the time observation
+    rejected = [r for r in records if r.get("rec") == "result" and r["decision"] == "rejected"]
+    assert len(rejected) == 1  # loud, not silent
+    late = next(r for r in records if r.get("seq") == rejected[0]["index"])
+    assert late["payload"]["exit_code"] == 0 and late["source"] == "reconcile"
+    # and the time observation that fired the kill is on that same attempt:
+    # a replay of this journal reproduces TERMINATED from the log alone
+    assert late["at"] == (T0 + timedelta(minutes=2)).isoformat()
+    from dsl41.oracle import Oracle
+
+    fresh = Oracle(lower_source(KILL_JIL))
+    replay_inputs(fresh, records)
+    assert fresh.store.job["x"].status == "TERMINATED"
 
 
 def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
@@ -966,7 +982,7 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
                 kind="STATUS",
                 payload={"job": "x", "run_number": 1, "exit_code": 0},
             ),
-            is_completion=True,
+            source="adapter",  # what makes it a COMPLETION, and so gated
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=2))
         assert engine.oracle.store.job["x"].status == "TERMINATED"  # kill wins

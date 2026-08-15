@@ -627,9 +627,11 @@ class ControlServer:
         queue = journal.subscribe()
         try:
             # sample the seam BEFORE the ack yields: a record written during
-            # the send bumps journal.seq and would be skipped as "covered"
-            # despite never being backfilled (DL-45)
-            max_seq = since if since is not None else journal.seq
+            # the send takes the next index and would be skipped as "covered"
+            # despite never being backfilled (DL-45). The seam is the
+            # admission frontier now (concurrency-model ss2) -- the journal
+            # stopped allocating the number when the frontier started to
+            max_seq = since if since is not None else self.engine.frontiers.committed_index
             await self._send(writer, {"ok": True, "subscribed": True})
             if since is not None:
                 records = read_journal(journal.path)

@@ -441,10 +441,16 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   detach-stop vs oracle-kill cancellation, resume-time reattachment) and the ss7
   spool ladder through which both the detached adapter and resume resolve an
   interrupted run's outcome
+- src/dsl41/runner_admission.py — phase-12 stage S2: the one order every input
+  takes (dedup, stamp, append, apply the time half, decide, record), the record
+  types it leaves (Attempt, ApplyResult), the typed Frontiers, the DecisionIndex
+  that answers a retry, the envelope fingerprint, and the stale-completion gate
+  as a pure function of state so replay reaches the same verdict the live engine
+  did
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/input/
-  advance/dispatch/drop/preflight records, append+fsync before every feed),
-  read_journal, replay_inputs, and catalog_hash, the resume gate written into
-  the header
+  advance/result/dispatch/drop/preflight records, append+fsync before every
+  feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
+  gate written into the header
 - src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
   day sets and windowed extended-calendar generators, DL-56/57) and the SEM-35
   timezone ladder that turns its ticks into UTC instants (zoneinfo, the
@@ -559,6 +565,14 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
   catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
   `journal` CLI
+- tests/test_admission.py — phase-12 stage S2: the frozen admission order
+  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  §4). CM-04 (the deadline fires before the gate reads the status it gates on),
+  CM-05 (an exact retry takes no index and moves no time) and CM-07 (two-pass
+  replay: a durable rejection is not applied, a durable application is not
+  re-decided, and an attempt with no result is applied through the gate), plus
+  the frontier invariants, the decision index, and the pre-S2 journal that
+  replays unchanged
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping

@@ -66,7 +66,23 @@ Stale-completion gate (ss4, DL-41 decision 4): completions carry
 11b -- any completion whose run_number mismatches the current one or whose
 job is already terminal. The gate guards ONLY engine-made completions:
 externally injected STATUS keeps sendevent CHANGE_STATUS parity (it may
-legally overwrite terminal statuses; oracle module docstring).
+legally overwrite terminal statuses; oracle module docstring). Which
+completions those are is read off `Event.source` (DL-68) rather than
+carried beside it: a record in the log has its provenance and nothing else,
+so replay must be able to reach the same verdict from the same field.
+
+Stage S2 (docs/concurrency-model.md ss4, DL-89) put ONE admission order in
+front of the loop, and every input in this module now goes through it --
+operator commands, scheduler ticks, adapter completions, reconciliation
+injections and standalone time observations alike. `_admit_and_apply` is
+that order and its docstring maps it to the frozen steps. Two consequences
+are visible from here: the gate above now runs AFTER the input is durably
+admitted, so a rejection is a recorded decision rather than an absence
+(replay can honour it instead of guessing); and the batch's time
+observation applies even when the attempt is rejected, which is the
+property DL-44's advance record was added for. The engine holds the log's
+position in `frontiers` and the decisions it has already made in
+`decisions`, both restored from the log on resume.
 
 Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 
@@ -143,10 +159,19 @@ from dsl41.runner_adapters import (
     _fsync_dir,
     _resolve_spool,
 )
+from dsl41.runner_admission import (
+    ApplyResult,
+    Attempt,
+    DecisionIndex,
+    Frontiers,
+    apply_attempt,
+    fingerprint,
+)
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import (
     Journal,
     _last_journal_at,
+    baseline_id,
     catalog_hash,
     read_journal,
     replay_inputs,
@@ -158,6 +183,29 @@ from dsl41.runner_scheduler import Scheduler
 class _LiveRun:
     run_number: int
     task: asyncio.Task[None]
+
+
+@dataclass
+class _Pending:
+    """One input awaiting admission. A client's `request_id` rides from the
+    moment the input is raised, because concurrency-model ss4 deduplicates
+    BEFORE it stamps or indexes anything -- an id minted at admission could
+    never answer a retry.
+
+    None is an input the engine raised itself: a timer firing, a scheduler
+    tick, an adapter completion. It still takes an identity in the log,
+    because the decision index indexes by one, but that identity comes from
+    the admission index and is never looked up. Nobody outside this process
+    can retry it, and a per-incarnation counter would collide with the ids
+    the previous incarnation left in the log the moment a resume replayed
+    them.
+
+    `ev` absent is an attempt with no verb: a standalone time observation,
+    which ss4 admits by the same rule as everything else."""
+
+    at: datetime
+    request_id: str | None
+    ev: Event | None = None
 
 
 def _raise_if_failed(task: asyncio.Task[None]) -> None:
@@ -198,10 +246,20 @@ class Engine:
         #: case b): the SupervisedCommandAdapter then abandons instead of killing
         self.detach = DetachSignal()
         self.drops: list[tuple[Event, str]] = []  # gate rejections; also WAL drop records
-        #: time-ordered event queue: (at, arrival seq, event, is_completion);
-        #: provenance rides on Event.source (DL-68); see the module docstring
-        #: for why FIFO alone is wrong here
-        self._queue: list[tuple[datetime, int, Event, bool]] = []
+        #: concurrency-model ss2: the log's position. `frontiers` is where
+        #: admission and application have reached; `decisions` answers a
+        #: retry from what it already decided (ss4 step 2). Both are restored
+        #: from the log on resume -- an engine that forgot them would re-admit
+        #: an input the log had already decided.
+        self.baseline_id = journal.baseline_id if journal is not None else ""
+        self.frontiers = Frontiers()
+        self.decisions = DecisionIndex()
+        #: retries answered from the index rather than re-applied (CM-05)
+        self.deduped: list[tuple[str, ApplyResult]] = []
+        #: time-ordered input queue: (at, arrival seq, pending); provenance
+        #: rides on Event.source (DL-68); see the module docstring for why
+        #: FIFO alone is wrong here
+        self._queue: list[tuple[datetime, int, _Pending]] = []
         self._queue_seq = 0
         #: real-domain wake signal: set on every enqueue and adapter-task
         #: completion so a blocked wait_until() re-plans immediately
@@ -223,17 +281,29 @@ class Engine:
         reach into `_live` from another module."""
         return frozenset(self._live)
 
-    def inject(self, ev: Event, *, source: str | None = "control") -> None:
+    def inject(
+        self, ev: Event, *, source: str | None = "control", request_id: str | None = None
+    ) -> None:
         """Queue an external event (test scripts; ss10 sendevent verbs).
         External events are never gated: injected STATUS keeps its
         CHANGE_STATUS parity. source=None injects unattributed (the bisim
-        harness: oracle-direct scripts carry no provenance, DL-68)."""
-        self._enqueue(ev, is_completion=False, source=source)
+        harness: oracle-direct scripts carry no provenance, DL-68).
 
-    def _enqueue(self, ev: Event, *, is_completion: bool, source: str | None = "adapter") -> None:
+        `request_id` makes the injection retryable: an exact retry under the
+        same id is answered from its first decision and applies nothing
+        (concurrency-model ss4 step 2). Omitted, the engine names the input
+        itself -- an input nobody can retry still needs an identity, because
+        the log indexes decisions by one."""
+        self._enqueue(ev, source=source, request_id=request_id)
+
+    def _enqueue(
+        self, ev: Event, *, source: str | None = "adapter", request_id: str | None = None
+    ) -> None:
         ev.source = source  # DL-68: the event carries its own provenance
         self._queue_seq += 1
-        heapq.heappush(self._queue, (ev.at, self._queue_seq, ev, is_completion))
+        heapq.heappush(
+            self._queue, (ev.at, self._queue_seq, _Pending(at=ev.at, request_id=request_id, ev=ev))
+        )
         self._activity.set()
 
     async def run_until_quiescent(self, horizon: datetime) -> list[Event]:
@@ -306,33 +376,8 @@ class Engine:
                 and (self.clock.virtual or eff_due <= now)
             )
             if take_event:
-                _, _, ev, is_completion = heapq.heappop(self._queue)
-                if is_completion:
-                    # kill-wins gate ordering (DL-44 amendment):
-                    # fire the oracle timers due at or before the completion's
-                    # instant FIRST -- feed() would fire exactly these anyway,
-                    # but the gate must SEE every kill decision they carry
-                    # (term_run_time TERMINATED) or a late natural exit would
-                    # overwrite a kill. The gate still precedes ENGINE clock
-                    # movement: a dropped completion moves no wall/virtual
-                    # time and wakes no sleeper (DL-43 item 11).
-                    timer_due = self.oracle.next_timer_due()
-                    if timer_due is not None and timer_due <= ev.at:
-                        if self.journal is not None:
-                            self.journal.advance(ev.at)
-                        out = self.oracle.advance(ev.at)
-                        emitted.extend(out)
-                        self._dispatch(out)
-                    reason = self._stale_reason(ev)
-                    if reason is not None:
-                        self.drops.append((ev, reason))
-                        if self.journal is not None:
-                            self.journal.drop(ev, reason)
-                        continue
-                if self.journal is not None:
-                    self.journal.input(ev, ev.source)  # WAL-append + fsync BEFORE feed (ss7)
-                await self.clock.wait_until(ev.at)
-                out = self.oracle.feed(ev)
+                _, _, pending = heapq.heappop(self._queue)
+                out = await self._admit_and_apply(pending)
                 emitted.extend(out)
                 self._dispatch(out)
             elif take_sched:
@@ -343,16 +388,15 @@ class Engine:
                 assert sched_due is not None and self.scheduler is not None
                 await self.clock.wait_until(sched_due)
                 for tick_ev in self.scheduler.pop_due(sched_due):
-                    self._enqueue(tick_ev, is_completion=False, source="scheduler")
+                    self._enqueue(tick_ev, source="scheduler")
             elif fire_timer:
                 assert eff_due is not None
-                if self.journal is not None:
-                    # a time observation is an input (DL-44 amendment): the
-                    # timer firings it causes must survive a crash, or resume
-                    # replay would resurrect a job the oracle already killed
-                    self.journal.advance(eff_due)
-                await self.clock.wait_until(eff_due)
-                out = self.oracle.advance(eff_due)
+                # a time observation is an input (DL-44 amendment): the timer
+                # firings it causes must survive a crash, or resume replay
+                # would resurrect a job the oracle already killed. It is
+                # admitted exactly like an operator command -- an attempt with
+                # no verb (concurrency-model ss4)
+                out = await self._admit_and_apply(_Pending(at=eff_due, request_id=None))
                 emitted.extend(out)
                 self._dispatch(out)
             elif self.clock.virtual or (
@@ -427,15 +471,63 @@ class Engine:
                 return
             await asyncio.sleep(0)
 
-    def _stale_reason(self, ev: Event) -> str | None:
-        job = ev.job()
-        assert job is not None  # engine-made completions always carry a job
-        rt = self.oracle.store.job.get(job)
-        if rt is None or rt.run_number != ev.payload.get("run_number"):
-            return "run_number mismatch"
-        if rt.status in TERMINAL:
-            return "job already terminal"
-        return None
+    async def _admit_and_apply(self, pending: _Pending) -> list[Event]:
+        """The frozen admission order for ONE input (concurrency-model ss4),
+        which every input in this engine goes through: operator commands,
+        scheduler ticks, adapter completions, reconciliation injections and
+        standalone time observations alike.
+
+        Reading it against ss4's numbered steps: framing and `baseline_id`
+        are settled by construction here (1); the index answers an exact
+        retry before anything is stamped or appended, so a retry costs no
+        index and moves no clock (2); the frontier hands out the next index
+        at a non-decreasing stamp (3); the attempt is one line, so its time
+        observation cannot be torn from its verb (4); the batch applies the
+        time half -- firing due timers, which is what puts a term_run_time
+        kill AHEAD of the gate that reads the status it kills (5); the gate
+        decides (6); the result is recorded with the revisions the input
+        moved (7). Steps 5-7 do not yield: `wait_until` is done with, and
+        nothing else in this process writes the oracle."""
+        ev = pending.ev
+        fp = fingerprint(
+            baseline_id=self.baseline_id,
+            kind=ev.kind if ev is not None else None,
+            payload=dict(ev.payload) if ev is not None else {},
+            source=ev.source if ev is not None else None,
+        )
+        if pending.request_id is not None:
+            prior = self.decisions.lookup(pending.request_id, fp)
+            if prior is not None:
+                self.deduped.append((pending.request_id, prior))
+                return []  # a retry advances no logical time (CM-05)
+        self.frontiers = self.frontiers.admit(pending.at)
+        index = self.frontiers.committed_index
+        attempt = self._attempt(pending, index, fp)
+        if self.journal is not None:
+            self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
+        self.decisions.note(attempt)
+        await self.clock.wait_until(pending.at)
+        applied = apply_attempt(self.oracle, attempt)
+        self.decisions.record(applied.result)
+        self.frontiers = self.frontiers.record(attempt.index)
+        if self.journal is not None:
+            self.journal.result(applied.result)
+        if applied.result.decision == "rejected":
+            assert ev is not None and applied.result.reason is not None
+            self.drops.append((ev, applied.result.reason))
+        return applied.emitted
+
+    def _attempt(self, pending: _Pending, index: int, fp: str) -> Attempt:
+        ev = pending.ev
+        return Attempt(
+            index=index,
+            at=pending.at,
+            request_id=pending.request_id or f"engine:{index}",
+            fingerprint=fp,
+            kind=ev.kind if ev is not None else None,
+            payload=dict(ev.payload) if ev is not None else {},
+            source=ev.source if ev is not None else None,
+        )
 
     def _dispatch(self, emitted: list[Event]) -> None:
         for ev in emitted:
@@ -521,10 +613,9 @@ class Engine:
             payload |= {"status": "FAILURE", "cause": result.cause}
         else:
             raise EngineError(f"adapter for {job_ir.name!r} returned {result!r}")
-        self._enqueue(
-            Event(at=self.clock.now(), kind="STATUS", payload=payload),
-            is_completion=True,
-        )
+        # source="adapter" is what makes this a COMPLETION, and therefore
+        # what subjects it to the ss4 stale gate (runner_admission)
+        self._enqueue(Event(at=self.clock.now(), kind="STATUS", payload=payload))
 
 
 # ------------------------------------------------------------ run lifecycle (ss7)
@@ -617,10 +708,7 @@ async def resume_run(
     journal = Journal(
         run_root / "journal.jsonl",
         fsync_each=not clock.virtual,
-        start_seq=max(
-            (int(r["seq"]) for r in records if r.get("rec") in ("input", "advance")),
-            default=0,
-        ),
+        baseline_id=baseline_id(records),
     )
     engine = Engine(
         catalog,
@@ -631,7 +719,13 @@ async def resume_run(
         scheduler=scheduler,
         hold_open=hold_open,
     )
-    replay_inputs(engine.oracle, records)
+    replay = replay_inputs(engine.oracle, records)
+    # the log's position comes back with its contents (concurrency-model
+    # ss2): the next admission continues the index, and a retry of anything
+    # this log already decided is still answered from that decision rather
+    # than applied a second time
+    engine.frontiers = replay.frontiers
+    engine.decisions = replay.decisions
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -721,8 +815,7 @@ async def _reconcile(
                 kind="STATUS",
                 payload={"job": job, "run_number": run_number, **extras},
             ),
-            is_completion=True,  # the ss4 gate applies: replay may know better
-            source="reconcile",
+            source="reconcile",  # a COMPLETION: the ss4 gate applies, replay may know better
         )
 
     for (job, run_number), run_dir in sorted(candidates.items()):

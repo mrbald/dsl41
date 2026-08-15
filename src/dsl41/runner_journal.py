@@ -15,6 +15,19 @@ Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
   are audit/ordering only (DL-41a): spawn.json, written by the process
   that spawned, is the authoritative spawn record, so dispatch carries
   wrapper_pid + run_dir rather than a pgid the engine never observes.
+
+Stage S2 (concurrency-model ss4) made this log a two-record ledger without
+changing what an input record means. An `input`/`advance` record IS the
+`InputAttempt` -- one line, so the batch it carries cannot be torn in half
+by a crash -- and it now names its `request_id` and `fingerprint`. A
+`result` record carries the decision that attempt got, appended after it,
+which is what makes replay two-pass: pass one indexes the decisions, pass
+two applies. An attempt whose result never landed is applied, through the
+same gate the live engine used (concurrency-model ss4, runner_admission).
+
+A journal written before S2 replays unchanged. Its attempts have no
+results, so all of them apply -- exactly what the single-pass reader did,
+and the reason no format gate was needed.
 """
 
 from __future__ import annotations
@@ -23,13 +36,23 @@ import asyncio
 import hashlib
 import json
 import os
+import uuid
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Event, Oracle
+from dsl41.runner_admission import (
+    ApplyResult,
+    Attempt,
+    DecisionIndex,
+    Frontiers,
+    apply_attempt,
+    fingerprint,
+)
 from dsl41.runner_clock import EngineError
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
@@ -64,12 +87,15 @@ class Journal:
     rehearse, fsync on close. macOS caveat, accepted: os.fsync does not
     force the drive cache (F_FULLFSYNC would, at a large cost)."""
 
-    def __init__(self, path: Path | str, *, fsync_each: bool, start_seq: int = 0) -> None:
+    def __init__(self, path: Path | str, *, fsync_each: bool, baseline_id: str = "") -> None:
         self.path = Path(path)
         self._f = self.path.open("ab")
         os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
         self._fsync_each = fsync_each
-        self.seq = start_seq
+        #: concurrency-model ss2: this log's identity, part of every
+        #: fingerprint. Empty for a journal written before S2, and for the
+        #: journal-less engines the bisimulation harness runs.
+        self.baseline_id = baseline_id
         #: live feeds for ss10 subscribe: every appended record is fanned out
         #: post-write; queues are unbounded (a slow subscriber buffers, the
         #: WAL never blocks on one)
@@ -79,10 +105,12 @@ class Journal:
     def create(
         cls, path: Path | str, *, catalog: CatalogIR, clock_domain: str, started_at: datetime
     ) -> Journal:
-        journal = cls(path, fsync_each=clock_domain == "real")
+        baseline_id = str(uuid.uuid4())
+        journal = cls(path, fsync_each=clock_domain == "real", baseline_id=baseline_id)
         journal._write(
             {
                 "rec": "header",
+                "baseline_id": baseline_id,
                 "catalog_hash": catalog_hash(catalog),
                 "dsl41_version": _dsl41_version(),
                 "clock_domain": clock_domain,
@@ -91,30 +119,51 @@ class Journal:
         )
         return journal
 
-    def input(self, ev: Event, source: str | None) -> None:
-        """source in {scheduler, adapter, control, reconcile} (ss7); None
-        marks an unattributed script injection and never occurs in a real
-        run. Persisted so replay re-derives the same causes (DL-68)."""
-        self.seq += 1
+    def admit(self, attempt: Attempt) -> None:
+        """Append one admitted input -- the concurrency-model ss4 step-4
+        batch -- as ONE line, so no crash can leave its time observation
+        without its attempt or the reverse.
+
+        The two record names are the two shapes of an attempt, not two
+        paths: `input` has a verb, `advance` is the standalone time
+        observation (DL-44's other half of the input alphabet), and both
+        carry the same admission fields. `source` in {scheduler, adapter,
+        control, reconcile} (ss7); None marks an unattributed script
+        injection and never occurs in a real run. It is persisted because
+        replay must re-derive the same causes and the same gate verdict
+        from it (DL-68)."""
+        record: dict[str, Any] = {
+            "rec": "input" if attempt.kind is not None else "advance",
+            "seq": attempt.index,
+            "at": attempt.at.isoformat(),
+            "request_id": attempt.request_id,
+            "fingerprint": attempt.fingerprint,
+        }
+        if attempt.kind is not None:
+            record |= {"kind": attempt.kind, "payload": attempt.payload, "source": attempt.source}
+        self._write(record)
+
+    def result(self, result: ApplyResult) -> None:
+        """Append the decision an admitted attempt got (ss4 step 7). Written
+        unconditionally, including for an application that changed nothing:
+        the absence of a result is how replay recognises the crash window,
+        so an absence that also meant "nothing happened" would make that
+        window unreadable.
+
+        Its index rides under `index`, not `seq`: `seq` is the ss10
+        subscribe cursor, and a result shares its attempt's number, so two
+        records under one cursor value would leave the second undeliverable
+        to a resuming subscriber."""
         self._write(
             {
-                "rec": "input",
-                "seq": self.seq,
-                "at": ev.at.isoformat(),
-                "kind": ev.kind,
-                "payload": ev.payload,
-                "source": source,
+                "rec": "result",
+                "index": result.index,
+                "request_id": result.request_id,
+                "decision": result.decision,
+                "reason": result.reason,
+                "revisions": result.revisions,
             }
         )
-
-    def advance(self, at: datetime) -> None:
-        """A time observation the engine acted on (Oracle.advance): part of
-        the input alphabet (DL-44 amendment) -- the timer firings it causes
-        (term_run_time kills, alarms) must replay, or a crash after an
-        advance-fired kill would resurrect the job. Shares the input seq so
-        replay interleaves feeds and advances in the original order."""
-        self.seq += 1
-        self._write({"rec": "advance", "seq": self.seq, "at": at.isoformat()})
 
     def dispatch(
         self,
@@ -203,28 +252,104 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
     return records
 
 
-def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> None:
-    """Apply the journal's input AND advance records, in seq order, through
-    `oracle` (an advance is a time observation -- the other half of the
-    input alphabet; DL-44 amendment)."""
-    replayable = sorted(
-        (r for r in records if r.get("rec") in ("input", "advance")),
-        key=lambda r: int(r["seq"]),
-    )
-    for record in replayable:
-        if record["rec"] == "advance":
-            oracle.advance(datetime.fromisoformat(record["at"]))
-        else:
-            oracle.feed(
-                Event(
-                    at=datetime.fromisoformat(record["at"]),
-                    kind=record["kind"],
-                    payload=record["payload"],
-                    # DL-68: provenance is part of the input alphabet -- replay
-                    # must re-derive the same causes and started_by
-                    source=record.get("source"),
-                )
+def baseline_id(records: list[dict[str, Any]]) -> str:
+    return str(records[0].get("baseline_id") or "")
+
+
+def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
+    """The log's admitted inputs, in admission order.
+
+    A record written before S2 carries no `request_id` and no
+    `fingerprint`; it gets the ones it would have been admitted under, so
+    the rest of the pipeline sees one kind of attempt rather than two. The
+    synthesized id names its position in this log, which is the only thing
+    that could ever have identified it."""
+    base = baseline_id(records)
+    attempts: list[Attempt] = []
+    for record in records:
+        rec = record.get("rec")
+        if rec not in ("input", "advance"):
+            continue
+        kind = record.get("kind") if rec == "input" else None
+        payload = record.get("payload") or {}
+        source = record.get("source")
+        attempts.append(
+            Attempt(
+                index=int(record["seq"]),
+                at=datetime.fromisoformat(record["at"]),
+                request_id=str(record.get("request_id") or f"log:{record['seq']}"),
+                fingerprint=str(
+                    record.get("fingerprint")
+                    or fingerprint(baseline_id=base, kind=kind, payload=payload, source=source)
+                ),
+                kind=kind,
+                payload=payload,
+                source=source,
             )
+        )
+    return sorted(attempts, key=lambda a: a.index)
+
+
+def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
+    """Pass one: the durable decisions, indexed. Built from the whole log
+    before anything is applied, because an attempt says nothing about its
+    own fate -- its result is a LATER record, and the gap between them is
+    the crash window (concurrency-model ss4)."""
+    index = DecisionIndex()
+    for attempt in read_attempts(records):
+        index.note(attempt)
+    for record in records:
+        if record.get("rec") != "result":
+            continue
+        index.record(
+            ApplyResult(
+                index=int(record["index"]),
+                request_id=str(record["request_id"]),
+                decision=record["decision"],
+                reason=record.get("reason"),
+                revisions=record.get("revisions") or {},
+            )
+        )
+    return index
+
+
+@dataclass
+class Replay:
+    """Where the log left the state machine (concurrency-model ss2/ss4)."""
+
+    frontiers: Frontiers = field(default_factory=Frontiers)
+    decisions: DecisionIndex = field(default_factory=DecisionIndex)
+    #: attempts admitted with no durable result -- the crash window, decided
+    #: here by re-running the gate rather than guessed at
+    recovered: list[ApplyResult] = field(default_factory=list)
+
+
+def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
+    """Apply the journal through `oracle`, two-pass (concurrency-model ss4).
+
+    Pass one indexes the decisions; pass two applies each attempt in
+    admission order. A durable decision is authoritative -- a rejected
+    attempt is NOT fed, and an applied one is fed without re-deciding, so
+    this build reproduces the log's history rather than the one its current
+    gate would write. An attempt with no result is applied, because
+    admission is the commit point; it goes through the gate on the way,
+    since a decision is exactly what it is missing.
+
+    The time half of every batch applies either way. A rejected completion
+    still observed the clock, and the kill that observation let fire is a
+    decision the estate already acted on -- skipping it wholesale would
+    resurrect a killed job -- the case DL-44's amendment added the advance
+    record for, now decided by record rather than by absence."""
+    decisions = read_decisions(records)
+    replay = Replay(decisions=decisions)
+    for attempt in read_attempts(records):
+        durable = decisions.for_index(attempt.index)
+        applied = apply_attempt(oracle, attempt, decided=durable)
+        if durable is None:
+            decisions.record(applied.result)
+            replay.recovered.append(applied.result)
+        replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
+    return replay
 
 
 def _last_journal_at(records: list[dict[str, Any]]) -> datetime:

@@ -32,6 +32,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Event, EventKind, Oracle
 from dsl41.runner import Engine, start_run
 from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import Journal, catalog_hash, read_journal, replay_inputs
 
@@ -68,22 +69,45 @@ def test_header_record_carries_catalog_hash_version_domain_and_started_at(
     assert header["started_at"] == T0.isoformat()
 
 
-def test_input_record_carries_seq_at_kind_payload_source_and_seq_increments(
+def _attempt(index: int, event: Event | None, *, source: str | None = "control") -> Attempt:
+    at = event.at if event is not None else T0 + timedelta(minutes=index)
+    return Attempt(
+        index=index,
+        at=at,
+        request_id=f"r{index}",
+        fingerprint=fingerprint(
+            baseline_id="b",
+            kind=event.kind if event else None,
+            payload=dict(event.payload) if event else {},
+            source=source if event else None,
+        ),
+        kind=event.kind if event else None,
+        payload=dict(event.payload) if event else {},
+        source=source if event else None,
+    )
+
+
+def test_input_record_carries_seq_at_kind_payload_source_and_the_admission_fields(
     tmp_path: Path,
 ) -> None:
-    """(runner-design ss7): input = {seq, at, kind, payload, source}, source
-    in {scheduler, adapter, control, reconcile}. seq is a monotone WAL
+    """(runner-design ss7 + concurrency-model ss4): input = {seq, at, kind,
+    payload, source} as it always was, plus the two fields admission needs
+    -- the `request_id` a retry is answered by and the `fingerprint` that
+    catches an id reused for a different command. seq is a monotone WAL
     sequence number, independent of `at` (adapter completions can enqueue
     out of chronological arrival relative to future-stamped script events --
-    module docstring)."""
+    module docstring); it is the ss2 committed index under its old name."""
     journal = Journal.create(
         tmp_path / "journal.jsonl",
         catalog=lower_source(_SOLO_JIL),
         clock_domain="virtual",
         started_at=T0,
     )
-    journal.input(ev("STARTJOB", 0, job="j1"), source="control")
-    journal.input(ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
+    first = _attempt(1, ev("STARTJOB", 0, job="j1"))
+    journal.admit(first)
+    journal.admit(
+        _attempt(2, ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
+    )
     journal.close()
     records = read_journal(tmp_path / "journal.jsonl")
     inputs = [r for r in records if r["rec"] == "input"]
@@ -94,10 +118,56 @@ def test_input_record_carries_seq_at_kind_payload_source_and_seq_increments(
         "kind": "STARTJOB",
         "payload": {"job": "j1"},
         "source": "control",
+        "request_id": "r1",
+        "fingerprint": first.fingerprint,
     }
     assert inputs[1]["seq"] == 2
     assert inputs[1]["source"] == "adapter"
     assert inputs[1]["payload"] == {"job": "j1", "run_number": 1, "exit_code": 0}
+    # ONE line per admitted input (concurrency-model ss4 step 4): the batch's
+    # time observation is that line's `at`, so no crash can leave the
+    # observation without the attempt it belongs to
+    assert len(records) == 3  # header + two admissions, nothing between them
+
+
+def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Path) -> None:
+    """(concurrency-model ss4): the standalone time observation takes the
+    same path as an operator command and leaves the same kind of record --
+    an `advance`, which is an attempt whose verb is absent. It carries the
+    admission fields for the same reason everything else does: the log
+    indexes decisions by request_id, and an input with no identity has no
+    decision anyone can look up."""
+    journal = Journal.create(
+        tmp_path / "journal.jsonl",
+        catalog=lower_source(_SOLO_JIL),
+        clock_domain="virtual",
+        started_at=T0,
+    )
+    journal.admit(_attempt(1, None))
+    journal.result(ApplyResult(index=1, request_id="r1", decision="applied"))
+    journal.close()
+    records = read_journal(tmp_path / "journal.jsonl")
+    advance = next(r for r in records if r["rec"] == "advance")
+    assert advance == {
+        "rec": "advance",
+        "seq": 1,
+        "at": (T0 + timedelta(minutes=1)).isoformat(),
+        "request_id": "r1",
+        "fingerprint": advance["fingerprint"],
+    }
+    assert "kind" not in advance and "payload" not in advance
+    result = next(r for r in records if r["rec"] == "result")
+    # `index`, not `seq`: a result shares its attempt's number, and the ss10
+    # subscribe cursor is keyed on seq -- two records under one cursor value
+    # would leave the second undeliverable to a resuming subscriber
+    assert result == {
+        "rec": "result",
+        "index": 1,
+        "request_id": "r1",
+        "decision": "applied",
+        "reason": None,
+        "revisions": {},
+    }
 
 
 def test_dispatch_record_carries_job_run_number_wrapper_pid_run_dir_started_at(
@@ -178,8 +248,10 @@ def _write_two_input_journal(tmp_path: Path) -> Path:
     journal = Journal.create(
         path, catalog=lower_source(_SOLO_JIL), clock_domain="virtual", started_at=T0
     )
-    journal.input(ev("STARTJOB", 0, job="j1"), source="control")
-    journal.input(ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
+    journal.admit(_attempt(1, ev("STARTJOB", 0, job="j1")))
+    journal.admit(
+        _attempt(2, ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
+    )
     journal.close()
     return path
 
@@ -373,14 +445,22 @@ def test_input_records_tag_injected_events_control_and_completions_adapter(
     assert completion["payload"] == {"job": "j1", "run_number": 1, "exit_code": 0}
 
 
-def test_gate_dropped_completion_is_journaled_as_a_drop_record(tmp_path: Path) -> None:
-    """(runner-design ss4 stale-completion gate + ss7): a completion the
-    engine drops (run_number mismatch) never feeds the oracle but IS
-    journaled -- "never a silent overwrite" extends to never silently
-    vanishing either. White-box via the same Engine._enqueue(is_completion=
-    True) trick test_runner.py's gate test uses -- 11a has no black-box
-    trigger for this gate under VirtualClock (runner.py module docstring:
-    the natural-exit-vs-kill race always resolves to the kill there)."""
+def test_gate_dropped_completion_is_journaled_as_an_admitted_rejection(tmp_path: Path) -> None:
+    """(runner-design ss4 stale-completion gate + ss7, concurrency-model
+    ss4): a completion the engine drops (run_number mismatch) never feeds
+    the oracle but IS journaled -- "never a silent overwrite" extends to
+    never silently vanishing either.
+
+    S2 changed WHERE it lands. The gate now runs after admission, so the
+    completion is in the log as an attempt and its rejection is in the log
+    as that attempt's result. That is not bookkeeping: a `drop` record was
+    absence, and absence cannot be told apart from a crash, so replay had
+    to guess. A recorded rejection is a decision replay can honour.
+
+    White-box via the same Engine._enqueue(..., source="adapter") trick
+    test_runner.py's gate test uses -- 11a has no black-box trigger for this
+    gate under VirtualClock (runner.py module docstring: the
+    natural-exit-vs-kill race always resolves to the kill there)."""
     text = "insert_job: sa\njob_type: c\ncommand: x\nmachine: m1\n"
 
     async def scenario() -> None:
@@ -399,7 +479,7 @@ def test_gate_dropped_completion_is_journaled_as_a_drop_record(tmp_path: Path) -
                 kind="STATUS",
                 payload={"job": "sa", "run_number": 0, "exit_code": 0},
             ),
-            is_completion=True,
+            source="adapter",  # what makes it a COMPLETION, and so gated
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
         assert len(engine.drops) == 1
@@ -408,12 +488,15 @@ def test_gate_dropped_completion_is_journaled_as_a_drop_record(tmp_path: Path) -
         engine.journal.close()
 
     asyncio.run(scenario())
-    drops = [r for r in read_journal(tmp_path / "run" / "journal.jsonl") if r["rec"] == "drop"]
-    assert len(drops) == 1
-    assert drops[0]["reason"] == "run_number mismatch"
-    assert drops[0]["kind"] == "STATUS"
-    assert drops[0]["payload"] == {"job": "sa", "run_number": 0, "exit_code": 0}
-    assert "seq" not in drops[0]
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    rejected = [r for r in records if r["rec"] == "result" and r["decision"] == "rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["reason"] == "run_number mismatch"
+    assert rejected[0]["revisions"] == {}  # a rejection moved nothing
+    attempt = next(r for r in records if r.get("seq") == rejected[0]["index"])
+    assert attempt["kind"] == "STATUS"
+    assert attempt["payload"] == {"job": "sa", "run_number": 0, "exit_code": 0}
+    assert attempt["source"] == "adapter"  # and the log says why it was gated
 
 
 # ------------------------------------------------------------- 6. start_run gate

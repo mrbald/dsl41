@@ -36,8 +36,11 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
                RealClock) + EngineError, at the bottom of the import DAG
   runner_adapters - the ss6 adapter contract and every adapter, plus the
                ss6a Tier-1 detached path and the ss7 spool ladder
-  runner_journal - the ss7 inputs-only WAL: Journal, read_journal,
-               replay_inputs, and the catalog_hash resume gate
+  runner_admission - the frozen admission order (concurrency-model ss4):
+               Attempt/ApplyResult, the typed Frontiers, the DecisionIndex,
+               the fingerprint, and the gate as a pure function
+  runner_journal - the ss7 inputs-only WAL: Journal, read_journal, the
+               two-pass replay_inputs, and the catalog_hash resume gate
   runner_scheduler - the ss5 calendar scheduler + the SEM-35 timezone ladder
                that turns its ticks into UTC instants
   runner_preflight - the ss8 ERROR/WARN item model and its rules

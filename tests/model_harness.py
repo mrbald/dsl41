@@ -303,8 +303,11 @@ class ModelRun:
         takes, and the only one the ss4 stale gate sees. `inject` cannot
         model this: an external event is never gated (it carries
         CHANGE_STATUS parity), so a duplicated or superseded result has to
-        arrive the way a real adapter would deliver it."""
-        self.live._enqueue(ev, is_completion=True, source=source)
+        arrive the way a real adapter would deliver it. The SOURCE is what
+        makes it a completion (runner_admission.COMPLETION_SOURCES): the
+        log carries provenance and nothing else, so replay has to reach the
+        gate's verdict from the same field."""
+        self.live._enqueue(ev, source=source)
 
     async def crash(self) -> None:
         """Model engine death: in-flight adapter tasks die without

@@ -35,6 +35,7 @@ from hypothesis import strategies as st
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Event, EventKind, Oracle, OracleError, TraceEntry
+from dsl41.runner_clock import EngineError
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -1616,10 +1617,15 @@ def test_cascade_order_two_consumers_of_one_producer_start_in_catalog_order() ->
 
 
 def test_error_feed_time_going_backwards_raises() -> None:
+    """Refused by whichever layer meets it first, and the engine meets it
+    earlier: the ss4 admission frontier stamps monotonically, so a backwards
+    input is refused before anything is appended, where the oracle refuses it
+    at apply. Both say "backwards"; only the type differs, and asserting one
+    of them here would pin the wrong thing about the other path."""
     text = "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"
     o = oracle(text)
     o.feed(ev("STATUS", 5, job="solo", status="SUCCESS"))
-    with pytest.raises(OracleError, match="backwards"):
+    with pytest.raises((OracleError, EngineError), match="backwards"):
         o.feed(ev("STATUS", 0, job="solo", status="SUCCESS"))
 
 

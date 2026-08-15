@@ -651,7 +651,12 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
                     server.path, {"cmd": "sendevent", "event": "OFF_HOLD", "job": "sub_job"}
                 )
                 assert r2["ok"] is True
-                live = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
+                # every admitted input is now followed by its ss4 result
+                # record, which streams like any other record -- drain past
+                # the trailing ones to reach the new input
+                live: dict[str, object] = {}
+                while live.get("kind") is None:
+                    live = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
                 assert live.get("kind") == "OFF_HOLD"
                 # the seq'd input record must not have been duplicated across
                 # the backfill/live seam

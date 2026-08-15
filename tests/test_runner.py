@@ -534,7 +534,7 @@ def test_stale_completion_gate_run_number_mismatch_and_already_terminal() -> Non
     VirtualClock the kill-vs-natural-exit race always resolves to the kill
     (runner.py module docstring), so the gate has no black-box trigger in
     11a -- it guards the REAL time domain (11b). We reach it here only by
-    forging completions through the private `Engine._enqueue(..., is_completion=True)`
+    forging completions through the private `Engine._enqueue(..., source="adapter")`
     path: a stale run_number is dropped with "run_number mismatch"; a
     current-run_number completion on an already-terminal job is dropped with
     "job already terminal". Both leave the trace untouched."""
@@ -558,7 +558,7 @@ def test_stale_completion_gate_run_number_mismatch_and_already_terminal() -> Non
                 kind="STATUS",
                 payload={"job": "sa", "run_number": 0, "exit_code": 0},
             ),
-            is_completion=True,
+            source="adapter",  # what makes it a COMPLETION, and so gated
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
         assert len(engine.drops) == 1
@@ -571,7 +571,7 @@ def test_stale_completion_gate_run_number_mismatch_and_already_terminal() -> Non
                 kind="STATUS",
                 payload={"job": "sa", "run_number": 1, "exit_code": 0},
             ),
-            is_completion=True,
+            source="adapter",  # what makes it a COMPLETION, and so gated
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=4))
         assert len(engine.drops) == 2
