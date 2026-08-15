@@ -4184,3 +4184,80 @@
   the control plane publishes); and every ss/DL citation comment, which is
   this project's core discipline and not noise.
   2039 passed; ruff, mypy, arch_check blocking checks clean.
+- DL-99 how S6 is built, and where the leader record lives (2026-08-15;
+  sequencing decision, taken before the code so the slices do not re-derive
+  it, as DL-93 was for S5). `docs/concurrency-model.md` ss10 names S6 as
+  *ledger + election*, and ss1's contract table says what a ledger has to
+  provide. Two of its five rows landed with S2 without being called out as
+  such: decision lookup by `request_id` IS the `DecisionIndex`, and atomic
+  multi-record commit IS the one-line attempt record -- a batch no crash can
+  tear in half, because it is a single append. S6 is the other three:
+  monotone epoch allocation, epoch-conditional append, and a linearizable
+  read of the leader record. Three slices, in this order.
+  **The hole this closes is live, and it is not the one the epoch closes.**
+  `_serve_run` claims the control socket AFTER `resume_run` has replayed the
+  log, reconciled the estate, re-driven recorded kills and appended to the
+  WAL. Two `dsl41 run --resume` processes on one run root therefore both act,
+  in full, before either is refused -- and the refusal itself is a heuristic:
+  a 0.2-second connect probe that UNLINKS a socket it cannot reach. A mutex
+  taken after the first side effect is not a mutex. That is what ss7 means by
+  beginning the barrier at ACQUIRE, and it is the headline of S6a.
+  **S6a election: the lock, the epoch, and eligibility.** An exclusive lock
+  on the run root, taken before the log is read and before anything is
+  written; the epoch allocated under it and appended as a `leader` record;
+  ss7's eligibility gate completed. A refusal names the holder.
+  **S6b the fence: epoch-conditional append.** ss7's "losing proof stops
+  dispatch, not merely renewal" -- every append re-checks that this process
+  still provably holds the run root, and an append is what precedes every
+  effect, so a fence on appends is a fence on dispatch without a second
+  mechanism to keep in step.
+  **S6c the takeover barrier.** ACQUIRE -> reconcile -> retire superseded,
+  re-drive pending -> dispatch, ordered explicitly rather than by accident of
+  call order, and closing the question DL-96 deferred to it: whether a
+  pending SPAWN is re-driven or failed.
+  **The leader record lives IN the ledger,** for ss1's own reason about the
+  outbox: the epoch is allocated BY appending it, so the allocation and the
+  log's account of it cannot disagree, and no crash leaves one without the
+  other. The lock file is the mutex and nothing else. It carries the holder's
+  pid and epoch so a refusal can name who holds it, and that note is
+  diagnostics -- never read as the fence, because a note can be stale and a
+  held lock cannot.
+  **The mutex needs no liveness heuristic,** which is the whole reason to
+  prefer it to what is there now. The kernel releases an `flock` when the
+  holder dies, `kill -9` included -- exactly what the connect probe
+  approximates, and gets wrong in both directions: an engine wedged past
+  200ms loses its socket to a second engine, and a socket left by a crash has
+  to be unlinked on a guess. Nothing has to decide whether the previous
+  holder is alive. The probe stays where it is, demoted to what it always
+  was -- cleanup of a stale socket FILE, not an election.
+  **What the substrate provides, and where it stops.** ss1 asks for a
+  Postgres-class store and says "whatever provides it": a flock'd file with
+  fsync provides all three remaining rows for ONE host and none of them
+  across hosts. So S6 does not unblock the relay DL-97 deferred, and should
+  not be read as doing so -- a lock on a local filesystem is not a
+  linearizable leader record for a second machine, and NFS is where that
+  sentence stops being pedantic. What S6 gives the relay is the token it
+  would fence on, allocated and moving, rather than a constant.
+  **The state-machine version is ss7's other half of eligibility.** The
+  header already pins `catalog_hash` and resume already gates on it; the
+  version is pinned and gated on nothing. `dsl41_version` is the wrong thing
+  to gate on -- it moves for a docs typo, and refusing to resume a live
+  estate after a patch release would be an outage manufactured by
+  bookkeeping. ss7 says "state-machine version", which is a number that moves
+  when the oracle's derivation of state from inputs moves, and that is what
+  S6a adds. Absent from a pre-S6 header it reads as 1, on the same courtesy
+  S2 gave a journal with no `request_id`.
+  **What the epoch is worth on one host, stated without inflation.** It is
+  not what stands between this estate and a double run -- the lock is. It
+  buys two things now: the log becomes self-describing about which
+  incarnation admitted which input, which is what makes a failover
+  reconstructible after the fact, and ss4's step-2 ordering (dedup, THEN
+  reject an unseen stale epoch) stops being a rule pinned by a test against a
+  constant and becomes one exercised by a value that moves. The rest of its
+  worth arrives with a second leader, which is S7's matrix to prove.
+  **Journal-less engines keep `INERT_EPOCH`.** The bisimulation harness runs
+  Engines with no run root and no ledger, so there is nothing for them to be
+  elected over. Epoch 0 stops meaning "not implemented" and starts meaning
+  "no election was held here", which is a distinction worth keeping rather
+  than papering over with a fake epoch 1 on an engine that has no log to
+  fence.
