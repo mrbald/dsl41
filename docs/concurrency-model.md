@@ -664,12 +664,29 @@ S2  typed frontiers, atomic admission, decision index, two-pass replay
 S3  mandatory preconditions + protocol v2
 S4  CLI / TUI          ∥   S5  relay + host identity, effects, barrier,
                               deadman, host states + evict
-                              (S5a-c landed; the relay and the barrier moved
+                              (S5a-d landed; the relay and the barrier moved
                                to S6 by DL-97 -- both rest on election or on
                                a second host, and neither exists before it)
-S6  ledger + election
+S6  ledger + election (S6a-c landed, DL-99: election, the fence, the
+    barrier. The RELAY did not land here -- see below)
 S7  failover / partition / double-run matrix over nightbank
 ```
+
+*(Amended by DL-103, at build — closing S6.* DL-97 deferred the relay with
+the trigger "build it when there is a second execution host to route to,
+which in practice means alongside S6". S6 has landed and the relay has not,
+so the distinction that sentence packed into "in practice" is worth
+unpacking: the trigger is a **second execution host**, and S6 was the
+expected occasion for one, not the condition. Nothing in election, the fence
+or the barrier produces a second machine or answers §7's open question of
+how mutually authenticated principals are named, issued and rotated. The
+barrier that S6c did build is the local half — it reconciles every host in
+the routing table, and today that table has one row.
+
+What S6 does hand the relay is the thing it was missing: an epoch that is
+allocated, monotone, and re-checked on every append, so "a relay rejects any
+dispatch carrying an epoch below the highest it has seen" now names a value
+that moves rather than a constant. The trigger stands unchanged.*)*
 
 Two dependencies were inverted in earlier drafts and are pinned here: S2
 persists `InputAttempt`, so the envelope and `ApplyResult` types must be

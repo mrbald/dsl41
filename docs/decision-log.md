@@ -4392,3 +4392,33 @@
   drain's held work and nobody had met it, because the `activate` that
   released it was itself an input. Also mutation-tested.
   2054 -> 2057 passed; ruff, mypy, arch_check blocking checks clean.
+- DL-103 S6 closes, and the relay's trigger did not fire (2026-08-15;
+  stage close-out). ss10 carries the amendment. Three slices landed --
+  DL-100 election, DL-101 the fence, DL-102 the barrier -- and ss1's five
+  ledger capabilities are all provided for one host.
+  **The relay was not built here, and that is not an omission.** DL-97
+  deferred it with the trigger "build it when there is a second execution
+  host to route to, which in practice means alongside S6". S6 has landed and
+  the relay has not, so the distinction that sentence packed into "in
+  practice" needs unpacking: the trigger is a SECOND EXECUTION HOST, and S6
+  was the expected occasion for one, not the condition. Nothing in election,
+  the fence or the barrier produces a second machine or answers ss7's open
+  question of how mutually authenticated principals are named, issued and
+  rotated. The barrier S6c built is the local half -- it reconciles every
+  host in the routing table, and that table has one row. What S6 does hand
+  the relay is what it was missing: an epoch that is allocated, monotone and
+  re-checked on every append, so ss7's "a relay rejects any dispatch carrying
+  an epoch below the highest it has seen" names a value that moves.
+  **What the obligations table says now.** CM-06, CM-09 (local), CM-10,
+  CM-11, CM-13 closed; CM-09's remote half and CM-12's self-fencing wait with
+  the relay; CM-14 -- no `(job, run_number)` runs twice over seeded
+  interleavings -- is S7, and is the one the whole document exists for.
+  **What S6 changed that was not on its list.** Three things, each a real
+  defect rather than a stage deliverable: two engines on one run root could
+  both replay, reconcile, re-drive kills and append before either was
+  refused (DL-100); a start the previous leader decided and never dispatched
+  was failed rather than delivered, and FAILURE is not inert -- it routes the
+  estate's f()-recovery paths (DL-102); and the outbox was drained only on
+  the way out of the next admitted input, so held or re-driven work waited on
+  unrelated traffic (DL-102). None of the three was visible before the stage
+  that named them.
