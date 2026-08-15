@@ -3761,3 +3761,14 @@
   `runner_admission` as its own module rather than part of the WAL: S6
   replaces the storage under a stable admission layer, which is the
   argument DL-89 made and it still holds.
+  **The ratchet is re-baselined, and that accepts more than the split.**
+  `oracle.py` leaves the size map because the finding was acted on;
+  `cli.py` (1583 → 1612) and `runner_tui.py` (1652 → 1712) stay in it at
+  their new heights, which is an acceptance, not a reset — both were read
+  in this review, the duplication in them was the finding above and is
+  gone, and what remains is the S3 surface itself (`--expect`, the
+  read-then-write, the TUI's precondition path). Two entries move the
+  other way and are worth naming because they are S2's doing:
+  `run_until_quiescent` 161 → 135 lines and `_reconcile` 124 → 123, from
+  pulling the admission order out into `_admit_and_apply`. The gate now
+  measures drift from here.
