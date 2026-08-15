@@ -215,7 +215,14 @@ is not desynced).
   all prior wrappers received EOF and recorded. The spool is the
   cross-restart truth, and LIST shows live state only. `wrapper_rc` is
   null while the wrapper is alive.
-- `PING` → `{ok, version: 1, incarnation}`.
+- `PING` → `{ok, version: 1, incarnation, deadman_s}`.
+
+`deadman_s` (S5b, DL-95) rides both read verbs: the interval this supervisor
+was started with, or `null`. It is read back rather than assumed because a
+reattaching engine meets a supervisor it did not start, and
+`docs/concurrency-model.md` §8's eviction bound has to describe the host
+rather than some engine's launch options. Additive; older clients ignore it
+like any unknown field.
 
 **Lease verbs** (single controller, observers are unlimited):
 
@@ -297,6 +304,27 @@ The engine's OWN control socket (runner-design §10) deliberately keeps
 no lease: sendevent is multi-writer by AutoSys nature, and the
 single-writer engine loop serializes it. The lease guards the tier that
 spawns without semantics.
+
+**The deadman** (S5b, DL-95). Started with `--deadman-seconds N`, a
+supervisor that has had **no live leaseholder** for N seconds stops its loop
+and returns. Both halves of "live" from the lease definition above apply:
+unexpired *and* the holder's connection still open — an expired lease whose
+connection is open is a controller that stopped renewing, and an unexpired
+one whose connection died is a controller that is gone. The clock restarts
+whenever a live leaseholder appears, so a reconnecting engine reprieves it.
+
+Its exit is the whole mechanism: the process dying EOFs every lifeline it
+owns, and each wrapper then runs §4 step 5 — TERM, grace, KILL, record
+`terminated / parent lost`. That is the existing kill path, not a new one,
+and the supervisor still decides nothing about what should run. Omitted, a
+supervisor tolerates an absent controller forever, which is what lets an
+engine crash and resume with its runs intact (DL-79).
+
+It is here for one reason outside this tier: `docs/concurrency-model.md`
+§8's `evict` — the only state that lets another host run work bound to this
+one — must be provable, and nothing else bounds when a controller-less
+supervisor's wrappers die. A run root without a deadman is never reroutable
+except by force.
 
 ## 6. License earmark
 

@@ -219,11 +219,19 @@ class HostRuntime(BaseModel):
 #: effect or disk state that lives runner-side and never entered these rows;
 #: if one ever does, its name belongs here with a reason.
 _UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
+#: ss3's other exclusion class, reaching the host row (DL-95): `last_contact`
+#: is liveness that moves with relay traffic and no committed input -- the
+#: same category ss3 names `watching` for. Projecting it would put a revision
+#: on every lease renewal, which makes an operator's `expect` on a host
+#: unholdable and the WAL a heartbeat log. Excluding it is safe in the
+#: direction that matters: a fresher contact only ever DELAYS an eviction,
+#: and a replay re-seeds it at resume time, which is fresher still.
+_UNPROJECTED_HOST: frozenset[str] = _UNPROJECTED | {"last_contact"}
 _PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
     name for name in JobRuntime.model_fields if name not in _UNPROJECTED
 )
 _PROJECTED_HOST_FIELDS: tuple[str, ...] = tuple(
-    name for name in HostRuntime.model_fields if name not in _UNPROJECTED
+    name for name in HostRuntime.model_fields if name not in _UNPROJECTED_HOST
 )
 _DEFAULT_JOB = JobRuntime()
 
@@ -525,6 +533,18 @@ class RuntimeState:
             deadman_s=deadman_s,
             last_contact=at if at is not None else (row.last_contact if row else None),
         )
+
+    def touch_host(self, host_id: str, at: datetime) -> None:
+        """Record positive contact with a host (concurrency-model ss8, S5b).
+
+        Deliberately NOT an admitted input: `last_contact` is outside the
+        semantic projection, so this moves no revision and leaves no log
+        record, and a lease heartbeat every twenty seconds costs neither. A
+        host the table does not know is ignored rather than created -- the
+        table is an inventory, and contact with something not in it is not a
+        registration."""
+        if host_id in self._hosts:
+            self._replace_host(host_id, last_contact=at)
 
     def set_host_state(self, host_id: str, state: HostState) -> None:
         """Move a host between ss8's routing states. Eviction is NOT this

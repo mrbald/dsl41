@@ -42,7 +42,7 @@ import sys
 import time
 import uuid
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -484,8 +484,29 @@ class SupervisorClient:
     _TTL_S = 60.0
     _RENEW_EVERY_S = 20.0
 
-    def __init__(self, run_root: Path) -> None:
+    def __init__(
+        self,
+        run_root: Path,
+        *,
+        deadman_s: float | None = None,
+        on_contact: Callable[[], None] | None = None,
+    ) -> None:
         self.run_root = run_root
+        #: S5b (concurrency-model ss8): the deadman a supervisor WE spawn is
+        #: started with. It is not what gets recorded -- `supervisor_deadman_s`
+        #: below is, read back from the supervisor -- because a reattaching
+        #: engine meets a supervisor it did not start, and a bound derived
+        #: from this engine's own flag would then describe nothing.
+        self.deadman_s = deadman_s
+        #: what the supervisor we are talking to says it runs. None until the
+        #: first PING/ACQUIRE answers, and None afterwards if it runs none.
+        self.supervisor_deadman_s: float | None = None
+        #: called after every confirmed lease exchange -- ss8's "positive
+        #: contact with this host". A callback rather than a store write here,
+        #: because this module is the transport and the routing table is the
+        #: engine's state; what it stamps is deliberately UNPROJECTED, so a
+        #: heartbeat costs no revision and no log record.
+        self.on_contact = on_contact
         self.sock_path = run_root / "supervisor.sock"
         # Per-INCARNATION since DL-79, and deliberately not stable: the old
         # value said "one run_root has one logical engine controller", which
@@ -558,13 +579,18 @@ class SupervisorClient:
             resp = await self._request({"cmd": "PING"}, _connect=False)
         except SupervisorUnavailable:
             return False
+        if resp.get("ok"):
+            self._note_contact(resp)  # PING is where a REATTACH learns the deadman
         return bool(resp.get("ok"))
 
     def _spawn_supervisor(self) -> None:
+        argv = [sys.executable, str(_SUPERVISOR_PATH), "--run-root", str(self.run_root)]
+        if self.deadman_s is not None:
+            argv += ["--deadman-seconds", str(self.deadman_s)]
         logf = (self.run_root / "supervisor.log").open("ab")
         try:
             subprocess.Popen(
-                [sys.executable, str(_SUPERVISOR_PATH), "--run-root", str(self.run_root)],
+                argv,
                 stdin=subprocess.DEVNULL,
                 stdout=logf,
                 stderr=logf,
@@ -728,9 +754,21 @@ class SupervisorClient:
             raise SupervisorUnavailable(f"lease acquire refused: {resp}")
         self.token = int(resp["token"])
         self.incarnation = resp.get("incarnation")  # DL-80
+        self._note_contact(resp)
         if self._renew_task is None:
             self._renew_task = asyncio.ensure_future(self._renew_loop(ttl))
         return self.token
+
+    def _note_contact(self, resp: Mapping[str, Any]) -> None:
+        """One confirmed lease exchange: ss8's "positive contact with this
+        host". `deadman_s` is only carried by the two read verbs and by
+        ACQUIRE, so a RENEW's answer refreshes the contact and leaves the
+        interval alone -- it cannot change without a new incarnation."""
+        reported = resp.get("deadman_s")
+        if isinstance(reported, int | float) and not isinstance(reported, bool):
+            self.supervisor_deadman_s = float(reported)
+        if self.on_contact is not None:
+            self.on_contact()
 
     async def _renew_loop(self, ttl_s: float) -> None:
         """Keep the lease alive (spec ss2: renew every 20s). Review fix
@@ -776,6 +814,7 @@ class SupervisorClient:
                     resp = {"ok": False}
                 if resp.get("ok"):
                     failures = 0
+                    self._note_contact(resp)  # ss8: the host answered
                     continue
                 failures += 1
                 if failures >= 5:

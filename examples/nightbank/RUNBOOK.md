@@ -267,6 +267,28 @@ uv run dsl41 host evict local -S <run>/engine/control.sock   # exit 3, and why
 `activate` re-dispatches everything the drain held, which is what makes a
 drain reversible and a Ctrl-C not.
 
+**The deadman — what makes eviction possible at all.** `host list` shows
+`"deadman_s": null` by default: nothing bounds when this host's jobs would
+die if the engine vanished, so nothing can prove it is safe to run them
+somewhere else. Start a detached night with an interval and watch the whole
+chain:
+
+```sh
+uv run dsl41 run <exec line> --detached --deadman 30
+uv run dsl41 host list -S <run>/engine/control.sock   # deadman_s: 30.0
+# now SIGKILL the engine -- no goodbye, the way a real crash arrives
+pkill -9 -f 'dsl41 run'
+# the jobs keep running: that is what --detached buys...
+# ...for 30 seconds. Then the supervisor exits and takes them with it:
+tail -1 <run>/engine/supervisor.log          # "deadman fired -- no live leaseholder"
+cat <run>/engine/runs/*/status.json          # "cause": "parent lost"
+```
+
+Restart the engine inside the interval and nothing dies — the clock restarts
+whenever a controller is watching. That is the trade in one line: a deadman
+costs you the outage window `--detached` was for, and buys the only proof an
+operator can offer that a dead host's work may be rerun elsewhere.
+
 ## 11. Changing a job spec
 
 There is no mid-run reload, by design: resume gates on the exact catalog

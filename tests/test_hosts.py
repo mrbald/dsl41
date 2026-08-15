@@ -48,7 +48,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, HostRuntime, OracleError, RuntimeState
 from dsl41.runner import Engine, resume_run, start_run
-from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_adapters import FakeAdapter, SupervisorClient
 from dsl41.runner_admission import PROTOCOL_VERSION, Envelope
 from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_control import ControlServer, outcome_of, read_for, revision_in
@@ -758,7 +758,97 @@ def test_a_rejected_host_command_replays_as_the_rejection_it_was(short_root: Pat
     asyncio.run(scenario())
 
 
-# ------------------------------------------------------------- 6. the DL-93 pin
+# --------------------------------------------- 6. the deadman's half of the bound
+
+
+def test_contact_refreshes_the_row_without_costing_a_revision_or_a_record() -> None:
+    """S5b's design constraint, and the reason `last_contact` sits outside
+    ss3's semantic projection.
+
+    An engine renews its supervisor lease every twenty seconds. If that were
+    an admitted input, every host row would move a revision three times a
+    minute -- no operator could hold an `expect` on one, and the WAL would
+    become a heartbeat log. Excluding it is safe in the only direction that
+    matters: a FRESHER contact can only ever delay an eviction."""
+    engine = _engine()
+    store = engine.oracle.store
+    before = store.host(LOCAL_EXECUTOR_ID)
+    assert before is not None
+
+    engine.note_executor_contact()
+    engine.note_executor_contact()
+    after = store.host(LOCAL_EXECUTOR_ID)
+    assert after is not None
+    assert after.last_contact == engine.clock.now()
+    assert after.state_rev == before.state_rev == SEEDED  # no revision moved
+    assert engine.frontiers.committed_index == 0  # and nothing was admitted
+
+    # a host the table does not know is ignored, not created: contact with
+    # something outside the inventory is not a registration
+    store.touch_host("stranger", T0)
+    assert store.host("stranger") is None
+
+
+def test_the_recorded_deadman_is_what_the_supervisor_reports() -> None:
+    """ss8's bound has to describe the HOST. A reattaching engine meets a
+    supervisor it did not start -- possibly one launched with a different
+    interval, or none -- so the row records what the supervisor says it runs,
+    read back over the lease exchange, never the flag this engine was given.
+
+    A wrong value here is not cosmetic: it is the length of the wait that
+    stands between an operator and a double run."""
+    client = SupervisorClient(Path("/nonexistent"), deadman_s=90.0)
+    assert client.supervisor_deadman_s is None  # nothing said so yet
+
+    client._note_contact({"ok": True, "deadman_s": 45.0})
+    assert client.supervisor_deadman_s == 45.0  # the supervisor's, not the flag's
+    client._note_contact({"ok": True})  # RENEW carries no interval
+    assert client.supervisor_deadman_s == 45.0  # and does not erase one
+
+    engine = Engine(
+        lower_source(_SOLO_JIL),
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        deadman_s=client.supervisor_deadman_s,
+    )
+    row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
+    assert row is not None and row.deadman_s == 45.0
+
+
+def test_cm11_a_real_deadman_and_a_real_contact_make_the_bound_computable() -> None:
+    """The two producers S5a was missing, joined to the gate S5a wrote. What
+    is still synthetic here is `quarantined` -- ss8's first precondition, whose
+    producer is S5d's unreachability detector -- so this pins the bound and
+    not yet the whole eviction.
+
+    The refusal names the remaining wait, because an operator who is told
+    only "no" waits by guessing, and guessing short is the double run."""
+    engine = Engine(
+        lower_source(_SOLO_JIL),
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        deadman_s=60.0,
+    )
+    store = engine.oracle.store
+    engine.note_executor_contact()  # last heard from at T0
+    store.begin_input()
+    store.set_host_state(LOCAL_EXECUTOR_ID, "quarantined")  # S5d's producer, by hand
+    store.commit_input()
+
+    cmd = _cmd("evict")
+    bound = 60.0 + T_KILL_S
+    bound += skew_allowance(bound)
+    early = host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound - 30))
+    assert early is not None and "wait 30.0s more" in early and "deadman 60.0s" in early
+    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is None
+
+    # and a later contact pushes the bound out again -- the safe direction,
+    # which is why refreshing it needs no input
+    store.touch_host(LOCAL_EXECUTOR_ID, T0 + timedelta(seconds=bound))
+    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is not None
+
+
+# ------------------------------------------------------------- 7. the DL-93 pin
 
 
 def test_the_oracle_never_names_a_host_row() -> None:

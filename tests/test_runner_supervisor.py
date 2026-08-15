@@ -87,12 +87,17 @@ def proc_state(pid: int) -> str:
 # ---------------------------------------------------------- protocol harness
 
 
-def start_supervisor(run_root: Path, env: dict | None = None) -> subprocess.Popen:
+def start_supervisor(
+    run_root: Path, env: dict | None = None, deadman_s: float | None = None
+) -> subprocess.Popen:
     (run_root / "runs").mkdir(parents=True, exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     logf = (run_root / "supervisor.log").open("ab")
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(run_root)]
+    if deadman_s is not None:
+        argv += ["--deadman-seconds", str(deadman_s)]
     proc = subprocess.Popen(
-        [sys.executable, str(SUPERVISOR), "--run-root", str(run_root)],
+        argv,
         stdin=subprocess.DEVNULL,
         stdout=logf,
         stderr=logf,
@@ -807,6 +812,96 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
         assert listing["ok"] is True  # the client is still usable
     finally:
         teardown_supervisor(short_root, proc)
+
+
+# ------------------------------------------------------------- deadman (ss8)
+
+
+def _command_pgid(run_dir: Path) -> int:
+    wait_for(lambda: (run_dir / "spawn.json").exists())
+    return int(json.loads((run_dir / "spawn.json").read_text())["command_pgid"])
+
+
+def test_cm10_the_deadman_fires_and_takes_its_wrappers_with_it(short_root: Path) -> None:
+    """docs/concurrency-model.md ss8. A supervisor that has had no LIVE
+    leaseholder for T_deadman exits, and its exit EOFs every lifeline it
+    owns -- the kill path ss5 already relies on, not a new one.
+
+    This is what makes `evict` provable rather than assumed: without it,
+    nothing bounds how long an unreachable host keeps running work, and the
+    leader could never say the old executor is certainly done. The lease
+    connection is closed rather than RELEASEd, because that is the shape the
+    real failure has: an engine that died, not one that said goodbye."""
+    proc = start_supervisor(short_root, deadman_s=1.0)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 300})["token"]
+        run_dir = short_root / "runs" / "long.1"
+        run_dir.mkdir(parents=True)
+        spawned = cli.send(
+            {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(run_dir, "sleep 300", grace=0.5)}
+        )
+        assert spawned["ok"]
+        pgid = _command_pgid(run_dir)
+        assert pid_alive(pgid)
+
+        # the holder's connection dies. The lease is unexpired -- ttl 300 --
+        # so an expiry-only check would wait five minutes; ss5's LIVE lease is
+        # unexpired AND connected, and the kernel closes this fd only when the
+        # holder process is gone
+        cli.close()
+
+        wait_for(lambda: proc.poll() is not None, timeout_s=20)
+        wait_for(lambda: not pid_alive(pgid), timeout_s=20)
+        assert "deadman fired" in (short_root / "supervisor.log").read_text()
+    finally:
+        teardown_supervisor(short_root, proc)
+
+
+def test_a_live_leaseholder_reprieves_the_deadman(short_root: Path) -> None:
+    """The contrast that makes the test above non-vacuous: the same interval,
+    the same wait, and nothing dies -- because the clock RESTARTS whenever a
+    live leaseholder is present. A deadman that fired on a watched supervisor
+    would be an outage generator, not a safety property."""
+    proc = start_supervisor(short_root, deadman_s=1.0)
+    cli = RawClient(short_root)
+    try:
+        answer = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 300})
+        assert answer["ok"]
+        time.sleep(3.0)  # three deadman intervals, connection held open
+        assert proc.poll() is None
+        assert cli.send({"v": 1, "cmd": "PING"})["deadman_s"] == 1.0
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_a_supervisor_with_no_deadman_outlives_its_controller(short_root: Path) -> None:
+    """ss8: opt-in per run root, and this is what opting out buys. Tolerating
+    an absent controller indefinitely is exactly what lets an engine crash and
+    resume with its runs intact (DL-79) -- and the price is written into the
+    routing row as `deadman_s: null`, which no eviction can get past."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        assert cli.send({"v": 1, "cmd": "PING"})["deadman_s"] is None
+        cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 1})
+        cli.close()
+        time.sleep(2.5)  # lease expired AND holder gone: still no deadman
+        assert proc.poll() is None
+    finally:
+        teardown_supervisor(short_root, proc)
+
+
+def test_a_deadman_interval_must_be_positive(short_root: Path) -> None:
+    out = subprocess.run(
+        [sys.executable, str(SUPERVISOR), "--run-root", str(short_root), "--deadman-seconds", "0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert "must be positive" in out.stderr
 
 
 def _spec(run_dir: Path, command: str, grace: float = 2.0) -> dict:

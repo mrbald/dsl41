@@ -279,6 +279,7 @@ class Engine:
         scheduler: Scheduler | None = None,
         hold_open: bool = False,
         executor_id: str = LOCAL_EXECUTOR_ID,
+        deadman_s: float | None = None,
     ) -> None:
         self.oracle = Oracle(catalog)
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
@@ -287,8 +288,11 @@ class Engine:
         #: relay until S5d, so every job routes here. Seeded into the table at
         #: genesis rather than admitted, so no log index is spent recording a
         #: fact about how this process was launched (see seed_local_executor).
+        #: `deadman_s` is what the LOCAL SUPERVISOR reports it runs, read back
+        #: rather than declared, so the ss8 eviction bound describes the host
+        #: and not this engine's launch options (S5b).
         self.executor_id = executor_id
-        seed_local_executor(self.oracle.store, executor_id, at=clock.now())
+        seed_local_executor(self.oracle.store, executor_id, at=clock.now(), deadman_s=deadman_s)
         self.clock = clock
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
@@ -335,6 +339,16 @@ class Engine:
         #: cancelled tasks awaiting collection; _settle re-raises any
         #: non-CancelledError they die with (fail loudly, never swallow)
         self._reaping: list[asyncio.Task[None]] = []
+
+    def note_executor_contact(self) -> None:
+        """Stamp positive contact with this engine's own execution host
+        (concurrency-model ss8). Wired to the supervisor client's lease
+        exchanges: a confirmed ACQUIRE or RENEW is the leader hearing back
+        from the host, which is exactly what the eviction bound counts from.
+
+        Costs nothing per beat -- `last_contact` is outside the ss3 semantic
+        projection, so this moves no revision and writes no log record."""
+        self.oracle.store.touch_host(self.executor_id, self.clock.now())
 
     def held_jobs(self) -> frozenset[str]:
         """Jobs the oracle has started and this shell has not dispatched,
@@ -862,6 +876,7 @@ def start_run(
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None = None,
     hold_open: bool = False,
+    deadman_s: float | None = None,
 ) -> Engine:
     """Create the run-root layout (journal.jsonl, runs/, logs/) and an
     Engine wired to it. Refuses a run_root that already holds a journal --
@@ -892,6 +907,7 @@ def start_run(
         run_root=run_root,
         scheduler=scheduler,
         hold_open=hold_open,
+        deadman_s=deadman_s,
     )
 
 
@@ -906,6 +922,7 @@ async def resume_run(
     settle_seconds: float = 5.0,
     grace_seconds: float = 10.0,
     supervisor: SupervisorClient | None = None,
+    deadman_s: float | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -951,6 +968,7 @@ async def resume_run(
         run_root=run_root,
         scheduler=scheduler,
         hold_open=hold_open,
+        deadman_s=deadman_s,
     )
     replay = replay_inputs(engine.oracle, records)
     # the log's position comes back with its contents (concurrency-model

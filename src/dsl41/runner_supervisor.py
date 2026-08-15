@@ -34,6 +34,23 @@ verbs (SPAWN/SIGNAL/SHUTDOWN) carry a monotonic fencing token from ACQUIRE.
 
 Linux hardening: PR_SET_CHILD_SUBREAPER (prctl 36) so a killed wrapper's
 command reparents to the supervisor for reaping rather than to init.
+
+The DEADMAN (stage S5b, DL-95; docs/concurrency-model.md ss8) is the one
+thing here that is not purely reactive, and it is deliberately the smallest
+possible addition: one interval, one exit. With `--deadman-seconds N`, a
+supervisor that has had no LIVE leaseholder for N seconds stops its loop and
+returns -- and its death EOFs every lifeline it owns, which is the kill path
+ss5 already relies on ("supervisor death kills all wrappers by lifeline"),
+not a new one. It adds no policy: the supervisor still decides nothing about
+what should run, only that nobody is watching it any more.
+
+It exists because ss8's `evict` -- the only state that lets another host run
+work bound to this one -- must be PROVABLE rather than assumed, and nothing
+else in this tier bounds when a controller-less supervisor's wrappers die.
+It is opt-in per run root because it costs something real: tolerating an
+absent controller indefinitely is exactly what lets an engine crash and
+resume with its runs intact (DL-79). A run root without it is never
+reroutable except by force.
 """
 
 from __future__ import annotations
@@ -191,8 +208,19 @@ class Supervisor:
     self-pipe, listen socket, client sockets) -- the same select+self-pipe
     shape the wrapper uses, so no thread-safety surface."""
 
-    def __init__(self, run_root: str) -> None:
+    def __init__(self, run_root: str, *, deadman_s: float | None = None) -> None:
         self.run_root = run_root
+        #: ss8's T_deadman, in seconds. None = no deadman: this supervisor
+        #: tolerates an absent controller forever, which is what lets an
+        #: engine crash and resume with its runs intact (DL-79), and is why
+        #: the run root it serves is never reroutable except by force.
+        self.deadman_s = deadman_s
+        #: monotonic instant since which there has been no LIVE leaseholder,
+        #: or None while one is live. Armed at bind rather than at the first
+        #: lease, so a supervisor nobody ever leases dies too -- otherwise the
+        #: one case with no controller at all would be the one case the
+        #: deadman missed.
+        self._unleased_since: float | None = None
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
         self.boot_id = current_boot_id()
@@ -302,6 +330,7 @@ class Supervisor:
         assert self._listen is not None
         self._sel.register(self._listen, selectors.EVENT_READ, ("listen", None))
         self._sel.register(self._chld_r, selectors.EVENT_READ, ("chld", None))
+        self._unleased_since = time.monotonic()
         try:
             while self._running:
                 for key, _mask in self._sel.select(timeout=1.0):
@@ -320,9 +349,52 @@ class Supervisor:
                 self._reap()
                 if self._shutdown_requested:
                     self._orderly_shutdown()
+                elif self._deadman_expired():
+                    self._running = False
         finally:
             self._teardown()
         return 0
+
+    # -- deadman (ss8) ------------------------------------------------------
+
+    def _live_leaseholder(self) -> bool:
+        """ss5's LIVE lease: unexpired AND its holder's connection still open.
+
+        Both halves, because either alone asks the wrong question. An
+        unexpired lease whose connection died means a controller that is
+        GONE -- the kernel closes this AF_UNIX fd only when the holder
+        process is, kill -9 included. An expired lease whose connection is
+        open means a controller that stopped renewing, which is a controller
+        that has stopped watching."""
+        return self._lease_active() and self.lease is not None and self.lease.conn is not None
+
+    def _deadman_expired(self) -> bool:
+        """Has this supervisor been unwatched for T_deadman (ss8)?
+
+        The clock RESTARTS whenever a live leaseholder appears, so a
+        reconnecting engine reprieves it. That is the point: the deadman
+        bounds how long an UNREACHABLE host keeps running work, and a host
+        the leader can still reach is not that."""
+        if self.deadman_s is None:
+            return False
+        if self._live_leaseholder():
+            self._unleased_since = None
+            return False
+        now = time.monotonic()
+        if self._unleased_since is None:
+            self._unleased_since = now
+            return False
+        if now - self._unleased_since < self.deadman_s:
+            return False
+        # loud, in the one log this process has: an operator reading it after
+        # the fact must find the reason its jobs died, not infer it
+        print(
+            f"supervisor: deadman fired -- no live leaseholder for {self.deadman_s}s;"
+            f" exiting, which EOFs {len(self.runs)} lifeline(s) (concurrency-model ss8)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return True
 
     def _accept(self) -> None:
         assert self._listen is not None
@@ -402,7 +474,16 @@ class Supervisor:
         self._send(conn, handler(conn, req))
 
     def _h_ping(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "version": PROTOCOL_VERSION, "incarnation": self.incarnation}
+        # `deadman_s` rides the two READ verbs (S5b): the leader records what
+        # this host ACTUALLY runs, not what some engine once asked it to run.
+        # A reattaching engine meets a supervisor it did not start, and a
+        # bound derived from its own flag would then describe nothing.
+        return {
+            "ok": True,
+            "version": PROTOCOL_VERSION,
+            "incarnation": self.incarnation,
+            "deadman_s": self.deadman_s,
+        }
 
     def _h_list(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
         lease = None
@@ -415,6 +496,7 @@ class Supervisor:
             "supervisor_pid": os.getpid(),
             "boot_id": self.boot_id,
             "incarnation": self.incarnation,
+            "deadman_s": self.deadman_s,
             "lease": lease,
             "runs": [
                 {
@@ -752,13 +834,24 @@ def _load_json(path: str) -> dict[str, Any] | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="runner_supervisor")
     parser.add_argument("--run-root", required=True)
+    parser.add_argument(
+        "--deadman-seconds",
+        type=float,
+        default=None,
+        help="exit after this long with no live leaseholder, killing every"
+        " wrapper by lifeline EOF (concurrency-model ss8). Omitted: no deadman,"
+        " and this run root is never reroutable except by force.",
+    )
     args = parser.parse_args(argv)
+    if args.deadman_seconds is not None and args.deadman_seconds <= 0:
+        print("supervisor: --deadman-seconds must be positive", file=sys.stderr)
+        return 2
     # ENOENT on the run_root is a caller bug (the engine makes it first)
     if not os.path.isdir(args.run_root):
         print(f"supervisor: run-root {args.run_root!r} does not exist", file=sys.stderr)
         return 2
     try:
-        return Supervisor(args.run_root).run()
+        return Supervisor(args.run_root, deadman_s=args.deadman_seconds).run()
     except SystemExit as exc:  # the live-supervisor gate
         print(str(exc), file=sys.stderr)
         return exc.code if isinstance(exc.code, int) else 1

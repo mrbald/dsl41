@@ -3971,3 +3971,58 @@
   here — the sweep that grew is a distinct concern and pulling it out is an
   architecture change, which gets its own commit rather than riding inside
   a slice.
+- DL-95 the deadman: one interval, one exit, and the two producers the
+  eviction bound was missing (2026-08-15; stage S5b, DL-93's second slice).
+  Closes CM-10 and makes CM-11's bound computable from real state. The
+  supervisor gains `--deadman-seconds N`: no LIVE leaseholder for N seconds
+  and it stops its loop and returns. Its death EOFs every lifeline it owns,
+  which is supervisor-protocol §4 step 5's existing kill path, not a new
+  one — so the tier still decides nothing about what should run, only that
+  nobody is watching it. DL-42's counter-fence holds: no queueing, no
+  policy, one number.
+  **Both halves of "live" are load-bearing.** §5 defines a live lease as
+  unexpired AND its holder's connection still open, and either alone asks
+  the wrong question here: an unexpired lease whose connection died is a
+  controller that is GONE (the kernel closes an AF_UNIX fd only when the
+  holder process is, `kill -9` included), and an expired one whose
+  connection is open is a controller that stopped renewing. The clock
+  restarts whenever a live leaseholder appears, so a reconnecting engine
+  reprieves it — a deadman that fired on a watched supervisor would be an
+  outage generator rather than a safety property. The test pins the
+  contrast, not only the firing.
+  **`deadman_s` is read back, never declared.** It rides `PING` and `LIST`
+  (additive; older clients ignore unknown fields) and the engine records
+  what the supervisor SAYS it runs. A reattaching engine meets a supervisor
+  it did not start, possibly on a different interval or none — and a bound
+  derived from this invocation's flag would then describe nothing. A wrong
+  number here is not cosmetic: it is the length of the wait standing
+  between an operator and a double run. `--deadman` on an already-running
+  supervisor therefore warns rather than pretending.
+  **`last_contact` left the semantic projection.** An engine renews every
+  twenty seconds; admitting that as an input would move every host row's
+  revision three times a minute, making an `expect` on a host unholdable
+  and the WAL a heartbeat log. It is the class §3 already excludes for
+  `watching` — state that moves with relay activity and no committed
+  input — so the lease callback stamps it for free. Safe in the one
+  direction that matters: a FRESHER contact only ever delays an eviction,
+  and a replay re-seeds it at resume time, which is fresher still. A new
+  leader that cannot reach a host therefore counts the bound from its own
+  takeover rather than from an inherited value: over-waiting, which is the
+  safe way to be wrong.
+  **`--deadman` needs `--detached`, loudly.** A tethered run has no
+  supervisor, so there is nothing a deadman could bound. Accepting the flag
+  and ignoring it would be the worst of both.
+  Not closed here: `evict` still rejects at §8's first precondition, whose
+  producer — the leader's unreachability detector — is S5d's. What S5b
+  adds is that the bound behind it is now computed from a real interval and
+  a real contact rather than from rows a test built.
+  2007 -> 2014 passed; ruff, mypy, arch_check blocking checks clean. The
+  chain was exercised end to end against real processes, not only tests:
+  `run --detached --deadman 3`, SIGKILL the engine, the job keeps running,
+  three seconds later the supervisor logs the firing and exits, and the
+  wrapper records `terminated / parent lost` with `signaled: 15`.
+  arch_check now reports five advisory notes and a review-due diff; cli.py's
+  `run` crossed the 120-line function note, which is one typer option and
+  two validations. Extraction is an architecture change and gets its own
+  commit — `_running_deadman` came out of `_serve_run` because it names a
+  concern, not to buy back lines.

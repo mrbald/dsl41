@@ -417,6 +417,27 @@ state survived while its work was failed would be a drain in name only.
 The three operator verbs are `activate`, `drain` and `evict`.
 `quarantined` is the leader's, and its producer is S5d.*)*
 
+*(Amended by DL-95, at build — stage S5b.* Two more, from wiring the
+deadman.
+
+**`last_contact` is outside §3's semantic projection.** An engine renews its
+supervisor lease every twenty seconds. Admitting that as an input would move
+every host row's revision three times a minute — no operator could hold an
+`expect` on one, and the WAL would become a heartbeat log. It is the class
+§3 already excludes for `watching`: state that moves with relay activity and
+no committed input. Excluding it is safe in the one direction that matters,
+because a **fresher** contact only ever delays an eviction; and a replay
+re-seeds it at resume time, which is fresher still. A new leader that cannot
+reach a host therefore starts the bound from its own takeover rather than
+from a value it inherited — over-waiting, which is the safe way to be wrong.
+
+**`T_deadman` is read back from the host, never declared by the leader.** A
+reattaching engine meets a supervisor it did not start, possibly one launched
+with a different interval or none at all. The bound has to describe the host,
+so the row records what the supervisor reports over the lease exchange. A
+wrong value here is not cosmetic: it is the length of the wait standing
+between an operator and a double run.*)*
+
 ## 9. The proving ground
 
 A **deterministic model harness** comes before the code it validates: N
@@ -442,8 +463,8 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | cheap |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | expensive |
-| CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | cheap (virtual clock) |
-| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | refusals landed (DL-94); the live permitted path needs S5b's `last_contact` and S5d's quarantine |
+| CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
+| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | refusals landed (DL-94); the bound computable from a real deadman and a real contact (DL-95); the last precondition needs S5d's quarantine |
 | CM-12 | a returning evicted host is refused and self-fences | medium |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
 | CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | expensive — **the point** |

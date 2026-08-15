@@ -279,6 +279,7 @@ dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervi
 dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
 dsl41 supervise list --run-root ./run1            # what the supervisor is holding
 dsl41 supervise shutdown --run-root ./run1        # stop it (TERM->grace->KILL)
+dsl41 run jobs.jil --run-root ./run1 --detached --deadman 600  # opt into eviction
 ```
 
 A per-run-root supervisor (`runner_supervisor.py`, stdlib-only, one process
@@ -290,6 +291,15 @@ from the spool, any runs that finished meanwhile. The engine holds a single
 fencing lease. The socket protocol of the supervisor is frozen in
 [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
 ss5. `supervise` is read-only by default (DL-42).
+
+`--deadman N` trades some of what `--detached` buys, deliberately. The
+supervisor exits after N seconds with no live controller, which kills every
+job it holds by lifeline EOF — so an engine down longer than N loses its
+jobs, and that is the point: it is the only thing that bounds how long an
+unreachable host keeps running work, and therefore the only thing that makes
+`dsl41 host evict` provable rather than a guess. Without it a run root is
+never reroutable except by `--force`. Choose it longer than any planned
+engine outage.
 
 ### Serving the TUI over the web (phase 11e)
 
@@ -619,7 +629,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   derived rather than stored, CM-11's refusals (a host with no deadman is never
   evictable, the bound reports the wait it has left, `--force` is attributed on the
   row), the four outcomes over the `host` verb, a drain that survives a resume, and
-  the DL-93 pin that `oracle.py` never names a host row
+  the DL-93 pin that `oracle.py` never names a host row. Then stage S5b's
+  engine half: a lease heartbeat refreshes the routing row without costing a
+  revision or a log record, the recorded interval is what the supervisor
+  reports rather than what the flag asked for, and the ss8 bound computed
+  from both
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping
@@ -649,7 +663,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   SIGNAL pid-reuse refusal, peer-cred, stale-socket reclaim), the import-boundary
   AST test, Linux-only subreaper, and the detached kill matrix (SIGKILL engine →
   survive + reattach, kill -9 supervisor → spool-resolve TERMINATED, orderly
-  SHUTDOWN, detach-stop SIGINT → reattach SUCCESS, oracle KILLJOB detached)
+  SHUTDOWN, detach-stop SIGINT → reattach SUCCESS, oracle KILLJOB detached).
+  Plus stage S5b's deadman (CM-10): an unwatched supervisor exits and its
+  wrappers die with it, a live leaseholder reprieves it over the same
+  interval, and one started without the flag outlives its controller
 - tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
   here because they share equiv's truth-table machinery), and the equiv CLI
 - tests/test_backend_uc.py — edge classification, migration report, report + uc CLIs,

@@ -955,6 +955,16 @@ def run(
         " engine restart reattaches instead of killing them; stopping the engine"
         " leaves jobs running -- resume with --resume --detached.",
     ),
+    deadman: float = typer.Option(
+        None,
+        "--deadman",
+        help="SECONDS with no live controller after which the supervisor exits,"
+        " killing every job it holds by lifeline EOF (concurrency-model ss8)."
+        " Needs --detached. This is what makes `dsl41 host evict` provable: a"
+        " run root without it is never reroutable except by force. It costs the"
+        " thing --detached buys, so choose it longer than any planned engine"
+        " outage -- an engine down longer than this loses its jobs.",
+    ),
     machine_policy: str = typer.Option(
         "strict",
         "--machine-policy",
@@ -1005,6 +1015,14 @@ def run(
         tz_aliases=tz_aliases,
     )
     _check_base_tz(timezone, tz_aliases)
+    if deadman is not None and not detached:
+        # loud, not silent: without a supervisor there is nothing to hold the
+        # lifelines, so nothing a deadman could bound (concurrency-model ss8)
+        typer.echo("--deadman needs --detached: a tethered run has no supervisor", err=True)
+        raise typer.Exit(2)
+    if deadman is not None and deadman <= 0:
+        typer.echo("--deadman must be a positive number of seconds", err=True)
+        raise typer.Exit(2)
     from dsl41.runner_clock import EngineError
 
     if not resume and not (run_root / "journal.jsonl").exists():
@@ -1036,6 +1054,7 @@ def run(
                     warns,
                     ui,
                     detached,
+                    deadman,
                     tz_aliases,
                     spec_texts=_spec_texts(parsed, catalog),
                     estate_fingerprint=fingerprint,
@@ -1060,6 +1079,27 @@ def _import_tui_or_exit_2():
     return runner_tui
 
 
+def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "float | None":
+    """The deadman the LOCAL SUPERVISOR reports it runs (concurrency-model
+    ss8), and a warning when that is not what this invocation asked for.
+
+    Read back rather than assumed, because the eviction bound has to describe
+    the host: a reattaching engine meets a supervisor it did not start, and a
+    supervisor already up cannot change its interval without being stopped.
+    Silently recording the flag instead would put a number in the routing
+    table that names nothing -- and that number is the length of the wait
+    between an operator and a double run."""
+    running = getattr(client, "supervisor_deadman_s", None) if client is not None else None
+    if asked is not None and running != asked:
+        typer.echo(
+            f"note: the supervisor serving {run_root} runs deadman {running!r}, not the"
+            f" {asked} asked for -- it was already up. Stop it"
+            " (`dsl41 supervise shutdown`) to change the interval.",
+            err=True,
+        )
+    return running
+
+
 async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
@@ -1068,6 +1108,7 @@ async def _serve_run(
     warns: list,
     ui: bool = False,
     detached: bool = False,
+    deadman: "float | None" = None,
     tz_aliases: "dict[str, str] | None" = None,
     spec_texts: "dict[str, str] | None" = None,
     estate_fingerprint: "dict[str, str] | None" = None,
@@ -1099,7 +1140,7 @@ async def _serve_run(
     client: SupervisorClient | None = None
     if detached:
         run_root.mkdir(parents=True, exist_ok=True)  # the supervisor needs it first
-        client = SupervisorClient(run_root)
+        client = SupervisorClient(run_root, deadman_s=deadman)
         try:
             await client.ensure_running()
             await client.acquire()
@@ -1113,6 +1154,7 @@ async def _serve_run(
     else:
         adapters = {"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()}
     scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone, tz_aliases=tz_aliases)
+    running_deadman = _running_deadman(client, deadman, run_root)
     if resume:
         engine = await _resume_run(
             catalog,
@@ -1122,11 +1164,24 @@ async def _serve_run(
             scheduler=scheduler,
             hold_open=True,
             supervisor=client,
+            deadman_s=running_deadman,
         )
     else:
         engine = start_run(
-            catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler, hold_open=True
+            catalog,
+            run_root,
+            clock=clock,
+            adapters=adapters,
+            scheduler=scheduler,
+            hold_open=True,
+            deadman_s=running_deadman,
         )
+    if client is not None:
+        # ss8's "positive contact with this host": every confirmed lease
+        # exchange from here on stamps the routing row (S5b). Wired after the
+        # engine exists, which is why the first ACQUIRE above does not -- the
+        # genesis seed stamps that same instant anyway.
+        client.on_contact = engine.note_executor_contact
     # everything resume did not apply: E9's missed scheduler ticks, plus any
     # reconciliation completion the ss4 gate rejected. Both are on `drops`
     # (DL-91 finding 4 declined splitting them); the wording no longer claims
