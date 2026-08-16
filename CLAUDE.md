@@ -26,7 +26,7 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
   not edit or persist as truth.
 - **Pure compiler.** No runtime dependency in any emitted artifact.
 - **Corpus hygiene.** `tests/corpus/` is synthetic/doc-derived ONLY. Never accept
-  production JIL from any employer estate into the repo, tests, or docs (LICENSING.md).
+  proprietary or production JIL from any estate into the repo, tests, or docs (LICENSING.md).
 - **Open questions stay open.** Q1–Q9 (autosys dossier §9), U1–U8 (stonebranch
   Part III). DL-53 (2026-07-28) closed nine — Q1, Q4, Q5, U2, U4, U5, U6a, U7,
   U8 — each pinned to a dossier citation; DL-54 (same day) resolved Q2a

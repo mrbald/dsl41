@@ -9,8 +9,8 @@ Operational requirements:
    copyright to the founder's entity, preserving the right to dual-license.
    No external PR is merged without a signed CLA. (Add CLA text before first
    external contribution; not needed while the founder is the sole contributor.)
-2. Clean-room discipline. No production JIL, exports, names, or derived artifacts
-   from any employer estate may enter this repository, its test corpus, docs, or
+2. Clean-room discipline. No proprietary JIL, exports, names, or derived artifacts
+   from any production estate may enter this repository, its test corpus, docs, or
    issue tracker. tests/corpus/ is synthetic/doc-derived only.
 3. LICENSE file: verbatim AGPL-3.0 text from gnu.org — done 2026-07-08 (sha256
    0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0, the canonical

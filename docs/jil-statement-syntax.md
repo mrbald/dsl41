@@ -120,7 +120,7 @@ here gets a fidelity test (AST contract, `ir-design.md` §2).
 ## Corpus policy
 
 `tests/corpus/` contains **synthetic JIL only**. Each fixture is hand-written from Broadcom
-documentation examples, or is generated. Production JIL from any employer estate must never
+documentation examples, or is generated. Proprietary or production JIL must never
 enter this repository (see LICENSING.md / CONTRIBUTING note). When a fixture exercises a
 specific dossier entry, its name is `sem_<entry>_<slug>.jil`.
 
