@@ -4876,3 +4876,85 @@
   against the lease design `runner_ledger`'s docstring rejects.
   2154 -> 2165 passed; 100% branch held on the eight gated modules; ruff,
   mypy, arch_check clean.
+- DL-113 run history: a projection, not a new record kind (2026-08-16).
+  The operational question no surface answered: "how long did this job take,
+  run after run, and did it change." Every fact was already durable -- the
+  `dispatch` record, `spawn.json`, `status.json` -- and what was missing was a
+  key, an index and a query, because `run_number` restarts at 0 in every run
+  root (§6 of `docs/deployment-runbook.md`) and run roots are not indexed.
+  `dsl41 runs <run-root>... [--job NAME] [--since ISO8601]
+  [--format table|json|csv]` folds one or more run roots' `journal.jsonl` +
+  `manifest/` + spool into one row per job run --
+  `src/dsl41/runner_history.py`'s `RunRow`, the pure `fold_run_rows` (CM-37),
+  and the thin I/O shell `read_run_root`/`read_run_roots`. Offline only, no
+  control-protocol change (`docs/control-protocol.md` stays frozen at v2).
+  **Four decisions.** (1) Clock: a row's `started_at`/`ended_at` come from
+  the spool WHOLESALE when spawn.json (and, for a complete run, status.json)
+  name that exact run; journal otherwise -- never a per-field mix, which
+  `clock_source` records. (2) Boxes get rows: since a box never gets a
+  `dispatch` record and its fold is emitted, never journaled, a box row is
+  folded entirely from the replayed trace (the Nth `*->STARTING` transition
+  opens run N, the next terminal transition closes it), always on the
+  journal clock. (3) Incomplete runs never fabricate a duration: still
+  RUNNING at journal end, or a `source="reconcile"` completion whose
+  payload carries no true `ended_at` (E7, and the "wrapper lost; killed at
+  resume" TERMINATED case -- both verified against `runner_startup.py` to
+  return `None` for it), get `ended_at: None` and their real recorded
+  status, never the resume instant dressed up as an end. (4) Segmentation is
+  per JOB, not per estate: every row carries both the journal's
+  `catalog_hash` and this job's own `job_hash` (sha256 over the job's lowered
+  IR with `span` keys stripped -- `catalog_hash`'s own technique one level
+  down), and `--format table`'s labelled break fires on `job_hash`, falling
+  back to `catalog_hash` and saying so when either row lacks one. Drawing the
+  break from the estate hash alone was the first shape and it is wrong:
+  that hash is deliberately conservative, so a release touching twelve jobs
+  of eight hundred moves it for all eight hundred and the break fires on
+  every job in the estate -- checked against two real `examples/nightbank`
+  run roots, where it marked all 519. The per-job hash covers the
+  POST-placeholder definition, so an estate whose placeholders vary per run
+  (nightbank bakes the run root into `profile`/`std_out_file`) degrades back
+  to exactly what `catalog_hash` said; both hashes ride on the row so a
+  reader can tell the two situations apart. What this is NOT is a definition
+  diff: "changed how, and can state carry across it" is a catalog-diff
+  classification, and it is not built. (5) A MISSING `manifest/` degrades
+  and a WRONG one refuses. Refusing both would have made the tool unable to
+  read exactly the run roots it exists for -- `manifest/` is DL-66, every
+  root predating it has none, and retention prunes it (6 of 18 local
+  nightbank roots). An absent manifest folds from records alone; a manifest
+  whose `catalog_hash` disagrees with the header still refuses, because that
+  is a wrong fact rather than a missing one. The cost rides per row in
+  `fidelity="records_only"` rather than only in a warning line a JSON or CSV
+  consumer never sees: no box rows, no `box_name`/`started_by`/`job_hash`,
+  bare-default SEM-09 verdicts, and -- the one that misleads rather than
+  omits -- a KILLJOB/`term_run_time` close reading as RUNNING, since the
+  trace decision 2 needs is exactly what is unavailable. The CLI also warns
+  on stderr for that reason.
+  **One thing built beyond the literal proposal.** §6a's sketch reads as if
+  a box's completion could be read like a leaf job's; reading `oracle.py`
+  showed the fold is entirely emitted, never an admitted input, so a box
+  row needs a full replay through a fresh Oracle -- the same one
+  `dsl41 journal` already does, with the catalog rebuilt from `manifest/`
+  rather than supplied on the command line (DL-66's self-contained artifact
+  makes this possible with no new CLI argument). The same replay turned out
+  to be the only way to close a leaf run that KILLJOB or a `term_run_time`
+  auto-TERMINATE ended, too: both are decided by the oracle synchronously
+  while processing the KILLJOB/timer input itself, so neither produces the
+  adapter-completion `STATUS` record a pure dispatch+STATUS read would
+  need -- reading only those two record kinds would have silently
+  misreported such a run as still RUNNING.
+  **What is deferred.** A row carries neither an estate nor a period id:
+  `run_number` still resets at every re-baseline, so the caller names which
+  run roots to combine and `catalog_hash` -- not `run_number` -- is what
+  tells two runs of the same job apart across one. Rows are computed on
+  demand by the CLI and never materialized at any write time, there being no
+  period boundary to materialize them at. Both become changes to an existing
+  projection if a carried `run_number` ever arrives, not new decisions.
+  `tests/test_run_history.py`: the pure-fold property (folding the same
+  records twice reproduces the same rows) and the combine (a two-run-root
+  series comes back segmented, never merged into one hash), a suite over the
+  spool/journal fallback (including a pruned and a partially-pruned spool),
+  the E7 and KILLJOB no-duration cases, and a real-subprocess pair through
+  `start_run` + `RealClock` + `LocalCommandAdapter` proving `read_run_root`
+  end to end against a real journal, manifest and spool -- 29 tests.
+  2165 -> 2194 passed; ruff, mypy, arch_check clean (baseline updated:
+  `cli.py`'s advisory line count moved with the new command).

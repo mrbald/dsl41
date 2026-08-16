@@ -405,6 +405,49 @@ so don't share the service account if that distinction matters. Note
 what stayed true: `current/` still holds yesterday's data — this
 variant rolls the *date*, not the day.
 
+## 14. After the night — run history
+
+Everything above reads one run root while it is still live, over the
+socket. `dsl41 runs` reads it cold, afterwards — no engine, no socket:
+
+```sh
+dsl41 runs <run>/engine
+```
+
+One row per job run, folded from the journal, the manifest, and each job's
+spool. `AMER_MKT_FX_C` (exercise 4's failure-then-retry) shows up as two
+rows — run 1 FAILURE, run 2 SUCCESS, `started_by` naming the
+`FORCE_STARTJOB` that fixed it. Box rows (`EMEA_MKT_B`, `AMER_EOD_B`, ...)
+show up too, timed from the replayed trace rather than a spool — a box
+never spawns a process, so there is nothing else to time it from.
+
+```sh
+dsl41 runs <run>/engine --job EMEA_MKT_B --format json
+```
+
+`--format json`/`csv` for scripting, `--since ISO8601` for a window,
+`--job NAME` to narrow to one job across everything below.
+
+**Two run roots, one series.** Exercise 11 already produces a second run
+root under a changed catalog — bump `EMEA_ACC_CASH_C`'s `--sleep` and start
+a fresh night, exactly as that exercise says. Point `dsl41 runs` at both
+run roots on one command line:
+
+```sh
+dsl41 runs <first-run>/engine <second-run>/engine --job EMEA_ACC_CASH_C
+```
+
+The table comes back as one series, sorted by start time, with a labelled
+break where *that job's own* definition changed — never blended into one
+misleading line, and never a refusal to print just because the definition
+moved underneath the job.
+
+Drop `--job` and the point sharpens: only `EMEA_ACC_CASH_C` gets a break,
+even though the estate-wide `catalog_hash` moved for every job in the
+estate. That is why the break is drawn from the per-job fingerprint and
+not from the catalog hash (DL-113 decision 4) — a release touching one job
+of hundreds should mark one job, not all of them.
+
 ## Day-shift extras
 
 - Browser UI: `dsl41 serve --socket $S` (then `dsl41 ui` per session).

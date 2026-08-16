@@ -415,6 +415,11 @@ re-driven, which is that sentence made literal rather than widened.*)*
   "prints, journals, and runs" made literal). This record is not an
   input, and replay ignores it.
 
+`dsl41 runs` is not a new record kind: its rows are a projection folded from
+the records above (`dispatch`, `input(kind=STATUS)`, `effect`) plus the
+replayed trace and the spool, offline, with nothing appended to the journal
+(DL-113).
+
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence — external events plus time observations (oracle
 determinism). Thus they are never journaled. `dsl41 journal` replays

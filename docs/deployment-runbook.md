@@ -123,6 +123,15 @@ survive into operation.
   `manifest.json`'s recorded paths say it was; the manifest copies are
   for inspection and for restoring that checkout, not a drop-in
   replay input.
+- Offline history: `dsl41 runs <root>... [--job NAME] [--since ISO8601]
+  [--format table|json|csv]` folds one or more run roots' journal +
+  manifest + spool into one row per job run — "how long did it take, run
+  after run, and did it change" (DL-113). Unlike `dsl41 journal`
+  it needs no estate-file argument: it rebuilds the catalog from
+  `<root>/manifest/` itself (DL-66's self-contained artifact). Name
+  several run roots on one command line to carry a series across a
+  baseline change — the default table marks the break rather than
+  blending two catalogs into one misleading line.
 
 ## 5. Routine operations
 

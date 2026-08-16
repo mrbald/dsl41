@@ -33,6 +33,7 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from datetime import datetime
 
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
+    from dsl41.runner_history import RunRow
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -537,6 +538,132 @@ def journal(
         raise typer.Exit(2) from exc
     for entry in oracle.trace():
         typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+
+
+class RunsFormat(str, Enum):
+    table = "table"
+    json = "json"
+    csv = "csv"
+
+
+def _runs_table(rows: list[RunRow]) -> list[str]:
+    """table format: fixed-width columns, sorted (job, started_at) by the
+    caller already, plus a labelled break wherever the SAME job's rows cross a
+    definition change (`runner_history` decision 4 -- never a hidden line,
+    never a refusal to print)."""
+    header = (
+        f"{'JOB':<32} {'RUN':>4} {'STARTED_AT':<26} {'DURATION_S':>10}"
+        f" {'STATUS':<11} {'CLOCK':<7} {'HASH':<10} BOX"
+    )
+    from dsl41.runner_history import definition_change
+
+    lines = [header]
+    previous: RunRow | None = None
+    for row in rows:
+        if previous is not None and previous.job == row.job:
+            change = definition_change(previous, row)
+            if change == "definition":
+                lines.append(
+                    f"  -- {row.job}: definition changed"
+                    f" {previous.job_hash[:10] if previous.job_hash else '?'} ->"
+                    f" {row.job_hash[:10] if row.job_hash else '?'} --"
+                )
+            elif change == "catalog":
+                lines.append(
+                    f"  -- {row.job}: catalog changed {previous.catalog_hash[:10]} ->"
+                    f" {row.catalog_hash[:10]} (estate-wide: no per-job fingerprint here) --"
+                )
+        duration = "-" if row.duration_s is None else f"{row.duration_s:.1f}"
+        lines.append(
+            f"{row.job:<32} {row.run_number:>4} {row.started_at.isoformat():<26}"
+            f" {duration:>10} {row.status:<11} {row.clock_source:<7}"
+            f" {row.catalog_hash[:10]:<10} {row.box_name or '-'}"
+        )
+        previous = row
+    return lines
+
+
+@app.command()
+def runs(
+    run_roots: list[Path] = typer.Argument(
+        ..., help="One or more run roots (dsl41 run --run-root TARGET)."
+    ),
+    job: str = typer.Option(None, "--job", help="Filter to one job's rows."),
+    since: str = typer.Option(
+        None, "--since", help="ISO 8601: only runs started at or after this instant."
+    ),
+    output_format: RunsFormat = typer.Option(
+        RunsFormat.table,
+        "--format",
+        help="table (default): human-readable, with a labelled break at every"
+        " catalog change. json / csv: every field, self-describing via catalog_hash"
+        " on every row -- segment yourself by watching it change.",
+    ),
+) -> None:
+    """Run history (DL-113): one row per job run, folded from each run
+    root's journal + manifest + spool -- "how long did it take, run after
+    run, and did it change." Offline only: no control socket, no live engine,
+    and deliberately not a control-protocol verb (docs/control-protocol.md
+    stays frozen at v2).
+
+    Multiple run roots on one command line is the point: every row sorts by
+    (job, started_at) across ALL of them, so a series that crosses a baseline
+    change comes back segmented rather than blended into one misleading
+    line -- never silently, and never refused."""
+    from datetime import UTC
+    from datetime import datetime as datetime_mod
+
+    from dsl41.runner_history import RunHistoryError, read_run_roots
+
+    since_at = None
+    if since is not None:
+        try:
+            since_at = datetime_mod.fromisoformat(since)
+        except ValueError as exc:
+            typer.echo(f"--since: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        if since_at.tzinfo is not None:  # journal timestamps are naive UTC
+            since_at = since_at.astimezone(UTC).replace(tzinfo=None)
+    try:
+        rows = read_run_roots(run_roots, job=job, since=since_at)
+    except RunHistoryError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    if any(row.fidelity == "records_only" for row in rows):
+        # Loud on stderr as well as on the row, because the one degraded
+        # field that MISLEADS rather than omits is `status`.
+        typer.echo(
+            "warning: some run roots have no manifest/ (DL-66), so their rows are"
+            " fidelity=records_only: no box rows, no box_name/started_by/job_hash,"
+            " and a run closed by KILLJOB or term_run_time reads as RUNNING",
+            err=True,
+        )
+
+    if output_format is RunsFormat.json:
+        import json as json_mod
+
+        typer.echo(
+            json_mod.dumps([row.model_dump(mode="json") for row in rows], indent=2, sort_keys=True)
+        )
+    elif output_format is RunsFormat.csv:
+        import csv as csv_mod
+        import io
+
+        from dsl41.runner_history import RunRow as _RunRow
+
+        fields = list(_RunRow.model_fields.keys())
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(fields)
+        for row in rows:
+            dump = row.model_dump(mode="json")
+            writer.writerow(["" if dump[f] is None else dump[f] for f in fields])
+        typer.echo(buf.getvalue(), nl=False)
+    else:
+        for line in _runs_table(rows):
+            typer.echo(line)
+    raise typer.Exit(0)
 
 
 @app.command()
