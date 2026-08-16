@@ -842,6 +842,24 @@ def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
     return Text(f"{label}: {body}", style=_OUTCOME_STYLE.get(outcome, "yellow"))
 
 
+def _transport_line(label: str, exc: ControlClientError) -> Text:
+    """One console line for a command that never got an ANSWER.
+
+    `_outcome_line` above reads four outcomes out of a response; this reads
+    the two out of a response that never arrived, and the split is the same
+    one for the same reason. A request that never left the app is the
+    refusal case exactly -- nothing logged, send it again. A request that
+    left and got nothing back is the unknown case exactly, and telling an
+    operator watching a terminal that it was "not sent" is how they resend a
+    command that is already admitted."""
+    if not exc.delivered:
+        return Text(f"{label}: not sent ({exc})", style="red")
+    return Text(
+        f"{label}: NO DECISION -- may still apply, do not resend: {exc}",
+        style="yellow",
+    )
+
+
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
     """Parse an event-console line into the VERB HALF of a sendevent request,
     or return an error string. Grammar (ss11): `<JOB_VERB> [job]`,
@@ -1710,7 +1728,7 @@ class RunnerApp(App[None]):
             )
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
-            self._console_write(Text(f"{label}: not sent ({exc})", style="red"))
+            self._console_write(_transport_line(label, exc))
             return
         self._set_connected(True)
         self._console_write(_outcome_line(label, response))

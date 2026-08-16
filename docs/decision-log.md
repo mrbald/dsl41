@@ -4797,3 +4797,82 @@
   and no startup path can set `executor_id`. Every rule in ss8 is implemented
   and tested; what is missing is a second row to point them at.
   2149 -> 2154 passed; 100% branch held; ruff, mypy, arch_check clean.
+- DL-112 the layers that were only ever tested by an interpreter meet two
+  processes (2026-08-16; stage S7c, item 2 of the post-S7b plan). S0-S4 each
+  got a real-process tier as they landed -- the wrapper's kill matrix, the
+  supervisor's lease and fencing, the deadman, engine SIGKILL tethered and
+  detached, 55 tests across two files. S5 and S6 did not. Everything the
+  routing table, the election, the fence and the takeover barrier shipped
+  with drives one engine in-process under a virtual clock, which is the
+  right instrument for interleavings (S7a/S7b) and cannot ask the question
+  this tier asks: an `flock` is a mutex only if a second PROCESS is refused
+  it, a fence is a fence only if an unlink is noticed, and a crash window is
+  a window only if a process can die inside it.
+  `tests/test_runner_leadership.py` is that tier: two real `dsl41 run`
+  processes racing one run root (`test_cm14_a_second_engine_is_refused_the_run_root_and_the_first_is_untouched`,
+  with `test_a_run_root_whose_holder_was_killed_is_taken_by_the_next_engine`
+  as its contrast -- SIGKILL, so nothing releases anything and the kernel is
+  the whole cleanup step); a live engine whose lock file is deleted and, in
+  the other arm, replaced under it
+  (`test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching`);
+  DL-102's re-drive end to end
+  (`test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume`);
+  and quarantine produced rather than injected
+  (`test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held`).
+  Six tests, 6.8 s.
+  **Every mechanism claim carries a positive control,** because an empty
+  `runs/` is also what a build that never starts anything produces. The
+  fence test starts a job through the very verb and socket it then breaks,
+  one step earlier, and asserts the directory holds exactly that one; the
+  re-drive test reads the job's own stdout; the quarantine test waits for a
+  real lease exchange to move `last_contact` before killing the process that
+  was stamping it.
+  **Scoped to seconds on purpose.** The tier must be ordinary CI, so it
+  waits out no bound: what waiting out ss8's real `T_kill` would prove is a
+  sum, and the sum is pinned under a controlled clock in test_hosts.py. The
+  one thing paid in real time is the renewal loop's five consecutive
+  failures -- and the ~4 s floor that count implies is now ASSERTED, because
+  giving up on the first blip reaches `quarantined` too, faster, and would
+  hold an estate's work over one refused connection.
+  **The crash window is picked, not raced.** `_admit_and_apply` journals the
+  attempt and its effects, and the loop then dispatches them; the window
+  between is two statements wide. `tests/runner_redrive_driver.py` replaces
+  `_dispatch` with an untrappable `os._exit`, so what the patch chooses is
+  WHEN the process dies -- every record before it was written and fsync'd by
+  the ordinary path, nothing after it exists, and the log is the one a
+  `kill -9` landing there would leave. Racing for it instead would buy
+  nothing and flake.
+  **What it found, which is why the tier exists.** `dsl41 sendevent` against
+  an engine that died mid-request exited **2**, and 2 is REFUSED: "nothing
+  was admitted, no index consumed, the log says NOTHING about it -- safe to
+  send again unchanged" (`outcome_of`'s own words). The engine fsyncs an
+  attempt BEFORE it feeds it, so a connection that dies after the write may
+  have died over a command that is already durably admitted. That is
+  `unknown`, whose only safe retry is under the same `request_id`, and the
+  CLI was telling operators the opposite. `ControlClientError` now carries
+  `delivered` -- set at the write in both clients, defaulted to False
+  because the safe default claims less -- and both surfaces read it: the CLI
+  exits 4 with the retry id, and the TUI console stops printing "not sent"
+  over a command that may be running. Both mutating verbs now go through one
+  `_mutate`, which is also the duplicate block they already were.
+  **Nine mutations, nine caught,** each by the test that claims it: the mutex
+  swallowing its refusal, the epoch not moving, `check()` proving nothing on
+  either arm, the barrier not re-driving, unreachability not reaching the
+  routing table, a quarantined host routing anyway, quarantine on the first
+  blip instead of the fifth, a lease exchange that stops stamping the
+  routing row, and nothing dispatching at all.
+  **The first draft made three claims it did not hold,** all found by an
+  adversarial pass and all fixed rather than reworded. (1) The bound was
+  re-derived as `deadman + T_kill + skew(deadman)` where ss8 measures skew
+  over the whole wait -- agreeing only because `SKEW_FLOOR_S` dominates
+  below ~5000 s, so the test pinned a constant while claiming to pin the
+  arithmetic. (2) "A `last_contact` stamped by a real lease exchange" was
+  false: `on_contact` is wired after `acquire()` and the supervisor died
+  before the first RENEW landed, so the value came from the genesis seed and
+  deleting the wiring changed nothing. (3) "Five failed renewals" was in the
+  test's NAME and in no assertion. Also fixed: the contrast test sent SIGINT,
+  whose orderly path calls `release()` -- so the test named for the kernel
+  dropping the lock was exercising a manual unlock, and would have passed
+  against the lease design `runner_ledger`'s docstring rejects.
+  2154 -> 2165 passed; 100% branch held on the eight gated modules; ruff,
+  mypy, arch_check clean.

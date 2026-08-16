@@ -24,11 +24,13 @@ import socket as socket_mod
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -1770,3 +1772,118 @@ def test_status_publishes_the_revision_a_precondition_would_name(short_root: Pat
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+# ------------------------------ a lost round trip has two readings (DL-92, S7c)
+
+
+def test_a_request_that_never_left_is_not_the_same_failure_as_one_with_no_answer(
+    short_root: Path,
+) -> None:
+    """`roundtrip` raises one exception type for two facts, and the CLI turns
+    the difference into two exit codes (2 refused / 4 unknown), so the split
+    has to be made where the transport is -- at the write, not at the caller.
+
+    The distinction is not academic: the engine fsyncs an attempt BEFORE it
+    feeds it, so a connection that dies after the write may well have died
+    over a command that is already durably admitted. Reading that as a
+    refusal tells an operator to send it again, which is how it applies
+    twice."""
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    missing = short_root / "nobody.sock"
+    with pytest.raises(ControlClientError) as never:
+        roundtrip(missing, {"cmd": "status"})
+    assert never.value.delivered is False  # nothing was written anywhere
+
+    path = short_root / "hangup.sock"
+    server = socket_mod.socket(socket_mod.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+
+    def hang_up() -> None:
+        conn, _ = server.accept()
+        conn.recv(65536)  # take the request, answer nothing
+        conn.close()
+
+    thread = threading.Thread(target=hang_up)
+    thread.start()
+    try:
+        with pytest.raises(ControlClientError) as lost:
+            roundtrip(path, {"cmd": "status"})
+        # an empty read is not an OSError: it falls out of the loop and lands
+        # on json.loads(b""), which is why the delivered arm catches ValueError
+        # as well and why this test exists rather than a mutation of the flag
+        assert lost.value.delivered is True
+    finally:
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_a_reply_that_is_not_an_object_was_still_delivered(short_root: Path) -> None:
+    """The last arm: the engine answered, and answered something this client
+    cannot read. The command reached it, so the answer to "did it apply" is
+    still "no idea"."""
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    path = short_root / "notobject.sock"
+    server = socket_mod.socket(socket_mod.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+
+    def answer_a_list() -> None:
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.sendall(b"[1, 2, 3]\n")
+        conn.close()
+
+    thread = threading.Thread(target=answer_a_list)
+    thread.start()
+    try:
+        with pytest.raises(ControlClientError) as lost:
+            roundtrip(path, {"cmd": "status"})
+        assert lost.value.delivered is True
+        assert "not a JSON object" in str(lost.value)
+    finally:
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
+    monkeypatch, capsys
+) -> None:
+    """DL-92's exit contract, whole, at the one helper both mutating verbs go
+    through. Four codes for four answers, and -- since S7c -- two readings of
+    NO answer, because a request that never left and one that left and was
+    not answered are different facts about the same silence.
+
+    Table-driven so that adding a fifth outcome without a code fails here,
+    rather than defaulting to 0 in front of an operator."""
+    import dsl41.runner_control as control_mod
+    from dsl41.cli import _mutate
+    from dsl41.runner_control import ControlClientError
+
+    request = {"cmd": "sendevent", "request_id": "req-7"}
+    cases: list[tuple[object, int, bool]] = [
+        ({"ok": True, "index": 3}, 0, False),
+        ({"ok": False, "refused": True, "error": "no expect"}, 2, False),
+        ({"ok": False, "decision": "rejected", "index": 4}, 3, False),
+        ({"ok": False, "error": "no decision within 5.0s"}, 4, True),
+        (ControlClientError("no such file"), 2, False),
+        (ControlClientError("engine hung up", delivered=True), 4, True),
+    ]
+    for answer, code, names_the_id in cases:
+
+        def fake_roundtrip(_path, _request, *, answer=answer, **_kw):
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
+        with pytest.raises(typer.Exit) as exit_info:
+            _mutate(Path("/nowhere.sock"), request)
+        assert exit_info.value.exit_code == code, answer
+        err = capsys.readouterr().err
+        # the id is the only thing that makes a retry safe, so every outcome
+        # that may still apply has to carry it and no other outcome may
+        assert ("--request-id req-7" in err) is names_the_id, answer

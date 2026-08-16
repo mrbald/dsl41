@@ -911,7 +911,26 @@ class ControlServer:
 
 
 class ControlClientError(RuntimeError):
-    """The control socket is unreachable or hung up mid-exchange."""
+    """The control socket is unreachable or hung up mid-exchange.
+
+    `delivered` says which of those two it was, and it is the difference
+    between the operator's two next moves (ss3, and `outcome_of`'s reading
+    of them). A request that never left this process changed nothing
+    anywhere: no index was taken, the log says nothing about it, and it is
+    safe to send again UNCHANGED. A request that left and got no answer
+    back promises neither -- the engine fsyncs the attempt before it feeds
+    it, so a connection that died after the write may well have died over a
+    command that is already durably admitted. That is `unknown`, and its
+    only safe retry is under the same `request_id`.
+
+    Defaulted to False because the constructor is called from both clients
+    and the safe default is the one that claims less: a caller that reads
+    `delivered` and gets False on a delivered failure would tell an
+    operator to resend, which is how a command applies twice."""
+
+    def __init__(self, *args: object, delivered: bool = False) -> None:
+        super().__init__(*args)
+        self.delivered = delivered
 
 
 def _versioned(request: dict[str, Any]) -> dict[str, Any]:
@@ -1064,6 +1083,10 @@ class ControlClient:
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = _versioned(payload)
         async with self._lock:
+            #: whether this request reached the socket. Everything after the
+            #: drain is `delivered`, including the reads that fail: see
+            #: ControlClientError.
+            sent = False
             try:
                 if self._writer is None:
                     # limit: one `status` response line covers every job and
@@ -1074,10 +1097,11 @@ class ControlClient:
                 assert self._reader is not None
                 self._writer.write(json.dumps(payload).encode("utf-8") + b"\n")
                 await self._writer.drain()
+                sent = True
                 line = await self._reader.readline()
             except OSError as exc:
                 await self._drop()
-                raise ControlClientError(str(exc)) from exc
+                raise ControlClientError(str(exc), delivered=sent) from exc
             except BaseException:
                 # a CANCELLED exchange (an exclusive worker superseded
                 # mid-request) leaves the response unread on the stream;
@@ -1088,15 +1112,15 @@ class ControlClient:
                 raise
             if not line:
                 await self._drop()
-                raise ControlClientError("engine hung up")
+                raise ControlClientError("engine hung up", delivered=True)
             try:
                 response = json.loads(line)
             except ValueError as exc:
                 await self._drop()
-                raise ControlClientError(f"bad response line: {exc}") from exc
+                raise ControlClientError(f"bad response line: {exc}", delivered=True) from exc
             if not isinstance(response, dict):
                 await self._drop()
-                raise ControlClientError("response is not a JSON object")
+                raise ControlClientError("response is not a JSON object", delivered=True)
             return response
 
     async def subscribe(self, since: int | None = None) -> AsyncIterator[dict[str, Any]]:
@@ -1156,22 +1180,33 @@ def roundtrip(
     """One-shot blocking request/response, for callers with no event loop
     (the typer `sendevent`/`query` verbs). Raises ControlClientError on any
     transport or decode failure -- exit-code mapping is the CLI's job, so
-    this stays free of typer (DL-78)."""
+    this stays free of typer (DL-78).
+
+    Split in two on purpose: everything up to and including the write is
+    UNDELIVERED and everything after it is DELIVERED, because that boundary
+    is what the failure means rather than where it happened."""
+    conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:
-        conn = socket_mod.socket(socket_mod.AF_UNIX)
-        conn.settimeout(timeout)
-        conn.connect(str(socket_path))
-        conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
+        try:
+            conn.settimeout(timeout)
+            conn.connect(str(socket_path))
+            conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
+        except OSError as exc:
+            raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
+        try:
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            response = json.loads(buf)
+        except (OSError, ValueError) as exc:
+            raise ControlClientError(f"control socket {socket_path}: {exc}", delivered=True) from exc
+    finally:
         conn.close()
-        response = json.loads(buf)
-    except (OSError, ValueError) as exc:
-        raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
     if not isinstance(response, dict):
-        raise ControlClientError(f"control socket {socket_path}: response is not a JSON object")
+        raise ControlClientError(
+            f"control socket {socket_path}: response is not a JSON object", delivered=True
+        )
     return response

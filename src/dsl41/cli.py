@@ -1396,7 +1396,11 @@ def rehearse(
 
 def _control_roundtrip(socket_path: Path, request: dict) -> dict:
     """Exit-code shell around runner_control.roundtrip (DL-78): the protocol
-    client raises, the CLI decides that unreachable == exit 2."""
+    client raises, the CLI decides that a failed READ is exit 2.
+
+    Reads only. A read that did not answer changed nothing whether or not it
+    was delivered, so it has one outcome; a MUTATION has four, and takes
+    `_mutate` below."""
     from dsl41.runner_control import ControlClientError, roundtrip
 
     try:
@@ -1404,6 +1408,57 @@ def _control_roundtrip(socket_path: Path, request: dict) -> dict:
     except ControlClientError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
+
+
+def _no_decision(request: dict) -> None:
+    """DL-92's fourth outcome, said out loud. The id is on stderr because it
+    is the only thing that makes the retry safe, and a caller that lost the
+    round trip has nowhere else to get it: the answer that would have
+    carried it never came."""
+    typer.echo(
+        f"no decision: this command may still apply. Re-read, then retry ONLY as"
+        f" --request-id {request['request_id']}",
+        err=True,
+    )
+
+
+def _mutate(socket_path: Path, request: dict) -> None:
+    """Send one ss6 command envelope and exit on its outcome: DL-92's four
+    (0 applied / 2 refused / 3 rejected / 4 unknown).
+
+    One helper for `sendevent` and `host` because reading an answer is the
+    PROTOCOL's business, not the verb's -- and because the transport half
+    has to read the same way at both, which is the half that was wrong. A
+    dropped connection used to land on exit 2 wherever it happened, and 2
+    promises the log says nothing about the command and it is safe to send
+    again unchanged. That promise holds for a request that never left; for
+    one that left and got no answer it is exactly backwards, because the
+    engine fsyncs an attempt before it feeds it. Delivered-and-unanswered is
+    the case `unknown` exists for."""
+    import json as json_mod
+
+    from dsl41.runner_control import (
+        REFUSED,
+        REJECTED,
+        UNKNOWN,
+        ControlClientError,
+        outcome_of,
+        roundtrip,
+    )
+
+    try:
+        response = roundtrip(socket_path, request)
+    except ControlClientError as exc:
+        typer.echo(str(exc), err=True)
+        if not exc.delivered:
+            raise typer.Exit(2) from exc
+        _no_decision(request)
+        raise typer.Exit(4) from exc
+    typer.echo(json_mod.dumps(response, sort_keys=True))
+    outcome = outcome_of(response)
+    if outcome == UNKNOWN:
+        _no_decision(request)
+    raise typer.Exit({REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0))
 
 
 _SOCKET_OPT = typer.Option(
@@ -1482,11 +1537,9 @@ def sendevent(
       4  UNKNOWN: no decision arrived. NOT a failure -- the command may be
          durably admitted and about to apply. Re-read; if it must be sent
          again, send it with --request-id and the id printed on stderr."""
-    import json as json_mod
-
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_control import REFUSED, REJECTED, UNKNOWN, claimed_actor, command, outcome_of
+    from dsl41.runner_control import claimed_actor, command
 
     verb = event.upper()
     payload: dict = {}
@@ -1518,19 +1571,7 @@ def sendevent(
         request_id=request_id,
         claimed_actor=claimed_actor(),
     )
-    response = _control_roundtrip(socket_path, request)
-    typer.echo(json_mod.dumps(response, sort_keys=True))
-    outcome = outcome_of(response)
-    if outcome == UNKNOWN:
-        # the id is on stderr because it is the only thing that makes the
-        # retry safe, and a caller that lost the round trip has nowhere else
-        # to get it: the answer that would have carried it never came
-        typer.echo(
-            f"no decision: this command may still apply. Re-read, then retry ONLY as"
-            f" --request-id {request['request_id']}",
-            err=True,
-        )
-    raise typer.Exit({REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0))
+    _mutate(socket_path, request)
 
 
 @app.command()
@@ -1573,7 +1614,7 @@ def host(
     import json as json_mod
 
     from dsl41.oracle_state import RuntimeState
-    from dsl41.runner_control import REFUSED, REJECTED, UNKNOWN, claimed_actor, command, outcome_of
+    from dsl41.runner_control import claimed_actor, command
 
     verb = action.lower()
     if verb == "list":
@@ -1596,16 +1637,7 @@ def host(
         claimed_actor=claimed_actor(),
         cmd="host",
     )
-    response = _control_roundtrip(socket_path, request)
-    typer.echo(json_mod.dumps(response, sort_keys=True))
-    outcome = outcome_of(response)
-    if outcome == UNKNOWN:
-        typer.echo(
-            f"no decision: this command may still apply. Re-read, then retry ONLY as"
-            f" --request-id {request['request_id']}",
-            err=True,
-        )
-    raise typer.Exit({REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0))
+    _mutate(socket_path, request)
 
 
 @app.command()

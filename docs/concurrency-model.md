@@ -22,6 +22,15 @@ every fault one host can suffer — §9's "property of that estate under
 injected faults", held rather than promised. The real-PROCESS half stands:
 §9 calls it a separate tier and it is S7c.*)*
 
+*(Amended by DL-112, at build — stage S7c.* That half is now held for the
+layers that had none. S0–S4 each got a process tier as they landed; S5 and
+S6 did not, so the mutex, the fence, the barrier's re-drive and the routing
+table were all proved by one interpreter talking to itself. They are now
+proved by two OS processes, or by one and the kernel:
+`tests/test_runner_leadership.py`. What stays deliberately virtual is
+arithmetic — waiting out §8's real `T_kill` proves nothing a controlled
+clock does not.*)*
+
 Already landed: DL-82 (state ownership), DL-83 (the spawn-window signal
 fix and the derived-field gate).
 
@@ -879,6 +888,19 @@ whole interleaving — that is what makes the double-run failure testable
 rather than argued. Real-process chaos is a separate tier, in which
 nightbank's manual RUNBOOK path becomes automated.
 
+*(Amended by DL-112, at build — S7c.* "A separate tier" understates what
+separates them. The model harness answers *which interleavings are safe*,
+which is a question about orderings and needs one interpreter that can
+hold them all. The process tier answers *whether the mechanism is the one
+described*, which is a question about the kernel: an `flock` is only a
+mutex if a second process is refused it, a fence is only a fence if an
+unlink is noticed, and a crash window is only a window if a process can
+actually die inside it. Neither tier can be asked the other's question,
+so neither substitutes. What the process tier must NOT do is re-derive
+arithmetic: waiting out §8's real bound would add a minute per run and
+prove a sum. `tests/test_runner_leadership.py` holds S5/S6; S0–S4's live
+in the supervisor and lifecycle tiers.*)*
+
 Obligations. Tests are named `test_cmNN_*`, on the house convention of
 `test_semXX_*`.
 
@@ -892,12 +914,12 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | landed: the phase-11a gate, which every SEM trace already runs through both interpreters. No `test_cm08_*` of its own -- the obligation is that the existing suite stays green |
-| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); remote delivery waits on the relay |
+| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); both re-proved against real processes at S7c (DL-112) -- an engine that really died in the outbox window, and a quarantine set by renewals that really failed; remote delivery waits on the relay |
 | CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
-| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its principal | landed (DL-94/95/97): every precondition now produced rather than built by hand |
+| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its claimed principal | landed (DL-94/95/97): every precondition now produced rather than built by hand, and at S7c (DL-112) produced by real processes end to end -- a deadman read back off a live supervisor, a `last_contact` stamped by a real lease exchange, a quarantine no test wrote by hand |
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
-| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 81-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
+| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 81-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. S7c (DL-112) adds the half no interpreter can hold: the mutex is refused between two OS processes, and an engine that loses its lock file stops before the work rather than after it. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
 
 Pause, drift and thundering-herd tests are **not mandatory** until their
 clock model, client count, attempt limits and pass criteria are

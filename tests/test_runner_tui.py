@@ -54,6 +54,7 @@ from dsl41.runner_tui import (
     _LogPane,
     _LogTail,
     _outcome_line,
+    _transport_line,
     assemble_detail_trigger_lines,
     assemble_trigger_rows,
     compile_search,
@@ -308,6 +309,21 @@ def test_the_console_does_not_paint_an_undecided_command_as_a_failure() -> None:
     assert "no decision within 5.0s" in line.plain
 
 
+def test_the_console_reads_a_lost_round_trip_by_whether_it_was_sent() -> None:
+    """A command with no ANSWER has the same two readings as one with an
+    answer, and the console used to give it only one: "not sent". That is the
+    refusal reading, and it is right for a socket that was never reached and
+    wrong for one that hung up after the write -- the engine fsyncs an
+    attempt before it feeds it, so the command may already be admitted."""
+    never = _transport_line("> ON_HOLD j", ControlClientError("no such file"))
+    assert never.plain == "> ON_HOLD j: not sent (no such file)"
+    assert never.style == "red"
+    lost = _transport_line("> ON_HOLD j", ControlClientError("engine hung up", delivered=True))
+    assert "NO DECISION" in lost.plain and "do not resend" in lost.plain
+    assert "engine hung up" in lost.plain
+    assert lost.style == "yellow"  # matches the undecided ANSWER above, on purpose
+
+
 # ------------------------------------------------------------- 2. ControlClient
 
 
@@ -387,6 +403,44 @@ def test_control_client_reconnects_after_the_server_closes_and_reopens(short_roo
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_control_client_says_whether_a_failed_request_left_the_process(
+    short_root: Path,
+) -> None:
+    """The async client's half of the S7c split. `_transport_line` above
+    renders the distinction; this is where it has to be produced, and it is
+    produced at the drain -- everything before it never reached a socket,
+    everything after it did.
+
+    The delivered arm is the interesting one and it is not an OSError: the
+    write succeeds into a socket whose peer has hung up, and the failure
+    arrives as an empty `readline`."""
+    never = ControlClient(short_root / "nobody.sock")
+    with pytest.raises(ControlClientError) as undelivered:
+        asyncio.run(never.request({"cmd": "status"}))
+    assert undelivered.value.delivered is False
+
+    async def hang_up_on_one_request() -> ControlClientError:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readline()  # take the request, answer nothing
+            writer.close()
+
+        path = short_root / "hangup.sock"
+        server = await asyncio.start_unix_server(handle, str(path))
+        client = ControlClient(path)
+        try:
+            with pytest.raises(ControlClientError) as delivered:
+                await client.request({"cmd": "status"})
+            return delivered.value
+        finally:
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    exc = asyncio.run(hang_up_on_one_request())
+    assert exc.delivered is True
+    assert "hung up" in str(exc)
 
 
 def test_control_client_subscribe_yields_a_record_for_an_injected_event(short_root: Path) -> None:
