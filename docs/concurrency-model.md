@@ -198,6 +198,16 @@ can be armed by an input that changes no row at all — a second schedule
 tick arms a second `must_start` deadline and finds the job already armed —
 which is exactly why the heap carries a token and the queue does not.*)*
 
+*(Amended by DL-120, at build — U1.* The pool did not stay. DL-86's
+argument — "replaying the transitions replays the order" — is true only while
+replay starts at genesis, and a seal does not; and `_bucket_used` summed units
+held by live runs with units permanently spent (SEM-16), so a checkpoint
+recomputing usage from holders would have refunded every depletable. The
+inventory is now closed: `reservations` and `waiter_seq` are `JobRuntime`
+fields, projected with the row; `consumed` and `enqueue_counter` are under
+`RuntimeState`; `CapacityPool` is a pure function of (catalog, rows,
+consumed). `docs/period-model.md` §5 is normative.*)*
+
 **Completeness is structural, not statistical.** One feed mutates several
 fields, so a missed site hides behind a sibling's write — `_run` sets
 `armed`, `run_number` and `started_by` and then sets status twice, so one
