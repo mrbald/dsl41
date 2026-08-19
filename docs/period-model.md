@@ -1027,8 +1027,9 @@ nothing.
   `(index, effect_id)`.
 - Duplicate object keys are **rejected at decode**.
 - Escaping is pinned: `"` and `\` escaped; `\b \f \n \r \t` by short form;
-  every other control character `\u00XX` lower-case; `/` never escaped; nothing
-  else escaped.
+  every other **Unicode Cc** character — U+0000–U+001F, U+007F, U+0080–U+009F —
+  as `\u00xx` lower-case (DL-128 fixed the set; "control character" alone was
+  read two ways at build); `/` never escaped; nothing else escaped.
 - `digest` is `"sha256:" + hexdigest` over the canonical bytes with the
   **top-level** `digest` key removed — only that one. A nested opaque payload
   key named `"digest"` is data and stays; a recursive "strip every digest key"

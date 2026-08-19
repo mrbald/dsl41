@@ -145,8 +145,9 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, time as dtime, timedelta
+from typing import Final
 
-
+from dsl41.canon import CanonError, canonical_bytes
 from dsl41.capacity import CapacityPool
 from dsl41.conditions import (
     And,
@@ -178,6 +179,7 @@ from dsl41.oracle_state import (
 #: DELIBERATELY absent (DL-50): a resource-queued job is not running, so n() is
 #: TRUE for it -- and every status/exitcode atom reads false (it never ran).
 _N_FALSE_STATUSES: frozenset[str] = frozenset({"STARTING", "RUNNING"})
+
 
 class InputBatch:
     """One admitted input, applied as ONE store transaction.
@@ -245,6 +247,13 @@ class InputBatch:
         changed = oracle.store.commit_input()
         self.revisions = {key: oracle.store.revision(key) for key in changed}
         self.emitted = oracle._emitted[self._emitted_start :]
+
+
+#: The closed set of deadline checks the oracle arms as TIMER payloads
+#: (`payload["check"]`); the fourth shape, the run-window defer, carries
+#: `deferred_cause` instead. PR-09 enumerates this set and proves each member
+#: canonicalizes; `_schedule_timer` refuses anything outside it.
+TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", "term_run_time"})
 
 
 class Oracle:
@@ -390,6 +399,23 @@ class Oracle:
         self._trace.append(TraceEntry(at=self._now, job=job, transition=transition, cause=cause))
 
     def _schedule_timer(self, at: datetime, ev: Event) -> None:
+        # PR-09: the shapes a timer payload can take are a CLOSED set, because
+        # every one must be proven canonicalizable before it may be armed -- a
+        # timer that cannot be written would leave the estate unsealable for
+        # as long as it stayed armed. A new deadline kind is added to
+        # TIMER_CHECKS (and to the PR-09 test that enumerates it) first.
+        check = ev.payload.get("check")
+        if check is None:
+            if "deferred_cause" not in ev.payload:
+                raise OracleError("unregistered timer shape (PR-09)")
+        elif check not in TIMER_CHECKS:
+            raise OracleError(f"unregistered timer check {check!r} (PR-09)")
+        # and the payload itself canonicalizes -- the registry names the
+        # shapes, this proves the bytes, and neither vanishes under -O
+        try:
+            canonical_bytes(ev.payload)
+        except CanonError as exc:
+            raise OracleError(f"timer payload is not canonicalizable (PR-09): {exc}") from exc
         self.store.enqueue_timer(at, ev)
 
     # -------------------------------------------------------------- status store

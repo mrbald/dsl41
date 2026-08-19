@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
+from dsl41.canon import is_scalar_json
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_clock import Clock, EngineError
 
@@ -163,13 +164,19 @@ def fsync_dir(path: Path) -> None:
 
 def load_json(path: Path) -> dict[str, Any] | None:
     """Tolerant spool read: missing or unparseable -> None (an unreadable
-    record can never be trusted for signaling; the ladder falls through)."""
+    record can never be trusted for signaling; the ladder falls through).
+
+    A record carrying an unpaired surrogate is unreadable in the same sense
+    (PR-10a): it decodes, but nothing downstream can canonicalize it, so it
+    takes the same path rather than a new one."""
     try:
         with path.open("rb") as f:
             loaded = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict) or not is_scalar_json(loaded):
+        return None
+    return loaded
 
 
 def _naive_utc(iso: str) -> datetime:

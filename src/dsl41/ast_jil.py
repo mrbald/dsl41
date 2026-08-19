@@ -44,6 +44,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from dsl41.canon import is_scalar_string
+
 #: Statement boundaries per jil-statement-syntax.md rule 3, recognized
 #: case-insensitively. Unknown keys are attributes, never boundaries
 #: (forward compatibility).
@@ -271,6 +273,18 @@ def _mask_closed_blocks(value: str) -> str:
 
 class _Scanner:
     def __init__(self, text: str, file: str) -> None:
+        # PR-10a: an unpaired surrogate is a legal Python str and never a
+        # Unicode scalar string, so it has no UTF-8 spelling -- the span
+        # arithmetic below would raise UnicodeEncodeError on it, and an estate
+        # holding one could never be sealed (period-model ss3.2). Refused here,
+        # where the text enters, with the line it is on.
+        if not is_scalar_string(text):
+            bad = next(i for i, ch in enumerate(text) if not is_scalar_string(ch))
+            raise JilParseError(
+                "unpaired surrogate: JIL text must be Unicode scalar values",
+                file,
+                text.count("\n", 0, bad) + 1,
+            )
         self.text = text
         self.file = file
         self.style: Literal["\n", "\r\n"] = self._detect_newline()

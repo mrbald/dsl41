@@ -5120,3 +5120,10 @@
   gates the rest), the spool of any live or carried execution, or any SPAWN
   tombstone whose effect can still be replayed — deleting one authorizes a
   spawn.
+- DL-128 canonical form: "control character" is Unicode Cc (2026-08-20;
+  period-model §3.2 amended at build of `canon.py`). The frozen text said
+  "every other control character `\u00XX`" and the first implementation read
+  it as C0 + DEL, leaving U+0080–U+009F raw. The set is fixed as the Unicode
+  category: U+0000–U+001F, U+007F, U+0080–U+009F. Reason: the category is the
+  only reading with no second interpretation, and the `\u00XX` template names
+  exactly that range. The golden vector (PR-08) pins it.

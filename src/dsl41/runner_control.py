@@ -94,6 +94,7 @@ from collections.abc import AsyncIterator, Awaitable, Mapping
 from pathlib import Path
 from typing import Any, get_args
 
+from dsl41.canon import is_scalar_json, is_scalar_string
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.oracle_state import Event, EventKind, HostRuntime, JobRuntime, JobStatus
@@ -474,6 +475,8 @@ class ControlServer:
         host_id = payload.get("id")
         if not isinstance(host_id, str) or not host_id:
             return {"ok": False, "error": "a host verb addresses a host by id"}
+        if not is_scalar_string(host_id):
+            return {"ok": False, "error": "host id carries an unpaired surrogate"}  # PR-10a
         force = payload.get("force", False)
         if not isinstance(force, bool):
             return {"ok": False, "error": f"force must be a boolean, got {force!r}"}
@@ -567,6 +570,12 @@ class ControlServer:
             ev = Event(at=at, kind="STATUS", payload=status_payload)
         else:
             return {"ok": False, "error": f"unknown verb {verb!r}"}
+        if not is_scalar_json(ev.payload):
+            # PR-10a: a lone surrogate is a legal Python str and a legal JSON
+            # escape, and canonicalization raises on one -- a single admitted
+            # SET_GLOBAL value would leave the estate unsealable, so the door
+            # refuses it and nothing is written (period-model ss3.2).
+            return {"ok": False, "error": "payload carries an unpaired surrogate"}
         return ev
 
     def _spec_drift(self) -> bool | None:

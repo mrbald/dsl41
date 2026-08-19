@@ -68,6 +68,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from dsl41.ast_jil import JilFile, JilStatement, RawAttr, SourceSpan
 from dsl41.ast_jil import parse as parse_jil
+from dsl41.canon import is_scalar_json, is_scalar_string
 from dsl41.conditions import Cond, ConditionParseError, parse_condition, unescape_job_name
 
 # ------------------------------------------------------------- attribute inventories
@@ -749,12 +750,32 @@ class _Lowerer:
     def err(self, message: str, span: SourceSpan | None) -> None:
         self.findings.append(LoweringFinding(message=message, span=span))
 
+    def _check_scalar_strings(self, stmt: JilStatement) -> None:
+        """PR-10a: a JIL statement carrying an unpaired surrogate anywhere
+        cannot be canonicalized, so an estate holding one could never be
+        sealed (period-model ss3.2). Refused where it enters, not where it
+        breaks -- and checked over the statement's WHOLE dump rather than an
+        enumerated field list, so a field added to the AST later is covered by
+        default (DL-83): subject, subcommand, attrs, date lines, comments, every
+        span's file, the layout trivia."""
+        if not is_scalar_json(stmt.model_dump(mode="json")):
+            self.err(
+                f"statement {stmt.subject!r} carries an unpaired surrogate;"
+                " not a Unicode scalar string (PR-10a)",
+                stmt.span,
+            )
+
     # ------------------------------------------------------------------ driver
 
     def run(self, files: Iterable[JilFile]) -> CatalogIR:
         for jf in files:
+            if not is_scalar_string(jf.file):
+                # PR-10a: the path rides in SourceSpan.file and so in the
+                # catalog hash; a surrogate-escaped path is not canonicalizable
+                self.err(f"source path {jf.file!r} carries an unpaired surrogate (PR-10a)", None)
             self.source_files.append(jf.file)
             for stmt in jf.statements:
+                self._check_scalar_strings(stmt)
                 sub = stmt.subcommand.lower()
                 if sub == "insert_job":
                     self._lower_job(stmt)

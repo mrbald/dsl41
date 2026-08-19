@@ -92,6 +92,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
+from dsl41.canon import is_scalar_string
 from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
@@ -256,6 +257,13 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
     actor = request.get("claimed_actor")
     if actor is not None and not isinstance(actor, str):
         raise EnvelopeError(f"claimed_actor must be a string, got {actor!r}")
+    # PR-10a: every string the envelope carries into the WAL is a Unicode
+    # scalar string, or the estate could never be sealed while the record
+    # stood. The payload's strings are the verb's business; these are the
+    # envelope's own.
+    for name, value in (("request_id", request_id), ("claimed_actor", actor)):
+        if isinstance(value, str) and not is_scalar_string(value):
+            raise EnvelopeError(f"{name} carries an unpaired surrogate (PR-10a)")
     return Envelope(
         request_id=request_id,
         expect=_parse_expect(request.get("expect"), addressed=addressed),
