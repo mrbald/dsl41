@@ -481,14 +481,23 @@ def test_a_run_the_host_admits_to_is_never_re_driven(tmp_path: Path) -> None:
     _crash_after_deciding_a_start(run_root)
     _log_without_spawn_result(run_root)
 
+    bound = next(
+        e["run_id"]
+        for r in read_journal(run_root / "journal.jsonl")
+        if r.get("rec") == "decision"
+        for e in r["effects"]
+        if e["kind"] == "SPAWN"
+    )
+
     class _HostWithTheRun:
         """A reachable supervisor that reports the run as live -- the state
-        the disk cannot show once its directory is gone."""
+        the disk cannot show once its directory is gone. It reports the id
+        the durable effect bound, as the real supervisor would: a different
+        one is a different scenario, the DL-118 identity split, which resume
+        REFUSES rather than reconciles."""
 
         async def list_runs(self) -> dict:
-            return {
-                "runs": [{"job": "j", "run_number": 1, "run_id": "rid-1", "wrapper_alive": True}]
-            }
+            return {"runs": [{"job": "j", "run_number": 1, "run_id": bound, "wrapper_alive": True}]}
 
     async def scenario():
         resumed = await resume_run(

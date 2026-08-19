@@ -156,7 +156,7 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         started_at=T0,
     )
     journal.admit(_attempt(1, None))
-    journal.result(ApplyResult(index=1, request_id="r1", decision="applied"))
+    journal.decision(ApplyResult(index=1, request_id="r1", decision="applied"), [])
     journal.close()
     records = read_journal(tmp_path / "journal.jsonl")
     advance = next(r for r in records if r["rec"] == "advance")
@@ -173,17 +173,19 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
     # a time observation is the engine's own. Writing a null for it would blur
     # the one distinction this record has to keep.
     assert "expect" not in advance and "claimed_actor" not in advance
-    result = next(r for r in records if r["rec"] == "result")
-    # `index`, not `seq`: a result shares its attempt's number, and the ss10
+    decision = next(r for r in records if r["rec"] == "decision")
+    # `index`, not `seq`: a decision shares its attempt's number, and the ss10
     # subscribe cursor is keyed on seq -- two records under one cursor value
     # would leave the second undeliverable to a resuming subscriber
-    assert result == {
-        "rec": "result",
+    assert decision == {
+        "rec": "decision",
         "index": 1,
         "request_id": "r1",
         "decision": "applied",
         "reason": None,
         "revisions": {},
+        "legacy_batch": False,
+        "effects": [],
     }
 
 
@@ -284,6 +286,41 @@ def test_read_journal_tolerates_a_torn_final_line(tmp_path: Path) -> None:
     path.write_bytes(torn)
     records = read_journal(path)
     assert [r["rec"] for r in records] == ["header", "input"]
+
+
+def test_reopening_cuts_a_torn_tail_before_the_first_append(tmp_path: Path) -> None:
+    """(Journal._repair_tail): the bytes must agree with what `read_journal`
+    reads BEFORE a successor appends. Opened for append straight after a
+    torn fragment, the successor's first record would fuse with it into one
+    corrupt interior line and every later read would raise -- a run root
+    made unreadable by the resume that was meant to recover it."""
+    path = _write_two_input_journal(tmp_path)
+    lines = path.read_bytes().split(b"\n")
+    path.write_bytes(b"\n".join(lines[:-2]) + b"\n" + lines[-2][:15])
+    before = read_journal(path)
+    journal = Journal(path, fsync_each=False)
+    assert path.read_bytes() == b"\n".join(lines[:-2]) + b"\n"  # cut at the last newline
+    journal.leader(epoch=2, at=T0)
+    journal.close()
+    after = read_journal(path)
+    assert after[: len(before)] == before
+    assert [r["rec"] for r in after] == ["header", "input", "leader"]
+
+
+def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path) -> None:
+    """The other torn shape: every byte of the record landed, the newline did
+    not. `read_journal` already counts that record, so cutting it would lose
+    a record the resuming engine replayed -- it gets its newline instead."""
+    path = _write_two_input_journal(tmp_path)
+    whole = path.read_bytes()
+    path.write_bytes(whole[:-1])
+    before = read_journal(path)
+    assert [r["rec"] for r in before] == ["header", "input", "input"]
+    journal = Journal(path, fsync_each=False)
+    assert path.read_bytes() == whole
+    journal.leader(epoch=2, at=T0)
+    journal.close()
+    assert read_journal(path)[:-1] == before
 
 
 def test_read_journal_refuses_interior_corruption(tmp_path: Path) -> None:
@@ -506,7 +543,7 @@ def test_gate_dropped_completion_is_journaled_as_an_admitted_rejection(tmp_path:
 
     asyncio.run(scenario())
     records = read_journal(tmp_path / "run" / "journal.jsonl")
-    rejected = [r for r in records if r["rec"] == "result" and r["decision"] == "rejected"]
+    rejected = [r for r in records if r["rec"] == "decision" and r["decision"] == "rejected"]
     assert len(rejected) == 1
     assert rejected[0]["reason"] == "run_number mismatch"
     assert rejected[0]["revisions"] == {}  # a rejection moved nothing

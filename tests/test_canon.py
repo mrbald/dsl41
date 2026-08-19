@@ -224,7 +224,7 @@ def test_pr10a_surrogate_refused_in_the_envelope() -> None:
     before anything is admitted."""
     from dsl41.runner_admission import EnvelopeError, parse_envelope
 
-    base = {"v": 2, "baseline_id": "b", "epoch": 0, "expect": {"job:j": 0}}
+    base = {"v": PROTOCOL_VERSION, "baseline_id": "b", "epoch": 0, "expect": {"job:j": 0}}
     for field in ("request_id", "claimed_actor"):
         request = {**base, "request_id": "r1", field: "x" + SURROGATE}
         with pytest.raises(EnvelopeError, match="unpaired surrogate"):

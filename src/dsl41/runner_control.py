@@ -22,9 +22,9 @@ Phase 11c (ss10; DL-45 pins the decisions):
   no controller lease here, DL-41a). Queries (status/trace/explain/plan)
   read the oracle store between feeds -- safe because feed() never yields.
   subscribe streams journal records live (at-least-once for unsequenced
-  dispatch/drop records during the backfill race; seq'd records exactly
-  once). A stale socket file from a crashed run is detected by a probe
-  connect and unlinked; a LIVE socket refuses the second engine.
+  dispatch/drop/decision records during the backfill race; seq'd records
+  exactly once). A stale socket file from a crashed run is detected by a
+  probe connect and unlinked; a LIVE socket refuses the second engine.
 
 Phase 11d (ss11; DL-46 pins the decisions; runner_tui.py's docstring is the
 TUI-side normative detail):
@@ -57,16 +57,17 @@ drives from outside an event loop. They are two transports for one
 protocol, not two protocols -- both raise ControlClientError and neither
 knows anything about typer or textual.
 
-Protocol v2 (stage S3, DL-90; docs/control-protocol.md is the frozen text).
-Two changes, taken as ONE wire break because taking them as two would break
-every client twice:
+Protocol v3 (DL-118; v2 was stage S3, DL-90; docs/control-protocol.md is
+the frozen text). Two changes at v2, taken as ONE wire break because taking
+them as two would break every client twice:
 
-- **Every request names `"v": 2`** -- the version handshake that
-  control-protocol ss7 recorded as a known gap. There is no v1 fallback:
-  concurrency-model ss0 refuses a caller that does not name a version, and
-  "accept it unversioned for compatibility" is exactly the opt-out ss0
-  forbids. The check sits in `_handle`, ahead of the subscribe branch, so
-  no door is left unversioned.
+- **Every request names `"v": 3`** -- the version handshake control-protocol
+  ss7 recorded as a known gap. No fallback to an older version:
+  concurrency-model ss0 refuses a caller that does not name one, and "accept
+  it unversioned for compatibility" is exactly the opt-out ss0 forbids. The
+  check sits in `_handle`, ahead of the subscribe branch, so no door is left
+  unversioned. v3 is DL-118: `result` and standalone `effect` become one
+  `decision`, and a v2 client on `rec == "effect"` goes blind.
 - **A mutation carries the ss6 envelope and is answered with its
   decision.** The flat `event`/`job`/`name` fields became `verb` +
   `payload`; `request_id` and `expect` joined them and are required. The
@@ -136,7 +137,7 @@ class ControlServer:
     object per line ({"ok": bool, ...}), except `subscribe`, which streams
     journal records until the client hangs up.
 
-    Every request names `"v": 2` (DL-90). Queries: status [job], trace
+    Every request names `"v": 3` (DL-90, DL-118). Queries: status [job], trace
     [since], explain job, spec job, deps job, timers, plan, global name,
     globals names; and subscribe [since]. Every answer carries the ss6 read
     header -- `baseline_id`, `epoch`, `applied_index` -- so a client can
@@ -873,8 +874,10 @@ class ControlServer:
         """Stream journal records: optional backfill from `since` (an input/
         advance seq; the cut is positional -- everything after the last
         record at or below it), then live. seq'd records are exactly-once
-        across the backfill/live seam; unsequenced dispatch/drop records in
-        the race window are at-least-once (runner.py module docstring)."""
+        across the backfill/live seam; unsequenced dispatch/drop/decision
+        records in the race window are at-least-once (runner.py module
+        docstring). The seam keys on `seq` and never on a record name, so
+        DL-118's `decision` inherited `result`'s guarantee unchanged."""
         journal = self.engine.journal
         if journal is None:
             await self._send(writer, {"ok": False, "error": "this run has no journal"})
@@ -942,11 +945,14 @@ class ControlClientError(RuntimeError):
         self.delivered = delivered
 
 
-def _versioned(request: dict[str, Any]) -> dict[str, Any]:
+def versioned(request: dict[str, Any]) -> dict[str, Any]:
     """Stamp `v` unless the caller already did. The clients are part of this
     protocol's implementation, not callers of it, so making every query site
     repeat the version would be noise -- but a caller that names one keeps
-    it, which is what makes the server's refusal testable from here."""
+    it, which is what makes the server's refusal testable from here. Public
+    because the CLI's raw subscribe socket is a client too: it sent no `v`
+    from v2 to v3 and the server's refusal left it hanging on an open
+    connection, which is what one stamp site prevents."""
     return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
 
 
@@ -1090,7 +1096,7 @@ class ControlClient:
         self._lock = asyncio.Lock()
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        payload = _versioned(payload)
+        payload = versioned(payload)
         async with self._lock:
             #: whether this request reached the socket. Everything after the
             #: drain is `delivered`, including the reads that fail: see
@@ -1199,7 +1205,7 @@ def roundtrip(
         try:
             conn.settimeout(timeout)
             conn.connect(str(socket_path))
-            conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
+            conn.sendall(json.dumps(versioned(request)).encode("utf-8") + b"\n")
         except OSError as exc:
             raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
         try:
@@ -1211,7 +1217,9 @@ def roundtrip(
                 buf += chunk
             response = json.loads(buf)
         except (OSError, ValueError) as exc:
-            raise ControlClientError(f"control socket {socket_path}: {exc}", delivered=True) from exc
+            raise ControlClientError(
+                f"control socket {socket_path}: {exc}", delivered=True
+            ) from exc
     finally:
         conn.close()
     if not isinstance(response, dict):

@@ -816,13 +816,25 @@ condition: s(x)
 
 
 def _fabricate_exit_record(run_root: Path, job: str, run_number: int, ended_at: datetime) -> None:
+    """A late natural-exit record for the run the engine REALLY spawned --
+    so it must carry that run's bound run_id, read from the journal's
+    decision, exactly as the real wrapper would have written it. A wrong id
+    here is a different scenario: a stranger's record, which resume now
+    REFUSES (DL-118 identity split) rather than consumes."""
+    spawned = next(
+        e["run_id"]
+        for r in read_journal(run_root / "journal.jsonl")
+        if r.get("rec") == "decision"
+        for e in r["effects"]
+        if e["kind"] == "SPAWN" and (e["job"], e["run_number"]) == (job, run_number)
+    )
     run_dir = run_root / "runs" / f"{job}.{run_number}"
     run_dir.mkdir(parents=True)
     (run_dir / "status.json").write_text(
         json.dumps(
             {
                 "version": 1,
-                "run_id": "fabricated",
+                "run_id": spawned,
                 "job": job,
                 "run_number": run_number,
                 "outcome": "exited",
@@ -889,7 +901,7 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     statuses, records = asyncio.run(scenario())
     assert statuses["x"] == "TERMINATED"  # the kill stands
     assert statuses["y"] == "INACTIVE"  # s(x) never satisfied
-    rejected = [r for r in records if r.get("rec") == "result" and r["decision"] == "rejected"]
+    rejected = [r for r in records if r.get("rec") == "decision" and r["decision"] == "rejected"]
     assert len(rejected) == 1  # loud, not silent
     late = next(r for r in records if r.get("seq") == rejected[0]["index"])
     assert late["payload"]["exit_code"] == 0 and late["source"] == "reconcile"

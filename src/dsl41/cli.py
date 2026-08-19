@@ -1936,6 +1936,12 @@ def query(
             raise typer.Exit(0)
         typer.echo(json_mod.dumps(response, indent=2, sort_keys=True))
         raise typer.Exit(0 if response.get("ok") else 2)
+    from dsl41.runner_control import versioned
+
+    # the raw socket is a client like `roundtrip` is: an unversioned
+    # subscribe is refused, and a refusal does not close the connection, so
+    # without the stamp this loop prints the refusal and waits forever
+    request = versioned(request)
     try:
         conn = socket_mod.socket(socket_mod.AF_UNIX)
         conn.connect(str(socket_path))

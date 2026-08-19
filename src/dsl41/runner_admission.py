@@ -97,10 +97,15 @@ from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
-#: The wire version of the ss6 envelope. There is no v1 to fall back to:
-#: ss0 refuses a caller that does not name a version, and accepting an
-#: unversioned request "for compatibility" is the opt-out ss0 forbids.
-PROTOCOL_VERSION = 2
+#: The wire version of the ss6 envelope. There is no earlier version to fall
+#: back to: ss0 refuses a caller that does not name a version, and accepting
+#: an unversioned or older request "for compatibility" is the opt-out ss0
+#: forbids. v1 went that way at DL-90; v2 goes the same way at DL-118, which
+#: replaces the subscribe stream's `result` and `effect` records with one
+#: atomic `decision` -- a v2 client waiting on `rec == "effect"` would
+#: silently stop seeing intents, so a compatibility projection would be a
+#: second record shape for one fact.
+PROTOCOL_VERSION = 3
 
 #: Sources whose events are ENGINE-MADE completions and therefore pass the
 #: stale gate. Externally injected STATUS keeps sendevent CHANGE_STATUS
@@ -110,7 +115,7 @@ PROTOCOL_VERSION = 2
 #: reach the same verdict from the same field the live engine did.
 COMPLETION_SOURCES: frozenset[str] = frozenset({"adapter", "reconcile"})
 
-#: ss6 ships `epoch` in the v2 envelope though it is inert on one host,
+#: ss6 shipped `epoch` in the v2 envelope though it was inert on one host,
 #: because adding it after the clients migrate is a second wire break. S6
 #: allocates it for real.
 INERT_EPOCH = 0

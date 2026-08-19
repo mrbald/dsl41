@@ -363,20 +363,34 @@ The journal is an append-only JSONL WAL, one file per run. Record kinds:
   event — the interpreter never reads a host row, so this one is applied to
   the state owner rather than fed. Under its own key rather than
   `payload`, so no record shape spells one field name two ways.
-- `effect` — `{effect_id, kind, job, run_number, executor_id, index, at}`: an
-  act on an execution host that the engine INTENDS, appended with the §4
-  step-7 batch that decided it (S5c, DL-96). Before the attempt, which is
-  the whole content of an outbox: an engine that dies between deciding and
-  acting leaves the record that it meant to act.
+- `decision` — `{index, request_id, decision, reason, revisions,
+  legacy_batch, effects}`: the whole §4 step-7 batch in one line (DL-118,
+  `docs/period-model.md` §2.3) — the decision the attempt at `index` got,
+  the revisions it moved, and every effect it planned. `index`, not `seq`,
+  because it shares its attempt's number and `seq` is the §10 subscribe
+  cursor. Each nested effect is `{effect_id, kind, job, run_number, run_id,
+  executor_id, generation, index, at}`: an act on an execution host that the
+  engine INTENDS, recorded before the attempt, which is the whole content of
+  an outbox — an engine that dies between deciding and acting leaves the
+  record that it meant to act. A SPAWN's `run_id` is minted in the same
+  transaction (PR-36a) and the wrapper spec carries it, so the WAL and the
+  spool name one process identity; a KILL carries the id its run's SPAWN
+  bound, or null for a run a pre-DL-118 journal spawned. `generation` is
+  the executor host row's value at birth (PR-16). The list is in ADMISSION
+  order, so a SPAWN precedes its run's later KILL. `legacy_batch` is
+  `false` from this writer.
 - `effect_result` — `{effect_id, state, run_id, detail}`: what became of one
   attempt — `applied`, `indeterminate`, or `retired` (superseded before it
   ran). Its ABSENCE means `pending`, which is the crash window, and is
   exactly the distinction `indeterminate` exists to keep separate: nothing
   was tried, versus something was tried and cannot be reported on.
-- `result` — `{index, request_id, decision, reason, revisions}`: the
-  decision the attempt at `index` got, appended after it. `index`, not
-  `seq`, because it shares its attempt's number and `seq` is the §10
-  subscribe cursor.
+- `result` and standalone `effect` — **retired** (DL-118). They were the
+  decision and its intents as separate records, each its own fsync, and the
+  window between them was the atomicity violation §4 step 7 forbids.
+  Nothing writes them. Everything that READS a journal still accepts them,
+  so a run root written before DL-118 keeps replaying, resuming and
+  reporting: an old `result` folds into the same decision index and an old
+  `effect` into the same outbox.
 - `dispatch` — `{job, run_number, wrapper_pid, run_dir, started_at}`
   (audit/ordering only). The wrapper's `spawn.json` is the authoritative
   spawn record, written by the process that did the spawn. This closes
@@ -387,7 +401,7 @@ The journal is an append-only JSONL WAL, one file per run. Record kinds:
   (E9, DL-45).
 
 *(Amended by DL-89, stage S2.* The three admission fields and the `result`
-record are new here, and `drop` narrowed. A completion the §4 gate drops
+record (since DL-118: `decision`) are new here, and `drop` narrowed. A completion the §4 gate drops
 used to be a `drop` record — the input was refused before it was
 journaled, so its refusal was an ABSENCE in the log, and absence cannot be
 told apart from a crash. It is now admitted like every other input and its
@@ -403,8 +417,9 @@ the log has to keep — which inputs were externally requested and
 therefore had to name a revision. Replay reads `expect` back, because an
 attempt admitted without a result is re-decided through the same gate,
 and the revision it named is half of what that gate reads.*)
-*(Amended by DL-96, stage S5c.* The two `effect` records are new here, and
-one sentence above narrowed with them. "No side effects on resume beyond
+*(Amended by DL-96, stage S5c.* The two `effect` records are new here
+(since DL-118: nested in `decision`), and one sentence above narrowed with
+them. "No side effects on resume beyond
 recorded kills" used to be aspirational for the DETACHED path: a kill was a
 `task.cancel()` with no id, so an engine that decided TERMINATED and died
 before cancelling left a run whose parent is the supervisor still going,
@@ -416,9 +431,9 @@ re-driven, which is that sentence made literal rather than widened.*)*
   input, and replay ignores it.
 
 `dsl41 runs` is not a new record kind: its rows are a projection folded from
-the records above (`dispatch`, `input(kind=STATUS)`, `effect`) plus the
-replayed trace and the spool, offline, with nothing appended to the journal
-(DL-113).
+the records above (`dispatch`, `input(kind=STATUS)`, the effects nested in
+`decision`) plus the replayed trace and the spool, offline, with nothing
+appended to the journal (DL-113).
 
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence — external events plus time observations (oracle

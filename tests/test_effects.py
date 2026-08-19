@@ -42,9 +42,12 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import ValidationError
+
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event, JobRuntime
 from dsl41.runner import Engine
+from dsl41.runner_clock import EngineError
 from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_effects import (
@@ -76,7 +79,15 @@ def _engine(jil: str = _SOLO_JIL, adapter: FakeAdapter | None = None) -> Engine:
     )
 
 
-def _effect(kind: str = "SPAWN", *, job: str = "j", run_number: int = 1, index: int = 1) -> Effect:
+def _effect(
+    kind: str = "SPAWN",
+    *,
+    job: str = "j",
+    run_number: int = 1,
+    index: int = 1,
+    run_id: str | None = None,
+    generation: int | None = None,
+) -> Effect:
     return Effect(
         effect_id=effect_id_for(index, kind, job, run_number),  # type: ignore[arg-type]
         kind=kind,  # type: ignore[arg-type]
@@ -85,6 +96,8 @@ def _effect(kind: str = "SPAWN", *, job: str = "j", run_number: int = 1, index: 
         executor_id="local",
         index=index,
         at=T0,
+        run_id=run_id,
+        generation=generation,
     )
 
 
@@ -127,6 +140,82 @@ def test_cm06_an_effect_that_cannot_be_reported_on_answers_outcome_unavailable()
     assert outbox.pending() == []  # attempted: never re-driven blindly
 
 
+def test_the_outbox_holds_one_run_one_identity_both_directions() -> None:
+    """period-model ss11a: one `(job, run_number)` maps to one `run_id` and
+    one `run_id` to one run. The planner keeps this by construction, so a
+    record that breaks it is corruption or a foreign writer -- and acting on
+    either half would act on the wrong process."""
+    rid_a = "00000000-0000-4000-8000-00000000000a"
+    rid_b = "00000000-0000-4000-8000-00000000000b"
+    outbox = Outbox()
+    outbox.record(_effect("SPAWN", index=1, run_id=rid_a, generation=0))
+    # the same run under a second id
+    with pytest.raises(EngineError, match="one run, one identity"):
+        outbox.record(_effect("KILL", index=2, run_id=rid_b, generation=0))
+    # the same id claimed by a second run
+    with pytest.raises(EngineError, match="one identity, one run"):
+        outbox.record(_effect("SPAWN", index=3, run_number=2, run_id=rid_a, generation=0))
+    # the KILL that carries ITS run's id is the agreeing case
+    outbox.record(_effect("KILL", index=2, run_id=rid_a, generation=0))
+    # and identity-less records (pre-DL-118) claim nothing
+    outbox.record(_effect("KILL", index=4, run_number=3))
+
+
+def test_a_reused_effect_id_with_different_content_refuses() -> None:
+    """`effect_id` is derived, so two different effects under one id mean the
+    log disagrees with itself. Overwriting would let the later record
+    silently replace the intent the earlier one recorded -- a pending SPAWN
+    flipped into a KILL loses the start. Exact replay stays a no-op."""
+    outbox = Outbox()
+    spawn = _effect("SPAWN", generation=0)
+    outbox.record(spawn)
+    outbox.record(spawn)  # replay meets the live record: no-op
+    assert [e.effect_id for e in outbox.pending()] == [spawn.effect_id]
+    forged = spawn.model_copy(update={"kind": "KILL"})
+    with pytest.raises(EngineError, match="disagrees with itself"):
+        outbox.record(forged)
+    assert [e.kind for e in outbox.pending()] == ["SPAWN"]  # the intent survived
+
+
+def test_an_outcome_must_belong_to_its_effect() -> None:
+    """DL-118's readback half at the outcome layer: an outcome for an effect
+    this outbox never saw means the log lost the record that said what was
+    meant, and an outcome naming a different run_id than its effect bound is
+    a stranger's fate filed under this run's intent. Both refuse."""
+    rid = "00000000-0000-4000-8000-00000000000c"
+    outbox = Outbox()
+    with pytest.raises(EngineError, match="unknown effect"):
+        outbox.resolve(EffectOutcome(effect_id="e9:SPAWN:ghost.1", state="applied"))
+    effect = _effect("SPAWN", run_id=rid, generation=0)
+    outbox.record(effect)
+    with pytest.raises(EngineError, match="stranger's fate"):
+        outbox.resolve(
+            EffectOutcome(effect_id=effect.effect_id, state="applied", run_id="not-this-run")
+        )
+    outbox.resolve(EffectOutcome(effect_id=effect.effect_id, state="applied", run_id=rid))
+    assert outbox.state_of(effect.effect_id) == "applied"
+
+
+def test_generation_is_strict_and_never_coerced() -> None:
+    """The fold gate compares generation to exactly 0; lax pydantic would
+    coerce `false`, `"0"` and `0.0` into integers that pass it. Strict mode
+    refuses them at the model."""
+    for bogus in (False, "0", 0.0):
+        with pytest.raises(ValidationError):
+            Effect.model_validate(
+                {
+                    "effect_id": "e1:SPAWN:j.1",
+                    "kind": "SPAWN",
+                    "job": "j",
+                    "run_number": 1,
+                    "executor_id": "local",
+                    "index": 1,
+                    "at": T0.isoformat(),
+                    "generation": bogus,
+                }
+            )
+
+
 def test_the_outbox_keeps_admission_order() -> None:
     """ss5 makes per-run effect ordering mandatory. A KILL decided after a
     SPAWN that overtook it would stop a run that had not started."""
@@ -149,6 +238,11 @@ def test_an_effect_id_is_derived_not_minted() -> None:
     assert effect_id_for(7, "KILL", "nightly", 3) != effect_id_for(7, "SPAWN", "nightly", 3)
 
 
+#: the identity binds every planning call needs (DL-118): a deterministic
+#: mint so assertions can name the ids, generation 0, no prior bindings.
+_IDENTITY: dict = dict(generation=0, run_ids={}, mint_run_id=lambda: "rid-minted")
+
+
 # ------------------------------------------------------- 2. planning (ss4 step 7)
 
 
@@ -159,7 +253,7 @@ def test_planning_reads_the_ghost_run_gate() -> None:
     whether an effect EXISTS, which is the honest place, because the shell
     never intended to act."""
     emitted = [_ev("STATUS", 0, job="j", status="STARTING")]
-    common = dict(index=1, executor_id="local", live={}, dispatchable=frozenset({"j"}))
+    common = dict(index=1, executor_id="local", live={}, dispatchable=frozenset({"j"}), **_IDENTITY)
 
     real = plan_effects(emitted, runs={"j": 1}, dispatched={}, **common)  # type: ignore[arg-type]
     assert [e.kind for e in real] == ["SPAWN"] and real[0].run_number == 1
@@ -178,6 +272,7 @@ def test_a_terminal_with_no_live_run_plans_no_kill() -> None:
         runs={"j": 1},
         dispatched={"j": 1},
         dispatchable=frozenset({"j"}),
+        **_IDENTITY,
     )
     assert plan_effects(emitted, live={}, **common) == []  # type: ignore[arg-type]
     [kill] = plan_effects(emitted, live={"j": 1}, **common)  # type: ignore[arg-type]
@@ -198,9 +293,73 @@ def test_boxes_and_ghosts_get_no_effects() -> None:
             dispatched={},
             live={},
             dispatchable=frozenset(),
+            **_IDENTITY,
         )
         == []
     )
+
+
+def test_pr36a_a_spawn_mints_its_run_id_in_the_planning_transaction() -> None:
+    """period-model ss2.3: every SPAWN effect carries `run_id`, minted with
+    the effect -- identity is created in the decision transaction and
+    nowhere later, so the WAL and the spool can only ever name one key."""
+    emitted = [_ev("STATUS", 0, job="j", status="STARTING")]
+    [spawn] = plan_effects(
+        emitted,
+        index=1,
+        executor_id="local",
+        runs={"j": 1},
+        dispatched={},
+        live={},
+        dispatchable=frozenset({"j"}),
+        **_IDENTITY,
+    )
+    assert (spawn.kind, spawn.run_id) == ("SPAWN", "rid-minted")
+
+
+def test_pr36a_a_kill_carries_the_run_id_its_spawn_bound_or_none() -> None:
+    """A KILL never mints: the run it stops already has an identity, bound by
+    the SPAWN this run root recorded -- or by no one, for a run a pre-DL-118
+    journal spawned, which is the one honest None."""
+    emitted = [_ev("STATUS", 0, job="j", status="SUCCESS")]
+    common = dict(
+        index=2,
+        executor_id="local",
+        runs={"j": 1},
+        dispatched={"j": 1},
+        live={"j": 1},
+        dispatchable=frozenset({"j"}),
+        generation=0,
+        mint_run_id=_refuse_mint,
+    )
+    [kill] = plan_effects(emitted, run_ids={("j", 1): "rid-from-spawn"}, **common)  # type: ignore[arg-type]
+    assert (kill.kind, kill.run_id) == ("KILL", "rid-from-spawn")
+    [legacy] = plan_effects(emitted, run_ids={}, **common)  # type: ignore[arg-type]
+    assert (legacy.kind, legacy.run_id) == ("KILL", None)
+
+
+def _refuse_mint() -> str:
+    raise AssertionError("a KILL must not mint an identity")
+
+
+def test_pr16_every_effect_records_the_generation_it_was_born_under() -> None:
+    """The executor host row's generation, read at birth: an effect born
+    before an eviction cannot pass for one born after it, because the value
+    it read is in the durable record."""
+    emitted = [_ev("STATUS", 0, job="j", status="STARTING")]
+    [spawn] = plan_effects(
+        emitted,
+        index=1,
+        executor_id="local",
+        runs={"j": 1},
+        dispatched={},
+        live={},
+        dispatchable=frozenset({"j"}),
+        generation=3,
+        run_ids={},
+        mint_run_id=lambda: "rid",
+    )
+    assert spawn.generation == 3
 
 
 # --------------------------------------------------------- 3. supersession (ss5)
@@ -246,11 +405,19 @@ def test_an_effect_for_a_job_with_no_row_is_superseded() -> None:
 # ---------------------------------------------- 4. the engine drives the outbox
 
 
-def test_a_start_writes_its_intent_before_it_launches_anything(tmp_path: Path) -> None:
-    """ss4 step 7 and ss1: the decision and the outbox entry it implies are
-    ONE batch. The order in the log is what makes an interrupted engine
-    readable -- the effect record sits after the result that decided it and
-    before any evidence the act happened."""
+def test_a_start_records_its_intent_in_the_decision_that_planned_it(tmp_path: Path) -> None:
+    """ss4 step 7 and ss1: the decision and the outbox entries it implies are
+    ONE batch -- and since DL-118 one RECORD, so there is no order between
+    them left to get wrong.
+
+    This is what remains of `test_a_start_writes_its_intent_before_it_
+    launches_anything`, which asserted that the `effect` record followed the
+    `result` record. Ordering was the most the two-record shape could prove,
+    and it is not the property ss4 step 7 asks for: an engine could write
+    them in that order and still die between the fsyncs. The atomicity claim
+    is now `tests/test_decision_record.py`'s
+    `test_pr35_decision_and_effects_commit_together`. What stays here is the
+    record's contents and the outbox it rebuilds."""
     engine = start_run(
         lower_source(_SOLO_JIL),
         tmp_path / "run",
@@ -267,10 +434,11 @@ def test_a_start_writes_its_intent_before_it_launches_anything(tmp_path: Path) -
     engine.journal.close()
 
     records = read_journal(tmp_path / "run" / "journal.jsonl")
-    kinds = [r["rec"] for r in records]
-    assert kinds.index("effect") > kinds.index("result")  # step 7's batch, in order
-    [intent] = [r for r in records if r["rec"] == "effect"]
+    [decision] = [r for r in records if r["rec"] == "decision"]
+    assert decision["decision"] == "applied" and decision["legacy_batch"] is False
+    [intent] = decision["effects"]
     assert (intent["kind"], intent["job"], intent["run_number"]) == ("SPAWN", "j", 1)
+    assert intent["index"] == decision["index"]  # the effect names its own decision
     assert intent["executor_id"] == "local"  # ss5: at-most-once is bound to a host
     [outcome] = [r for r in records if r["rec"] == "effect_result"]
     assert outcome["state"] == "applied"

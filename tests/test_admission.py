@@ -357,7 +357,7 @@ def _write_log(
     for attempt in attempts:
         journal.admit(attempt)
         if attempt.index in by_index:
-            journal.result(by_index[attempt.index])
+            journal.decision(by_index[attempt.index], [])
     journal.close()
     return read_journal(path)
 
@@ -406,7 +406,7 @@ def test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay(tmp_path: Path
     assert replay.frontiers.applied_index == 2
     assert not replay.recovered  # both decisions were durable
 
-    without_the_rejection = [r for r in records if not (r["rec"] == "result" and r["index"] == 2)]
+    without_the_rejection = [r for r in records if not (r["rec"] == "decision" and r["index"] == 2)]
     fresh = Oracle(lower_source(_SOLO_JIL))
     replay_inputs(fresh, without_the_rejection)
     assert fresh.store.job["j"].status == "SUCCESS"

@@ -1,15 +1,16 @@
 # Control protocol — the engine's public contract
 
-Status: frozen at **v2** (2026-08-15, DL-90; first frozen 2026-08-13,
-DL-78). This document is normative for the runner's §10 control plane in
-the same way `docs/supervisor-protocol.md` is normative for the §6a
-lifecycle tier. Each change to a frozen item requires a decision-log
-entry.
+Status: frozen at **v3** (2026-08-20, DL-118; v2 2026-08-15, DL-90; first
+frozen 2026-08-13, DL-78). This document is normative for the runner's §10
+control plane in the same way `docs/supervisor-protocol.md` is normative for
+the §6a lifecycle tier. Each change to a frozen item requires a
+decision-log entry.
 
-**v1 is gone, not deprecated.** `docs/concurrency-model.md` §0 refuses a
-caller that does not name a version, and accepting unversioned requests
-"for compatibility" is exactly the opt-out it forbids. An engine at this
-version answers a v1 client with a refusal naming the version it speaks.
+**An older version is gone, not deprecated.** `docs/concurrency-model.md`
+§0 refuses a caller that does not name a version, and accepting unversioned
+requests "for compatibility" is exactly the opt-out it forbids. An engine at
+this version answers a v1 or v2 client with a refusal naming the version it
+speaks. v2 went that way at DL-118, on the precedent v1 set.
 
 The two protocols sit on opposite sides of the engine:
 
@@ -50,7 +51,7 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
   overruns asyncio's 64 KiB default at roughly 300 jobs.
-- **Every request carries `"v": 2`**, including queries and `subscribe`.
+- **Every request carries `"v": 3`**, including queries and `subscribe`.
   The check runs before the request is routed at all, so `subscribe` —
   which owns its connection and never reaches the response path — is not
   the one unversioned door left open. A refusal does not close the
@@ -74,9 +75,9 @@ crashed run's leftover, which is unlinked and claimed. Two engines racing
 past the probe are separated by the bind itself. This probe is the *only*
 mechanism enforcing one engine per run root — see §7.
 
-**The version handshake** is `"v": 2` on every request (DL-90). This was
-listed here as a known gap through v1; it closed in the same break that
-made preconditions mandatory, because two wire breaks would have cost
+**The version handshake** is `"v": 3` on every request (DL-90, DL-118).
+This was listed here as a known gap through v1; it closed in the same break
+that made preconditions mandatory, because two wire breaks would have cost
 every client twice.
 
 **No controller lease.** Deliberate (DL-41a). `sendevent` is multi-writer
@@ -87,7 +88,7 @@ semantics.
 ## 3. Mutating verbs: sendevent, host
 
 ```json
-{"cmd": "sendevent", "v": 2, "baseline_id": "…", "epoch": 0,
+{"cmd": "sendevent", "v": 3, "baseline_id": "…", "epoch": 0,
  "request_id": "…", "verb": "CHANGE_STATUS",
  "payload": {"job": "nightly", "status": "SUCCESS"},
  "expect": {"job:nightly": 12}, "claimed_actor": "alice@host"}
@@ -177,7 +178,7 @@ lists them.
 ### `host` (S5a, DL-94)
 
 ```json
-{"cmd": "host", "v": 2, "baseline_id": "…", "epoch": 0,
+{"cmd": "host", "v": 3, "baseline_id": "…", "epoch": 0,
  "request_id": "…", "verb": "drain", "payload": {"id": "local"},
  "expect": {"host:local": 1}, "claimed_actor": "alice@host"}
 ```
@@ -358,18 +359,25 @@ no journal"}`.
 
 Delivery guarantees, exactly as implemented:
 
-- unsequenced records now also include `effect` and `effect_result` (S5c).
 - seq'd records (`input`, `advance`, `host`) are **exactly once** across the
   backfill/live seam. The seam is sampled *before* the ack is written,
   because a record appended during the send would otherwise be skipped as
   "covered" despite never being backfilled.
-- unsequenced records (`dispatch`, `drop`, `result`) are
-  **at-least-once** inside the backfill race window. `result` carries its
+- unsequenced records (`dispatch`, `drop`, `decision`, `effect_result`) are
+  **at-least-once** inside the backfill race window. `decision` carries its
   attempt's number under `index` rather than `seq` for exactly this
   reason: two records sharing one cursor value would leave the second
   undeliverable to a resuming subscriber (DL-89).
 - `since` cuts positionally: everything after the last record whose seq is
   at or below it.
+
+*(Amended by DL-118, at build.* `decision` replaces `result` and the
+standalone `effect` record on this stream: one line carrying the decision,
+its revisions and the effects it planned. The seam behaviour is
+**unchanged** — it keys on the presence of `seq`, not on a record name, so
+`decision` inherits `result`'s at-least-once guarantee and needed no code
+change beyond the name. `effect_result` is unchanged. This is the wire break
+that took the protocol to v3.*)
 
 ## 6. Client obligations
 
@@ -387,7 +395,8 @@ Delivery guarantees, exactly as implemented:
 These are honest limits of the frozen protocol, listed because the
 multihost track (`docs/decision-log.md` DL-78) has to address each one.
 
-1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2).
+1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2); v3 since
+   DL-118.
 2. **No authentication or authorization.** The socket's `0600` mode plus
    filesystem ownership is the entire access-control model. Any process
    running as the invoking user has full `sendevent` authority. This is

@@ -138,6 +138,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import uuid
 
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
@@ -711,12 +712,12 @@ class Engine:
         # step 7 commits the decision and the outbox entries it implies as ONE
         # batch (concurrency-model ss1): an engine that dies between deciding
         # and acting must leave behind the record that it MEANT to act, or a
-        # kill it decided vanishes with the task that would have delivered it
+        # kill it decided vanishes with the task that would have delivered it.
+        # ONE record and one fsync since DL-118 -- separate writes made "as one
+        # batch" a claim the substrate did not keep (CM-17)
         effects = self._plan_effects(applied, attempt.index)
         if self.journal is not None:
-            self.journal.result(applied.result)
-            for effect in effects:
-                self.journal.effect(effect)
+            self.journal.decision(applied.result, effects)
         for effect in effects:
             self.outbox.record(effect)
         if applied.result.decision == "rejected" and ev is not None:
@@ -727,15 +728,32 @@ class Engine:
 
     def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
         """ss4 step 7's other half: what the shell now intends to do about
-        what the oracle just decided."""
+        what the oracle just decided.
+
+        The two identity binds happen HERE, inside the decision transaction
+        (period-model ss2.3): a SPAWN's `run_id` is minted with the effect
+        (PR-36a), and `generation` is read from the executor's host row at
+        this moment (PR-16) -- the row exists from the genesis seed, so the
+        fallback 0 is the seed's own value and unreachable in practice. A
+        KILL looks its run's id up in the outbox, where the SPAWN that
+        started it recorded it; a run a pre-DL-118 journal spawned has none
+        to find."""
+        row = self.oracle.store.host(self.executor_id)
         return plan_effects(
             applied.emitted,
             index=index,
             executor_id=self.executor_id,
+            generation=row.generation if row is not None else 0,
             runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
             dispatchable=self._dispatchable(),
+            run_ids={
+                (e.job, e.run_number): e.run_id
+                for e in self.outbox.effects()
+                if e.kind == "SPAWN" and e.run_id is not None
+            },
+            mint_run_id=lambda: str(uuid.uuid4()),
         )
 
     def _dispatchable(self) -> frozenset[str]:
@@ -863,7 +881,7 @@ class Engine:
             # -- cancelling is the tidy half, not the safety half.
             stale.task.cancel()
             self._reaping.append(stale.task)
-        self._launch(job_ir, effect.run_number, adapter)
+        self._launch(job_ir, effect.run_number, adapter, run_id=effect.run_id)
         self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
 
     def _apply_kill(self, effect: Effect) -> None:
@@ -894,13 +912,18 @@ class Engine:
         self._reaping.append(live.task)
         self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
 
-    def _launch(self, job_ir: JobIR, run_number: int, adapter: JobAdapter) -> None:
+    def _launch(
+        self, job_ir: JobIR, run_number: int, adapter: JobAdapter, *, run_id: str | None = None
+    ) -> None:
         """Create the adapter task. Reached from `_apply_spawn` (an outbox
         effect) and from resume's FW re-dispatch and detached reattach
         (module docstring), neither of which goes through an effect: one is
-        an idempotent re-read and the other is a run that never stopped."""
+        an idempotent re-read and the other is a run that never stopped.
+        `run_id` is the effect's, on the `_apply_spawn` path only -- the
+        default None is exactly those two effect-less callers, plus a
+        re-driven SPAWN from a pre-DL-118 journal."""
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self._run_adapter(job_ir, run_number, adapter))
+        task = loop.create_task(self._run_adapter(job_ir, run_number, adapter, run_id))
         task.add_done_callback(lambda _t: self._activity.set())
         self._live[job_ir.name] = _LiveRun(run_number=run_number, task=task)
 
@@ -930,12 +953,15 @@ class Engine:
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 raise result
 
-    async def _run_adapter(self, job_ir: JobIR, run_number: int, adapter: JobAdapter) -> None:
+    async def _run_adapter(
+        self, job_ir: JobIR, run_number: int, adapter: JobAdapter, run_id: str | None = None
+    ) -> None:
         ctx = AdapterContext(
             clock=self.clock,
             run_root=self.run_root,
             journal=self.journal,
             detach=self.detach,
+            run_id=run_id,
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate

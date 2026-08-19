@@ -247,27 +247,38 @@ For every input, in log order:
 
 Steps 5–7 must not yield to another state-changing input.
 
-**Worked example — one operator kill, four lines.** A job running at run 1,
+**Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what
 the log gets, verbatim from a run of the shipped code:
 
 ```jsonl
 {"rec":"input","seq":2,"at":"…T02:00:30","kind":"KILLJOB","payload":{"job":"nightly"},
  "expect":{"job:nightly":1},"epoch":1,"request_id":"k1"}
-{"rec":"result","index":2,"request_id":"k1","decision":"applied","reason":null,
- "revisions":{"job:nightly":2}}
-{"rec":"effect","effect_id":"e2:KILL:nightly.1","kind":"KILL","job":"nightly",
- "run_number":1,"executor_id":"local","index":2,"at":"…T02:00:30"}
+{"rec":"decision","index":2,"request_id":"k1","decision":"applied","reason":null,
+ "revisions":{"job:nightly":2},"legacy_batch":false,
+ "effects":[{"effect_id":"e2:KILL:nightly.1","kind":"KILL","job":"nightly",
+ "run_number":1,"run_id":"…","executor_id":"local","generation":0,
+ "index":2,"at":"…T02:00:30"}]}
 {"rec":"effect_result","effect_id":"e2:KILL:nightly.1","state":"applied",
  "run_id":null,"detail":null}
 ```
 
-Three of those are step 4 and step 7 — the attempt, then the decision and
-what it implies, committed together. The fourth arrives on the dispatch
+Two of those are step 4 and step 7 — the attempt, then the decision and
+what it implies, committed together. The third arrives on the dispatch
 that follows in the same loop iteration. Read them as the answers to four
 different questions: *what was asked* (with the revision it was asked
 against), *what was decided* (and which revisions moved), *what that
 implied* (before it was attempted), and *what came of it*.
+
+*(Amended by DL-118, period-model §2.3.* The decision and its effects were
+two records here — `result`, then one `effect` per intent — each its own
+fsync. Step 7 says "atomically"; two fsyncs are not that (CM-17). They are
+now one `decision` line. The effect also gained two fields: `run_id` — the
+KILL names the identity its run's SPAWN minted in its own decision
+transaction (PR-36a), which closes the "`run_id` is not bound before the
+attempt" deviation DL-96 recorded in §5 below for the local engine — and
+`generation`, the host row's value at birth (PR-16). Nothing else in the
+example moved.*)
 
 Now change one thing at a time:
 
@@ -438,7 +449,9 @@ the spool reports, when it reports it". On the live path it never does:
 `None` default and never revise it. `run_id` is populated only on the two
 *resume* paths. The deviation still holds for the reason DL-96 gave — the
 run directory is the identity locally — but the sentence describes a
-recording that does not happen.*)*
+recording that does not happen. Since DL-118 the deviation itself is closed
+— `run_id` is bound at effect birth; see the amendment in the DL-96 block
+below.*)*
 
 *(Amended by DL-96, at build — stage S5c.* Four deviations, each bounded and
 each because the thing it defers against does not exist yet.
@@ -449,7 +462,10 @@ sees only ids. Locally `(job, run_number)` IS the identity —
 `runs/<job>.<run_number>` is created with `mkdir()` and no `exist_ok`, so a
 second spawn of one run fails loudly rather than doubling — so the outbox
 records the process identity the spool reports, when it reports it. Binding
-it earlier arrives with the relay that needs it.
+it earlier arrives with the relay that needs it. *(Closed by DL-118 before
+any relay: the seal needed the binding first. A SPAWN's `run_id` is minted
+in the step-7 decision transaction, rides in the durable effect, and the
+wrapper spec carries it — period-model §2.3, PR-36a.)*
 
 **TERM and KILL are one effect, not two staged ids.** The split exists so a
 relay can tell a retried TERM from a retried KILL. The adapter's ladder

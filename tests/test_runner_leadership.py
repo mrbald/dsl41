@@ -218,9 +218,7 @@ def test_cm14_a_second_engine_is_refused_the_run_root_and_the_first_is_untouched
         assert f"pid {first.proc.pid}" in second.stderr  # named, from the lock's note
         assert "epoch 1" in second.stderr
         assert first.proc.poll() is None  # the incumbent never noticed
-        status = cli(
-            "query", "status", "--socket", str(first.run_root / "control.sock"), "--brief"
-        )
+        status = cli("query", "status", "--socket", str(first.run_root / "control.sock"), "--brief")
         assert status.returncode == 0
         assert "idle" in status.stdout
     terms = [r for r in read_journal(first.run_root / "journal.jsonl") if r.get("rec") == "leader"]
@@ -312,7 +310,8 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
     records = read_journal(live.run_root / "journal.jsonl")
     jobs = [r["payload"].get("job") for r in records if r.get("rec") == "input"]
     assert jobs == ["proof"]  # admitted, then nothing: `after` never entered the log
-    assert [e["job"] for e in records if e.get("rec") == "effect"] == ["proof"]
+    planned = [e for r in records if r.get("rec") == "decision" for e in r["effects"]]
+    assert [e["job"] for e in planned] == ["proof"]
 
 
 # ------------------------------------------------- S6c: the barrier re-drives
@@ -349,7 +348,7 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
 
     # the fault fired, and left exactly what ss5 says a pending effect is
     records = read_journal(run_root / "journal.jsonl")
-    effects = [r for r in records if r.get("rec") == "effect"]
+    effects = [e for r in records if r.get("rec") == "decision" for e in r["effects"]]
     assert [(e["kind"], e["job"]) for e in effects] == [("SPAWN", "lost")]
     assert not [r for r in records if r.get("rec") == "effect_result"]
     # nothing anywhere on the host: `runs/` is the scaffolding every run root

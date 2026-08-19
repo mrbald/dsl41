@@ -36,36 +36,43 @@ module adds, is the layer above:
 
 What is deliberately NOT here, and why:
 
-- **`run_id` is not bound before the attempt.** ss5 binds it atomically for
-  the reason a RELAY cannot see a run directory: it has only ids. Locally
-  `(job, run_number)` IS the identity -- `runs/<job>.<run_number>` is
-  created with `mkdir()` and no `exist_ok`, so a second spawn of one run
-  fails loudly rather than doubling -- so the outbox records the process
-  identity the spool reports, when it reports it. Binding it earlier is
-  S5d's, where a relay exists to need it.
+- ~~`run_id` is not bound before the attempt~~ -- **it is now** (DL-118,
+  period-model ss2.3, PR-36a). A SPAWN's `run_id` is minted inside the
+  step-7 decision transaction and rides in the durable effect, so the WAL,
+  the wrapper spec and the spool name ONE key: an engine that dies between
+  the durable effect and the spawn resumes knowing which identity the run
+  would have had, which is what ss11a's supervisor-index dedup keys on.
+  DL-96 deferred the binding "until the relay needs it"; the seal needed it
+  first. The mint stays out of `effect_id`, which remains derived -- replay
+  reconstructs the same outbox without trusting a uuid, and reads the
+  `run_id` back from the record instead of re-minting it.
 - **TERM and KILL are one effect, not two staged ids.** ss5 splits them so a
   relay can tell a retried TERM from a retried KILL. The adapter's ladder
   (TERM, grace, KILL) never yields to the engine between its stages, so
   there is no engine-visible state between them for a second id to name; a
   re-driven kill re-runs the whole ladder, and TERM to a dead group is a
   no-op. The split lands with the relay that needs it.
-- **A pending SPAWN is not re-driven at resume.** runner-design ss7 fails a
-  start with no spool trace rather than re-running it ("provably-never-ran
-  is still never re-executed silently"), and that is a semantic decision
-  DL-41a took deliberately. The outbox makes re-driving EXPRESSIBLE; whether
-  a takeover should re-drive rather than fail is ss7's barrier question and
-  belongs where leader election gives it a context.
+- ~~A pending SPAWN is not re-driven at resume~~ -- **it is now** (DL-102,
+  the takeover barrier). A durable pending SPAWN is committed intent, and
+  the barrier re-drives it through the same gates a fresh effect passes.
+  What DL-41a's "provably-never-ran is never re-executed silently" still
+  governs is the start with NO recorded intent: an admitted input whose
+  decision never landed planned nothing durable, and resume FAILS that run
+  loudly rather than re-deciding its effects after the fact.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
-from datetime import datetime
-from typing import Literal
+import re
 
-from pydantic import BaseModel, ConfigDict
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from datetime import datetime
+from typing import Final, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from dsl41.oracle_state import TERMINAL, Event, JobRuntime
+from dsl41.runner_clock import EngineError
 
 #: ss5's effect alphabet at this stage. SHUTDOWN is not here: it binds to a
 #: supervisor incarnation and a scheduler epoch, and neither is allocated
@@ -77,6 +84,20 @@ EffectKind = Literal["SPAWN", "KILL"]
 #: three states is that "we sent it and then died" is a fact, and reporting it
 #: as either success or failure invents one.
 OUTCOME_UNAVAILABLE = "outcome_unavailable"
+
+
+#: period-model ss11a pins `run_id` to a filename-safe grammar at the wire:
+#: the canonical uuid4 string form the adapter has always minted. Everything
+#: that WRITES or ACCEPTS a bound run_id checks it -- an empty or freehand
+#: string would survive presence checks and then lose to `or`-style
+#: fallbacks downstream, splitting the one key DL-118 exists to keep whole.
+RUN_ID_RE: Final = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+
+
+def is_valid_run_id(run_id: str) -> bool:
+    return RUN_ID_RE.fullmatch(run_id) is not None
 
 
 class Effect(BaseModel):
@@ -99,6 +120,17 @@ class Effect(BaseModel):
     #: effect back to the decision that wanted it
     index: int
     at: datetime
+    #: the run's process identity, minted IN the decision transaction for a
+    #: SPAWN (period-model ss2.3, PR-36a) and carried by the KILL of a run
+    #: this log spawned. None only on a record written before DL-118, or on
+    #: a KILL for such a run -- never from this writer's planner for a SPAWN.
+    run_id: str | None = None
+    #: the executor host row's generation, read at birth (PR-16): an effect
+    #: born before an eviction cannot pass for one born after it. None only
+    #: on a pre-DL-118 record. STRICT: the fold gate compares it to exactly
+    #: 0, and lax pydantic would wave `false`, `"0"` and `0.0` through that
+    #: comparison as coerced integers.
+    generation: int | None = Field(default=None, strict=True)
 
 
 class EffectOutcome(BaseModel):
@@ -109,8 +141,10 @@ class EffectOutcome(BaseModel):
 
     effect_id: str
     state: Literal["applied", "indeterminate", "retired"]
-    #: the process identity the spool named, once it names one. Recorded here
-    #: rather than bound before the attempt: see the module docstring.
+    #: the process identity the spool named, once it names one -- the
+    #: OBSERVED half. The intended half lives on the Effect since DL-118
+    #: (minted at birth); the two agree by construction on the live path and
+    #: this field remains what resume paths can actually read back.
     run_id: str | None = None
     detail: str | None = None
 
@@ -137,15 +171,85 @@ class Outbox:
         #: insertion order IS admission order, and ss5 makes per-run ordering
         #: mandatory: a KILL decided after a SPAWN must not overtake it.
         self._order: list[str] = []
+        #: the ss11a one-to-one ownership maps, both directions
+        self._run_ids: dict[tuple[str, int], str] = {}
+        self._runs_by_id: dict[str, tuple[str, int]] = {}
 
     def record(self, effect: Effect) -> None:
         """Note an intended effect. Idempotent on `effect_id`, because replay
-        meets the same record the live engine wrote."""
-        if effect.effect_id not in self._effects:
-            self._order.append(effect.effect_id)
+        meets the same record the live engine wrote.
+
+        Ownership is one-to-one in BOTH directions (period-model ss11a): one
+        `(job, run_number)` maps to one `run_id` and one `run_id` to one
+        `(job, run_number)`. The planner keeps that by construction -- a KILL
+        looks its run's id up from the SPAWN that bound it -- so a record
+        that breaks it (a KILL naming a different id than its run's SPAWN, or
+        one id claimed by two runs) is corruption or a foreign writer, and
+        acting on either half would act on the wrong process."""
+        existing = self._effects.get(effect.effect_id)
+        if existing is not None:
+            if existing != effect:
+                # `effect_id` is DERIVED, so two different effects under one
+                # id mean the log disagrees with itself -- and overwriting
+                # would let the later record silently replace the intent the
+                # earlier one recorded
+                raise EngineError(
+                    f"effect {effect.effect_id}: recorded twice with different"
+                    " content -- the log disagrees with itself (DL-118)"
+                )
+            return  # exact replay of the same record: a no-op
+        run = (effect.job, effect.run_number)
+        if effect.run_id is None:
+            bound = self._run_ids.get(run)
+            if bound is not None:
+                # the planner looks a KILL's id up from the SPAWN that bound
+                # it, so a NEW identity-less intent for an identified run was
+                # not planned by this code (DL-118)
+                raise EngineError(
+                    f"effect {effect.effect_id}: carries no run_id but"
+                    f" {effect.job}.{effect.run_number} is bound to {bound!r} -- an"
+                    " identity-less intent for an identified run (DL-118)"
+                )
+        if effect.run_id is not None:
+            bound = self._run_ids.get(run)
+            if bound is not None and bound != effect.run_id:
+                raise EngineError(
+                    f"effect {effect.effect_id}: names run_id {effect.run_id!r} but"
+                    f" {effect.job}.{effect.run_number} is bound to {bound!r} -- one run,"
+                    " one identity (DL-118)"
+                )
+            owner = self._runs_by_id.get(effect.run_id)
+            if owner is not None and owner != run:
+                raise EngineError(
+                    f"effect {effect.effect_id}: run_id {effect.run_id!r} already names"
+                    f" run {owner[0]}.{owner[1]} -- one identity, one run (DL-118)"
+                )
+            self._run_ids[run] = effect.run_id
+            self._runs_by_id[effect.run_id] = run
+        self._order.append(effect.effect_id)
         self._effects[effect.effect_id] = effect
 
     def resolve(self, outcome: EffectOutcome) -> None:
+        """Record what became of one attempt. STRICT on association: an
+        outcome for an effect this outbox never saw means the log lost the
+        record that said what was meant, and an outcome naming a different
+        run_id than its effect bound is a stranger's fate filed under this
+        run's intent -- both refuse (DL-118)."""
+        effect = self._effects.get(outcome.effect_id)
+        if effect is None:
+            raise EngineError(
+                f"outcome for unknown effect {outcome.effect_id!r}: the log lost the"
+                " record that said what was meant"
+            )
+        if (
+            effect.run_id is not None
+            and outcome.run_id is not None
+            and outcome.run_id != effect.run_id
+        ):
+            raise EngineError(
+                f"outcome for {outcome.effect_id} names run_id {outcome.run_id!r} but the"
+                f" effect bound {effect.run_id!r} -- a stranger's fate refused (DL-118)"
+            )
         self._outcomes[outcome.effect_id] = outcome
 
     def state_of(self, effect_id: str) -> str | None:
@@ -186,18 +290,29 @@ def plan_effects(
     *,
     index: int,
     executor_id: str,
+    generation: int,
     runs: Mapping[str, int],
     dispatched: Mapping[str, int],
     live: Mapping[str, int],
     dispatchable: frozenset[str],
+    run_ids: Mapping[tuple[str, int], str],
+    mint_run_id: Callable[[], str],
 ) -> list[Effect]:
     """The effects one applied input implies (ss4 step 7).
 
     A pure function of what the oracle emitted plus what the shell is
-    holding, so the same input plans the same effects on replay as it did
-    live. It decides INTENT only -- whether an intent is still desired when
-    its turn comes is `superseded_reason`'s question, asked at dispatch,
-    because the world moves between the two.
+    holding -- except the one deliberate impurity: a SPAWN's `run_id` comes
+    from `mint_run_id`, because identity is CREATED here, in the decision
+    transaction (PR-36a), and nowhere later. Replay is not exposed to the
+    mint: it never re-plans, it reads the outbox back from the records
+    (`Replay`), so the id a resumed engine acts on is the id the log holds.
+    A KILL carries the run's id from `run_ids` -- the (job, run_number) ->
+    run_id bindings this run root already made -- or None for a run a
+    pre-DL-118 journal spawned without one. `generation` is the executor
+    host row's CURRENT value (PR-16), one value because one call plans for
+    one executor. The function still decides INTENT only -- whether an
+    intent is still desired when its turn comes is `superseded_reason`'s
+    question, asked at dispatch, because the world moves between the two.
 
     Two filters keep un-appliable intent out of the log entirely. The
     ghost-run gate (`runs[job] > dispatched[job]`) is where it has always
@@ -232,6 +347,8 @@ def plan_effects(
                 executor_id=executor_id,
                 index=index,
                 at=ev.at,
+                run_id=mint_run_id() if kind == "SPAWN" else run_ids.get((job, run_number)),
+                generation=generation,
             )
         )
     return effects

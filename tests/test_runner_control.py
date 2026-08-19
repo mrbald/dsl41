@@ -80,7 +80,7 @@ def wait_for(predicate, timeout_s: float = 5.0, interval_s: float = 0.02):
     raise AssertionError(f"timed out after {timeout_s}s waiting for {predicate}")
 
 
-def _v2(request: dict) -> dict:
+def _versioned(request: dict) -> dict:
     """Stamp the protocol version unless the caller named one itself -- the
     same rule the shipped clients follow, so a test that DOES name one can
     still exercise the server's refusal (DL-90)."""
@@ -93,7 +93,7 @@ def _sync_control_call(sock_path: Path, request: dict, timeout: float = 5.0) -> 
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     conn.settimeout(timeout)
     conn.connect(str(sock_path))
-    conn.sendall(json.dumps(_v2(request)).encode("utf-8") + b"\n")
+    conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = conn.recv(65536)
@@ -109,7 +109,7 @@ async def _control_call(sock_path: Path, request: dict) -> dict:
     spec: 'Connect with asyncio.open_unix_connection')."""
     reader, writer = await asyncio.open_unix_connection(str(sock_path))
     try:
-        writer.write(json.dumps(_v2(request)).encode("utf-8") + b"\n")
+        writer.write(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
         await writer.drain()
         line = await reader.readline()
         return json.loads(line)
@@ -307,10 +307,13 @@ def test_change_status_bad_status_rejected_valid_status_updates_the_store(short_
             bad = await _sendevent(server.path, "CHANGE_STATUS", job="cs_job", status="BOGUS")
             assert bad["ok"] is False
 
-            good = await _sendevent(server.path, "CHANGE_STATUS", job="cs_job",
-                    status="SUCCESS",
-                    exit_code=0,
-                )
+            good = await _sendevent(
+                server.path,
+                "CHANGE_STATUS",
+                job="cs_job",
+                status="SUCCESS",
+                exit_code=0,
+            )
             assert good["ok"] is True
 
             async def updated() -> bool:
@@ -668,7 +671,9 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
 
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             try:
-                writer.write(json.dumps(_v2({"cmd": "subscribe", "since": 0})).encode() + b"\n")
+                writer.write(
+                    json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
+                )
                 await writer.drain()
                 ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
                 assert ack == {"ok": True, "subscribed": True}
@@ -1313,14 +1318,20 @@ def test_change_status_on_declared_xinst_ghost_satisfies_a_cross_instance_atom(
         adapter = FakeAdapter(default=(0.05, 0))
         engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
         try:
-            refused = await _sendevent(server.path, "CHANGE_STATUS", job="FEED^NOPE",
-                    status="SUCCESS",
-                )
+            refused = await _sendevent(
+                server.path,
+                "CHANGE_STATUS",
+                job="FEED^NOPE",
+                status="SUCCESS",
+            )
             assert refused["ok"] is False
 
-            resp = await _sendevent(server.path, "CHANGE_STATUS", job="FEED^PRD",
-                    status="SUCCESS",
-                )
+            resp = await _sendevent(
+                server.path,
+                "CHANGE_STATUS",
+                job="FEED^PRD",
+                status="SUCCESS",
+            )
             assert resp["ok"] is True
 
             async def dep_fired() -> bool:

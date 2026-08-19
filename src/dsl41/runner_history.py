@@ -2,10 +2,11 @@
 
 `docs/runner-design.md` ss7 lists every record the journal ever writes; this
 module invents none of them. It reads what is already there -- `dispatch`,
-the `input` records the ss4 stale-completion gate journals, `effect`, and the
-run root's manifest/spool -- and folds them into one row per job run: "how
-long did it take, run after run, and did it change." Offline only: no
-engine, no control socket, no new verb on the wire.
+the `input` records the ss4 stale-completion gate journals, the effects
+nested in each `decision`, and the run root's manifest/spool -- and folds
+them into one row per job run: "how long did it take, run after run, and
+did it change." Offline only: no engine, no control socket, no new verb on
+the wire.
 
 Two layers, deliberately split so the fold stays testable with no
 filesystem: `fold_run_rows` is a pure function of already-parsed journal
@@ -378,6 +379,18 @@ def _leaf_status(
     return "RUNNING", None
 
 
+def _note_executor(effect: Mapping[str, Any], executor_by_key: dict[tuple[str, int], str]) -> None:
+    """Bind one run to the host its SPAWN named. One function for both
+    dialects: a nested effect inside a `decision` and a pre-DL-118 standalone
+    `effect` record carry the same fields, so reading them twice differently
+    is how the two would drift."""
+    if effect.get("kind") != "SPAWN":
+        return
+    job, run_number = effect.get("job"), effect.get("run_number")
+    if isinstance(job, str) and isinstance(run_number, int):
+        executor_by_key[(job, run_number)] = str(effect.get("executor_id"))
+
+
 def _leaf_rows(
     records: list[dict[str, Any]],
     catalog: CatalogIR | None,
@@ -424,10 +437,13 @@ def _leaf_rows(
                 "at": record["at"],
                 "source": record.get("source"),
             }
-        elif rec == "effect" and record.get("kind") == "SPAWN":
-            e_job, e_run = record.get("job"), record.get("run_number")
-            if isinstance(e_job, str) and isinstance(e_run, int):
-                executor_by_key[(e_job, e_run)] = str(record.get("executor_id"))
+        elif rec == "decision":
+            # the executor a run was bound to rides on the SPAWN effect inside
+            # the decision that planned it (DL-118)
+            for effect in record.get("effects") or []:
+                _note_executor(effect, executor_by_key)
+        elif rec == "effect":
+            _note_executor(record, executor_by_key)  # pre-DL-118 dialect
 
     rows: list[RunRow] = []
     for key in order:
@@ -527,14 +543,24 @@ def fold_run_rows(
 # ------------------------------------------------------------- I/O: the spool
 
 
-def read_spool(run_dir: Path, job: str, run_number: int) -> SpoolRead | None:
+def read_spool(
+    run_dir: Path, job: str, run_number: int, bound_run_id: str | None = None
+) -> SpoolRead | None:
     """One run's spool, read and validated against (job, run_number) --
     supervisor-protocol ss3's frozen spawn.json/status.json shapes. None
     when spawn.json is missing, unparseable, or names a different run
     (never trust a spoofed or pruned record, same rule
-    `runner_adapters.resolve_spool` applies live)."""
+    `runner_adapters.resolve_spool` applies live).
+
+    `bound_run_id` is the identity the run's durable SPAWN minted (DL-118):
+    when known, a spool record naming a different `run_id` is a stranger's
+    -- its timings would be reported as this run's -- and reads as ABSENT.
+    Absent, not refused: this is offline reporting, and one corrupt
+    directory should cost one row's timings, not the whole report."""
     spawn = load_json(run_dir / "spawn.json")
     if spawn is None or spawn.get("job") != job or spawn.get("run_number") != run_number:
+        return None
+    if bound_run_id is not None and spawn.get("run_id") != bound_run_id:
         return None
     raw_started = spawn.get("started_at")
     if not isinstance(raw_started, str):
@@ -543,13 +569,30 @@ def read_spool(run_dir: Path, job: str, run_number: int) -> SpoolRead | None:
     ended_at = None
     status = load_json(run_dir / "status.json")
     if status is not None and status.get("job") == job and status.get("run_number") == run_number:
-        raw_ended = status.get("ended_at")
-        if isinstance(raw_ended, str):
-            ended_at = _parse_timestamp(raw_ended)
+        if bound_run_id is None or status.get("run_id") == bound_run_id:
+            raw_ended = status.get("ended_at")
+            if isinstance(raw_ended, str):
+                ended_at = _parse_timestamp(raw_ended)
     return SpoolRead(started_at=started_at, ended_at=ended_at)
 
 
+def _bound_run_ids(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
+    """(job, run_number) -> the run_id its durable SPAWN bound, from the
+    decisions in the log (DL-118). Empty for a pre-DL-118 journal."""
+    bound: dict[tuple[str, int], str] = {}
+    for record in records:
+        if record.get("rec") != "decision":
+            continue
+        for effect in record.get("effects") or []:
+            if effect.get("kind") == "SPAWN" and effect.get("run_id") is not None:
+                bound[(str(effect.get("job")), int(effect.get("run_number", 0)))] = str(
+                    effect.get("run_id")
+                )
+    return bound
+
+
 def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], SpoolRead]:
+    bound = _bound_run_ids(records)
     spool: dict[tuple[str, int], SpoolRead] = {}
     for record in records:
         if record.get("rec") != "dispatch":
@@ -558,7 +601,7 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
         run_dir = record.get("run_dir")
         if not isinstance(run_dir, str):
             continue
-        found = read_spool(Path(run_dir), job, run_number)
+        found = read_spool(Path(run_dir), job, run_number, bound.get((job, run_number)))
         if found is not None:
             spool[(job, run_number)] = found
     return spool

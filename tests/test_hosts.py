@@ -594,13 +594,16 @@ def test_status_publishes_a_held_job(short_root: Path) -> None:
                     "payload": {"job": "j"},
                     "expect": {
                         "job:j": revision_in(
-                            await _call(server.path, {"cmd": "status", "job": "j", "v": 2}), "job:j"
+                            await _call(
+                                server.path, {"cmd": "status", "job": "j", "v": PROTOCOL_VERSION}
+                            ),
+                            "job:j",
                         )
                     },
                 },
             )
             assert start["ok"] is True
-            status = await _call(server.path, {"cmd": "status", "job": "j", "v": 2})
+            status = await _call(server.path, {"cmd": "status", "job": "j", "v": PROTOCOL_VERSION})
             # RUNNING, with no process: status alone cannot tell an operator
             # that, which is the whole reason `held` is published
             assert status["jobs"]["j"]["status"] == "RUNNING"

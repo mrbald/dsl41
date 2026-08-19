@@ -350,6 +350,7 @@ async def _reconcile(
     for key in supervised_live:
         candidates.setdefault(key, None)
 
+    _preflight_identities(engine, candidates, supervised_live)
     _reconcile_applied_spawns(engine, candidates)
 
     for (job, run_number), run_dir in sorted(candidates.items()):
@@ -365,7 +366,8 @@ async def _reconcile(
             if isinstance(cmd_adapter, SupervisedCommandAdapter):
                 # REATTACH: the run's parent (the supervisor) never died, so it
                 # never stopped -- the adapter task just awaits its exit push,
-                # NO reconciliation injection (spec ss3)
+                # NO reconciliation injection (spec ss3). The LIST row's
+                # identity was checked against the WAL by the preflight.
                 cmd_adapter.reattach[(job, run_number)] = str(reattach["run_id"])
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
@@ -384,6 +386,11 @@ async def _reconcile(
                 )
             engine._launch(job_ir, run_number, adapter)  # idempotent read
             continue
+        # the ladder resolves this run's fate from its directory; the
+        # directory's claim to BE this run's was checked by the preflight,
+        # and the bound id rides along so a record that appears BETWEEN the
+        # preflight and this read is held to the same identity
+        bound = _spawn_effect_for(engine, job, run_number)
         result, ended_at = await resolve_spool(
             job,
             run_number,
@@ -391,6 +398,7 @@ async def _reconcile(
             boot_now,
             settle_seconds=settle_seconds,
             grace_seconds=grace_seconds,
+            expected_run_id=bound.run_id if bound is not None else None,
         )
         extras: dict[str, object]
         if isinstance(result, int):
@@ -492,6 +500,73 @@ def _resume_untraced_starts(
         )
 
 
+def _spawn_effect_for(engine: Engine, job: str, run_number: int) -> Effect | None:
+    """The durable SPAWN that bound this run's identity, in any state --
+    resolved included, because the split to refuse is between the WAL and
+    what a spool or a supervisor claims NOW, and resolution does not expire
+    the binding."""
+    return next(
+        (
+            e
+            for e in engine.outbox.effects()
+            if e.kind == "SPAWN" and (e.job, e.run_number) == (job, run_number)
+        ),
+        None,
+    )
+
+
+def _refuse_identity_split(effect: Effect, observed: object, source: str) -> None:
+    """One key runs through the WAL and the spool (DL-118, PR-36a): the
+    durable effect bound this run's `run_id` at birth, so PRESENT evidence
+    about the run must name that id. A different id -- or none, where a
+    new-writer wrapper always records one -- is a WAL/spool split:
+    corruption, a spoofed record, or a directory from another estate, and
+    reattaching to, resolving, or killing that process would act on a run
+    the log never spawned. Refused loudly rather than reconciled: there is
+    no correct pick between two identities for one run. Callers pass only
+    evidence that EXISTS -- an absent file is the ladder's business, not a
+    split. A pre-DL-118 effect has no bound id and checks nothing."""
+    if effect.run_id is None:
+        return
+    observed_id = str(observed) if observed is not None else None
+    if observed_id != effect.run_id:
+        raise EngineError(
+            f"{effect.job}.{effect.run_number}: {source} reports run_id"
+            f" {observed_id!r} but the durable effect bound {effect.run_id!r}"
+            " -- refusing to act on a run the log did not spawn (DL-118)"
+        )
+
+
+def _preflight_identities(
+    engine: Engine,
+    candidates: dict[tuple[str, int], Path | None],
+    supervised_live: dict[tuple[str, int], dict[str, Any]],
+) -> None:
+    """Check EVERY candidate's observed identities against the WAL before
+    the barrier mutates anything (DL-118). One sweep, up front, because the
+    branch-by-branch alternative had ordering holes by construction: a
+    reconciliation that durably recorded `applied` before a later branch
+    refused the same run left the refusal half-taken, and a dead LIST row
+    with no local directory reached `resolve_spool` through a branch no
+    guard covered. A refusal here has appended nothing and launched
+    nothing -- the run root is exactly as the crash left it."""
+    for (job, run_number), run_dir in sorted(candidates.items()):
+        effect = _spawn_effect_for(engine, job, run_number)
+        if effect is None or effect.run_id is None:
+            continue
+        directory = run_dir
+        if directory is None and engine.run_root is not None:
+            directory = engine.run_root / "runs" / f"{job}.{run_number}"
+        if directory is not None:
+            for name in ("spawn.json", "status.json"):
+                doc = load_json(directory / name)
+                if doc is not None:
+                    _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
+        listing = supervised_live.get((job, run_number))
+        if listing is not None:  # alive or dead: a row is a claim either way
+            _refuse_identity_split(effect, listing.get("run_id"), "the supervisor's LIST")
+
+
 def _reconcile_applied_spawns(
     engine: Engine, candidates: dict[tuple[str, int], Path | None]
 ) -> None:
@@ -587,6 +662,8 @@ def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
     FORENSICS about how the group died rather than as its verdict."""
     run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
     status = load_json(run_dir / "status.json")
+    if status is not None:
+        _refuse_identity_split(effect, status.get("run_id"), "the spool's status.json")
     if status is None:
         return EffectOutcome(
             effect_id=effect.effect_id,

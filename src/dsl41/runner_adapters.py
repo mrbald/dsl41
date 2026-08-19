@@ -91,12 +91,19 @@ class AdapterContext:
     """What an adapter may touch (ss6): the clock, and in the real domain
     the run-root layout (runs/, logs/) plus the WAL for dispatch records.
     `detach` distinguishes a detach-stop from an oracle-decided kill in the
-    detached CMD path (ss3 case b vs a)."""
+    detached CMD path (ss3 case b vs a). `run_id` is the identity the
+    decision minted for this spawn (DL-118, PR-36a): the wrapper spec
+    carries it onward, so the WAL, the spool and every later reader name
+    ONE key. None on the paths with no effect behind them -- FW
+    re-dispatch, detached reattach -- and for a SPAWN re-driven from a
+    pre-DL-118 journal, where the adapter minting its own is the old
+    behaviour kept."""
 
     clock: Clock
     run_root: Path | None = None
     journal: Journal | None = None
     detach: DetachSignal | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -247,7 +254,12 @@ def _build_run_spec(
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
         "version": _wrapper.SPEC_VERSION,
-        "run_id": str(uuid.uuid4()),
+        # the decision's mint when there is one (PR-36a); the local fallback
+        # covers only the effect-less and pre-DL-118 paths (AdapterContext).
+        # `is None`, never falsy: an empty-string id (which the journal
+        # gates refuse anyway) must fail loudly downstream rather than
+        # silently become a second, minted identity
+        "run_id": ctx.run_id if ctx.run_id is not None else str(uuid.uuid4()),
         "job": job_ir.name,
         "run_number": run_number,
         "command": command,
@@ -321,7 +333,7 @@ class LocalCommandAdapter:
                     )
                 await proc.wait()
             except asyncio.CancelledError:
-                await self._kill(run_dir, proc)
+                await self._kill(run_dir, proc, str(spec["run_id"]))
                 raise
             status = load_json(run_dir / "status.json")
             if status is None:
@@ -331,14 +343,23 @@ class LocalCommandAdapter:
                     f"exit_status_unobservable (wrapper exited rc={proc.returncode}"
                     " without a status record)"
                 )
-            return outcome_from_status(status)
+            # the exclusive mkdir owned the directory at CREATION; the fate
+            # file is written later, so it is held to the run's identity like
+            # every other status consumption (DL-118)
+            return outcome_from_status(_named(status, str(spec["run_id"]), job_ir.name, run_number))
         finally:
             os.close(lifeline_w)
 
-    async def _kill(self, run_dir: Path, proc: asyncio.subprocess.Process) -> None:
+    async def _kill(self, run_dir: Path, proc: asyncio.subprocess.Process, run_id: str) -> None:
         """The oracle decided terminal: signal the command pgid (never the
         wrapper -- the recorder is untouchable), escalate after grace, then
-        wait for the wrapper to record and exit."""
+        wait for the wrapper to record and exit.
+
+        The record that NAMES the group to signal is held to this run's
+        identity first (DL-118): the pid-reuse token proves the process the
+        record describes is alive, not that it is OURS, and a spoofed
+        record with a live foreign token would otherwise aim the kill at a
+        stranger's process group."""
         if proc.stdin is not None:
             proc.stdin.close()  # a wrapper still reading its spec must not hang
         spawn = None
@@ -348,6 +369,12 @@ class LocalCommandAdapter:
             if spawn is not None or proc.returncode is not None:
                 break
             await asyncio.sleep(0.05)
+        if spawn is not None and spawn.get("run_id") != run_id:
+            raise EngineError(
+                f"{run_dir.name}: spawn.json reports run_id {spawn.get('run_id')!r} but"
+                f" this run is {run_id!r} -- refusing to signal a stranger's process"
+                " group (DL-118)"
+            )
         if spawn is None:
             # only reachable when the wrapper died or is frozen pre-record
             # (test pauses); the lifeline tether covers the residue -- wait
@@ -968,7 +995,7 @@ class SupervisedCommandAdapter:
                     break  # the supervisor itself is unreachable -> spool below
                 status = load_json(status_path)
                 if status is not None:
-                    return outcome_from_status(status)
+                    return outcome_from_status(_named(status, run_id, job, run_number))
                 lost_wait = asyncio.ensure_future(self.client.lost.wait())
                 exit_wait = asyncio.ensure_future(asyncio.shield(fut))
                 try:
@@ -983,7 +1010,7 @@ class SupervisedCommandAdapter:
                 if fut.done() and not fut.cancelled():
                     status = load_json(status_path)
                     if status is not None:
-                        return outcome_from_status(status)
+                        return outcome_from_status(_named(status, run_id, job, run_number))
                     rc = (fut.result() or {}).get("wrapper_rc")
                     return Failed(  # PENDING: E7
                         f"exit_status_unobservable (wrapper exited rc={rc} without a status record)"
@@ -1001,6 +1028,7 @@ class SupervisedCommandAdapter:
             _procid.current_boot_id(),
             settle_seconds=self.settle_seconds,
             grace_seconds=self.grace_seconds,
+            expected_run_id=run_id,
         )
         return result
 
@@ -1062,6 +1090,20 @@ class SupervisedCommandAdapter:
             self.client.forget_exit(run_id)
 
 
+def _named(status: dict[str, Any], run_id: str, job: str, run_number: int) -> dict[str, Any]:
+    """A status record is consumed as a run's FATE, so it must name the run
+    (DL-118): the detached path awaits an outcome by `run_id`, and a record
+    carrying a different one is a stranger's -- corruption or a spoof --
+    refused before `outcome_from_status` turns it into this job's verdict."""
+    if status.get("run_id") != run_id:
+        raise EngineError(
+            f"{job}.{run_number}: status.json reports run_id {status.get('run_id')!r}"
+            f" but this run is {run_id!r} -- refusing to consume a stranger's fate"
+            " (DL-118)"
+        )
+    return status
+
+
 async def resolve_spool(
     job: str,
     run_number: int,
@@ -1070,18 +1112,45 @@ async def resolve_spool(
     *,
     settle_seconds: float,
     grace_seconds: float,
+    expected_run_id: str | None = None,
 ) -> tuple[AdapterResult, datetime | None]:
     """Resolve one incomplete CMD run from its spool directory, walking the
-    ss7 ladder top to bottom. Returns (outcome, true ended_at if known)."""
+    ss7 ladder top to bottom. Returns (outcome, true ended_at if known).
+
+    `expected_run_id` is the identity the durable effect bound (DL-118):
+    when given, a spool record naming a DIFFERENT run_id refuses loudly
+    before its fate is consumed. Loud, not dropped like the (job,
+    run_number) spoof below: dropping would read the stranger's presence as
+    this run's absence and fabricate "dispatch lost". None means no bound
+    identity exists to check -- a pre-DL-118 chain, or a caller (tests, the
+    ladder for a legacy run) with nothing to expect."""
     if run_dir is None or not run_dir.is_dir():
         return Failed("dispatch lost to engine crash (run directory missing)"), None
     status_path = run_dir / "status.json"
-    spawn = load_json(run_dir / "spawn.json")
+
+    def _checked(name: str, doc: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The identity gate, applied to the RAW document at every load --
+        before the tuple filter (a wrong-tuple wrong-id record must refuse,
+        not be cleared into a fabricated absence) and on every settle-window
+        reload (the first load being absent must not exempt the last)."""
+        if expected_run_id is not None and doc is not None and doc.get("run_id") != expected_run_id:
+            raise EngineError(
+                f"{job}.{run_number}: the spool's {name} reports run_id"
+                f" {doc.get('run_id')!r} but the durable effect bound"
+                f" {expected_run_id!r} -- refusing to consume a stranger's fate"
+                " (DL-118)"
+            )
+        return doc
+
+    def _load_status() -> dict[str, Any] | None:
+        return _checked("status.json", load_json(status_path))
+
+    spawn = _checked("spawn.json", load_json(run_dir / "spawn.json"))
     if spawn is not None and not (
         spawn.get("job") == job and spawn.get("run_number") == run_number
     ):
         spawn = None  # spoofed/corrupt spawn record: never trust, never signal
-    status = load_json(status_path)
+    status = _load_status()
     if status is None and spawn is not None and spawn.get("boot_id") == boot_now:
         # same boot: liveness checks mean something (DL-42 item 5)
         wrapper_pid = spawn.get("wrapper_pid")
@@ -1095,11 +1164,11 @@ async def resolve_spool(
             # give its status.json a settle window
             deadline = time.monotonic() + settle_seconds + grace_seconds
             while time.monotonic() < deadline:
-                status = load_json(status_path)
+                status = _load_status()
                 if status is not None:
                     break
                 if not _procid.verify_alive(wrapper_pid, wrapper_token):
-                    status = load_json(status_path)  # one last read after death
+                    status = _load_status()  # one last read after death
                     break
                 await asyncio.sleep(0.1)
         if status is None:

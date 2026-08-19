@@ -28,7 +28,10 @@ import signal
 import subprocess
 import sys
 import time
+import os
+import uuid
 from datetime import UTC, datetime, timedelta
+
 from pathlib import Path
 
 import pytest
@@ -436,6 +439,60 @@ def test_bogus_adapter_result_raises_engine_error_loudly() -> None:
 
 
 # ------------------------------------------------- 5. process-identity units
+
+
+def test_pr36a_the_wrapper_spec_carries_the_decision_minted_run_id(tmp_path: Path) -> None:
+    """The one seam between the WAL and the spool (DL-118, period-model
+    ss2.3): the durable effect minted `run_id`, and `_build_run_spec` must
+    hand THAT id to the wrapper, or the log and the run directory would name
+    the same process two ways. The fallback mint exists only for the paths
+    with no effect behind them (AdapterContext docstring)."""
+    from dsl41.runner_adapters import AdapterContext, _build_run_spec
+
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
+    job_ir = catalog.jobs["j"]
+    bound = AdapterContext(
+        clock=VirtualClock(start=T0), run_root=tmp_path / "a", run_id="rid-from-effect"
+    )
+    _, spec = _build_run_spec(job_ir, 1, bound, grace_seconds=1.0)
+    assert spec["run_id"] == "rid-from-effect"
+
+    unbound = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path / "b")
+    _, legacy = _build_run_spec(job_ir, 1, unbound, grace_seconds=1.0)
+    assert uuid.UUID(legacy["run_id"]).version == 4  # effect-less path still mints
+
+    # the fallback keys on `is None`, never on falsiness: an empty id (which
+    # the journal gates refuse anyway) must fail loudly downstream rather
+    # than silently become a second, minted identity
+    empty = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path / "c", run_id="")
+    _, spec_empty = _build_run_spec(job_ir, 1, empty, grace_seconds=1.0)
+    assert spec_empty["run_id"] == ""
+
+
+def test_a_kill_refuses_a_spawn_record_naming_a_stranger(tmp_path: Path) -> None:
+    """DL-118 at the sharpest edge: the spawn record names the process group
+    the kill will signal, and the pid-reuse token proves that group is
+    ALIVE, not that it is ours. A spoofed record with a live foreign token
+    would aim the kill at a stranger's processes -- refused on identity
+    before any process field is read."""
+    from dsl41.runner_adapters import LocalCommandAdapter
+
+    run_dir = tmp_path / "j.1"
+    run_dir.mkdir()
+    (run_dir / "spawn.json").write_text(
+        json.dumps({"run_id": "rid-else", "command_pid": os.getpid(), "command_pgid": os.getpid()})
+    )
+
+    class _Proc:
+        stdin = None
+        returncode: int | None = None
+
+    async def scenario() -> None:
+        adapter = LocalCommandAdapter(grace_seconds=0.1)
+        with pytest.raises(EngineError, match="stranger's process group"):
+            await adapter._kill(run_dir, _Proc(), "rid-wal")  # type: ignore[arg-type]
+
+    asyncio.run(scenario())
 
 
 def test_durable_write_leaves_no_temp_file_and_content_matches(tmp_path: Path) -> None:

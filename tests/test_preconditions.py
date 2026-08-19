@@ -198,11 +198,11 @@ def test_epoch_is_required_rather_than_defaulted() -> None:
 
 
 def test_an_unversioned_or_wrongly_versioned_request_is_refused() -> None:
-    for bad in (None, 1, "2", 3):
+    for bad in (None, 1, 2, "3", 4):
         request = _request(v=bad)
         if bad is None:
             del request["v"]
-        with pytest.raises(EnvelopeError, match="this engine speaks v2"):
+        with pytest.raises(EnvelopeError, match="this engine speaks v3"):
             parse_envelope(request, addressed="job:j", baseline_id="the-log")
 
 
@@ -471,7 +471,7 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
     records = read_journal(tmp_path / "run" / "journal.jsonl")
     ids = [r.get("request_id") for r in records if r.get("rec") == "input"]
     assert ids.count("keeps-its-index") == 1  # the rejection; the refusal is absent
-    result = next(r for r in records if r.get("rec") == "result" and r["decision"] == "rejected")
+    result = next(r for r in records if r.get("rec") == "decision" and r["decision"] == "rejected")
     assert "precondition failed" in result["reason"]
     # the attempt records what it was composed against, so replay can re-run
     # the same gate against the same claim
@@ -519,9 +519,7 @@ def test_an_unseen_request_at_a_stale_epoch_is_refused() -> None:
     async def scenario() -> Engine:
         engine = _engine()
         engine.epoch = 7
-        future = engine.submit(
-            _ev("ON_HOLD", 1, job="j"), _envelope("r1", "job:j", 0, epoch=3)
-        )
+        future = engine.submit(_ev("ON_HOLD", 1, job="j"), _envelope("r1", "job:j", 0, epoch=3))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         with pytest.raises(AdmissionRefused, match="epoch 3 is not this leader's 7"):
             await future
@@ -620,8 +618,8 @@ def test_an_admitted_precondition_with_no_result_re_runs_the_gate(tmp_path: Path
     asyncio.run(scenario())
     path = tmp_path / "run" / "journal.jsonl"
     records = read_journal(path)
-    # cut the last result record: the crash landed between steps 4 and 7
-    torn = [r for r in records if not (r.get("rec") == "result" and r["index"] == 2)]
+    # cut the last decision record: the crash landed between steps 4 and 7
+    torn = [r for r in records if not (r.get("rec") == "decision" and r["index"] == 2)]
     path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in torn))
 
     fresh = Oracle(lower_source(_SOLO_JIL))
@@ -704,10 +702,11 @@ def test_every_door_refuses_an_unversioned_caller(short_root: Path) -> None:
                 {"cmd": "sendevent", "verb": "ON_HOLD", "payload": {"job": "j"}},
                 {"cmd": "subscribe", "since": 0},
                 {"cmd": "status", "v": 1},
+                {"cmd": "status", "v": 2},  # gone, not deprecated (DL-118)
             ):
                 answer = await _call(server.path, request)
                 assert answer["ok"] is False
-                assert "this engine speaks v2" in answer["error"]
+                assert "this engine speaks v3" in answer["error"]
             # the connection stays usable: a refusal is not a hangup
             good = await _call(server.path, {"cmd": "status", "v": PROTOCOL_VERSION})
             assert good["ok"] is True
@@ -971,9 +970,7 @@ def test_the_journal_records_what_the_caller_claimed_to_be(short_root: Path) -> 
 
     asyncio.run(scenario())
     record = next(
-        r
-        for r in read_journal(run_root / "journal.jsonl")
-        if r.get("request_id") == "claim-1"
+        r for r in read_journal(run_root / "journal.jsonl") if r.get("request_id") == "claim-1"
     )
     assert record["claimed_actor"] == "not-really-root@somewhere"
     assert record["expect"] == {"job:j": 0}
@@ -1226,7 +1223,7 @@ def test_a_retry_under_the_original_id_applies_nothing_twice(short_root: Path) -
         r for r in read_journal(run_root / "journal.jsonl") if r.get("request_id") == "operator-2"
     ]
     # one admission and one decision -- the retry added neither
-    assert [r["rec"] for r in records] == ["input", "result"]
+    assert [r["rec"] for r in records] == ["input", "decision"]
 
 
 def test_the_shell_can_read_the_revision_its_expect_has_to_name(short_root: Path) -> None:

@@ -1010,29 +1010,44 @@ def _decided_kill(run_root: Path, *, with_effect: bool) -> None:
     is the same technique DL-83's spawn-window test uses -- recreate the
     exact state, then assert on the answer.
 
-    No `result` record: an attempt admitted without one IS the crash window
-    (ss4), and replay re-decides it through the gate, so nothing here has to
-    guess the revisions the decision moved."""
+    Since DL-118 an intent has no record of its own, so the constructed state
+    is the admitted input plus the `decision` that planned the kill. The
+    `with_effect=False` twin is the SAME decision with an empty `effects`
+    list -- identical in every other respect, which is what makes the
+    contrast about the recorded intent and nothing else.
+
+    The revisions the decision moved are derived, not guessed: CM-02 is one
+    increment per entity per committed input, so the kill takes `job:slow`
+    one past wherever the log left it. A wrong number does not pass quietly
+    -- replay refuses a decision whose revisions this build cannot
+    reproduce."""
     records = read_journal(run_root / "journal.jsonl")
     seq = max(r["seq"] for r in records if "seq" in r) + 1
     at = max(r["at"] for r in records if "at" in r)
-    appended: list[dict] = [
-        {
-            "rec": "input",
-            "seq": seq,
-            "at": at,
-            "request_id": f"kill-{seq}",
-            "fingerprint": "",  # absent/empty: read_attempts synthesizes it
-            "epoch": 0,
-            "kind": "KILLJOB",
-            "payload": {"job": "slow"},
-            "source": "control",
-        }
-    ]
-    if with_effect:
-        appended.append(
+    revision = (
+        max(
+            (
+                int(r["revisions"]["job:slow"])
+                for r in records
+                if r.get("rec") == "decision" and "job:slow" in (r.get("revisions") or {})
+            ),
+            default=0,
+        )
+        + 1
+    )
+    # the id the run's SPAWN bound (DL-118): the real planner looks a KILL's
+    # run_id up from the outbox, so the constructed decision must too -- a
+    # null one for a bound run is refused as an identity-less intent
+    bound = next(
+        e["run_id"]
+        for r in records
+        if r.get("rec") == "decision"
+        for e in r.get("effects") or []
+        if e["kind"] == "SPAWN" and (e["job"], e["run_number"]) == ("slow", 1)
+    )
+    effects = (
+        [
             {
-                "rec": "effect",
                 "effect_id": f"e{seq}:KILL:slow.1",
                 "kind": "KILL",
                 "job": "slow",
@@ -1040,9 +1055,40 @@ def _decided_kill(run_root: Path, *, with_effect: bool) -> None:
                 "executor_id": "local",
                 "index": seq,
                 "at": at,
+                # a native decision names identity at birth (DL-118)
+                "generation": 0,
+                "run_id": bound,
             }
-        )
-    _append_records(run_root, appended)
+        ]
+        if with_effect
+        else []
+    )
+    _append_records(
+        run_root,
+        [
+            {
+                "rec": "input",
+                "seq": seq,
+                "at": at,
+                "request_id": f"kill-{seq}",
+                "fingerprint": "",  # absent/empty: read_attempts synthesizes it
+                "epoch": 0,
+                "kind": "KILLJOB",
+                "payload": {"job": "slow"},
+                "source": "control",
+            },
+            {
+                "rec": "decision",
+                "index": seq,
+                "request_id": f"kill-{seq}",
+                "decision": "applied",
+                "reason": None,
+                "revisions": {"job:slow": revision},
+                "legacy_batch": False,
+                "effects": effects,
+            },
+        ],
+    )
 
 
 async def _resume_and_watch(run_root: Path, command_pid: int) -> bool:
@@ -1130,7 +1176,7 @@ def test_a_recorded_kill_is_delivered_after_the_engine_that_decided_it_died(
 def test_without_the_recorded_kill_the_run_is_orphaned(short_root: Path) -> None:
     """The contrast that makes the test above non-vacuous, and the exact
     behaviour before the outbox: identical journal, identical resume, minus
-    the one record that says a kill was meant. The process survives."""
+    the one entry that says a kill was meant. The process survives."""
     assert _kill_decided_before_the_crash(short_root, with_effect=False) is True
 
 

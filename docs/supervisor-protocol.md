@@ -46,7 +46,7 @@ stdlib-only.
 ```json
 {
   "version": 1,
-  "run_id": "uuid4 string, minted by the spawner",
+  "run_id": "uuid4 string, from the decision that planned the SPAWN (DL-118); the spawner mints only on effect-less paths",
   "job": "job name",
   "run_number": 3,
   "command": "exact /bin/sh -c command line (profile already composed)",

@@ -20,10 +20,21 @@ Stage S2 (concurrency-model ss4) made this log a two-record ledger without
 changing what an input record means. An `input`/`advance` record IS the
 `InputAttempt` -- one line, so the batch it carries cannot be torn in half
 by a crash -- and it now names its `request_id` and `fingerprint`. A
-`result` record carries the decision that attempt got, appended after it,
+`decision` record carries the decision that attempt got, appended after it,
 which is what makes replay two-pass: pass one indexes the decisions, pass
-two applies. An attempt whose result never landed is applied, through the
+two applies. An attempt whose decision never landed is applied, through the
 same gate the live engine used (concurrency-model ss4, runner_admission).
+
+DL-118 (period-model ss2.3) made the second half of that pair ONE line too.
+It used to be a `result` record plus one standalone `effect` record per
+intent, each its own `_write` and its own fsync, and the window between
+them was the atomicity violation ss4 step 7 forbids: the decision durable,
+the process dead before the KILL effect was written, recovery finding every
+attempt decided and an empty outbox. A `decision` record now carries the
+decision, the revisions it moved and the effects it planned, in admission
+order, in one write. `result` and standalone `effect` are RETIRED: nothing
+here writes them, and both readers still accept them, because a run root
+written before DL-118 must keep replaying, resuming and reporting.
 
 Stage S6a (concurrency-model ss1/ss7) makes it a LEDGER rather than only a
 log. A `leader` record allocates this incarnation's epoch by being
@@ -47,6 +58,7 @@ import os
 import socket
 import uuid
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -65,7 +77,9 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import EngineError
-from dsl41.runner_effects import Effect, EffectOutcome, Outbox
+from pydantic import ValidationError
+
+from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock
 
@@ -110,6 +124,7 @@ class Journal:
         lock: LeaderLock | None = None,
     ) -> None:
         self.path = Path(path)
+        _repair_tail(self.path)
         self._f = self.path.open("ab")
         os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
         self._fsync_each = fsync_each
@@ -220,38 +235,69 @@ class Journal:
             record["claimed_actor"] = attempt.claimed_actor
         self._write(record)
 
-    def result(self, result: ApplyResult) -> None:
-        """Append the decision an admitted attempt got (ss4 step 7). Written
-        unconditionally, including for an application that changed nothing:
-        the absence of a result is how replay recognises the crash window,
-        so an absence that also meant "nothing happened" would make that
-        window unreadable.
+    def decision(self, result: ApplyResult, effects: Sequence[Effect]) -> None:
+        """Append the whole ss4 step-7 batch as ONE line (period-model ss2.3,
+        DL-118): the decision an admitted attempt got, the revisions it
+        moved, and every effect it planned.
 
-        Its index rides under `index`, not `seq`: `seq` is the ss10
-        subscribe cursor, and a result shares its attempt's number, so two
+        One line, one fsync -- the same argument `admit` already makes for
+        the input side. Each effect lands here before anything ATTEMPTS it,
+        which is the whole content of an outbox: an engine that dies between
+        deciding and acting leaves the record that it meant to act, and a
+        recorded kill is re-driven at resume rather than lost with the task
+        that would have delivered it. Writing the decision and the intents
+        separately left a window in which the first was durable and the
+        second was not, and no precondition anywhere could see it (CM-17).
+
+        Written unconditionally, including for an application that moved
+        nothing and planned nothing: the ABSENCE of a decision is how replay
+        recognises the crash window, so an absence that also meant "nothing
+        happened" would make that window unreadable.
+
+        `effects` is in ADMISSION ORDER -- the order `Outbox` receives them,
+        so a SPAWN precedes its run's later KILL.
+
+        The index rides under `index`, not `seq`: `seq` is the ss10
+        subscribe cursor, and a decision shares its attempt's number, so two
         records under one cursor value would leave the second undeliverable
-        to a resuming subscriber."""
+        to a resuming subscriber (DL-89).
+
+        `legacy_batch` is on every decision and `false` from this writer. A
+        `true` one is a batch folded from a legacy estate's separate fsyncs
+        at adoption (period-model ss11), which nothing builds yet -- the
+        field is on the record now so the schema is one rather than two.
+
+        A NATIVE decision names its identity at birth, and this writer
+        refuses one that does not: `generation` on every effect, `run_id`
+        on every SPAWN (DL-118, PR-16/PR-36a). The model's None defaults
+        exist so records READ from a pre-DL-118 journal validate -- a fresh
+        effect reaching this method without them is a planner bug, and
+        writing it would smuggle the legacy shape out under
+        `legacy_batch: false`."""
+        for effect in effects:
+            if (
+                effect.generation is None
+                or (effect.kind == "SPAWN" and effect.run_id is None)
+                or (effect.run_id is not None and not is_valid_run_id(effect.run_id))
+            ):
+                raise EngineError(
+                    f"effect {effect.effect_id}: a native decision binds identity at"
+                    " birth -- generation on every effect, run_id on a SPAWN, and any"
+                    " run_id in the ss11a uuid4 grammar (DL-118); an empty or"
+                    " freehand id would lose to a fallback mint downstream"
+                )
         self._write(
             {
-                "rec": "result",
+                "rec": "decision",
                 "index": result.index,
                 "request_id": result.request_id,
                 "decision": result.decision,
                 "reason": result.reason,
                 "revisions": result.revisions,
+                "legacy_batch": False,
+                "effects": [effect.model_dump(mode="json") for effect in effects],
             }
         )
-
-    def effect(self, effect: Effect) -> None:
-        """One intended effect, appended with the ss4 step-7 batch that
-        decided it (concurrency-model ss1: the outbox lives IN the ledger, so
-        the decision and what it implies cannot be torn apart by a crash).
-
-        BEFORE the attempt, which is the whole content of an outbox: an
-        engine that dies between deciding and acting leaves a record that it
-        meant to act, and a recorded kill is re-driven at resume rather than
-        lost with the task that would have delivered it."""
-        self._write({"rec": "effect", **effect.model_dump(mode="json")})
 
     def effect_result(self, outcome: EffectOutcome) -> None:
         """What came of one attempt (concurrency-model ss5). Absent means
@@ -340,6 +386,36 @@ class Journal:
             self._lock.release()  # the term ends where the log does (S6a)
 
 
+def _repair_tail(path: Path) -> None:
+    """Make an existing WAL end on a line boundary before anything appends.
+
+    `_write` puts `json + "\\n"` in one call, and a crash mid-write leaves a
+    prefix of it. `read_journal` drops a torn final line (the feed it
+    preceded never ran), and the bytes must agree with that reading before
+    the next record lands: appended straight after the fragment, the
+    successor's `leader` makes one corrupt interior line out of the two,
+    and every later read raises. Two shapes, both fixed under the caller's
+    lock and fsynced: a tail that parses lost only its newline and gets one
+    back; any other tail is cut at the last newline. What `read_journal`
+    returns is the same before and after -- this changes bytes, never
+    records."""
+    if not path.exists():
+        return
+    with path.open("r+b") as f:
+        data = f.read()
+        if not data or data.endswith(b"\n"):
+            return
+        cut = data.rfind(b"\n") + 1
+        try:
+            json.loads(data[cut:])
+        except ValueError:
+            f.truncate(cut)
+        else:
+            f.write(b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def read_journal(path: Path | str) -> list[dict[str, Any]]:
     """Parse a run journal. A torn FINAL line (crash mid-append) is dropped
     -- write-ahead means the corresponding feed never happened; torn or
@@ -423,13 +499,17 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
 def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
     """Pass one: the durable decisions, indexed. Built from the whole log
     before anything is applied, because an attempt says nothing about its
-    own fate -- its result is a LATER record, and the gap between them is
-    the crash window (concurrency-model ss4)."""
+    own fate -- its decision is a LATER record, and the gap between them is
+    the crash window (concurrency-model ss4).
+
+    `result` is the pre-DL-118 spelling of the same fact, read for the
+    reason every legacy shape here is read: a run root does not become
+    unreadable because the writer moved on."""
     index = DecisionIndex()
     for attempt in read_attempts(records):
         index.note(attempt)
     for record in records:
-        if record.get("rec") != "result":
+        if record.get("rec") not in ("decision", "result"):
             continue
         index.record(
             ApplyResult(
@@ -449,14 +529,104 @@ def read_outbox(records: list[dict[str, Any]]) -> Outbox:
     One pass, in file order, because an outcome always follows the effect it
     resolves -- the two are written by the same engine in that order, and an
     outcome for an unknown effect would mean the log lost the record that
-    said what was meant."""
+    said what was meant. Inside one `decision` the nested list is already in
+    admission order, so reading it in order is all per-run ordering takes.
+
+    A standalone `effect` record is the pre-DL-118 dialect and folds into
+    the same outbox: the two spellings differ in how many fsyncs the writer
+    spent, not in what they say."""
     outbox = Outbox()
+    # deferred fold checks (period-model ss11, PR-48), run after the pass
+    # when the outcomes have been read: adoption refuses a pending legacy
+    # outbox, so EVERY folded effect must resolve -- and a fold's
+    # null-run_id SPAWN only ever legally resolves retired or indeterminate
+    # (a run that never reached an adapter has no id and no file; an
+    # applied one must have both)
+    folded: list[str] = []
+    unidentified: list[str] = []
     for record in records:
-        if record.get("rec") == "effect":
+        if record.get("rec") == "decision":
+            # a `decision` record has exactly one shape (ss2.3): a BOOLEAN
+            # `legacy_batch` and a LIST `effects`. `.get(...) or []` here
+            # would read a corrupt or foreign record as an empty native
+            # decision -- intents silently lost, provenance silently
+            # invented -- so the shape is checked, not defaulted around.
+            marker = record.get("legacy_batch")
+            if not isinstance(marker, bool):
+                raise EngineError(
+                    f"decision at index {record.get('index')}: legacy_batch is"
+                    f" {marker!r}, not a boolean -- the fold allowances are claimed"
+                    " with exactly true (DL-118)"
+                )
+            effects_field = record.get("effects")
+            if not isinstance(effects_field, list):
+                raise EngineError(
+                    f"decision at index {record.get('index')}: effects is"
+                    f" {type(effects_field).__name__}, not a list (DL-118)"
+                )
+            for effect in effects_field:
+                try:
+                    parsed = Effect.model_validate(effect)
+                except ValidationError as exc:
+                    # strict fields surface here: `generation: false` or "0"
+                    # must not coerce past the fold's exact-0 gate
+                    raise EngineError(
+                        f"decision at index {record.get('index')}: malformed effect: {exc}"
+                    ) from exc
+                if parsed.run_id is not None and not is_valid_run_id(parsed.run_id):
+                    # any run_id a decision carries is in the ss11a grammar
+                    # -- the legacy estate's adapter minted uuid4 too
+                    raise EngineError(
+                        f"decision at index {record.get('index')}: effect"
+                        f" {parsed.effect_id} carries run_id {parsed.run_id!r} outside"
+                        " the ss11a grammar (DL-118)"
+                    )
+                if marker:
+                    # a fold is a defined reconstruction, not a guess: one
+                    # legacy executor at generation 0, every effect resolved
+                    if parsed.generation != 0:
+                        raise EngineError(
+                            f"decision at index {record.get('index')}: folded effect"
+                            f" {parsed.effect_id} carries generation"
+                            f" {parsed.generation!r}; a legacy estate had exactly one"
+                            " executor at generation 0 (period-model ss11)"
+                        )
+                    folded.append(parsed.effect_id)
+                    if parsed.kind == "SPAWN" and parsed.run_id is None:
+                        unidentified.append(parsed.effect_id)
+                elif parsed.generation is None or (
+                    parsed.kind == "SPAWN" and parsed.run_id is None
+                ):
+                    # the writer refuses these shapes (Journal.decision), so
+                    # a native decision carrying one was not written by this
+                    # code: corruption or a foreign writer. Accepting it
+                    # would let resume mint an identity AFTER the
+                    # transaction -- the exact hole DL-118 closed.
+                    raise EngineError(
+                        f"decision at index {record.get('index')}: native effect"
+                        f" {parsed.effect_id} carries no birth identity (DL-118)"
+                    )
+                outbox.record(parsed)
+        elif record.get("rec") == "effect":
             outbox.record(Effect.model_validate({k: v for k, v in record.items() if k != "rec"}))
         elif record.get("rec") == "effect_result":
             outbox.resolve(
                 EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
+            )
+    for effect_id in folded:
+        if outbox.state_of(effect_id) == "pending":
+            raise EngineError(
+                f"legacy fold: effect {effect_id} is pending -- adoption refuses a"
+                " pending legacy outbox (period-model ss11, PR-48), so a fold that"
+                " carries one was not made by it; re-driving it would execute"
+                " legacy intent adoption already refused"
+            )
+    for effect_id in unidentified:
+        if outbox.state_of(effect_id) not in ("retired", "indeterminate"):
+            raise EngineError(
+                f"legacy fold: SPAWN {effect_id} has no run_id and its outcome is"
+                f" {outbox.state_of(effect_id)!r} -- null is legal only for a run"
+                " that provably never reached an adapter (period-model ss11)"
             )
     return outbox
 

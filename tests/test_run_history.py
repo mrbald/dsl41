@@ -111,18 +111,31 @@ def _status_input(
     }
 
 
-def _spawn_effect(
+def _spawn_decision(
     index: int, at: datetime, *, job: str, run_number: int, executor_id: str = "local"
 ) -> dict[str, Any]:
+    """One decision and the SPAWN it planned (DL-118): an effect has no
+    record of its own, so the fold reads it out of the decision that wanted
+    it."""
     return {
-        "rec": "effect",
-        "effect_id": f"e{index}:SPAWN:{job}.{run_number}",
-        "kind": "SPAWN",
-        "job": job,
-        "run_number": run_number,
-        "executor_id": executor_id,
+        "rec": "decision",
         "index": index,
-        "at": at.isoformat(),
+        "request_id": f"r{index}",
+        "decision": "applied",
+        "reason": None,
+        "revisions": {},
+        "legacy_batch": False,
+        "effects": [
+            {
+                "effect_id": f"e{index}:SPAWN:{job}.{run_number}",
+                "kind": "SPAWN",
+                "job": job,
+                "run_number": run_number,
+                "executor_id": executor_id,
+                "index": index,
+                "at": at.isoformat(),
+            }
+        ],
     }
 
 
@@ -411,15 +424,77 @@ def test_leaf_row_carries_its_box_name_from_the_catalog() -> None:
     assert row.box_name == "b1"
 
 
-def test_executor_id_comes_from_the_spawn_effect_record() -> None:
+def test_executor_id_comes_from_the_spawn_effect_in_the_decision() -> None:
     records = [
         _header(),
-        _spawn_effect(1, T0, job="j1", run_number=1, executor_id="local"),
+        _spawn_decision(1, T0, job="j1", run_number=1, executor_id="local"),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
     ]
     [row] = fold_run_rows(records)
     assert row.executor_id == "local"
+
+
+def test_a_spool_record_naming_a_stranger_reads_as_absent(tmp_path: Path) -> None:
+    """DL-118 at the reporting layer: the durable SPAWN bound this run's
+    run_id, and a spool record naming a different one is a stranger's --
+    its timings must not be reported as this run's. Absent, not refused:
+    offline reporting costs one row's timings for one corrupt directory,
+    not the whole report."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    (run_dir / "spawn.json").write_text(
+        json.dumps(
+            {
+                "job": "j1",
+                "run_number": 1,
+                "run_id": "rid-else",
+                "started_at": "2026-07-01T08:00:00",
+            }
+        )
+    )
+    assert read_spool(run_dir, "j1", 1, "rid-bound") is None
+    found = read_spool(run_dir, "j1", 1, "rid-else")
+    assert found is not None and found.started_at is not None
+    # and a stranger's status alone costs only the end time
+    (run_dir / "spawn.json").write_text(
+        json.dumps(
+            {
+                "job": "j1",
+                "run_number": 1,
+                "run_id": "rid-bound",
+                "started_at": "2026-07-01T08:00:00",
+            }
+        )
+    )
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {"job": "j1", "run_number": 1, "run_id": "rid-else", "ended_at": "2026-07-01T08:05:00"}
+        )
+    )
+    partial = read_spool(run_dir, "j1", 1, "rid-bound")
+    assert partial is not None and partial.ended_at is None
+
+
+def test_a_pre_dl118_run_root_still_reports_its_executor() -> None:
+    """The fold reads run roots, and old ones outnumber new ones. A journal
+    written before DL-118 carries its SPAWN as a standalone `effect` record
+    rather than nested in the decision that planned it; both spell the same
+    fact, so both answer."""
+    decision = _spawn_decision(1, T0, job="j1", run_number=1, executor_id="remote")
+    # a faithful old record: pre-DL-118 effects had no run_id or generation
+    legacy = {
+        "rec": "effect",
+        **{k: v for k, v in decision["effects"][0].items() if k not in ("run_id", "generation")},
+    }
+    records = [
+        _header(),
+        legacy,
+        _dispatch("j1", 1, run_dir=None, started_at=T0),
+        _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
+    ]
+    [row] = fold_run_rows(records)
+    assert row.executor_id == "remote"
 
 
 def test_a_run_numberless_change_status_overwrites_the_currently_open_run() -> None:
