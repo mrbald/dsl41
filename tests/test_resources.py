@@ -33,14 +33,20 @@ def _ev(kind: str, minute: float, **payload: object) -> Event:
     return Event(at=T0 + timedelta(minutes=minute), kind=kind, payload=payload)  # type: ignore[arg-type]
 
 
+def _used(o: Oracle) -> dict[str, int]:
+    """Bucket usage as DL-120 decomposes it: the units the live rows reserve
+    plus the units the owner records as spent. The pool holds neither."""
+    return o._pool.used(o.store.job, o.store.consumed)
+
+
 def _no_overcommit(o: Oracle) -> bool:
-    return all(o._pool._bucket_used.get(k, 0) <= cap for k, cap in o._pool._bucket_cap.items())
+    used = _used(o)
+    return all(used.get(k, 0) <= cap for k, cap in o._pool._bucket_cap.items())
 
 
 def _renewable_pool_catalog(capacity: int, demands: list[int]) -> str:
     jobs = "".join(
-        f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: m1\n"
-        f"resources: (R, QUANTITY={q})\n\n"
+        f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY={q})\n\n"
         for i, q in enumerate(demands)
     )
     return f"insert_resource: R\nres_type: R\namount: {capacity}\n\n{jobs}"
@@ -84,9 +90,7 @@ def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObje
                 made_progress = True
 
     assert len(terminal) == n, "deadlock: a runnable job was never admitted"
-    assert all(
-        o._pool._bucket_used.get(k, 0) == 0 for k in o._pool._bucket_cap
-    ), "renewable units leaked"
+    assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "renewable units leaked"
 
 
 def test_dl50_depletable_drains_and_never_refills() -> None:
@@ -143,7 +147,7 @@ def test_dl50_unsized_resource_is_unmodelled_oracle_direct() -> None:
 def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
     """Direct check of the review BLOCKER: after a self-retriggering holder
     finally stops, the renewable bucket must be back to 0 and, at every step,
-    `used` must equal the units actually recorded in the pool's `_held` (no strand)."""
+    `used` must equal the units the rows actually reserve (no strand)."""
     text = (
         "insert_resource: R\nres_type: R\namount: 2\n\n"
         "insert_job: sl\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -152,15 +156,15 @@ def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
     o = Oracle(lower_source(text))
 
     def held_total() -> int:
-        return sum(u for held in o._pool._held.values() for (_, u, _) in held)
+        return sum(r.units for row in o.store.job.values() for r in row.reservations)
 
     o.feed(_ev("FORCE_STARTJOB", 0, job="sl"))
-    assert o._pool._bucket_used.get("r:R", 0) == held_total() == 1
+    assert _used(o).get("r:R", 0) == held_total() == 1
     o.feed(_ev("STATUS", 1, job="sl", status="SUCCESS"))  # r1 done, r2 re-acquires
     # not 1-with-empty-held (the leak)
-    assert o._pool._bucket_used.get("r:R", 0) == held_total() == 1
+    assert _used(o).get("r:R", 0) == held_total() == 1
     o.feed(_ev("STATUS", 2, job="sl", status="FAILURE"))  # r2 fails, loop stops
-    assert o._pool._bucket_used.get("r:R", 0) == held_total() == 0  # fully released, no strand
+    assert _used(o).get("r:R", 0) == held_total() == 0  # fully released, no strand
 
 
 def test_dl50_duplicate_resource_refs_coalesce_no_overcommit() -> None:
@@ -174,5 +178,5 @@ def test_dl50_duplicate_resource_refs_coalesce_no_overcommit() -> None:
     o = Oracle(lower_source(text))
     o.feed(_ev("STARTJOB", 0, job="dj"))
     assert o.store.job["dj"].status == "RUNNING"
-    assert o._pool._bucket_used.get("r:DUP") == 2  # coalesced, not 2+2=4
+    assert _used(o).get("r:DUP") == 2  # coalesced, not 2+2=4
     assert _no_overcommit(o)

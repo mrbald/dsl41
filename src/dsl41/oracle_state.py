@@ -45,12 +45,12 @@ from __future__ import annotations
 
 import heapq
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OracleError(ValueError):
@@ -108,6 +108,31 @@ class TraceEntry(BaseModel):
     cause: str
 
 
+#: DL-50's three release policies, named once: `CapacityReservation` stores
+#: one and `capacity.py` derives it from res_type + FREE.
+ReleasePolicy = Literal["completion", "success", "never"]
+
+
+class CapacityReservation(BaseModel):
+    """One bucket's units, held by one `(job, run_number)` (DL-120,
+    period-model ss5). FROZEN, for `JobRuntime`'s reason: it rides on that row
+    and a change to it is a replacement of the row.
+
+    The vector is frozen at acquisition and never recomputed from the current
+    catalog: a re-baseline that raises the job's QUANTITY must still release
+    what the live run actually took (PR-20)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: `m:<machine>` (max_load) or `r:<name>` (resource amount), as
+    #: `CapacityPool` keys them.
+    bucket: str
+    units: int = Field(gt=0)
+    #: DL-50: when the units go back. `never` and an unmet `success` are the
+    #: two that CONSUME them instead (SEM-16).
+    release_policy: ReleasePolicy
+
+
 class JobRuntime(BaseModel):
     """One job entity's authoritative runtime row. FROZEN (DL-86): a change
     is a REPLACEMENT, so "this entity changed" is one observable act rather
@@ -134,6 +159,16 @@ class JobRuntime(BaseModel):
     #: current execution. Only a BOX row ever carries entries; it was the loose
     #: `_box_ran` map until DL-86 moved it onto the entity it describes.
     ran_members: frozenset[str] = frozenset()
+    #: DL-120: the capacity vector THIS run acquired, non-empty only while
+    #: STARTING or RUNNING. It is a per-run fact with exactly `run_number`'s
+    #: lifetime, so it belongs on the row rather than in a map beside it --
+    #: which is also what makes it reconstructible from the rows a seal
+    #: carries (period-model ss5).
+    reservations: tuple[CapacityReservation, ...] = ()
+    #: DL-120: this job's rank in the QUE_WAIT queue, non-null iff QUE_WAIT.
+    #: The rank is allocated from `RuntimeState.enqueue_counter` and rides on
+    #: the row so that admission ORDER survives a boundary (PR-21).
+    waiter_seq: int | None = None
     #: DL-87: this entity's optimistic-locking revision. Incremented at most
     #: once per committed input, and only when the SEMANTIC projection below
     #: changed. Deliberately last, and deliberately excluded from that
@@ -253,8 +288,10 @@ class RuntimeState:
     rather than merely detected. The rows are frozen, the maps are private
     and published only as read-only views, and every write goes through a
     verb that names what changed (`transition`, `start_run`, `set_flags`,
-    `set_armed`, `set_global`, `enqueue_timer`). No caller assembles a field
-    dict, so no caller can invent a field combination the verbs do not.
+    `set_armed`, `set_global`, `enqueue_timer`, and the DL-120 capacity five:
+    `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
+    `seed_consumed`). No caller assembles a field dict, so no caller can
+    invent a field combination the verbs do not.
 
     The reason is the concurrency model, not tidiness. Optimistic locking
     needs one place where "this entity changed" is observable exactly once
@@ -271,7 +308,14 @@ class RuntimeState:
     is ordered globally by `(due, insertion token)` and every job's own
     timers carry that token, so the cross-job order of equal-time timers --
     which decides resource release, box cascades and which job starts -- is
-    recoverable per entity rather than only in aggregate."""
+    recoverable per entity rather than only in aggregate.
+
+    **The capacity state lives here too** (DL-120, period-model ss5). The
+    held half is on the rows as `reservations`; the spent half is `consumed`,
+    which belongs to a bucket rather than to any completed job; the waiter
+    rank is on the row and its allocator is `enqueue_counter`. What is NOT
+    here is any sum of the two: `CapacityPool` computes usage from these, so
+    the number a seal carries is one nobody has to explain."""
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobRuntime] = {}
@@ -283,6 +327,18 @@ class RuntimeState:
         self._hosts: dict[str, HostRuntime] = {}
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
+        #: DL-120: bucket key -> units PERMANENTLY spent (SEM-16 depletion,
+        #: and `never`/unmet-`success` holds a terminal transition kept). The
+        #: held half lives on the rows; this half belongs to no row, which is
+        #: exactly why a seal that recomputed usage from holders refunded it.
+        #: Keys survive their resource: a bucket the catalog no longer sizes
+        #: keeps its entry and still counts if the resource returns (PR-19a).
+        self._consumed: dict[str, int] = {}
+        #: DL-120: the waiter-rank allocator's high-water mark. Carried, never
+        #: renormalised -- redefining the rank as `1 + max(active)` would buy
+        #: one integer in exchange for proving that renormalisation equals
+        #: genesis replay (period-model ss5).
+        self._enqueue_counter = 0
         #: DL-87 input transaction: entity key -> its projection at FIRST
         #: touch within the open input. Empty and inert outside one.
         self._snapshots: dict[str, object] = {}
@@ -360,6 +416,19 @@ class RuntimeState:
         row = self._globals.get(name)
         return None if row is None else row.value
 
+    @property
+    def consumed(self) -> Mapping[str, int]:
+        """Read-only view of the permanently spent units per bucket (DL-120).
+        A proxy for `job`'s reason: `CapacityPool` reads it on every admission
+        test and must not be able to write it."""
+        return MappingProxyType(self._consumed)
+
+    @property
+    def enqueue_counter(self) -> int:
+        """The last waiter rank allocated (DL-120). Read-only: a rank is
+        allocated by `enqueue_waiter` and by nothing else."""
+        return self._enqueue_counter
+
     # ------------------------------------------------ the input transaction (DL-87)
 
     def _projection(self, key: str) -> object:
@@ -413,6 +482,7 @@ class RuntimeState:
         `ApplyResult` need the list, not just the effect."""
         self._in_input = False
         snapshots, self._snapshots = self._snapshots, {}
+        self._check_capacity(snapshots)
         changed = [key for key, before in snapshots.items() if self._projection(key) != before]
         for key in sorted(changed):
             namespace, _, name = key.partition(":")
@@ -424,6 +494,41 @@ class RuntimeState:
                 row = self._globals[name]
                 self._globals[name] = GlobalRuntime(value=row.value, state_rev=row.state_rev + 1)
         return sorted(changed)
+
+    def _check_capacity(self, snapshots: Mapping[str, object]) -> None:
+        """The DL-120 capacity invariants, checked at the CLOSE of an input.
+
+        Not inside the verbs: one input legitimately passes through states
+        that break them -- a terminal transition lands the status before the
+        release that follows it, an enqueue allocates the rank before the
+        QUE_WAIT transition -- and only the boundary between inputs is a state
+        anything else observes.
+
+        Only the touched rows are checked. A row this input did not touch was
+        checked when it was, and the counter only grows."""
+        for key in snapshots:
+            namespace, _, name = key.partition(":")
+            if namespace != "job":
+                continue
+            row = self._jobs.get(name)
+            if row is None:
+                continue
+            live = row.status in ("STARTING", "RUNNING")
+            if row.reservations and not live:
+                raise OracleError(f"{name!r} holds capacity at status {row.status}")
+            if (row.waiter_seq is not None) != (row.status == "QUE_WAIT"):
+                raise OracleError(
+                    f"{name!r} has waiter_seq {row.waiter_seq} at status {row.status}:"
+                    " a rank is held exactly while QUE_WAIT"
+                )
+            if row.waiter_seq is not None and row.waiter_seq > self._enqueue_counter:
+                raise OracleError(
+                    f"{name!r} has waiter_seq {row.waiter_seq} above the allocator's"
+                    f" {self._enqueue_counter}"
+                )
+        for bucket, units in self._consumed.items():
+            if units < 0:
+                raise OracleError(f"consumed[{bucket!r}] = {units}: units spent cannot be negative")
 
     # ------------------------------------------------------------------ writes
 
@@ -504,6 +609,77 @@ class RuntimeState:
         self._globals[name] = GlobalRuntime(
             value=value, state_rev=0 if row is None else row.state_rev
         )
+
+    # --------------------------------------------------------- capacity (DL-120)
+    #
+    # `consumed` and `enqueue_counter` are authoritative state under this owner
+    # with no key space of their own, and they do not need one: each changes
+    # only inside an input that ALSO replaces the row of the job whose units or
+    # rank moved -- a terminal transition for the first, a QUE_WAIT transition
+    # for the second -- so the touched entity that carries the revision is that
+    # job. They gain an `expect` namespace on the day an operator has a reason
+    # to address them, which for `consumed` is SEM-16 replenishment
+    # (period-model ss5).
+
+    def reserve(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
+        """Record the capacity vector a start acquired (period-model ss5).
+
+        Refuses a row that already holds one. The Oracle releases before it
+        wakes anything, so a live record here at a start means a release was
+        missed, and the old pool's forgiving `extend` turned that into a
+        permanently stranded unit nobody could account for."""
+        if self.runtime(job).reservations:
+            raise OracleError(f"{job!r} already holds reservations: a start may not overwrite")
+        self._replace(job, reservations=tuple(reservations))
+
+    def release_reservations(self, job: str, new_status: str) -> None:
+        """Clear a run's vector on the edge that leaves STARTING/RUNNING and
+        move what it did NOT free into `consumed` (DL-120).
+
+        `new_status` is whatever the row is moving to -- a terminal status for
+        every ordinary run, and INACTIVE for an injected STATUS on a live
+        holder, which used to strand the units. The two halves are one act
+        within the input: the row write and the spend happen in the same
+        input transaction, and replay re-applies the whole input, so a crash
+        between them cannot leave units both held and spent or neither. `never`
+        and an unmet `success` are the policies that spend (SEM-16 depletion,
+        hold-on-failure); what is spent never comes back."""
+        row = self.runtime(job)
+        if not row.reservations:
+            return
+        spent: dict[str, int] = {}
+        for reservation in row.reservations:
+            policy = reservation.release_policy
+            if policy == "never" or (policy == "success" and new_status != "SUCCESS"):
+                spent[reservation.bucket] = spent.get(reservation.bucket, 0) + reservation.units
+        self._replace(job, reservations=())  # validates first; the spend cannot raise
+        for bucket, units in spent.items():
+            self._consumed[bucket] = self._consumed.get(bucket, 0) + units
+
+    def enqueue_waiter(self, job: str) -> None:
+        """Allocate this job's QUE_WAIT rank. Idempotent: a job already queued
+        keeps the rank it was given, because its position was decided when it
+        first failed admission."""
+        if self.runtime(job).waiter_seq is not None:
+            return
+        rank = self._enqueue_counter + 1
+        self._replace(job, waiter_seq=rank)
+        self._enqueue_counter = rank
+
+    def dequeue_waiter(self, job: str) -> None:
+        """Drop a job out of the queue -- admitted, killed, iced or cancelled.
+        The counter does not go back: it is a high-water allocator, not a
+        length."""
+        self._replace(job, waiter_seq=None)
+
+    def seed_consumed(self, consumed: Mapping[str, int]) -> None:
+        """Open the map from a carried seal (period-model ss3.3). A negative
+        value would open the period with invented capacity, so it is refused
+        here as well as by the loader (PR-22)."""
+        for bucket, units in consumed.items():
+            if units < 0:
+                raise OracleError(f"consumed[{bucket!r}] = {units}: units spent cannot be negative")
+        self._consumed = dict(consumed)
 
     # ------------------------------------------------------------------- hosts
 

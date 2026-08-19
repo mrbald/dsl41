@@ -18,11 +18,12 @@ Four groups:
     fields it must change AND the fields it must leave alone; a verb that
     quietly clears a sibling field is the exact failure the generic
     `update(**fields)` it replaces made invisible.
-  * **the inventory is accounted for** (ss3). `_box_ran` moved onto the box row
-    and `_run_started_at` turned out to be write-only and is gone, so what
-    remains outside the rows is `_CapacityPool` and its waiter order -- kept
-    there deliberately, with the invariants that make the projection sound
-    tested here rather than asserted in prose.
+  * **the inventory is accounted for** (ss3). `_box_ran` moved onto the box row,
+    `_run_started_at` turned out to be write-only and is gone, and DL-120 moved
+    the capacity state too -- the reservations and the waiter ranks onto the
+    rows, the spent units under the owner. Nothing of ss3's inventory is
+    outside the rows now, and the invariants that used to justify the
+    exception are tested here rather than asserted in prose.
   * **the revision is the projection's** (CM-02/CM-03). One increment per
     entity per input, and only when the SEMANTIC projection moved -- checked
     both as worked cases and as a property over a widened generator, whose
@@ -271,16 +272,21 @@ _POOL_JIL = (
 
 
 def _pool_invariants(o: Oracle) -> list[str]:
-    """The two invariants that let `_CapacityPool` stay outside the rows
-    (concurrency-model ss3 gives the owner this choice explicitly): its
-    membership is a FUNCTION of the projected statuses, so no pool change can
-    happen without an accompanying row change to carry it."""
+    """The two invariants that used to LET `_CapacityPool` stay outside the
+    rows, and that DL-120 turned into properties of the rows themselves: the
+    queue is exactly the QUE_WAIT jobs, and only a starting or running job
+    holds units. Read through the pool's pure surface, which is now the only
+    surface it has."""
     broken = []
     queued = {j for j, rt in o.store.job.items() if rt.status == "QUE_WAIT"}
-    if set(o._pool._waiters) != queued:
-        broken.append(f"waiters {sorted(o._pool._waiters)} != QUE_WAIT jobs {sorted(queued)}")
+    waiters = o._pool.sorted_waiters(o.store.job)
+    if set(waiters) != queued:
+        broken.append(f"waiters {sorted(waiters)} != QUE_WAIT jobs {sorted(queued)}")
     for job in list(o.store.job):
-        if o._pool.holds(job) and o.store.job[job].status not in ("STARTING", "RUNNING"):
+        if o._pool.holds(o.store.job[job]) and o.store.job[job].status not in (
+            "STARTING",
+            "RUNNING",
+        ):
             broken.append(f"{job} holds units at status {o.store.job[job].status}")
     return broken
 
@@ -288,12 +294,13 @@ def _pool_invariants(o: Oracle) -> list[str]:
 @settings(max_examples=200, deadline=None)
 @given(data=st.data())
 def test_the_capacity_pool_never_changes_without_a_row_change(data: st.DataObject) -> None:
-    """`_CapacityPool` and its waiter order are the state that did NOT move
-    onto the rows, so the model owes them a tested invariant instead: every
-    queued job is QUE_WAIT and every QUE_WAIT job is queued, and only a job
-    that is starting or running holds units. Both directions hold after EVERY
-    event of a random contended schedule -- so a pool mutation with no
-    projected row change is not constructible here."""
+    """Every queued job is QUE_WAIT and every QUE_WAIT job is queued, and only
+    a job that is starting or running holds units. Both directions hold after
+    EVERY event of a random contended schedule -- so a capacity change with no
+    projected row change is not constructible here. DL-86 needed this because
+    the pool held the state; DL-120 put the state on the rows, and the
+    property is now what the owner enforces at every commit, checked here
+    end-to-end through the interpreter rather than at the verb."""
     o = Oracle(lower_source(_POOL_JIL))
     jobs = ["q1", "q2", "q3"]
     minute = 0.0
@@ -323,7 +330,7 @@ def test_the_waiter_order_is_the_order_of_the_que_wait_transitions() -> None:
     assert o.store.job["q3"].status == "RUNNING"  # took the single unit
     queued_in_trace = [e.job for e in o.trace() if e.transition.endswith("->QUE_WAIT")]
     assert queued_in_trace == ["q1", "q2"]
-    assert o._pool.sorted_waiters() == queued_in_trace
+    assert o._pool.sorted_waiters(o.store.job) == queued_in_trace
 
 
 def test_box_membership_bookkeeping_lives_on_the_box_row() -> None:

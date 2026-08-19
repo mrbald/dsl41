@@ -148,7 +148,7 @@ from datetime import datetime, time as dtime, timedelta
 from typing import Final
 
 from dsl41.canon import CanonError, canonical_bytes
-from dsl41.capacity import CapacityPool
+from dsl41.capacity import CapacityPool, to_reservations
 from dsl41.conditions import (
     And,
     Cond,
@@ -295,6 +295,9 @@ class Oracle:
                 self._referencers.setdefault(key, []).append(name)
         #: DL-50 capacity buckets + the QUE_WAIT queue (DL-74): it decides
         #: admission and its order, the transitions below are this class's.
+        #: Since DL-120 it holds no state -- the reservations and the ranks are
+        #: on the rows, the spent units are under the owner, and the pool is
+        #: given all three.
         self._pool = CapacityPool(catalog)
         self._in_wake = False
 
@@ -455,15 +458,30 @@ class Oracle:
                             "SCHED_DISARM",
                             f"unconsumed arm dies with box {job!r} run (Q3c pin, DL-54/58)",
                         )
+        # DL-120: a job leaves QUE_WAIT through one of three paths that drop
+        # its rank first (admitted, killed, cancelled) -- or through an
+        # injected STATUS, which drops nothing. A rank left behind kept a
+        # terminal job in the admission queue, where the next release would
+        # start it again, so the rank goes with the status that owns it.
+        if new != "QUE_WAIT" and self._runtime(job).waiter_seq is not None:
+            self.store.dequeue_waiter(job)
         # DL-50: RELEASE a completed holder's units BEFORE waking anything. A
         # self-referencing re-trigger (the L010 tight-loop -- _wake_referencers
         # may re-start the very job that just completed) must re-acquire against
         # the FREED capacity, not overwrite its own still-held record and strand
         # a unit (adversarial review BLOCKER). Waiters then wake after condition
         # referencers -- the documented deterministic order.
-        released = new in TERMINAL and self._pool.holds(job)
+        #
+        # DL-120: the release edge is LEAVING the live statuses, not reaching a
+        # terminal one. The two coincide for every ordinary run and differ only
+        # for an injected STATUS INACTIVE on a live holder, which used to strand
+        # the units in a `_held` record no row could see. Reservations exist
+        # exactly while STARTING or RUNNING (period-model ss5), so the release
+        # is on that same edge; a non-SUCCESS exit spends what FREE=N and a
+        # depletable were always going to spend.
+        released = new not in ("STARTING", "RUNNING") and self._pool.holds(self._runtime(job))
         if released:
-            self._pool.release(job, new)
+            self.store.release_reservations(job, new)
         # SEM-01/dossier ss0: the transition wakes exactly the jobs whose
         # condition references this one (edge-triggered, DL-13)
         self._wake_referencers(job, cause=f"status of {job!r} changed to {new}")
@@ -513,7 +531,7 @@ class Oracle:
                 # silently dropped and then admitted on the next release -- a
                 # standalone queued job has no box-end to cancel it. It holds
                 # nothing; dequeue and TERMINATE (the kill happened).
-                self._pool.dequeue(job)
+                self.store.dequeue_waiter(job)
                 # Q3 (DL-54): the kill consumes a latched arm -- the queued
                 # attempt was the tick's run and it just got killed.
                 self.store.set_armed(job, False)
@@ -566,7 +584,7 @@ class Oracle:
                 # queue and settle its status now, instead of lingering QUE_WAIT
                 # until a later release cancels it. _set_status wakes referencers,
                 # so on_ice-satisfaction (SEM-20) still propagates.
-                self._pool.dequeue(job)
+                self.store.dequeue_waiter(job)
                 self._set_status(job, "INACTIVE", cause="iced while queued (DL-50)")
             else:
                 # SEM-20: downstream conditions now treat this job as satisfied
@@ -815,10 +833,13 @@ class Oracle:
         # RUNNING, byte-identical to the pre-resource oracle (bisim + the whole
         # existing corpus are untouched: no buckets, no waiters, same cause).
         vector = self._pool.demand_vector(job_ir)
-        if vector and not self._pool.can_admit(vector):
+        if vector and not self._pool.can_admit(vector, self.store.job, self.store.consumed):
             self._enqueue_waiter(job, cause)
             return
-        self._pool.acquire(job, vector)
+        # DL-120: the vector is FROZEN onto the row here. The terminal
+        # transition releases what this run took, never what the catalog says
+        # the job wants by then (PR-20).
+        self.store.reserve(job, to_reservations(vector))
         self._run(job_ir, cause, had_demand=bool(vector))
 
     def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
@@ -849,7 +870,7 @@ class Oracle:
     # ---------------------------------------------------------- resources (DL-50)
 
     def _enqueue_waiter(self, job: str, cause: str) -> None:
-        self._pool.enqueue(job)
+        self.store.enqueue_waiter(job)
         self._set_status(job, "QUE_WAIT", cause=f"waiting for resources ({cause})")
 
     def _wake_waiters(self) -> None:
@@ -862,7 +883,7 @@ class Oracle:
         try:
             while any(
                 self._readmit(job) in ("admitted", "cancelled")
-                for job in self._pool.sorted_waiters()
+                for job in self._pool.sorted_waiters(self.store.job)
             ):
                 pass  # queue changed; sorted_waiters is re-read each scan
         finally:
@@ -882,15 +903,15 @@ class Oracle:
         if rt.on_hold:
             return "held"  # stays queued; OFF_HOLD re-scans
         vector = self._pool.demand_vector(job_ir)
-        if not self._pool.can_admit(vector):
+        if not self._pool.can_admit(vector, self.store.job, self.store.consumed):
             return "waiting"
-        self._pool.dequeue(job)
-        self._pool.acquire(job, vector)
+        self.store.dequeue_waiter(job)
+        self.store.reserve(job, to_reservations(vector))
         self._run(job_ir, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True)
         return "admitted"
 
     def _cancel_waiter(self, job: str, why: str) -> str:
-        self._pool.dequeue(job)
+        self.store.dequeue_waiter(job)
         self._set_status(job, "INACTIVE", cause=f"QUE_WAIT cancelled: {why} (DL-50)")
         return "cancelled"
 

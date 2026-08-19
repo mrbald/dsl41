@@ -203,14 +203,64 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
 #: DL-94 widened it from one model to the owner's whole set, for the same
 #: reason: a second frozen row arrived (`HostRuntime`, the ss8 routing table)
 #: and a gate that protected only the first would have been narrower the day
-#: after it was written.
-_STATE_MODELS = ("JobRuntime", "HostRuntime")
+#: after it was written. DL-120 adds `CapacityReservation`, which rides on a
+#: `JobRuntime` and is authoritative for what a live run holds (PR-52).
+_STATE_MODELS = ("JobRuntime", "HostRuntime", "CapacityReservation")
 _STATE_OWNER = "RuntimeState"
 #: Containers on the owner that a caller could reach through instead. Both the
 #: private maps and the read-only views over them (DL-86): the views raise at
 #: runtime, but a static name is the better error, and a caller who reaches for
 #: `_jobs` should be told the same thing as one who reaches for `job`.
-_STATE_MAPS = ("_jobs", "_globals", "_timers", "_hosts", "job", "globals_", "hosts")
+#:
+#: DL-120 adds the capacity state, `consumed` and `enqueue_counter` (PR-52).
+#: The counter is a scalar, not a container -- which is why the gate also
+#: watches a plain rebind of these names and not only a subscript write; a
+#: number nobody can subscript was reachable by assignment alone.
+_STATE_MAPS = (
+    "_jobs",
+    "_globals",
+    "_timers",
+    "_hosts",
+    "_consumed",
+    "_enqueue_counter",
+    "job",
+    "globals_",
+    "hosts",
+    "consumed",
+    "enqueue_counter",
+)
+
+
+def _store_aliases(tree: ast.Module) -> set[str]:
+    """Names bound to an owner instance in this module: `store = <x>.store`
+    (the idiom every runner module uses) and the literal name `store`. A gate
+    that matched only the dotted `<x>.store.<name>` form was bypassed by the
+    first alias (U1 review); a gate that matched any `<x>._<name>` would flag
+    every unrelated class with a private field of the same name, so the alias
+    set is derived from the module's own assignments instead."""
+    names = {"store"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr == "store":
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+    return names
+
+
+def _owner_container(node: ast.expr, aliases: set[str]) -> str | None:
+    """The owner container an expression names -- `<...>.store.<name>` or
+    `<alias>.<name>` for an alias `_store_aliases` found -- or None."""
+    if not isinstance(node, ast.Attribute) or node.attr not in _STATE_MAPS:
+        return None
+    base = node.value
+    if (isinstance(base, ast.Attribute) and base.attr == "store") or (
+        isinstance(base, ast.Name) and base.id in aliases
+    ):
+        return node.attr
+    return None
 
 
 def _model_fields(tree: ast.Module) -> dict[str, str]:
@@ -271,6 +321,7 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
             continue
         fields = _model_fields(tree)
         exempt = _owner_class_lines(tree)
+        aliases = _store_aliases(tree)
 
         def _flag(line: int, message: str, path: Path = path) -> None:
             findings.append(Finding(_rel(path), line, f"{message} (DL-82)"))
@@ -299,17 +350,17 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
                 continue
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 # store.job.update(...) / .setdefault(...) / .pop(...) / .clear()
-                container = node.func.value
-                if (
-                    node.func.attr in ("update", "setdefault", "pop", "clear", "popitem")
-                    and isinstance(container, ast.Attribute)
-                    and container.attr in _STATE_MAPS
-                    and isinstance(container.value, ast.Attribute)
-                    and container.value.attr == "store"
+                container = _owner_container(node.func.value, aliases)
+                if container is not None and node.func.attr in (
+                    "update",
+                    "setdefault",
+                    "pop",
+                    "clear",
+                    "popitem",
                 ):
                     _flag(
                         node.lineno,
-                        f"mutates store.{container.attr} through .{node.func.attr}():"
+                        f"mutates store.{container} through .{node.func.attr}():"
                         f" route it through {_STATE_OWNER}",
                     )
                 continue
@@ -324,17 +375,18 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
                             f"assigns {fields[attribute.attr]}.{attribute.attr} directly:"
                             f" route it through {_STATE_OWNER}",
                         )
-                if isinstance(target, ast.Subscript):
-                    inner = target.value
-                    if (
-                        isinstance(inner, ast.Attribute)
-                        and inner.attr in _STATE_MAPS
-                        and isinstance(inner.value, ast.Attribute)
-                        and inner.value.attr == "store"
-                    ):
+                    replaced = _owner_container(attribute, aliases)
+                    if replaced is not None:
                         _flag(
                             node.lineno,
-                            f"writes store.{inner.attr} directly: route it through {_STATE_OWNER}",
+                            f"rebinds store.{replaced} directly: route it through {_STATE_OWNER}",
+                        )
+                if isinstance(target, ast.Subscript):
+                    written = _owner_container(target.value, aliases)
+                    if written is not None:
+                        _flag(
+                            node.lineno,
+                            f"writes store.{written} directly: route it through {_STATE_OWNER}",
                         )
     return findings
 

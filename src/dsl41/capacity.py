@@ -6,28 +6,51 @@ and event emission that decision implies stays on the Oracle. Nothing here
 knows about statuses, events or time -- which is why it could move at all,
 and why it is the piece to move first when the interpreter needs room.
 
-The pool is authoritative state that deliberately does NOT live under
-`RuntimeState` (concurrency-model ss3, settled by DL-86). It carries tested
-invariants instead: its waiter set is exactly the QUE_WAIT jobs and only a
-starting or running job holds units, so no change here is constructible
-without an accompanying row change to carry it into a revision.
+DL-120 finished the move. The pool holds NO mutable state: its buckets are
+sized from the catalog and everything else is passed in. Usage is
+
+    used[bucket] = consumed[bucket] + sum(units reserved by the live rows)
+
+with the held half on `JobRuntime.reservations` and the spent half in
+`RuntimeState.consumed`. The old `_bucket_used` added those two together, and
+a sum of a transient and an irreversible fact is a number no seal can rebuild:
+recomputing it from the holders alone refilled every depletable (period-model
+ss5). The waiter queue went the same way -- a rank is `JobRuntime.waiter_seq`,
+so admission ORDER is reconstructible from the rows rather than from an
+in-memory list.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from dsl41.oracle_state import CapacityReservation, ReleasePolicy
+
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from dsl41.ir import CatalogIR, JobIR
+    from dsl41.oracle_state import JobRuntime
+
+#: Sorts a waiter whose priority nothing declares -- and one whose job the
+#: catalog no longer has at all -- behind every declared priority.
+_UNSET_PRIORITY = 1 << 31
+
+#: The demand vector's entry shape: (bucket key, units, mode, release policy).
+#: mode is 'acquire' (holds units) or 'gate' (threshold: check-only).
+DemandEntry = tuple[str, int, str, ReleasePolicy | None]
 
 
 class CapacityPool:
     """The DL-50 capacity subsystem of one Oracle: the sized buckets (machine
-    max_load, resource amounts), the units each RUNNING job holds, and the
-    QUE_WAIT queue with its admission ORDER. Extracted from Oracle by DL-74
-    along the one line that matters: the pool decides who may be admitted and
-    in what order; every status transition and event emission the decision
-    implies stays on the Oracle."""
+    max_load, resource amounts), the demand each start makes on them, and the
+    admission ORDER of the QUE_WAIT queue. The pool decides who may be
+    admitted and in what order; every status transition and event emission
+    the decision implies stays on the Oracle (DL-74).
+
+    Since DL-120 it is a pure function of (catalog, rows, consumed): the
+    caller passes the state, the pool answers. Nothing here can be out of step
+    with the rows, because there is nothing here to be out of step."""
 
     def __init__(self, catalog: CatalogIR) -> None:
         self.catalog = catalog
@@ -35,8 +58,6 @@ class CapacityPool:
         # from the catalog (malformed -> skipped; preflight refuses the run).
         #: bucket key -> capacity. `m:<machine>` = max_load, `r:<name>` = amount.
         self._bucket_cap: dict[str, int] = {}
-        #: bucket key -> units currently held by RUNNING acquirers.
-        self._bucket_used: dict[str, int] = {}
         for mname, machine in catalog.machines.items():
             cap = _safe_units(machine.max_load_units)
             if cap is not None:
@@ -45,20 +66,14 @@ class CapacityPool:
             cap = _safe_units(resource.capacity_units)
             if cap is not None:
                 self._bucket_cap[f"r:{rname}"] = cap
-        #: job -> [(bucket_key, units, release_policy)] it holds while RUNNING.
-        self._held: dict[str, list[tuple[str, int, str]]] = {}
-        #: QUE_WAIT jobs and their enqueue sequence (deterministic ordering).
-        self._waiters: list[str] = []
-        self._waiter_seq: dict[str, int] = {}
-        self._enqueue_counter = 0
 
-    def demand_vector(self, job_ir: JobIR) -> list[tuple[str, int, str, str | None]]:
+    def demand_vector(self, job_ir: JobIR) -> list[DemandEntry]:
         """The full (bucket_key, units, mode, release_policy) demand of a start.
         mode is 'acquire' (holds units) or 'gate' (threshold: check-only, never
         holds). Only buckets the oracle can size appear -- an unsized resource
         or an absent max_load contributes nothing here (preflight refuses the
         former for execution; the latter is AutoSys's unlimited-load default)."""
-        raw: list[tuple[str, int, str, str | None]] = []
+        raw: list[DemandEntry] = []
         spec = job_ir.exec_
         if spec is not None and spec.machine is not None:
             key = f"m:{spec.machine}"
@@ -77,11 +92,11 @@ class CapacityPool:
             else:
                 raw.append((key, ref.quantity, "acquire", _release_policy(res_type, ref.free)))
         # Coalesce duplicate bucket keys (a job listing one resource twice):
-        # SUM the demand so can_admit's per-entry test and acquire's sum agree
-        # -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while the
-        # acquire over-commits to 4 (review MINOR). Release policy merges to the
-        # most restrictive so asymmetric FREE never frees early.
-        merged: dict[str, tuple[int, str, str | None]] = {}
+        # SUM the demand so can_admit's per-entry test and the reservation's sum
+        # agree -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while
+        # the acquire over-commits to 4 (review MINOR). Release policy merges to
+        # the most restrictive so asymmetric FREE never frees early.
+        merged: dict[str, tuple[int, str, ReleasePolicy | None]] = {}
         for key, units, mode, policy in raw:
             if key in merged:
                 u0, m0, p0 = merged[key]
@@ -91,62 +106,73 @@ class CapacityPool:
                 merged[key] = (units, mode, policy)
         return [(key, units, mode, policy) for key, (units, mode, policy) in merged.items()]
 
-    def can_admit(self, vector: list[tuple[str, int, str, str | None]]) -> bool:
+    def used(self, rows: Mapping[str, JobRuntime], consumed: Mapping[str, int]) -> dict[str, int]:
+        """Units unavailable per bucket: those PERMANENTLY spent plus those
+        held by live runs (DL-120). One pass over the rows, so the two facts
+        stay separate right up to the addition that needs them together.
+
+        A `consumed` key the catalog no longer sizes is kept and still counts:
+        a period that drops a resource must not refund what an earlier one
+        burned, and a later period that brings the resource back must not find
+        the quota full again (PR-19a, period-model ss3.3)."""
+        used = dict(consumed)
+        for row in rows.values():
+            for reservation in row.reservations:
+                used[reservation.bucket] = used.get(reservation.bucket, 0) + reservation.units
+        return used
+
+    def can_admit(
+        self,
+        vector: list[DemandEntry],
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+    ) -> bool:
         """True iff every bucket has room for its demand (gate and acquire share
         the same free>=units test; keys are guaranteed sized)."""
-        return all(
-            self._bucket_used.get(key, 0) + units <= self._bucket_cap[key]
-            for key, units, _, _ in vector
-        )
+        used = self.used(rows, consumed)
+        return all(used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
 
-    def acquire(self, job: str, vector: list[tuple[str, int, str, str | None]]) -> None:
-        held: list[tuple[str, int, str]] = []
-        for key, units, mode, policy in vector:
-            if mode == "acquire":
-                self._bucket_used[key] = self._bucket_used.get(key, 0) + units
-                assert policy is not None
-                held.append((key, units, policy))
-        if held:
-            # extend, never overwrite: with release-before-wake the job's prior
-            # record is already released, so this is empty -> assignment; the
-            # extend is the belt-and-braces that turns any missed release into a
-            # recoverable over-hold, never a permanent strand (review BLOCKER).
-            self._held.setdefault(job, []).extend(held)
+    @staticmethod
+    def holds(row: JobRuntime) -> bool:
+        """True while this row still holds units. The Oracle releases on the
+        edge that LEAVES STARTING/RUNNING (period-model ss5) -- terminal for
+        every ordinary run -- before it wakes anything (the release-before-wake
+        gate)."""
+        return bool(row.reservations)
 
-    def holds(self, job: str) -> bool:
-        """True while `job` still holds units: only a holder's terminal
-        transition frees anything (the Oracle's release-before-wake gate)."""
-        return job in self._held
+    def sorted_waiters(self, rows: Mapping[str, JobRuntime]) -> list[str]:
+        """The QUE_WAIT jobs in admission order, read off the rows."""
 
-    def release(self, job: str, terminal_status: str) -> None:
-        """Return a completed holder's units per each request's release policy;
-        'never' / unmet 'success' units stay consumed (depletable / hold-on-
-        failure) -- and the job is terminal, so they never come back."""
-        for key, units, policy in self._held.pop(job, []):
-            if policy == "completion" or (policy == "success" and terminal_status == "SUCCESS"):
-                self._bucket_used[key] = self._bucket_used.get(key, 0) - units
-
-    def enqueue(self, job: str) -> None:
-        """Record a refused admission in the queue; the QUE_WAIT transition it
-        implies is the Oracle's (DL-74)."""
-        self._enqueue_counter += 1
-        self._waiter_seq[job] = self._enqueue_counter
-        if job not in self._waiters:
-            self._waiters.append(job)
-
-    def sorted_waiters(self) -> list[str]:
-        def key(j: str) -> tuple[int, int, str]:
+        def key(item: tuple[str, int]) -> tuple[int, int, str]:
+            job, seq = item
             # PENDING: Qr2 -- lower priority number == higher priority assumed;
             # unset sorts last. enqueue-seq then name make the order total.
-            prio = _safe_units(self.catalog.jobs[j].priority_value)
-            return (prio if prio is not None else 1 << 31, self._waiter_seq.get(j, 0), j)
+            #
+            # A waiter the catalog does not have takes that same "unset"
+            # priority rather than raising KeyError. period-model ss10
+            # classifies QUE_WAIT-and-removed R, so an operator is refused the
+            # boundary long before this runs; the default is the floor under
+            # that gate, so a classifier bug is a misordered queue and not a
+            # crash in the admission loop (period-model ss5).
+            job_ir = self.catalog.jobs.get(job)
+            prio = _safe_units(job_ir.priority_value) if job_ir is not None else None
+            return (prio if prio is not None else _UNSET_PRIORITY, seq, job)
 
-        return sorted(self._waiters, key=key)
+        waiting = [(job, row.waiter_seq) for job, row in rows.items() if row.waiter_seq is not None]
+        return [job for job, _ in sorted(waiting, key=key)]
 
-    def dequeue(self, job: str) -> None:
-        if job in self._waiters:
-            self._waiters.remove(job)
-        self._waiter_seq.pop(job, None)
+
+def to_reservations(vector: list[DemandEntry]) -> tuple[CapacityReservation, ...]:
+    """The acquiring half of a demand vector, as the rows record it. A `gate`
+    entry holds nothing, so it reserves nothing -- the threshold was tested at
+    admission and is not owed a release."""
+    held = []
+    for key, units, mode, policy in vector:
+        if mode != "acquire":
+            continue
+        assert policy is not None  # demand_vector gives every acquire entry one
+        held.append(CapacityReservation(bucket=key, units=units, release_policy=policy))
+    return tuple(held)
 
 
 def _safe_units(accessor: object) -> int | None:
@@ -163,7 +189,7 @@ def _safe_units(accessor: object) -> int | None:
     return value
 
 
-def _release_policy(res_type: str, free: str | None) -> str:
+def _release_policy(res_type: str, free: str | None) -> ReleasePolicy:
     """DL-50: per-request release policy. FREE overrides the res_type default.
     Returns 'completion' (release on any terminal), 'success' (only on SUCCESS),
     or 'never'. res_type is upper-cased; '' (absent) reads as renewable."""
@@ -176,7 +202,7 @@ def _release_policy(res_type: str, free: str | None) -> str:
     return "never" if res_type == "D" else "completion"  # FREE absent -> res_type default
 
 
-def _merge_policy(a: str | None, b: str | None) -> str | None:
+def _merge_policy(a: ReleasePolicy | None, b: ReleasePolicy | None) -> ReleasePolicy | None:
     """Coalesce two release policies for one bucket (duplicate resource refs) to
     the MOST RESTRICTIVE, so asymmetric FREE never frees early (DL-50 review)."""
     if a is None:
