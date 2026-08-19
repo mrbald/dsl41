@@ -3,6 +3,21 @@
 You are implementing a migration compiler designed in a prior session. The design
 is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 
+## Writing style
+
+Write in plain, short English. No "claudisms": no marketing adjectives, no
+"comprehensive/robust/seamless", no rhetorical flourishes, no emoji, no
+restating the question. Prefer ASD-STE100 simplified-English style for all
+docs, specs, commit messages and chat replies. One idea per sentence. If a
+sentence can be shorter, make it shorter.
+
+## Public repo hygiene
+
+This repo is public. Never commit client-derived narrative, real
+calendar/customer names, or private data. When scrubbing, read files line by
+line -- grep sweeps are insufficient. A pre-push guard exists; do not bypass
+it.
+
 ## Read first, in this order
 1. `docs/ir-design.md` — the central spec (pipeline, AST/IR-F/IR-G models, oracle,
    equivalence tiers, linter rules L001–L015). Model sketches there are the API.
@@ -11,7 +26,11 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 4. `docs/stonebranch-semantics.md` — UCS entries + M01–M36 mapping table; the UC
    backend refuses R-rows and reports A-row assumptions (Part II requirements 1–3).
 5. `docs/decision-log.md` — do not relitigate DL entries; append new ones.
-6. `docs/citation-index.md` — what every reference token in the sources means
+6. `docs/period-model.md` — normative for periods, seals, the carry, the
+   lineage fence and the optional run root (DL-114). The runner's other
+   frozen contracts — `concurrency-model.md`, `control-protocol.md`,
+   `supervisor-protocol.md` — are read when touching the runner.
+7. `docs/citation-index.md` — what every reference token in the sources means
    and which doc defines it (SEM/UCS/M/P-M/DL/L/T/F/ss/Q/Qr/U/E). A new
    namespace needs a row there first; `scripts/arch_check.py` fails on a
    citation that resolves to nothing.
@@ -136,6 +155,32 @@ technique) — start there. Summary:
   shapes but never committed (corpus hygiene).
 
 <!-- hats:core -->
+## Git workflow
+
+- Never run `git pull`. Use `git fetch` then `git rebase`.
+- Commit as soon as a change is green (tests + lint + type gates). Do not wait
+  for permission to commit; only ask before pushing to protected branches or
+  merging PRs.
+- Push after each logically complete slice rather than batching many commits.
+- Stage explicit paths; never `git add -A` (untracked scratch here is often
+  estate-derived).
+
+## Verification gates
+
+Before claiming any work is done: run the full test suite, ruff, and mypy. For
+browser/UI work, verify in Chromium AND WebKit (and Firefox where relevant) --
+never declare a UI feature working from one engine. For interactive features,
+exercise the actual interaction (right-click, keyboard, resize), not just page
+load.
+
+## Self-review
+
+After implementing any multi-file change, run an adversarial self-review
+subagent before committing. Look specifically for: over-claiming or leaking
+tests, duplicate records, orphaned tests from bad inserts, clock-domain
+mixups, and flaky timing assertions -- these are recurring defect classes in
+this codebase.
+
 ## Engineering core (hats)
 
 This project uses the shared **hats engineering core**. Before substantive

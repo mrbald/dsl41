@@ -4958,3 +4958,165 @@
   end to end against a real journal, manifest and spool -- 29 tests.
   2165 -> 2194 passed; ruff, mypy, arch_check clean (baseline updated:
   `cli.py`'s advisory line count moved with the new command).
+- DL-114 the period model is frozen (2026-08-20). `docs/period-model.md` is
+  normative for periods, seals, the carry, the lineage fence and the optional
+  run root, in the way `docs/concurrency-model.md` is for admission and
+  `docs/control-protocol.md` for the wire: each change to a frozen item needs a
+  DL entry. It supersedes `docs/ops-model.md` §1–§3 and §8a–§8b as mechanism;
+  `docs/ha-deployment.md` and `docs/ops-model.md` are reconciled to it and say
+  so. Its §13 obligations (`PR-\d{2}[a-z]?`, tests `test_prNN_*`) are the risk
+  control: nothing ships incrementally, so an obligation weak enough to let a
+  broken implementation pass is a defect of the same rank as a wrong mechanism.
+  DL-115..DL-127 below are the decisions the document contains, stated once
+  each so they are citable; the document carries the reasons.
+- DL-115 the directory is not the baseline (2026-08-20; period-model §1). Five
+  identities: estate (`estate_id`, uuid4 at genesis), estate root (a path, and
+  only a path), period (`period_id`, `baseline_id`; one catalog + one runtime
+  profile + one state-machine version), segment (one WAL file), seal, execution.
+  **I1**: a period is exactly one segment — there is no size roll; to roll,
+  seal. **I2**: indices, epochs and run numbers are monotone across the
+  estate. Every periodized root carries a permanent `journal.jsonl` sentinel
+  (`rec: period_root`) so an old binary refuses both `run` and `run --resume`
+  there. One ownership rule for every root and every anchor: absent → create;
+  exact same estate and exact same incomplete transaction → resume; anything
+  else → refuse. Rolling the estate root is optional archival hygiene: the seal
+  and opening are byte-identical whether the next period continues in place or
+  opens a fresh root (PR-24).
+- DL-116 the lineage fence (2026-08-20; period-model §1.3). Four head states
+  `open | closed | claimed | adopting` in an anchor at a path outside any
+  archivable root; `claim_successor` is a CAS idempotent on `claim_id =
+  sha256(prev_seal_digest, next_period, realpath(target_root))`, never on a
+  PID. Local substrate is `LeaderLock`'s pattern on the anchor — lifetime
+  flock, inode-under-pathname re-check before every append, dispatch,
+  revision-bearing read and FW spool append; local filesystem only (NFS
+  refused); every write by the spool liturgy. A stale claim is break-glass
+  (`estate reclaim --force`), attributed. When the shared store arrives
+  (ha-deployment S8a) it **replaces** the anchor as the sole authority for term
+  and head; two leadership truths is the failure mode. The anchor's `periods`
+  map is the archive registry; a period's row is inserted when a root first
+  owns it, provisional until its segment is durable.
+- DL-117 `baseline_id` is the period's, and derived (2026-08-20; period-model
+  §3.4, §4). Every transition derives `baseline_id = sha256(estate_id,
+  period_id, stage_digest)`; a command composed under C1 is refused after C2
+  opens even when the addressed row never moved. `control-protocol.md`'s wire
+  shape does not change; the definition does, from the log's identity to the
+  period's. A committed seal's exact retry is answered from the seal record
+  before the baseline gate, one seal back; older retries are refused as stale
+  (liveness, not safety). Client-proposed `next_period` carries only catalog
+  and profile identity; the engine derives `period_id = current + 1`,
+  `segment_no = period_id`, `baseline_id`, `clock_domain = current`, and
+  `first_index = closes_at_index + 1` after the cutoff.
+- DL-118 the atomic `decision` record and control-protocol v3 (2026-08-20;
+  period-model §2). `result` plus standalone `effect` records become one
+  `decision` line carrying the decision, revisions and effects in admission
+  order, `index` not `seq` (DL-89 kept). This closes CM-17 on the file
+  substrate: the result-fsynced-effect-not-written window is gone. `header` is
+  retired for a self-describing `segment` record; `seal` is added; `leader`
+  unchanged. The subscribe stream changes shape, which is a wire break:
+  **v3**, on DL-90's precedent — v2 is gone, not deprecated. v3 also carries
+  the `seal` verb, the `host` cmd's `route` verb and `routes` query with the
+  `route:` namespace, the subscription gap marker, and the exact-retry
+  expiry (DL-123).
+- DL-119 the seal artifact and the canonical form (2026-08-20; period-model
+  §3). Three writes in order: sidecar by the liturgy, `seal` record, anchor
+  CAS `open → closed`. The seal carries rows, timers with `timer_seq`,
+  `consumed`, `enqueue_counter`, `now` + clock domain,
+  `scheduler_admitted_through`, `outbox_pending`, `executions` (a
+  discriminated union `pending_spawn | bound | fw_watch` — no `terminating`;
+  the sealer waits out a KILL ladder), `classification`, `next_period`, and the
+  boundary request; it does not carry `last_contact`, `deadman_us`, the
+  decision index, `unresolved`, or anything derived. §3.2's canonical form
+  governs every artifact this spec defines under one shared
+  `artifact_format_version`: sorted keys at every depth, no floats, every
+  typed field present, opaque payloads preserved, Unicode scalar values at
+  every ingress, pinned escaping, golden vectors. A seal is an authoritative
+  checkpoint reproducible from its opening checkpoint and its period's inputs
+  — "verified" means re-derived by `audit`, not self-consistent; `verify`
+  (attestation binding) is a different verb; attestation N requires N−1.
+- DL-120 capacity decomposed (2026-08-20; period-model §5). DL-86's move
+  finished: `CapacityReservation {bucket, units > 0, release_policy}` and
+  `waiter_seq` live on `JobRuntime`; `consumed` (≥ 0, ghost buckets survive a
+  resource's removal) and `enqueue_counter` under `RuntimeState`;
+  `CapacityPool` becomes a pure function of (catalog, rows, consumed).
+  Reason: `_bucket_used` summed units held by live runs with units permanently
+  spent, and a seal recomputing usage from holders would refund every
+  depletable (SEM-16 inverted). DL-86's invariant — no pool change without a
+  row change — was true and is not the property a seal needs, which is
+  reconstructibility from those rows.
+- DL-121 `run_id` is minted in the effect; SPAWN idempotency is durable; FW has
+  a spool (2026-08-20; period-model §2.3, §3.5, §11a). DL-96's deferral is
+  lifted: `plan_effects` mints `run_id` and every SPAWN effect carries it, with
+  `{executor_id, generation}` from birth. The supervisor's SPAWN idempotency is
+  directory-backed — `mkdir`, `run_id` index, `receipt.json`, spawn,
+  `reply.json`, answer — resolved through the index and answered from the
+  directory, so it outlives `LIST` presence and a supervisor restart; a
+  detached run's directory is created by the supervisor; `run_id` has a
+  filename-safe grammar at the wire. The FW adapter writes an append-only
+  `watch.jsonl` — a `start` line on dispatch, then one line per poll, under the
+  fence — and the seal carries `watch_seq`, not wall time.
+- DL-122 `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` (2026-08-20;
+  period-model §1.1, §2.1). `catalog_hash` v2 is the canonical `CatalogIR` with
+  `meta` projected to `{source_files}` — `tool_version` and `parsed_at` leave,
+  spans stay — carried with `catalog_hash_version: 2`; today's hash moves on a
+  patch release, which is DL-100's "outage manufactured by bookkeeping".
+  `catalogs/` is addressed by `source_bundle_hash` over the ordered,
+  length-framed post-placeholder bytes. A period's semantics are `(catalog_hash,
+  runtime_hash, state_machine_version)`; `runtime_hash` is over a typed
+  `RuntimeProfile` (timezone basis, `as_machine`, policy, mode, durations in
+  µs, `retry_horizon_us`) — not the route table. Two manifests: the CLI stages
+  `staged_manifest.json`; the engine writes `manifest.json` with the derived
+  fields at install.
+- DL-123 classification, latches, the retry horizon (2026-08-20; period-model
+  §9, §10). Three tiers: executing → R; latent intent (`armed`, QUE_WAIT,
+  semantic timer) → A except removed → R; not live → carry. `pending_spawn` is
+  executing. The graph runs job → dependency over jobs, globals, `name^INST`,
+  boxes (both ways, nested), resources, machines, calendars, the timezone
+  basis, and runtime-profile fields per kind (`retry_horizon_us` reaches no
+  job); IR-G is one input, reversed. E19 closes: a member changed while its
+  box is executing is R. **Armed latches cross a release** — the runbook's
+  "latches die with the old baseline" becomes false; one held tick under C1 →
+  exactly one start after C2. The gate counts the last admitted externally
+  requested attempt with a durable decision (rejected and no-op included)
+  against the **closing** period's `retry_horizon_us`; naming a horizon
+  weakens `control-protocol.md` §3's unbounded exact-retry promise (no wire
+  change, this entry).
+- DL-124 the seal operation (2026-08-20; period-model §6–§8). `dsl41 seal` in
+  live mode (control verb; the engine seals in its single-writer loop and
+  exits 3) or offline mode (takes both locks, runs the recovery barrier);
+  both stage C2, run three loader phases (`validate_staged` before the barrier,
+  `validate_boundary` after, `open_from_seal` at resume, each over a typed
+  context), and hand off to `run --resume` or `run --open-from`. The `seal`
+  record is the boundary's own decision; an uncommitted request is unseen and
+  retries afresh; the seal append is the point of no return — failure there
+  fail-stops with an unknown outcome and recovery decides after a confirming
+  `fsync`. The barrier places no holds (there is one hold bit; it is the
+  operator's); the reversible interval ends before the append and
+  `abort_boundary` runs on every exit inside it. The cutoff watermark is
+  `scheduler_admitted_through: T`; C1 owns ticks ≤ T. **A transition may not
+  change `state_machine_version`**: an SM bump stays a new estate.
+- DL-125 adoption (2026-08-20; period-model §11). `dsl41 estate adopt`: take
+  both locks, mint `estate_id`, reconstruct legacy state read-only, phase-1
+  readiness, then fence (hard-link, sentinel over `journal.jsonl`), then
+  authority (`absent → adopting`), then a dispatch-free recovery barrier under
+  the adopter's own `leader` term, translate into a conforming segment
+  (`result`+`effect` folded into `decision` with `legacy_batch: true`), seal as
+  period 1 through the common body, `adopting → closed`. Refuses a live
+  wrapper, a live FW, a pending legacy outbox, or an admitted input without
+  a durable `result`. Retries under the same `estate_id` with a corrected C2.
+- DL-126 `deadman_s` leaves the host semantic projection (2026-08-20;
+  concurrency-model §3 amended by period-model §3.3). It joins `last_contact`
+  in `_UNPROJECTED_HOST`: it is observed liveness configuration read back from
+  the supervisor, registration changes it with no journal record, and a
+  projected change there moved `state_rev` past what audit could derive. The
+  eviction gate reads the current row value regardless. A host row's deadman
+  is null until the host re-registers in a new period, and a null deadman is
+  not evictable except by force. An evicted host's return stays the relay's
+  (CM-12); this spec records nothing for it.
+- DL-127 retention floors (2026-08-20; period-model §11a, §12). Policy is a
+  business decision; the floors are not: never prune the sentinel, anchor,
+  active claim, the opening and closing sidecars, current and committed-next
+  manifests and bundles, an uncommitted candidate's artifacts, the latest
+  attestation checkpoint, the WAL and spool of any unattested period (E20
+  gates the rest), the spool of any live or carried execution, or any SPAWN
+  tombstone whose effect can still be replayed — deleting one authorizes a
+  spawn.

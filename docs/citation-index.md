@@ -36,7 +36,8 @@ Two rules follow from it:
 | `Q\d[a-z]?` | AutoSys open question | An unresolved AutoSys semantics question, Q1–Q9 plus lettered splits (Q8a…Q8e). `Q8x` means "the Q8 family". Live ones carry a `# PENDING: Qn` code marker. **Unrelated to `Qr\d`** — see the note below. | `docs/autosys-semantics.md` §9 |
 | `Qr\d` | Resource-manager open question | An unresolved resource-manager question from DL-49/DL-50. No dossier backs these; they are a runner-side series. **Unrelated to `Q\d`** — see the note below. | `docs/decision-log.md` DL-49, DL-50 |
 | `U\d[a-z]?` | UC open question | An unresolved Stonebranch question, U1–U8 plus lettered splits (U3a/U3b, U6a/U6b). | `docs/stonebranch-semantics.md` Part III |
-| `E\d{1,2}` | Runner open question | An unresolved runner/execution question, E1–E11. Implemented defaults carry a `# PENDING: En` marker. | `docs/runner-design.md` §15 |
+| `E\d{1,2}` | Runner open question | An unresolved runner/execution question. E1–E11 in the runner design; E12–E15 opened by the HA plan; E16–E23 by the ops plan. Implemented defaults carry a `# PENDING: En` marker. | `docs/runner-design.md` §15; `docs/ha-deployment.md` §11; `docs/ops-model.md` §11 |
+| `PR-\d{2}[a-z]?` | Period-model obligation | One obligation of the frozen period model (DL-114), PR-01–PR-52 with lettered splits — a property the seal, the lineage fence, the classifier and adoption must be *tested* to hold. Tests are named `test_prNN_*` / `test_prNNx_*`. | `docs/period-model.md` §13 |
 | `# PENDING: <token>` | Code marker | The house convention for a documented default standing in for an unresolved question. The token is a `Q`/`Qr`/`U`/`E` reference from the rows above. | `CLAUDE.md` |
 | `\[[VF?]\]` | Evidence tier | How well a claim is backed: **[V]** verified against a cited public source, **[F]** one unverified field observation, **[?]** open. | `docs/autosys-semantics.md` |
 

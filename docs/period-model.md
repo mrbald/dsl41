@@ -1,6 +1,6 @@
 # Period model — the seal, the segment, and the optional run root
 
-Status: **draft 29, not frozen — converged.** Intended to become normative in the way
+Status: **frozen (2026-08-20, DL-114).** Draft 29, converged. Intended to become normative in the way
 `docs/concurrency-model.md` and `docs/control-protocol.md` are: once frozen,
 each change to a frozen item requires a decision-log entry. It supersedes
 `docs/ops-model.md` §1–§3 and §8a–§8b as the *mechanism*; that document stays
