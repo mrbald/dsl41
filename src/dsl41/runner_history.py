@@ -12,9 +12,10 @@ Two layers, deliberately split so the fold stays testable with no
 filesystem: `fold_run_rows` is a pure function of already-parsed journal
 records plus (optionally) a catalog and a trace -- both themselves plain
 data, never a live `Engine`. `read_run_root` is the thin I/O shell: it reads
-`journal.jsonl`, rebuilds the catalog from `manifest/` (DL-66's self-
-contained artifact -- no estate-file argument needed, unlike `dsl41
-journal`), replays it through a fresh `Oracle` exactly as `dsl41 journal`
+`journal.jsonl`, rebuilds the catalog from the run root's own stored
+inputs (no estate-file argument needed, unlike `dsl41 journal`: DL-130's
+bundle, or DL-66's `manifest/` on a root that predates it), replays it
+through a fresh `Oracle` exactly as `dsl41 journal`
 does, and reads the spool. `read_spool` is its own thin function for the
 same reason: a duration table has two independent I/O concerns (the WAL,
 the spool), and mixing them into one function would make the fold hard to
@@ -74,12 +75,12 @@ Five decisions, each with its reason here; the decision itself is
    and a null duration, never the resume instant dressed up as an end time.
 
 4. **Segmentation, on the job and not on the estate.** Every row carries
-   both the `catalog_hash` of the journal header it came from and this job's
+   both the `catalog_hash` of the segment it came from and this job's
    own `job_hash`, always, in every `--format`. The break line `--format
    table` prints between two consecutive rows of the same job fires on
    `job_hash`, falling back to `catalog_hash` only when either row has none.
    The estate hash alone is the wrong signal to draw it from: it is
-   deliberately conservative (`runner_journal.catalog_hash` -- "an estate
+   deliberately conservative (`period.catalog_hash_v2` -- "an estate
    that changed in ANY way re-baselines"), so a release touching twelve jobs
    of eight hundred moves it for all eight hundred, and a break on it marks
    every job in the estate as changed. See `_job_fingerprints` for what the
@@ -89,12 +90,13 @@ Five decisions, each with its reason here; the decision itself is
    (job, started_at) first, so a break lands exactly where that job changed
    -- never a hidden line, never a refusal to print.
 
-5. **A missing manifest degrades; a wrong one refuses.** `manifest/` is
-   DL-66 and a run root predating it has none, as does one whose retention
-   pruned it -- and those are exactly the old run roots a history tool
-   exists to read. So an absent manifest folds from records alone rather
-   than refusing the whole root, while a manifest whose `catalog_hash`
-   disagrees with the journal header still refuses, because that one is not
+5. **A missing manifest degrades; a wrong one refuses.** The period
+   manifest is DL-130 and `manifest/` before it is DL-66; a run root
+   predating both has neither, as does one whose retention pruned them --
+   and those are exactly the old run roots a history tool exists to read.
+   So an absent manifest folds from records alone rather than refusing the
+   whole root, while a manifest whose `catalog_hash` disagrees with the
+   journal's opening record still refuses, because that one is not
    a missing fact but a wrong one. What the degraded path costs is real and
    is carried per row in `fidelity` rather than in a warning line a JSON or
    CSV consumer never sees: no box rows at all, no `box_name`, no
@@ -120,6 +122,14 @@ from dsl41.ast_jil import JilParseError, parse
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, JobStatus, OracleError, TraceEntry
+from dsl41.period import (
+    Manifest,
+    bundle_dir,
+    bundle_source_paths,
+    is_opening,
+    opening_at,
+    read_period_manifest,
+)
 from dsl41.runner_adapters import load_json
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
@@ -206,7 +216,7 @@ def _strip_spans(value: Any) -> Any:
 
 
 def _job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
-    """Per-job definition fingerprints -- `runner_journal.catalog_hash`'s
+    """Per-job definition fingerprints -- `period.catalog_hash_v2`'s
     technique (sha256 over a canonical JSON dump) applied one level down.
 
     The estate-wide hash exists to gate resume and it is deliberately
@@ -216,8 +226,8 @@ def _job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
     line computed from it fires on every job and tells the reader nothing
     about the one they are looking at.
 
-    **The limit, stated rather than discovered.** `manifest/` holds the
-    POST-placeholder JIL (DL-66), so this fingerprints the RESOLVED
+    **The limit, stated rather than discovered.** The bundle holds the
+    POST-placeholder JIL, so this fingerprints the RESOLVED
     definition. An estate whose placeholders vary per run -- `examples/
     nightbank` bakes the run root into `profile`, `std_out_file` and
     `std_err_file`, so every job's resolved text differs between any two run
@@ -523,8 +533,8 @@ def fold_run_rows(
     success_codes/fail_codes. Every row then says so in `fidelity`
     (decision 5) rather than reading like a complete one. `read_run_root`
     below supplies a catalog whenever the run root has a `manifest/`."""
-    if not records or records[0].get("rec") != "header":
-        raise RunHistoryError("run history requires a journal starting with a header record")
+    if not records or not is_opening(records[0]):
+        raise RunHistoryError("run history requires a journal starting with a segment record")
     catalog_hash = str(records[0]["catalog_hash"])
     trace_windows = _trace_windows_by_job(trace)
     fingerprints = {} if catalog is None else _job_fingerprints(catalog)
@@ -611,40 +621,71 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
 
 
 def load_catalog_from_manifest(run_root: Path) -> CatalogIR:
-    """Rebuild the catalog `dsl41 run` loaded, from its own self-contained
-    artifact (DL-66) -- no estate-file argument needed, unlike `dsl41
-    journal`. `manifest/` holds the byte-exact post-placeholder JIL
-    (render_preserve, F1); `manifest.json`'s `sources` list gives the file
-    order.
+    """Rebuild the catalog `dsl41 run` loaded, from the run root's own
+    self-contained artifact -- no estate-file argument needed, unlike
+    `dsl41 journal`.
+
+    Two layouts, one reader. A root opened since DL-130 keeps its inputs in
+    `catalogs/<source_bundle_hash>/`, addressed by their bytes, and names
+    the address in `periods/000001/manifest.json`; one opened before it has
+    `manifest/` with its own `sources` list. Both hold the byte-exact
+    post-placeholder JIL (render_preserve, F1) in command-line order.
 
     This is NOT hash-gated the way `dsl41 journal` is: `SourceSpan.file`
-    inside the reloaded catalog names the manifest path, not the original
-    recorded one, so its own `catalog_hash` can never equal the journal
-    header's (runner-design ss7 says so explicitly -- a deliberate defer).
-    The one check available offline is that manifest.json's OWN recorded
-    hash -- computed from the SAME original catalog object `Journal.create`
-    hashed for the header, at the same moment -- agrees with the header;
-    that catches a manifest that belongs to a different run, not a caller's
-    path typo."""
-    manifest_dir = run_root / "manifest"
-    payload = load_json(manifest_dir / "manifest.json")
-    if payload is None:
-        raise RunHistoryError(f"{run_root}: no readable manifest/manifest.json (DL-66 artifact)")
-    sources = payload.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise RunHistoryError(f"{run_root}: manifest.json carries no sources")
+    inside the reloaded catalog names the stored path, not the original
+    recorded one, so its own `catalog_hash` can never equal the journal's
+    (runner-design ss7 says so explicitly -- a deliberate defer). The one
+    check available offline is that the manifest's OWN recorded hash --
+    computed from the SAME original catalog object the opening record was
+    written from, at the same moment -- agrees with that record; that
+    catches a manifest that belongs to a different run, not a caller's path
+    typo."""
+    paths = stored_input_paths(run_root)
+    if not paths:
+        raise RunHistoryError(f"{run_root}: no stored inputs to rebuild the catalog from")
     parsed = []
     try:
-        for entry in sources:
-            name = entry["file"]
-            path = manifest_dir / str(name)
-            text = path.read_text(encoding="utf-8")
-            parsed.append(parse(text, file=str(path)))
+        for path in paths:
+            parsed.append(parse(path.read_text(encoding="utf-8"), file=str(path)))
         return lower_catalog(parsed, permit_unknown=True)
-    except (OSError, KeyError, TypeError, UnicodeDecodeError, JilParseError, LoweringError) as exc:
-        raise RunHistoryError(
-            f"{run_root}: cannot rebuild the catalog from manifest/ ({exc})"
-        ) from exc
+    except (OSError, UnicodeDecodeError, JilParseError, LoweringError) as exc:
+        raise RunHistoryError(f"{run_root}: cannot rebuild the catalog ({exc})") from exc
+
+
+def _period_manifest_or_refuse(run_root: Path) -> "Manifest | None":
+    """`read_period_manifest`, with its refusal converted to this module's.
+
+    Every door into run history answers `RunHistoryError` and the CLI
+    prints it as exit 2; a decoder error escaping as itself would take
+    down a whole multi-root `dsl41 runs` with a traceback."""
+    try:
+        return read_period_manifest(run_root)
+    except EngineError as exc:
+        raise RunHistoryError(f"{run_root}: {exc}") from exc
+
+
+def stored_input_paths(run_root: Path) -> list[Path]:
+    """The stored inputs in command-line order -- DL-130's bundle where
+    there is one, DL-66's `manifest/` otherwise -- or `[]` when this root
+    stores none: an engine started with nothing staged, a root older than
+    both layouts, or one whose retention pruned them. Empty is a missing
+    fact and degrades (decision 5); a bundle that is present and unreadable
+    is corruption and raises."""
+    manifest = _period_manifest_or_refuse(run_root)
+    if manifest is not None:
+        directory = bundle_dir(run_root, manifest.source_bundle_hash)
+        if not (directory / "sources.json").exists():
+            return []
+        try:
+            return bundle_source_paths(run_root, manifest.source_bundle_hash)
+        except EngineError as exc:
+            raise RunHistoryError(f"{run_root}: {exc}") from exc
+    manifest_dir = run_root / "manifest"
+    payload = load_json(manifest_dir / "manifest.json")
+    sources = payload.get("sources") if payload is not None else None
+    if not isinstance(sources, list):
+        return []
+    return [manifest_dir / str(entry["file"]) for entry in sources]
 
 
 def replay_trace(
@@ -655,8 +696,7 @@ def replay_trace(
     reads it, `cli.py`'s `journal` command docstring explains why), then
     `replay_inputs`."""
     oracle = Oracle(catalog)
-    started_at = _parse_timestamp(str(records[0]["started_at"]))
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=started_at)
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:
         replay_inputs(oracle, records)
     except OracleError as exc:
@@ -673,21 +713,32 @@ def read_run_root(run_root: Path) -> list[RunRow]:
     except (OSError, EngineError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
     spool = _read_all_spool(records)
-    manifest = load_json(run_root / "manifest" / "manifest.json")
+    period_manifest = _period_manifest_or_refuse(run_root)
+    manifest: dict[str, Any] | None = (
+        period_manifest.model_dump(mode="json")
+        if period_manifest is not None
+        else load_json(run_root / "manifest" / "manifest.json")
+    )
     if manifest is None:
         # A MISSING manifest degrades; a WRONG one refuses. The two are
         # different facts and a history tool that refused both would be
-        # unable to read exactly the run roots it exists for: `manifest/` is
-        # DL-66 and every root predating it has none, as does one whose
-        # retention pruned it. Every row it returns says `records_only`, so
-        # what is missing rides on the data rather than on a warning the
-        # caller may not print (decision 5).
+        # unable to read exactly the run roots it exists for: the period
+        # manifest is DL-130, `manifest/` is DL-66, and every root
+        # predating both has neither, as does one whose retention pruned
+        # them. Every row it returns says `records_only`, so what is
+        # missing rides on the data rather than on a warning the caller may
+        # not print (decision 5).
         return fold_run_rows(records, spool=spool)
     if manifest.get("catalog_hash") != records[0].get("catalog_hash"):
         raise RunHistoryError(
-            f"{run_root}: manifest/manifest.json's catalog_hash disagrees with the"
-            " journal header -- this manifest is not this journal's"
+            f"{run_root}: the manifest's catalog_hash disagrees with the journal's"
+            " opening record -- this manifest is not this journal's"
         )
+    if not stored_input_paths(run_root):
+        # a manifest that names inputs this root no longer holds is the
+        # same missing fact as no manifest at all: the rows come back
+        # `records_only` rather than the whole root being refused
+        return fold_run_rows(records, spool=spool)
     catalog = load_catalog_from_manifest(run_root)
     trace = replay_trace(run_root, records, catalog)
     return fold_run_rows(records, catalog=catalog, trace=trace, spool=spool)

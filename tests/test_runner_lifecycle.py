@@ -45,7 +45,8 @@ from dsl41.ir import lower_source
 from dsl41.runner_startup import resume_run
 from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resolve_spool
 from dsl41.runner_clock import RealClock
-from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
+from dsl41.period import catalog_hash_v2
+from dsl41.runner_journal import read_journal, replay_inputs
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -737,7 +738,7 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     catalog = lower_source(CRASH_JIL)
     changed = lower_source(CRASH_JIL.replace("sleep 120", "sleep 121"))
-    assert catalog_hash(catalog) != catalog_hash(changed)
+    assert catalog_hash_v2(catalog) != catalog_hash_v2(changed)
 
     async def scenario() -> str:
         engine = start_run(
@@ -1057,7 +1058,10 @@ def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None
         return ""
 
     message = asyncio.run(scenario())
-    assert "no FW adapter registered" in message
+    # since DL-130 the pinned root refuses one gate earlier, before replay,
+    # naming the missing type -- the same loud refusal, moved to where
+    # nothing has mutated yet
+    assert "no adapter" in message and "FW" in message
 
 
 def test_m6_wrapper_spawn_failure_fails_job_not_engine(

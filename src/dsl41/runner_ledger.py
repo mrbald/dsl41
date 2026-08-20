@@ -47,6 +47,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dsl41.ir import CatalogIR
+from dsl41.period import catalog_hash_for
 from dsl41.runner_clock import EngineError
 
 #: ss7 ledger header, the half `catalog_hash` does not cover: the version of
@@ -202,17 +204,22 @@ def next_epoch(records: list[dict[str, Any]]) -> int:
     return max(terms, default=0) + 1
 
 
-def check_leader_eligibility(header: dict[str, Any], *, expected_catalog_hash: str) -> None:
-    """ss7: eligibility requires an exact match on the ledger header's two
+def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> None:
+    """ss7: eligibility requires an exact match on the log's two opening
     pins. Both checks live here rather than one here and one at the resume
     site -- they answer one question ("may this build lead this log?") and
-    splitting them is how the second one goes missing."""
-    if header.get("catalog_hash") != expected_catalog_hash:
+    splitting them is how the second one goes missing.
+
+    The catalog hash is recomputed under the recipe the log itself names
+    (period-model ss1.1): v2 for a `segment`, v1 for a legacy `header`.
+    Comparing across recipes would refuse every estate that predates
+    DL-130, which is the outage DL-100 already named."""
+    if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"
             " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
         )
-    pinned = header.get("state_machine_version", _ASSUMED_VERSION)
+    pinned = opening.get("state_machine_version", _ASSUMED_VERSION)
     if pinned != STATE_MACHINE_VERSION:
         raise EngineError(
             f"state-machine version mismatch: this journal is v{pinned}, this build"

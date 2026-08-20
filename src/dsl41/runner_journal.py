@@ -40,8 +40,17 @@ Stage S6a (concurrency-model ss1/ss7) makes it a LEDGER rather than only a
 log. A `leader` record allocates this incarnation's epoch by being
 appended -- allocation and the log's account of it are one write, so they
 cannot disagree -- under a lock on the run root that this object owns the
-release of (runner_ledger). The header gains ss7's second pin, the
+release of (runner_ledger). The opening record gains ss7's second pin, the
 state-machine version, beside the catalog hash it already carried.
+
+DL-130 (period-model ss2.1) replaced `header` with `segment` as that
+opening record. A once-per-log header cannot describe a log made of
+segments, and a segment is self-describing: period, estate, catalog,
+runtime profile and semantics, without reading an earlier file. Only
+`segment` is written; every reader accepts BOTH, because a `header` is
+exactly what a log written before DL-130 opens with, and it pins
+`catalog_hash` v1 where a `segment` pins v2 -- so every gate that compares
+hashes compares like for like (`period.catalog_hash_for`).
 
 A journal written before S2 replays unchanged. Its attempts have no
 results, so all of them apply -- exactly what the single-pass reader did,
@@ -52,7 +61,6 @@ and the reason no format gate was needed. One written before S6a has no
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import socket
@@ -76,6 +84,16 @@ from dsl41.runner_admission import (
     apply_attempt,
     fingerprint,
 )
+from dsl41.period import (
+    CATALOG_HASH_VERSION,
+    Manifest,
+    catalog_hash_at,
+    check_segment_record,
+    genesis_manifest,
+    is_opening,
+    opening_at,
+    segment_record,
+)
 from dsl41.runner_clock import EngineError
 from pydantic import ValidationError
 
@@ -85,13 +103,6 @@ from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
-
-
-def catalog_hash(catalog: CatalogIR) -> str:
-    """Content hash gating resume (ss7): sha256 of the catalog's canonical
-    JSON dump. Conservative by design -- an estate that changed in ANY way
-    re-baselines explicitly rather than silently drifting semantics."""
-    return hashlib.sha256(catalog.model_dump_json().encode("utf-8")).hexdigest()
 
 
 def _dsl41_version() -> str:
@@ -107,7 +118,7 @@ class Journal:
     """ss7 append-only JSONL WAL, one file per run. Inputs-only principle:
     emitted events and the trace are pure functions of the input sequence
     (oracle determinism), so only injected inputs are stored; `journal
-    render` replays them through a fresh Oracle. Record kinds: header /
+    render` replays them through a fresh Oracle. Record kinds: segment /
     input / advance / dispatch / drop / preflight (module docstring covers
     why dispatch is audit-only and why advances are inputs; preflight keeps
     the ss8 WARN caveats next to the run). fsync per record in the
@@ -153,22 +164,62 @@ class Journal:
         clock_domain: str,
         started_at: datetime,
         lock: LeaderLock | None = None,
+        manifest: Manifest | None = None,
+        estate_id: str | None = None,
     ) -> Journal:
-        baseline_id = str(uuid.uuid4())
-        journal = cls(path, fsync_each=clock_domain == "real", baseline_id=baseline_id, lock=lock)
-        journal._write(
-            {
-                "rec": "header",
-                "baseline_id": baseline_id,
-                "catalog_hash": catalog_hash(catalog),
-                "dsl41_version": _dsl41_version(),
+        """Open a NEW log with its `segment` record (period-model ss2.1,
+        DL-130). `segment` replaces `header`: a once-per-log header cannot
+        describe a log made of segments, and every segment is
+        self-describing -- period, catalog and semantics without reading an
+        earlier file.
+
+        A caller that has installed `periods/000001/manifest.json` passes
+        the `manifest` it committed, so the file and the record cannot say
+        two different things (PR-22); one that only has a catalog -- a
+        rehearsal, an embedder, the bisimulation harness -- gets a default
+        over the empty bundle and the default runtime profile. The
+        `estate_id` is minted here at genesis; there is no anchor to read
+        one back from yet."""
+        if manifest is None:
+            manifest = genesis_manifest(
+                catalog,
+                clock_domain=clock_domain,
                 # ss7's other pin, gated where catalog_hash is (S6a,
-                # runner_ledger): what leader eligibility means is that these
-                # two match, and a pin nothing reads is not a pin
-                "state_machine_version": STATE_MACHINE_VERSION,
-                "clock_domain": clock_domain,
-                "started_at": started_at.isoformat(),
-            }
+                # runner_ledger): what leader eligibility means is that
+                # these two match, and a pin nothing reads is not a pin
+                state_machine_version=STATE_MACHINE_VERSION,
+            )
+        else:
+            if manifest.catalog_hash_version != CATALOG_HASH_VERSION:
+                # a NATIVE log pins the current recipe, always: v1 exists
+                # only to compare legacy journals, and a fresh segment
+                # pinned under it would refuse this unchanged estate at the
+                # next patch release -- the exact outage v2 exists to end
+                raise EngineError(
+                    f"manifest pins catalog_hash_version {manifest.catalog_hash_version}:"
+                    f" a new log pins {CATALOG_HASH_VERSION} (period-model ss1.1)"
+                )
+            # under the recipe the manifest itself names, so this gate can
+            # never be the one place that assumes a version
+            expected = catalog_hash_at(manifest.catalog_hash_version, catalog)
+            if manifest.catalog_hash != expected:
+                raise EngineError(
+                    f"manifest catalog_hash {manifest.catalog_hash} is not this catalog's"
+                    f" ({expected}): the log would open on a period it does not describe"
+                )
+        if manifest.clock_domain != clock_domain:
+            raise EngineError(
+                f"manifest clock_domain {manifest.clock_domain!r} is not this run's"
+                f" ({clock_domain!r})"
+            )
+        journal = cls(
+            path, fsync_each=clock_domain == "real", baseline_id=manifest.baseline_id, lock=lock
+        )
+        # the identity lives in the record, and nowhere else on this object:
+        # a second copy here would be a second authority, and a pin nothing
+        # reads is not a pin
+        journal._write(
+            segment_record(manifest, estate_id=estate_id or str(uuid.uuid4()), at=started_at)
         )
         return journal
 
@@ -419,7 +470,10 @@ def _repair_tail(path: Path) -> None:
 def read_journal(path: Path | str) -> list[dict[str, Any]]:
     """Parse a run journal. A torn FINAL line (crash mid-append) is dropped
     -- write-ahead means the corresponding feed never happened; torn or
-    invalid INTERIOR lines are corruption and raise loudly."""
+    invalid INTERIOR lines are corruption and raise loudly.
+
+    The first record must be an opening one: a `segment` (DL-130) or the
+    legacy `header` every log written before it opens with."""
     records: list[dict[str, Any]] = []
     raw = Path(path).read_bytes()
     lines = raw.split(b"\n")
@@ -433,8 +487,9 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
             if index == len(lines) - 1 and trailing is None:
                 break  # torn final append: the feed it preceded never ran
             raise EngineError(f"journal {path}: corrupt line {index + 1}: {exc}") from exc
-    if not records or records[0].get("rec") != "header":
-        raise EngineError(f"journal {path}: missing header record")
+    if not records or not is_opening(records[0]):
+        raise EngineError(f"journal {path}: missing segment record")
+    check_segment_record(records[0])  # exact ss2.1 shape; a header is exempt
     return records
 
 
@@ -677,7 +732,7 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
 
 def last_journal_at(records: list[dict[str, Any]]) -> datetime:
     """max time the journal proves the run reached (ss7 'last journal at')."""
-    stamps = [datetime.fromisoformat(records[0]["started_at"])]
+    stamps = [opening_at(records[0])]
     for record in records:
         for key in ("at", "started_at"):
             if key in record:

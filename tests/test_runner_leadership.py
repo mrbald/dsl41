@@ -54,6 +54,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -126,7 +127,14 @@ class RunProcess:
 
     _n = 0
 
-    def __init__(self, base: Path, *, resume: bool = False, jil_text: str = IDLE_JIL) -> None:
+    def __init__(
+        self,
+        base: Path,
+        *,
+        resume: bool = False,
+        jil_text: str = IDLE_JIL,
+        extra: Sequence[str] = (),
+    ) -> None:
         self.run_root = base / "run"
         self.jil = base / "estate.jil"
         if not self.jil.exists():
@@ -134,6 +142,7 @@ class RunProcess:
         argv = [sys.executable, "-m", "dsl41", "run", "--run-root", str(self.run_root)]
         if resume:
             argv.append("--resume")
+        argv.extend(extra)  # launch options under test, before the file list
         RunProcess._n += 1
         # per-instance: two engines in one test must not share a file, or the
         # second silently truncates the evidence the first left
@@ -179,11 +188,13 @@ class RunProcess:
 
 
 @contextlib.contextmanager
-def engine(base: Path, *, resume: bool = False, jil_text: str = IDLE_JIL):
+def engine(
+    base: Path, *, resume: bool = False, jil_text: str = IDLE_JIL, extra: Sequence[str] = ()
+):
     """Started and reaped, including when the startup assertion is what
     fails: an engine left behind holds a `flock` on its run root, and every
     later test against that root would be refused by a ghost."""
-    proc = RunProcess(base, resume=resume, jil_text=jil_text)
+    proc = RunProcess(base, resume=resume, jil_text=jil_text, extra=extra)
     try:
         yield proc.wait_until_up()
     finally:

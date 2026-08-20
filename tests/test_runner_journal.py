@@ -3,7 +3,7 @@
 
 Normative spec: docs/runner-design.md ss7 (journal and recovery) and ss4 (the
 stale-completion gate whose rejections the WAL also records as drops).
-runner_journal.py's Journal/read_journal/replay_inputs/catalog_hash docstrings are
+runner_journal.py's Journal/read_journal/replay_inputs docstrings are
 the API under test; cli.py's `journal` command is the CLI surface. Resume
 and the crash/reconciliation ladder are tests/test_runner_lifecycle.py's
 territory (owned elsewhere, not duplicated here) -- this file stays on the
@@ -37,10 +37,10 @@ from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import (
     Journal,
     _dsl41_version,
-    catalog_hash,
     read_journal,
     replay_inputs,
 )
@@ -58,24 +58,40 @@ _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
 # --------------------------------------------------------------- 1. record shapes
 
 
-def test_header_record_carries_catalog_hash_version_domain_and_started_at(
+def test_segment_record_carries_the_period_identity_domain_and_instant(
     tmp_path: Path,
 ) -> None:
-    """(runner-design ss7 / Journal.create docstring): header = {catalog_hash,
-    dsl41_version, clock_domain, started_at}. catalog_hash matches the
-    standalone catalog_hash() function -- one source of truth, no drift
-    between Journal.create's own hashing and the resume gate."""
+    """(period-model ss2.1 / Journal.create docstring): the opening record
+    is a `segment`, and it carries the whole period identity -- estate,
+    period, baseline, catalog hash AND its version, bundle, runtime hash,
+    state-machine version, clock domain, first index, `at`. catalog_hash
+    matches the standalone catalog_hash_v2() function -- one source of
+    truth, no drift between Journal.create's own hashing and the resume
+    gate.
+
+    `dsl41_version` is deliberately absent: it is per-process, it rides on
+    `leader`, and a patch release must not move these bytes (PR-07)."""
     catalog = lower_source(_SOLO_JIL)
     journal = Journal.create(
         tmp_path / "journal.jsonl", catalog=catalog, clock_domain="real", started_at=T0
     )
     journal.close()
-    header = read_journal(tmp_path / "journal.jsonl")[0]
-    assert header["rec"] == "header"
-    assert header["catalog_hash"] == catalog_hash(catalog)
-    assert isinstance(header["dsl41_version"], str) and header["dsl41_version"]
-    assert header["clock_domain"] == "real"
-    assert header["started_at"] == T0.isoformat()
+    segment = read_journal(tmp_path / "journal.jsonl")[0]
+    assert segment["rec"] == "segment"
+    assert segment["catalog_hash"] == catalog_hash_v2(catalog)
+    assert segment["catalog_hash_version"] == 2
+    assert segment["catalog_hash_v1"] is None
+    assert segment["clock_domain"] == "real"
+    assert segment["at"] == T0.isoformat()
+    assert segment["period_id"] == 1 and segment["segment_no"] == 1
+    assert segment["first_index"] == 1
+    assert segment["opens_from_seal"] is None
+    assert segment["reclaimed"] is None and segment["trust_unaudited"] is None
+    assert segment["estate_id"] and segment["baseline_id"]
+    assert segment["source_bundle_hash"].startswith("sha256:")
+    assert segment["runtime_hash"].startswith("sha256:")
+    assert segment["state_machine_version"] == 1
+    assert "dsl41_version" not in segment
 
 
 def _attempt(index: int, event: Event | None, *, source: str | None = "control") -> Attempt:
@@ -285,7 +301,7 @@ def test_read_journal_tolerates_a_torn_final_line(tmp_path: Path) -> None:
     torn = b"\n".join(lines[:-2]) + b"\n" + lines[-2][:15]  # cut the last record short
     path.write_bytes(torn)
     records = read_journal(path)
-    assert [r["rec"] for r in records] == ["header", "input"]
+    assert [r["rec"] for r in records] == ["segment", "input"]
 
 
 def test_reopening_cuts_a_torn_tail_before_the_first_append(tmp_path: Path) -> None:
@@ -304,7 +320,7 @@ def test_reopening_cuts_a_torn_tail_before_the_first_append(tmp_path: Path) -> N
     journal.close()
     after = read_journal(path)
     assert after[: len(before)] == before
-    assert [r["rec"] for r in after] == ["header", "input", "leader"]
+    assert [r["rec"] for r in after] == ["segment", "input", "leader"]
 
 
 def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path) -> None:
@@ -315,7 +331,7 @@ def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path)
     whole = path.read_bytes()
     path.write_bytes(whole[:-1])
     before = read_journal(path)
-    assert [r["rec"] for r in before] == ["header", "input", "input"]
+    assert [r["rec"] for r in before] == ["segment", "input", "input"]
     journal = Journal(path, fsync_each=False)
     assert path.read_bytes() == whole
     journal.leader(epoch=2, at=T0)
@@ -342,7 +358,7 @@ def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
         '{"rec": "input", "seq": 1, "at": "2026-07-01T08:00:00",'
         ' "kind": "STARTJOB", "payload": {}, "source": "control"}\n'
     )
-    with pytest.raises(EngineError, match="missing header"):
+    with pytest.raises(EngineError, match="missing segment"):
         read_journal(path)
 
 
@@ -350,16 +366,16 @@ def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
 
 
 def test_catalog_hash_stable_across_identical_loads() -> None:
-    """(catalog_hash docstring): a sha256 of the canonical JSON dump -- the
+    """(catalog_hash_v2 docstring): a sha256 of the canonical form -- the
     same estate text loaded twice hashes identically."""
-    assert catalog_hash(lower_source(_SOLO_JIL)) == catalog_hash(lower_source(_SOLO_JIL))
+    assert catalog_hash_v2(lower_source(_SOLO_JIL)) == catalog_hash_v2(lower_source(_SOLO_JIL))
 
 
 def test_catalog_hash_differs_on_any_change() -> None:
-    """(catalog_hash docstring): "an estate that changed in ANY way
+    """(catalog_hash_v2 docstring): "an estate that changed in ANY way
     re-baselines explicitly" -- even a one-token command change flips it."""
     changed = _SOLO_JIL.replace("command: x", "command: y")
-    assert catalog_hash(lower_source(_SOLO_JIL)) != catalog_hash(lower_source(changed))
+    assert catalog_hash_v2(lower_source(_SOLO_JIL)) != catalog_hash_v2(lower_source(changed))
 
 
 # ------------------------------------------------------------------ 4. replay

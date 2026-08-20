@@ -600,7 +600,7 @@ What an investigator or an auditor is handed for a closed period:
 
 Item 3 is the one that does not work today. Offline replay is hash-gated against
 the estate *at its recorded paths* (`deployment-runbook.md` §4), so the byte-exact
-copies under `manifest/` do not pass from anywhere else — a deliberate defer,
+copies in the run root's own input bundle do not pass from anywhere else — a deliberate defer,
 because relocation-independent hashing would orphan every existing journal.
 
 The store fixes this without touching the hashing rule: **store the manifest

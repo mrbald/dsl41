@@ -66,21 +66,136 @@ from dsl41.runner_adapters import (
 )
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_effects import Effect, EffectOutcome
+from dsl41.period import (
+    RuntimeProfile,
+    StagedManifest,
+    check_manifest_against_segment,
+    genesis_manifest,
+    read_period_manifest,
+    write_period_manifest,
+)
 from dsl41.runner_journal import (
     Journal,
     last_journal_at,
     baseline_id,
-    catalog_hash,
     read_journal,
     replay_inputs,
 )
 from dsl41.runner_ledger import (
+    STATE_MACHINE_VERSION,
     LeaderLock,
     acquire_run_root,
     check_leader_eligibility,
     next_epoch,
 )
 from dsl41.runner_scheduler import Scheduler
+
+
+def _derive_runtime_profile(
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
+    deadman_s: float | None,
+    base: RuntimeProfile | None,
+) -> RuntimeProfile:
+    """The runtime profile the engine is ACTUALLY wired with (period-model
+    ss2.1, DL-130).
+
+    The pin has to describe the machine that runs, not the flags somebody
+    typed: an embedder that builds a Europe/Zurich scheduler and stages
+    nothing would otherwise open a period whose hash says UTC while every
+    tick is shifted. So the wired components are read back -- the
+    scheduler's timezone, the adapters' modes and windows, the deadman --
+    over `base` for the fields the engine cannot see (machine policy and
+    as-machine live in preflight, not on any wired object)."""
+    from dsl41.period import RuntimeProfile, to_us
+    from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
+
+    values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
+    if scheduler is not None:
+        values["default_tz"] = scheduler.default_tz or "UTC"
+        values["tz_aliases"] = dict(scheduler.tz_aliases)
+    values["deadman_us"] = None if deadman_s is None else to_us(deadman_s)
+    cmd = adapters.get("CMD")
+    if isinstance(cmd, SupervisedCommandAdapter):
+        values["execution_mode"] = "detached"
+        values["cmd_grace_us"] = to_us(cmd.grace_seconds)
+        values["reconcile_settle_us"] = to_us(cmd.settle_seconds)
+    elif isinstance(cmd, LocalCommandAdapter):
+        values["execution_mode"] = "tethered"
+        values["cmd_grace_us"] = to_us(cmd.grace_seconds)
+    fw = adapters.get("FW")
+    if isinstance(fw, FileWatcherAdapter):
+        values["fw_default_interval_us"] = to_us(float(fw.default_interval_s))
+    # the spawn window is a module constant, not an adapter knob: derive it
+    # from the value the machine actually runs, so a staged 0 cannot pin a
+    # fiction over the real five seconds
+    values["spawn_window_us"] = to_us(SupervisedCommandAdapter._SPAWN_WINDOW_S)
+    return RuntimeProfile.model_validate(values)
+
+
+def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: str) -> None:
+    """A catalog that schedules jobs needs a scheduler wired -- and the
+    RIGHT one (DL-130). The profile cannot see a scheduler's absence
+    (default_tz inherits the pin and reports no drift), and one built over
+    a DIFFERENT catalog carries another estate's plans with a matching
+    timezone -- either way scheduled execution silently stops or fires
+    wrong. Run at genesis and at resume."""
+    if scheduler is not None:
+        # EVERY supplied scheduler is held to its compile-time hash --
+        # before the scheduled-jobs check, because a catalog whose last
+        # trigger was removed after the compile would otherwise skip the
+        # comparison while the stale plans still fire the removed jobs
+        from dsl41.period import catalog_hash_v2
+
+        if scheduler.catalog_hash != catalog_hash_v2(catalog):
+            raise EngineError(
+                f"the {where}'s scheduler was built over a different catalog --"
+                " its plans are not this estate's (period-model ss2.1)"
+            )
+        return
+    scheduled = sorted(
+        name
+        for name, job in catalog.jobs.items()
+        if job.schedule is not None
+        and (
+            job.schedule.start_times
+            or job.schedule.start_mins
+            or job.schedule.run_calendar is not None
+        )
+    )
+    if scheduled:
+        raise EngineError(
+            f"this catalog schedules {len(scheduled)} job(s) ({scheduled[0]}, ...)"
+            f" and the {where} wired no scheduler -- scheduled execution would"
+            " silently stop (period-model ss2.1)"
+        )
+
+
+def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], where: str) -> None:
+    """Every executable job type must have an adapter wired (DL-130). The
+    profile inherits pinned values for wiring it cannot see, so a missing
+    adapter drifts nothing -- and a job of that type then reaches RUNNING
+    with no process behind it (`plan_effects` suppresses the SPAWN for a
+    type with no dispatch row). Run at GENESIS and at resume: an estate
+    that opens unable to dispatch its own catalog is the same silent hole
+    one gate later."""
+    required = sorted(
+        {job.job_type for job in catalog.jobs.values() if job.job_type != "BOX"} - set(adapters)
+    )
+    if required:
+        raise EngineError(
+            f"this catalog runs job type(s) {', '.join(required)} and the {where}"
+            " wired no adapter for them -- their jobs would run with no process"
+            " behind them (period-model ss2.1)"
+        )
+
+
+def _profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
+    return sorted(
+        name
+        for name in type(derived).model_fields
+        if getattr(derived, name) != getattr(pinned, name)
+    )
 
 
 def start_run(
@@ -93,10 +208,18 @@ def start_run(
     hold_open: bool = False,
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
+    staged: StagedManifest | None = None,
 ) -> Engine:
-    """Create the run-root layout (journal.jsonl, runs/, logs/) and an
-    Engine wired to it. Refuses a run_root that already holds a journal --
-    that is what --resume is for (no silent re-baselining).
+    """Create the run-root layout (journal.jsonl, periods/, runs/, logs/)
+    and an Engine wired to it. Refuses a run_root that already holds a
+    journal -- that is what --resume is for (no silent re-baselining).
+
+    Genesis installs period 1 before it opens the log (period-model ss1.1):
+    the committed manifest first, then the `segment` record that names it,
+    both derived from ONE object so the two cannot disagree (PR-22).
+    `staged` is what the launcher pinned -- catalog hash, bundle address,
+    runtime profile; a caller with none gets the default profile over the
+    empty bundle.
 
     Leadership (S6a) is acquired BEFORE that refusal, not after: the
     refusal reads the estate's state, and one leader per run root is the
@@ -119,12 +242,52 @@ def start_run(
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     at = clock.now()
+    _require_adapters(catalog, adapters, "genesis")
+    _require_scheduler(catalog, scheduler, "genesis")
+    derived = _derive_runtime_profile(
+        scheduler, adapters, deadman_s, base=staged.runtime_profile if staged else None
+    )
+    if staged is not None:
+        if staged.state_machine_version != STATE_MACHINE_VERSION:
+            # one executable implements exactly one state-machine version
+            # (period-model ss2.1): committing a different pin would leave
+            # this engine running beneath a manifest it can never satisfy
+            raise EngineError(
+                f"staged state_machine_version {staged.state_machine_version}: this"
+                f" build runs {STATE_MACHINE_VERSION}"
+            )
+        drift = _profile_drift(derived, staged.runtime_profile)
+        if drift:
+            # the pin must describe the machine that runs: a staged profile
+            # the wiring disagrees with is a fiction, refused before it is
+            # made durable
+            raise EngineError(
+                f"staged runtime profile disagrees with the engine's wiring on"
+                f" {', '.join(drift)} (period-model ss2.1)"
+            )
+    else:
+        from dsl41.period import EMPTY_BUNDLE_HASH, stage_manifest
+
+        staged = stage_manifest(
+            catalog,
+            source_bundle_hash=EMPTY_BUNDLE_HASH,
+            profile=derived,
+            state_machine_version=STATE_MACHINE_VERSION,
+        )
+    manifest = genesis_manifest(
+        catalog,
+        clock_domain="virtual" if clock.virtual else "real",
+        state_machine_version=STATE_MACHINE_VERSION,
+        staged=staged,
+    )
+    write_period_manifest(run_root, manifest)
     journal = Journal.create(
         journal_path,
         catalog=catalog,
-        clock_domain="virtual" if clock.virtual else "real",
+        clock_domain=manifest.clock_domain,
         started_at=at,
         lock=lock,
+        manifest=manifest,
     )
     epoch = next_epoch([])  # the first term over a log that has none
     journal.leader(epoch=epoch, at=at)
@@ -151,8 +314,8 @@ async def resume_run(
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None = None,
     hold_open: bool = False,
-    settle_seconds: float = 5.0,
-    grace_seconds: float = 10.0,
+    settle_seconds: float | None = None,
+    grace_seconds: float | None = None,
     supervisor: SupervisorClient | None = None,
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
@@ -205,8 +368,8 @@ async def _resume_under_lock(
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None,
     hold_open: bool,
-    settle_seconds: float,
-    grace_seconds: float,
+    settle_seconds: float | None,
+    grace_seconds: float | None,
     supervisor: SupervisorClient | None,
     deadman_s: float | None,
 ) -> Engine:
@@ -214,12 +377,60 @@ async def _resume_under_lock(
     Split from `resume_run` so the acquire/release pairing is one readable
     block rather than a `finally` wrapped around a hundred lines."""
     records = read_journal(run_root / "journal.jsonl")
-    header = records[0]
-    check_leader_eligibility(header, expected_catalog_hash=catalog_hash(catalog))
-    domain = "virtual" if clock.virtual else "real"
-    if header.get("clock_domain") != domain:
+    opening = records[0]
+    check_leader_eligibility(opening, catalog=catalog)
+    # PR-22's U4 half: the committed manifest is the engine's own output,
+    # and a manifest that is not this segment's refuses rather than being
+    # read past. A root with none is one written before DL-130 (its opening
+    # record is a `header`) or one whose manifest was pruned: genesis
+    # installs it BEFORE the log opens, so no crash leaves a segment that
+    # never had one. A MISSING artifact degrades where a WRONG one
+    # refuses (DL-113 decision 5).
+    manifest = read_period_manifest(run_root)
+    if manifest is None and opening.get("rec") == "segment":
+        # genesis installs the manifest BEFORE the log opens, so a segment
+        # root without one is a root that LOST it -- pruned or damaged --
+        # and degrading here would skip every profile gate below. Only a
+        # legacy `header` root may degrade: it never had one to lose.
         raise EngineError(
-            f"clock-domain mismatch: journal is {header.get('clock_domain')!r},"
+            f"{run_root}: a segment journal with no periods/000001/manifest.json --"
+            " the period's pin is missing, not legacy (period-model ss2.1)"
+        )
+    if manifest is not None:
+        check_manifest_against_segment(manifest, opening)
+        # the runtime half of the same gate, in CORE: the wired components
+        # must be what the period pinned, or shifted ticks and different
+        # kill windows run under an unchanged hash. Fields the engine
+        # cannot see inherit the pin, so only real wiring can move this.
+        derived = _derive_runtime_profile(
+            scheduler, adapters, deadman_s, base=manifest.runtime_profile
+        )
+        drift = _profile_drift(derived, manifest.runtime_profile)
+        if drift:
+            raise EngineError(
+                f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
+                " change is a new period (period-model ss2.1); re-baseline"
+                " explicitly with a fresh run root"
+            )
+        # the reconciliation windows have no wire flag, so the PIN is their
+        # default: a None param resolves from the manifest, and an explicit
+        # one is a caller's deliberate override (a harness affordance, like
+        # wiring a different adapter object)
+        if settle_seconds is None:
+            settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
+        if grace_seconds is None:
+            grace_seconds = manifest.runtime_profile.cmd_grace_us / 1_000_000
+    if settle_seconds is None:
+        settle_seconds = 5.0  # a legacy root: the shipped defaults
+    if grace_seconds is None:
+        grace_seconds = 10.0
+    if manifest is not None:
+        _require_adapters(catalog, adapters, "resume")
+    _require_scheduler(catalog, scheduler, "resume")
+    domain = "virtual" if clock.virtual else "real"
+    if opening.get("clock_domain") != domain:
+        raise EngineError(
+            f"clock-domain mismatch: journal is {opening.get('clock_domain')!r},"
             f" resume clock is {domain!r}"
         )
     last_at = last_journal_at(records)

@@ -93,13 +93,22 @@ def canonical_bytes(value: object) -> bytes:
     return "".join(parts).encode("utf-8")
 
 
+def hash_over(value: object) -> str:
+    """`"sha256:" + hexdigest` over the canonical bytes of `value`.
+
+    The identity hashes -- `catalog_hash` v2 and `runtime_hash`
+    (period-model ss1.1/ss2.1) -- are this over a whole document. `digest`
+    below is this over a document minus its own `digest` key, which is a
+    different thing and only ever differs for a document that HAS one."""
+    return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
 def digest(value: Mapping[str, Any]) -> str:
     """`"sha256:" + hexdigest` over the canonical bytes of `value` with only
     the TOP-LEVEL `digest` key removed (PR-13)."""
     if not isinstance(value, Mapping):
         raise CanonError(f"digest takes a mapping, got {type(value).__name__}")
-    body = {key: item for key, item in value.items() if key != DIGEST_KEY}
-    return "sha256:" + hashlib.sha256(canonical_bytes(body)).hexdigest()
+    return hash_over({key: item for key, item in value.items() if key != DIGEST_KEY})
 
 
 def with_digest(value: Mapping[str, Any]) -> dict[str, Any]:

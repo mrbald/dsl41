@@ -505,14 +505,22 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   verdict without a live host to probe), the one predicate that says which
   states route new effects, and the genesis seed that puts this engine's own
   executor in the table
-- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (header/leader/input/
+- src/dsl41/period.py — period identity (period-model ss1.1/ss2.1, DL-130):
+  `catalog_hash` v2 (the ss3.2 canonical form with `meta` projected to
+  `{source_files}`, so a patch release cannot orphan a live estate) beside the
+  v1 a legacy journal still pins, `source_bundle_hash` (length-framed, in
+  command-line order) and the content-addressed input bundle it addresses,
+  the typed frozen `RuntimeProfile` and its `runtime_hash`, the staged and
+  committed manifest models, and the `segment` record every new log opens with
+- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
-  feed), read_journal, the two-pass replay_inputs, and catalog_hash, the resume
-  gate written into the header
+  feed), read_journal, the two-pass replay_inputs, and the resume gate written
+  into the opening record (a `segment`, or a `header` on a log written before
+  DL-130 — every reader accepts both)
 - src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
   the mutex (an flock held for the process lifetime, so nothing has to decide
   whether the previous holder is alive), the epoch allocated by being appended to
-  the log under it, and ss7's eligibility gate on the header's two pins. Acquired
+  the log under it, and ss7's eligibility gate on the opening record's two pins. Acquired
   before the log is read and before the first side effect: `resume_run` replays,
   reconciles and re-drives recorded kills, and a mutex taken after those is not
   one

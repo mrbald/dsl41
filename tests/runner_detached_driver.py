@@ -40,7 +40,10 @@ async def main(run_root: str, sleep_s: str) -> None:
         root,
         clock=RealClock(),
         adapters={
-            "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
+            # settle 1.0 to MATCH every resume in the suite: the profile the
+            # period pins is derived from this wiring (DL-130), and a resume
+            # wired differently is refused as a new period
+            "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0, settle_seconds=1.0),
             "FW": FileWatcherAdapter(),
         },
         hold_open=True,

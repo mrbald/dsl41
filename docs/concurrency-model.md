@@ -712,6 +712,22 @@ drained only on the way out of the next admitted input, so a re-driven start
 would wait on unrelated traffic to arrive: hours on a quiet estate, and
 never on one whose only remaining work was the run that was lost.*)*
 
+*(Amended by DL-130, at build.* **`catalog_hash` is v2, and it is
+versioned.** v1 hashed the whole `CatalogIR`, `CatalogMeta.tool_version`
+included, so a patch release that changed nothing else moved the hash and
+this gate refused to resume a live estate — the outage DL-100 already
+refused to manufacture for the state-machine version, arriving by the other
+door. v2 is sha256 over the §3.2 canonical form of `CatalogIR` with `meta`
+projected to `{source_files}` only: `tool_version` and `parsed_at` are
+diagnostic and leave, and **spans stay** — a relocated or reordered estate
+is still a different estate (`docs/period-model.md` §1.1). The version is
+carried explicitly as `catalog_hash_version` on the opening record and on
+the period manifest, never inferred, and **the gate recomputes under the
+recipe the log itself names**: a legacy `header` pins v1 and is compared
+under v1 for the rest of its life; a `segment` pins v2. Comparing across
+recipes would refuse every journal in existence, in one direction or the
+other. What eligibility means is unchanged: two pins, both exact.*)*
+
 ## 8. Host lifecycle: active, passive, evicted
 
 Quarantine (§7) is safe and it is not sufficient on its own: one dead

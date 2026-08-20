@@ -974,19 +974,32 @@ def test_pr36_the_engine_no_longer_makes_the_detached_directory(tmp_path: Path) 
 # ------------------------------------------------ PR-36a: the engine replays
 
 
-def _probe_adapter():
+def _probe_adapter(*, hang: bool = False):
     """A SupervisedCommandAdapter in TYPE only: the resume ladder chooses the
     PR-36a replay by adapter type, and what this test pins is the CHOICE and
     the identity it rides on -- not the wire, which the in-process Supervisor
-    tests above already own."""
+    tests above already own. It carries the wiring attributes the DL-130
+    profile derivation reads, at the defaults, so the genesis pin and the
+    resume wiring agree; the GENESIS probe hangs (a run mid-flight at the
+    crash), the resume probe answers 0."""
+
     from dsl41.runner_adapters import SupervisedCommandAdapter
 
     class _Probe(SupervisedCommandAdapter):
+        grace_seconds = 10.0
+        settle_seconds = 5.0
+
         def __init__(self) -> None:  # no client: run() below never uses one
             self.calls: list[tuple[str, int, str | None]] = []
 
         async def run(self, job_ir, run_number, ctx):  # type: ignore[override]
             self.calls.append((job_ir.name, run_number, ctx.run_id))
+            if hang:
+                # park on the VIRTUAL clock, exactly as FakeAdapter does: a
+                # real Event here never wakes and wedges run_until_quiescent
+                from datetime import datetime as _dt
+
+                await ctx.clock.sleep_until(_dt.max)
             return 0
 
     return _Probe()
@@ -999,7 +1012,6 @@ def _crashed_run_root(tmp: Path):
 
     from dsl41.ir import lower_source
     from dsl41.oracle_state import Event
-    from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
     from dsl41.runner_startup import start_run
     from datetime import datetime
@@ -1010,7 +1022,10 @@ def _crashed_run_root(tmp: Path):
         catalog,
         tmp / "run",
         clock=VirtualClock(start=t0),
-        adapters={"CMD": FakeAdapter(default=None)},
+        # the SAME adapter type the resume wires: the DL-130 profile is
+        # derived from the wiring, and a genesis pinned tethered would
+        # refuse the detached-typed resume as a new period
+        adapters={"CMD": _probe_adapter(hang=True)},
     )
 
     async def scenario() -> None:

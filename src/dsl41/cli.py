@@ -33,6 +33,7 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from datetime import datetime
 
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
+    from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
 
 app = typer.Typer(
@@ -91,56 +92,38 @@ def _load_catalog_and_ast_or_exit_2(
         raise typer.Exit(2) from exc
 
 
-def _write_manifest(
+def _stage_period(
     run_root: Path,
     parsed: "list[JilFile]",
     catalog: CatalogIR,
-    fingerprint: "dict[str, str]",
-    options: "dict[str, object]",
-) -> None:
-    """DL-66 (review finding: old runs were not self-contained artifacts).
-    manifest/ preserves the POST-PLACEHOLDER source this run loaded
-    (render_preserve is byte-exact, F1) plus manifest.json: tool version,
-    catalog hash, sha256 of every input, original paths, launch options.
-    The manifest sources are valid JIL needing no -p; the catalog hash
-    covers SourceSpan.file, so byte-exact resume/replay against them also
-    needs the original paths recorded here (relocation-independent hashing
-    is a DELIBERATE defer -- changing the hash orphans every existing
-    journal's resume gate; it needs its own versioned migration)."""
-    import json as json_mod
-    import os
-    from datetime import UTC, datetime
+    profile: "RuntimeProfile",
+) -> "StagedManifest":
+    """Materialize period 1's inputs and pin its identity (period-model
+    ss1.1, DL-130) -- the self-contained artifact DL-66 asked for, now
+    content-addressed.
 
+    `catalogs/<source_bundle_hash>/` holds the POST-PLACEHOLDER source this
+    run loaded, byte-exact (render_preserve is F1), beside `sources.json`;
+    the directory is addressed by those very bytes, so a relaunch on
+    unchanged inputs reuses it and never rewrites it. The engine installs
+    the committed `periods/000001/manifest.json` at genesis, because
+    `baseline_id` and `first_index` are its to know, not the launcher's.
+
+    The original paths are recorded because `catalog_hash` covers
+    `SourceSpan.file`: byte-exact replay against a relocated copy still
+    needs them (relocation-independent hashing is a DELIBERATE defer -- it
+    orphans every existing journal's resume gate)."""
     from dsl41.ast_jil import render_preserve
-    from dsl41.runner_journal import _dsl41_version, catalog_hash
+    from dsl41.period import SourceFile, stage_manifest, write_bundle
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
-    manifest_dir = run_root / "manifest"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(manifest_dir, 0o700)
-    sources: list[dict[str, str]] = []
-    used: set[str] = set()
-    for jf in parsed:
-        base = Path(jf.file).name or "estate.jil"
-        name, n = base, 1
-        while name in used:
-            n += 1
-            name = f"{n:02d}-{base}"
-        used.add(name)
-        (manifest_dir / name).write_text(render_preserve(jf))
-        os.chmod(manifest_dir / name, 0o600)
-        sources.append({"file": name, "original_path": jf.file})
-    payload = {
-        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "dsl41_version": _dsl41_version(),
-        "catalog_hash": catalog_hash(catalog),
-        "inputs_sha256": fingerprint,
-        "sources": sources,
-        "options": options,
-    }
-    (manifest_dir / "manifest.json").write_text(
-        json_mod.dumps(payload, indent=2, sort_keys=True) + "\n"
+    sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
+    return stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=profile,
+        state_machine_version=STATE_MACHINE_VERSION,
     )
-    os.chmod(manifest_dir / "manifest.json", 0o600)
 
 
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
@@ -498,13 +481,12 @@ def journal(
     stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
     explicitly.
     """
-    from datetime import datetime as datetime_mod
-
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
+    from dsl41.period import catalog_hash_for, opening_at
     from dsl41.runner_clock import EngineError
     from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-    from dsl41.runner_journal import catalog_hash, read_journal, replay_inputs
+    from dsl41.runner_journal import read_journal, replay_inputs
 
     catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
     try:
@@ -512,8 +494,11 @@ def journal(
     except (OSError, EngineError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
-    header = records[0]
-    if header.get("catalog_hash") != catalog_hash(catalog):
+    opening = records[0]
+    # like for like (period-model ss1.1): a `segment` pins catalog_hash v2,
+    # a legacy `header` pins v1, and comparing across the two would refuse
+    # every journal written before DL-130
+    if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         typer.echo(
             "catalog hash mismatch: the estate differs from the one this journal ran"
             " (runner-design ss7: no silent semantic drift)",
@@ -526,11 +511,7 @@ def journal(
     # already holds this engine's own executor (concurrency-model ss8), and a
     # replay without it would decide "no such host" where the run decided
     # otherwise. The stamp only reaches `last_contact`, which no input reads.
-    seed_local_executor(
-        oracle.store,
-        LOCAL_EXECUTOR_ID,
-        at=datetime_mod.fromisoformat(str(header["started_at"])),
-    )
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(opening))
     try:
         replay_inputs(oracle, records)
     except OracleError as exc:
@@ -634,7 +615,7 @@ def runs(
         # Loud on stderr as well as on the row, because the one degraded
         # field that MISLEADS rather than omits is `status`.
         typer.echo(
-            "warning: some run roots have no manifest/ (DL-66), so their rows are"
+            "warning: some run roots have no stored inputs, so their rows are"
             " fidelity=records_only: no box rows, no box_name/started_by/job_hash,"
             " and a run closed by KILLJOB or term_run_time reads as RUNNING",
             err=True,
@@ -1151,25 +1132,24 @@ def run(
         typer.echo("--deadman must be a positive number of seconds", err=True)
         raise typer.Exit(2)
     from dsl41.runner_clock import EngineError
+    from dsl41.period import runtime_profile_from_cli
 
+    # ss2.1: the launch options that change interpretation or dispatch, as
+    # one typed value -- `runtime_hash` is what tells a period launched
+    # --timezone UTC from the same JIL launched --timezone Europe/Zurich
+    profile = runtime_profile_from_cli(
+        timezone=timezone,
+        tz_aliases=tz_aliases,
+        as_machine=as_machine,
+        machine_policy=machine_policy,
+        detached=detached,
+        deadman_s=deadman,
+    )
+    staged: "StagedManifest | None" = None
     if not resume and not (run_root / "journal.jsonl").exists():
         # a used run root is start_run's refusal to make -- never repaint
-        # its manifest on the way to that refusal
-        _write_manifest(
-            run_root,
-            parsed,
-            catalog,
-            fingerprint,
-            {
-                "files": [str(f) for f in files],
-                "properties": [str(p) for p in (properties or [])],
-                "run_root": str(run_root),
-                "detached": detached,
-                "machine_policy": machine_policy,
-                "as_machine": list(as_machine),
-                "timezone": timezone,
-            },
-        )
+        # its artifacts on the way to that refusal
+        staged = _stage_period(run_root, parsed, catalog, profile)
     try:
         raise typer.Exit(
             asyncio.run(
@@ -1185,6 +1165,8 @@ def run(
                     tz_aliases,
                     spec_texts=_spec_texts(parsed, catalog),
                     estate_fingerprint=fingerprint,
+                    staged=staged,
+                    profile=profile,
                 )
             )
         )
@@ -1204,6 +1186,72 @@ def _import_tui_or_exit_2():
         typer.echo("the TUI needs the optional [ui] extra: pip install 'dsl41[ui]'", err=True)
         raise typer.Exit(2) from exc
     return runner_tui
+
+
+def _observed_profile(
+    staged: "StagedManifest | None", running_deadman: "float | None"
+) -> "StagedManifest | None":
+    """Re-pin the runtime profile on the deadman the run REALLY has.
+
+    A reattaching engine meets a supervisor it did not start, and one
+    already up cannot change its interval -- so `--deadman 90` against a
+    supervisor running 60 gets 60, and the engine is started with 60. The
+    manifest has to say 60 too: a profile that recorded the request would
+    pin a number the estate does not have, which is what `_running_deadman`
+    refuses to do for the routing table for the same reason (DL-126)."""
+    from dsl41.period import RuntimeProfile, runtime_hash, to_us
+
+    if staged is None:
+        return None
+    observed = None if running_deadman is None else to_us(running_deadman)
+    if observed == staged.runtime_profile.deadman_us:
+        return staged
+    profile = RuntimeProfile.model_validate(
+        {**staged.runtime_profile.model_dump(), "deadman_us": observed}
+    )
+    return staged.model_copy(
+        update={"runtime_profile": profile, "runtime_hash": runtime_hash(profile)}
+    )
+
+
+def _resume_profile_error(
+    run_root: Path, profile: "RuntimeProfile", running_deadman: "float | None"
+) -> "str | None":
+    """PR-22's runtime half (period-model ss2.1): a period's semantics are
+    (catalog_hash, runtime_hash, state_machine_version), and either of the
+    first two moving is a new period. The catalog gate lives in resume;
+    this holds the LAUNCH OPTIONS to the pin -- a resume that quietly
+    rebuilt the adapters and the scheduler under different options would
+    change period semantics with every identity gate green. A root with no
+    manifest predates DL-130 and has no pin to hold. The deadman compares
+    at its OBSERVED value, for the reason `_observed_profile` gives."""
+    from dsl41.period import RuntimeProfile, read_period_manifest, runtime_hash, to_us
+    from dsl41.runner_clock import EngineError
+
+    try:
+        manifest = read_period_manifest(run_root)
+    except EngineError as exc:
+        return str(exc)
+    if manifest is None:
+        return None
+    observed_deadman = None if running_deadman is None else to_us(running_deadman)
+    observed = RuntimeProfile.model_validate(
+        {**profile.model_dump(), "deadman_us": observed_deadman}
+    )
+    if runtime_hash(observed) == manifest.runtime_hash:
+        return None
+    pinned = manifest.runtime_profile
+    moved = sorted(
+        name
+        for name in type(observed).model_fields
+        if getattr(observed, name) != getattr(pinned, name)
+    )
+    return (
+        "runtime-profile mismatch: this resume was launched with different"
+        f" options than the period pinned ({', '.join(moved) or 'runtime_hash'})."
+        " A runtime-profile change is a new period (period-model ss2.1):"
+        " re-baseline explicitly with a fresh run root"
+    )
 
 
 def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "float | None":
@@ -1239,6 +1287,8 @@ async def _serve_run(
     tz_aliases: "dict[str, str] | None" = None,
     spec_texts: "dict[str, str] | None" = None,
     estate_fingerprint: "dict[str, str] | None" = None,
+    staged: "StagedManifest | None" = None,
+    profile: "RuntimeProfile | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -1276,8 +1326,27 @@ async def _serve_run(
     # supervisor that owns the wrapper lifelines, so an engine restart does
     # not kill the jobs. FW stays in-engine (no process to survive).
     client: SupervisorClient | None = None
+    supervisor_deadman = deadman
+    if resume:
+        # start a MISSING supervisor with the deadman the period PINNED, not
+        # the one this invocation asked for: asking 90 against a pinned 60
+        # would otherwise start a 90-second supervisor before the profile
+        # gate refuses -- and the next CORRECT 60-second resume then
+        # observes 90 and refuses too. The ask still warns
+        # (_running_deadman) and still refuses below if it differs; it just
+        # never gets to reconfigure the host on the way to that refusal.
+        from dsl41.period import read_period_manifest
+
+        try:
+            pinned = read_period_manifest(run_root)
+        except EngineError as exc:
+            typer.echo(str(exc), err=True)
+            return 2
+        if pinned is not None:
+            pinned_us = pinned.runtime_profile.deadman_us
+            supervisor_deadman = None if pinned_us is None else pinned_us / 1_000_000
     if detached:
-        client = SupervisorClient(run_root, deadman_s=deadman)
+        client = SupervisorClient(run_root, deadman_s=supervisor_deadman)
         try:
             await client.ensure_running()
             await client.acquire()
@@ -1292,6 +1361,12 @@ async def _serve_run(
         adapters = {"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()}
     scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone, tz_aliases=tz_aliases)
     running_deadman = _running_deadman(client, deadman, run_root)
+    staged = _observed_profile(staged, running_deadman)
+    if resume and profile is not None:
+        error = _resume_profile_error(run_root, profile, running_deadman)
+        if error is not None:
+            typer.echo(error, err=True)
+            return 2
     if resume:
         engine = await _resume_run(
             catalog,
@@ -1314,6 +1389,7 @@ async def _serve_run(
             hold_open=True,
             deadman_s=running_deadman,
             lock=lock,
+            staged=staged,
         )
     if client is not None:
         # ss8's "positive contact with this host": every confirmed lease
@@ -1451,13 +1527,14 @@ def rehearse(
     from datetime import UTC, datetime, timedelta
 
     from dsl41.oracle_state import Event, OracleError
+    from dsl41.period import runtime_profile_from_cli
     from dsl41.runner import Engine
     from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
     from dsl41.runner_scheduler import Scheduler
 
-    catalog = _load_catalog_or_exit_2(files, permit_unknown, properties)
+    catalog, parsed, _ = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     start_dt = (
         _naive_utc_arg(start, "--start")
         if start
@@ -1489,8 +1566,29 @@ def rehearse(
     adapters = {"CMD": adapter, "FW": adapter}
     try:
         if run_root is not None:
+            # a rehearsal's run root is a self-contained artifact like a
+            # real one: the profile it interpreted the estate under -- its
+            # timezone above all -- belongs in the manifest, or the log
+            # claims a period it did not run (ss2.1). Staged only for a
+            # FRESH root: an existing journal is start_run's refusal to
+            # make, and nothing is written on the way to it.
+            staged = (
+                _stage_period(
+                    run_root,
+                    parsed,
+                    catalog,
+                    runtime_profile_from_cli(timezone=timezone, tz_aliases=tz_aliases),
+                )
+                if not (run_root / "journal.jsonl").exists()
+                else None
+            )
             engine = start_run(
-                catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler
+                catalog,
+                run_root,
+                clock=clock,
+                adapters=adapters,
+                scheduler=scheduler,
+                staged=staged,
             )
         else:
             engine = Engine(catalog, clock=clock, adapters=adapters, scheduler=scheduler)

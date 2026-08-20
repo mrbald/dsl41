@@ -46,6 +46,10 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
                the fingerprint, and the gate as a pure function; plus the
                ss6 envelope and the ss0 mandate that a mutation names the
                revision it was composed against (parse_envelope)
+  period     - period identity (docs/period-model.md ss1.1/ss2.1):
+               catalog_hash v1/v2, source_bundle_hash and the bundle it
+               addresses, RuntimeProfile + runtime_hash, the staged and
+               committed manifests, and the `segment` record
   runner_journal - the ss7 inputs-only WAL: Journal, read_journal, the
                two-pass replay_inputs, and the catalog_hash resume gate
   runner_scheduler - the ss5 calendar scheduler + the SEM-35 timezone ladder

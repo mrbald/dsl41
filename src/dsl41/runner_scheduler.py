@@ -310,6 +310,20 @@ class Scheduler:
         tz_aliases: Mapping[str, str] | None = None,
     ) -> None:
         base_tz = _scheduler_tz(default_tz, "--timezone", tz_aliases) if default_tz else None
+        # what this scheduler was WIRED with, kept READ-ONLY (properties
+        # below) so the runtime profile the period pins is derived from the
+        # compile-time inputs the plans actually use -- a mutable attribute
+        # here would let a post-compile edit pin one timezone while `_plans`
+        # execute under another (period-model ss2.1, DL-130)
+        self._default_tz = default_tz
+        self._tz_aliases: dict[str, str] = dict(tz_aliases or {})
+        # the catalog these plans were COMPILED from, pinned as its v2 hash
+        # at compile time -- an object reference could be mutated after the
+        # plans were built, and the gate would then bless stale plans under
+        # the changed catalog's own identity
+        from dsl41.period import catalog_hash_v2
+
+        self._catalog_hash = catalog_hash_v2(catalog)
         self._plans: dict[str, _SchedulePlan] = {}
         for name, job in catalog.jobs.items():
             sched = job.schedule
@@ -369,6 +383,18 @@ class Scheduler:
             )
         self._next: dict[str, datetime] = {}
         self.reset(start)
+
+    @property
+    def default_tz(self) -> str | None:
+        return self._default_tz
+
+    @property
+    def tz_aliases(self) -> dict[str, str]:
+        return dict(self._tz_aliases)  # a copy: mutating it moves nothing here
+
+    @property
+    def catalog_hash(self) -> str:
+        return self._catalog_hash
 
     @staticmethod
     def _ticks(sched: ScheduleBlock) -> tuple[tuple[int, int], ...]:

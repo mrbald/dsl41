@@ -43,10 +43,15 @@ pairs (DL-46/47); do not force older ones.
 ```
 
 The run root is created by `dsl41 run` and is self-contained: `journal.jsonl`
-(the WAL), `manifest/` (the post-placeholder JIL this run actually loaded +
-`manifest.json` with tool version, catalog hash, input sha256s, launch
-options), `runs/` + logs, `control.sock`, and `supervisor.sock` when
-detached. Run roots are `0700`, journals and job output `0600` — the WAL
+(the WAL), `catalogs/<source_bundle_hash>/` (the post-placeholder JIL this
+run actually loaded + `sources.json` with the original paths and the
+sha256 of the stored — post-placeholder — text, which is not the checksum
+of the file you passed when `-p` resolved anything in it), `periods/000001/manifest.json` (catalog hash and its
+version, bundle address, the runtime profile and its hash, state-machine
+version, and the period's own `baseline_id`/`first_index`), `runs/` + logs,
+`control.sock`, and `supervisor.sock` when detached. A run root written
+before DL-130 has `manifest/` instead, and every reader still accepts it.
+Run roots are `0700`, journals and job output `0600` — the WAL
 carries globals and every control input, so keep the service account's
 home to itself. A run root is the audit artifact of its night: retention
 is a business decision, not a cleanup script's.
@@ -117,18 +122,19 @@ survive into operation.
 - Offline audit: `dsl41 journal <root>/journal.jsonl <estate files>`
   replays the WAL with no engine — but it is hash-gated against the
   exact estate *at its recorded paths*: the catalog hash covers source
-  file identity, so the byte-exact copies under `<root>/manifest/`
-  do not pass directly from a different location (runner-design §7,
-  a deliberate defer). Keep the estate tag checked out where
-  `manifest.json`'s recorded paths say it was; the manifest copies are
-  for inspection and for restoring that checkout, not a drop-in
-  replay input.
+  file identity, so the byte-exact copies under
+  `<root>/catalogs/<source_bundle_hash>/` do not pass directly from a
+  different location (runner-design §7, a deliberate defer). Keep the
+  estate tag checked out where `sources.json`'s recorded paths say it was;
+  the stored copies are for inspection and for restoring that checkout,
+  not a drop-in replay input.
 - Offline history: `dsl41 runs <root>... [--job NAME] [--since ISO8601]
   [--format table|json|csv]` folds one or more run roots' journal +
   manifest + spool into one row per job run — "how long did it take, run
   after run, and did it change" (DL-113). Unlike `dsl41 journal`
-  it needs no estate-file argument: it rebuilds the catalog from
-  `<root>/manifest/` itself (DL-66's self-contained artifact). Name
+  it needs no estate-file argument: it rebuilds the catalog from the run
+  root's own stored inputs (DL-130's bundle, or DL-66's `manifest/` on a
+  root that predates it). Name
   several run roots on one command line to carry a series across a
   baseline change — the default table marks the break rather than
   blending two catalogs into one misleading line.
@@ -189,11 +195,12 @@ swapping files, not discovering problems.
    (fresh, no `--resume`). Name run roots after the baseline —
    date + estate tag serves well. The old run root stays untouched as the
    record of the old world.
-7. **Verify**: preflight WARNs, `manifest.json` (hash, version, files),
+7. **Verify**: preflight WARNs, `periods/000001/manifest.json` (hashes,
+   versions, runtime profile) and `sources.json` (files),
    `query plan` for the expected waves, then the first scheduled fire.
 
 **Rollback** is the same procedure with the previous tag and another
-fresh run root. If VCS is ever in doubt, the old run root's `manifest/`
+fresh run root. If VCS is ever in doubt, the old run root's `catalogs/`
 holds the post-placeholder JIL that baseline actually ran — byte-exact,
 though with placeholders already resolved, so prefer the tag.
 

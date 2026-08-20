@@ -30,7 +30,7 @@ from typer.testing import CliRunner
 
 from dsl41 import runner_history
 from dsl41.ast_jil import parse
-from dsl41.cli import _write_manifest, app
+from dsl41.cli import _stage_period, app
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle_state import Event, TraceEntry
 from dsl41.runner_adapters import LocalCommandAdapter
@@ -43,7 +43,9 @@ from dsl41.runner_history import (
     read_run_roots,
     read_spool,
 )
+from dsl41.period import runtime_profile_from_cli
 from dsl41.runner_startup import start_run
+from test_period_identity import legacy_twin
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -52,13 +54,27 @@ T0 = datetime(2026, 7, 1, 8, 0)
 
 
 def _header(catalog_hash: str = "h1", started_at: datetime = T0) -> dict[str, Any]:
+    """The opening record, in the shape `Journal.create` writes it since
+    DL-130. The helper keeps its name because every caller below means
+    "the record the fold reads its estate identity from"."""
     return {
-        "rec": "header",
+        "rec": "segment",
+        "segment_no": 1,
+        "estate_id": "e-test",
+        "period_id": 1,
+        "baseline_id": "b-test",
         "catalog_hash": catalog_hash,
-        "dsl41_version": "0+test",
+        "catalog_hash_version": 2,
+        "source_bundle_hash": "sha256:bundle",
+        "runtime_hash": "sha256:runtime",
         "state_machine_version": 1,
+        "catalog_hash_v1": None,
         "clock_domain": "real",
-        "started_at": started_at.isoformat(),
+        "first_index": 1,
+        "opens_from_seal": None,
+        "reclaimed": None,
+        "trust_unaudited": None,
+        "at": started_at.isoformat(),
     }
 
 
@@ -519,9 +535,25 @@ def test_a_run_numberless_change_status_overwrites_the_currently_open_run() -> N
     assert row.status == "SUCCESS"
 
 
-def test_fold_run_rows_refuses_a_record_list_with_no_header() -> None:
-    with pytest.raises(RunHistoryError, match="header"):
+def test_fold_run_rows_refuses_a_record_list_with_no_opening_record() -> None:
+    with pytest.raises(RunHistoryError, match="segment"):
         fold_run_rows([_dispatch("j1", 1, run_dir=None, started_at=T0)])
+
+
+def test_fold_run_rows_accepts_a_legacy_header_journal() -> None:
+    """(DL-130): `segment` replaced `header`, and every reader accepts
+    both -- a run root written before it is exactly what this tool exists
+    to read."""
+    legacy = {
+        "rec": "header",
+        "catalog_hash": "h1",
+        "dsl41_version": "0+test",
+        "state_machine_version": 1,
+        "clock_domain": "real",
+        "started_at": T0.isoformat(),
+    }
+    [row] = fold_run_rows([legacy, _dispatch("j1", 1, run_dir=None, started_at=T0)])
+    assert row.job == "j1" and row.catalog_hash == "h1"
 
 
 # ------------------------------------------------------------- 2. the spool
@@ -641,18 +673,25 @@ def test_an_open_run_prefers_spools_started_at_with_no_ended_at_to_mix(tmp_path:
 async def _run_real_and_manifest(
     text: str, run_root: Path, jobs: list[str], *, file: str = "estate.jil"
 ) -> None:
-    """start_run + inject STARTJOB for every named job, run to quiescence,
-    shut down, close the journal, and write manifest/ the way `dsl41 run`
-    does (`cli._write_manifest`) -- the shared shape every read_run_root
-    integration scenario below needs. Real subprocesses (`command: exit N`),
-    the test_runner_adapters.py pattern."""
+    """Stage the period the way `dsl41 run` does (`cli._stage_period`:
+    the content-addressed input bundle), then start_run -- which installs
+    `periods/000001/manifest.json` -- inject STARTJOB for every named job,
+    run to quiescence, shut down and close the journal. The shared shape
+    every read_run_root integration scenario below needs. Real subprocesses
+    (`command: exit N`), the test_runner_adapters.py pattern."""
     jil = parse(text, file=file)
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
+    # the staged profile must BE the wiring below (the DL-130 gate refuses
+    # a fiction): grace 2s, exactly what the adapter runs
+    staged = _stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
     engine = start_run(
-        catalog, run_root, clock=clock, adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)}
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+        staged=staged,
     )
-    _write_manifest(run_root, [jil], catalog, {}, {})
     now = clock.now()
     for job in jobs:
         engine.inject(Event(at=now, kind="STARTJOB", payload={"job": job}))
@@ -686,10 +725,10 @@ def test_read_run_root_end_to_end_leaf_and_box_rows(tmp_path: Path) -> None:
 def test_read_run_root_degrades_rather_than_refusing_when_there_is_no_manifest(
     tmp_path: Path,
 ) -> None:
-    """(DL-113 decision 5): `manifest/` is DL-66, so every run root predating
-    it has none and retention prunes it -- exactly the old roots a history
-    tool exists to read. The rows come back, and every one says
-    `records_only` so nothing reads like a complete row."""
+    """(DL-113 decision 5): stored inputs are DL-66 and then DL-130, so a
+    run root predating both has none and retention prunes them -- exactly
+    the old roots a history tool exists to read. The rows come back, and
+    every one says `records_only` so nothing reads like a complete row."""
     text = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
     run_root = tmp_path / "run"
 
@@ -706,7 +745,7 @@ def test_read_run_root_degrades_rather_than_refusing_when_there_is_no_manifest(
         assert engine.journal is not None
         engine.journal.close()
 
-    asyncio.run(scenario())  # deliberately no _write_manifest call
+    asyncio.run(scenario())  # deliberately unstaged: no bundle, no manifest
     [row] = read_run_root(run_root)
     assert row.job == "j1"
     assert row.fidelity == "records_only"
@@ -717,7 +756,7 @@ def test_read_run_root_degrades_rather_than_refusing_when_there_is_no_manifest(
 
 def test_a_manifest_belonging_to_another_journal_still_refuses(tmp_path: Path) -> None:
     """(DL-113 decision 5): a MISSING manifest is a missing fact and degrades;
-    a manifest whose catalog_hash disagrees with the header is a WRONG one,
+    a manifest whose catalog_hash disagrees with the segment is a WRONG one,
     and reading a run against another run's estate is the silent semantic
     drift runner-design ss7 refuses everywhere else."""
     run_root = tmp_path / "run"
@@ -726,12 +765,29 @@ def test_a_manifest_belonging_to_another_journal_still_refuses(tmp_path: Path) -
             "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n", run_root, ["j1"]
         )
     )
-    manifest = run_root / "manifest" / "manifest.json"
+    manifest = run_root / "periods" / "000001" / "manifest.json"
     payload = json.loads(manifest.read_text())
-    payload["catalog_hash"] = "not-this-journals-hash"
+    payload["catalog_hash"] = "sha256:" + "0" * 64
     manifest.write_text(json.dumps(payload))
     with pytest.raises(RunHistoryError, match="not this journal's"):
         read_run_root(run_root)
+
+
+def test_a_legacy_run_root_still_folds_full_fidelity_rows(tmp_path: Path) -> None:
+    """(DL-130): a root written before the period layout keeps `manifest/`
+    and a `header` journal. `dsl41 runs` exists to read old roots, so both
+    halves stay readable -- the catalog rebuilds from `manifest/` and the
+    rows come back `full`, not `records_only`."""
+    text = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
+    run_root = tmp_path / "run"
+    asyncio.run(_run_real_and_manifest(text, run_root, ["j1"]))
+    legacy_twin(run_root, lower_catalog([parse(text, file="estate.jil")], permit_unknown=False))
+
+    [row] = read_run_root(run_root)
+    assert row.job == "j1"
+    assert row.fidelity == "full"
+    assert row.job_hash is not None
+    assert row.status == "SUCCESS"
 
 
 def test_cli_runs_table_prints_a_labelled_break_across_two_run_roots(tmp_path: Path) -> None:

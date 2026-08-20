@@ -5165,3 +5165,74 @@
   signal must NAME the run; and the watch fold refuses a line of unknown
   kind or foreign identity. The
   per-poll anchor-fence re-check and the §6 seal barrier are not built here.
+- DL-130 a period gets its name, its inputs and its launch options
+  (2026-08-20; period-model ss1.1 and ss2.1, built as PR-07a / PR-08a /
+  PR-08c / PR-15 / PR-15a / PR-22's first half). Four things land together
+  because they are one identity. (1) **`catalog_hash` v2.** v1 hashed the
+  whole `CatalogIR` including `CatalogMeta.tool_version`, so 1.2.3 -> 1.2.4
+  moved the hash of an unchanged estate and leader eligibility refused to
+  resume it -- the outage DL-100 refused to manufacture for the
+  state-machine version, arriving by the other door. v2 is sha256 over the
+  ss3.2 canonical form with `meta` projected to `{source_files}`:
+  `tool_version` and `parsed_at` leave, spans STAY (a relocated or
+  reordered estate is still a different estate). This changes a frozen
+  identity, so it is versioned rather than swapped: `catalog_hash_version`
+  rides on the record and on the manifest, `catalog_hash_v1` stays
+  computable, and every gate recomputes under the recipe the log itself
+  names -- v1 for a legacy `header`, v2 for a `segment`. Comparing across
+  recipes would have refused every journal in existence, in one direction
+  or the other. (2) **`source_bundle_hash`**, framed normatively: inputs in
+  command-line order, `len(path) || path || len(bytes) || bytes` with
+  8-byte big-endian lengths, sha256 over the concatenation. The framing is
+  what stops `["ab", "c"]` colliding with `["a", "bc"]`; the order is kept
+  rather than sorted away, because `catalog_hash` covers `source_files` and
+  the spans, so one address for two orderings would map one directory to
+  two catalog hashes. `catalogs/<digest>/` holds the post-placeholder JIL
+  byte-exact plus `sources.json`, content-addressed and reused rather than
+  rewritten. The directory is named by the digest's hex half and the value
+  is spelled `sha256:...`: a colon in an archived path is a remote host to
+  `rsync` and `scp`, and an estate root is a thing operators archive. (3)
+  **`RuntimeProfile` and `runtime_hash`.** The launch options that change
+  interpretation or dispatch, as a typed frozen model rather than an open
+  list, so a field added later is hashed by construction; every duration is
+  microseconds validated against its own bound, `deadman_us` is the only
+  nullable, `as_machine` is sorted and de-duplicated. Identical JIL under
+  two timezones has one `catalog_hash` and two sets of ticks, and without
+  this nothing would say the period changed. The PR-15 sweep is derived
+  from `model_fields` -- the DL-83 discipline -- so a new field fails the
+  suite until it has a case. (4) **The `segment` record replaces
+  `header`.** A once-per-log header cannot describe a log made of segments;
+  a segment is self-describing (estate, period, baseline, both hashes and
+  their versions, clock domain, first index) and carries no
+  `dsl41_version`, so two openings under two patch releases can be
+  byte-identical. Nothing writes a `header`; every reader accepts one.
+  `periods/000001/manifest.json` is installed before the log opens and both
+  are derived from ONE object, so they cannot disagree at birth; resume
+  checks them against each other and names both sides of any disagreement.
+  A root that stores no inputs -- an unstaged embedder, a pruned
+  archive -- degrades to `records_only` in `dsl41 runs` rather than
+  refusing, which is DL-113 decision 5 unchanged. `dsl41 rehearse
+  --run-root` stages too: a rehearsal is evidence about production
+  behavior, and its `--timezone` is the option most able to make it
+  evidence about something else. The legacy `manifest/` is
+  no longer written and is still read. Two readings the spec left open are
+  recorded rather than hidden: `sources.json` records the sha256 of the
+  POST-placeholder bytes (the bytes the directory holds and the address is
+  taken over, so the bundle verifies against itself), and
+  `retry_horizon_us` defaults to 60s, which is what ss9's own worked
+  example gives the closing period -- the gate that reads it is a later
+  unit. The adversarial pass added four
+  refusals the first cut left implicit: a `catalog_hash_version` this
+  binary does not implement is refused BY NAME rather than recomputed
+  under v1 and reported as "the estate changed" (which would tell an
+  operator to abandon a live estate); an unreadable period manifest is an
+  `EngineError` naming the file rather than a decoder error escaping
+  `dsl41 runs` as a traceback; bundle completeness is `sources.json` and
+  not the directory, with the bundle assembled in a temp directory and
+  renamed in, so a crash mid-write cannot poison an address forever and a
+  concurrent writer of the same bytes is not an error; and the manifest
+  pins the deadman the supervisor REALLY runs, not the one the invocation
+  asked for -- the same rule DL-126 applies to the routing table, for the
+  same reason. Out of scope by construction: the seal, `wal/`, the sentinel, the
+  anchor, `periods/.staging/` and adoption. 2325 -> 2410 passed; ruff,
+  mypy and arch_check clean.

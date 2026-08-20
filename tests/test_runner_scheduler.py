@@ -886,8 +886,21 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
 
     now = RealClock().now()
     past = now - timedelta(hours=2)
+    # a hand-built root is still a DL-130 root: genesis installs the period
+    # manifest before the log opens, and resume refuses a segment without one
+    from dsl41.period import genesis_manifest, write_period_manifest
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
+
+    manifest = genesis_manifest(
+        catalog, clock_domain="real", state_machine_version=STATE_MACHINE_VERSION
+    )
+    write_period_manifest(run_root, manifest)
     journal = Journal.create(
-        run_root / "journal.jsonl", catalog=catalog, clock_domain="real", started_at=past
+        run_root / "journal.jsonl",
+        catalog=catalog,
+        clock_domain="real",
+        started_at=past,
+        manifest=manifest,
     )
     journal.close()
 

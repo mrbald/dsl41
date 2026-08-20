@@ -679,16 +679,16 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
                 assert ack == {"ok": True, "subscribed": True}
 
                 backfilled = []
-                seen_header = False
+                seen_opening = False
                 while True:
                     line = await asyncio.wait_for(reader.readline(), timeout=2.0)
                     record = json.loads(line)
                     backfilled.append(record)
-                    if record.get("rec") == "header":
-                        seen_header = True
+                    if record.get("rec") == "segment":
+                        seen_opening = True
                     if record.get("kind") == "ON_HOLD":
                         break
-                assert seen_header
+                assert seen_opening
                 assert sum(1 for r in backfilled if r.get("kind") == "ON_HOLD") == 1
 
                 # a NEW live event, sent only after the backfill is fully drained

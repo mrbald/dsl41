@@ -540,7 +540,7 @@ def test_a_native_decision_refuses_an_effect_without_its_identity(tmp_path: Path
         journal.decision(result, [empty_id])
     journal.close()
     # neither refused batch left a line behind
-    assert [r["rec"] for r in read_journal(tmp_path / "journal.jsonl")] == ["header"]
+    assert [r["rec"] for r in read_journal(tmp_path / "journal.jsonl")] == ["segment"]
 
 
 def _spool_engine() -> Engine:

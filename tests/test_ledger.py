@@ -49,6 +49,7 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_effects import OUTCOME_UNAVAILABLE
+from dsl41.period import catalog_hash_v1, catalog_hash_v2
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -361,11 +362,11 @@ def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> No
 # ------------------------------------------------------- 4. eligibility (ss7)
 
 
-def test_the_header_pins_the_state_machine_version(tmp_path: Path) -> None:
+def test_the_segment_pins_the_state_machine_version(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     _close(_start(run_root))
-    header = read_journal(run_root / "journal.jsonl")[0]
-    assert header["state_machine_version"] == STATE_MACHINE_VERSION
+    segment = read_journal(run_root / "journal.jsonl")[0]
+    assert segment["state_machine_version"] == STATE_MACHINE_VERSION
 
 
 def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Path) -> None:
@@ -387,9 +388,48 @@ def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Pa
 def test_a_header_that_pins_no_version_reads_as_the_one_that_defined_it() -> None:
     """A journal written before S6a. Refusing it would make the gate's first
     act an outage on every run root in existence."""
-    check_leader_eligibility({"catalog_hash": "h"}, expected_catalog_hash="h")
+    catalog = lower_source(_SOLO_JIL)
+    check_leader_eligibility(
+        {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)}, catalog=catalog
+    )
     with pytest.raises(EngineError, match="catalog hash mismatch"):
-        check_leader_eligibility({"catalog_hash": "h"}, expected_catalog_hash="other")
+        check_leader_eligibility({"rec": "header", "catalog_hash": "other"}, catalog=catalog)
+
+
+def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:
+    """(period-model ss1.1, DL-130): `catalog_hash` is versioned, so the
+    gate recomputes under the recipe the record pins -- v1 for a legacy
+    `header`, v2 for a `segment`. Comparing across recipes would refuse
+    every journal ever written, in one direction or the other."""
+    catalog = lower_source(_SOLO_JIL)
+    legacy = {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)}
+    current = {
+        "rec": "segment",
+        "catalog_hash": catalog_hash_v2(catalog),
+        "catalog_hash_version": 2,
+    }
+    check_leader_eligibility(legacy, catalog=catalog)
+    check_leader_eligibility(current, catalog=catalog)
+    # the same estate under the OTHER recipe is a mismatch, both ways
+    for swapped in (
+        {**legacy, "catalog_hash": current["catalog_hash"]},
+        {**current, "catalog_hash": legacy["catalog_hash"]},
+    ):
+        with pytest.raises(EngineError, match="catalog hash mismatch"):
+            check_leader_eligibility(swapped, catalog=catalog)
+
+
+def test_a_changed_estate_refuses_under_either_recipe() -> None:
+    """The gate's own reason for existing, on both sides of the version:
+    a changed estate re-baselines explicitly rather than drifting."""
+    catalog = lower_source(_SOLO_JIL)
+    changed = lower_source(_SOLO_JIL.replace("command: x", "command: y"))
+    for record in (
+        {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)},
+        {"rec": "segment", "catalog_hash": catalog_hash_v2(catalog), "catalog_hash_version": 2},
+    ):
+        with pytest.raises(EngineError, match="catalog hash mismatch"):
+            check_leader_eligibility(record, catalog=changed)
 
 
 # ------------------------------------------------- 5. the takeover barrier
@@ -623,7 +663,7 @@ def test_a_journal_stamped_in_the_future_refuses_to_resume(tmp_path: Path) -> No
     _close(engine)
     path = run_root / "journal.jsonl"
     records = read_journal(path)
-    records[0]["started_at"] = "2099-01-01T00:00:00"
+    records[0]["at"] = "2099-01-01T00:00:00"  # a segment's opening stamp
     path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
 
     async def scenario() -> None:
@@ -738,7 +778,10 @@ def test_an_incomplete_watch_with_no_adapter_to_re_arm_it_refuses_loudly(tmp_pat
         await engine.shutdown()
         _close(engine)
 
-        with pytest.raises(EngineError, match="no FW adapter registered"):
+        # since DL-130 the PINNED root refuses one gate earlier -- before
+        # replay, naming the missing type -- which is the same loud refusal
+        # this test always pinned, moved to where nothing has mutated yet
+        with pytest.raises(EngineError, match="no adapter"):
             await _resume_with(run_root, T0 + timedelta(minutes=2), _FW_JIL, {})
 
     asyncio.run(scenario())
@@ -748,7 +791,14 @@ def test_a_job_whose_type_this_engine_cannot_dispatch_is_left_alone(tmp_path: Pa
     """Parity with the running engine, which would not have dispatched it
     either: an engine with no adapter for a job's type has no dispatch row
     for it live, so reconciliation must not invent a verdict about a run it
-    could never have started. Not a failure -- an absence."""
+    could never have started. Not a failure -- an absence.
+
+    Since DL-130 this is a LEGACY root's behaviour only: a pinned root
+    refuses the missing adapter before replay (test_period_identity pins
+    that), so the left-alone parity is exercised through the header-journal
+    twin a pre-DL-130 estate actually is."""
+    from test_period_identity import legacy_twin
+
     run_root = tmp_path / "run"
 
     async def scenario():
@@ -757,6 +807,7 @@ def test_a_job_whose_type_this_engine_cannot_dispatch_is_left_alone(tmp_path: Pa
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         await engine.shutdown()
         _close(engine)
+        legacy_twin(run_root, lower_source(_SOLO_JIL))
 
         resumed = await _resume_with(
             run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}

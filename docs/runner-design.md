@@ -352,10 +352,26 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 The journal is an append-only JSONL WAL, one file per run. Record kinds:
 
-- `header` — catalog content hash, state-machine version, dsl41 version,
-  clock domain, started_at. The first two are what leader eligibility is an
-  exact match on (`docs/concurrency-model.md` §7, S6a); the dsl41 version is
-  advisory forensics and gates nothing.
+- `segment` — the first record of every segment, and the whole identity of
+  the period it opens: `{rec, segment_no, estate_id, period_id,
+  baseline_id, catalog_hash, catalog_hash_version, source_bundle_hash,
+  runtime_hash, state_machine_version, catalog_hash_v1, clock_domain,
+  first_index, opens_from_seal, reclaimed, trust_unaudited, at}`
+  (`docs/period-model.md` §2.1, DL-130). Self-describing on purpose: a
+  reader that opens it knows the period, the catalog and the semantics
+  without reading an earlier file. `catalog_hash` + `state_machine_version`
+  are what leader eligibility is an exact match on
+  (`docs/concurrency-model.md` §7, S6a); `catalog_hash_version` says which
+  recipe the hash was taken under, so the gate compares like for like.
+  `dsl41_version` is deliberately NOT here — it is per-process, it rides on
+  `leader`, and a patch release must not move these bytes (PR-07).
+- `header` — **retired for new logs** (DL-130): a once-per-log header
+  cannot describe a log made of segments. It was `{catalog_hash,
+  state_machine_version, dsl41_version, clock_domain, started_at}`, and its
+  `catalog_hash` is v1. Nothing writes one; every reader accepts one, because
+  a run root written before DL-130 must keep replaying, resuming and
+  reporting — and a v1 pin is compared under v1 for the rest of that log's
+  life.
 - `leader` — `{epoch, at, pid, host, dsl41_version}`: one term of leadership
   over this run root (S6a, DL-100). Appended under the run root's lock
   immediately after acquiring it, which is what makes the epoch monotone —
@@ -458,14 +474,23 @@ inputs and advances through a fresh Oracle to reconstruct the full trace.
 One source of truth, no divergence possible. Write-ahead discipline: fsync
 per record before `feed()`/`advance()` in run mode, batched in rehearse.
 
-**Self-contained artifact** (DL-66): `dsl41 run` writes `manifest/` into
-the run root before baselining — the post-placeholder JIL the run loaded
-(byte-exact, F1) plus `manifest.json` (tool version, catalog hash, sha256
-of every input, original paths, launch options). The run root outlives
-the estate files it was launched from. The catalog hash covers
-`SourceSpan.file`, so byte-exact replay against relocated manifest copies
-still needs the recorded original paths; relocation-independent hashing
-is a deliberate defer (it orphans every existing journal's resume gate).
+**Self-contained artifact** (DL-66, re-laid-out by DL-130): `dsl41 run`
+materializes the inputs into `catalogs/<source_bundle_hash>/` before
+baselining — the post-placeholder JIL the run loaded (byte-exact, F1)
+plus `sources.json` (the ordered vector of original paths and their
+sha256) — and the engine installs `periods/000001/manifest.json`
+(`artifact_format_version`, `catalog_hash` + its version,
+`source_bundle_hash`, the `RuntimeProfile` and its `runtime_hash`,
+`state_machine_version`, and the five fields only the opening knows:
+`period_id`, `baseline_id`, `clock_domain`, `segment_no`, `first_index`).
+The bundle is addressed by its own bytes, so a relaunch on unchanged
+inputs reuses the directory rather than rewriting it. The run root
+outlives the estate files it was launched from. The legacy `manifest/`
+directory is no longer written; a root that has one keeps being read from
+it. The catalog hash covers `SourceSpan.file`, so byte-exact replay
+against relocated copies still needs the recorded original paths;
+relocation-independent hashing is a deliberate defer (it orphans every
+existing journal's resume gate).
 
 **Permissions** (DL-66): run roots are `0700` (created and re-tightened
 at resume); the journal, wrapper spool files, and job stdout/stderr are
