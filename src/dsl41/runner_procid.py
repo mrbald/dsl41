@@ -97,6 +97,63 @@ def durable_write(path: str, data: bytes) -> None:
         os.close(dfd)
 
 
+def durable_create(path: str, data: bytes) -> None:
+    """The DL-41a liturgy with CREATE-ONLY publication: the temp is linked
+    into place, never renamed over an existing file. Raises
+    FileExistsError when the name is already taken -- the caller decides
+    what a lost race means (for a content-addressed or verify-able
+    artifact, the winner IS the answer)."""
+    directory = os.path.dirname(path) or "."
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, path)  # fails EEXIST rather than replacing
+        except FileExistsError:
+            # the WINNER's link may not be durable yet (it links, then
+            # fsyncs the directory): a loser who acts on the visible file
+            # -- verifying it, flipping a row over it -- must first make
+            # it durable itself, or a power cut can drop the link and
+            # leave the row pointing at nothing
+            make_durable(path)
+            raise
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    dfd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def make_durable(path: str) -> None:
+    """Fsync an EXISTING file and its directory entry: what a reader owes
+    a file it is about to durably rely on when the writer may have died
+    between the link and its fsync."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def durable_write_json(path: str, record: dict[str, Any]) -> None:
     durable_write(path, json.dumps(record, sort_keys=True).encode("utf-8") + b"\n")
 

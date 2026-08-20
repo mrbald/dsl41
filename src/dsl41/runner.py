@@ -413,6 +413,10 @@ class Engine:
         #: on any row and a committed seal carries every `on_hold` exactly
         #: as the operator left it (PR-28c).
         self.sealing = False
+        #: ss11 step 5: adoption's barrier is DISPATCH-FREE. Every effect
+        #: its reconciliation injections plan is left PENDING, and period 2
+        #: dispatches it after opening (DL-134)
+        self.hold_outbox = False
         #: the same freeze, seen by an FW task at its poll boundary (ss3.5)
         self.barrier = SealBarrier()
         self._seal: _PendingSeal | None = None
@@ -1382,7 +1386,18 @@ class Engine:
         The fence is re-proved HERE and not only in the journal writer
         (period-model ss1.3): an append and a dispatch are two acts, and a
         leader that lost the lineage between them would start a process for
-        an estate it no longer leads (PR-03)."""
+        an estate it no longer leads (PR-03).
+
+        `hold_outbox` makes the whole surface a no-op, and exactly one
+        caller sets it: `estate adopt`'s barrier (period-model ss11 step 5,
+        DL-134). A reconciled FAILURE can satisfy a downstream condition
+        and plan a SPAWN, and a barrier that dispatched it before its
+        decision was durable in the TRANSLATED WAL would repeat the act
+        after a crash. Held, the injection and its planned effect are
+        durable in `wal/000001.jsonl` and in the seal's `outbox_pending`
+        before anything acts on them, and period 2 dispatches it once."""
+        if self.hold_outbox:
+            return
         pending = self.outbox.pending()
         if pending and self.fence is not None:
             self.fence.check()

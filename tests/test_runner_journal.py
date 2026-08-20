@@ -40,7 +40,7 @@ from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import (
     Journal,
-    _dsl41_version,
+    dsl41_version,
     read_journal,
     replay_inputs,
 )
@@ -717,4 +717,4 @@ def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> Non
         raise importlib.metadata.PackageNotFoundError("dsl41")
 
     monkeypatch.setattr(importlib.metadata, "version", no_such_distribution)
-    assert _dsl41_version() == "0+unknown"
+    assert dsl41_version() == "0+unknown"

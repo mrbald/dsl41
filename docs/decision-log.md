@@ -5694,3 +5694,279 @@
   already-raised corpses keeps `shutdown` from raising the same failure a
   second time to the caller who just observed it -- teardown collects,
   it does not repeat.
+- DL-134 the estate gets its verbs: the seal an operator runs, the proof
+  that lets a root be archived, and the two ways a root joins a lineage
+  (2026-08-20; period-model ss1.3, ss7, ss8, ss11 and ss13's PR-01c,
+  PR-02a, PR-02d, PR-02e, PR-02f, PR-47a, PR-47b and PR-48's readiness,
+  drain, idempotency and `adopting` rows, built as U7). DL-133 built the
+  boundary and left five things out by construction: the `dsl41 seal` CLI,
+  the physical roll, adoption, `audit`/`verify`, and `estate reclaim`.
+  This unit builds all five and flips DL-133 item 14.
+  (1) **The lock decides which seal mode you get, not a flag.** ss7 has
+  two entry modes and one body. `dsl41 seal` tries to take `leader.lock`:
+  refused means a live engine leads the root, so the CLI stages C2 and
+  asks it over the socket; taken means nothing leads it, so this process
+  becomes the offline leader for exactly one boundary. Probing
+  `control.sock` would have answered a different question -- a socket file
+  outlives the process that made it -- and a `--offline` flag would have
+  let an operator assert something the estate can prove.
+  (2) **The offline mode is `resume_run` plus `submit_seal`, and nothing
+  else.** ss7 says offline "runs the same-root recovery barrier in full,
+  then performs ss6 steps 1-8 as that offline leader", and that IS resume
+  followed by the live seal path: the same `leader` record at epoch+1, the
+  same replay, the same reconciliation, the same cutoff in the same
+  single-writer loop. A second implementation of the boundary would have
+  been a second place for every crash window this model spent twenty-six
+  drafts closing. C1 is loaded from the ROOT's own bundle rather than from
+  the command line, because the run root outlives the estate files it was
+  launched from and an offline seal that needed them would be unusable
+  exactly when it matters.
+  (3) **`audit` re-derives; `verify` checks a checkpoint.** ss11 says
+  "verified means re-derived, not self-consistent", so `rederive_seal`
+  rebuilds the whole sidecar from the four inputs ss11 names -- the
+  opening seal, the complete ordered WAL, the immutable spool, the C1 and
+  C2 manifests -- plus the sentinel, read for the one derivation of
+  `boundary_request.source`. It reuses the machinery resume already has
+  (`open_from_seal`, `replay_inputs`, `executions_at`, the classifier,
+  `close_runtime`), so audit and the engine cannot drift about what a
+  period means. The staged half of the opening comes back off C2's
+  COMMITTED MANIFEST, because the `seal` record carries only
+  `next_period_id` and `next_baseline_id` -- which is exactly why ss11
+  names that manifest as an audit input. The three `boundary_request`
+  input scalars are checked record-against-sidecar and carried, as ss11
+  exempts them; `source` is derived and compared, and an adoption's
+  `request_id` is re-derived (PR-47b).
+  (4) **Producing and consuming a checkpoint are two rules, and the code
+  says so in two functions.** `audit_period` requires the predecessor
+  attestation present and VERIFIED; `verify_attestation` accepts one
+  ALONE. Draft 8 wrote one rule for both and made a second roll
+  impossible: a rolled root holds the seal it opened from and none of that
+  period's evidence, so it can verify and must not be asked to audit.
+  `dsl41 audit` with no `--period` therefore names only the periods this
+  root holds a WAL for, and audit of an imported seal refuses by naming
+  `verify` and the registry.
+  (5) **`chain_through_period` is derived, not asserted.** It is
+  `predecessor + 1`, and it must equal `period_id` -- so a producer that
+  skipped a link cannot write a checkpoint that claims to cover it. The
+  consumer reads that one field and the induction is what it trusts.
+  (6) **The attestation lives beside its seal**, at
+  `seals/<period>.audit.json`. ss11 names the filename and no directory;
+  this is the choice, and it is the one that makes a physical roll's import
+  a pair of files under one name pattern rather than a second index.
+  (7) **The physical roll is the in-place opener with two steps in front
+  of it.** ss7's order -- new-root `leader.lock`, sentinel durable,
+  `anchor.lock` and the claim, the import, the segment, the head -- is
+  honoured by giving `open_next_period` a catalog it may resolve LAZILY:
+  a callable is called after the claim and before the segment, which is
+  where ss7 puts the import and the only place a roll can load C2, since
+  until the import there is no bundle to load it from. The import is
+  idempotent by content address, and it deliberately does NOT bring C1's
+  WAL or bundle: re-deriving C1 in the new root would need C1's whole
+  proof set, and importing that on every roll is retention policy rather
+  than a boundary mechanism.
+  (8) **Adoption stops at the point where the root becomes ordinary.**
+  `adopt_legacy_root` runs ss11 steps 1-6 and hands back a period-1 root;
+  step 7 is the COMMON seal body, run by an ordinary engine over it. A
+  private seal path for adoption would have been a second implementation
+  of the one thing this model exists to have exactly one of (PR-48). One
+  reordering against ss11's numbering, stated where it happens: the SPLIT
+  (step 6) precedes the TRANSLATION (step 5's second half), because the
+  synthesized `segment` record IS the manifest's fields and the manifest
+  has to exist before the record that copies it. Nothing observes the root
+  in between -- the head is `adopting` and every other resume refuses by
+  name -- so the reordering changes no state a reader can reach.
+  (9) **`adopting` has one exception and it is explicit.** The head exists
+  so adoption owns recovery of the root until period 1 seals, and
+  `act_on_head` refuses it by name. The adopter's own barrier passes an
+  `adopting=True` that also holds the outbox -- one flag, one meaning
+  ("this resume IS ss11 step 5"), two consequences that are both step 5's:
+  the head is ours to stand on, and the barrier is dispatch-free so a
+  reconciled FAILURE's planned SPAWN is durable in the translated WAL and
+  in the seal before anything acts on it.
+  (10) **The legacy catalog is rebuilt under DL-66's `original_path`, and
+  the header's v1 hash is carried opaque.** ss11 says "`catalog_hash`
+  recomputed as v2 from the loaded catalog, `catalog_hash_v1` from the
+  header", and it says nothing about verifying the latter -- deliberately:
+  v1 hashes `meta`, so it moves with the installed package version, and an
+  adoption is by definition an old root met by a new binary. Refusing on
+  it would refuse every adoption there will ever be. The paths still
+  matter, because v2 covers spans, so the rebuild parses under the
+  original paths the legacy manifest recorded.
+  (11) **The LEGACY period's launch options are operator-attested.**
+  DL-66's `manifest/` recorded inputs and a catalog hash, not launch
+  options, so `estate adopt` takes them as flags (`--timezone`,
+  `--as-machine`, ...) and pins them in period 1's manifest. A wrong
+  attestation is not silent: the resume gate compares the wiring against
+  the pin and refuses, loudly, before anything is sealed.
+  (12) **Two shipped bugs surfaced on the way and are fixed at the root.**
+  A period opened from a seal was re-seeded from the CATALOG on every
+  resume AFTER the one that opened it -- globals gone, holds gone,
+  revisions moved -- because the carry was computed only on the opening
+  pass. And the carried outbox was patched in AFTER the segment's records
+  were read, so an `effect_result` in the new segment for an effect born
+  in the old one hit `Outbox.resolve`'s "outcome for unknown effect" on
+  the next resume. Both are one fix: ss7 phase 3 runs at EVERY resume of a
+  period that opened from a seal, and `carried_outbox` seeds the replay
+  rather than being applied to it. Neither was reachable before this unit
+  because nothing resumed a rolled or re-opened root twice.
+  (13) **The legacy launch options are the LEGACY MANIFEST's where it has
+  them.** DL-66's `manifest/manifest.json` carries an `options` block with
+  `timezone`, `as_machine`, `machine_policy` and `detached`, so adoption
+  reads those and the flags supply only what it never held -- the deadman,
+  the timezone table, the reconciliation windows. The adopter's WIRING is
+  then built from the result, so the pin and the machine agree by
+  construction instead of by attestation, and the operator is asked to
+  remember only what nothing recorded. What is still attested is UNCHECKED
+  at adoption and cannot be otherwise -- the barrier is wired from the
+  profile it is attesting, so nothing can disagree with it. It is pinned in
+  period 1's manifest and every LATER resume is held to it, and that is
+  where a wrong one surfaces. Said plainly in the verb's help and in the
+  runbook, because a guard that cannot fire is worse than none.
+  (14) **Break-glass is recorded twice.** ss1.3 says a reclaim is recorded
+  in the anchor and in the next `segment`'s `reclaimed` field. The anchor
+  keeps an append-only ledger and the opener COPIES the entry for its own
+  period rather than consuming it, so the fork stays visible in the fence
+  that permitted it and in the log of the period that was let through.
+  (15) **DL-133 item 14 is flipped.** A legacy `header` root now refuses
+  `run --resume` and names `dsl41 estate adopt`. The question asked is
+  narrow -- the first record is a `header` -- because a `journal.jsonl`
+  that opens with a `segment` is a root somebody rewrote over its own
+  sentinel, and telling that operator to adopt would send them where the
+  problem is not. `runner-design.md` ss7 records the flip.
+  Deliberately deferred, each with its reason. The seal's crash matrix
+  over the roll and over adoption's seven steps (PR-45's roll rows, PR-48's
+  power-loss half) is not built: the seams are in place (`crash_point` on
+  both operations) and the matrix is a unit of its own, the size of
+  DL-133's. `--trust-unaudited-seal` (PR-47) is not built -- it is
+  resume's switch, not an estate verb's. The `dsl41 audit`/`journal`/`runs`
+  estate-WIDE walk across roots through the registry (PR-02f's cross-root
+  half) is not built; the registry carries what it needs and the readers
+  still take one root at a time. And `_resume_untraced_starts`'s
+  no-adapter branch is now UNREACHABLE from `resume_run` -- the only route
+  to it was a legacy root, which (14) closed -- so its test was retargeted
+  to the two refusals that replaced it and the branch is left in place,
+  named here, for the architecture review to decide about rather than
+  deleted quietly on the way past. `cli.py` grew by roughly 1100 lines and
+  is the largest advisory finding `arch_check` reports; the verbs' bodies
+  are the natural thing to move out and that is the review's call, not
+  this unit's.
+  A self-review sweep over the finished tree found twelve more, each
+  fixed at the root and pinned by a test where a test can see it. The
+  worst was an `estate adopt` re-run over a root whose period 1 was
+  ALREADY SEALED: steps 5-6 ran before the recovery check, so a re-run
+  under a different flag rewrote the committed manifest and exited 0,
+  leaving a period that could never be re-derived and a verb that said it
+  had succeeded. The recovery check moved above the split, and the split
+  now REFUSES a manifest it disagrees with instead of overwriting it. A
+  physical roll interrupted after its claim refused its own head, because
+  the roll accepted only `closed` -- ss1.3 makes the claim idempotent on
+  `claim_id`, so a `claimed` head naming this root now resumes through the
+  claim FILE, which carries the seal the head no longer does, and a
+  COMPLETED roll refuses by naming `--resume`. `dsl41 audit` held the
+  lineage lock for the whole verb, so auditing period N-1 while period N
+  ran was impossible -- a live engine holds that lock for its process
+  lifetime -- and the lock now wraps the one write ss1.3 gives it; a
+  caller that cannot take it keeps the checkpoint, which is what `verify`
+  and `run --open-from` actually read, and is told the registry row is
+  outstanding. `_drive_boundary` read the LOOP first, so an engine failure
+  during teardown after a committed boundary reported exit 2 -- "it did
+  not commit" -- the one lie about the estate it could tell; the future
+  decides now and the loop's other exceptions are diagnostics. The
+  `result`+`effect` FOLD had no test at all, on the one verb that writes a
+  durable period-1 WAL, because `legacy_twin` downgrades the header and
+  leaves the body native; the fixture now unfolds it and the fold is
+  checked against the retained original record by record. `audit`'s
+  producer-side chain check was a tautology once `verify` had run and is
+  gone, `verify`'s own two rules got the tests they lacked, and PR-08b's
+  attestation golden vector -- cited but not built -- is built. An earlier
+  sweep found five, each fixed the same way. ss11's matrix row
+  "adoption's `seal` record present, head still `adopting`" was
+  UNIMPLEMENTED: the re-run refused its own head and the estate was
+  stranded with a committed boundary nobody could close, so `estate adopt`
+  now performs that CAS -- fsyncing the WAL first, on the rule every head
+  transition here follows -- and reports a finished adoption rather than
+  sealing a period that is already closed. The roll left an open `Journal`
+  on the new root's WAL, and closing it the ordinary way would have
+  released the proofs its own successor was about to append under, so
+  `Journal.close` split into `detach` (the descriptor) plus the release
+  (the term) and the roll takes the first. The import copied the seal and
+  the attestation without reading the COPY back, which is the one thing
+  the new root will resume from, audit against and hand to a second roll.
+  A `chmod` after `durable_write`'s rename was a window on a WAL that
+  carries globals. And the drain check compared attempts against the
+  POST-REPLAY decision index, which recovers exactly the missing decisions
+  it was supposed to detect -- dead in production while its test stayed
+  green, so it now reads the durable decisions off the records.
+  2789 -> 2839 collected, 49 new in `tests/test_estate.py` and one in
+  `tests/test_boundary.py`, all passing; ruff, mypy and arch_check clean.
+  The first EXTERNAL adversarial round found eleven blockers, all folded
+  in with pins: audit compares the `seal` record against the sidecar it
+  attests and the manifest against the segment BEFORE re-derivation (a
+  rewritten record or rewritten segment pins over an untouched partner
+  refuses by name); the watch fold takes the seal's own `watch_seq`
+  prefix, so a watch that carried across the boundary is audited on C1's
+  evidence and not the successor's later polls (the digest comparison is
+  what makes the claimed prefix safe to take); the attestation model is
+  strict -- no coercions, one byte form (`from_bytes` requires the file's
+  bytes to BE the canonical serialization), links and timestamps
+  grammar-checked, and the null predecessor is period 1's base case and
+  nothing else's; audit is idempotent AND still finishes the `attested`
+  CAS a crashed run left behind; adoption proves the anchor is empty or
+  its own BEFORE the fence, and an adopted sentinel with an empty anchor
+  refuses a retry pointed at the wrong `--estate-anchor` (a second closed
+  authority over one root is the fork ss1.3 exists to prevent); the fence
+  requires an existing archived name to be the SAME inode as the legacy
+  journal and fsyncs unconditionally; the drain check asks a live
+  supervisor socket for LIST (a wrapper the spool never recorded) and
+  refuses an unanswering socket; the fold refuses a spawn.json naming
+  another (job, run_number); recovery of a committed adoption validates
+  the sidecar, its record mirrors, its `adopt` source, its estate and the
+  successor manifest before the head CAS; and `reclaim` recomputes the
+  claim id from the body and requires agreement with the head, the
+  estate, the target root and the registry's closing seal before it moves
+  anything.
+  The second external round found seven shadows, closed at the root: the
+  watch fold's cut is `at <= T` with T from the period's OWN replay --
+  never a prefix read off the artifact being verified, which a coherent
+  re-forge could move -- and lines past the cut are not validated at all,
+  so a successor's evidence (an unsupported version a future binary
+  wrote included) cannot make a closed period unauditable; the fence
+  durably binds the ORIGINAL anchor (`legacy/anchor.json`), which is what
+  tells the fence-to-authority crash window (retry proceeds) from a retry
+  pointed at the wrong anchor (the fork; refused naming the bound one) --
+  and `legacy_sources` reads DL-66's `manifest/` directly so the window
+  itself is resumable; the drain LIST must be a well-formed successful
+  answer, never an error envelope read as empty; the `attested` CAS is
+  bound to the estate, the normalized root and the seal digest, so a
+  stranger's unlocked anchor cannot be marked; recovery of a committed
+  adoption runs the FULL seal-to-opening validation (`open_from_seal`)
+  before the head CAS, not a presence check; and `reclaim` requires exact
+  registry agreement, null included.
+  The third external round found five, closed at the root: the watch
+  fold's cut is POSITIONAL (ss3.5: an instant is not a unique log
+  position -- a successor unparked at the boundary can poll at exactly
+  T), and the count's authority is the successor segment's
+  `opens_from_seal`, an artifact independent of the sidecar under audit
+  -- a coherent re-forge of sidecar and record together refuses against
+  the successor's pin before any evidence is folded, and a period with no
+  successor segment owns its whole log; lines past the prefix are never
+  read. The drain LIST requires the frozen protocol version and every
+  typed field per row -- a row missing `wrapper_alive` would read as
+  false and fence over an unspooled live wrapper. The `attested` CAS and
+  `reclaim` both require the registry row committed AND durable
+  (`seal_digest` exact, null included; `segment_durable` true). And the
+  fence's anchor binding moved INTO the sentinel (`adopted_anchor`,
+  written by the same atomic rename) -- a side file was swappable under
+  an untouched sentinel, and a forged binding could point a fence-crash
+  retry at a second empty anchor.
+  A fourth round found the last one: attestation publication is
+  CREATE-ONLY (`durable_create`: the temp is linked into place, never
+  renamed over an existing name) -- two racing audits would otherwise
+  publish two digests for one period, and a roll could import one while
+  the closing root keeps the other, a forked chain. The loser verifies
+  the winner and finishes the `attested` CAS over it -- after first
+  making the winning file and its directory entry DURABLE
+  (`make_durable`): the winner links before it fsyncs, and a durable
+  `attested` row over a merely-visible checkpoint survives a power cut
+  the checkpoint does not. The idempotent early return fsyncs the
+  observed checkpoint on the same rule.

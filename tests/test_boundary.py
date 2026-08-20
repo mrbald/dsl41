@@ -2968,3 +2968,64 @@ def test_start_run_creates_the_root_through_the_durable_helper(tmp_path: Path, m
     monkeypatch.undo()
     assert os_mod.stat(run_root.parent).st_ino in synced
     assert os_mod.stat(tmp_path).st_ino in synced
+
+
+def test_the_watch_fold_takes_a_positional_prefix_and_never_reads_past_it(
+    tmp_path: Path,
+) -> None:
+    """ss2.2/ss3.5: the cut is a COUNT, not an instant (a successor
+    unparked at the boundary can poll at exactly T), and lines past the
+    prefix are not read at all: an unsupported version a future binary
+    wrote must not make a closed period unauditable. A prefix the log
+    cannot supply refuses -- the claimed evidence does not exist."""
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+    from dsl41.runner_adapters import read_watch_log
+
+    run_dir = tmp_path / "runs" / "w.1"
+    run_dir.mkdir(parents=True)
+    rid = str(uuid.uuid4())
+    lines: list[dict[str, Any]] = [
+        {
+            "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+            "at": T0.isoformat(),
+            "kind": "start",
+            "run_id": rid,
+        },
+        {
+            "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+            "at": (T0 + timedelta(minutes=1)).isoformat(),
+            "kind": "poll",
+            "run_id": rid,
+            "exists": True,
+            "size": 3,
+            "qualifying": True,
+            "stable_polls": 1,
+        },
+        {
+            # the SUCCESSOR's poll: written by a future binary whose
+            # version this one does not implement
+            "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1000,
+            "at": (T0 + timedelta(minutes=9)).isoformat(),
+            "kind": "poll",
+            "run_id": rid,
+            "exists": True,
+            "size": 3,
+            "qualifying": True,
+            "stable_polls": 2,
+        },
+    ]
+    (run_dir / "watch.jsonl").write_text(
+        "".join(json.dumps(rec, sort_keys=True) + "\n" for rec in lines)
+    )
+    cut = read_watch_log(run_dir, prefix=2)
+    assert cut is not None and cut.watch_seq == 2  # the closed period's evidence exactly
+    assert cut.stable_polls == 1
+    with pytest.raises(EngineError, match="artifact_format_version"):
+        read_watch_log(run_dir)  # the LIVE fold still refuses the whole log
+    short_dir = tmp_path / "runs" / "s.1"
+    short_dir.mkdir(parents=True)
+    (short_dir / "watch.jsonl").write_text(
+        "".join(json.dumps(rec, sort_keys=True) + "\n" for rec in lines[:2])
+    )
+    with pytest.raises(EngineError, match="claimed evidence does not exist"):
+        read_watch_log(short_dir, prefix=3)  # an over-claim over a valid log

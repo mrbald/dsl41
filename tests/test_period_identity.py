@@ -852,9 +852,16 @@ def test_a_manifest_for_another_catalog_never_opens_a_log(tmp_path: Path) -> Non
 # ------------------------------------------- 6. the legacy journal, still read
 
 
-def test_a_legacy_header_journal_still_replays_and_resumes(tmp_path: Path) -> None:
-    """DL-130 retired `header` for new logs and for nothing else. A run
-    root written before it resumes, renders and folds exactly as it did."""
+def test_a_legacy_header_journal_still_replays_and_is_adopted_not_resumed(
+    tmp_path: Path,
+) -> None:
+    """DL-130 retired `header` for new logs and for nothing else: a run root
+    written before it still RENDERS and folds exactly as it did.
+
+    What changed at DL-134 is the other half. ss11's matrix says a legacy
+    journal is not opened in place -- it is adopted -- and DL-133 let one
+    resume only because the verb that lifts the refusal did not exist yet.
+    It does now, so `--resume` refuses and names it."""
     run_root = tmp_path / "run"
     jil_path = tmp_path / "estate.jil"
     jil_path.write_text(_SOLO_JIL)
@@ -868,7 +875,8 @@ def test_a_legacy_header_journal_still_replays_and_resumes(tmp_path: Path) -> No
     opening = read_journal(run_root / "journal.jsonl")[0]
     assert opening["rec"] == "header"
     assert opening["catalog_hash"] == catalog_hash_v1(catalog)
-    _close(asyncio.run(_resume(run_root, catalog, at=T0 + timedelta(minutes=1))))
+    with pytest.raises(EngineError, match="dsl41 estate adopt"):
+        asyncio.run(_resume(run_root, catalog, at=T0 + timedelta(minutes=1)))
     rendered = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
     assert rendered.exit_code == 0
 
@@ -887,12 +895,14 @@ def test_the_resume_gate_compares_like_for_like_on_both_layouts(tmp_path: Path) 
     with pytest.raises(EngineError, match="catalog hash mismatch"):
         asyncio.run(_resume(current, changed, at=T0 + timedelta(minutes=2)))
 
+    # the v1 half of the comparison is `check_leader_eligibility`'s, and it
+    # is pinned there (test_ledger) because a legacy root no longer reaches
+    # resume at all: ss11 adopts one, and DL-134 made `--resume` say so
     legacy = tmp_path / "legacy"
     _close(_start(legacy, catalog))
     legacy_twin(legacy, catalog)
-    _close(asyncio.run(_resume(legacy, catalog, at=T0 + timedelta(minutes=1))))
-    with pytest.raises(EngineError, match="catalog hash mismatch"):
-        asyncio.run(_resume(legacy, changed, at=T0 + timedelta(minutes=2)))
+    with pytest.raises(EngineError, match="dsl41 estate adopt"):
+        asyncio.run(_resume(legacy, catalog, at=T0 + timedelta(minutes=1)))
 
 
 def test_the_run_cli_stages_the_bundle_and_the_profile_it_was_launched_with(

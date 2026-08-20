@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -35,6 +36,11 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from datetime import datetime
 
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
+    from dsl41.boundary import SealRequest
+    from dsl41.runner import Engine
+    from dsl41.runner_adapters import JobAdapter, SupervisorClient
+    from dsl41.runner_ledger import LeaderLock
+    from dsl41.runner_scheduler import Scheduler
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
 
@@ -1059,6 +1065,15 @@ def run(
     resume: bool = typer.Option(
         False, "--resume", help="Resume the run_root's journal (replay + reconcile, ss7)."
     ),
+    open_from: Path = typer.Option(
+        None,
+        "--open-from",
+        help="PHYSICAL ROLL: open the next period into this FRESH --run-root from the"
+        " lineage this ANCHOR DIRECTORY names (period-model ss7). The head must be"
+        " `closed`, the closing period must be quiescent and ATTESTED (`dsl41"
+        " audit`), and the target must satisfy ss1.1's ownership rule. The anchor is"
+        " the lineage's, so pass the same --estate-anchor on every later --resume.",
+    ),
     estate_anchor: Path = typer.Option(
         None,
         "--estate-anchor",
@@ -1123,6 +1138,23 @@ def run(
 
     if ui:
         _import_tui_or_exit_2()  # fail before the engine starts, not after
+    if open_from is not None:
+        if resume:
+            typer.echo(
+                "--open-from and --resume are the two OPENERS and you get one:"
+                " --resume continues the lineage in this root, --open-from opens the"
+                " next period into a fresh one (period-model ss7)",
+                err=True,
+            )
+            raise typer.Exit(2)
+        if estate_anchor is not None and Path(estate_anchor) != Path(open_from):
+            typer.echo(
+                f"--open-from {open_from} IS the lineage anchor; --estate-anchor"
+                f" {estate_anchor} names another one (period-model ss7)",
+                err=True,
+            )
+            raise typer.Exit(2)
+        estate_anchor = open_from
     catalog, parsed, fingerprint = _load_catalog_and_ast_or_exit_2(
         files, permit_unknown, properties
     )
@@ -1176,6 +1208,7 @@ def run(
                     parsed=parsed,
                     profile=profile,
                     anchor_dir=estate_anchor,
+                    open_from=open_from,
                 )
             )
         )
@@ -1223,6 +1256,22 @@ def _observed_profile(
     )
 
 
+def _active_period(run_root: Path) -> int:
+    """Which period this root's ACTIVE segment holds (period-model I1).
+
+    1 on a root that has never sealed and on a legacy one. A reader that
+    defaulted to 1 after a boundary would read period 1's manifest beside
+    period N's records -- and a ROLLED root has no period 1 at all."""
+    from dsl41.runner_history import RunHistoryError, active_period_id
+
+    try:
+        return active_period_id(run_root)
+    except RunHistoryError:
+        from dsl41.period import GENESIS_PERIOD_ID
+
+        return GENESIS_PERIOD_ID
+
+
 def _resume_profile_error(
     run_root: Path, profile: "RuntimeProfile", running_deadman: "float | None"
 ) -> "str | None":
@@ -1238,7 +1287,10 @@ def _resume_profile_error(
     from dsl41.runner_clock import EngineError
 
     try:
-        manifest = read_period_manifest(run_root)
+        # the ACTIVE period's manifest, never period 1's: every artifact
+        # under `periods/` is addressed by the period number, and a rolled
+        # root holds only the period it was opened into (DL-134)
+        manifest = read_period_manifest(run_root, _active_period(run_root))
     except EngineError as exc:
         return str(exc)
     if manifest is None:
@@ -1299,6 +1351,7 @@ async def _serve_run(
     parsed: "list[JilFile] | None" = None,
     profile: "RuntimeProfile | None" = None,
     anchor_dir: "Path | None" = None,
+    open_from: "Path | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -1311,7 +1364,6 @@ async def _serve_run(
     from dsl41.runner_startup import resume_run as _resume_run
     from dsl41.runner_adapters import (
         FileWatcherAdapter,
-        JobAdapter,
         LocalCommandAdapter,
         SupervisedCommandAdapter,
         SupervisorClient,
@@ -1341,6 +1393,33 @@ async def _serve_run(
     # keeps a WAL, a seal, a committed period or a populated runs/ is
     # somebody's work, and both the staging below and the supervisor start
     # after it are acts on an estate this process may turn out not to lead.
+    if open_from is not None:
+        # ss7's second opener, and its order is the whole argument:
+        # new-root leader.lock (above), sentinel durable, anchor.lock and
+        # the claim, the import, the segment, the head. What comes back is
+        # an ordinary period-N root, and the ladder below resumes it --
+        # there is no second semantic path (PR-07).
+        from dsl41.estate import check_roll_target, roll_into_root
+
+        try:
+            check_roll_target(run_root, open_from)
+            rolled = roll_into_root(
+                run_root, anchor_dir=open_from, catalog_of=lambda _root, _m: catalog, lock=lock
+            )
+        except EngineError as exc:
+            typer.echo(str(exc), err=True)
+            lock.release()
+            return 2
+        # stderr: stdout's first line is the `engine up` handshake every
+        # supervisor and test reads, and a roll note ahead of it would move
+        # the line they wait for
+        typer.echo(
+            f"opened period {rolled.seal.next_period.period_id} in {run_root} from seal"
+            f" {rolled.seal.digest} ({rolled.closing_root}). This root's anchor is the"
+            f" LINEAGE's: every later resume needs --estate-anchor {open_from}",
+            err=True,
+        )
+        resume = True
     staged: "StagedManifest | None" = None
     if not resume:
         from dsl41.boundary import check_root_unused
@@ -1375,7 +1454,7 @@ async def _serve_run(
         from dsl41.period import read_period_manifest
 
         try:
-            pinned = read_period_manifest(run_root)
+            pinned = read_period_manifest(run_root, _active_period(run_root))
         except EngineError as exc:
             typer.echo(str(exc), err=True)
             return 2
@@ -1510,7 +1589,7 @@ async def _serve_run(
         # already set above, so the supervised adapter abandons its await
         # instead of killing a run the next period will reattach (PR-30b).
         typer.echo(str(loop_task.exception()))
-        typer.echo(f"open it with `dsl41 run --resume --run-root {run_root} <new estate files>`")
+        _say_next(run_root, anchor_dir)
         code = 3
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, PeriodSealed):
@@ -2162,3 +2241,952 @@ def supervise(
         raise typer.Exit(2) from exc
     finally:
         conn.close()
+
+
+# ------------------------------------------------------- the boundary (U7)
+
+_RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root (period-model ss1.1).")
+
+_ANCHOR_OPT = typer.Option(
+    None,
+    "--estate-anchor",
+    help="The lineage anchor directory (period-model ss1.3). Defaults to"
+    " <run-root>.anchor -- a sibling of the root, never inside it, because the"
+    " root is what an operator archives. A ROLLED root's anchor is the lineage's"
+    " and must be named explicitly.",
+)
+
+_ACTOR_OPT = typer.Option(
+    None,
+    "--claimed-actor",
+    help="Who is asking, for the log. A CLAIM: this tier has no authentication"
+    " (control-protocol ss7 gap 2), so it is a breadcrumb, never an"
+    " authorization. Defaults to <user>@<host>.",
+)
+
+
+def _next_profile(
+    timezone: "str | None",
+    timezone_map: "Path | None",
+    as_machine: list[str],
+    machine_policy: str,
+    detached: bool,
+    deadman: "float | None",
+) -> "RuntimeProfile":
+    """C2's `RuntimeProfile` from the `--next-*` flags (period-model ss2.1).
+
+    Prefixed because a boundary names TWO periods and the CLI would
+    otherwise read as if it were describing the one that is running. What
+    it describes is the one about to open."""
+    from dsl41.period import runtime_profile_from_cli
+
+    tz_aliases = _load_tz_aliases(timezone_map)
+    _check_base_tz(timezone, tz_aliases)
+    return runtime_profile_from_cli(
+        timezone=timezone,
+        tz_aliases=tz_aliases,
+        as_machine=as_machine,
+        machine_policy=machine_policy,
+        detached=detached,
+        deadman_s=deadman,
+    )
+
+
+def _stage_next(
+    run_root: Path,
+    files: list[Path],
+    profile: "RuntimeProfile",
+    permit_unknown: bool,
+    properties: "list[Path] | None",
+) -> "tuple[StagedManifest, CatalogIR]":
+    """ss7's staging, both modes: the immutable bundle, then
+    `staged_manifest.json` and `candidate.json` under
+    `periods/.staging/<stage_digest>/`.
+
+    Content-addressed, so a repeat is idempotent and a concurrent client
+    writing the same bytes is harmless -- which is what makes it safe to do
+    this against a LIVE engine's root without holding its lock."""
+    from dsl41.boundary import stage_next_period
+
+    catalog, parsed, _ = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+    staged_manifest = _stage_period(run_root, parsed, catalog, profile)
+    stage_next_period(run_root, staged_manifest=staged_manifest)
+    return staged_manifest, catalog
+
+
+@app.command()
+def seal(
+    next_files: list[Path] = typer.Option(
+        ...,
+        "--next",
+        help="JIL file(s) forming C2 -- the estate the NEXT period runs."
+        " Repeatable; command-line order is part of source_bundle_hash.",
+    ),
+    run_root: Path = _RUN_ROOT_OPT,
+    estate_anchor: Path = _ANCHOR_OPT,
+    force_seal: bool = typer.Option(
+        False,
+        "--force-seal",
+        help="Commit inside the closing period's retry horizon (period-model ss9)."
+        " Recorded as force_seal: true in the seal and, when the gate was really"
+        " engaged, with the gate's own numbers in forced_gate.",
+    ),
+    claimed_actor: str = _ACTOR_OPT,
+    request_id: str = typer.Option(
+        None,
+        "--request-id",
+        help="Reuse the id of an earlier attempt to RETRY it exactly. A committed"
+        " boundary answers its own exact retry from the next period; anything"
+        " else is a fresh request.",
+    ),
+    next_timezone: str = typer.Option(
+        None, "--next-timezone", help="C2's base zone for schedules without a per-job one."
+    ),
+    next_timezone_map: Path = typer.Option(
+        None, "--next-timezone-map", help="C2's vendor timezone table (SEM-35/DL-62)."
+    ),
+    next_as_machine: list[str] = typer.Option(
+        [], "--next-as-machine", help="Machine name(s) C2 runs as (DL-52). Repeatable."
+    ),
+    next_machine_policy: str = typer.Option(
+        "strict", "--next-machine-policy", help="C2's machine policy: strict|local-eligible."
+    ),
+    next_detached: bool = typer.Option(
+        False, "--next-detached", help="C2 runs CMD jobs under the supervisor (ss6a Tier 1)."
+    ),
+    next_deadman: float = typer.Option(
+        None, "--next-deadman", help="C2's supervisor deadman, seconds. Needs --next-detached."
+    ),
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Close the running period and commit the next one (period-model ss7).
+
+    Two entry modes and one body. **Live**: an engine leads `--run-root`,
+    so this stages C2 and asks it over the control socket; the engine runs
+    the cutoff in its single-writer loop and then exits with code 3.
+    **Offline**: nothing leads the root, so this takes `leader.lock` and
+    `anchor.lock`, appends a `leader` record, runs the same-root recovery
+    barrier in full, and performs the boundary as that offline leader.
+    Which one you get is decided by the lock, not by a flag: an engine that
+    holds it is a live engine.
+
+    Step 9 in both modes is an OPENER -- `dsl41 run --resume` on the same
+    root, or `dsl41 run --open-from` into a fresh one. A transition is a
+    restart, not a reload.
+
+    Exit codes: 0 the boundary committed; 2 it did NOT commit and the period
+    is still open (C1 may legitimately have advanced first -- an offline
+    sealer's `leader` record and the cutoff's admitted ticks are C1
+    activity, not damage); 4 the outcome is UNKNOWN, and the printed
+    request_id is the only safe way to retry.
+    """
+    import asyncio
+
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_control import claimed_actor as default_actor
+    from dsl41.runner_ledger import acquire_run_root
+
+    if next_deadman is not None and not next_detached:
+        typer.echo(
+            "--next-deadman needs --next-detached: a tethered run has no supervisor", err=True
+        )
+        raise typer.Exit(2)
+    profile = _next_profile(
+        next_timezone,
+        next_timezone_map,
+        next_as_machine,
+        next_machine_policy,
+        next_detached,
+        next_deadman,
+    )
+    actor = claimed_actor or default_actor()
+    try:
+        lock = acquire_run_root(run_root)
+    except EngineError:
+        # the lock IS the discriminator: an engine that holds it is a live
+        # engine, and probing a socket would answer a different question
+        # (a socket file outlives the process that made it)
+        raise typer.Exit(
+            _live_seal(
+                run_root,
+                next_files,
+                profile,
+                permit_unknown,
+                properties,
+                force_seal,
+                actor,
+                request_id,
+            )
+        ) from None
+    try:
+        raise typer.Exit(
+            asyncio.run(
+                _offline_seal(
+                    run_root,
+                    estate_anchor,
+                    next_files,
+                    profile,
+                    permit_unknown,
+                    properties,
+                    force_seal,
+                    actor,
+                    request_id,
+                    lock,
+                )
+            )
+        )
+    finally:
+        lock.release()
+
+
+def _live_seal(
+    run_root: Path,
+    next_files: list[Path],
+    profile: "RuntimeProfile",
+    permit_unknown: bool,
+    properties: "list[Path] | None",
+    force_seal: bool,
+    actor: str,
+    request_id: "str | None",
+) -> int:
+    """ss7 live mode: stage C2, then ask the leading engine for the
+    boundary over the control socket.
+
+    The CLI stages FIRST and names the staged bytes by `stage_digest`; the
+    engine validates exactly those bytes. Two clients racing on one root
+    stage under two fingerprints and the engine commits exactly the one its
+    request names."""
+    import json as json_mod
+    import uuid
+
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    socket_path = run_root / "control.sock"
+    if not socket_path.exists():
+        typer.echo(
+            f"{run_root}: an engine holds leader.lock and {socket_path} is not there --"
+            " a live seal is asked for over the control socket, and this root has a"
+            " leader with no door (period-model ss7)",
+            err=True,
+        )
+        return 2
+    try:
+        header = roundtrip(socket_path, {"cmd": "status"})
+    except ControlClientError as exc:
+        typer.echo(f"{socket_path}: {exc}", err=True)
+        return 2
+    baseline, epoch = header.get("baseline_id"), header.get("epoch")
+    if not isinstance(baseline, str) or not isinstance(epoch, int):
+        typer.echo(str(header.get("error", "the engine answered no read header")), err=True)
+        return 2
+    staged_manifest, _ = _stage_next(run_root, next_files, profile, permit_unknown, properties)
+    from dsl41.seal import StagedNextPeriod
+
+    staged = StagedNextPeriod(
+        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
+    )
+    request = {
+        "cmd": "seal",
+        "v": 3,
+        "baseline_id": baseline,
+        "epoch": epoch,
+        "request_id": request_id or str(uuid.uuid4()),
+        "next_period": staged.model_dump(mode="json"),
+        "stage_digest": staged.stage_digest,
+        "force_seal": force_seal,
+        "claimed_actor": actor,
+    }
+    try:
+        answer = roundtrip(socket_path, request)
+    except ControlClientError as exc:
+        typer.echo(str(exc), err=True)
+        if not exc.delivered:
+            return 2
+        _no_decision(request)
+        return 4
+    typer.echo(json_mod.dumps(answer, sort_keys=True))
+    if answer.get("ok"):
+        _say_next(run_root, None)
+        return 0
+    if answer.get("refused"):
+        return 2
+    _no_decision(request)
+    return 4
+
+
+async def _offline_seal(
+    run_root: Path,
+    estate_anchor: "Path | None",
+    next_files: list[Path],
+    profile: "RuntimeProfile",
+    permit_unknown: bool,
+    properties: "list[Path] | None",
+    force_seal: bool,
+    actor: str,
+    request_id: "str | None",
+    lock: "LeaderLock",
+) -> int:
+    """ss7 offline mode: no engine, so this process becomes the leader for
+    exactly one boundary.
+
+    `leader.lock` is already held (the caller took it, which is how the two
+    modes are told apart). `resume_run` is the same-root recovery barrier
+    in full -- it takes `anchor.lock`, appends a `leader` record at
+    epoch+1, replays, reconciles and re-drives recorded kills -- and the
+    boundary that follows is the SAME `submit_seal` a live engine serves.
+    Two entry modes, one body; the alternative is two implementations of
+    the one thing this model exists to have exactly one of.
+
+    C1 is loaded from the ROOT's own bundle, never from the command line:
+    the run root outlives the estate files it was launched from, and the
+    closing period's identity is the manifest's."""
+    import uuid
+
+    from dsl41.boundary import SealRequest
+    from dsl41.runner_clock import EngineError, RealClock
+    from dsl41.runner_history import active_period_id
+    from dsl41.period import read_period_manifest
+    from dsl41.runner_startup import resume_run
+    from dsl41.seal import StagedNextPeriod
+
+    try:
+        pinned = read_period_manifest(run_root, active_period_id(run_root))
+    except Exception as exc:  # RunHistoryError or EngineError: both are refusals
+        typer.echo(f"{run_root}: {exc}", err=True)
+        return 2
+    if pinned is None:
+        typer.echo(
+            f"{run_root}: no period manifest -- an offline seal reads the CLOSING"
+            " period's identity from the root itself, and this root has none"
+            " (period-model ss7)",
+            err=True,
+        )
+        return 2
+    staged_manifest, _ = _stage_next(run_root, next_files, profile, permit_unknown, properties)
+    staged = StagedNextPeriod(
+        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
+    )
+    wiring = None
+    try:
+        catalog = _catalog_from_root(run_root, pinned.source_bundle_hash)
+        wiring = await _wire_from_profile(run_root, catalog, pinned.runtime_profile)
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=RealClock(),
+            adapters=wiring.adapters,
+            scheduler=wiring.scheduler,
+            hold_open=True,
+            supervisor=wiring.client,
+            deadman_s=wiring.deadman_s,
+            lock=lock,
+            anchor_dir=estate_anchor,
+        )
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        if wiring is not None:
+            await wiring.close()
+        return 2
+    request = SealRequest(
+        baseline_id=engine.baseline_id,
+        epoch=engine.epoch,
+        request_id=request_id or str(uuid.uuid4()),
+        next_period=staged,
+        stage_digest=staged.stage_digest,
+        force_seal=force_seal,
+        claimed_actor=actor,
+    )
+    code = await _drive_boundary(engine, request, run_root, estate_anchor)
+    await wiring.close()
+    return code
+
+
+async def _drive_boundary(
+    engine: "Engine", request: "SealRequest", run_root: Path, estate_anchor: "Path | None"
+) -> int:
+    """One queued boundary, driven to its outcome by this process's own
+    loop -- the offline sealer's and the adopter's shared tail.
+
+    Two things can finish first and they mean different things. The LOOP
+    ending is a committed boundary (`PeriodSealed`), a fail-stop, or a
+    crash. The REQUEST's future ending while the loop runs on is a refusal:
+    `abort_boundary` reopened admission and the period is still open, which
+    is exactly what ss7's exit code 2 is for -- so waiting on the loop
+    alone would wait forever for an engine that is correctly still
+    serving C1.
+
+    The three exits are ss7's: 0 committed, 2 refused with C1 still open,
+    4 an unknown outcome whose only safe retry is the printed
+    `request_id`."""
+    import asyncio
+    import contextlib
+
+    from datetime import datetime
+
+    from dsl41.boundary import BoundaryFailStop, PeriodSealed
+    from dsl41.runner_clock import EngineError
+
+    # `ensure_future` over the engine's own future: it hands the same
+    # object back and gives this function the `done`/`exception`/`result`
+    # surface its three-way classification is written against
+    future = asyncio.ensure_future(engine.submit_seal(request))
+    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+    await asyncio.wait({future, loop_task}, return_when=asyncio.FIRST_COMPLETED)
+    code = 2
+    outcome: BaseException | None = None
+    if future.done() and future.exception() is None:
+        # **The FUTURE decides, not the loop.** It is the boundary's own
+        # answer, and once it holds a committed boundary the boundary
+        # committed -- whatever the loop does afterwards. Reading the loop
+        # first would let an unrelated engine failure during teardown
+        # report exit 2, which ss7 defines as "it did NOT commit and the
+        # period is still open": the one lie about the estate this
+        # function could tell. The loop is still awaited, because it is a
+        # bounded number of turns from its own `PeriodSealed` and that
+        # object is the single authority for the sentence an operator
+        # reads; anything else it raises is printed as diagnostics.
+        outcome = PeriodSealed(future.result())
+        try:
+            await loop_task
+        except PeriodSealed as sealed:
+            outcome = sealed
+        except BaseException as raised:  # noqa: BLE001 -- diagnostics only
+            typer.echo(f"the engine stopped after the boundary: {raised}", err=True)
+    elif loop_task.done():
+        outcome = loop_task.exception()
+    else:
+        outcome = future.exception()
+        loop_task.cancel()
+    if isinstance(outcome, PeriodSealed):
+        typer.echo(str(outcome))
+        _say_next(run_root, estate_anchor)
+        code = 0
+    elif isinstance(outcome, BoundaryFailStop):
+        typer.echo(str(outcome), err=True)
+        code = 4
+    elif outcome is not None:
+        typer.echo(str(outcome), err=True)
+        code = 2 if isinstance(outcome, EngineError) else 1
+    else:
+        typer.echo("the engine loop returned without a boundary", err=True)
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await loop_task
+    with contextlib.suppress(Exception):
+        await engine.shutdown()
+    if engine.journal is not None:
+        engine.journal.close()
+    return code
+
+
+def _say_next(run_root: Path, estate_anchor: "Path | None") -> None:
+    anchor = f" --estate-anchor {estate_anchor}" if estate_anchor is not None else ""
+    typer.echo(
+        f"open it with `dsl41 run --resume --run-root {run_root}{anchor} <new estate files>`,"
+        f" or roll: `dsl41 audit --run-root {run_root}{anchor}` then"
+        " `dsl41 run --open-from <anchor-dir> --run-root <new-root> <new estate files>`"
+    )
+
+
+def _catalog_from_root(run_root: Path, source_bundle_hash: str) -> "CatalogIR":
+    """C1, from the root's own immutable bundle (period-model ss7).
+
+    Parsed under the ORIGINAL paths `sources.json` records, because
+    `catalog_hash` v2 covers spans and a span names its file."""
+    from dsl41.period import bundle_sources
+
+    sources = bundle_sources(run_root, source_bundle_hash)
+    return lower_catalog([parse(source.text, file=source.path) for source in sources])
+
+
+@dataclass
+class _Wiring:
+    """The components a period's PINNED profile says it runs with.
+
+    Derived from the manifest rather than from flags, because an offline
+    sealer and an adopter both meet an estate that already decided: the
+    resume gate compares the wiring it finds against the pin, and a
+    process that wired from its own defaults would refuse the estate it
+    was asked to close."""
+
+    adapters: "dict[str, JobAdapter]"
+    scheduler: "Scheduler"
+    client: "SupervisorClient | None"
+    deadman_s: "float | None"
+
+    async def close(self) -> None:
+        if self.client is not None:
+            await self.client.release()
+            await self.client.close()
+
+
+async def _wire_from_profile(
+    run_root: Path, catalog: "CatalogIR", profile: "RuntimeProfile"
+) -> _Wiring:
+    """Build adapters, scheduler and (when the period is detached) the
+    supervisor client from `profile`."""
+    from datetime import UTC, datetime
+
+    from dsl41.runner_adapters import (
+        FileWatcherAdapter,
+        LocalCommandAdapter,
+        SupervisedCommandAdapter,
+        SupervisorClient,
+        SupervisorUnavailable,
+    )
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_scheduler import Scheduler
+
+    deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
+    client = None
+    if profile.execution_mode == "detached":
+        client = SupervisorClient(run_root, deadman_s=deadman_s)
+        try:
+            await client.ensure_running()
+            await client.acquire()
+        except SupervisorUnavailable as exc:
+            raise EngineError(f"supervisor unavailable: {exc}") from exc
+        cmd: object = SupervisedCommandAdapter(
+            client,
+            grace_seconds=profile.cmd_grace_us / 1_000_000,
+            settle_seconds=profile.reconcile_settle_us / 1_000_000,
+        )
+    else:
+        cmd = LocalCommandAdapter(grace_seconds=profile.cmd_grace_us / 1_000_000)
+    adapters = {
+        "CMD": cmd,
+        "FW": FileWatcherAdapter(
+            default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
+        ),
+    }
+    scheduler = Scheduler(
+        catalog,
+        start=datetime.now(UTC).replace(tzinfo=None),
+        default_tz=profile.default_tz,
+        tz_aliases=dict(profile.tz_aliases),
+    )
+    return _Wiring(
+        adapters=cast("dict[str, JobAdapter]", adapters),
+        scheduler=scheduler,
+        client=client,
+        deadman_s=deadman_s,
+    )
+
+
+@app.command()
+def audit(
+    run_root: Path = _RUN_ROOT_OPT,
+    estate_anchor: Path = _ANCHOR_OPT,
+    period: int = typer.Option(
+        None, "--period", help="Audit exactly this period. Omit to audit every closed one."
+    ),
+) -> None:
+    """Re-derive a closed period and write its attestation (period-model
+    ss1.3, ss11).
+
+    **Verified means re-derived, not self-consistent.** A sidecar whose
+    digest matches its own canonical form proves integrity, not derivation,
+    so this rebuilds the seal from the period's own evidence -- the opening
+    seal, the complete ordered WAL, the immutable spool, and the C1 and C2
+    manifests -- and refuses when the two disagree, naming the fields.
+
+    **Producing an attestation and consuming one are two acts with two
+    rules.** Producing N requires the PREDECESSOR attestation present and
+    VERIFIED;
+    period 1 is the base case. There is deliberately no "or re-derive
+    everything below" alternative, because without the requirement a
+    checkpoint can be emitted over an unaudited opening seal and earlier
+    roots then get deleted on a chain that was never established.
+
+    `dsl41 verify` is the other verb and is not this one: it validates an
+    attestation, which is what a rolled root can do and a full audit is
+    not.
+
+    Exit 0 when every period asked for is attested, 2 on any refusal.
+    """
+    from dsl41.attest import Unattested, audit_period
+    from dsl41.boundary import EstateAnchor, default_anchor_dir
+    from dsl41.runner_clock import EngineError
+
+    periods = [period] if period is not None else _closed_periods(run_root)
+    if not periods:
+        typer.echo(f"{run_root}: no closed period to audit", err=True)
+        raise typer.Exit(2)
+    # the anchor is taken by `audit_period` for the ONE write that needs it
+    # and released again, so auditing a closed period while a later one is
+    # live is possible: a leader holds the lineage lock for its whole life
+    anchor = EstateAnchor(estate_anchor or default_anchor_dir(run_root))
+    try:
+        for period_id in periods:
+            attestation = audit_period(run_root, period_id, anchor=anchor)
+            typer.echo(
+                f"period {period_id} attested: {attestation.digest}"
+                f" (seal {attestation.seal_digest}, chain through"
+                f" {attestation.chain_through_period})"
+            )
+    except Unattested as exc:
+        # the checkpoint IS written; only the registry row is not, and the
+        # row is bookkeeping. Loud on stderr, and not a failure
+        typer.echo(str(exc), err=True)
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command()
+def verify(
+    run_root: Path = _RUN_ROOT_OPT,
+    period: int = typer.Option(
+        None, "--period", help="Verify this period's attestation. Omit for the newest one."
+    ),
+) -> None:
+    """Validate an attestation: its own digest, its binding to the seal it
+    names, and its place in the chain (period-model ss1.3).
+
+    It accepts the attestation ALONE, deliberately. The producing `audit`
+    already established the induction, and a physical roll imports only the
+    current seal and its attestation -- a consumer that re-walked the chain
+    would make a second roll impossible. So a root that imported seal 2 and
+    attestation 2 while its predecessors are gone verifies the chain below
+    seal 2, because attestation 2 proves it.
+
+    Exit 0 when it verifies, 2 otherwise.
+    """
+    from dsl41.attest import verify_attestation
+    from dsl41.period import attestation_path
+    from dsl41.runner_clock import EngineError
+
+    if period is None:
+        held = sorted(
+            int(entry.name.split(".")[0])
+            for entry in (run_root / "seals").glob("*.audit.json")
+            if entry.name.split(".")[0].isdigit()
+        )
+        if not held:
+            typer.echo(f"{run_root}: no attestation to verify", err=True)
+            raise typer.Exit(2)
+        period = held[-1]
+    try:
+        attestation = verify_attestation(run_root, period)
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(
+        f"{attestation_path(run_root, period)} verifies: seal {attestation.seal_digest},"
+        f" chain through period {attestation.chain_through_period},"
+        f" produced by dsl41 {attestation.dsl41_version}"
+    )
+
+
+def _closed_periods(run_root: Path) -> list[int]:
+    """Every period this root can AUDIT, in order: a committed seal AND the
+    segment whose evidence re-derives it.
+
+    A rolled root holds the seal it opened from and none of that period's
+    WAL or spool, by design (period-model ss1.3), so the imported seal is
+    this root's to `verify` and another root's to audit. Naming it here
+    would make `dsl41 audit` on a rolled root refuse work it was never
+    asked to do."""
+    from dsl41.period import wal_path
+
+    directory = run_root / "seals"
+    if not directory.is_dir():
+        return []
+    return sorted(
+        int(entry.stem)
+        for entry in directory.glob("*.json")
+        if entry.stem.isdigit()
+        and not entry.name.endswith(".audit.json")
+        and wal_path(run_root, int(entry.stem)).exists()
+    )
+
+
+estate_app = typer.Typer(
+    no_args_is_help=True,
+    help="Lineage-level operations: adopt a legacy root, and the break-glass reclaim.",
+)
+app.add_typer(estate_app, name="estate")
+
+
+@estate_app.command("adopt")
+def estate_adopt(
+    legacy_root: Path = typer.Argument(
+        ..., help="The legacy run root to adopt (a `header` journal)."
+    ),
+    next_files: list[Path] = typer.Option(
+        ...,
+        "--next",
+        help="JIL file(s) forming C2 -- the estate period 2 will run. Adoption IS a"
+        " seal, so it takes --next like one.",
+    ),
+    estate_anchor: Path = _ANCHOR_OPT,
+    force_seal: bool = typer.Option(
+        False, "--force-seal", help="Commit inside the retry horizon (period-model ss9)."
+    ),
+    claimed_actor: str = _ACTOR_OPT,
+    timezone: str = _TIMEZONE_OPT,
+    timezone_map: Path = _TIMEZONE_MAP_OPT,
+    as_machine: list[str] = typer.Option(
+        [],
+        "--as-machine",
+        help="Machine name(s) the LEGACY period ran as. Only read when"
+        " `manifest/manifest.json` does not record them.",
+    ),
+    machine_policy: str = typer.Option(
+        "strict",
+        "--machine-policy",
+        help="The legacy period's machine policy. Only read when the legacy"
+        " manifest does not record it.",
+    ),
+    detached: bool = typer.Option(
+        False,
+        "--detached",
+        help="The legacy period ran CMD jobs under a supervisor. Only read when"
+        " the legacy manifest does not record it.",
+    ),
+    deadman: float = typer.Option(
+        None, "--deadman", help="The legacy period's supervisor deadman, seconds."
+    ),
+    next_timezone: str = typer.Option(None, "--next-timezone", help="C2's base zone."),
+    next_timezone_map: Path = typer.Option(
+        None, "--next-timezone-map", help="C2's vendor timezone table."
+    ),
+    next_as_machine: list[str] = typer.Option(
+        [], "--next-as-machine", help="Machine name(s) C2 runs as. Repeatable."
+    ),
+    next_machine_policy: str = typer.Option(
+        "strict", "--next-machine-policy", help="C2's machine policy: strict|local-eligible."
+    ),
+    next_detached: bool = typer.Option(
+        False, "--next-detached", help="C2 runs CMD jobs under the supervisor."
+    ),
+    next_deadman: float = typer.Option(
+        None, "--next-deadman", help="C2's supervisor deadman, seconds."
+    ),
+    permit_unknown: bool = _PERMIT_UNKNOWN,
+    properties: list[Path] = _PROPERTIES,
+) -> None:
+    """Adopt a legacy run root into a periodized lineage (period-model
+    ss11): fence first, authority second, on a DRAINED estate.
+
+    In order, and the order is the whole argument. C2's readiness runs
+    first, over an in-memory reconstruction of the legacy state, so a
+    candidate that could never open refuses while the sentinel, the legacy
+    WAL and the anchor are untouched. The fence follows -- the legacy
+    journal is hard-linked to `legacy/journal.jsonl` and the `period_root`
+    sentinel is renamed over its name, so there is no instant at which
+    `journal.jsonl` is absent and an old binary could genesis here. Only
+    then does the anchor gain `adopting`, which is what gives adoption ONE
+    recovery owner: while it stands, `run --resume` refuses and names this
+    verb. Then the term, the barrier with the outbox HELD, the
+    translation, and finally period 1's seal through the COMMON seal body.
+
+    A drained estate means: no live wrapper, no live file watch, nothing
+    pending in the legacy outbox, and every admitted input holding a
+    durable decision. Each is a refusal, not a repair -- resume the legacy
+    engine, let it settle, and retry. A drain is what the runbook already
+    does at every release.
+
+    Every step is idempotent: a re-run finds the tombstone, reads
+    `estate_id` back rather than minting a second, and continues from
+    wherever it stopped.
+
+    The LEGACY period's `timezone`, `as_machine`, `machine_policy` and
+    `detached` come from `manifest/manifest.json`'s own `options` block --
+    the estate's record of how it ran beats anyone's memory of it. What
+    that block never held (the deadman, the timezone table, the
+    reconciliation windows) is what the flags below state, and that
+    statement is UNCHECKED by construction: the barrier is wired from the
+    profile it is attesting, so nothing can disagree with it. It is pinned
+    in period 1's manifest and every LATER resume is held to it, which is
+    where a wrong one surfaces.
+
+    Exit codes are `seal`'s: 0 committed, 2 refused with the estate as it
+    was, 4 unknown.
+    """
+    import asyncio
+
+    from dsl41.runner_control import claimed_actor as default_actor
+
+    if deadman is not None and not detached:
+        typer.echo("--deadman needs --detached: a tethered run has no supervisor", err=True)
+        raise typer.Exit(2)
+    if next_deadman is not None and not next_detached:
+        typer.echo("--next-deadman needs --next-detached", err=True)
+        raise typer.Exit(2)
+    profile = _next_profile(timezone, timezone_map, as_machine, machine_policy, detached, deadman)
+    next_profile = _next_profile(
+        next_timezone,
+        next_timezone_map,
+        next_as_machine,
+        next_machine_policy,
+        next_detached,
+        next_deadman,
+    )
+    raise typer.Exit(
+        asyncio.run(
+            _adopt(
+                legacy_root,
+                estate_anchor,
+                next_files,
+                profile,
+                next_profile,
+                permit_unknown,
+                properties,
+                force_seal,
+                claimed_actor or default_actor(),
+            )
+        )
+    )
+
+
+async def _adopt(
+    legacy_root: Path,
+    estate_anchor: "Path | None",
+    next_files: list[Path],
+    profile: "RuntimeProfile",
+    next_profile: "RuntimeProfile",
+    permit_unknown: bool,
+    properties: "list[Path] | None",
+    force_seal: bool,
+    actor: str,
+) -> int:
+    """ss11 steps 1-7: the transaction, then the common seal body over the
+    root it produced."""
+    from dsl41.boundary import default_anchor_dir
+    from dsl41.estate import adopt_legacy_root, legacy_profile
+    from dsl41.runner_clock import EngineError, RealClock
+    from dsl41.runner_ledger import acquire_run_root
+    from dsl41.runner_startup import resume_run
+
+    anchor_dir = estate_anchor or default_anchor_dir(legacy_root)
+    try:
+        lock = acquire_run_root(legacy_root)
+    except EngineError as exc:
+        typer.echo(
+            f"{exc} -- a live legacy engine holds this root, and adoption refuses"
+            " rather than racing it (period-model ss11)",
+            err=True,
+        )
+        return 2
+    wiring = None
+    try:
+        # DL-66's `manifest/` recorded four of the launch options, and the
+        # estate's own record of how it ran beats an operator's memory of
+        # it. The flags supply the rest -- the deadman, the timezone table,
+        # the windows -- and the WIRING below is built from the result, so
+        # the pin and the machine agree by construction rather than by
+        # attestation. Read under the lock, like everything else here
+        profile = legacy_profile(legacy_root, profile)
+        # readiness needs C2 STAGED under the legacy root: phase 1 validates
+        # exactly the staged bytes the digest names, in adoption exactly as
+        # in a live seal (ss8's readiness is identical in all three modes)
+        staged_manifest, _ = _stage_next(
+            legacy_root, next_files, next_profile, permit_unknown, properties
+        )
+        adoption = adopt_legacy_root(
+            legacy_root,
+            anchor_dir=anchor_dir,
+            profile=profile,
+            staged_manifest=staged_manifest,
+            claimed_actor=actor,
+            force_seal=force_seal,
+        )
+        if adoption.sealed:
+            # ss11's matrix row: the boundary was already committed and
+            # this run performed the head CAS the crashed one did not.
+            # There is nothing left to seal -- sealing again would close a
+            # period that is already closed
+            typer.echo(
+                f"period 1 of estate {adoption.estate_id} was already sealed; the"
+                " lineage head is now `closed` and the adoption is complete"
+            )
+            _say_next(legacy_root, estate_anchor)
+            lock.release()
+            return 0
+        wiring = await _wire_from_profile(legacy_root, adoption.catalog, profile)
+        engine = await resume_run(
+            adoption.catalog,
+            legacy_root,
+            clock=RealClock(),
+            adapters=wiring.adapters,
+            scheduler=wiring.scheduler,
+            hold_open=True,
+            supervisor=wiring.client,
+            deadman_s=wiring.deadman_s,
+            lock=lock,
+            anchor_dir=anchor_dir,
+            adopting=True,  # ss11 step 5: this resume IS adoption's barrier
+        )
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        if wiring is not None:
+            await wiring.close()
+        lock.release()
+        return 2
+    request = adoption.request.model_copy(update={"epoch": engine.epoch})
+    code = await _drive_boundary(engine, request, legacy_root, estate_anchor)
+    await wiring.close()
+    return code
+
+
+@estate_app.command("reclaim")
+def estate_reclaim(
+    estate_anchor: Path = typer.Option(
+        ..., "--estate-anchor", help="The lineage anchor directory (period-model ss1.3)."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Required. This is the one operation that can fork a lineage."
+    ),
+    claimed_actor: str = _ACTOR_OPT,
+) -> None:
+    """Break-glass: move a successor claim out of the way (period-model
+    ss1.3).
+
+    **A stale claim is break-glass, not garbage.** A `claimed` head whose
+    target root is unreachable cannot be told from one whose target is
+    merely paused, and nothing here decides that -- you do. If the claimant
+    is alive, this forks the lineage: two roots then open the same period,
+    allocate the same indices and run the same `(job, run_number)` twice,
+    which is the safety property the whole fence exists to hold. Prove the
+    claimant is gone before you run it.
+
+    It is recorded in the anchor and again in the next `segment` record's
+    `reclaimed` field with the actor who claimed to authorize it -- loud,
+    durable and attributable.
+
+    Exit 0 when the head moved, 2 otherwise.
+    """
+    from dsl41.boundary import EstateAnchor
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_control import claimed_actor as default_actor
+
+    if not force:
+        typer.echo(
+            "refusing without --force: reclaiming a live claimant's head forks the"
+            " lineage, and this verb exists for the case where you have PROVED it is"
+            " gone (period-model ss1.3)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    anchor = EstateAnchor(estate_anchor)
+    try:
+        anchor.acquire()
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    try:
+        stored = anchor.require()
+        _, moved = anchor.reclaim(
+            estate_id=stored.estate_id, claimed_actor=claimed_actor or default_actor()
+        )
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    finally:
+        anchor.release()
+    typer.echo(
+        f"reclaimed claim {moved.claim_id} from {moved.target_root}: period"
+        f" {moved.next_period} may be opened again, and the next opening `segment`"
+        f" will record that {moved.claimed_actor} said so"
+    )

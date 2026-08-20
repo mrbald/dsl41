@@ -1,0 +1,777 @@
+"""The attestation: what `audit` produces and `verify` consumes.
+
+Normative spec: `docs/period-model.md` ss1.3 (the successor fence's
+attestation rules) and ss11 ("verified means re-derived, not
+self-consistent"). Built by DL-134 as U7. Obligations PR-02a, PR-02d,
+PR-02e, PR-47a in ss13.
+
+**An attestation is a chain checkpoint, by induction and not by
+assertion**, and producing one is not the same act as consuming one:
+
+- *Producing* N (`audit`) re-derives the seal from the period's own
+  evidence and requires the PREDECESSOR attestation **present and
+  verified**. Period 1
+  is the base case, with `prev_attestation_digest: null`. There is
+  deliberately no "or re-derive everything below" alternative: it left
+  `prev_attestation_digest` undefined when no predecessor artifact
+  existed, and a wrong implementation then checks only its own digest and
+  seal binding, emits a "checkpoint" over an unaudited opening seal, and
+  earlier roots get deleted on a chain that was never established.
+- *Consuming* N (`verify`) accepts N **alone** -- its own digest, its
+  binding to the seal it names, and its `chain_through_period` -- because
+  the producing audit already established the induction, and a physical
+  roll imports only the current seal and attestation. Draft 8 wrote one
+  rule for both and made a second roll impossible.
+
+So a root that imported seal 2 and attestation 2 while its predecessors
+are gone verifies the chain below seal 2 *because attestation 2 proves
+it*, and `audit` there refuses: full re-derivation needs the period's WAL,
+spool and manifests, and a rolled root holds none of its predecessor's
+(PR-02a, PR-02e).
+
+**"Verified" means re-derived.** A sidecar whose digest matches its own
+canonical form proves integrity, not derivation. `rederive_seal` rebuilds
+the sidecar from the four inputs ss11 names -- the opening seal, the
+complete ordered WAL of the period, the immutable spool evidence, and the
+C1/C2 manifests -- plus the sentinel, read for exactly one derivation
+(`boundary_request.source`). The `boundary_request` input scalars are the
+one exception the spec states: they originate in a request no WAL record
+independently holds, so audit checks them record-against-sidecar and
+carries them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated, Any, Final, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from dsl41.boundary import (
+    EstateAnchor,
+    adopt_request_id,
+    check_seal_record,
+    carried_outbox,
+    executing_jobs,
+    executions_at,
+    read_seal,
+    retry_horizon_gate,
+    seal_fingerprint,
+    check_record_names_sidecar,
+)
+from dsl41.canon import (
+    ARTIFACT_FORMAT_VERSION,
+    CanonError,
+    canonical_bytes,
+    decode,
+    digest as digest_over,
+    with_digest,
+)
+from dsl41.classify import Baseline, carried_from_oracle, classify
+from dsl41.ir import CatalogIR, LoweringError, lower_catalog
+from dsl41.ast_jil import JilParseError, parse
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import CarriedRows
+from dsl41.period import (
+    Manifest,
+    attestation_path,
+    bundle_sources,
+    read_period_manifest,
+    read_sentinel,
+    seal_path,
+    wal_path,
+    check_manifest_against_segment,
+    is_hash_address,
+)
+from dsl41.runner_clock import EngineError
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
+from dsl41.runner_journal import dsl41_version, read_journal, replay_inputs
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, next_epoch
+from dsl41.runner_procid import durable_create, make_durable
+from dsl41.seal import (
+    BoundaryRequest,
+    Seal,
+    SealedHost,
+    SealedState,
+    StagedNextPeriod,
+    close_runtime,
+    implicit_routes,
+    open_from_seal,
+)
+
+#: ss11's word for what `audit` proves. One value today, and a FIELD
+#: rather than a constant because the whole point of writing it down is
+#: that a later, narrower proof must not be readable as this one.
+FULL: Final[str] = "full"
+
+
+class Unattested(EngineError):
+    """The checkpoint is written and durable; the registry row is not.
+
+    Raised when `audit` cannot take the lineage lock -- which a live
+    engine holds for its process lifetime. The `attestation` rides on the
+    exception because it EXISTS: `verify` and `run --open-from` read the
+    artifact, not the row, so the caller has a real checkpoint and one
+    piece of bookkeeping left to do (ss1.3)."""
+
+    def __init__(self, attestation: Attestation, reason: str) -> None:
+        super().__init__(
+            f"period {attestation.period_id} is attested at {attestation.digest} and the"
+            f" registry row could not be set ({reason}): the checkpoint is durable and"
+            " is what `verify` and `run --open-from` read -- re-run `dsl41 audit` when"
+            " the lineage lock is free to set the row (period-model ss1.3)"
+        )
+        self.attestation = attestation
+
+
+class Attestation(BaseModel):
+    """ss11's durable proof: `seals/<period_id>.audit.json`.
+
+    The `digest` key is not a field, on `Seal`'s rule and for its reason:
+    it is a pure function of everything else, and a stored copy would be a
+    second authority the artifact could disagree with itself about."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    artifact_format_version: int = ARTIFACT_FORMAT_VERSION
+    seal_digest: str
+    period_id: int = Field(ge=1)
+    #: how far the induction reaches. Derived as `prev.chain_through_period
+    #: + 1`, and equal to `period_id` on a chain with no gap -- which is
+    #: what a consumer reads it to check (ss1.3)
+    chain_through_period: int = Field(ge=1)
+    #: null only on period 1, the base case of the induction
+    prev_attestation_digest: str | None = None
+    state_machine_version: int
+    #: the interpreter that produced the proof. Diagnostic for the seal's
+    #: identity and load-bearing for ss11's "auditing an old period runs
+    #: the interpreter that produced it"
+    dsl41_version: str
+    #: ss3.2's spelling: naive UTC with exactly six fractional digits
+    audited_at: str
+    scope: Annotated[str, Field(pattern=r"^full$")] = FULL
+
+    @model_validator(mode="after")
+    def _artifact_invariants(self) -> Attestation:
+        for name in (
+            "artifact_format_version",
+            "period_id",
+            "chain_through_period",
+            "state_machine_version",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
+        if not is_hash_address(self.seal_digest):
+            raise ValueError(f"seal_digest {self.seal_digest!r}: not a sha256 address")
+        if (self.prev_attestation_digest is None) != (self.period_id == 1):
+            raise ValueError(
+                f"period {self.period_id} with prev_attestation_digest"
+                f" {self.prev_attestation_digest!r}: null is period 1's base case and"
+                " nothing else's (period-model ss1.3)"
+            )
+        if self.prev_attestation_digest is not None and not is_hash_address(
+            self.prev_attestation_digest
+        ):
+            raise ValueError(
+                f"prev_attestation_digest {self.prev_attestation_digest!r}: not a sha256 address"
+            )
+        if not self.dsl41_version:
+            raise ValueError("dsl41_version is empty: the producing interpreter is load-bearing")
+        try:
+            parsed = datetime.fromisoformat(self.audited_at)
+        except ValueError as exc:
+            raise ValueError(f"audited_at {self.audited_at!r}: {exc}") from exc
+        if parsed.tzinfo is not None or "." not in self.audited_at:
+            raise ValueError(
+                f"audited_at {self.audited_at!r}: naive UTC with six fractional digits"
+                " (ss3.2's spelling)"
+            )
+        if len(self.audited_at.rsplit(".", 1)[1]) != 6:
+            raise ValueError(f"audited_at {self.audited_at!r}: exactly six fractional digits")
+        return self
+
+    @property
+    def digest(self) -> str:
+        """`"sha256:" + hexdigest` over the canonical bytes with only the
+        top-level `digest` key removed (ss3.2, PR-08b)."""
+        return digest_over(self.model_dump(mode="json"))
+
+    def to_bytes(self) -> bytes:
+        return canonical_bytes(with_digest(self.model_dump(mode="json")))
+
+    @classmethod
+    def from_bytes(cls, data: bytes | str, *, where: str) -> Attestation:
+        """Parse and CHECK: the canonical form, the version, and the
+        artifact's own digest, in that order.
+
+        A stamped digest that does not match the bytes it stamps is the
+        one thing an attestation must never be read past -- the whole
+        artifact exists to be a checkpoint somebody trusts."""
+        try:
+            payload = decode(data)
+        except CanonError as exc:
+            raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
+        if not isinstance(payload, dict):
+            raise EngineError(f"{where}: not a JSON object")
+        stamped = payload.pop("digest", None)
+        version = payload.get("artifact_format_version")
+        if version != ARTIFACT_FORMAT_VERSION:
+            raise EngineError(
+                f"{where}: artifact_format_version {version!r}: this binary implements"
+                f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
+            )
+        try:
+            attestation = cls.model_validate(payload)
+        except ValidationError as exc:
+            raise EngineError(f"{where}: not an attestation this binary can read ({exc})") from exc
+        if stamped != attestation.digest:
+            raise EngineError(
+                f"{where}: stamped digest {stamped!r} but the bytes digest to"
+                f" {attestation.digest} -- an attestation that disagrees with itself"
+                " proves nothing (period-model ss11)"
+            )
+        raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        if raw != attestation.to_bytes():
+            # a payload that omits a defaulted key (or otherwise differs
+            # from the canonical serialization) still model-validates and
+            # still digests right, because the digest is computed over the
+            # FILLED model -- so the equality is what forbids a second
+            # byte form for one logical artifact (ss3.2, Seal's own rule)
+            raise EngineError(
+                f"{where}: the file's bytes are not the attestation's canonical"
+                " serialization -- one artifact has one byte form (period-model ss3.2)"
+            )
+        return attestation
+
+
+def read_attestation(run_root: Path, period_id: int) -> Attestation | None:
+    """The attestation for `period_id`, or None when this root holds none.
+
+    Absence is a fact; a file that exists and does not parse is not."""
+    path = attestation_path(run_root, period_id)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+    return Attestation.from_bytes(raw, where=str(path))
+
+
+def verify_attestation(run_root: Path, period_id: int) -> Attestation:
+    """ss1.3's CONSUMER rule: accept attestation N alone.
+
+    Three checks and no more: the artifact's own digest (in
+    `from_bytes`), its binding to the seal it names, and the
+    `chain_through_period` the producing audit established. Nothing here
+    walks the chain -- the induction was proved when the attestation was
+    produced, and a physical roll imports only the current seal and its
+    attestation, so a consumer that re-walked would make a second roll
+    impossible (PR-02e)."""
+    attestation = read_attestation(run_root, period_id)
+    if attestation is None:
+        raise EngineError(
+            f"{attestation_path(run_root, period_id)}: period {period_id} is not"
+            " attested -- `dsl41 audit` produces the checkpoint (period-model ss1.3)"
+        )
+    if attestation.period_id != period_id:
+        raise EngineError(
+            f"{attestation_path(run_root, period_id)}: attests period"
+            f" {attestation.period_id}, not {period_id} -- an attestation filed under"
+            " another period's name (period-model ss1.3)"
+        )
+    seal = read_seal(run_root, period_id)
+    if attestation.seal_digest != seal.digest:
+        raise EngineError(
+            f"{attestation_path(run_root, period_id)}: attests seal"
+            f" {attestation.seal_digest} and {seal_path(run_root, period_id)} digests to"
+            f" {seal.digest} -- the checkpoint is not this boundary's (PR-02d)"
+        )
+    if attestation.chain_through_period != period_id:
+        raise EngineError(
+            f"{attestation_path(run_root, period_id)}: chains through period"
+            f" {attestation.chain_through_period} while attesting {period_id} -- the"
+            " induction has a gap the checkpoint claims to cover (period-model ss1.3)"
+        )
+    return attestation
+
+
+def audit_period(
+    run_root: Path, period_id: int, *, anchor: EstateAnchor | None = None
+) -> Attestation:
+    """ss1.3's PRODUCER rule: re-derive period N and write its checkpoint.
+
+    Producing N requires the PREDECESSOR attestation **present and
+    verified**; period 1
+    is the base case with `prev_attestation_digest: null`. The absence of
+    an "or re-derive everything below" alternative is the rule, not an
+    omission -- without it a wrong implementation checks only its own
+    digest and seal binding, emits a checkpoint over an unaudited opening
+    seal, and earlier roots get deleted on a chain that was never
+    established (PR-02e).
+
+    The `attested` transition is this verb's: `audit.json` lands by the
+    liturgy first, and only then does the anchor row flip, so no state has
+    an `attested` row without the artifact that justifies it."""
+    stored = read_seal(run_root, period_id)
+    if stored.state_machine_version != STATE_MACHINE_VERSION:
+        # ss11: auditing an old period runs the interpreter that produced
+        # it. Cross-version audit inside one binary is a non-goal, and the
+        # refusal names what to install (PR-47a)
+        raise EngineError(
+            f"period {period_id} ran state_machine_version"
+            f" {stored.state_machine_version} and this binary implements"
+            f" {STATE_MACHINE_VERSION}: audit runs the interpreter that produced the"
+            f" period -- install dsl41 {_producing_version(run_root, period_id)} and"
+            " audit with it (period-model ss11, PR-47a)"
+        )
+    existing = read_attestation(run_root, period_id)
+    if existing is not None:
+        # IDEMPOTENT, not re-produced: a later attestation records this
+        # one's digest as `prev_attestation_digest`, and a rewrite with a
+        # fresh `audited_at` would silently re-digest the checkpoint that
+        # link names. A stored attestation that verifies IS the checkpoint;
+        # one that does not verify refuses loudly inside verify rather
+        # than being papered over by a rewrite. The ANCHOR transition still
+        # runs: a crash between the durable artifact and the `attested` CAS
+        # leaves the row unflipped, and a retry that returned early would
+        # leave it unflipped forever (ss1.3)
+        # the checkpoint may be another process's crash window -- linked,
+        # not yet fsynced -- and a durable `attested` row over an
+        # undurable file survives a power cut the file does not
+        make_durable(str(attestation_path(run_root, period_id)))
+        verified = verify_attestation(run_root, period_id)
+        _flip_attested(run_root, period_id, anchor, verified)
+        return verified
+    previous: Attestation | None = None
+    if period_id > 1:
+        previous = verify_attestation(run_root, period_id - 1)
+    rederived = rederive_seal(run_root, period_id, stored=stored)
+    if rederived.digest != stored.digest:
+        raise EngineError(
+            f"{seal_path(run_root, period_id)} does not re-derive"
+            f" ({'; '.join(_diff(rederived, stored))}): a sidecar whose digest matches"
+            " its own canonical form proves integrity, not derivation -- and this one"
+            " is not what the period's own evidence produces (period-model ss11)"
+        )
+    # the induction, WRITTEN DOWN: one more than the predecessor reaches,
+    # and 1 at the base case. It is `period_id` on a chain with no gap, and
+    # `verify_attestation` above is what proved the predecessor had none --
+    # so this is derived here and CHECKED there, in the one place a
+    # consumer reads it (ss1.3)
+    chain_through = 1 if previous is None else previous.chain_through_period + 1
+    attestation = Attestation(
+        seal_digest=stored.digest,
+        period_id=period_id,
+        chain_through_period=chain_through,
+        prev_attestation_digest=None if previous is None else previous.digest,
+        state_machine_version=stored.state_machine_version,
+        dsl41_version=dsl41_version(),
+        audited_at=datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="microseconds"),
+    )
+    try:
+        durable_create(str(attestation_path(run_root, period_id)), attestation.to_bytes())
+    except FileExistsError:
+        # a concurrent audit won the create: two racers would otherwise
+        # publish two digests for one period (`audited_at` differs), and a
+        # physical roll could import one while the closing root keeps the
+        # other -- a forked attestation chain. The winner IS the
+        # checkpoint; the loser verifies it and finishes the CAS over it.
+        winner = verify_attestation(run_root, period_id)
+        _flip_attested(run_root, period_id, anchor, winner)
+        return winner
+    _flip_attested(run_root, period_id, anchor, attestation)
+    return attestation
+
+
+def _flip_attested(
+    run_root: Path, period_id: int, anchor: EstateAnchor | None, attestation: Attestation
+) -> None:
+    """The `attested` CAS, after the artifact is durable (ss1.3).
+
+    The artifact is durable BEFORE the row that points at it: a crash
+    between the two leaves a re-runnable audit, and the reverse leaves an
+    `attested` period with no proof. The lock is taken HERE and for this
+    one write, not around the re-derivation: the lineage lock is held for
+    the process lifetime of whoever leads the lineage, so an audit that
+    held it for the whole verb could never run while a later period was
+    live -- and auditing a CLOSED period while a later one runs is exactly
+    what retention needs. The ARTIFACT is the proof that `verify` and
+    `run --open-from` read; the registry row is bookkeeping, and a caller
+    that could not take the lock is told so rather than losing the
+    checkpoint."""
+    if anchor is None:
+        return
+    try:
+        anchor.acquire()
+    except EngineError as exc:
+        raise Unattested(attestation, str(exc)) from exc
+    try:
+        seal = read_seal(run_root, period_id)
+        anchor.attest(
+            period_id,
+            estate_id=seal.estate_id,
+            root=run_root,
+            seal_digest=attestation.seal_digest,
+        )
+    finally:
+        anchor.release()
+
+
+def _producing_version(run_root: Path, period_id: int) -> str:
+    """The `dsl41_version` that produced this period, for the PR-47a
+    refusal: the attestation's if there is one, else the newest `leader`
+    record's. Diagnostic only -- nothing decides on it."""
+    existing = None
+    try:
+        existing = read_attestation(run_root, period_id)
+    except EngineError:
+        existing = None
+    if existing is not None:
+        return existing.dsl41_version
+    try:
+        records = read_journal(wal_path(run_root, period_id))
+    except EngineError:
+        return "the version named in the period's `leader` records"
+    versions = [
+        str(record["dsl41_version"])
+        for record in records
+        if record.get("rec") == "leader" and record.get("dsl41_version")
+    ]
+    return versions[-1] if versions else "the version named in the period's `leader` records"
+
+
+# ------------------------------------------------------- re-derivation
+
+
+def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None) -> Seal:
+    """ss11's "verified means re-derived": rebuild period N's sidecar from
+    the period's own evidence.
+
+    The inputs are exactly ss11's: the opening seal, the complete ordered
+    WAL of the period, the immutable spool evidence, and the C1 and C2
+    manifests -- plus the root's sentinel, read for the single derivation
+    of `boundary_request.source`. Nothing is copied out of the stored
+    sidecar except the three `boundary_request` input scalars the spec
+    exempts, and those are read from the `seal` RECORD and checked against
+    the sidecar, never taken from one alone."""
+    path = wal_path(run_root, period_id)
+    if not path.exists():
+        # a ROLLED root holds the seal it opened from and none of that
+        # period's evidence, by design: re-deriving C1 there would need
+        # C1's whole proof set, and importing that on every roll is
+        # retention policy rather than a boundary mechanism. What the root
+        # CAN do with an imported checkpoint is `verify` it (ss1.3)
+        raise EngineError(
+            f"{path}: period {period_id}'s WAL is not in this root -- audit"
+            " re-derives from the period's own evidence, and an imported seal"
+            " carries none of it. Verify its attestation instead"
+            f" (`dsl41 verify --run-root {run_root} --period {period_id}`), or audit"
+            " in the root the registry names (period-model ss1.3, ss11)"
+        )
+    records = read_journal(path)
+    opening = records[0]
+    # `read_journal` runs ss2.1's segment schema over the opening record,
+    # so every field indexed below is present and of its exact type. The
+    # `seal` record gets the same treatment where it is selected, and both
+    # refuse as `EngineError` -- a KeyError traceback out of a CLI verb
+    # that catches refusals is a defect, not a diagnosis
+    if opening.get("rec") != "segment":
+        raise EngineError(
+            f"{wal_path(run_root, period_id)}: opens with a"
+            f" {opening.get('rec')!r} record -- a legacy log has no period to audit"
+            " until `dsl41 estate adopt` has translated it (period-model ss11)"
+        )
+    committed = [record for record in records if record.get("rec") == "seal"]
+    if not committed:
+        raise EngineError(
+            f"{wal_path(run_root, period_id)}: no `seal` record -- period {period_id}"
+            " is still open and an open period has no boundary to attest"
+            " (period-model ss11)"
+        )
+    record = committed[-1]
+    check_seal_record(record)
+    if stored is not None:
+        # the WAL's `seal` record and the stored sidecar must name each
+        # other BEFORE re-derivation: a rewritten record over an untouched
+        # sidecar would otherwise be ignored, and audit would attest a
+        # seal the WAL does not name (ss2.2/ss11)
+        check_record_names_sidecar(stored, record, run_root)
+    closing = read_period_manifest(run_root, period_id)
+    if closing is None:
+        raise EngineError(
+            f"{run_root}: periods/{period_id:06d}/manifest.json is not there -- audit"
+            " re-derives from the C1 and C2 manifests and cannot invent one"
+            " (period-model ss11)"
+        )
+    # the manifest and the segment are ONE object written twice (PR-22):
+    # a closed segment whose pins were rewritten under a self-consistent
+    # manifest must refuse before either is used as evidence
+    check_manifest_against_segment(closing, opening)
+    watch_prefix: dict[tuple[str, int], int] | None = None
+    successor_wal = wal_path(run_root, period_id + 1)
+    if successor_wal.exists():
+        link = read_journal(successor_wal)[0].get("opens_from_seal")
+        if stored is not None:
+            if not (
+                isinstance(link, dict)
+                and link.get("period_id") == period_id
+                and link.get("digest") == stored.digest
+            ):
+                # the successor's opening is the INDEPENDENT artifact that
+                # pins the sidecar: a re-forged sidecar under an honest
+                # successor disagrees here, before any evidence is folded
+                raise EngineError(
+                    f"{successor_wal}: opens from {link!r}, not from"
+                    f" {stored.digest} -- the sidecar being audited is not the one"
+                    " this lineage opened its successor from (period-model ss11)"
+                )
+            watch_prefix = {
+                (entry.job, entry.run_number): entry.watch_seq
+                for entry in stored.executions
+                if entry.kind == "fw_watch"
+            }
+    c1 = _catalog_from_bundle(run_root, closing.source_bundle_hash)
+    carried = _carried_from_opening(run_root, opening, closing)
+    oracle = Oracle(c1, carried=carried)
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=_opening_at(opening))
+    replay = replay_inputs(
+        oracle,
+        records,
+        outbox=carried_outbox(_opened_runtime(run_root, opening, closing), at=_opening_at(opening)),
+    )
+    at = replay.frontiers.at
+    if at is None:
+        raise EngineError(
+            f"{wal_path(run_root, period_id)}: the segment admitted no input, so it"
+            " holds no cutoff instant -- every boundary advances through T"
+            " (period-model ss6)"
+        )
+    boundary_request = _boundary_request(run_root, opening, record)
+    # C2's own committed manifest is where the staged half of the opening
+    # comes back from: the `seal` RECORD carries only `next_period_id` and
+    # `next_baseline_id`, and ss11 names the C2 manifest as an audit input
+    # for exactly this. The five engine-derived fields are re-derived below
+    # by `staged.commit`, never read.
+    opening_manifest = _opening_manifest(run_root, period_id + 1)
+    staged = StagedNextPeriod(
+        **{name: getattr(opening_manifest, name) for name in _STAGED_FROM_RECORD}
+    )
+    fingerprint = seal_fingerprint(
+        source=boundary_request.source,
+        baseline_id=closing.baseline_id,
+        epoch=next_epoch(records) - 1,
+        next_period=staged,
+        force_seal=boundary_request.force_seal,
+        claimed_actor=boundary_request.claimed_actor or None,
+    )
+    executing = executing_jobs(replay.outbox, oracle.store.job)
+    post_barrier = carried_from_oracle(
+        oracle,
+        now=at,
+        pending_spawn=[job for job, state in executing.items() if state == "pending"],
+        bound=[job for job, state in executing.items() if state == "applied"],
+    )
+    return close_runtime(
+        closing=closing,
+        estate_id=str(opening["estate_id"]),
+        epoch=next_epoch(records) - 1,
+        prev_seal_digest=_opens_from(opening),
+        closes_at_index=replay.frontiers.applied_index,
+        closed_at=at,
+        scheduler_admitted_through=at,
+        state=SealedState(
+            jobs=dict(oracle.store.job),
+            globals=dict(oracle.store.globals_),
+            hosts={host_id: SealedHost.of(row) for host_id, row in oracle.store.hosts.items()},
+            routes=implicit_routes(LOCAL_EXECUTOR_ID),
+            timers=tuple(oracle.store.timers()),
+            timer_seq=oracle.store.timer_seq,
+            consumed=dict(oracle.store.consumed),
+            enqueue_counter=oracle.store.enqueue_counter,
+            now=at,
+        ),
+        outbox_pending=tuple(replay.outbox.pending()),
+        executions=executions_at(
+            run_root=run_root,
+            outbox=replay.outbox,
+            rows=oracle.store.job,
+            catalog=c1,
+            interval_default=max(
+                1, round(closing.runtime_profile.fw_default_interval_us / 1_000_000)
+            ),
+            # a live watch that crossed the boundary keeps appending to
+            # the SAME file in the next period; the closed period's
+            # evidence is the positional prefix its sidecar names, and the
+            # sidecar was pinned above by the successor segment's
+            # `opens_from_seal` -- an artifact INDEPENDENT of the one being
+            # re-derived. No successor segment means no successor ever
+            # opened, so the whole log is this period's.
+            watch_prefix=watch_prefix,
+        ),
+        classification=classify(
+            closing=Baseline(catalog=c1, profile=closing.runtime_profile),
+            opening=Baseline(
+                catalog=_catalog_from_bundle(run_root, staged.source_bundle_hash),
+                profile=opening_manifest.runtime_profile,
+            ),
+            carried=post_barrier,
+        ),
+        staged=staged,
+        boundary_request=boundary_request,
+        request_fingerprint=fingerprint,
+        forced_gate=retry_horizon_gate(
+            records,
+            horizon_us=closing.runtime_profile.retry_horizon_us,
+            at=at,
+            force_seal=boundary_request.force_seal,
+        ),
+    )
+
+
+#: the staged half of the opening, read back off C2's committed manifest.
+#: DERIVED from the model, so a field added to `StagedNextPeriod` is read
+#: by default rather than by somebody remembering to list it.
+_STAGED_FROM_RECORD: Final[tuple[str, ...]] = tuple(StagedNextPeriod.model_fields)
+
+
+def _opening_at(opening: Mapping[str, Any]) -> datetime:
+    return datetime.fromisoformat(str(opening["at"]))
+
+
+def _opens_from(opening: Mapping[str, Any]) -> str | None:
+    link = opening.get("opens_from_seal")
+    return str(link["digest"]) if isinstance(link, Mapping) else None
+
+
+def _catalog_from_bundle(run_root: Path, source_bundle_hash: str) -> CatalogIR:
+    """C1 or C2, loaded from the immutable bundle this root holds.
+
+    Parsed under the ORIGINAL paths `sources.json` records, because
+    `catalog_hash` v2 covers spans and a span names its file: parsing the
+    stored copies would produce a catalog that could never hash back to
+    the period's own pin."""
+    sources: Sequence[Any] = bundle_sources(run_root, source_bundle_hash)
+    try:
+        return lower_catalog([parse(source.text, file=source.path) for source in sources])
+    except (JilParseError, LoweringError) as exc:
+        raise EngineError(
+            f"{run_root}: bundle {source_bundle_hash} does not load ({exc}): audit"
+            " cannot re-derive a period whose inputs it cannot parse (period-model ss11)"
+        ) from exc
+
+
+def _opening_manifest(run_root: Path, next_period_id: int) -> Manifest:
+    """C2's committed manifest -- ss11's fourth audit input.
+
+    The staged identity the boundary committed and the runtime profile the
+    committed classification was taken against both live here, and a
+    boundary whose opening manifest was pruned cannot be re-derived: the
+    retention floor forbids pruning it, and audit does not invent one."""
+    manifest = read_period_manifest(run_root, next_period_id)
+    if manifest is None:
+        raise EngineError(
+            f"{run_root}: periods/{next_period_id:06d}/manifest.json is not there --"
+            " audit re-derives the opening from the C2 manifest, and the boundary's"
+            " own artifacts may never be pruned (period-model ss11, ss12)"
+        )
+    return manifest
+
+
+def _carried_from_opening(
+    run_root: Path, opening: Mapping[str, Any], closing: Manifest
+) -> CarriedRows | None:
+    """The rows period N opened with: the predecessor seal's, installed
+    verbatim, or None for period 1, which opened from a catalog."""
+    opened = _opened_runtime(run_root, opening, closing)
+    if opened is None:
+        return None
+    state = opened.state
+    return CarriedRows(
+        jobs=dict(state.jobs),
+        globals_=dict(state.globals),
+        hosts=opened.host_rows,
+        timers=state.timers,
+        timer_seq=state.timer_seq,
+        consumed=dict(state.consumed),
+        enqueue_counter=state.enqueue_counter,
+        period_id=opened.next_period.period_id,
+        now=state.now,
+    )
+
+
+def _opened_runtime(run_root: Path, opening: Mapping[str, Any], closing: Manifest) -> Any:
+    link = opening.get("opens_from_seal")
+    if not isinstance(link, Mapping):
+        return None
+    return open_from_seal(
+        read_seal(run_root, int(link["period_id"])),
+        expected_digest=str(link["digest"]),
+        manifest=closing,
+    )
+
+
+def _boundary_request(
+    run_root: Path, opening: Mapping[str, Any], record: Mapping[str, Any]
+) -> BoundaryRequest:
+    """ss11's one derivation and its three carried scalars.
+
+    `source` is DERIVED, never read: a boundary is `adopt` iff the closing
+    segment is period 1 with `catalog_hash_v1` non-null and the root's
+    sentinel `adopted_from` non-null. For period 1 the two must agree; for
+    any later period `adopted_from` stays set for the life of the root
+    while `catalog_hash_v1` is null, so agreement is checked only on period
+    1 and every later boundary derives `request` (PR-47b). An adoption's
+    `request_id` is re-derived too."""
+    sentinel = read_sentinel(run_root)
+    adopted = sentinel is not None and sentinel.adopted_from is not None
+    legacy_hash = opening.get("catalog_hash_v1") is not None
+    period_id = int(opening["period_id"])
+    if period_id == 1 and adopted != legacy_hash:
+        raise EngineError(
+            f"{run_root}: the sentinel says adopted_from"
+            f" {None if sentinel is None else sentinel.adopted_from!r} and the period-1"
+            f" segment says catalog_hash_v1 {opening.get('catalog_hash_v1')!r} -- an"
+            " adoption sets both or neither, and audit derives `source` from the pair"
+            " (period-model ss11, PR-47b)"
+        )
+    source: Literal["request", "adopt"] = "adopt" if (period_id == 1 and adopted) else "request"
+    if record.get("source") != source:
+        raise EngineError(
+            f"the `seal` record says source {record.get('source')!r} and this period"
+            f" derives {source!r}: `source` is audit's to derive, never to read"
+            " (period-model ss11, PR-47b)"
+        )
+    request_id = (
+        adopt_request_id(str(opening["estate_id"])) if source == "adopt" else record["request_id"]
+    )
+    if source == "adopt" and record.get("request_id") != request_id:
+        raise EngineError(
+            f"the `seal` record says request_id {record.get('request_id')!r} and an"
+            f" adoption of estate {opening['estate_id']} derives {request_id}: a"
+            " consistent rewrite of the id is exactly what deriving it catches"
+            " (period-model ss11, PR-47b)"
+        )
+    return BoundaryRequest(
+        source=source,
+        request_id=str(request_id),
+        claimed_actor=str(record.get("claimed_actor", "")),
+        force_seal=bool(record.get("force_seal", False)),
+    )
+
+
+def _diff(rederived: Seal, stored: Seal) -> list[str]:
+    """Which top-level fields disagree -- the refusal's whole value.
+
+    "The digests differ" tells an operator nothing they can act on; the
+    field names tell them whether they are looking at a pruned spool, a
+    tampered artifact or a version skew."""
+    left, right = rederived.to_payload(), stored.to_payload()
+    return [
+        f"{field}: re-derived {left.get(field)!r} vs stored {right.get(field)!r}"
+        for field in sorted(set(left) | set(right))
+        if left.get(field) != right.get(field)
+    ] or ["the canonical forms differ"]

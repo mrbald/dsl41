@@ -496,6 +496,16 @@ def seal_path(run_root: Path, period_id: int) -> Path:
     return seal_dir(run_root) / f"{period_id:06d}.json"
 
 
+def attestation_path(run_root: Path, period_id: int) -> Path:
+    """`<root>/seals/<period_id zero-padded to 6>.audit.json` -- the
+    attestation `audit` writes and `verify` reads (ss1.3, ss11).
+
+    Beside the sidecar it attests, under the same zero-padded name, because
+    a physical roll imports the pair together and a reader that holds one
+    must be able to name the other without a second index."""
+    return seal_dir(run_root) / f"{period_id:06d}.audit.json"
+
+
 def staging_dir(run_root: Path, stage_digest: str) -> Path:
     """`<root>/periods/.staging/<stage digest>/` (ss7).
 
@@ -565,6 +575,12 @@ class Sentinel(BaseModel):
     adopted_from: str | None = None
     #: the claim that FIRST opened this root (a physical roll's), or null
     claim_id: str | None = None
+    #: adoption only (DL-134): the normalized anchor directory the fence
+    #: bound, written in the SAME atomic sentinel rename -- a swappable
+    #: side file would let a forged binding point a fence-crash retry at a
+    #: second empty anchor and mint a second authority. Null on native and
+    #: rolled roots.
+    adopted_anchor: str | None = None
 
 
 def sentinel_path(run_root: Path) -> Path:
@@ -1018,6 +1034,7 @@ def segment_record(
     at: datetime,
     catalog_hash_v1: str | None = None,
     opens_from_seal: Mapping[str, Any] | None = None,
+    reclaimed: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """ss2.1's `segment`, verbatim: the first record of every segment.
 
@@ -1051,8 +1068,10 @@ def segment_record(
         # the boundary's field, and genesis passes none -- it opens no seal
         "opens_from_seal": dict(opens_from_seal) if opens_from_seal is not None else None,
         # the two break-glass paths (ss1.3, ss11): null until an opener
-        # takes one, and filled by the opener that did
-        "reclaimed": None,
+        # takes one, and filled by the opener that did -- `reclaimed`
+        # names the claim a `dsl41 estate reclaim --force` moved out of
+        # this opener's way, and the actor who claimed to authorize it
+        "reclaimed": dict(reclaimed) if reclaimed is not None else None,
         "trust_unaudited": None,
         "at": at.isoformat(),
     }

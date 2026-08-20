@@ -134,11 +134,17 @@ class RunProcess:
         resume: bool = False,
         jil_text: str = IDLE_JIL,
         extra: Sequence[str] = (),
+        run_root: Path | None = None,
+        files: Sequence[Path] | None = None,
     ) -> None:
-        self.run_root = base / "run"
+        # `run_root` and `files` are the estate tier's overrides: a PHYSICAL
+        # roll opens a SECOND root in the same base, from the catalog the
+        # boundary staged rather than from this helper's own
+        self.run_root = run_root or base / "run"
         self.jil = base / "estate.jil"
         if not self.jil.exists():
             self.jil.write_text(jil_text)
+        self.files = [str(path) for path in (files or [self.jil])]
         argv = [sys.executable, "-m", "dsl41", "run", "--run-root", str(self.run_root)]
         if resume:
             argv.append("--resume")
@@ -148,7 +154,7 @@ class RunProcess:
         # second silently truncates the evidence the first left
         self.err = (base / f"engine{RunProcess._n}.err").open("w+")
         self.proc = subprocess.Popen(
-            argv + [str(self.jil)], stdout=subprocess.PIPE, stderr=self.err, text=True
+            argv + self.files, stdout=subprocess.PIPE, stderr=self.err, text=True
         )
 
     def wait_until_up(self, timeout_s: float = 60.0) -> RunProcess:
@@ -189,12 +195,20 @@ class RunProcess:
 
 @contextlib.contextmanager
 def engine(
-    base: Path, *, resume: bool = False, jil_text: str = IDLE_JIL, extra: Sequence[str] = ()
+    base: Path,
+    *,
+    resume: bool = False,
+    jil_text: str = IDLE_JIL,
+    extra: Sequence[str] = (),
+    run_root: Path | None = None,
+    files: Sequence[Path] | None = None,
 ):
     """Started and reaped, including when the startup assertion is what
     fails: an engine left behind holds a `flock` on its run root, and every
     later test against that root would be refused by a ghost."""
-    proc = RunProcess(base, resume=resume, jil_text=jil_text, extra=extra)
+    proc = RunProcess(
+        base, resume=resume, jil_text=jil_text, extra=extra, run_root=run_root, files=files
+    )
     try:
         yield proc.wait_until_up()
     finally:

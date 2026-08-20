@@ -106,7 +106,7 @@ if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
 
 
-def _dsl41_version() -> str:
+def dsl41_version() -> str:
     try:
         from importlib.metadata import version
 
@@ -168,6 +168,7 @@ class Journal:
         manifest: Manifest | None = None,
         estate_id: str | None = None,
         opens_from_seal: Mapping[str, Any] | None = None,
+        reclaimed: Mapping[str, Any] | None = None,
     ) -> Journal:
         """Open a NEW log with its `segment` record (period-model ss2.1,
         DL-130). `segment` replaces `header`: a once-per-log header cannot
@@ -186,7 +187,11 @@ class Journal:
         callers that have no root to carry one. `opens_from_seal` is the
         boundary's: null on segment 1, `{period_id, digest}` on every later
         segment, copied verbatim from the seal the period opened from so the
-        two openings of one seal are byte-identical (PR-07)."""
+        two openings of one seal are byte-identical (PR-07). `reclaimed`
+        is null unless a `dsl41 estate reclaim --force` cleared this
+        opener's way, and then it names the claim that was moved and the
+        actor who claimed to authorize it (ss1.3) -- loud, durable and
+        attributable in the log the period opens with."""
         if manifest is None:
             manifest = genesis_manifest(
                 catalog,
@@ -231,6 +236,7 @@ class Journal:
                 estate_id=estate_id or str(uuid.uuid4()),
                 at=started_at,
                 opens_from_seal=opens_from_seal,
+                reclaimed=reclaimed,
             )
         )
         # the opening record NAMES the segment, so it is durable before any
@@ -258,7 +264,7 @@ class Journal:
                 "at": at.isoformat(),
                 "pid": os.getpid(),
                 "host": socket.gethostname(),
-                "dsl41_version": _dsl41_version(),
+                "dsl41_version": dsl41_version(),
             }
         )
 
@@ -485,11 +491,24 @@ class Journal:
             queue.put_nowait(record)
 
     def close(self) -> None:
+        self.detach()
+        if self._lock is not None:
+            self._lock.release()  # the term ends where the log does (S6a)
+
+    def detach(self) -> None:
+        """Flush and close the FILE, leaving the term where it is.
+
+        `close` ends both, because for an engine the log and the lock end
+        together (S6a). A PHYSICAL ROLL is the one caller that ends
+        neither: it writes the opening `segment` and hands the ROOT to the
+        ordinary resume path, which opens its own journal over the same
+        file and holds the same proofs. Two descriptors on one WAL in one
+        process is one too many, and closing this one the ordinary way
+        would release the proofs its successor is about to append under
+        (period-model ss7, DL-134)."""
         self._f.flush()
         os.fsync(self._f.fileno())
         self._f.close()
-        if self._lock is not None:
-            self._lock.release()  # the term ends where the log does (S6a)
 
 
 def repair_tail(path: Path) -> None:
@@ -650,8 +669,15 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
     return index
 
 
-def read_outbox(records: list[dict[str, Any]]) -> Outbox:
+def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> Outbox:
     """The effects this log intended, and what became of them (ss5).
+
+    `outbox` is what the segment OPENED holding -- a period opened from a
+    seal carries C1's undelivered intents and its applied bindings
+    (period-model ss3.5), and an `effect_result` in this segment for one of
+    them is an outcome this pass has to attach. Seeded rather than patched
+    in afterwards, because `resolve` refuses an outcome for an effect it
+    never saw, which is the right rule and the wrong order.
 
     One pass, in file order, because an outcome always follows the effect it
     resolves -- the two are written by the same engine in that order, and an
@@ -662,7 +688,7 @@ def read_outbox(records: list[dict[str, Any]]) -> Outbox:
     A standalone `effect` record is the pre-DL-118 dialect and folds into
     the same outbox: the two spellings differ in how many fsyncs the writer
     spent, not in what they say."""
-    outbox = Outbox()
+    outbox = outbox if outbox is not None else Outbox()
     # deferred fold checks (period-model ss11, PR-48), run after the pass
     # when the outcomes have been read: adoption refuses a pending legacy
     # outbox, so EVERY folded effect must resolve -- and a fold's
@@ -774,8 +800,13 @@ class Replay:
     outbox: Outbox = field(default_factory=Outbox)
 
 
-def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
+def replay_inputs(
+    oracle: Oracle, records: list[dict[str, Any]], *, outbox: Outbox | None = None
+) -> Replay:
     """Apply the journal through `oracle`, two-pass (concurrency-model ss4).
+
+    `outbox` is the carry: a segment opened from a seal starts with C1's
+    undelivered intents and applied bindings already in it (`read_outbox`).
 
     Pass one indexes the decisions; pass two applies each attempt in
     admission order. A durable decision is authoritative -- a rejected
@@ -800,7 +831,7 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
     base = int(first) - 1 if isinstance(first, int) and not isinstance(first, bool) else 0
     replay = Replay(
         decisions=decisions,
-        outbox=read_outbox(records),
+        outbox=read_outbox(records, outbox),
         frontiers=Frontiers(committed_index=base, applied_index=base),
     )
     for attempt in read_attempts(records):

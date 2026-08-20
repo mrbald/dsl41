@@ -49,8 +49,16 @@ sha256 of the stored — post-placeholder — text, which is not the checksum
 of the file you passed when `-p` resolved anything in it), `periods/000001/manifest.json` (catalog hash and its
 version, bundle address, the runtime profile and its hash, state-machine
 version, and the period's own `baseline_id`/`first_index`), `runs/` + logs,
-`control.sock`, and `supervisor.sock` when detached. A run root written
-before DL-130 has `manifest/` instead, and every reader still accepts it.
+`control.sock`, and `supervisor.sock` when detached. *(Amended by DL-133
+and DL-134.)* Since the periodized layout the records live in
+`wal/<segment_no>.jsonl` and `journal.jsonl` is a one-line sentinel; the
+root also holds `seals/<period>.json`, `seals/<period>.audit.json` and
+`periods/<period>/manifest.json`, and the LINEAGE anchor lives OUTSIDE it,
+at `<run-root>.anchor` by default — deliberately, so `tar`ing a root never
+carries the fence away with it. Back both up. A run root written
+before DL-130 has `manifest/` instead of `catalogs/` + `periods/`; every
+reader still accepts it, and `dsl41 estate adopt` is how it joins a
+lineage (§6a).
 Run roots are `0700`, journals and job output `0600` — the WAL
 carries globals and every control input, so keep the service account's
 home to itself. A run root is the audit artifact of its night: retention
@@ -90,11 +98,13 @@ Decisions to make once, per site:
   `<root>/journal.jsonl` exists — a crash-restart must resume the same
   run root, while the first start of a new baseline must not. Never
   automate the *choice* of run root: new baselines are operator actions
-  (§6).
+  (§6). *(Amended by DL-134.)* Add **3** to
+  `RestartPreventExitStatus=2 3`: a sealed engine exits 3 and the next
+  period is opened by an operator, not by a restart loop (§6a).
 
 Exit codes: 0 = clean stop, 1 = engine/estate failure, 2 = refused
 before start (used run root, hash mismatch, preflight ERROR, live
-socket). Treat 2 as "a human misconfigured something" — restarting
+socket), 3 = sealed; period N+1 is ready to open (§6a). Treat 2 as "a human misconfigured something" — restarting
 harder will not help, hence `RestartPreventExitStatus=2` above. (A
 second engine on a live run root is refused by a socket probe, so even
 a misconfigured restart loop cannot double-start — it just loops.)
@@ -152,17 +162,14 @@ jobs afterwards with explicit, journaled `FORCE_STARTJOB`s.
 
 ## 6. JIL rollout — updating the estate
 
-*(Amended by DL-133, at build of period-model §7.)* **There is a second
-cycle, and it is the one this model is built around: seal → swap → open IN
-PLACE.** The window below still applies to the fresh-run-root cycle, and a
-fresh run root is still a correct thing to do; what it is no longer is the
-only way to change an estate. A boundary closes the running period at a
-chosen instant T and commits the next one, and `dsl41 run --resume` on the
-SAME root opens it. **The operator surface is not shipped yet**: DL-133
-built the mechanism and the engine's `seal` control verb, and the `dsl41
-seal` command that drives them arrives with the physical roll and the
-estate verbs. Until then this section describes where the window is going,
-and step 6 below is still what an operator runs. State does not reset: runtime globals, operator holds,
+*(Amended by DL-133, at build of period-model §7; the operator surface
+landed with DL-134.)* **There is a second cycle, and it is the one this
+model is built around: seal → swap → open IN PLACE.** The window below
+still applies to the fresh-run-root cycle, and a fresh run root is still a
+correct thing to do; what it is no longer is the only way to change an
+estate. A boundary closes the running period at a chosen instant T and
+commits the next one, and `dsl41 run --resume` on the SAME root opens it.
+The verbs are in §6a below. State does not reset: runtime globals, operator holds,
 `last_end_at`, armed latches, every box's `ran_members` and `run_number`
 all cross the boundary, because the boundary is a record rather than a
 directory. Two sentences in this section were true only of the old cycle
@@ -231,6 +238,129 @@ swapping files, not discovering problems.
 fresh run root. If VCS is ever in doubt, the old run root's `catalogs/`
 holds the post-placeholder JIL that baseline actually ran — byte-exact,
 though with placeholders already resolved, so prefer the tag.
+
+## 6a. The boundary — sealing a period and opening the next
+
+*(Added by DL-134, at build of period-model §7 and §11.)* The cycle §6
+describes, as commands. It keeps the state: runtime globals, operator
+holds, `last_end_at`, armed latches, every box's `ran_members` and
+`run_number` all cross, because the boundary is a record rather than a
+directory.
+
+**Seal.** Steps 1–3 of §6's window are unchanged — quiesce triggers,
+drain, stop the web UI. Then:
+
+```sh
+dsl41 seal --run-root /srv/dsl41/runs/<id> \
+    --next /srv/dsl41/estate/*.jil \
+    [-p site.properties] [--next-timezone …] [--claimed-actor you@host]
+```
+
+`seal` has two entry modes and **the lock decides which**, not a flag: an
+engine holding `leader.lock` is a live engine, so the CLI stages C2 and
+asks it over the control socket, and that engine then exits **code 3**
+("sealed; period N+1 is ready to open") — set `RestartPreventExitStatus=2 3`
+under systemd, or an init system restart-loops a sealed engine. With no
+engine running, the same command takes the lock itself, replays and
+reconciles, and performs the boundary as an offline leader. C1 comes from
+the run root's own bundle in both modes, so the estate files the period was
+launched from need not still exist.
+
+Exit codes: 0 committed; 2 not committed and the period is still open (C1
+may legitimately have advanced first — an offline sealer's `leader` record
+and the cutoff's admitted ticks are C1 activity, not damage); 4 the outcome
+is UNKNOWN, and the printed `request_id` is the only safe way to retry.
+`--force-seal` commits inside the closing period's retry horizon and is
+recorded as such in the seal.
+
+The `--next-*` options describe the period about to OPEN
+(`--next-timezone`, `--next-as-machine`, `--next-machine-policy`,
+`--next-detached`, `--next-deadman`, `--next-timezone-map`). A change to
+any of them is a new period exactly as a catalog change is.
+
+**Open, in place** — the ordinary case:
+
+```sh
+dsl41 run --resume --run-root /srv/dsl41/runs/<id> /srv/dsl41/estate/*.jil
+```
+
+**Attest.** Before a period's root can be archived or rolled away from,
+audit it:
+
+```sh
+dsl41 audit  --run-root /srv/dsl41/runs/<id>     # re-derive + checkpoint
+dsl41 verify --run-root /srv/dsl41/runs/<id>     # validate a checkpoint
+```
+
+`audit` rebuilds the seal from the period's own evidence and refuses if the
+two disagree; it needs the period's WAL, spool and manifests, and the
+predecessor checkpoint present and verified. `verify` validates a
+checkpoint alone — its digest, its binding to the seal it names, and the
+chain it claims — which is what a rolled root can do and a full audit is
+not. Auditing an old period needs the dsl41 version that produced it (§7's
+venv-per-version pattern); the refusal names the version.
+
+**Open, in a fresh root** — the physical roll, optional archival hygiene:
+
+```sh
+dsl41 audit --run-root /srv/dsl41/runs/<old>
+dsl41 run --open-from /srv/dsl41/runs/<old>.anchor \
+    --run-root /srv/dsl41/runs/<new> /srv/dsl41/estate/*.jil
+```
+
+It refuses unless the head is `closed`, the closing period is quiescent
+(no live executions at all) and **attested**. The anchor is the
+LINEAGE's, not the root's, so every later `--resume` of the new root needs
+`--estate-anchor /srv/dsl41/runs/<old>.anchor`. Put it in the unit file
+with the run root.
+
+**Adopt** a run root written before the periodized layout — a `header`
+journal and `manifest/`. Such a root no longer resumes; it is adopted, once:
+
+```sh
+dsl41 estate adopt /srv/dsl41/runs/<legacy> \
+    --next /srv/dsl41/estate/*.jil \
+    [--deadman …] [--timezone-map …]     # what `manifest/` did not record
+```
+
+It requires a **drained and settled** estate: no live wrapper, no live file
+watch, nothing pending in the legacy outbox, and every admitted input
+holding a durable decision. Each is a refusal, not a repair — resume the
+legacy engine, let it settle, and retry. A drain is what §6's window
+already does.
+
+The legacy period's `timezone`, `as_machine`, `machine_policy` and
+`detached` come from `manifest/manifest.json`'s own `options` block — the
+estate's record of how it ran beats anyone's memory of it. The deadman,
+the timezone table and the reconciliation windows were never recorded, so
+those are the flags — and that statement is **unchecked**: the adoption
+barrier is wired from the profile it is attesting, so nothing can
+contradict it. It is pinned in period 1's manifest and every later
+`--resume` is held to it, which is where a wrong one surfaces. Get it
+right, and keep it in the unit file.
+
+Every step is idempotent: a re-run continues from where it stopped, never
+mints a second estate id, and refuses rather than re-describing a period
+it already pinned. A re-run after a crash between the seal record and the
+head CAS performs the CAS and reports the adoption complete.
+
+A roll that is refused **after** it wrote the target root's sentinel
+leaves that directory owned by the claim it was attempting: §1.1's
+ownership rule then refuses every later roll into it. That is the rule
+working, not a bug — pick a fresh directory, or remove the abandoned one
+after checking it holds nothing but the sentinel and the import.
+
+**Break-glass.** A `claimed` lineage head whose target root is gone blocks
+every opener. Overriding it can FORK the lineage — two roots opening one
+period, running the same `(job, run_number)` twice — so prove the claimant
+is gone first:
+
+```sh
+dsl41 estate reclaim --estate-anchor /srv/dsl41/runs/<id>.anchor --force
+```
+
+It is recorded in the anchor and again in the next `segment` record with
+the actor who claimed to authorize it.
 
 ## 7. Upgrading dsl41 itself
 

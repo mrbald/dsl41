@@ -538,10 +538,23 @@ claims the successor, writes `wal/<N+1>.jsonl` with its opening `segment`
 at T, moves the head, and seeds the interpreter from the sidecar — carried
 rows install verbatim, revisions included, and only genuinely new rows are
 seeded from the catalog. Step 1 then gates on THAT segment's pins, which
-are C2's. A root with no sentinel is a legacy root and skips all four:
-period-model §11's matrix would have `run --resume` refuse one until
-`dsl41 estate adopt` has run, and that refusal lands with the verb that can
-lift it — refusing first would strand every existing run root.
+are C2's.
+
+*(Amended by DL-134, at build of period-model §11's adoption.)* **A legacy
+`header` root now refuses `--resume` and names the verb that lifts it.**
+DL-133 let one resume, deliberately: the refusal belongs with `dsl41 estate
+adopt`, and refusing before that verb existed would have stranded every
+existing run root with no way back. The verb exists, so the refusal stands
+where §11's matrix puts it — a legacy journal is not opened in place, it is
+adopted, which fences it, translates it into `wal/000001.jsonl` and seals
+period 1 in one transaction. The question asked is narrow: the first record
+is a `header`. A `journal.jsonl` that opens with a `segment` is not legacy
+and never was, and its own refusals are unchanged.
+
+A root with a sentinel that has `adopted_from` set is an ADOPTED root and
+resumes like any other; while the lineage head is `adopting`, `--resume`
+refuses and names `dsl41 estate adopt`, because adoption owns recovery of
+that root until period 1 seals.
 
 1. On catalog-hash mismatch, refuse — no silent semantic drift. A changed
    estate re-baselines explicitly.

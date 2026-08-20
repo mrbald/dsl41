@@ -540,6 +540,24 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   seal selection and head actions at resume. `seal.py` is the artifact; this is
   what has to be true before a period may close, in what order the bytes hit the
   disk, and who may open next
+- src/dsl41/attest.py — the attestation (period-model ss1.3/ss11, DL-134): what
+  `audit` produces and `verify` consumes, and the two rules that are not one.
+  Producing a checkpoint re-derives the period's seal from the four inputs ss11
+  names — the opening seal, the complete ordered WAL, the immutable spool, and
+  the C1/C2 manifests, plus the sentinel for the single `source` derivation —
+  and requires the predecessor checkpoint present and verified; consuming one
+  accepts it ALONE, which is what lets a rolled root verify a chain whose
+  earlier roots are gone. "Verified" means re-derived: a sidecar that matches
+  its own canonical form proves integrity, not derivation
+- src/dsl41/estate.py — estate-level transactions over roots (period-model
+  ss1.1/ss1.3/ss7/ss11, DL-134): the PHYSICAL ROLL (`run --open-from`) — head
+  `closed`, closing period quiescent and attested, sentinel before claim, import
+  between claim and segment — and ADOPTION (`estate adopt`) — readiness before
+  the fence, the fence as a hard link plus a rename so `journal.jsonl` is never
+  absent, `adopting` as the head that gives adoption one recovery owner, the
+  drain refusals, the `manifest/` split and the `result`+`effect` fold. Neither
+  is a second semantic path: both hand the ordinary machinery a root it can
+  resume, and adoption seals period 1 through the COMMON seal body
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/effect/effect_result/result/seal/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
@@ -813,6 +831,15 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   barrier parking a watch at its poll boundary, one held tick under C1 starting
   exactly once after C2, and the `seal` control verb with its committed-retry
   route
+- tests/test_estate.py — the estate verbs (period-model ss1.3/ss7/ss11, DL-134):
+  the offline seal committing and refusing over one root, the live seal between
+  two real processes with the engine exiting code 3, audit re-deriving a seal and
+  refusing a consistently rewritten one, the producer rule's three negatives
+  (missing, corrupt, mismatched predecessor), a physical roll opening period 2 in
+  a fresh root and resuming there while the closing root refuses the same seal,
+  the attestation gate on a roll, break-glass reclaim recorded in the anchor and
+  in the next `segment`, and adoption end to end — fence, translate, seal — with
+  its readiness-before-fence, drain and `adopting`-head refusals
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)

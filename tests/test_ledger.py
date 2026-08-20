@@ -787,16 +787,20 @@ def test_an_incomplete_watch_with_no_adapter_to_re_arm_it_refuses_loudly(tmp_pat
     asyncio.run(scenario())
 
 
-def test_a_job_whose_type_this_engine_cannot_dispatch_is_left_alone(tmp_path: Path) -> None:
-    """Parity with the running engine, which would not have dispatched it
-    either: an engine with no adapter for a job's type has no dispatch row
-    for it live, so reconciliation must not invent a verdict about a run it
-    could never have started. Not a failure -- an absence.
+def test_a_job_whose_type_this_engine_cannot_dispatch_never_reaches_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """An engine with no adapter for a job's type is refused BEFORE replay,
+    on both routes it can arrive by.
 
-    Since DL-130 this is a LEGACY root's behaviour only: a pinned root
-    refuses the missing adapter before replay (test_period_identity pins
-    that), so the left-alone parity is exercised through the header-journal
-    twin a pre-DL-130 estate actually is."""
+    This used to pin the reconciliation ladder's left-alone parity -- an
+    engine that could never have started the run must not invent a verdict
+    about it -- and reached that branch through the header-journal twin a
+    pre-DL-130 estate is, because a pinned root already refused the missing
+    adapter first. DL-134 closed that route: ss11's matrix adopts a legacy
+    journal rather than resuming it. So both routes now refuse, and what is
+    pinned here is that neither of them replays a thing (DL-134's own entry
+    records the ladder branch left unreachable)."""
     from test_period_identity import legacy_twin
 
     run_root = tmp_path / "run"
@@ -807,17 +811,17 @@ def test_a_job_whose_type_this_engine_cannot_dispatch_is_left_alone(tmp_path: Pa
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         await engine.shutdown()
         _close(engine)
+        with pytest.raises(EngineError, match="wired no adapter"):
+            await _resume_with(
+                run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
+            )
         legacy_twin(run_root, lower_source(_SOLO_JIL))
+        with pytest.raises(EngineError, match="dsl41 estate adopt"):
+            await _resume_with(
+                run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
+            )
 
-        resumed = await _resume_with(
-            run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
-        )
-        await resumed.run_until_quiescent(T0 + timedelta(minutes=3))
-        return resumed
-
-    resumed = asyncio.run(scenario())
-    assert resumed.oracle.store.job["j"].status == "RUNNING"  # not FAILURE
-    _close(resumed)
+    asyncio.run(scenario())
 
 
 def _event_for(job: str, kind: str, minutes: float):

@@ -66,7 +66,6 @@ from dsl41.runner_adapters import (
 )
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_effects import Effect, EffectOutcome
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.period import (
     GENESIS_PERIOD_ID,
     GENESIS_SEGMENT_NO,
@@ -79,6 +78,7 @@ from dsl41.period import (
     read_period_manifest,
     opening_at,
     read_sentinel,
+    sentinel_path,
     wal_path,
     wal_segments,
     write_period_manifest,
@@ -98,6 +98,7 @@ from dsl41.boundary import (
     EstateHome,
     OpenedPeriod,
     act_on_head,
+    carried_outbox,
     claim_root,
     default_anchor_dir,
     open_next_period,
@@ -106,7 +107,7 @@ from dsl41.boundary import (
     select_seal,
 )
 from dsl41.oracle_state import CarriedRows
-from dsl41.seal import OpenedRuntime, Seal
+from dsl41.seal import OpenedRuntime, Seal, open_from_seal
 from dsl41.runner_ledger import (
     STATE_MACHINE_VERSION,
     Fence,
@@ -427,6 +428,7 @@ async def resume_run(
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
     anchor_dir: Path | None = None,
+    adopting: bool = False,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -453,6 +455,20 @@ async def resume_run(
     anchor: EstateAnchor | None = None
     try:
         sentinel = read_sentinel(run_root)
+        if sentinel is None and _is_legacy_header(run_root):
+            # ss11's matrix row, now that the verb that lifts it exists: a
+            # legacy `header` journal is not opened in place, it is
+            # ADOPTED. DL-133 deliberately let one resume, because
+            # refusing before `dsl41 estate adopt` shipped would have
+            # stranded every existing run root with no way back. It ships
+            # here, so the refusal lands with it (DL-134).
+            raise EngineError(
+                f"{sentinel_path(run_root)}: a legacy `header` journal is not resumed"
+                " in place -- it is adopted, which fences it, translates it into"
+                " `wal/000001.jsonl` and seals period 1 in one transaction. Run"
+                f" `dsl41 estate adopt {run_root} --next <estate files>...`"
+                " (period-model ss11)"
+            )
         if sentinel is not None:
             anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
             anchor.acquire()
@@ -471,6 +487,7 @@ async def resume_run(
             grace_seconds=grace_seconds,
             supervisor=supervisor,
             deadman_s=deadman_s,
+            adopting=adopting,
         )
     except BaseException:
         # a refused resume holds nothing: the next engine may lead
@@ -496,6 +513,7 @@ async def _resume_under_lock(
     grace_seconds: float | None,
     supervisor: SupervisorClient | None,
     deadman_s: float | None,
+    adopting: bool = False,
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
@@ -515,8 +533,13 @@ async def _resume_under_lock(
     records = read_journal(estate_wal(run_root))
     lineage = select_seal(run_root, records)  # step 3
     if anchor is not None and sentinel is not None:
-        act_on_head(anchor, run_root=run_root, estate_id=sentinel.estate_id, lineage=lineage)  # 4
-    carried: CarriedRows | None = None
+        act_on_head(  # step 4
+            anchor,
+            run_root=run_root,
+            estate_id=sentinel.estate_id,
+            lineage=lineage,
+            adopting=adopting,
+        )
     opened_period: OpenedPeriod | None = None
     journal: Journal | None = None
     if lineage.opens_next:
@@ -524,8 +547,21 @@ async def _resume_under_lock(
         opened_period = _open_from_seal(run_root, anchor, lineage.seal, catalog, fence)
         journal = opened_period.journal
         records = read_journal(journal.path)
-        carried = _carried_rows(opened_period.opened)
     opening = records[0]
+    # ss7 phase 3, at EVERY resume of a period that opened from a seal --
+    # not only at the resume that opened it. The segment is written once
+    # and resumed many times, and an opener that seeded the carry only on
+    # the opening pass rebuilt every later incarnation from the CATALOG:
+    # globals gone, holds gone, revisions moved, and an `effect_result`
+    # for a carried effect refused as an outcome for an unknown effect.
+    # The seal is the same one either way, and phase 3 is a pure function
+    # of it, so there is one code path and it runs unconditionally.
+    opened = (
+        opened_period.opened
+        if opened_period is not None
+        else _reopened(run_root, opening, lineage.seal)
+    )
+    carried: CarriedRows | None = None if opened is None else _carried_rows(opened)
     check_leader_eligibility(opening, catalog=catalog)
     # PR-22's U4 half: the committed manifest is the engine's own output,
     # and a manifest that is not this segment's refuses rather than being
@@ -629,7 +665,22 @@ async def _resume_under_lock(
         ),
         fence=fence,
     )
-    replay = replay_inputs(engine.oracle, records)
+    # ss3.5: the carry is what this segment OPENED holding -- C1's
+    # undelivered intents and its applied bindings -- and it is seeded
+    # BEFORE the segment's own records are read, never patched in
+    # afterwards: an `effect_result` here for an effect born in C1 is an
+    # outcome the replay has to attach, and `Outbox.resolve` refuses an
+    # outcome for an effect it never saw.
+    # ss11 step 5: adoption's barrier is DISPATCH-FREE, and the flag is
+    # set BEFORE the ladder rather than after it, because the ladder
+    # itself dispatches. A reconciled FAILURE can satisfy a downstream
+    # condition and plan a SPAWN; held, that injection and its planned
+    # effect are durable in the translated WAL and in the seal's
+    # `outbox_pending` before anything acts on them (DL-134)
+    engine.hold_outbox = adopting
+    replay = replay_inputs(
+        engine.oracle, records, outbox=carried_outbox(opened, at=opening_at(opening))
+    )
     # the log's position comes back with its contents (concurrency-model
     # ss2): the next admission continues the index, and a retry of anything
     # this log already decided is still answered from that decision rather
@@ -641,42 +692,6 @@ async def _resume_under_lock(
     # orphaned for the rest of its life -- its job is already TERMINAL, so
     # reconciliation skips it, and nothing else would ever look again.
     engine.outbox = replay.outbox
-    if opened_period is not None:
-        # a period that opened from a seal has an EMPTY segment: its intents
-        # and its ghost-run gate come from the sidecar, which is exactly why
-        # ss3.3 carries them. The decision index is deliberately NOT carried
-        # -- `_by_index` is log-local, and ss9 handles retries across the
-        # boundary.
-        for effect in opened_period.opened.outbox_pending:
-            engine.outbox.record(effect)
-        # ss3.5: the APPLIED bindings cross too, or reconciliation meets a
-        # bound run with no SPAWN in the outbox and accepts whatever
-        # identity the LIST or the spool claims. Every bound and fw_watch
-        # entry reconstructs its effect and its applied resolution, so the
-        # preflight's identity gates hold the world to run_id A, not B.
-        for entry in opened_period.opened.executions:
-            if entry.kind == "pending_spawn":
-                continue  # its pending effect is in outbox_pending already
-            effect = Effect(
-                effect_id=entry.effect_id,
-                kind="SPAWN",
-                job=entry.job,
-                run_number=entry.run_number,
-                executor_id=getattr(entry, "executor_id", LOCAL_EXECUTOR_ID),
-                index=entry.index,
-                at=last_at,
-                run_id=entry.run_id,
-                generation=getattr(entry, "generation", 0),
-            )
-            engine.outbox.record(effect)
-            engine.outbox.resolve(
-                EffectOutcome(
-                    effect_id=entry.effect_id,
-                    state="applied",
-                    run_id=entry.run_id,
-                    detail="carried across the boundary as an applied binding (ss3.5)",
-                )
-            )
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -728,6 +743,21 @@ async def _resume_under_lock(
         supervisor=supervisor,
     )
     return engine
+
+
+def _is_legacy_header(run_root: Path) -> bool:
+    """Whether `journal.jsonl` is a LEGACY log -- one whose first record is
+    a `header` (ss11's matrix row).
+
+    The narrow question, not "is there a file at that name". A root whose
+    `journal.jsonl` opens with a `segment` is not legacy and never was; it
+    is a root somebody rewrote over its own sentinel, and telling that
+    operator to adopt would send them somewhere the problem is not."""
+    try:
+        records = read_journal(sentinel_path(run_root))
+    except (OSError, EngineError):
+        return False
+    return bool(records) and records[0].get("rec") == "header"
 
 
 def _drop_never_opened_segment(run_root: Path) -> None:
@@ -782,6 +812,31 @@ def _open_from_seal(
         catalog=catalog,
         lock=fence,
     )
+
+
+def _reopened(
+    run_root: Path, opening: Mapping[str, Any], seal: Seal | None
+) -> OpenedRuntime | None:
+    """ss7 phase 3 over a segment that is ALREADY open: the carry this
+    period was seeded from the first time it opened.
+
+    None for a genesis segment and for a legacy `header` root -- neither
+    opened from a seal, so neither has a carry. `select_seal` has already
+    verified the sidecar against the digest the segment names, and this
+    re-runs the pure load over it, because the load is what turns a
+    sidecar into rows and it is the same load either way."""
+    link = opening.get("opens_from_seal")
+    if seal is None or not isinstance(link, Mapping):
+        return None
+    manifest = read_period_manifest(run_root, int(opening["period_id"]))
+    if manifest is None:
+        raise EngineError(
+            f"{run_root}: periods/{int(opening['period_id']):06d}/manifest.json is not"
+            " there -- a period that opened from a seal is re-seeded from that seal at"
+            " every resume, and the load needs this period's committed manifest"
+            " (period-model ss7 phase 3)"
+        )
+    return open_from_seal(seal, expected_digest=str(link["digest"]), manifest=manifest)
 
 
 def _carried_rows(opened: OpenedRuntime) -> CarriedRows:

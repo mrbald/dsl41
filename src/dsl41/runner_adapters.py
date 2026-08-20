@@ -530,13 +530,26 @@ class WatchLog:
         return self.last_at + timedelta(seconds=interval_s)
 
 
-def read_watch_log(run_dir: Path) -> WatchLog | None:
+def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | None:
     """Fold a run directory's `watch.jsonl`, or None when the watch has not
     been dispatched (no file, or no `start` line yet).
 
     A torn FINAL line is dropped, exactly as `read_journal` drops one: the
     append is write-ahead, so the progress it would have recorded never
-    happened. A torn INTERIOR line is corruption and raises."""
+    happened. A torn INTERIOR line is corruption and raises.
+
+    `prefix` folds only the first that many durable lines: audit
+    re-derives a CLOSED period whose live watch carried across the
+    boundary, and the successor's later polls in the same file are ITS
+    evidence, not the closed period's. POSITIONAL, not a wall-time cut:
+    ss3.5 says an instant is not a unique log position, and a successor
+    unparked at the boundary can poll at exactly T. The count's authority
+    is audit's business (attest.py: the successor segment's
+    `opens_from_seal` pins the sidecar the count is read from). Lines past
+    the prefix are not read at all -- the successor's evidence, an
+    unsupported version a future binary wrote included, must not make a
+    closed period unauditable. A prefix the log cannot supply refuses: the
+    claimed evidence does not exist."""
     path = run_dir / WATCH_LOG
     try:
         raw = path.read_bytes()
@@ -550,6 +563,8 @@ def read_watch_log(run_dir: Path) -> WatchLog | None:
     trailing = lines.pop() if lines and lines[-1] == b"" else None
     records: list[dict[str, Any]] = []
     for index, line in enumerate(lines):
+        if prefix is not None and len(records) == prefix:
+            break  # everything further is the successor's, and is not read
         if not line:
             raise EngineError(f"{path}: empty interior line {index + 1}")
         if index == len(lines) - 1 and trailing is None and not _is_json(line):
@@ -567,6 +582,11 @@ def read_watch_log(run_dir: Path) -> WatchLog | None:
         records.append(record)
     if not records:
         return None
+    if prefix is not None and len(records) < prefix:
+        raise EngineError(
+            f"{path}: a prefix of {prefix} line(s) was claimed and the log holds"
+            f" {len(records)} -- the claimed evidence does not exist (ss2.2)"
+        )
     for position, record in enumerate(records, start=1):
         # required, not merely implemented-if-present: `decode` refuses a
         # version it does not implement but passes an absent one, and an

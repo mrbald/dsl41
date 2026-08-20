@@ -101,7 +101,8 @@ from dsl41.period import (
 from dsl41.oracle_state import JobRuntime
 from dsl41.runner_admission import DecisionIndex, RequestCollision
 from dsl41.runner_clock import EngineError
-from dsl41.runner_effects import Effect, Outbox
+from dsl41.runner_effects import Effect, EffectOutcome, Outbox
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.runner_journal import Journal, read_journal
 from dsl41.runner_ledger import LeaderLock, Proof
 from dsl41.runner_procid import current_boot_id, durable_write, mkdir_durable, proc_start_token
@@ -190,7 +191,13 @@ class SealRequest(BaseModel):
 
     It names an `expect` on nothing, because it is a boundary and not a row
     mutation, and it carries `request_id` like every command -- which is
-    what makes a lost response retryable at all."""
+    what makes a lost response retryable at all.
+
+    `source` has two values and not three: a live seal through the control
+    socket and an offline seal from the CLI are ONE kind of boundary, a
+    request carrying an id its caller minted. `adopt` is the other, and
+    only `for_adoption` below constructs it -- the wire parser never reads
+    the field, so nothing on a socket can claim to be an adoption."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -201,11 +208,40 @@ class SealRequest(BaseModel):
     stage_digest: str
     force_seal: bool = False
     claimed_actor: str = ""
+    source: Literal["request", "adopt"] = "request"
+
+    @classmethod
+    def for_adoption(
+        cls,
+        *,
+        estate_id: str,
+        baseline_id: str,
+        epoch: int,
+        next_period: StagedNextPeriod,
+        claimed_actor: str,
+        force_seal: bool = False,
+    ) -> SealRequest:
+        """ss11 step 7's synthetic request: the fingerprint over the same
+        envelope a live request would carry, and a DERIVED `request_id`.
+
+        Adoption has no caller-supplied request, so its id is
+        `sha256("adopt" || estate_id)` -- one estate, one adoption, one id,
+        and audit re-derives rather than reads it (PR-47b)."""
+        return cls(
+            baseline_id=baseline_id,
+            epoch=epoch,
+            request_id=adopt_request_id(estate_id),
+            next_period=next_period,
+            stage_digest=next_period.stage_digest,
+            force_seal=force_seal,
+            claimed_actor=claimed_actor,
+            source="adopt",
+        )
 
     @property
     def fingerprint(self) -> str:
         return seal_fingerprint(
-            source="request",
+            source=self.source,
             baseline_id=self.baseline_id,
             epoch=self.epoch,
             next_period=self.next_period,
@@ -216,7 +252,7 @@ class SealRequest(BaseModel):
     @property
     def boundary_request(self) -> BoundaryRequest:
         return BoundaryRequest(
-            source="request",
+            source=self.source,
             request_id=self.request_id,
             claimed_actor=self.claimed_actor,
             force_seal=self.force_seal,
@@ -248,7 +284,7 @@ class EstateHome:
     prior_seal_record: dict[str, Any] | None = None
 
 
-def _no_crash(_stage: str) -> None:
+def no_crash(_stage: str) -> None:
     """The crash matrix's seam, and nothing else (`runner_supervisor`'s
     `_crash_point`, generalized to a parameter).
 
@@ -338,6 +374,25 @@ class PeriodRow(BaseModel):
     attested: bool = False
 
 
+class Reclaimed(BaseModel):
+    """One break-glass override, as the anchor records it (ss1.3).
+
+    Loud, durable and attributable: the claim that was moved, the root that
+    held it, who said to move it and when. Nothing here is read to DECIDE
+    anything -- the decision was the operator's `--force` -- and everything
+    here is read to REPORT it, in the anchor and again in the opening
+    `segment` of the period that was let through."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: str
+    target_root: str
+    next_period: int = Field(ge=2)
+    claimed_actor: str
+    #: ss3.2's spelling: naive UTC with exactly six fractional digits
+    at: str
+
+
 class Anchor(BaseModel):
     """ss1.3's `anchor.json`: the lineage head plus the archive registry."""
 
@@ -349,6 +404,12 @@ class Anchor(BaseModel):
     #: keyed by the period number spelled as a string -- JSON has no
     #: integer keys and ss3.2 sorts every object's keys by code point
     periods: dict[str, PeriodRow] = {}
+    #: ss1.3's break-glass ledger: every claim `estate reclaim --force`
+    #: moved out of a successor's way, in the order it happened. Append-only
+    #: and never consumed -- the next opening `segment` COPIES the entry
+    #: into its own `reclaimed` field, so the fork is recorded in the
+    #: lineage's own log as well as in the fence that permitted it
+    reclaimed: list[Reclaimed] = []
 
     def row(self, period_id: int) -> PeriodRow | None:
         return self.periods.get(str(period_id))
@@ -589,6 +650,193 @@ class EstateAnchor:
         self.write(anchor)
         return anchor
 
+    def create_adopting(self, *, estate_id: str, root: Path, period_id: int = 1) -> Anchor:
+        """`absent -> adopting(period_id, root)`: adoption's step 4 (ss11).
+
+        The same create-only rule genesis takes, with the same single
+        resume exception in adoption's own words: our own `adopting(1,
+        this root, this estate_id)` is an adoption interrupted, and
+        `estate adopt` owns it until period 1 seals. Anything else --
+        another estate's anchor, this estate's `open` head, a dead
+        incumbent's -- refuses (PR-01b).
+
+        `adopting` is a FOURTH head state and it is what gives adoption
+        one recovery owner: `run --resume` refuses while it stands, and
+        draft 14's hand-off to `--resume` "once a segment exists" left the
+        crash between the segment and the seal with two owners and no
+        finisher."""
+        existing = self.read()
+        ours = (
+            existing is not None
+            and existing.estate_id == estate_id
+            and isinstance(existing.head, AdoptingHead)
+            and existing.head.period_id == period_id
+            and normalized_root(existing.head.root) == normalized_root(root)
+        )
+        action = own_or_refuse(
+            exists=existing is not None,
+            ours=ours,
+            what=str(self.path),
+            holder=_holder_of(existing),
+        )
+        if action == "resume":
+            assert existing is not None
+            return existing
+        anchor = Anchor(
+            estate_id=estate_id,
+            head=AdoptingHead(period_id=period_id, root=normalized_root(root)),
+            # provisional, exactly as genesis's row is: adoption's finalize
+            # is folded into `adopting -> closed`, because the period-1
+            # segment and its seal are one transaction here and no reader
+            # can reach the row in between (PR-02c, PR-48)
+            periods={str(period_id): PeriodRow(root=normalized_root(root))},
+        )
+        self.write(anchor)
+        return anchor
+
+    def attest(
+        self, period_id: int, *, estate_id: str, root: Path | str, seal_digest: str
+    ) -> Anchor:
+        """The `attested` transition, owned by `audit` (ss1.3): one write
+        under the lock, after `audit.json` is durable by the liturgy.
+
+        Idempotent, because a re-run of `audit` over a period already
+        attested writes the same file and must not then refuse the flag it
+        already set. BOUND, because the caller holds SOME unlocked anchor
+        and this row is a claim about one estate's one period in one root:
+        flipping it on a stranger's anchor would mark a period attested
+        whose proof lives in another lineage entirely."""
+        anchor = self.require(estate_id)
+        row = anchor.row(period_id)
+        if row is None:
+            raise EngineError(
+                f"{self.path}: period {period_id} has no registry row to attest:"
+                " the registry is how a cross-period reader finds a period's root,"
+                " and an attestation over a period it does not know names nothing"
+                " (period-model ss1.3)"
+            )
+        if normalized_root(row.root) != normalized_root(root):
+            raise EngineError(
+                f"{self.path}: period {period_id} lives in {row.root}, not {root} --"
+                " this attestation was produced in another estate's root"
+                " (period-model ss1.3)"
+            )
+        if row.seal_digest != seal_digest or not row.segment_durable:
+            # exact, null included, and DURABLE: a `seal` record can land
+            # before the close CAS, and marking that provisional row
+            # attested would certify a boundary the lineage has not
+            # committed (period-model ss1.3)
+            raise EngineError(
+                f"{self.path}: period {period_id} has seal {row.seal_digest!r}"
+                f" (segment_durable={row.segment_durable}) and the attestation names"
+                f" {seal_digest} -- only a committed, durable row is attested"
+                " (period-model ss1.3)"
+            )
+        if row.attested:
+            return anchor
+        updated = anchor.model_copy(
+            update={
+                "periods": anchor.with_row(period_id, row.model_copy(update={"attested": True}))
+            }
+        )
+        self.write(updated)
+        return updated
+
+    def reclaim(self, *, estate_id: str, claimed_actor: str) -> tuple[Anchor, Reclaimed]:
+        """ss1.3's break-glass: move a `claimed` head back to `closed` so
+        another root may claim the seal.
+
+        **A stale claim is break-glass, not garbage.** A `claimed` head
+        whose target is unreachable cannot be told from one whose target is
+        merely paused, so nothing here decides that -- an operator does,
+        under `--force`, and this records the decision: the moved claim and
+        the actor who claimed to authorize it come back so the next opening
+        `segment` carries them in `reclaimed`. It is the one path in this
+        module that can fork a lineage.
+
+        The seal the head goes back to is the claim's own
+        `prev_seal_digest`, and the closing root is the registry's row for
+        the closing period -- both READ, never supplied, so a reclaim
+        cannot invent a lineage the anchor never held."""
+        anchor = self.require(estate_id)
+        head = anchor.head
+        if not isinstance(head, ClaimedHead):
+            raise EngineError(
+                f"{self.path}: the head is {_spell(head)}, not a claim -- there is"
+                " nothing to reclaim, and this verb never moves a head that is"
+                " doing its job (period-model ss1.3)"
+            )
+        claim = self.read_claim(head.claim_id)
+        if claim is None:
+            raise EngineError(
+                f"{self.path}: the head names claim {head.claim_id} and"
+                f" {self.claim_path(head.claim_id)} is not there -- the claim file is"
+                " written before the head moves, so this state is unreachable without"
+                " something deleting it (period-model ss1.3)"
+            )
+        # the claim's BODY must be what its NAME binds: the id is derived
+        # from {prev_seal_digest, next_period, target_root}, so a swapped
+        # canonical body under the head's filename recomputes to a
+        # different id -- and a reclaim that trusted it would rewrite the
+        # head to a lineage this claim id never bound (ss1.3)
+        derived = claim_id_for(
+            prev_seal_digest=claim.prev_seal_digest,
+            next_period=claim.next_period,
+            target_root=claim.target_root,
+        )
+        if derived != head.claim_id or claim.claim_id != head.claim_id:
+            raise EngineError(
+                f"{self.claim_path(head.claim_id)}: body recomputes to {derived} under"
+                f" claim_id {claim.claim_id!r} while the head names {head.claim_id} --"
+                " a claim whose name does not bind its body reclaims nothing"
+                " (period-model ss1.3)"
+            )
+        if claim.estate_id != estate_id:
+            raise EngineError(
+                f"{self.claim_path(head.claim_id)}: estate {claim.estate_id} under an"
+                f" anchor naming {estate_id} -- a stranger's claim (period-model ss1.3)"
+            )
+        if normalized_root(claim.target_root) != normalized_root(head.target_root):
+            raise EngineError(
+                f"{self.claim_path(head.claim_id)}: targets {claim.target_root} while"
+                f" the head names {head.target_root} -- the claim and the head disagree"
+                " (period-model ss1.3)"
+            )
+        closing_period = claim.next_period - 1
+        row = anchor.row(closing_period)
+        if row is None:
+            raise EngineError(
+                f"{self.path}: period {closing_period} has no registry row -- the"
+                " reclaimed head must go back to a `closed` this anchor can name"
+                " (period-model ss1.3)"
+            )
+        if row.seal_digest != claim.prev_seal_digest or not row.segment_durable:
+            raise EngineError(
+                f"{self.claim_path(head.claim_id)}: prev_seal_digest"
+                f" {claim.prev_seal_digest} while the registry closed period"
+                f" {closing_period} under {row.seal_digest!r} -- the head would go back"
+                " to a seal this lineage never committed (period-model ss1.3)"
+            )
+        moved = Reclaimed(
+            claim_id=head.claim_id,
+            target_root=head.target_root,
+            next_period=claim.next_period,
+            claimed_actor=claimed_actor,
+            at=datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="microseconds"),
+        )
+        updated = anchor.model_copy(
+            update={
+                "head": ClosedHead(
+                    period_id=closing_period,
+                    seal_digest=claim.prev_seal_digest,
+                    closing_root=row.root,
+                ),
+                "reclaimed": [*anchor.reclaimed, moved],
+            }
+        )
+        self.write(updated)
+        return updated, moved
+
     def finalize(self, period_id: int) -> Anchor:
         """Period 1's finalize CAS, performed immediately after its segment
         lands (ss1.3) -- a sixth genesis step of its own, with a recovery
@@ -618,7 +866,15 @@ class EstateAnchor:
     def close_period(
         self, *, estate_id: str, period_id: int, root: Path, seal_digest: str
     ) -> Anchor:
-        """`open -> closed`: the THIRD write of the seal sequence (ss3).
+        """`open -> closed`, and `adopting -> closed`: the THIRD write of
+        the seal sequence (ss3, ss11 step 7).
+
+        ONE transition with two legal predecessors, not two methods: the
+        bytes it writes and the row it flips are identical, and adoption's
+        finalize is folded in here because a period-1 segment and its seal
+        are one transaction under `estate adopt` -- a separate finalize
+        would be a crash window with no reader that could use the row in
+        between (PR-48).
 
         Idempotent on a head already closed at this digest, because
         recovery performs exactly this CAS when the record landed and the
@@ -632,7 +888,7 @@ class EstateAnchor:
                     f" {head.seal_digest} -- this seal says {seal_digest} (period-model ss1.3)"
                 )
             return anchor
-        if not isinstance(head, OpenHead) or head.period_id != period_id:
+        if not isinstance(head, (OpenHead, AdoptingHead)) or head.period_id != period_id:
             raise EngineError(
                 f"{self.path}: cannot close period {period_id}: the head is"
                 f" {_spell(head)} (period-model ss1.3)"
@@ -921,7 +1177,7 @@ class Candidate(BaseModel):
 
 
 def stage_next_period(
-    run_root: Path, *, staged_manifest: StagedManifest, crash_point: CrashPoint = _no_crash
+    run_root: Path, *, staged_manifest: StagedManifest, crash_point: CrashPoint = no_crash
 ) -> StagedNextPeriod:
     """ss7's staging, second step: `staged_manifest.json` and
     `candidate.json` under `periods/.staging/<stage_digest>/`.
@@ -1131,6 +1387,17 @@ def seal_fingerprint(
             "source": source,
         }
     )
+
+
+def adopt_request_id(estate_id: str) -> str:
+    """ss11 step 7's synthetic boundary id: `sha256("adopt" || estate_id)`.
+
+    DERIVED rather than minted, and re-derived by audit rather than read
+    (PR-47b): an adoption has no caller-supplied request to carry an id,
+    and a consistent rewrite of `source: adopt -> request` plus a new id
+    would otherwise have told audit to treat the id as authoritative.
+    One estate, one adoption, one id."""
+    return "sha256:" + hashlib.sha256(("adopt" + estate_id).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------- the phases
@@ -1357,6 +1624,53 @@ def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str,
     open_from_seal(sidecar, expected_digest=sidecar.digest, manifest=ctx.committed_manifest)
 
 
+def carried_outbox(opened: OpenedRuntime | None, *, at: datetime) -> Outbox:
+    """The intents and applied bindings a period opens HOLDING (ss3.5).
+
+    `outbox_pending` alone is not the whole carry: an APPLIED SPAWN for a
+    still-live run is not pending, and an opener that restored only the
+    pending half would meet a bound run with no SPAWN in the outbox and
+    accept whatever identity the LIST or the spool claimed. Every `bound`
+    and `fw_watch` entry reconstructs its effect AND its applied
+    resolution, so the preflight's identity gates hold the world to run_id
+    A rather than B.
+
+    Built BEFORE the segment's own records are read, never patched in
+    afterwards: an `effect_result` in the new segment for an effect born
+    in the old one is an outcome the replay has to attach, and
+    `Outbox.resolve` refuses an outcome for an effect it never saw --
+    which is the right rule and the wrong order."""
+    outbox = Outbox()
+    if opened is None:
+        return outbox
+    for effect in opened.outbox_pending:
+        outbox.record(effect)
+    for entry in opened.executions:
+        if entry.kind == "pending_spawn":
+            continue  # its pending effect is in outbox_pending already
+        effect = Effect(
+            effect_id=entry.effect_id,
+            kind="SPAWN",
+            job=entry.job,
+            run_number=entry.run_number,
+            executor_id=getattr(entry, "executor_id", LOCAL_EXECUTOR_ID),
+            index=entry.index,
+            at=at,
+            run_id=entry.run_id,
+            generation=getattr(entry, "generation", 0),
+        )
+        outbox.record(effect)
+        outbox.resolve(
+            EffectOutcome(
+                effect_id=entry.effect_id,
+                state="applied",
+                run_id=entry.run_id,
+                detail="carried across the boundary as an applied binding (ss3.5)",
+            )
+        )
+    return outbox
+
+
 # ------------------------------------------------------- the seal record
 
 #: ss2.2's `seal` record: every field recovery needs to select the sidecar
@@ -1476,6 +1790,7 @@ def executions_at(
     rows: Mapping[str, JobRuntime],
     catalog: CatalogIR,
     interval_default: int,
+    watch_prefix: Mapping[tuple[str, int], int] | None = None,
 ) -> tuple[Execution, ...]:
     """ss3.5's discriminated lifecycle, read off the outbox and the spool.
 
@@ -1512,7 +1827,24 @@ def executions_at(
         run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
         run_id = _require_run_id(effect)
         if (run_dir / WATCH_LOG).exists():
-            log = read_watch_log(run_dir)
+            # audit passes the per-run positional prefix: a later period's
+            # polls in the same file are ITS evidence, and an instant is
+            # not a unique log position (ss3.5), so the cut is a count.
+            # The count's authority is established by the CALLER
+            # (attest.py: the successor segment's `opens_from_seal` pins
+            # the sidecar it is read from) -- here a run that has a log but
+            # no claimed entry refuses rather than folding a stranger's
+            # progress
+            bound = (
+                None if watch_prefix is None else watch_prefix.get((effect.job, effect.run_number))
+            )
+            if watch_prefix is not None and bound is None:
+                raise EngineError(
+                    f"{effect.job}.{effect.run_number}: watch.jsonl exists but the seal"
+                    " being re-derived carries no fw_watch entry for this run -- the"
+                    " evidence and the claim disagree (period-model ss11)"
+                )
+            log = read_watch_log(run_dir, prefix=bound)
             assert log is not None  # the file exists and the fold refuses a bad one
             if log.run_id != run_id:
                 # DL-118 at the seal: a valid log that appeared since
@@ -1655,7 +1987,7 @@ def commit_boundary(
     snapshot: Snapshot,
     prev_seal_digest: str | None,
     forced_gate: ForcedGate | None,
-    crash_point: CrashPoint = _no_crash,
+    crash_point: CrashPoint = no_crash,
 ) -> CommittedBoundary:
     """ss6 steps 7-8 and ss3's three writes, in the one order that is the
     durability argument.
@@ -1855,24 +2187,31 @@ def open_next_period(
     run_root: Path,
     anchor: EstateAnchor,
     committed: CommittedBoundary,
-    catalog: CatalogIR,
+    catalog: CatalogIR | Callable[[], CatalogIR],
     lock: Proof | None = None,
-    crash_point: CrashPoint = _no_crash,
+    crash_point: CrashPoint = no_crash,
 ) -> OpenedPeriod:
-    """ss7's opening half, in place: claim the successor, write the opening
-    segment, move the head, and seed from the seal.
+    """ss7's opening half: claim the successor, write the opening segment,
+    move the head, and seed from the seal.
 
     `at` on the opening segment IS T -- the seal's cutoff instant, not
     restart wall time -- and every non-derived opening field comes from the
     seal's `next_period`, which is what lets two openings of one seal be
     byte-identical (PR-07).
 
+    `catalog` may be a CALLABLE, and then it is resolved AFTER the claim
+    and before the segment -- which is exactly where ss7 puts a physical
+    roll's import, and the roll cannot load C2 until it has imported the
+    bundle. An in-place opener passes the object it already holds and
+    nothing happens between the two.
+
     Idempotent at every step: the claim resumes on its own `claim_id`, an
     already-written segment is verified rather than appended to, and
     `claimed -> open` is a no-op once performed."""
     seal = committed.seal
     opening = seal.next_period
-    head = anchor.require(seal.estate_id).head
+    stored = anchor.require(seal.estate_id)
+    head = stored.head
     # ss11's never-opened row: the head already says this root opened this
     # period, and only the SEGMENT is missing. The claim was consumed when
     # the head moved, so re-taking it would refuse -- what is left to do is
@@ -1893,10 +2232,16 @@ def open_next_period(
         )
     )
     crash_point("after_claim")
+    if callable(catalog):
+        catalog = catalog()
     link = {"period_id": seal.period_id, "digest": seal.digest}
+    # ss1.3: a break-glass override is recorded in the anchor AND in the
+    # next `segment`. Copied here rather than consumed, so the fork stays
+    # visible in both places for the life of both artifacts
+    forced = pending_reclaim(stored, opening.period_id)
     path = open_wal(run_root, opening.segment_no)
     if path.exists():
-        _check_existing_segment(path, opening, link)
+        _check_existing_segment(path, opening, link, forced)
         # a previous opener may have died between its write and its fsync:
         # readable is not durable, and the CAS below relies on this file
         _fsync_wal(path)
@@ -1916,6 +2261,7 @@ def open_next_period(
             manifest=committed.manifest,
             estate_id=seal.estate_id,
             opens_from_seal=link,
+            reclaimed=None if forced is None else forced.model_dump(mode="json"),
         )
         _fsync_dir(path.parent)
     crash_point("after_opening_segment")
@@ -1929,8 +2275,23 @@ def open_next_period(
     )
 
 
+def pending_reclaim(anchor: Anchor, next_period: int) -> Reclaimed | None:
+    """The break-glass override that cleared this opening's way, or None.
+
+    The newest entry for this period, because a lineage can be reclaimed
+    more than once and the opener that gets through is the one the LAST
+    reclaim let through."""
+    for entry in reversed(anchor.reclaimed):
+        if entry.next_period == next_period:
+            return entry
+    return None
+
+
 def _check_existing_segment(
-    path: Path, opening: CommittedNextPeriod, link: Mapping[str, Any]
+    path: Path,
+    opening: CommittedNextPeriod,
+    link: Mapping[str, Any],
+    forced: Reclaimed | None = None,
 ) -> None:
     """A segment already written by an interrupted opener is VERIFIED, not
     appended to: a second `segment` record for one period is exactly the
@@ -1946,6 +2307,9 @@ def _check_existing_segment(
         disagreements.append(
             f"opens_from_seal: segment {segment.get('opens_from_seal')!r} vs {dict(link)!r}"
         )
+    stamped = None if forced is None else forced.model_dump(mode="json")
+    if segment.get("reclaimed") != stamped:
+        disagreements.append(f"reclaimed: segment {segment.get('reclaimed')!r} vs {stamped!r}")
     if disagreements:
         raise EngineError(
             f"{path} already holds a segment this boundary did not open"
@@ -2018,6 +2382,13 @@ def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage
     return Lineage(seal=None, opens_next=False)
 
 
+def check_record_names_sidecar(seal: Seal, record: Mapping[str, Any], run_root: Path) -> None:
+    """Every duplicated field of the `seal` RECORD equals the sidecar's
+    (ss2.2/ss11). Public for audit: a rewritten record naming another
+    boundary must refuse BEFORE re-derivation attests the stored sidecar."""
+    _refuse_disagreement(seal, record, run_root)
+
+
 def _refuse_disagreement(seal: Seal, record: Mapping[str, Any], run_root: Path) -> None:
     disagreements = _record_disagreements(seal, record)
     if disagreements:
@@ -2029,7 +2400,12 @@ def _refuse_disagreement(seal: Seal, record: Mapping[str, Any], run_root: Path) 
 
 
 def act_on_head(
-    anchor: EstateAnchor, *, run_root: Path, estate_id: str, lineage: Lineage
+    anchor: EstateAnchor,
+    *,
+    run_root: Path,
+    estate_id: str,
+    lineage: Lineage,
+    adopting: bool = False,
 ) -> Anchor:
     """ss11 step 4: act on the head before anything is replayed.
 
@@ -2043,10 +2419,25 @@ def act_on_head(
     current = anchor.require(estate_id)
     head = current.head
     if isinstance(head, AdoptingHead):
-        raise EngineError(
-            f"{anchor.path}: the head is {_spell(head)}: adoption owns recovery of this"
-            " root until period 1 seals -- re-run `dsl41 estate adopt` (period-model ss11)"
-        )
+        # `adopting` is what gives adoption ONE recovery owner: while the
+        # head stands, `estate adopt` owns the root and every other resume
+        # refuses BY NAME rather than meeting an unknown state and guessing.
+        # The adopter's own barrier is the exception, and it says so
+        # explicitly -- draft 14 handed recovery to `--resume` "once a
+        # segment exists", which is after the translation and before the
+        # seal, so the crash there had two owners and neither could finish
+        if not (
+            adopting
+            and head.root == normalized_root(run_root)
+            and lineage.seal is None
+            and not lineage.opens_next
+        ):
+            raise EngineError(
+                f"{anchor.path}: the head is {_spell(head)}: adoption owns recovery of"
+                " this root until period 1 seals -- re-run `dsl41 estate adopt`"
+                " (period-model ss11)"
+            )
+        return current
     if (
         lineage.seal is not None
         and lineage.opens_next
