@@ -11,10 +11,11 @@ the wire.
 Two layers, deliberately split so the fold stays testable with no
 filesystem: `fold_run_rows` is a pure function of already-parsed journal
 records plus (optionally) a catalog and a trace -- both themselves plain
-data, never a live `Engine`. `read_run_root` is the thin I/O shell: it reads
-the run root's active WAL segment, rebuilds the catalog from its own stored
-inputs (no estate-file argument needed, unlike `dsl41 journal`: DL-130's
-bundle, or DL-66's `manifest/` on a root that predates it), replays it
+data, never a live `Engine`. `read_run_root` is the thin I/O shell: for
+EVERY WAL segment the root still retains -- one per period (I1) -- it
+rebuilds that period's catalog from its own stored inputs (no estate-file
+argument needed, unlike `dsl41 journal`: DL-130's bundle, or DL-66's
+`manifest/` on a root that predates it), replays it
 through a fresh `Oracle` exactly as `dsl41 journal`
 does, and reads the spool. `read_spool` is its own thin function for the
 same reason: a duration table has two independent I/O concerns (the WAL,
@@ -117,9 +118,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.ast_jil import JilParseError, parse
+from dsl41.boundary import read_seal
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import TERMINAL, JobStatus, OracleError, TraceEntry
+from dsl41.oracle_state import TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
 from dsl41.period import (
     Manifest,
     bundle_dir,
@@ -128,6 +130,8 @@ from dsl41.period import (
     job_fingerprints,
     opening_at,
     read_period_manifest,
+    check_manifest_against_segment,
+    SEGMENT_FIELDS,
 )
 from dsl41.runner_adapters import load_json
 from dsl41.runner_clock import EngineError
@@ -227,13 +231,21 @@ def _parse_timestamp(value: str) -> datetime:
     return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
-def _windows_from_entries(entries: Sequence[TraceEntry]) -> list[_TraceWindow]:
+def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list[_TraceWindow]:
     """One job's trace entries, already filtered to that job and in trace
     order, folded into run windows (decision 2). Out-of-band trace markers
     (`SCHED_DISARM`, `START_REFUSED`, ...) carry no "->" and are skipped --
-    they are not a job's own status transitions."""
+    they are not a job's own status transitions.
+
+    `first` is the run number this job had reached BEFORE the segment, so
+    the first window here is `first + 1`. Run numbers are monotone across
+    the ESTATE and not across a segment (I2): a replay that always started
+    at 1 gave a box that ran in two periods the same `(job, run_number)`
+    twice, and made a leaf run's window unfindable by its journal run
+    number. Zero -- period 1, or a segment whose opening seal this root no
+    longer holds -- is what the fold has always assumed."""
     windows: list[_TraceWindow] = []
-    run_number = 0
+    run_number = first
     started_at: datetime | None = None
     started_by = ""
     ended_at: datetime | None = None
@@ -256,11 +268,21 @@ def _windows_from_entries(entries: Sequence[TraceEntry]) -> list[_TraceWindow]:
     return windows
 
 
-def _trace_windows_by_job(trace: Sequence[TraceEntry]) -> dict[str, list[_TraceWindow]]:
+def _trace_windows_by_job(
+    trace: Sequence[TraceEntry], carried: Mapping[str, int] | None = None
+) -> dict[str, dict[int, _TraceWindow]]:
+    """job -> {run_number: window}. Keyed by the run NUMBER rather than by
+    position, because with `carried` the two are not the same thing."""
     by_job: dict[str, list[TraceEntry]] = {}
     for entry in trace:
         by_job.setdefault(entry.job, []).append(entry)
-    return {job: _windows_from_entries(entries) for job, entries in by_job.items()}
+    return {
+        job: {
+            window.run_number: window
+            for window in _windows_from_entries(entries, (carried or {}).get(job, 0))
+        }
+        for job, entries in by_job.items()
+    }
 
 
 def _box_rows(
@@ -268,15 +290,18 @@ def _box_rows(
     catalog: CatalogIR,
     catalog_hash: str,
     fingerprints: Mapping[str, str],
+    windows_by_job: Mapping[str, Mapping[int, _TraceWindow]],
 ) -> list[RunRow]:
     """Every BOX job's run rows, entirely from the trace (decision 2): there
-    is no dispatch record and no spool for a box."""
-    windows_by_job = _trace_windows_by_job(trace)
+    is no dispatch record and no spool for a box.
+
+    The windows are the caller's, so a box and a leaf in one fold are
+    numbered from the same carried state."""
     rows: list[RunRow] = []
     for job, job_ir in catalog.jobs.items():
         if job_ir.job_type != "BOX":
             continue
-        for window in windows_by_job.get(job, []):
+        for window in windows_by_job.get(job, {}).values():
             duration = (
                 None
                 if window.ended_at is None
@@ -360,7 +385,7 @@ def _leaf_rows(
     catalog: CatalogIR | None,
     catalog_hash: str,
     spool: Mapping[tuple[str, int], SpoolRead],
-    trace_windows: Mapping[str, list[_TraceWindow]],
+    trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
     fingerprints: Mapping[str, str],
     fidelity: Literal["full", "records_only"],
 ) -> list[RunRow]:
@@ -414,10 +439,9 @@ def _leaf_rows(
         job, run_number = key
         dispatch = dispatch_by_key[key]
         completion = completion_by_key.get(key)
-        window = None
-        windows = trace_windows.get(job, [])
-        if 0 < run_number <= len(windows):
-            window = windows[run_number - 1]
+        # by NUMBER, never by position: a run carried across a boundary has
+        # a run number the segment's own window list does not index (I2)
+        window = trace_windows.get(job, {}).get(run_number)
 
         journal_started = _parse_timestamp(str(dispatch["started_at"]))
         journal_ended = _journal_ended_at(completion)
@@ -473,6 +497,7 @@ def fold_run_rows(
     catalog: CatalogIR | None = None,
     trace: Sequence[TraceEntry] = (),
     spool: Mapping[tuple[str, int], SpoolRead] | None = None,
+    carried: Mapping[str, int] | None = None,
 ) -> list[RunRow]:
     """The pure fold (CM-37): a function of already-parsed journal records
     plus, optionally, a catalog (box_name/job_type/SEM-09) and a replayed
@@ -486,16 +511,21 @@ def fold_run_rows(
     use the bare SEM-09 default rather than a job's declared
     success_codes/fail_codes. Every row then says so in `fidelity`
     (decision 5) rather than reading like a complete one. `read_run_root`
-    below supplies a catalog whenever the run root has a `manifest/`."""
+    below supplies a catalog whenever the run root has a `manifest/`.
+
+    `carried` is job -> the run number this period OPENED with, so a run
+    that crosses a boundary keeps one identity (I2). Absent -- period 1, or
+    a caller with no seal to read it from -- the fold numbers from 1, which
+    is what it always did."""
     if not records or not is_opening(records[0]):
         raise RunHistoryError("run history requires a journal starting with a segment record")
     catalog_hash = str(records[0]["catalog_hash"])
-    trace_windows = _trace_windows_by_job(trace)
+    trace_windows = _trace_windows_by_job(trace, carried)
     fingerprints = {} if catalog is None else job_fingerprints(catalog)
     fidelity: Literal["full", "records_only"] = "records_only" if catalog is None else "full"
     rows: list[RunRow] = []
     if catalog is not None:
-        rows.extend(_box_rows(trace, catalog, catalog_hash, fingerprints))
+        rows.extend(_box_rows(trace, catalog, catalog_hash, fingerprints, trace_windows))
     rows.extend(
         _leaf_rows(
             records, catalog, catalog_hash, spool or {}, trace_windows, fingerprints, fidelity
@@ -574,7 +604,7 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
 # --------------------------------------------------------- I/O: the catalog
 
 
-def load_catalog_from_manifest(run_root: Path) -> CatalogIR:
+def load_catalog_from_manifest(run_root: Path, period_id: int | None = None) -> CatalogIR:
     """Rebuild the catalog `dsl41 run` loaded, from the run root's own
     self-contained artifact -- no estate-file argument needed, unlike
     `dsl41 journal`.
@@ -593,8 +623,13 @@ def load_catalog_from_manifest(run_root: Path) -> CatalogIR:
     computed from the SAME original catalog object the opening record was
     written from, at the same moment -- agrees with that record; that
     catches a manifest that belongs to a different run, not a caller's path
-    typo."""
-    paths = stored_input_paths(run_root)
+    typo.
+
+    `period_id` names WHICH period's catalog to rebuild; omitted, it is the
+    active one. Every period of an estate has its own bundle, and a reader
+    that always took the active period's would report a closed period's
+    runs under the estate files it does NOT hold (period-model ss1.1)."""
+    paths = stored_input_paths(run_root, period_id)
     if not paths:
         raise RunHistoryError(f"{run_root}: no stored inputs to rebuild the catalog from")
     parsed = []
@@ -622,26 +657,29 @@ def active_period_id(run_root: Path) -> int:
     return period_id if isinstance(period_id, int) and not isinstance(period_id, bool) else 1
 
 
-def _period_manifest_or_refuse(run_root: Path) -> "Manifest | None":
+def _period_manifest_or_refuse(run_root: Path, period_id: int | None = None) -> "Manifest | None":
     """`read_period_manifest`, with its refusal converted to this module's.
 
     Every door into run history answers `RunHistoryError` and the CLI
     prints it as exit 2; a decoder error escaping as itself would take
     down a whole multi-root `dsl41 runs` with a traceback."""
     try:
-        return read_period_manifest(run_root, active_period_id(run_root))
+        return read_period_manifest(
+            run_root, active_period_id(run_root) if period_id is None else period_id
+        )
     except EngineError as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
 
 
-def stored_input_paths(run_root: Path) -> list[Path]:
+def stored_input_paths(run_root: Path, period_id: int | None = None) -> list[Path]:
     """The stored inputs in command-line order -- DL-130's bundle where
     there is one, DL-66's `manifest/` otherwise -- or `[]` when this root
     stores none: an engine started with nothing staged, a root older than
     both layouts, or one whose retention pruned them. Empty is a missing
     fact and degrades (decision 5); a bundle that is present and unreadable
-    is corruption and raises."""
-    manifest = _period_manifest_or_refuse(run_root)
+    is corruption and raises. `period_id` names which period's inputs;
+    omitted, the active one."""
+    manifest = _period_manifest_or_refuse(run_root, period_id)
     if manifest is not None:
         directory = bundle_dir(run_root, manifest.source_bundle_hash)
         if not (directory / "sources.json").exists():
@@ -659,13 +697,23 @@ def stored_input_paths(run_root: Path) -> list[Path]:
 
 
 def replay_trace(
-    run_root: Path, records: list[dict[str, Any]], catalog: CatalogIR
+    run_root: Path,
+    records: list[dict[str, Any]],
+    catalog: CatalogIR,
+    carried: "CarriedRows | None" = None,
 ) -> list[TraceEntry]:
-    """The trace decision 2 needs, reconstructed exactly as `dsl41 journal`
-    does: a fresh Oracle, this engine's own executor seeded (S6a routing
-    reads it, `cli.py`'s `journal` command docstring explains why), then
-    `replay_inputs`."""
-    oracle = Oracle(catalog)
+    """The trace decision 2 needs, reconstructed exactly as `audit` does:
+    an Oracle seeded with the rows this period OPENED with, this engine's
+    own executor seeded (S6a routing reads it, `cli.py`'s `journal` command
+    docstring explains why), then `replay_inputs`.
+
+    `carried` is None for period 1 and for a period whose opening seal this
+    root no longer holds. Everywhere else it is required, not an
+    optimization: revisions and run numbers are monotone across the ESTATE
+    (I2), so an empty oracle derives numbers the log never recorded and
+    `replay_inputs` refuses at the first admitted input that touches a
+    carried entity (DL-136)."""
+    oracle = Oracle(catalog, carried=carried)
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:
         replay_inputs(oracle, records)
@@ -675,15 +723,76 @@ def replay_trace(
 
 
 def read_run_root(run_root: Path) -> list[RunRow]:
-    """The thin I/O shell: journal + manifest + spool for
-    one run root, folded into its run rows. The only function here that
-    touches a filesystem end to end; `fold_run_rows` above stays pure."""
+    """One run root's WHOLE retained history: every segment it still holds,
+    each folded under its own period's catalog, concatenated (PR-50).
+
+    **A period is a baseline, and this is the same fold `read_run_roots`
+    already performs per root.** Draft one read the ACTIVE segment alone,
+    which was true while a run root held one journal and became silently
+    wrong the moment DL-133 made the WAL many files: after the first seal
+    `dsl41 runs` reported an empty table, because every row it had ever
+    printed lived in a segment it no longer opened. That is the same defect
+    DL-135 closed for the subscriber's backfill, in the other reader.
+
+    Each period is folded on its own inputs -- its own manifest, its own
+    bundle, its own replay -- so a run is reported under the catalog it
+    started in, which is what `start_period` is for. What does NOT restart
+    at a boundary is state: the replay is seeded from the rows the period
+    opened with (`_opening_rows`), so revisions and run numbers continue,
+    and a box that ran in two periods gets runs 1 and 2 rather than run 1
+    twice.
+
+    Two limits, stated where a reader meets them. A run that SPANS a
+    boundary keeps its row in the period that dispatched it, with its spool
+    timings, and its STATUS stays RUNNING: the terminal input is in the
+    NEXT segment and this fold reads one segment at a time, so the end time
+    is there and the verdict is not. And the cost is one replay per
+    retained period -- `--job` and `--since` filter after the fold, so a
+    long-lived estate pays for its whole history to answer about one run."""
+    from dsl41.runner_journal import read_backfill
+
     try:
-        records = read_journal(run_root)
+        # ONE validated read for the whole estate: `read_backfill` is where
+        # DL-135 put the chain proofs -- sentinel-bound openings, filename
+        # vs record, contiguous retained numbers, each segment opening from
+        # the seal that closes the one before it, one estate, a continuous
+        # index frontier -- and history reusing it means a spliced foreign
+        # segment or a missing middle refuses HERE instead of silently
+        # omitting a period or reporting a stranger's rows
+        stream = read_backfill(run_root / "journal.jsonl", since=0).records
     except (OSError, EngineError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
+    rows: list[RunRow] = []
+    for records in _split_segments(stream):
+        rows.extend(_read_segment(run_root, records))
+    return rows
+
+
+def _split_segments(stream: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """The validated whole-estate stream, split back into its segments at
+    each opening record."""
+    out: list[list[dict[str, Any]]] = []
+    for record in stream:
+        if is_opening(record) or not out:
+            out.append([])
+        out[-1].append(record)
+    return out
+
+
+def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]:
+    """The thin I/O shell for ONE period: its (already chain-validated)
+    records + its manifest + the spool of the runs it dispatched, folded
+    into run rows. `fold_run_rows` above stays pure."""
+    if not records or not is_opening(records[0]):
+        raise RunHistoryError(
+            f"{run_root}: run history requires a journal starting with a segment record"
+        )
+    period_id = records[0].get("period_id")
+    if not isinstance(period_id, int) or isinstance(period_id, bool):
+        period_id = 1  # a legacy `header` root: one period, and always was
+    _prove_opening(run_root, records[0])
     spool = _read_all_spool(records)
-    period_manifest = _period_manifest_or_refuse(run_root)
+    period_manifest = _period_manifest_or_refuse(run_root, period_id)
     manifest: dict[str, Any] | None = (
         period_manifest.model_dump(mode="json")
         if period_manifest is not None
@@ -699,19 +808,110 @@ def read_run_root(run_root: Path) -> list[RunRow]:
         # missing rides on the data rather than on a warning the caller may
         # not print (decision 5).
         return fold_run_rows(records, spool=spool)
-    if manifest.get("catalog_hash") != records[0].get("catalog_hash"):
+    if period_manifest is not None:
+        # PR-22: the manifest and the segment are ONE object written twice,
+        # and a self-consistent REPLACEMENT sharing catalog_hash but not
+        # baseline_id or runtime_hash is foreign -- the full agreement
+        # check, not one field
+        try:
+            check_manifest_against_segment(period_manifest, records[0])
+        except EngineError as exc:
+            raise RunHistoryError(f"{run_root}: {exc}") from exc
+    elif manifest.get("catalog_hash") != records[0].get("catalog_hash"):
+        # the DL-66 dict manifest predates the model the full check reads
         raise RunHistoryError(
             f"{run_root}: the manifest's catalog_hash disagrees with the journal's"
             " opening record -- this manifest is not this journal's"
         )
-    if not stored_input_paths(run_root):
+    opened = _opening_rows(run_root, records[0], period_manifest)
+    carried = (
+        {}
+        if opened is None
+        else {job: row.run_number for job, row in opened.jobs.items() if row.run_number > 0}
+    )
+    if not stored_input_paths(run_root, period_id):
         # a manifest that names inputs this root no longer holds is the
         # same missing fact as no manifest at all: the rows come back
         # `records_only` rather than the whole root being refused
-        return fold_run_rows(records, spool=spool)
-    catalog = load_catalog_from_manifest(run_root)
-    trace = replay_trace(run_root, records, catalog)
-    return fold_run_rows(records, catalog=catalog, trace=trace, spool=spool)
+        return fold_run_rows(records, spool=spool, carried=carried)
+    catalog = load_catalog_from_manifest(run_root, period_id)
+    trace = replay_trace(run_root, records, catalog, opened)
+    return fold_run_rows(records, catalog=catalog, trace=trace, spool=spool, carried=carried)
+
+
+def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
+    """A period whose opening NAMES a seal must hold that sidecar, BEFORE
+    any degradation branch runs: the manifest-missing path returns
+    `records_only` rows, and without this proof it would return them from
+    an opening this root cannot prove -- the same hole `_opening_rows`
+    closes for the full-fidelity path (period-model ss11, PR-50)."""
+    link = opening.get("opens_from_seal")
+    if not isinstance(link, Mapping):
+        return  # period 1, or a legacy header: opened from nothing
+    period_id = link.get("period_id")
+    digest = link.get("digest")
+    try:
+        seal = read_seal(run_root, int(period_id))  # type: ignore[arg-type]
+    except (OSError, EngineError, ValueError, TypeError) as exc:
+        raise RunHistoryError(
+            f"{run_root}: this period opens from seal {digest!r} of period"
+            f" {period_id!r} and that sidecar cannot be read ({exc}) -- history"
+            " refuses an unproved opening (period-model ss11, PR-50)"
+        ) from exc
+    staged = seal.next_period
+    # the projection is DERIVED, never listed: every `next_period` field
+    # that is also a segment field is compared, so a field added to
+    # either model is covered by default rather than by somebody
+    # remembering to extend a list
+    shared = sorted(set(type(staged).model_fields) & SEGMENT_FIELDS)
+    grafted = (
+        seal.digest != digest
+        or seal.period_id != period_id
+        or seal.estate_id != opening.get("estate_id")
+        or seal.closed_at.isoformat() != opening.get("at")
+        or any(getattr(staged, name) != opening.get(name) for name in shared)
+    )
+    if grafted:
+        # the digest alone binds the FILE'S bytes, not its place in this
+        # lineage: a valid sidecar from another period or estate, with the
+        # link rewritten to its digest, passes a digest-only check -- the
+        # seal must also BE the named period's, this estate's, and the one
+        # whose next_period IS this opening
+        raise RunHistoryError(
+            f"{run_root}: the sidecar at period {period_id!r} is not the seal this"
+            f" opening stands on (seal: period {seal.period_id}, estate"
+            f" {seal.estate_id}, opens {seal.next_period.period_id}) -- an identity"
+            " graft, history refuses the unproved opening (period-model ss11, PR-50)"
+        )
+
+
+def _opening_rows(
+    run_root: Path, opening: Mapping[str, Any], manifest: "Manifest | None"
+) -> "CarriedRows | None":
+    """The rows this period opened with -- `attest.carried_from_opening`,
+    which is where audit gets the same fact.
+
+    None means "this period opened from nothing": period 1, a legacy
+    header, or a DL-66 root with no period manifest. A period whose
+    opening NAMES a seal and whose sidecar is absent, unreadable or not
+    the named one REFUSES: swallowing that failure would let a period 2
+    that happens to run only C2-added jobs replay cleanly from an empty
+    state and return full-fidelity history from an opening this root
+    cannot prove."""
+    from dsl41.attest import carried_from_opening
+
+    if opening.get("opens_from_seal") is None:
+        return None
+    if manifest is None:
+        return None  # pre-DL-130 layout: `records_only` fidelity downstream
+    try:
+        return carried_from_opening(run_root, opening, manifest)
+    except (OSError, EngineError, ValueError, KeyError) as exc:
+        raise RunHistoryError(
+            f"{run_root}: this period opens from a seal this root cannot prove"
+            f" ({exc}) -- history refuses an unproved opening rather than replaying"
+            " it from an empty state (period-model ss11, PR-50)"
+        ) from exc
 
 
 def read_run_roots(

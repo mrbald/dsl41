@@ -348,6 +348,12 @@ spawn decided and never acted on, duplicated and stale completions,
 quarantine and drain, and checks that no `(job, run_number)` ever runs twice
 across them (S7b).
 
+Exercises 15 to 21 are the boundary era: sealing a night live and offline,
+opening the next period in place and seeing what crossed, the morning-after
+`audit`/`verify`, adopting a night written before the period model, rolling
+to a fresh run root, break-glass reclaim, and retention. CI drives the same
+flows end to end in `tests/test_nightbank_boundary.py` (DL-136).
+
 ## Implementation memo
 
 All ten phases from the implementation order in CLAUDE.md are implemented and
@@ -878,6 +884,19 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   that run stays whole. Every estate is built by the real machinery; the one
   hand-written artifact is the supervisor's tombstone, reconstructed from the
   binding the WAL already holds
+- tests/test_nightbank_boundary.py — the boundary era over the training estate
+  (period-model ss1.3/ss7–ss9/ss11/ss11a/ss12, DL-136): the RUNBOOK's exercises
+  15–21 driven as acceptance scenarios, asserting only what an operator sees.
+  The flagship runs real processes — a night with operator activity and one
+  real job in it, ss9's horizon refusing the seal without killing the engine,
+  the forced seal and the engine's exit code 3, period 2 answering the socket
+  with period 1's globals, holds and statuses, then `audit`, `verify` and a
+  prune that takes the run's timings and leaves its row. The rest run in
+  process over the same 81-job estate: the offline seal of a stopped night,
+  the retention survey and its no-class refusal, a legacy night adopted, a
+  roll refused until the closing night is attested, and break-glass reclaim
+  after a crashed roll. A last test holds the RUNBOOK to the CLI: every
+  `dsl41 <verb>` it types must be a command this build has
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)

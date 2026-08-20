@@ -236,7 +236,10 @@ survive into operation.
   root that predates it). Name
   several run roots on one command line to carry a series across a
   baseline change — the default table marks the break rather than
-  blending two catalogs into one misleading line.
+  blending two catalogs into one misleading line. *(Amended by DL-136.)*
+  A root that has crossed a boundary holds one WAL segment per period, and
+  every retained one is read: each period is folded under its own
+  catalog, so a series crosses a seal exactly as it crosses a run root.
 
 ## 5. Routine operations
 

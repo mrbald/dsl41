@@ -573,6 +573,16 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
         raise EngineError(f"journal {path}: missing segment record")
     check_segment_record(records[0])  # exact ss2.1 shape; a header is exempt
     for position, record in enumerate(records):
+        if position > 0 and is_opening(record):
+            # I1: one segment record per file, and it is line 1. An
+            # embedded `segment` or `header` mid-file is a splice -- a
+            # reader that split on it would treat forged records as a
+            # validated file boundary and admit an unchained period
+            raise EngineError(
+                f"journal {path}: an opening record at line {position + 1} -- a"
+                " segment opens a FILE, and a second opening inside one is a splice"
+                " (period-model ss2.1, I1)"
+            )
         if record.get("rec") == "seal" and position != len(records) - 1:
             # ss11's recovery matrix: a `seal` is the last record of its
             # segment, so anything after one is a period that admitted work
@@ -686,8 +696,23 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
             )
         if named is not None:
             numbers.append(named)
+        first = _first_index(opening)
+        for record in records:
+            seq = record.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq < first:
+                # I2: a segment allocates from its own first_index upward.
+                # A forged low seq would make the containment test below
+                # claim this segment holds an old cursor, and every older
+                # segment -- and its chain checks -- would be skipped
+                raise EngineError(
+                    f"journal {segment}: seq {seq} below this segment's first_index"
+                    f" {first} -- a record this period could not have admitted (I2)"
+                )
         chunks.append(records)
-        if any(_seq_at_or_below(record, since) for record in records):
+        if first <= since:
+            # POSITIONAL containment from the validated opening, never from
+            # a record scan a forged seq could satisfy: the cursor sits in
+            # the first segment whose index range begins at or before it
             holds_cursor = True
             break
     if numbers and numbers != list(range(numbers[0], numbers[0] - len(numbers), -1)):
@@ -728,18 +753,18 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
                 f" {opening.get('estate_id')!r} opened -- two estates in one stream"
                 " (period-model ss1.2)"
             )
-        first = opening.get("first_index")
+        opens_at = opening.get("first_index")
         closes = seal_record.get("closes_at_index")
         if (
-            isinstance(first, int)
+            isinstance(opens_at, int)
             and isinstance(closes, int)
-            and not isinstance(first, bool)
+            and not isinstance(opens_at, bool)
             and not isinstance(closes, bool)
-            and first != closes + 1
+            and opens_at != closes + 1
         ):
             raise EngineError(
                 f"journal {path}: segment {opening.get('period_id')!r} starts its index"
-                f" range at {first} and the seal before it closes at {closes} -- the"
+                f" range at {opens_at} and the seal before it closes at {closes} -- the"
                 " index frontier is not continuous (I2)"
             )
     first = _first_index(chunks[-1][0])

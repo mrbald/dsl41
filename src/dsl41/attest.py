@@ -535,7 +535,7 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
                 if entry.kind == "fw_watch"
             }
     c1 = _catalog_from_bundle(run_root, closing.source_bundle_hash)
-    carried = _carried_from_opening(run_root, opening, closing)
+    carried = carried_from_opening(run_root, opening, closing)
     oracle = Oracle(c1, carried=carried)
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=_opening_at(opening))
     replay = replay_inputs(
@@ -681,11 +681,17 @@ def _opening_manifest(run_root: Path, next_period_id: int) -> Manifest:
     return manifest
 
 
-def _carried_from_opening(
+def carried_from_opening(
     run_root: Path, opening: Mapping[str, Any], closing: Manifest
 ) -> CarriedRows | None:
     """The rows period N opened with: the predecessor seal's, installed
-    verbatim, or None for period 1, which opened from a catalog."""
+    verbatim, or None for period 1, which opened from a catalog.
+
+    Public because `runner_history` needs the same rows for the same
+    reason: a replay of period N from an EMPTY oracle derives revisions and
+    run numbers the log never recorded, and refuses on the first admitted
+    input that touches a carried entity (DL-136). One derivation, so audit
+    and run history cannot disagree about what a period opened with."""
     opened = _opened_runtime(run_root, opening, closing)
     if opened is None:
         return None

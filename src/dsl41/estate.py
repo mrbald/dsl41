@@ -348,6 +348,47 @@ def import_boundary(source: Path, target: Path, *, seal: Seal, manifest: Manifes
     verify_attestation(target, period_id)
 
 
+def check_roll_ready(new_root: Path, anchor_dir: Path) -> None:
+    """`run --open-from`'s READ-ONLY preflight, run by the CLI BEFORE it
+    creates the new root or takes its lock: the lineage exists, the head
+    is a closed one this roll can succeed, the closing seal is the head's
+    and carries nothing live, and the closing period is ATTESTED.
+
+    Every check re-runs authoritatively inside `roll_into_root` under the
+    locks; this pass exists so a refusal -- the unattested-roll refusal
+    the runbook teaches first of all -- writes NOTHING, not even the
+    target directory and its `leader.lock`. Sound to run early because
+    each gate is monotone in the direction that matters: attestation is
+    never revoked, and a head that moves between this read and the locked
+    one is refused there."""
+    check_roll_target(new_root, anchor_dir)
+    anchor = EstateAnchor(anchor_dir)
+    stored = anchor.read()
+    if stored is None:
+        raise EngineError(
+            f"{anchor.path}: this lineage has no anchor -- a physical roll opens the"
+            " successor of a seal, and there is no lineage here to succeed"
+            " (period-model ss1.3)"
+        )
+    closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
+    seal = read_seal(closing_root, period_id)
+    if seal.digest != seal_digest:
+        raise EngineError(
+            f"{seal_path(closing_root, period_id)}: digest {seal.digest} but the"
+            f" head says {seal_digest} -- the closing root does not hold the seal"
+            " this lineage closed with (period-model ss11)"
+        )
+    if seal.executions:
+        live = ", ".join(f"{entry.job}.{entry.run_number}" for entry in seal.executions)
+        raise EngineError(
+            f"seal {seal.digest} carries live execution(s) ({live}): a physical roll"
+            " needs every execution terminal, because the supervisor is one per run"
+            " root and a new-root engine cannot reach the old root's work"
+            " (period-model ss8)"
+        )
+    verify_attestation(closing_root, period_id)
+
+
 def check_roll_target(new_root: Path, anchor_dir: Path) -> None:
     """What `run --open-from` refuses BEFORE it acts, in the caller's own
     words: a target that is the root this lineage just closed in.

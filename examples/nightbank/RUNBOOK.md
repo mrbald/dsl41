@@ -448,6 +448,468 @@ estate. That is why the break is drawn from the per-job fingerprint and
 not from the catalog hash (DL-113 decision 4) — a release touching one job
 of hundreds should mark one job, not all of them.
 
+## The boundary era — exercises 15 to 21
+
+Exercises 1 to 14 all live inside ONE night. The rest of an estate's life
+is the boundary: a night ends at an instant you choose, the next period
+opens with the state still on it, and last night's record becomes an
+archive somebody may one day have to prove. Those are the verbs below.
+
+Set three things once. `$R` is the engine's run root — the `engine`
+directory *inside* the night, not the night itself — `$P` is the
+properties file the night was launched with, and `$NEXT` is the estate the
+NEXT period will run:
+
+```bash
+R=<run>/engine
+P=<run>/night.properties
+NEXT=(); for f in examples/nightbank/estate/small/*.jil; do NEXT+=(--next "$f"); done
+```
+
+(`NEXT` is a shell ARRAY: bash or zsh. In a POSIX shell, type the six
+`--next <file>` pairs out.)
+
+`$NEXT` is one `--next` per file, and the file ORDER is part of the
+address the estate is stored under (`docs/period-model.md` §1.1) — so
+build it from the same sorted glob the launcher uses, and keep using it.
+Here the next estate is the same estate: an unchanged catalog is a legal
+new period, and sealing is also how you bound a long-running night's WAL
+file.
+
+The lineage anchor is `$R.anchor` — a SIBLING of the run root, never
+inside it, so `tar`ing the night never carries the fence away with it.
+
+## 15. Seal the night
+
+Goal: close period 1 at a chosen instant and commit period 2.
+
+The engine is still running (variant B below is the other case).
+
+1. Quiesce first, exactly as exercise 10's drain does: `dsl41 query
+   timers --socket $S` for what is about to fire, `ON_HOLD` the top-level
+   boxes that have not fired yet, and let running work finish
+   (`dsl41 query status --brief --socket $S` until nothing is RUNNING).
+2. Seal:
+
+```sh
+uv run dsl41 seal --run-root $R "${NEXT[@]}" -p $P --claimed-actor you@host
+```
+
+3. Read the refusal. If you sent any `sendevent` in the last minute you
+   get exit 2 and this:
+
+```
+the last externally requested attempt was 9.128s ago and the closing period's
+retry_horizon_us is 60000000: a retry composed under this baseline can no
+longer be answered after the boundary. Wait it out, or seal with
+--force-seal (period-model ss9)
+```
+
+   The engine is untouched — check with `dsl41 query status --brief
+   --socket $S`. A refused boundary is the closing period's business and it
+   keeps running.
+4. Wait the minute out and seal again. Now you get one JSON line and exit
+   0:
+
+```json
+{"digest": "sha256:a0b4…", "kind": "seal", "next_period_id": 2, "ok": true, "period_id": 1}
+```
+
+   The ENGINE then exits with code **3** — "sealed; period 2 is ready to
+   open". That is not a failure. Under an init system it needs
+   `RestartPreventExitStatus=2 3`, or the unit restart-loops a sealed
+   engine.
+5. The impatient variant: add `--force-seal`. It commits inside the
+   horizon and writes the gate's own numbers into the seal, so the record
+   alone shows that somebody forced it:
+
+```sh
+uv run dsl41 seal --run-root $R "${NEXT[@]}" -p $P --force-seal
+grep -o '"forced_gate":[^}]*}' $R/seals/000001.json
+```
+
+**Variant B — the night is already stopped.** Same command, no engine.
+`seal` tries to take `leader.lock` itself; nothing holds it, so this
+process becomes the leader for exactly one boundary — it replays the
+journal, reconciles what it finds, and performs the same cutoff a live
+engine would. You see a sentence instead of JSON:
+
+```
+sealed period 1 at sha256:a0b4…; period 2 is ready to open
+open it with `dsl41 run --resume --run-root <run>/engine <new estate files>`, …
+```
+
+Which mode you get is decided by the LOCK and never by a flag. There is no
+`--offline`: an engine that holds `leader.lock` IS a live engine, and a
+flag would let you assert something the estate can prove.
+
+*Why.* A boundary is a RECORD, not a directory (`docs/period-model.md`
+§6, §7). The cutoff freezes admission at one instant T, drains every
+command already admitted to its durable decision, admits every scheduler
+tick due at or before T, and only then writes three things in order: the
+seal sidecar, the `seal` record, and the lineage head. Anything that fails
+before the sidecar leaves the period open and correct — which is what exit
+2 means. The retry horizon (§9) is the soft gate: a command you sent
+seconds ago can still be retried under the closing baseline, and once
+period 2 opens that retry is refused as stale. Sixty seconds is the
+default and it is a `RuntimeProfile` field, pinned in the period's own
+manifest so an audit can re-derive the gate later.
+
+## 16. Open period 2 — what crossed, and what did not
+
+Goal: see that the night's state survived the boundary.
+
+1. Open the next period in place. It is an ordinary resume of the same run
+   root:
+
+```sh
+uv run dsl41 run --resume --run-root $R examples/nightbank/estate/small/*.jil -p $P
+```
+
+2. Ask the new period for the old period's state:
+
+```sh
+dsl41 query global --socket $S -N RECON_APAC     # still CLEAN
+dsl41 query status --socket $S --job OPS_B       # still "on_hold": true
+dsl41 query status --socket $S --job AMER_MKT_FX_C   # still SUCCESS (run 2, if you reran it in exercise 4)
+```
+
+3. Note what MOVED. Every answer now carries a different `baseline_id` —
+   period 2's, derived at the boundary. An `--expect` you composed against
+   a revision you read before the seal still holds, because the revisions
+   themselves crossed verbatim; a whole COMMAND composed under the old
+   baseline does not, and is refused as stale.
+4. Note the trap. An armed latch (flag `A` in `query status --brief`)
+   crosses too. If you held a box in step 1 of exercise 15 and its tick
+   landed while it was held, your `OFF_HOLD` in period 2 fires that run at
+   once — which is the whole point of a hold, and a surprise if you
+   expected the new period to start clean. To NOT have it, disarm before
+   the seal, with a journaled command.
+
+*Why.* Runtime globals, operator holds, `last_end_at`, armed latches,
+every box's `ran_members` and every `run_number` cross the boundary,
+because the boundary is a record and not a new directory
+(`docs/period-model.md` §3.3). What does not cross is the catalog and the
+launch options — those ARE the new period. The old
+`deployment-runbook.md` §6 sentence "latches die with the old baseline" is
+true only of the fresh-run-root cycle and is corrected there.
+
+## 17. The morning after — audit, verify, the attested row
+
+Goal: turn last night into evidence somebody can check without it.
+
+1. Re-derive the closed period from its own inputs:
+
+```sh
+uv run dsl41 audit --run-root $R
+```
+
+```
+period 1 attested: sha256:b720… (seal sha256:a0b4…, chain through 1)
+```
+
+2. Check the checkpoint on its own:
+
+```sh
+uv run dsl41 verify --run-root $R
+```
+
+```
+<run>/engine/seals/000001.audit.json verifies: seal sha256:a0b4…, chain
+through period 1, produced by dsl41 0.9.0
+```
+
+3. Find the attested row. It lives in the anchor, and the shortest way to
+   read it is the footer of a retention survey (exercise 21):
+
+```sh
+uv run dsl41 estate prune --run-root $R --dry-run | tail -1
+# … estate <uuid>, period 2, attested [1]
+```
+
+4. Run `audit` twice. The second run returns the same checkpoint and
+   changes nothing; it is idempotent by design, and it also finishes the
+   anchor row if a crash left it outstanding.
+5. Try `audit` while an engine leads the root and the row cannot be set.
+   The message says the checkpoint IS written and durable, and only the
+   anchor row is outstanding — re-run it when the lock is free.
+
+*Why.* `audit` and `verify` answer two different questions and the
+difference matters (`docs/period-model.md` §1.3). `audit` REBUILDS the
+seal from five things — the opening seal, the period's whole WAL, its
+immutable spool, the two period manifests, and the root's SENTINEL —
+and refuses if what it rebuilds differs from what is on disk. The
+sentinel is what lets audit rederive the request's `source`: on an
+adopted root `adopted_from` is set and must agree with the period-1
+segment's `catalog_hash_v1`, so keep the sentinel with the rest when
+you archive a period's evidence — without it the audit cannot say
+whether period 1 was born by adoption or by genesis. It needs all of that, so only the
+root that HOLDS the period can do it. `verify` checks an attestation: its
+own digest, its binding to the seal it names, and the chain it claims.
+That is what a rolled root can do with an imported pair, and it is why
+producing a checkpoint requires the one below it while consuming one
+accepts it alone. Attesting is also what unlocks retention: until a period
+is attested, its whole spool is floored, because that spool is what
+`audit` reads.
+
+## 18. Adopt a night from before the boundary era
+
+Goal: bring a run root written by an older build into a lineage.
+
+A root from before the periodized layout has a `header` journal and a
+`manifest/` directory. It no longer resumes.
+
+1. Try to resume one and read the refusal:
+
+```sh
+uv run dsl41 run --resume --run-root <legacy>/engine examples/nightbank/estate/small/*.jil -p $P
+```
+
+```
+<legacy>/engine/journal.jsonl: a legacy `header` journal is not resumed in
+place -- it is adopted, which fences it, translates it into
+`wal/000001.jsonl` and seals period 1 in one transaction. Run `dsl41 estate
+adopt <legacy>/engine --next <estate files>...` (period-model ss11)
+```
+
+2. Adopt it. Adoption IS a seal, so it takes `--next` like one:
+
+```sh
+uv run dsl41 estate adopt <legacy>/engine "${NEXT[@]}" -p $P --claimed-actor you@host
+```
+
+```
+sealed period 1 at sha256:ddb2…; period 2 is ready to open
+```
+
+3. Look at what it left. `journal.jsonl` is now a one-line sentinel naming
+   `legacy/journal.jsonl`; the old log is still there, under that name,
+   hard-linked and untouched; the records are translated into
+   `wal/000001.jsonl`; `seals/000001.json` closes period 1.
+4. Audit it like any other period — `dsl41 audit --run-root <legacy>/engine`.
+   The seal says `"source": "adopt"`, and audit DERIVES that rather than
+   believing it.
+5. Adoption refuses a night that is not drained: a live wrapper, a live
+   file watch, anything pending in the old outbox, or any admitted command
+   without a durable decision. Each is a refusal and not a repair — start
+   the old engine, let it settle, stop it, and retry.
+
+*Why.* The order is the whole argument (`docs/period-model.md` §11).
+Readiness for the next estate runs FIRST, over a reconstruction of the old
+state, so a candidate that could never open refuses while nothing has
+changed. The fence comes second: the old journal is hard-linked aside and
+the sentinel is renamed over its name, so there is no instant at which
+`journal.jsonl` is absent and an old binary could start a second estate in
+that directory. Authority comes third, and only then. A re-run after any
+crash continues from where it stopped and never mints a second estate id.
+
+## 19. Roll to a fresh run root
+
+Goal: open the next period in a NEW directory, so the old one can be
+archived. This is optional hygiene, not a second kind of boundary.
+
+1. Seal (exercise 15). Then try the roll before attesting, and read the
+   refusal:
+
+```sh
+uv run dsl41 run --open-from $R.anchor --run-root <run>/engine-p2 \
+    examples/nightbank/estate/small/*.jil -p $P
+```
+
+```
+<run>/engine/seals/000001.audit.json: period 1 is not attested -- `dsl41
+audit` produces the checkpoint (period-model ss1.3)
+```
+
+   Nothing was written at all — the target directory does not even
+   exist. Check it: the roll's preflight runs before anything is
+   created, so a refused roll leaves no residue to clean up.
+2. Attest, then roll for real:
+
+```sh
+uv run dsl41 audit --run-root $R
+uv run dsl41 run --open-from $R.anchor --run-root <run>/engine-p2 \
+    examples/nightbank/estate/small/*.jil -p $P
+```
+
+   The new root comes up serving period 2. It holds an imported
+   `seals/000001.json` and `seals/000001.audit.json`, its own
+   `wal/000002.jsonl`, and a sentinel naming the claim that created it.
+   Ctrl-C it when you have looked around; the checks below read files.
+3. Prove what the new root can and cannot do:
+
+```sh
+uv run dsl41 verify --run-root <run>/engine-p2 --period 1   # passes
+uv run dsl41 audit  --run-root <run>/engine-p2 --estate-anchor $R.anchor --period 1
+```
+
+```
+<run>/engine.anchor/anchor.json: period 1 lives in <run>/engine, not
+<run>/engine-p2 -- this attestation was produced in another estate's root
+(period-model ss1.3)
+```
+
+4. LINEAGE-FENCED operations on the new root — resuming it, sealing it,
+   rolling it again, setting its attested rows — need the lineage's
+   anchor, which still lives beside the FIRST root. (`verify` above
+   needed no anchor: it reads the artifact alone.) Leave the flag off
+   and the refusal says so before anything else does:
+
+```sh
+uv run dsl41 run --resume --run-root <run>/engine-p2 \
+    examples/nightbank/estate/small/*.jil -p $P
+```
+
+```
+<run>/engine-p2.anchor: this lineage has no anchor -- ...
+```
+
+   The corrected command names the original:
+
+```sh
+uv run dsl41 run --resume --run-root <run>/engine-p2 --estate-anchor $R.anchor \
+    examples/nightbank/estate/small/*.jil -p $P
+```
+
+*Why.* A roll leaves the closing period's WAL, spool and manifests behind
+in the old root, so the new root can never re-derive period 1 — it holds
+none of period 1's inputs. What it imports instead is the attestation, and
+requiring that BEFORE the roll is what stops an operator importing a seal
+nobody can verify (`docs/period-model.md` §1.3). The refusal also protects
+the other direction: a roll while any job is still live is refused
+outright, because a supervisor is one per run root and a new-root engine
+cannot reach the old root's work.
+
+## 20. Reclaim after a crashed roll
+
+Goal: unblock a lineage whose successor claim points at a root that is
+gone. This is the one verb here that can FORK a lineage. Read the whole
+exercise before you type it.
+
+1. Simulate the crash: start the roll of exercise 19 into a directory on
+   removable storage, kill it after it has claimed, and take the storage
+   away. The lineage head is now `claimed(<gone>)`.
+2. Try to roll into a fresh directory instead:
+
+```sh
+uv run dsl41 run --open-from $R.anchor --run-root <run>/engine-p2b \
+    examples/nightbank/estate/small/*.jil -p $P
+```
+
+```
+the head is claimed and this root does not hold it: a physical roll opens the
+period a committed seal left unopened, or resumes its own claim, and nothing
+else (period-model ss7)
+```
+
+3. Prove the claimant is gone. Nothing in the tool can do this for you: a
+   claimed head whose target is unreachable looks exactly like one whose
+   target is merely paused, and if the claimant is alive this next command
+   makes two roots open one period and run the same job twice.
+4. Then, and only then:
+
+```sh
+uv run dsl41 estate reclaim --estate-anchor $R.anchor --force \
+    --claimed-actor duty-manager@bank
+```
+
+```
+reclaimed claim sha256:2e41… from /mnt/gone/engine-p2: period 2 may be opened again,
+and the next opening `segment` will record that duty-manager@bank said so
+```
+
+5. Roll again into the fresh directory. It works now. Read the record it
+   left:
+
+```sh
+head -1 <run>/engine-p2b/wal/000002.jsonl | grep -o '"reclaimed":[^}]*}'
+```
+
+6. Try `reclaim --force` on a head that is `open` or `closed`. It refuses:
+   the verb moves a CLAIM and nothing else, because forcing a live period
+   is not break-glass, it is vandalism.
+
+*Why.* Exactly one root may succeed a seal, or the lineage forks and the
+same `(job, run_number)` runs twice — the safety property the whole fence
+exists to hold (`docs/period-model.md` §1.3). A claim is durable and
+idempotent on its own id, so an ordinary crash of the claimant is
+recovered by re-running the same roll. What cannot be recovered
+automatically is a claimant that will never come back, and that judgement
+is the operator's. The estate does not stop you; it records that you did
+it, twice — in the anchor and in the next `segment` record — with the
+actor you claimed to be.
+
+## 21. Retention — what may go, and what may never
+
+Goal: stop the run root growing, without deleting anything the model needs.
+
+1. Survey first. `--dry-run` deletes nothing and gives every artifact a
+   verdict:
+
+```sh
+uv run dsl41 estate prune --run-root $R --dry-run
+```
+
+```
+would remove (0):
+prunable, outside the flags given (0):
+held (floor lifted, PR-Q3/E20 open) (4):
+  held      wal    <run>/engine/wal/000001.jsonl  [period 1, PR-Q3] attested, …
+floored (the model refuses) (8):
+  floored   sentinel  <run>/engine/journal.jsonl  [estate, ss1.1] the one file …
+  floored   anchor    <run>/engine.anchor/anchor.json  [estate, ss1.3] …
+…
+would remove 0 artifact(s), 0 byte(s); 8 floored, 4 held -- estate <uuid>,
+period 2, attested [1]
+```
+
+2. Run it with no class named and read the refusal:
+
+```
+nothing selected: name at least one class (--tombstones, --quarantine) or ask
+for --dry-run. A prune verb with a default set would be a retention policy,
+and that is the operator's (period-model ss12)
+```
+
+3. Attest (exercise 17), then delete the class you chose:
+
+```sh
+uv run dsl41 estate prune --run-root $R --tombstones
+```
+
+   `--keep-runs N` and `--older-than-days D` narrow it further, and both
+   are your policy rather than the model's. Neither bites on a training
+   night: `--keep-runs` keeps the N newest spools OF EACH JOB, and no
+   nightbank job has run more than a handful of times, so
+   `--keep-runs 20` here would keep everything and delete nothing.
+
+4. See what it cost. The run's ROW survives in `dsl41 runs` — that row is
+   the journal's, not the spool's — and its TIMINGS do not: `clock_source`
+   flips from `spool` to `journal`, because start and end came from
+   `spawn.json` and `status.json` and those are now absent.
+
+```sh
+uv run dsl41 runs $R --job AMER_MKT_FX_C
+```
+
+5. Try to prune an unattested period's spool. You cannot: it is floored,
+   and no flag reaches it.
+
+*Why.* Three verdicts, not two (`docs/period-model.md` §12).
+**floored** is the model's refusal — everything reachable from the
+lineage head: the sentinel, the anchor and any live claim, the sidecars
+this period opened from and will close with, the current and next
+manifests, their catalog bundles, the newest attestation, and the WAL and
+spool of any period that has not been attested. **prunable** is licensed
+by name: a SPAWN tombstone whose period is attested and whose run has
+ended, and a quarantined candidate. **held** is everything between — a
+closed period's WAL, an older manifest, a superseded checkpoint. The floor
+has lifted on those and one question is still open (may a seal-only
+archive stand in for pruned inputs?), so nothing deletes them yet.
+Pruning a tombstone only goes one way: after it, that period can no longer
+be re-derived from its own evidence, and its attestation is the proof that
+stands for it.
+
 ## Day-shift extras
 
 - Browser UI: `dsl41 serve --socket $S` (then `dsl41 ui` per session).

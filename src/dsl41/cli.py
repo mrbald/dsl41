@@ -1375,6 +1375,18 @@ async def _serve_run(
     from dsl41.runner_ledger import acquire_run_root
 
     clock = RealClock()
+    if open_from is not None:
+        # the roll's READ-ONLY preflight runs before anything is created:
+        # a refusal -- the unattested-closing refusal above all -- must
+        # write nothing, not even the target directory and its lock. Every
+        # gate re-runs authoritatively inside the roll under the locks.
+        from dsl41.estate import check_roll_ready
+
+        try:
+            check_roll_ready(run_root, Path(open_from))
+        except EngineError as exc:
+            typer.echo(str(exc), err=True)
+            return 2
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this

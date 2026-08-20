@@ -26,9 +26,29 @@ uv run examples/nightbank/bin/nightbank up --headless --no-incidents
 uv run examples/nightbank/bin/nightbank up --estate bank   # ~520 jobs
 ```
 
-Then work through [RUNBOOK.md](RUNBOOK.md) — twelve operator exercises
+Then work through [RUNBOOK.md](RUNBOOK.md) — twenty-one operator exercises
 (stalled feeds, hung jobs, reruns, QUE_WAIT, the approval gate, restart
-drills). The default night does not complete without you.
+drills, and the boundary era below). The default night does not complete
+without you.
+
+## The boundary era
+
+A night is one period of an estate that outlives it. RUNBOOK exercises 15
+to 21 are the verbs for the rest of that life: seal the night at an instant
+you choose and open the next period in place, keeping every global, hold
+and latch; attest the closed period so it can be archived; adopt a run root
+written before the period model existed; roll to a fresh directory; free a
+lineage a crashed roll left claimed; and prune what retention licenses —
+and only that.
+
+Each exercise shows a refusal before the command that works, because the
+refusals are what an operator has to recognize. Sealing too soon after a
+command is refused by the retry horizon. Rolling before the closing period
+is attested is refused by name. A prune with no class named deletes nothing
+and says why.
+
+`tests/test_nightbank_boundary.py` drives the same flows on this estate in
+CI, so the exercises are checked rather than remembered.
 
 ## Layout
 
@@ -43,12 +63,22 @@ drills). The default night does not complete without you.
 - `estate/<profile>/incidents.conf` — each estate's scripted failures
   (bank targets are per-asset-class names that only exist there).
 
-Each night is one directory under `runs/` (data, logs, properties, WAL
-journal, manifest, control socket). Delete old ones freely — but stop
-the night first (Ctrl-C, and for `--detached` runs drain the supervisor:
-`dsl41 supervise shutdown --run-root <run>/engine`); deleting a LIVE
-run pulls the socket, journal, and supervisor state out from under
-running processes.
+Each night is one directory under `runs/` (data, logs, properties, control
+socket). The engine's own run root is `<run>/engine` inside it: the
+`journal.jsonl` sentinel, one `wal/<period>.jsonl` per period, `seals/`,
+`periods/` and `catalogs/`. The LINEAGE anchor is `<run>/engine.anchor`, a
+sibling of the run root and never inside it, so archiving the run root
+never carries the fence away with it. A night whose lineage anchor still names its root is a RETAINED
+estate: retire it through the boundary-era verbs (`dsl41 audit`, then
+`verify`, roll forward or `estate prune` the licensed classes —
+RUNBOOK exercises 16, 19 and 21), never by raw deletion, which would
+remove the sentinel, WAL, seals and spool the lineage still reaches
+(period-model §12). A training night whose anchor is gone with it — the
+whole `runs/<night>` directory, anchor included — may be deleted as a
+unit once stopped (Ctrl-C, and for `--detached` runs drain the
+supervisor first: `dsl41 supervise shutdown --run-root <run>/engine`);
+deleting a LIVE run pulls the socket, journal, and supervisor state out
+from under running processes.
 
 ## Notes
 

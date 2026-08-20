@@ -1977,13 +1977,24 @@ def test_pr30_the_gate_reads_a_real_wal_not_a_synthetic_one(tmp_path: Path) -> N
 
 
 def test_pr50_run_history_reads_the_estate_after_a_boundary(tmp_path: Path) -> None:
-    """`dsl41 runs` over a root that has crossed a boundary.
+    """PR-50's manifest half: `dsl41 runs` over a root that has crossed a
+    boundary reads the ACTIVE period's manifest.
 
     Every artifact under `periods/` is addressed by the period number, so a
     reader that defaulted to period 1 after a seal would open period 1's
     manifest beside period 2's records and refuse the whole root as
     inconsistent -- the tool would break on exactly the estates the
-    boundary exists for."""
+    boundary exists for.
+
+    PR-50's other half -- history SPANS the boundary, and a run stays under
+    the period that dispatched it -- cannot be held here: this tier's
+    adapter is a `FakeAdapter`, only a real adapter writes the `dispatch`
+    record a leaf row is built from, and a fixture that produces no rows
+    can say nothing about which rows survive. It is
+    `test_pr50_run_history_spans_a_boundary` in tests/test_run_history.py,
+    over real subprocesses. `assert isinstance(rows, list)` stood here
+    instead, and it is what let a reader that opened the ACTIVE segment
+    alone -- answering with an EMPTY table after every seal -- ship."""
     from dsl41.runner_history import read_run_root, stored_input_paths
 
     run_root = tmp_path / "run"
@@ -2000,7 +2011,7 @@ def test_pr50_run_history_reads_the_estate_after_a_boundary(tmp_path: Path) -> N
 
     assert stored_input_paths(run_root)  # C2's bundle, not C1's
     rows = read_run_root(run_root)  # refuses nothing: this is period 2's root
-    assert isinstance(rows, list)
+    assert rows == []  # and nothing was dispatched: no adapter ever wrote one
     manifest = read_period_manifest(run_root, 2)
     assert manifest is not None
     assert read_journal(run_root)[0]["catalog_hash"] == manifest.catalog_hash

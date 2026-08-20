@@ -6284,3 +6284,195 @@
   class the operator did not select, moved inside a selected tree after
   planning, refuses instead of riding along. The estate-wide allow-set
   is gone.
+- DL-136 the boundary era becomes operable, and one reader stops losing a
+  period (2026-08-20; period-model ss7, ss8, ss9, ss11, ss11a, ss12 and
+  ss13's PR-50, built as U9). DL-133, DL-134 and DL-135 built the boundary,
+  its verbs and its floors, each pinned by unit tests over two-job
+  fixtures. Nothing had ever driven them over an ESTATE, and nothing told
+  an operator how to run one.
+  (1) **The training estate gets the boundary, as exercises and as
+  scenarios.** `examples/nightbank/RUNBOOK.md` grows exercises 15-21 --
+  seal the night live and offline, open period 2 in place and see what
+  crossed, the morning-after `audit`/`verify`/attested row, adopt a night
+  from before the period model, roll to a fresh run root, reclaim a
+  crashed roll, prune. `tests/test_nightbank_boundary.py` drives the same
+  flows over the small profile's 81 jobs and asserts only what an operator
+  sees: an exit code, a line of output, a file, an answer over the control
+  socket. Nothing there re-tests a unit; what is new is the estate.
+  (2) **One flagship runs real processes, and the rest do not.** Three
+  claims cannot be made from inside one interpreter -- the engine exits
+  code 3 when its period is sealed, a refused seal leaves it serving, and
+  period 2 answers `dsl41 query` with period 1's globals, holds and
+  statuses. Those are one test with real subprocesses. The other five run
+  in process against the same estate and cost about a second each.
+  (3) **The night under test is the night the operator starts.** The
+  launcher's setup is now `prepare_night`, and both `nightbank up` and the
+  fixtures call it. A second copy of it in a test file would drift from
+  the one an operator runs, and a sandbox whose test night is not the real
+  night is worth nothing.
+  (4) **The retry horizon is where the scenarios and the fixtures part,
+  and the rule is the spec's.** ss9's gate counts EXTERNALLY requested
+  attempts, which `boundary.externally_requested_attempts` defines as
+  `expect is not None`. `dsl41 sendevent` carries one and `Engine.inject`
+  does not, so the flagship meets the gate -- it asserts the refusal, then
+  commits with `--force-seal` and checks `forced_gate` on the seal -- while
+  the in-process scenarios seal unforced and honestly. No test invents a
+  short horizon: `retry_horizon_us` is a `RuntimeProfile` field with no CLI
+  flag, so a root carrying a small one is a root no operator could make.
+  (5) **A defect in a landed unit, found by the scenarios and fixed at the
+  root: `dsl41 runs` lost every period it had ever printed.**
+  `read_run_root` opened the ACTIVE WAL segment, which was right for as
+  long as a run root held one journal and became silently wrong the moment
+  DL-133 made the WAL many files. After the first seal the table came back
+  EMPTY -- exit 0, no rows, no warning -- on exactly the estates the
+  boundary exists for. It is the same defect DL-135 closed for the
+  subscriber's backfill, in the other reader, and PR-50 ("run history spans
+  a boundary keeping `start_period`") is the obligation it broke.
+  `read_run_root` now walks `period.estate_segments` and folds each period
+  on its OWN inputs -- its manifest, its bundle, its replay -- and
+  concatenates, which is the same fold `read_run_roots` already performs
+  per root. A period is a baseline, so DL-113 decision 4's segmentation
+  break lands across periods exactly as it already did across roots.
+  (5a) **The replay is SEEDED, because a period does not start from
+  nothing.** Reading the segments was half of it. `replay_trace` built its
+  `Oracle` empty, so a later period derived revisions and run numbers the
+  log never recorded and `replay_inputs` refused -- "replay diverged at
+  index N" -- on the first admitted input that touched a carried entity.
+  That was already true of the ACTIVE segment before this unit, so `dsl41
+  runs` refused any real estate the moment its second period touched a job
+  from its first; nothing had ever run it there. The fix is the one audit
+  already uses: seed from the rows the period opened with, and
+  `attest._carried_from_opening` became `attest.carried_from_opening` so
+  there is ONE derivation of that fact rather than a second copy in the
+  reporting tool. Run NUMBERS then continue too, which needed the fold's
+  own half: `_windows_from_entries` counted a job's runs from 1 within a
+  segment, so a box that ran in two periods would have been numbered 1
+  twice, and a leaf run carried across a boundary could not find its trace
+  window by position -- losing `started_by` and decision 2's
+  KILLJOB/`term_run_time` close fallback. Windows are now keyed by the run
+  NUMBER, from the number the period opened with.
+  (5b) **What let it ship was an assertion that could not fail.** PR-50's
+  own test asserted `isinstance(rows, list)` over a fixture whose
+  `FakeAdapter` writes no `dispatch` record and therefore produces no rows
+  at all -- a test that could never have seen the rows disappear. The fix
+  is pinned in `tests/test_run_history.py`
+  (`test_pr50_run_history_spans_a_boundary`), over real subprocesses, where
+  a leaf row exists to lose; mutation-checked (fold the newest segment only
+  and exactly that case reds). The boundary-tier test keeps the half it CAN
+  hold -- the active period's manifest is the one selected -- and says in
+  its own docstring why the other half is not there. The replacement pin
+  runs ONE job and ONE box in BOTH periods -- the leaf takes its number
+  from the `dispatch` record and could never duplicate, so the box is
+  where the carry is proved -- and each half is mutation-checked
+  separately: unseed the replay and it refuses, number the windows
+  positionally and the box rows collide.
+  (5c) **What the fix does not claim.** A run that SPANS a boundary keeps
+  its row in the period that dispatched it, with its spool timings, and its
+  STATUS stays RUNNING: the terminal input is in the NEXT segment and the
+  fold reads one segment at a time. The end time is there and the verdict
+  is not. And the cost is one replay per retained period, with `--job` and
+  `--since` filtering after the fold, so a long-lived estate pays for its
+  whole history to answer about one run. Both are stated in the function's
+  docstring where a reader meets them.
+  (6) **Deliberately not fixed here: `dsl41 journal`.** ss11 says replay
+  across periods "walks segments and switches catalogs at each `segment`
+  record", and the verb still replays one segment under one catalog. Unlike
+  run history -- whose fold is per period already, because a period is a
+  baseline -- a journal replay is one oracle over a record sequence, so
+  switching catalogs mid-stream is a change to the replay contract and a
+  unit of its own. Named here rather than fixed quietly on the way past.
+  (7) **The RUNBOOK is held to the CLI.** A renamed verb is a refactor
+  nobody thinks of as a documentation change, so
+  `test_every_dsl41_verb_the_runbook_types_exists` requires every
+  `dsl41 <verb>` the runbook types to be a command this build has -- the
+  same contract `test_runbook_job_names_exist_in_an_estate` already holds
+  the job names to.
+  (8) **One stale count corrected.** `examples/nightbank/README.md` said
+  "twelve operator exercises" over a runbook that had fourteen before this
+  unit added seven.
+  (9) **Deliberately not built: period-model ss14's B1, B2 and the rest of
+  C.** ss14 names four worked scenarios over this estate. What landed here
+  is A's carry-and-audit half and C's quiet roll, crashed claim and
+  adoption rows. B1 (a boundary committing mid-night, detached, over a live
+  command, a KILL ladder in flight, a crossing FW watch, a QUE_WAIT pair
+  and two timers due at exactly T) and B2 (the same estate refusing, one
+  change at a time) each need a detached night with live closure under
+  them, which is a unit the size of DL-133's and not an exercise. C's
+  remaining rows -- a fork attempt from a second root, an old binary
+  pointed at an adopted root, the anchor deleted under the incumbent, a
+  crash in period 1 before any seal, a lost `seal` response on both sides
+  of the record -- are pinned unit-side in `tests/test_boundary.py` and
+  `tests/test_estate.py` already; what ss14 asks for is the same rows over
+  THIS estate, and that is the same unit.
+  An adversarial self-review over the finished tree found three blockers
+  and five lesser items, all folded in. The blockers: the `dsl41 runs`
+  replay was unseeded (5a) -- found by reasoning about the code, then
+  reproduced by widening the pin; RUNBOOK exercise 21 typed `--keep-runs
+  20` and then claimed a deletion, but `--keep-runs` is per JOB and no
+  nightbank job has twenty runs, so the command it printed would have
+  deleted nothing; and `read_run_root`'s docstring said a spanning run
+  reads as open only "with the spool pruned", where the status is RUNNING
+  either way (5c). The lesser five: the runbook-verb contract read only
+  the FIRST token, so `estate adopt` passed on the strength of `estate`
+  alone; the PR-50 pin's docstring described a `job_hash` comparison the
+  body did not make; a `${NEXT[@]}` array was fenced as ```sh` where it
+  needs bash or zsh; exercise 16's "run 2" for `AMER_MKT_FX_C` holds only
+  after exercise 4's rerun; and one sentence of rhetoric left the
+  sandbox README.
+  2918 -> 2926 collected, eight new: seven in
+  `tests/test_nightbank_boundary.py` (six scenarios and the runbook-verb
+  contract) plus PR-50's real pin in `tests/test_run_history.py`; ruff,
+  mypy and arch_check clean, and the full suite green.
+  The external adversarial round found seven blockers, all folded in:
+  history reads the estate through the SAME validated stream as the
+  subscriber's backfill (DL-135's chain proofs -- a spliced foreign
+  segment refuses instead of reporting a stranger's rows; a missing
+  oldest segment stays the legitimate pruned-history gap); the period
+  manifest is held to the FULL PR-22 agreement, not one field; an
+  opening that names a seal this root cannot prove REFUSES rather than
+  replaying from an empty state (a period running only C2-added jobs
+  would otherwise return full-fidelity history from an unproved
+  opening); the roll gained a READ-ONLY preflight in the CLI, so the
+  unattested-roll refusal writes nothing at all -- not even the target
+  directory and its lock (each gate re-runs authoritatively under the
+  locks; sound early because attestation is monotone); the runbook's
+  audit recipe names the SENTINEL as the fifth input with the
+  adopted_from <-> catalog_hash_v1 agreement rule; the README routes a
+  retained estate through the boundary-era verbs instead of "delete
+  freely" (raw deletion only for a night whose anchor goes with it); and
+  the anchor-flag exercise is scoped to lineage-fenced operations with a
+  real refusal-then-corrected pair.
+  The second round found two shadows, closed: the opening PROOF runs
+  before ANY degradation branch (`_prove_opening`: a named seal must be
+  readable and be the named one, or even `records_only` rows refuse --
+  the manifest-missing path had bypassed the check); and `read_journal`
+  refuses an opening record anywhere after line 1 (I1: a segment opens a
+  FILE, and an embedded `segment` or `header` is a splice the validated
+  stream's splitter would have treated as a file boundary).
+  The third round found two, closed: the opening proof binds the
+  sidecar's whole identity -- period, estate, and a `next_period` that
+  IS this opening -- not the digest alone (a valid sidecar from another
+  estate with a rewritten link is an identity graft and refuses); and
+  the backfill's cursor containment comes from the validated opening's
+  own `first_index` (positional, never a record scan a forged `seq: 0`
+  could satisfy), with any seq below the segment's first_index refusing
+  as a record the period could not have admitted (I2).
+  The fourth round found three, closed: the opening proof compares the
+  COMPLETE next_period projection onto the record's own fields --
+  segment_no, first_index, the three content hashes, clock_domain, and
+  `closed_at == the opening's at` -- so two same-stage seals differing
+  only in cutoff or index range cannot be swapped; the segment schema
+  requires `first_index >= 1` (a forged 0 would stop the backfill's
+  positional containment at that segment and hide every older one); and
+  the identity-graft pin was reshaped onto the rolled/pruned single-
+  segment root where the opening proof is the ONLY guard -- on a
+  two-segment root the chain check fires first and the pin proved
+  nothing about the proof it named.
+  The fifth round closed the projection at its root: the compared set
+  is DERIVED -- every `next_period` model field that is also a ss2.1
+  segment field (`period.SEGMENT_FIELDS`, now public), so a field added
+  to either model is covered by default -- and the coverage is PINNED
+  per field: each shared field forged on the opening refuses, with
+  earlier gates (the seq-range invariant for first_index, I1's own
+  number rule, the sentinel's estate binding) accepted as the coverage
+  where they fire first.

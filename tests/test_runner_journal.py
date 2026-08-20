@@ -718,3 +718,59 @@ def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> Non
 
     monkeypatch.setattr(importlib.metadata, "version", no_such_distribution)
     assert dsl41_version() == "0+unknown"
+
+
+# ------------------------------------------ peer-review round-2 pin (DL-136)
+
+
+def test_an_embedded_opening_record_refuses_the_journal(tmp_path: Path) -> None:
+    """I1: one segment record per file, and it is line 1. An embedded
+    `segment` or `header` mid-file is a splice -- a reader that split the
+    validated stream on it would treat forged records as a file boundary
+    and admit an unchained period."""
+    from dsl41.canon import canonical_bytes
+
+    wal = _write_two_input_journal(tmp_path)
+    records = read_journal(wal)
+    for forged_opening in (
+        dict(records[0]),  # a byte-true copy of the real segment record
+        {"rec": "header", "baseline_id": records[0].get("baseline_id", "b"), "v": 1},
+    ):
+        spliced = [records[0], forged_opening, *records[1:]]
+        wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
+        with pytest.raises(EngineError, match="a second opening inside one is a splice"):
+            read_journal(wal)
+    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
+    assert read_journal(wal)  # restored: clean
+
+
+def test_a_forged_low_seq_never_hides_older_segments(tmp_path: Path) -> None:
+    """I2 at the backfill: cursor containment comes from the validated
+    opening's own first_index, and a record whose seq is below it refuses
+    -- a forged `seq: 0` in the newest segment would otherwise claim the
+    cursor and silently skip every older segment and its chain checks."""
+    from dsl41.canon import canonical_bytes
+    from dsl41.runner_journal import read_backfill
+
+    wal = _write_two_input_journal(tmp_path)
+    records = read_journal(wal)
+    forged = {"rec": "drop", "at": "2026-07-01T08:00:00", "kind": "TICK", "seq": 0}
+    spliced = [*records, forged]
+    # rewrite WITHOUT a seal so this stays the active segment
+    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
+    with pytest.raises(EngineError, match="below this segment's first_index"):
+        read_backfill(wal, since=0)
+
+
+def test_a_zero_first_index_refuses_the_segment(tmp_path: Path) -> None:
+    """I2: index 1 is the first index there ever is -- a forged
+    `first_index: 0` would make the backfill's positional containment
+    stop at that segment and hide every older one."""
+    from dsl41.canon import canonical_bytes
+
+    wal = _write_two_input_journal(tmp_path)
+    records = read_journal(wal)
+    records[0] = {**records[0], "first_index": 0}
+    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
+    with pytest.raises(EngineError, match="first_index"):
+        read_journal(wal)

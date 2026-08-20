@@ -112,6 +112,47 @@ def live_run() -> Path:
     raise typer.Exit(2)
 
 
+def prepare_night(
+    run_dir: Path,
+    estate: str,
+    *,
+    anchor_utc: datetime,
+    stagger_mins: int = 3,
+    incidents: bool = True,
+) -> dict[str, str]:
+    """Everything `up` does before it execs the engine: the night's
+    directories, its properties file and its profile.
+
+    Split out of `up` so a test can build a night the launcher's own way.
+    A second copy of this in a test file would drift from the one an
+    operator runs, and the whole point of the sandbox is that the two are
+    the same night."""
+    for sub in ("data/incoming", "data/pending", "data/current", "data/state", "logs"):
+        (run_dir / sub).mkdir(parents=True, exist_ok=True)
+    os.chmod(run_dir, 0o700)  # run artifacts are owner-only (journal/logs/data)
+
+    props = compute_properties(run_dir, anchor_utc, stagger_mins)
+    write_kv(run_dir / "night.properties", props)
+    os.chmod(run_dir / "night.properties", 0o600)
+
+    env_lines = {
+        "NIGHTBANK_DATA": props["NB_DATA"],
+        "NIGHTBANK_STATE": f"{props['NB_DATA']}/state",
+        "NIGHTBANK_SOCKET": str(run_dir / "engine" / "control.sock"),
+        "PATH": f"{BASE / 'bin'}:{Path(sys.executable).parent}:$PATH",
+    }
+    if incidents:
+        # per-estate incidents: the bank estate's targets are per-asset-class
+        # names that only exist there (each estate ships its own file)
+        shutil.copy(BASE / "estate" / estate / "incidents.conf", run_dir / "incidents.conf")
+        env_lines["NIGHTBANK_INCIDENTS"] = str(run_dir / "incidents.conf")
+    (run_dir / "profile.env").write_text(
+        "".join(f'export {k}="{v}"\n' for k, v in env_lines.items())
+    )
+    os.chmod(run_dir / "profile.env", 0o600)
+    return props
+
+
 @app.command()
 def up(
     estate: Estate = typer.Option(Estate.small, "--estate"),
@@ -128,31 +169,17 @@ def up(
     if run_dir.exists():
         typer.echo(f"nightbank: {run_dir} already exists (a run root is one night)", err=True)
         raise typer.Exit(2)
-    for sub in ("data/incoming", "data/pending", "data/current", "data/state", "logs"):
-        (run_dir / sub).mkdir(parents=True)
-    os.chmod(run_dir, 0o700)  # run artifacts are owner-only (journal/logs/data)
     engine_dir = run_dir / "engine"
 
     anchor = datetime.now(UTC) + timedelta(minutes=lead_mins)
-    props = compute_properties(run_dir, anchor, stagger_mins)
-    write_kv(run_dir / "night.properties", props)
-    os.chmod(run_dir / "night.properties", 0o600)
-
-    env_lines = {
-        "NIGHTBANK_DATA": props["NB_DATA"],
-        "NIGHTBANK_STATE": f"{props['NB_DATA']}/state",
-        "NIGHTBANK_SOCKET": str(engine_dir / "control.sock"),
-        "PATH": f"{BASE / 'bin'}:{Path(sys.executable).parent}:$PATH",
-    }
-    if not no_incidents:
-        # per-estate incidents: the bank estate's targets are per-asset-class
-        # names that only exist there (each estate ships its own file)
-        shutil.copy(BASE / "estate" / estate.value / "incidents.conf", run_dir / "incidents.conf")
-        env_lines["NIGHTBANK_INCIDENTS"] = str(run_dir / "incidents.conf")
-    (run_dir / "profile.env").write_text(
-        "".join(f'export {k}="{v}"\n' for k, v in env_lines.items())
+    props = prepare_night(
+        run_dir,
+        estate.value,
+        anchor_utc=anchor,
+        stagger_mins=stagger_mins,
+        incidents=not no_incidents,
     )
-    os.chmod(run_dir / "profile.env", 0o600)
+    socket_path = str(engine_dir / "control.sock")
 
     argv = [
         sys.executable, "-m", "dsl41", "run",
@@ -170,9 +197,9 @@ def up(
         f"anchors (UTC {ceil_minute(anchor):%H:%M} + {stagger_mins}min stagger): "
         + " ".join(f"{r}={props[f'EOD_{r}']}" for r in REGION_TZ)
     )
-    typer.echo(f"socket: {env_lines['NIGHTBANK_SOCKET']}")
-    typer.echo(f"second terminal:  dsl41 ui --socket {env_lines['NIGHTBANK_SOCKET']}")
-    typer.echo(f"                  dsl41 query status --socket {env_lines['NIGHTBANK_SOCKET']}")
+    typer.echo(f"socket: {socket_path}")
+    typer.echo(f"second terminal:  dsl41 ui --socket {socket_path}")
+    typer.echo(f"                  dsl41 query status --socket {socket_path}")
     typer.echo("exec: " + " ".join(argv))
     os.execv(sys.executable, argv)
 

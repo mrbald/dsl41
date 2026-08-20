@@ -1139,12 +1139,20 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
     "state_machine_version": _int,
     "catalog_hash_v1": lambda v: v is None or isinstance(v, str),
     "clock_domain": _str,
-    "first_index": _int,
+    # >= 1: index 1 is the first index there ever is, and a forged 0 would
+    # make the backfill's positional containment stop at this segment and
+    # hide every older one (I2)
+    "first_index": lambda v: _int(v) and v >= 1,
     "opens_from_seal": lambda v: v is None or _opens_from_seal_ok(v),
     "reclaimed": lambda v: v is None or isinstance(v, dict),
     "trust_unaudited": lambda v: v is None or isinstance(v, dict),
     "at": _str,
 }
+
+
+#: the ss2.1 segment field names, public for readers that must compare a
+#: seal's projection against a record field-for-field (DL-136)
+SEGMENT_FIELDS = frozenset(_SEGMENT_SCHEMA)
 
 
 def check_segment_record(record: Mapping[str, Any]) -> None:
