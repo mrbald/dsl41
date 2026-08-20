@@ -66,10 +66,10 @@ from dsl41.boundary import (
     open_next_period,
     open_wal,
     read_seal,
-    seal_record,
     validate_staged,
     check_record_names_sidecar,
     seal_path,
+    staged_next_from,
 )
 from dsl41.canon import canonical_bytes
 from dsl41.classify import Baseline, carried_from_oracle
@@ -113,7 +113,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof, next_epoch
 from dsl41.runner_supervisor import PROTOCOL_VERSION as SUPERVISOR_PROTOCOL_VERSION
 from dsl41.runner_procid import durable_write, mkdir_durable, verify_alive
-from dsl41.seal import open_from_seal, OpenedRuntime, Seal, StagedNextPeriod
+from dsl41.seal import open_from_seal, OpenedRuntime, Seal
 
 
 @dataclass(frozen=True)
@@ -214,7 +214,7 @@ def roll_into_root(
     claim_root(new_root, estate_id=seal.estate_id, claim_id=claim_id)
     crash_point("after_roll_sentinel")
     anchor.acquire()
-    committed = CommittedBoundary(seal=seal, record=seal_record(seal), manifest=manifest)
+    committed = CommittedBoundary(seal=seal, manifest=manifest)
 
     def imported() -> CatalogIR:
         # ss7 puts the import BETWEEN the claim and the segment, and it is
@@ -574,9 +574,9 @@ def _adopt_under_lock(
     estate_id = existing.estate_id if existing is not None else str(uuid.uuid4())
     baseline_id = str(header["baseline_id"])
     epoch = next_epoch(records)
-    staged = StagedNextPeriod(
-        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
-    )
+    # the OWNER's projection (DL-137): the same derivation staging itself
+    # performs, via the shared helper rather than a reflection rebuild
+    staged = staged_next_from(staged_manifest)
     request = SealRequest.for_adoption(
         estate_id=estate_id,
         baseline_id=baseline_id,
@@ -1111,7 +1111,7 @@ def translate(
             catalog_hash_v1=str(header["catalog_hash"]),
         )
     ]
-    lines.extend(fold_legacy(legacy_root, records))
+    lines.extend(translate_legacy_records(legacy_root, records))
     open_wal(legacy_root, GENESIS_SEGMENT_NO)
     # `durable_write` creates its temp 0600 and renames, so the segment is
     # owner-only from the instant it exists -- the WAL carries globals and
@@ -1120,7 +1120,9 @@ def translate(
     return path
 
 
-def fold_legacy(legacy_root: Path, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def translate_legacy_records(
+    legacy_root: Path, records: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     """The record-by-record translation, as a pure function of the legacy
     log plus the spool.
 

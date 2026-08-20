@@ -155,7 +155,7 @@ def _unfold_decisions(run_root: Path) -> None:
 
     That dialect is what a LEGACY root really holds -- DL-118 is younger
     than every root adoption exists for -- and it is the only shape that
-    reaches `fold_legacy`'s `result` branch. `legacy_twin` downgrades the
+    reaches `translate_legacy_records`'s `result` branch. `legacy_twin` downgrades the
     header and the inputs and leaves the body native, so a fixture built
     on it alone would leave the fold untested on the one verb that writes
     a durable period-1 WAL."""
@@ -1126,7 +1126,7 @@ def test_pr48_a_fold_refuses_a_spawn_it_cannot_identify(tmp_path: Path) -> None:
     refuse an estate for a run that never existed. One with any other
     outcome is a run the fold cannot name, and inventing an id for it
     would be a guess in a durable record."""
-    from dsl41.estate import fold_legacy
+    from dsl41.estate import translate_legacy_records
 
     records = [
         {"rec": "result", "index": 4, "request_id": "r", "decision": "applied", "revisions": {}},
@@ -1143,13 +1143,13 @@ def test_pr48_a_fold_refuses_a_spawn_it_cannot_identify(tmp_path: Path) -> None:
         },
     ]
     retired = [*records, {"rec": "effect_result", "effect_id": "e-4", "state": "retired"}]
-    [decision] = [r for r in fold_legacy(tmp_path, retired) if r["rec"] == "decision"]
+    [decision] = [r for r in translate_legacy_records(tmp_path, retired) if r["rec"] == "decision"]
     assert decision["legacy_batch"] is True
     assert decision["effects"][0]["run_id"] is None
 
     applied = [*records, {"rec": "effect_result", "effect_id": "e-4", "state": "applied"}]
     with pytest.raises(EngineError, match="never reached an adapter"):
-        fold_legacy(tmp_path, applied)
+        translate_legacy_records(tmp_path, applied)
 
 
 def test_pr48_a_c2_that_fails_readiness_refuses_before_the_fence(tmp_path: Path) -> None:

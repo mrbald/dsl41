@@ -97,6 +97,7 @@ from dsl41.period import (
     wal_path,
     write_period_manifest,
     write_sentinel,
+    SEGMENT_FIELDS,
 )
 from dsl41.oracle_state import JobRuntime
 from dsl41.runner_admission import DecisionIndex, RequestCollision
@@ -105,7 +106,14 @@ from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.runner_journal import Journal, read_journal
 from dsl41.runner_ledger import LeaderLock, Proof
-from dsl41.runner_procid import current_boot_id, durable_write, mkdir_durable, proc_start_token
+from dsl41.runner_procid import (
+    current_boot_id,
+    durable_write,
+    fsync_dir,
+    fsync_file,
+    mkdir_durable,
+    proc_start_token,
+)
 from dsl41.seal import (
     LIVE_STATUS,
     BoundRun,
@@ -1136,26 +1144,8 @@ def open_wal(run_root: Path, segment_no: int) -> Path:
     directory = run_root / "wal"
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
-    _fsync_dir(directory)
+    fsync_dir(directory)
     return wal_path(run_root, segment_no)
-
-
-def _fsync_wal(path: Path) -> None:
-    """Make an existing WAL's bytes durable before a mutation relies on
-    them. Read-only open: recovery appends nothing here."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 # -------------------------------------------------------------- staging
@@ -1176,6 +1166,17 @@ class Candidate(BaseModel):
     next_period: StagedNextPeriod
 
 
+def staged_next_from(staged_manifest: StagedManifest) -> StagedNextPeriod:
+    """`StagedManifest` -> the client-proposal half, DERIVED from the
+    model's own fields (DL-137): this projection had four spellings --
+    one hand-listed here, one derived in attest, two reflection rebuilds
+    in the CLI and adoption -- and which fields cross from launcher-pin
+    to client-proposal is one fact."""
+    return StagedNextPeriod(
+        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
+    )
+
+
 def stage_next_period(
     run_root: Path, *, staged_manifest: StagedManifest, crash_point: CrashPoint = no_crash
 ) -> StagedNextPeriod:
@@ -1192,14 +1193,7 @@ def stage_next_period(
     excluded from `stage_digest` by construction (`StagedNextPeriod`), so a
     retry that closes at a different index stages the same identity."""
     check_manifest_self_consistent(staged_manifest, "staged_manifest.json")
-    staged = StagedNextPeriod(
-        catalog_hash=staged_manifest.catalog_hash,
-        catalog_hash_version=staged_manifest.catalog_hash_version,
-        source_bundle_hash=staged_manifest.source_bundle_hash,
-        runtime_hash=staged_manifest.runtime_hash,
-        state_machine_version=staged_manifest.state_machine_version,
-        artifact_format_version=staged_manifest.artifact_format_version,
-    )
+    staged = staged_next_from(staged_manifest)
     directory = staging_dir(run_root, staged.stage_digest)
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory.parent, 0o700)
@@ -1216,8 +1210,8 @@ def stage_next_period(
         )
         + b"\n",
     )
-    _fsync_dir(directory)
-    _fsync_dir(directory.parent)
+    fsync_dir(directory)
+    fsync_dir(directory.parent)
     crash_point("after_candidate")
     return staged
 
@@ -1270,6 +1264,28 @@ def _read_artifact(path: Path, model: type[Any]) -> Any:
         raise EngineError(f"{path}: not a {model.__name__} this binary can read ({exc})") from exc
 
 
+def load_bundle_catalog(
+    run_root: Path, source_bundle_hash: str, *, permit_unknown: bool = False
+) -> CatalogIR:
+    """Any period's catalog, loaded from the immutable bundle this root
+    holds -- the ONE loader (DL-137): staging validation, audit and
+    adoption all parse the same way or `catalog_hash` v2 cannot bind
+    them. Parsed under the ORIGINAL paths `sources.json` records, because
+    the hash covers spans and a span names its file."""
+    sources: Sequence[SourceFile] = bundle_sources(run_root, source_bundle_hash)
+    try:
+        return lower_catalog(
+            [parse(source.text, file=source.path) for source in sources],
+            permit_unknown=permit_unknown,
+        )
+    except (JilParseError, LoweringError) as exc:
+        raise EngineError(
+            f"{run_root}: bundle {source_bundle_hash} does not load ({exc}):"
+            " a catalog that cannot be rebuilt from its own bundle cannot be"
+            " validated, audited or adopted (period-model ss7, ss11)"
+        ) from exc
+
+
 def load_staged_catalog(
     run_root: Path, staged: StagedManifest, *, permit_unknown: bool = False
 ) -> CatalogIR:
@@ -1282,17 +1298,9 @@ def load_staged_catalog(
     that could never hash back to the pin. That is also what lets an engine
     validate a candidate on a host where the original files do not
     exist."""
-    sources: Sequence[SourceFile] = bundle_sources(run_root, staged.source_bundle_hash)
-    try:
-        return lower_catalog(
-            [parse(source.text, file=source.path) for source in sources],
-            permit_unknown=permit_unknown,
-        )
-    except (JilParseError, LoweringError) as exc:
-        raise EngineError(
-            f"{run_root}: the staged bundle {staged.source_bundle_hash} does not load"
-            f" ({exc}): the boundary would commit an estate nothing can open"
-        ) from exc
+    return load_bundle_catalog(
+        run_root, staged.source_bundle_hash, permit_unknown=permit_unknown
+    )
 
 
 # ---------------------------------------------------------- the ss9 gate
@@ -1968,11 +1976,16 @@ class Snapshot:
 @dataclass(frozen=True)
 class CommittedBoundary:
     """A committed boundary: the three artifacts that now name each
-    other."""
+    other. `record` is DERIVED (DL-137): it is a pure function of the
+    seal, and a stored copy was a field that could go stale plus a
+    parameter three construction sites had to fill correctly."""
 
     seal: Seal
-    record: dict[str, Any]
     manifest: Manifest
+
+    @property
+    def record(self) -> dict[str, Any]:
+        return seal_record(self.seal)
 
 
 def commit_boundary(
@@ -2055,12 +2068,12 @@ def commit_boundary(
         if plan.supersedes is not None:
             _quarantine(run_root, target, plan.supersedes)
         os.rename(plan.staging, target)
-        _fsync_dir(plan.staging.parent)
-        _fsync_dir(target.parent)
+        fsync_dir(plan.staging.parent)
+        fsync_dir(target.parent)
         crash_point("after_install")
     seal_dir(run_root).mkdir(parents=True, exist_ok=True)
     os.chmod(seal_dir(run_root), 0o700)
-    _fsync_dir(run_root)  # the run root's entry for seals/ is a record too
+    fsync_dir(run_root)  # the run root's entry for seals/ is a record too
     durable_write(str(seal_path(run_root, sidecar.period_id)), sidecar.to_bytes())
     crash_point("after_sidecar")
     # ---- the point of no return. Once any of these bytes may have been
@@ -2085,7 +2098,7 @@ def commit_boundary(
             " rather than reopening a period that would append records after a seal"
             " line; recovery decides (period-model ss7, PR-28d)"
         ) from exc
-    return CommittedBoundary(seal=sidecar, record=record, manifest=committed_manifest)
+    return CommittedBoundary(seal=sidecar, manifest=committed_manifest)
 
 
 @dataclass(frozen=True)
@@ -2159,8 +2172,8 @@ def _quarantine(run_root: Path, target: Path, installed: Candidate) -> None:
         shutil.rmtree(target)  # the same bytes are already quarantined
     else:
         os.rename(target, destination)
-    _fsync_dir(destination.parent)
-    _fsync_dir(target.parent)
+    fsync_dir(destination.parent)
+    fsync_dir(target.parent)
 
 
 def hash_over_bytes(data: bytes) -> str:
@@ -2244,7 +2257,7 @@ def open_next_period(
         _check_existing_segment(path, opening, link, forced)
         # a previous opener may have died between its write and its fsync:
         # readable is not durable, and the CAS below relies on this file
-        _fsync_wal(path)
+        fsync_file(path)
         journal = Journal(
             path,
             fsync_each=opening.clock_domain == "real",
@@ -2263,7 +2276,7 @@ def open_next_period(
             opens_from_seal=link,
             reclaimed=None if forced is None else forced.model_dump(mode="json"),
         )
-        _fsync_dir(path.parent)
+        fsync_dir(path.parent)
     crash_point("after_opening_segment")
     if claim is not None:
         anchor.open_claimed(claim_id=claim.claim_id, period_id=opening.period_id, root=run_root)
@@ -2298,9 +2311,15 @@ def _check_existing_segment(
     two-candidate state I1 exists to make impossible."""
     records = read_journal(path)
     segment = records[0]
+    # the DERIVED field set (DL-137): the old hand-written five omitted
+    # the three content hashes, catalog_hash_version and
+    # state_machine_version -- strictly weaker than
+    # `check_manifest_against_segment` for the same question, by accident
+    # rather than argument
+    shared = sorted(set(type(opening).model_fields) & SEGMENT_FIELDS)
     disagreements = [
         f"{field}: segment {segment.get(field)!r} vs the boundary's {getattr(opening, field)!r}"
-        for field in ("period_id", "segment_no", "baseline_id", "first_index", "clock_domain")
+        for field in shared
         if segment.get(field) != getattr(opening, field)
     ]
     if segment.get("opens_from_seal") != dict(link):
@@ -2367,7 +2386,7 @@ def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage
         record = committed[-1]
         check_seal_record(record)
         seal = read_seal(run_root, int(record["period_id"]))
-        _refuse_disagreement(seal, record, run_root)
+        check_record_names_sidecar(seal, record, run_root)
         return Lineage(seal=seal, opens_next=True)
     link = records[0].get("opens_from_seal") if records else None
     if isinstance(link, Mapping):
@@ -2384,12 +2403,9 @@ def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage
 
 def check_record_names_sidecar(seal: Seal, record: Mapping[str, Any], run_root: Path) -> None:
     """Every duplicated field of the `seal` RECORD equals the sidecar's
-    (ss2.2/ss11). Public for audit: a rewritten record naming another
-    boundary must refuse BEFORE re-derivation attests the stored sidecar."""
-    _refuse_disagreement(seal, record, run_root)
-
-
-def _refuse_disagreement(seal: Seal, record: Mapping[str, Any], run_root: Path) -> None:
+    (ss2.2/ss11): recovery selects the sidecar by these fields, audit
+    refuses a rewritten record before re-derivation attests the stored
+    one. One name (DL-137): this was a three-symbol forwarding chain."""
     disagreements = _record_disagreements(seal, record)
     if disagreements:
         raise EngineError(
@@ -2455,7 +2471,7 @@ def act_on_head(
         # cut then removes leaves a successor whose naming seal is gone.
         # Any failure here stays fail-stopped: recovery mutates nothing it
         # has not first made durable.
-        _fsync_wal(wal_path(run_root, lineage.seal.period_id))
+        fsync_file(wal_path(run_root, lineage.seal.period_id))
         return anchor.close_period(
             estate_id=estate_id,
             period_id=lineage.seal.period_id,
@@ -2481,12 +2497,12 @@ def act_on_head(
             # same readable-vs-durable rule as the close CAS above: the
             # segment's existence justifies the head move, so the segment
             # is made durable before the head names it
-            _fsync_wal(wal_path(run_root, claim.next_period))
+            fsync_file(wal_path(run_root, claim.next_period))
             return anchor.open_claimed(
                 claim_id=claim.claim_id, period_id=claim.next_period, root=run_root
             )
         return current
     if isinstance(head, OpenHead) and wal_path(run_root, head.period_id).exists():
-        _fsync_wal(wal_path(run_root, head.period_id))  # same rule at genesis finalize
+        fsync_file(wal_path(run_root, head.period_id))  # same rule at genesis finalize
         return anchor.finalize(head.period_id)
     return current

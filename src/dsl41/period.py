@@ -68,7 +68,7 @@ from dsl41.canon import (
 )
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
-from dsl41.runner_procid import durable_write, mkdir_durable
+from dsl41.runner_procid import durable_write, fsync_dir, mkdir_durable
 
 #: every stored digest is spelled exactly this way; an address outside the
 #: grammar is not an address, and a native period must never open under one
@@ -583,6 +583,21 @@ class Sentinel(BaseModel):
     adopted_anchor: str | None = None
 
 
+def split_run_dir(name: str) -> tuple[str, int] | None:
+    """`<job>.<run_number>` -- split at the LAST dot, because a job name
+    may hold one and a run number may not. CANONICAL spelling only:
+    `b.01` aliases `b.1`, and a parser that accepted it would let a
+    directory this estate never wrote answer for a real run's evidence
+    (ss11a; DL-137). The ONE parser -- retention and the resume sweep
+    both read run directories, and two parsers is how they disagreed."""
+    job, dot, tail = name.rpartition(".")
+    if not dot or not job or not tail.isdigit():
+        return None
+    if str(int(tail)) != tail:
+        return None
+    return (job, int(tail))
+
+
 def sentinel_path(run_root: Path) -> Path:
     return run_root / SENTINEL_NAME
 
@@ -624,7 +639,7 @@ def write_sentinel(run_root: Path, sentinel: Sentinel) -> Path:
     power loss restore the previous pathname (ss11 step 3)."""
     path = sentinel_path(run_root)
     durable_write(str(path), canonical_bytes(sentinel.model_dump(mode="json")) + b"\n")
-    _fsync_dir(run_root)
+    fsync_dir(run_root)
     return path
 
 
@@ -818,8 +833,8 @@ def write_bundle(run_root: Path, sources: Sequence[SourceFile]) -> str:
         )
         shutil.rmtree(directory, ignore_errors=True)  # provably incomplete under the lock
         os.rename(staging, directory)
-        _fsync_dir(directory.parent)
-        _fsync_dir(directory.parent.parent)  # run_root's entry for catalogs/
+        fsync_dir(directory.parent)
+        fsync_dir(directory.parent.parent)  # run_root's entry for catalogs/
     finally:
         os.close(lock_fd)  # closing releases the flock
     return address
@@ -942,8 +957,8 @@ def write_period_manifest(run_root: Path, manifest: Manifest) -> Path:
     # the liturgy fsyncs the file and ITS directory; the entries for
     # periods/<N>/ and periods/ are records too, and a power loss that
     # dropped either would make this root read as legacy-missing at resume
-    _fsync_dir(directory.parent)
-    _fsync_dir(run_root)
+    fsync_dir(directory.parent)
+    fsync_dir(run_root)
     return path
 
 
@@ -1023,16 +1038,6 @@ def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> 
 
 def _write_canonical_file(path: Path, payload: Mapping[str, Any]) -> None:
     durable_write(str(path), canonical_bytes(payload))
-
-
-def _fsync_dir(path: Path) -> None:
-    """A directory entry is a record too: a rename without this is not
-    durable across a power loss."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _read_canonical_file(path: Path) -> dict[str, Any] | None:
@@ -1228,18 +1233,9 @@ def opening_at(record: Mapping[str, Any]) -> datetime:
 #: The fields a committed manifest and its segment record must agree on
 #: (PR-22). Every shared field, not a chosen few: a disagreement in any one
 #: of them means the manifest is not this segment's.
-_SHARED_FIELDS: Final[tuple[str, ...]] = (
-    "catalog_hash",
-    "catalog_hash_version",
-    "source_bundle_hash",
-    "runtime_hash",
-    "state_machine_version",
-    "period_id",
-    "baseline_id",
-    "clock_domain",
-    "segment_no",
-    "first_index",
-)
+_SHARED_FIELDS = tuple(
+    sorted(set(Manifest.model_fields) & SEGMENT_FIELDS)
+)  # DERIVED (DL-137): a field added to Manifest and the schema is checked by default
 
 
 def check_manifest_against_segment(manifest: Manifest, segment: Mapping[str, Any]) -> None:

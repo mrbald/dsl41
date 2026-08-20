@@ -42,7 +42,7 @@ carries them.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
@@ -60,6 +60,7 @@ from dsl41.boundary import (
     retry_horizon_gate,
     seal_fingerprint,
     check_record_names_sidecar,
+    load_bundle_catalog,
 )
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
@@ -70,20 +71,18 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.classify import Baseline, carried_from_oracle, classify
-from dsl41.ir import CatalogIR, LoweringError, lower_catalog
-from dsl41.ast_jil import JilParseError, parse
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows
 from dsl41.period import (
     Manifest,
     attestation_path,
-    bundle_sources,
     read_period_manifest,
     read_sentinel,
     seal_path,
     wal_path,
     check_manifest_against_segment,
     is_hash_address,
+    opening_at,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
@@ -534,14 +533,14 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
                 for entry in stored.executions
                 if entry.kind == "fw_watch"
             }
-    c1 = _catalog_from_bundle(run_root, closing.source_bundle_hash)
+    c1 = load_bundle_catalog(run_root, closing.source_bundle_hash)
     carried = carried_from_opening(run_root, opening, closing)
     oracle = Oracle(c1, carried=carried)
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=_opening_at(opening))
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(opening))
     replay = replay_inputs(
         oracle,
         records,
-        outbox=carried_outbox(_opened_runtime(run_root, opening, closing), at=_opening_at(opening)),
+        outbox=carried_outbox(_opened_runtime(run_root, opening, closing), at=opening_at(opening)),
     )
     at = replay.frontiers.at
     if at is None:
@@ -615,7 +614,7 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
         classification=classify(
             closing=Baseline(catalog=c1, profile=closing.runtime_profile),
             opening=Baseline(
-                catalog=_catalog_from_bundle(run_root, staged.source_bundle_hash),
+                catalog=load_bundle_catalog(run_root, staged.source_bundle_hash),
                 profile=opening_manifest.runtime_profile,
             ),
             carried=post_barrier,
@@ -638,30 +637,9 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
 _STAGED_FROM_RECORD: Final[tuple[str, ...]] = tuple(StagedNextPeriod.model_fields)
 
 
-def _opening_at(opening: Mapping[str, Any]) -> datetime:
-    return datetime.fromisoformat(str(opening["at"]))
-
-
 def _opens_from(opening: Mapping[str, Any]) -> str | None:
     link = opening.get("opens_from_seal")
     return str(link["digest"]) if isinstance(link, Mapping) else None
-
-
-def _catalog_from_bundle(run_root: Path, source_bundle_hash: str) -> CatalogIR:
-    """C1 or C2, loaded from the immutable bundle this root holds.
-
-    Parsed under the ORIGINAL paths `sources.json` records, because
-    `catalog_hash` v2 covers spans and a span names its file: parsing the
-    stored copies would produce a catalog that could never hash back to
-    the period's own pin."""
-    sources: Sequence[Any] = bundle_sources(run_root, source_bundle_hash)
-    try:
-        return lower_catalog([parse(source.text, file=source.path) for source in sources])
-    except (JilParseError, LoweringError) as exc:
-        raise EngineError(
-            f"{run_root}: bundle {source_bundle_hash} does not load ({exc}): audit"
-            " cannot re-derive a period whose inputs it cannot parse (period-model ss11)"
-        ) from exc
 
 
 def _opening_manifest(run_root: Path, next_period_id: int) -> Manifest:
@@ -695,18 +673,7 @@ def carried_from_opening(
     opened = _opened_runtime(run_root, opening, closing)
     if opened is None:
         return None
-    state = opened.state
-    return CarriedRows(
-        jobs=dict(state.jobs),
-        globals_=dict(state.globals),
-        hosts=opened.host_rows,
-        timers=state.timers,
-        timer_seq=state.timer_seq,
-        consumed=dict(state.consumed),
-        enqueue_counter=state.enqueue_counter,
-        period_id=opened.next_period.period_id,
-        now=state.now,
-    )
+    return opened.carried_rows  # the ONE derivation (seal.py, DL-137)
 
 
 def _opened_runtime(run_root: Path, opening: Mapping[str, Any], closing: Manifest) -> Any:

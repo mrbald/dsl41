@@ -2389,7 +2389,7 @@ def test_recovery_fsyncs_the_closing_wal_before_the_cas(tmp_path: Path, monkeypa
     def broken(path: Path) -> None:
         raise OSError(f"fsync of {path} failed")
 
-    monkeypatch.setattr(boundary_mod, "_fsync_wal", broken)
+    monkeypatch.setattr(boundary_mod, "fsync_file", broken)
     with pytest.raises(OSError, match="fsync of"):
         _resume(run_root, C2_JIL)
     stored = EstateAnchor(default_anchor_dir(run_root)).read()
@@ -2437,14 +2437,14 @@ def test_the_run_root_is_fsynced_when_the_first_boundary_creates_seals(
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
     request = _request(engine, _stage(run_root, C2_JIL))
-    real = boundary_mod._fsync_dir
+    real = boundary_mod.fsync_dir
     fsynced: list[Path] = []
 
     def recording(path: Path) -> None:
         fsynced.append(path)
         real(path)
 
-    monkeypatch.setattr(boundary_mod, "_fsync_dir", recording)
+    monkeypatch.setattr(boundary_mod, "fsync_dir", recording)
     asyncio.run(_seal(engine, request))
     monkeypatch.undo()
     _close(engine)

@@ -1724,3 +1724,43 @@ def test_the_schedulers_compile_time_inputs_are_read_only() -> None:
         scheduler.default_tz = "Europe/Zurich"  # type: ignore[misc]
     scheduler.tz_aliases["x"] = "y"  # a copy: the compile-time inputs are unmoved
     assert scheduler.tz_aliases == {}
+
+
+# --------------------------------------------------- arch-review pins (DL-137)
+
+
+def test_the_resume_sweep_rejects_a_noncanonical_run_directory(tmp_path: Path) -> None:
+    """DL-137: `runs/b.01` aliases `b.1`, and the resume sweep's old inline
+    parser accepted it -- sorted-first, it could answer the ss7 ladder for
+    a run this estate never wrote. One parser now (period.split_run_dir),
+    and it refuses the spelling."""
+    from dsl41.period import split_run_dir
+
+    assert split_run_dir("b.1") == ("b", 1)
+    assert split_run_dir("a.b.12") == ("a.b", 12)
+    assert split_run_dir("b.01") is None  # non-canonical: never a run
+    assert split_run_dir("b.") is None and split_run_dir(".1") is None
+
+
+def test_a_bad_machine_policy_is_a_refusal_on_every_verb(tmp_path: Path) -> None:
+    """DL-137: `--machine-policy bogus` was a clean exit-2 on `run` and an
+    uncaught ValidationError (exit 1, documented as an estate failure) on
+    `seal` and `estate adopt`. One guard now, in `_next_profile`."""
+    from typer.testing import CliRunner
+
+    from dsl41.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "seal",
+            "--run-root",
+            str(tmp_path / "nowhere"),
+            "--next",
+            str(tmp_path / "nowhere.jil"),
+            "--next-machine-policy",
+            "bogus",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "expected strict|local-eligible" in result.output

@@ -6476,3 +6476,93 @@
   earlier gates (the seq-range invariant for first_index, I1's own
   number rule, the sentinel's estate binding) accepted as the coverage
   where they fire first.
+
+- DL-137 the review after the programme: what ten units of adversarial
+  hardening left behind (2026-08-21; the DL-75 architecture review over
+  the U6b-U9 tree, run by three parallel readers with the arch-review
+  lens; 29 size advisories left to the script, this entry is the half a
+  script cannot see).
+  THREE DEFECTS found and fixed with pins. (1) The resume sweep parsed
+  run directories with an inline `rpartition` that accepted `b.01` as
+  run 1 -- sorted-first, a directory this estate never wrote could
+  answer the ss7 ladder for a real run's fate; retention's canonical
+  parser was promoted to `period.split_run_dir` and both readers use it.
+  (2) `--machine-policy bogus` was a clean exit-2 refusal on `run` and
+  an uncaught ValidationError (exit 1, documented as an estate failure)
+  on `seal` and `estate adopt`; the guard now lives in `_next_profile`,
+  which all three routes call. (3) `_check_existing_segment` compared a
+  hand-written FIVE fields where `check_manifest_against_segment`
+  compares ten for the same question -- weaker by accident; the set is
+  now derived (`model_fields & SEGMENT_FIELDS`), like every other
+  projection after this entry.
+  ACTED, the cheap-deletion slice: ONE `OpenedRuntime.carried_rows`
+  derivation (the engine, the auditor and run history had three; the
+  docstring's "one derivation" promise is now structural); the third
+  uuid4 grammar copy in seal.py deleted (runner_effects' predicate was
+  already imported; the Tier-1 copy keeps DL-42's licence, and a new pin
+  asserts the two `.by_run_id` spellings agree across that boundary);
+  `attest._opening_at` deleted for `period.opening_at`; the
+  `check_record_names_sidecar` three-symbol forwarding chain collapsed
+  to one name; `period._SHARED_FIELDS` derived instead of hand-listed;
+  `plan_retention`'s anchor default computed once; the CLI's read-header
+  check extracted from two verbatim copies; the `StagedManifest ->
+  StagedNextPeriod` projection unified as `boundary.staged_next_from`
+  (four spellings: one hand-listed, one derived, two reflection
+  rebuilds); `CommittedBoundary.record` is a property (a stored pure
+  function of the seal was a field that could go stale); ONE
+  `load_bundle_catalog` (staging validation and audit parsed the same
+  way in two bodies); `fsync_dir`/`fsync_file` promoted to
+  runner_procid (five spellings of one liturgy step; every dsl41-tier
+  module now imports them, and the durability primitive no longer lives
+  in the execution tier); `estate.fold_legacy` renamed
+  `translate_legacy_records` ("fold" named two unrelated acts, against
+  the project's own stated rule); the resume-time `_require_adapters`
+  guard made unconditional (its condition was a dead fork of the
+  docstring's rule since DL-134).
+  DEFERRED, each its own future slice: the cli.py split (the verb-body
+  moves land first -- `_wire_from_profile` to runner_startup,
+  `_drive_boundary`, `_stage_period`, `_closed_periods` to their owning
+  modules -- then a five-module split by domain is mechanical; the 19
+  spellings of "EngineError means exit 2", the `_live_seal` copy of
+  `_mutate`'s DL-92 ladder and the four spellings of the seals-filename
+  rule consolidate as part of it); `_serve_run` wiring adapters bare
+  while the profile pins the windows (latent divergence -- the values
+  coincide today and no `run` flag reaches them yet; wiring through
+  `_wire_from_profile` belongs with that move); a typed LIST-row model
+  parsed inside SupervisorClient (four decoders, one strict);
+  runner_history's lenient second decoder of `decision.effects`
+  (whether history should REFUSE like `read_outbox` or degrade is a
+  judgement, recorded, not snuck); `run_until_quiescent`'s three
+  chained-negation booleans folded into one `_next_work` choice (sits on
+  the bisimulation pins; own slice, own test argument); one
+  `check_record(record, rec, schema, cite)` for the seal/segment record
+  liturgies; a shared `disagreements()` shape for the seven comparison
+  dialects; a shared ss3.2 `from_bytes` ingress for Seal and
+  Attestation.
+  DECLINED, so the next review does not re-find them: collapsing
+  `StagedManifest`/`Manifest` into `StagedNextPeriod`/
+  `CommittedNextPeriod` (measured: Manifest == CommittedNextPeriod +
+  runtime_profile -- but the pair-of-pairs exists because seal.py may
+  not import period.py's owner, the who-may-say-it split is the PR-05c
+  refusal mechanism, and a deep rework saving one concept fails the
+  review's own ratio); `OpenedRuntime` holding its `Seal` instead of
+  seven copied fields (closed_at -> opened_at is a semantic re-frame,
+  not a copy); renaming `globals_`/`digest_over`/the three `_naive_utc`
+  meanings (churn in frozen modules for a grep convenience).
+  LOAD-BEARING, named so this review is usable: the Tier-0/Tier-1
+  stdlib re-implementations (DL-42's licence, import-boundary tested);
+  the five TOCTOU re-checks over one piece of evidence in the resume
+  ladder; the Engine's four input doors (ss0's trust boundary made
+  structural); the two-transport pairs (SupervisorConn/Client,
+  roundtrip/ControlClient); `read_backfill`'s chain proofs beside
+  `select_seal` (a concatenation and a selection are different
+  questions); the staged/committed model split as a concept; baseline
+  and claim ids derived rather than read (the anti-forgery property);
+  `Reclaimed` copied into the segment (the one place a copy is the
+  requirement); `validate_boundary` re-running the classifier (an
+  enforced rule, not a tautology); the `Head` discriminated union; the
+  `floored`/`held`/`prunable` transcription of ss12's own list; and
+  every citation comment.
+  2934 -> 2937 collected (the parser pin, the machine-policy pin and
+  the tier-boundary equality pin); ruff, mypy and arch_check clean; the
+  review stamped arch-review/2026-08-21.

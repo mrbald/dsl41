@@ -67,6 +67,30 @@ def mkdir_durable(path: str) -> None:
         _sync(os.path.dirname(probe) or ".")
 
 
+def fsync_dir(path: "str | os.PathLike[str]") -> None:
+    """Fsync a directory: a create, rename or unlink is a directory-entry
+    write, and without this it is not durable across a power loss. The
+    ONE spelling (DL-137) -- five modules each had their own; the Tier-0/1
+    copies (runner_wrapper, runner_supervisor) stay by DL-42's licence."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_file(path: "str | os.PathLike[str]") -> None:
+    """Make an EXISTING file's bytes durable before a mutation relies on
+    them: recovery reads prove readable, not durable, and a CAS over a
+    line a power cut then removes leaves a successor whose naming record
+    is gone. Read-only open -- the caller appends nothing here."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def durable_write(path: str, data: bytes) -> None:
     """The DL-41a durability liturgy: same-dir temp file, fsync(file),
     rename, fsync(directory). Requires a local filesystem."""

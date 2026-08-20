@@ -82,6 +82,7 @@ from dsl41.period import (
     wal_path,
     wal_segments,
     write_period_manifest,
+    split_run_dir,
 )
 from dsl41.runner_journal import (
     Journal,
@@ -611,8 +612,11 @@ async def _resume_under_lock(
         settle_seconds = 5.0  # a legacy root: the shipped defaults
     if grace_seconds is None:
         grace_seconds = 10.0
-    if manifest is not None:
-        _require_adapters(catalog, adapters, "resume")
+    # unconditional (DL-137): the guard's docstring always said "run at
+    # genesis and at resume", and since DL-134 a manifest-less root never
+    # reaches this line anyway (legacy refuses to adopt, pruned refuses
+    # above) -- the condition was a dead fork of the stated rule
+    _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
     domain = "virtual" if clock.virtual else "real"
     if opening.get("clock_domain") != domain:
@@ -808,7 +812,7 @@ def _open_from_seal(
     return open_next_period(
         run_root=run_root,
         anchor=anchor,
-        committed=CommittedBoundary(seal=seal, record=seal_record(seal), manifest=manifest),
+        committed=CommittedBoundary(seal=seal, manifest=manifest),
         catalog=catalog,
         lock=fence,
     )
@@ -840,23 +844,11 @@ def _reopened(
 
 
 def _carried_rows(opened: OpenedRuntime) -> CarriedRows:
-    """The sidecar's carried half, in the owner's own types (ss7 phase 3).
-
-    Translated HERE, at the seam, because the artifact tier imports the
-    classifier and the classifier imports the interpreter -- so the
-    interpreter never learns what a sidecar is."""
-    state = opened.state
-    return CarriedRows(
-        jobs=dict(state.jobs),
-        globals_=dict(state.globals),
-        hosts=opened.host_rows,
-        timers=state.timers,
-        timer_seq=state.timer_seq,
-        consumed=dict(state.consumed),
-        enqueue_counter=state.enqueue_counter,
-        period_id=opened.next_period.period_id,
-        now=state.now,
-    )
+    """The sidecar's carried half -- `OpenedRuntime.carried_rows`, the ONE
+    derivation (DL-137): a carried field added to `CarriedRows` is spelled
+    once, or the engine and the auditor open the same period holding
+    different state."""
+    return opened.carried_rows
 
 
 async def _reconcile(
@@ -898,9 +890,13 @@ async def _reconcile(
     runs_dir = engine.run_root / "runs"
     if runs_dir.is_dir():
         for entry in sorted(runs_dir.iterdir()):
-            job, dot, num = entry.name.rpartition(".")
-            if entry.is_dir() and dot and num.isdigit():
-                candidates.setdefault((job, int(num)), entry)
+            run = split_run_dir(entry.name)
+            if entry.is_dir() and run is not None:
+                # the CANONICAL parser (DL-137): the inline rpartition it
+                # replaces accepted `b.01` as run 1, and setdefault over the
+                # sorted listing then let a directory this estate never
+                # wrote answer the ss7 ladder for a real run's fate
+                candidates.setdefault(run, entry)
     # ...and what the HOST says it is running (S6c). ss7 reconciles every
     # execution host, not every local directory: the sweep below concludes
     # "never spawned" from absence here, and absence that only means "the

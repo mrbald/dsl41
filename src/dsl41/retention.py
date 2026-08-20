@@ -67,6 +67,7 @@ from dsl41.boundary import (
     check_record_names_sidecar,
     check_seal_record,
 )
+from dsl41.runner_procid import fsync_dir
 from dsl41.runner_effects import RUN_ID_RE
 from dsl41.period import (
     SENTINEL_NAME,
@@ -78,6 +79,7 @@ from dsl41.period import (
     seal_path,
     wal_path,
     wal_segments,
+    split_run_dir,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal
@@ -225,8 +227,8 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
     # first observed, so an original moved into a prunable tree during
     # the scan KEEPS its pinned identity and the removal walk refuses it
     # -- a pin taken after the scan would pin whatever replaced it instead
-    early_anchor = Path(anchor_dir) if anchor_dir is not None else default_anchor_dir(run_root)
-    observed = _snapshot_idents(run_root, early_anchor)
+    anchor_dir = Path(anchor_dir) if anchor_dir is not None else default_anchor_dir(run_root)
+    observed = _snapshot_idents(run_root, anchor_dir)
     sentinel = read_sentinel(run_root)
     if sentinel is None:
         raise EngineError(
@@ -234,7 +236,6 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
             " model, and a legacy root joins one through `dsl41 estate adopt`"
             " (period-model ss1.1)"
         )
-    anchor_dir = Path(anchor_dir) if anchor_dir is not None else default_anchor_dir(run_root)
     stored = EstateAnchor(anchor_dir).read()
     if stored is None:
         raise EngineError(
@@ -1236,17 +1237,7 @@ def _not_a_spool(entry: Path, run: tuple[str, int] | None) -> str | None:
 
 
 def _split_run_dir(name: str) -> tuple[str, int] | None:
-    """`<job>.<run_number>` -- split at the LAST dot, because a job name
-    may hold one and a run number may not."""
-    job, dot, tail = name.rpartition(".")
-    if not dot or not job or not tail.isdigit():
-        return None
-    if str(int(tail)) != tail:
-        # `b.01` aliases `b.1`: a non-canonical spelling would let a
-        # second directory shadow a protected run's evidence while the
-        # planner assigns it the shadowed run's verdict
-        return None
-    return (job, int(tail))
+    return split_run_dir(name)  # one parser (period.py, DL-137)
 
 
 # ------------------------------------------------------------- the verb
@@ -1569,8 +1560,4 @@ def _fsync_parent(path: Path) -> None:
     as done while a power cut can bring the entry back -- and for a
     tombstone pair that resurrection is the half that authorizes a
     spawn."""
-    fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    fsync_dir(path.parent)

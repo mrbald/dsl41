@@ -40,6 +40,7 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from dsl41.runner import Engine
     from dsl41.runner_adapters import JobAdapter, SupervisorClient
     from dsl41.runner_ledger import LeaderLock
+    from dsl41.seal import StagedNextPeriod
     from dsl41.runner_scheduler import Scheduler
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
@@ -1856,10 +1857,10 @@ def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
     from dsl41.runner_control import read_for, revision_in
 
     response = _control_roundtrip(socket_path, read_for(key))
-    baseline, epoch = response.get("baseline_id"), response.get("epoch")
-    if not isinstance(baseline, str) or not isinstance(epoch, int):
-        typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
+    header = _read_header_of(response)
+    if header is None:
         raise typer.Exit(2)
+    baseline, epoch = header
     return baseline, epoch, revision_in(response, key)
 
 
@@ -2292,6 +2293,12 @@ def _next_profile(
     it describes is the one about to open."""
     from dsl41.period import runtime_profile_from_cli
 
+    if machine_policy not in ("strict", "local-eligible"):
+        # the same guard `run`/`rehearse` apply: without it a bad flag
+        # surfaces as an uncaught ValidationError and exit 1 -- documented
+        # as "the estate failed while running", which it never did (DL-137)
+        typer.echo(f"--machine-policy {machine_policy!r}: expected strict|local-eligible", err=True)
+        raise typer.Exit(2)
     tz_aliases = _load_tz_aliases(timezone_map)
     _check_base_tz(timezone, tz_aliases)
     return runtime_profile_from_cli(
@@ -2310,7 +2317,7 @@ def _stage_next(
     profile: "RuntimeProfile",
     permit_unknown: bool,
     properties: "list[Path] | None",
-) -> "tuple[StagedManifest, CatalogIR]":
+) -> "tuple[StagedNextPeriod, StagedManifest, CatalogIR]":
     """ss7's staging, both modes: the immutable bundle, then
     `staged_manifest.json` and `candidate.json` under
     `periods/.staging/<stage_digest>/`.
@@ -2322,8 +2329,19 @@ def _stage_next(
 
     catalog, parsed, _ = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     staged_manifest = _stage_period(run_root, parsed, catalog, profile)
-    stage_next_period(run_root, staged_manifest=staged_manifest)
-    return staged_manifest, catalog
+    staged = stage_next_period(run_root, staged_manifest=staged_manifest)
+    return staged, staged_manifest, catalog
+
+
+def _read_header_of(response: dict) -> "tuple[str, int] | None":
+    """The ss6 read header off one control answer, or None after printing
+    the refusal -- the ONE check (DL-137): two verbatim copies differed
+    only in how they exited."""
+    baseline, epoch = response.get("baseline_id"), response.get("epoch")
+    if not isinstance(baseline, str) or not isinstance(epoch, int):
+        typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
+        return None
+    return baseline, epoch
 
 
 @app.command()
@@ -2488,15 +2506,15 @@ def _live_seal(
     except ControlClientError as exc:
         typer.echo(f"{socket_path}: {exc}", err=True)
         return 2
-    baseline, epoch = header.get("baseline_id"), header.get("epoch")
-    if not isinstance(baseline, str) or not isinstance(epoch, int):
-        typer.echo(str(header.get("error", "the engine answered no read header")), err=True)
+    parsed_header = _read_header_of(header)
+    if parsed_header is None:
         return 2
-    staged_manifest, _ = _stage_next(run_root, next_files, profile, permit_unknown, properties)
-    from dsl41.seal import StagedNextPeriod
-
-    staged = StagedNextPeriod(
-        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
+    baseline, epoch = parsed_header
+    # `staged` is the OWNER's projection (stage_next_period's return,
+    # DL-137) -- the reflection rebuild it replaces was the third spelling
+    # of which fields cross from launcher-pin to client-proposal
+    staged, staged_manifest, _ = _stage_next(
+        run_root, next_files, profile, permit_unknown, properties
     )
     request = {
         "cmd": "seal",
@@ -2560,7 +2578,6 @@ async def _offline_seal(
     from dsl41.runner_history import active_period_id
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run
-    from dsl41.seal import StagedNextPeriod
 
     try:
         pinned = read_period_manifest(run_root, active_period_id(run_root))
@@ -2575,9 +2592,8 @@ async def _offline_seal(
             err=True,
         )
         return 2
-    staged_manifest, _ = _stage_next(run_root, next_files, profile, permit_unknown, properties)
-    staged = StagedNextPeriod(
-        **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
+    staged, staged_manifest, _ = _stage_next(
+        run_root, next_files, profile, permit_unknown, properties
     )
     wiring = None
     try:
@@ -3094,7 +3110,7 @@ async def _adopt(
         # readiness needs C2 STAGED under the legacy root: phase 1 validates
         # exactly the staged bytes the digest names, in adoption exactly as
         # in a live seal (ss8's readiness is identical in all three modes)
-        staged_manifest, _ = _stage_next(
+        _, staged_manifest, _ = _stage_next(
             legacy_root, next_files, next_profile, permit_unknown, properties
         )
         adoption = adopt_legacy_root(

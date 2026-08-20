@@ -55,7 +55,6 @@ artifact.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Annotated, Any, Final, Literal
@@ -82,7 +81,7 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.classify import Classification, Verdict
-from dsl41.oracle_state import Event, GlobalRuntime, HostRuntime, HostState, JobRuntime
+from dsl41.oracle_state import CarriedRows, Event, GlobalRuntime, HostRuntime, HostState, JobRuntime
 from dsl41.period import (
     CATALOG_HASH_VERSION,
     Manifest,
@@ -104,12 +103,6 @@ def _current_recipe(value: int) -> int:
 
 
 _CURRENT_RECIPE = AfterValidator(_current_recipe)
-
-
-#: period 1's baseline is minted uuid4 (ss1.2); every later one is derived
-_UUID_RE: Final = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-)
 
 
 def _naive_utc(value: datetime) -> datetime:
@@ -734,7 +727,7 @@ class Seal(BaseModel):
                     " whatever force_seal says (ss3.1)"
                 )
         if self.period_id == 1:
-            if not _UUID_RE.fullmatch(self.baseline_id):
+            if not is_valid_run_id(self.baseline_id):
                 raise ValueError(
                     f"baseline_id {self.baseline_id!r}: period 1's baseline is the"
                     " minted uuid4 (ss1.2)"
@@ -1330,6 +1323,26 @@ class OpenedRuntime(BaseModel):
         """The carried hosts as rows an engine can install, with the two
         ss3.3 exclusions null."""
         return {host_id: row.to_row() for host_id, row in self.state.hosts.items()}
+
+    @property
+    def carried_rows(self) -> "CarriedRows":
+        """The sidecar's carried half in the interpreter's own types --
+        ONE derivation (DL-137), so the engine, the auditor and run
+        history cannot open the same period holding different state. The
+        translation lives here, at the seam, because the interpreter
+        never learns what a sidecar is."""
+        state = self.state
+        return CarriedRows(
+            jobs=dict(state.jobs),
+            globals_=dict(state.globals),
+            hosts=self.host_rows,
+            timers=state.timers,
+            timer_seq=state.timer_seq,
+            consumed=dict(state.consumed),
+            enqueue_counter=state.enqueue_counter,
+            period_id=self.next_period.period_id,
+            now=state.now,
+        )
 
 
 def open_from_seal(

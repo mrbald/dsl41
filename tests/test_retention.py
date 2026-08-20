@@ -1696,3 +1696,16 @@ def test_an_unselected_class_moved_into_a_selected_tree_survives(tmp_path: Path)
     assert any("did not license beneath this deletion" in why for _, why in report.failed)
     found = list(run_root.rglob("smuggled-quarantine/candidate.json"))
     assert found  # the unselected class survived
+
+
+# --------------------------------------------------- arch-review pin (DL-137)
+
+
+def test_the_index_dir_constants_agree_across_the_tier_boundary() -> None:
+    """DL-42 forbids the supervisor tier importing dsl41, so `.by_run_id`
+    is spelled twice by licence -- and nothing asserted the two spellings
+    were equal until now."""
+    from dsl41.retention import INDEX_DIR
+    from dsl41.runner_supervisor import _INDEX_DIR
+
+    assert INDEX_DIR == _INDEX_DIR

@@ -53,6 +53,7 @@ from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode, is_scalar_json
 from dsl41.ir import ExecSpec, FwSpec, JobIR
+from dsl41.runner_procid import fsync_dir
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_ledger import Proof
 
@@ -215,14 +216,6 @@ class FakeAdapter:
         duration_s, exit_code = entry
         await ctx.clock.sleep_until(ctx.clock.now() + timedelta(seconds=duration_s))
         return exit_code
-
-
-def fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
