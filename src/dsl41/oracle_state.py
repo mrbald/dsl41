@@ -155,6 +155,12 @@ class JobRuntime(BaseModel):
     on_noexec: bool = False
     armed: bool = False  # a scheduled tick latched at a releasable gate (Q3, DL-54)
     started_by: str | None = None  # trace cause of the most recent actual start (DL-68)
+    #: which PERIOD this run started in (period-model ss3.5, DL-132): set
+    #: beside run_number at the actual start, so a run that crosses a seal
+    #: -- CMD, FW, a SPAWN pending across periods, or a box, which has no
+    #: execution entry at all -- stays attributable to the period that
+    #: started it (PR-50). 1 for every row a pre-period build wrote.
+    start_period: int = 1
     #: SEM-10 at-most-once bookkeeping: the members already run in THIS box's
     #: current execution. Only a BOX row ever carries entries; it was the loose
     #: `_box_ran` map until DL-86 moved it onto the entity it describes.
@@ -327,6 +333,17 @@ class RuntimeState:
         self._hosts: dict[str, HostRuntime] = {}
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
+        #: which period this state machine is running (period-model ss3.5,
+        #: DL-132). PRIVATE, moved only by `open_period` -- 1 until a seal
+        #: exists to move it -- and stamped onto every row's `start_period`
+        #: at its actual start. Not per-input state: it moves exactly once
+        #: per period, at the boundary, never inside one.
+        self._period_id: int = 1
+        #: seed-versus-advance is EXPLICIT, never inferred from state:
+        #: `seed_period` is legal exactly once, before any committed input
+        self._period_seeded: bool = False
+        self._inputs_committed: int = 0
+        self._genesis_finished: bool = False
         #: DL-120: bucket key -> units PERMANENTLY spent (SEM-16 depletion,
         #: and `never`/unmet-`success` holds a terminal transition kept). The
         #: held half lives on the rows; this half belongs to no row, which is
@@ -429,6 +446,16 @@ class RuntimeState:
         allocated by `enqueue_waiter` and by nothing else."""
         return self._enqueue_counter
 
+    @property
+    def timer_seq(self) -> int:
+        """The last timer token allocated (period-model ss3.1). Read-only,
+        for `enqueue_counter`'s reason -- a token is allocated by
+        `enqueue_timer` and by nothing else -- and readable because a seal
+        carries the high-water mark: the heap can be empty while the
+        allocator stands at 41, and an opener that restarted from 0 would
+        re-issue tokens the carried firing order was written in."""
+        return self._timer_seq
+
     # ------------------------------------------------ the input transaction (DL-87)
 
     def _projection(self, key: str) -> object:
@@ -481,6 +508,7 @@ class RuntimeState:
         once. Returns the changed keys in a stable order -- S2's outbox and
         `ApplyResult` need the list, not just the effect."""
         self._in_input = False
+        self._inputs_committed += 1
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
         changed = [key for key, before in snapshots.items() if self._projection(key) != before]
@@ -564,7 +592,11 @@ class RuntimeState:
 
         A box that is itself a member does both, to two different rows."""
         self._replace(
-            job, armed=False, run_number=self.runtime(job).run_number + 1, started_by=cause
+            job,
+            armed=False,
+            run_number=self.runtime(job).run_number + 1,
+            started_by=cause,
+            start_period=self._period_id,
         )
         if box is not None:
             self._replace(box, ran_members=self.runtime(box).ran_members | {job})
@@ -717,6 +749,64 @@ class RuntimeState:
             deadman_s=deadman_s,
             last_contact=at if at is not None else (row.last_contact if row else None),
         )
+
+    @property
+    def period_id(self) -> int:
+        return self._period_id
+
+    def finish_genesis(self) -> None:
+        """Mark the constructor's own seeding as NOT-an-input for the
+        seed-versus-advance latch. Genesis seeding (catalog rows, the local
+        executor) is identical on every replay and deliberately unjournaled
+        (`runner_hosts`), so a state that has only been constructed is a
+        fresh one -- and without this, `seed_period` would refuse every
+        assembly on a store the Oracle just built.
+
+        ONE-SHOT: a second call after real inputs would launder a used
+        state back to fresh and let `seed_period` skip a live lineage --
+        the exact bypass the latch exists to close."""
+        if self._genesis_finished:
+            raise ValueError("finish_genesis twice: construction happens once")
+        if self._period_seeded:
+            raise ValueError("finish_genesis after seed_period: construction comes first")
+        self._genesis_finished = True
+        self._inputs_committed = 0
+
+    def seed_period(self, period_id: int) -> None:
+        """Set the period a FRESH state is being assembled into (period-model
+        ss3.5, DL-132): the loader's first act, before any input. Explicit,
+        never inferred -- a state whose only mutations were globals, timers
+        or host rows would look untouched to any job-row inference and let
+        a live lineage skip. Legal exactly once, and never after a
+        committed input; the seal's own I2 and lineage bounds hold the
+        seeded number to the lineage."""
+        if self._in_input:
+            raise ValueError("seed_period inside an input: assembly precedes inputs")
+        if self._period_seeded or self._inputs_committed:
+            raise ValueError(
+                "seed_period on a used state: seeding is assembly's first act, and a"
+                " live state advances through open_period alone (I2)"
+            )
+        if period_id < 1:
+            raise ValueError(f"seed_period({period_id}): periods count from 1 (I2)")
+        self._period_seeded = True
+        self._period_id = period_id
+
+    def open_period(self, period_id: int) -> None:
+        """Advance the period counter by exactly one (period-model ss3.5,
+        DL-132): the boundary's write on a LIVE state, never inside an
+        input. A skip would let `start_period` name a period no seal
+        describes, and a repeat would re-open a period that closed. A fresh
+        assembly seeds through `seed_period` instead."""
+        if self._in_input:
+            raise ValueError("open_period inside an input: the boundary is not an input")
+        if period_id != self._period_id + 1:
+            raise ValueError(
+                f"open_period({period_id}) from period {self._period_id}: periods"
+                " advance by exactly one (I2)"
+            )
+        self._period_seeded = True  # an advanced state is a used one
+        self._period_id = period_id
 
     def touch_host(self, host_id: str, at: datetime) -> None:
         """Record positive contact with a host (concurrency-model ss8, S5b).

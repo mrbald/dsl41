@@ -5311,3 +5311,133 @@
   review pass found no blocker and one leaking test -- a SEM-05 arm whose
   two cases were both false under the rule and without it -- rebuilt so
   that removing the ice branch from the interpreter reds it.
+- DL-132 the period writes itself down: one sidecar, and the two functions
+  over it (2026-08-20; period-model ss3 and ss4, built as PR-05b, PR-05c,
+  PR-07's opening half, PR-08, PR-08d, PR-10a..PR-14, PR-18a, PR-19a,
+  PR-20, PR-21, PR-22, PR-22a, PR-24a and PR-47d). `seal.py` is the
+  artifact ss3.1 shapes and the two pure functions over it: CLOSE turns a
+  runtime snapshot into a `Seal`, OPEN turns a sidecar into an
+  `OpenedRuntime`. Neither touches a clock, a socket, an adapter or a
+  disk.
+  (1) **The artifact IS the model.** Every section is a frozen
+  `extra="forbid"` model and the wire keys are the field names, so a
+  section this binary does not know is a refusal rather than a silent
+  drop. `digest` is deliberately NOT a field: it is a pure function of
+  everything else, stamped on the way out and checked on the way in, and a
+  stored copy would be a second authority an artifact could disagree with
+  itself about. No section is named `digest`, because only the top-level
+  key is stripped (PR-13).
+  (2) **A `Seal` object is always a valid seal.** Every ss7 phase-3 step-6
+  invariant that reads the artifact ALONE is a model validator rather than
+  a check inside one of the functions: with the checks in `open` alone,
+  `close` could write a sidecar nothing opens; with them in `close` alone,
+  a tampered file would pass. Two checks need a fact the artifact does not
+  carry, and both are parameters of `open_from_seal`: the naming record's
+  digest and the opening period's committed manifest. A third, ss3.5's
+  CMD-or-FW half, needs C2's catalog and therefore belongs to the loader
+  that holds one.
+  (3) **The two ss3.3 exclusions are typed, not filtered.** `SealedHost`
+  has no `last_contact` field at all and its `deadman_us` is typed `None`,
+  so carrying either is not expressible; `SealedState` also accepts live
+  `HostRuntime` rows and projects them, so a caller cannot forget the
+  projection. The exclusion test derives its expectation from
+  `HostRuntime.model_fields`, so a field added to the host row later lands
+  in the seal or reds. `start_period` (PR-50) landed on `JobRuntime` in
+  the same unit's review round: set beside `run_number` at the actual
+  start from `RuntimeState._period_id`, whose writes are exactly two
+  verbs, split explicitly rather than inferred: `seed_period` (assembly's
+  first act -- one-shot, never inside or after a committed input; the
+  constructor's replay-identical genesis seeding is discounted by a
+  one-shot `finish_genesis`) and `open_period` (a live state's advance by
+  exactly one, never inside an input); the seal bounds the stamp to
+  [1, period_id].
+  (4) **`routes` is modelled and projected.** ss3.3 makes it a row like
+  the other three, owned by `RuntimeState` and remapped by the `host`
+  cmd's `route` verb -- and neither the storage nor the verb exists.
+  Today every effect is born for one local executor, so `implicit_routes`
+  projects exactly one row whose role IS that executor's id at revision 0,
+  because no verb that could have moved it exists. The row shape is the
+  frozen one, so the unit that adds the storage changes the producer and
+  not the artifact.
+  (5) **Order is applied by the writer and REQUIRED of the reader.**
+  `close_runtime` sorts `outbox_pending` and `executions` by
+  `(index, effect_id)`; `open_from_seal` refuses a document that is out of
+  that order rather than quietly sorting it, because a reader that sorted
+  would hide a writer that never did. Timers are the same, on
+  `(due, token)`.
+  (6) Seven readings the spec left to the implementation are recorded
+  rather than hidden. `class` is the wire key for a verdict, exactly as
+  ss3.1's block spells it -- a Python keyword, so the field is `verdict`
+  under an alias. The seal carries the WHOLE authoritative timer heap, not
+  the interpreter's live subset: a fire already discards a stale entry by
+  its own rule, and dropping one at the boundary would be the engine
+  editing authoritative state on the way out. An aware datetime is
+  REFUSED, where `canon` would convert it, because the artifact compares
+  instants -- `now`, `scheduler_admitted_through` and T are one value --
+  and a mixed pair would raise a `TypeError` out of a validator instead of
+  naming the field. A committed seal never carries an R verdict, at both
+  ends: ss10.1 says the boundary does not commit while one exists. An
+  execution's `run_id` is required and held to ss11a's grammar. A seal's
+  `deadman_us` is always null and the field stays present, because ss3.2
+  requires a typed field to be present rather than absent. And ss3.2's
+  reservation sentence has two halves that land in two places: duplicate
+  buckets are REJECTED at validation, and the vector SORTS at projection,
+  because the row keeps the order it acquired in.
+  (7) The digest is checked twice, with two messages: over the document as
+  decoded, before the model is built -- so a mutation that also breaks the
+  schema is still reported as a tamper -- and then against the canonical
+  form, so a file whose own digest is right but whose bytes are not ss3.2's
+  is refused too. `next_period.baseline_id` is re-derived on every read
+  from `{estate_id, period_id, stage_digest}`, so "derived, not minted"
+  (PR-47d) is checkable by every reader and not only by `audit`. Two rules
+  the spec states and a first pass only stated back: the opening's own
+  `artifact_format_version` is checked against this binary (ss8, PR-08d) --
+  it is a staged field, so a case that moves it must re-derive the baseline
+  or it is caught by the wrong rule -- and `run_dir` is refused unless it is
+  relative to the estate root (ss3.5), because an absolute one is the
+  physical roll's silent failure and the adapter that records a run
+  directory today records an absolute path.
+  (8) Three small changes outside the module. `RuntimeState` publishes
+  `timer_seq`, on `enqueue_counter`'s rule: the seal carries the
+  allocator's high-water mark, the heap can be empty while the allocator
+  stands at 41, and an opener that restarted from 0 would re-issue tokens
+  the carried firing order was written in -- and `scripts/arch_check.py`'s
+  ownership gate gains it beside the other allocator, because a gate that
+  watched one of the two would be narrower the day after it was written
+  (PR-52). `segment_record` takes `opens_from_seal`, so the opening segment
+  keeps ONE writer and the unit above copies the two derived fields rather
+  than recomputing them; and because that field became writable,
+  `check_segment_record` now holds it to ss2.1's shape -- `{period_id,
+  digest}`, null on segment 1 and non-null on every later one, since every
+  later segment opens a period and a period opens from a seal. "Any dict"
+  would have let a segment name its seal by a key nothing reads.
+  Out of scope by construction: the cutoff barrier (ss6), the seal
+  operation (ss7's two modes, staging, the three-write liturgy, the abort),
+  ss8's preconditions, the `seal` record, the anchor and the lineage fence,
+  adoption, and every CLI verb. The fold that turns the first `watch_seq`
+  lines of a `watch.jsonl` into an `fw_watch` entry stays with the reader of
+  that evidence: an artifact module that imported the adapter tier to spell
+  the projection would invert the layering to save a rename.
+  `OpenedRuntime` holds the SEAL-derived
+  half and states the five seeding rules the loader follows; assembling a
+  `RuntimeState` from it needs an install-verbatim verb and the `routes`
+  row, both of which belong to the unit that seeds an engine -- and ss7 is
+  explicit that a pure function may not return an `Engine`.
+  2530 -> 2650 collected, 120 new, all passing with 100% branch coverage of
+  `seal.py`; ruff, mypy and arch_check clean. An adversarial review pass
+  found one blocker and eight should-fixes, all folded in: the opening's
+  `artifact_format_version` was unchecked and the test that named the rule
+  passed on a hex substring of the baseline refusal; three sweep cases
+  tripped a neighbouring rule rather than their own, so every case now
+  carries the message fragment only its own rule produces and the two
+  `next_period` cases re-derive the baseline they moved; the ghost-run
+  gate's `run_number > 0` filter, the shared-manifest field set and the
+  `run_dir` rule had no case at all. Each fix was mutation-checked --
+  neutralise the rule, and exactly its case reds. One duplicate rule was
+  removed rather than tested twice: `from_bytes` no longer re-checks what
+  `from_payload` checks. The close-side R gate was REMOVED as a duplicate
+  and then PUT BACK by review: the model refuses an R in the projected
+  MAP, but the projection is a dict build, and two verdicts for one job
+  would let a later carry overwrite an R before the model ever saw it --
+  so `close_runtime` refuses on `Classification.refused` and on duplicate
+  verdicts, on the classifier's own object.

@@ -215,7 +215,11 @@ _STATE_OWNER = "RuntimeState"
 #: DL-120 adds the capacity state, `consumed` and `enqueue_counter` (PR-52).
 #: The counter is a scalar, not a container -- which is why the gate also
 #: watches a plain rebind of these names and not only a subscript write; a
-#: number nobody can subscript was reachable by assignment alone.
+#: number nobody can subscript was reachable by assignment alone. DL-132
+#: adds `timer_seq` beside it: the seal carries the timer allocator's
+#: high-water mark exactly as it carries the waiter allocator's, and a gate
+#: that protected one of the two would be narrower the day after it was
+#: written.
 _STATE_MAPS = (
     "_jobs",
     "_globals",
@@ -223,11 +227,18 @@ _STATE_MAPS = (
     "_hosts",
     "_consumed",
     "_enqueue_counter",
+    "_timer_seq",
+    "_period_id",
+    "_period_seeded",
+    "_inputs_committed",
+    "_genesis_finished",
     "job",
     "globals_",
     "hosts",
     "consumed",
     "enqueue_counter",
+    "timer_seq",
+    "period_id",
 )
 
 

@@ -280,6 +280,8 @@ class Oracle:
         for name, value in catalog.globals_declared.items():
             self.store.set_global(name, value)
         self.store.commit_input()
+        # the constructor's seed is not an input to the seed/advance latch
+        self.store.finish_genesis()
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
         self._queue: deque[Event] = deque()

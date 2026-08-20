@@ -71,8 +71,14 @@ from dsl41.runner_procid import durable_write
 _HASH_RE: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
-def _is_hash(value: object) -> bool:
+def is_hash_address(value: object) -> bool:
+    """Whether `value` is a spelled sha256 address -- the one grammar every
+    stored digest uses. Public: the seal artifact holds its own address
+    fields to the same rule (DL-132)."""
     return isinstance(value, str) and _HASH_RE.fullmatch(value) is not None
+
+
+_is_hash = is_hash_address  # the schema tables above read the short name
 
 
 #: The recipe `catalog_hash` names, carried explicitly on every `segment`
@@ -759,6 +765,7 @@ def segment_record(
     estate_id: str,
     at: datetime,
     catalog_hash_v1: str | None = None,
+    opens_from_seal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """ss2.1's `segment`, verbatim: the first record of every segment.
 
@@ -768,7 +775,13 @@ def segment_record(
     rides on `leader`, and a patch release must not move these bytes.
     `catalog_hash_v1` is null except on an adopted period 1, where it
     carries the legacy header's hash -- a typed field rather than a
-    contradiction with a schema that forbids extras."""
+    contradiction with a schema that forbids extras.
+
+    `opens_from_seal` is null on segment 1 and `{period_id, digest}` on
+    every later segment -- `seal.open_from_seal` derives it, and `at` on an
+    opening segment IS the seal's cutoff instant rather than restart wall
+    time, which is half of what makes two openings of one seal
+    byte-identical (PR-07)."""
     return {
         "rec": "segment",
         "segment_no": manifest.segment_no,
@@ -783,14 +796,26 @@ def segment_record(
         "catalog_hash_v1": catalog_hash_v1,
         "clock_domain": manifest.clock_domain,
         "first_index": manifest.first_index,
-        # the three the boundary fills and genesis cannot: this segment
-        # opens no seal, was reclaimed from nobody and trusts no unaudited
-        # predecessor (ss1.3, ss11)
-        "opens_from_seal": None,
+        # the boundary's field, and genesis passes none -- it opens no seal
+        "opens_from_seal": dict(opens_from_seal) if opens_from_seal is not None else None,
+        # the two break-glass paths (ss1.3, ss11): null until an opener
+        # takes one, and filled by the opener that did
         "reclaimed": None,
         "trust_unaudited": None,
         "at": at.isoformat(),
     }
+
+
+def _opens_from_seal_ok(value: object) -> bool:
+    """ss2.1's `{period_id, digest}`, exactly -- the two fields recovery
+    selects the sidecar by. "Any dict" would let a segment name a seal by
+    a key nothing reads and pass every gate below it (DL-132)."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"period_id", "digest"}
+        and _int(value["period_id"])
+        and _is_hash(value["digest"])
+    )
 
 
 #: the ss2.1 segment schema: required keys and their exact-type checks.
@@ -815,7 +840,7 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
     "catalog_hash_v1": lambda v: v is None or isinstance(v, str),
     "clock_domain": _str,
     "first_index": _int,
-    "opens_from_seal": lambda v: v is None or isinstance(v, dict),
+    "opens_from_seal": lambda v: v is None or _opens_from_seal_ok(v),
     "reclaimed": lambda v: v is None or isinstance(v, dict),
     "trust_unaudited": lambda v: v is None or isinstance(v, dict),
     "at": _str,
@@ -839,6 +864,37 @@ def check_segment_record(record: Mapping[str, Any]) -> None:
             raise EngineError(f"segment record missing {key} (period-model ss2.1)")
         if not check(record[key]):
             raise EngineError(f"segment record: {key} is {record[key]!r} (period-model ss2.1)")
+    # I1 first: segment_no IS period_id (ss3.4 derives one from the other,
+    # genesis is 1/1), both positive -- a segment 1 that declared period 3
+    # would leave a null lineage link over a period that needs one
+    if record["segment_no"] < 1 or record["segment_no"] != record["period_id"]:
+        raise EngineError(
+            f"segment {record['segment_no']} declares period {record['period_id']}:"
+            " one period, one segment, same number (period-model ss2.1, I1)"
+        )
+    # ss2.1: `opens_from_seal` is null on segment 1 and non-null on every
+    # later segment -- every later segment opens a period, and a period
+    # opens from a seal. A segment that lost the link is one recovery
+    # cannot follow back to the sidecar it opened from.
+    opens = record["opens_from_seal"] is not None
+    if opens != (record["segment_no"] > 1):
+        raise EngineError(
+            f"segment {record['segment_no']} with opens_from_seal"
+            f" {record['opens_from_seal']!r}: segment 1 opens no seal and every later"
+            " segment opens one (period-model ss2.1)"
+        )
+    link = record.get("opens_from_seal")
+    if isinstance(link, Mapping):
+        named = link.get("period_id")
+        if named != record["period_id"] - 1:
+            # the lineage LINK, not just its shape: a seal is the boundary
+            # between adjacent periods, so a segment opens exactly the seal
+            # that closed its predecessor -- any other period is a graft
+            raise EngineError(
+                f"segment {record['segment_no']}: opens_from_seal names period"
+                f" {named!r} but the predecessor is {record['period_id'] - 1}"
+                " (period-model ss2.1)"
+            )
 
 
 #: The two record kinds a journal may open with: `segment` is current,

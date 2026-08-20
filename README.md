@@ -521,6 +521,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   condition truth under both catalogs answers the boundary-truth diff ("whose readiness
   flips?"). Verdicts are R (executing), A with a named assumption (latent intent) or
   carry, one per job. Pure analysis: no disk, no socket, no clock
+- src/dsl41/seal.py — the seal artifact (period-model ss3/ss4, DL-132): the typed
+  sidecar a period ends by writing — every authoritative row, the timer heap, the
+  capacity scalars, the undelivered outbox, the three execution kinds, the
+  boundary's verdicts and the opening it commits — plus the two pure functions
+  over it, `close_runtime` and `open_from_seal`. Every section is a frozen model
+  and the wire keys are its fields, so an unknown section is a refusal; `digest`
+  is derived rather than stored; the two ss3.3 exclusions (a host's
+  `last_contact` and its deadman) are absent from the SHAPE; and
+  `next_period.baseline_id` is re-derived from `{estate_id, period_id,
+  stage_digest}` on every read, never minted. The seal OPERATION — the cutoff
+  barrier, staging, the write liturgy, the record and the CLI verb — is the unit
+  above it and calls these two unchanged
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
@@ -770,6 +782,16 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   no job — the PR-37
   non-job node kinds, every ss10.3 named case with its sentence, both closure directions
   including a case where they disagree, and containment nested two deep
+- tests/test_seal_artifact.py — the seal sidecar (period-model ss3/ss4, DL-132):
+  one golden vector with EXACT bytes and an EXACT digest over a small estate that
+  exercises every ss3.2 clause, close→open→close reproducing those bytes, two
+  openings of one seal deriving byte-identical `segment` records, tamper
+  detection swept over every top-level key, the ss3.2 ingress refusals (floats,
+  duplicate keys, an unpaired surrogate, a foreign artifact version), and one
+  injected failure per load invariant — each matched on the message only its
+  own rule produces, over a sweep whose size is derived from the module's own
+  rule count, so neither a rule added without a case nor a case caught by a
+  neighbouring rule passes unnoticed
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
