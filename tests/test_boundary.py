@@ -16,6 +16,7 @@ produces.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -48,6 +49,7 @@ from dsl41.boundary import (
 )
 from dsl41.ir import CatalogIR, lower_catalog
 from dsl41.oracle_state import Event
+from dsl41.attest import audit_period
 from dsl41.period import (
     RETRY_HORIZON_S,
     RuntimeProfile,
@@ -60,6 +62,7 @@ from dsl41.period import (
     stage_manifest,
     staging_dir,
     wal_path,
+    wal_segments,
     write_bundle,
 )
 from dsl41.runner import Engine
@@ -3029,3 +3032,258 @@ def test_the_watch_fold_takes_a_positional_prefix_and_never_reads_past_it(
     )
     with pytest.raises(EngineError, match="claimed evidence does not exist"):
         read_watch_log(short_dir, prefix=3)  # an over-claim over a valid log
+
+
+# ------------------------------- ss11 the subscriber across a boundary (DL-135)
+
+
+class _Recorder:
+    """A `StreamWriter` that keeps what was written to it.
+
+    The stream is what these tests are about, so the transport is the part
+    that may be a stand-in: a subscription is driven directly and its lines
+    are read back, rather than a socket being opened and drained."""
+
+    def __init__(self) -> None:
+        self.lines: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.lines.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def records(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in b"".join(self.lines).splitlines() if line]
+
+
+def _subscribed(engine, run_root: Path, **request: Any) -> list[dict[str, Any]]:
+    """One `subscribe` exchange, backfill only: the live half needs a
+    record to arrive and these tests are about what came BEFORE."""
+    from dsl41.runner_control import ControlServer
+
+    server = ControlServer(engine, run_root / "control.sock")
+    writer = _Recorder()
+
+    async def drive() -> None:
+        task = asyncio.ensure_future(
+            server._subscribe(writer, {"cmd": "subscribe", "v": 3, **request})  # type: ignore[arg-type]
+        )
+        for _ in range(200):  # the backfill is synchronous; the live half parks
+            await asyncio.sleep(0)
+            if task.done():
+                break
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(drive())
+    return writer.records()
+
+
+def _two_periods(run_root: Path):
+    """A root with period 1 closed and period 2 open, one admitted input
+    under each -- so a cursor taken under C1 names an index in a segment
+    the appender has moved on from."""
+    engine = _genesis(run_root)
+    engine.inject(Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": "1"}))
+    asyncio.run(engine.run_until_quiescent(T0))
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+    opened = _resume(run_root, C2_JIL)
+    opened.inject(Event(at=T0, kind="SET_GLOBAL", payload={"name": "H", "value": "2"}))
+    asyncio.run(opened.run_until_quiescent(T0))
+    return opened
+
+
+def test_pr49_the_backfill_spans_segments_after_a_boundary(tmp_path: Path) -> None:
+    """DL-135: `since` cuts into the ESTATE's records, not into the active
+    segment's.
+
+    A subscriber that resumes with a cursor taken under C1 was answered
+    with C2's records alone and no sign that anything came before them --
+    the gap it was resuming to avoid. I2 makes the index estate-wide, so
+    the cursor already meant one thing across the lineage and only the
+    reader had to widen."""
+    run_root = tmp_path / "run"
+    opened = _two_periods(run_root)
+    try:
+        streamed = _subscribed(opened, run_root, since=0)
+    finally:
+        _close(opened)
+    assert streamed[0] == {"ok": True, "subscribed": True}
+    body = streamed[1:]
+    assert [r["period_id"] for r in body if r.get("rec") == "segment"] == [1, 2]
+    # both admitted inputs, each exactly once, in estate index order
+    globals_set = [r for r in body if r.get("kind") == "SET_GLOBAL"]
+    assert [r["payload"]["name"] for r in globals_set] == ["G", "H"]
+    assert [r["seq"] for r in globals_set] == sorted(r["seq"] for r in globals_set)
+    # and the seal that ends period 1 is on the stream between them
+    assert any(r.get("rec") == "seal" for r in body)
+
+
+def test_pr49_a_cursor_inside_the_closed_segment_still_cuts_positionally(
+    tmp_path: Path,
+) -> None:
+    """The counterpart: a cursor INSIDE the closed segment delivers the
+    rest of that segment and then the next one.
+
+    Without it the test above would pass on a build that ignored `since`
+    and always sent everything."""
+    run_root = tmp_path / "run"
+    opened = _two_periods(run_root)
+    try:
+        under_c1 = [
+            record["seq"]
+            for record in read_journal(wal_path(run_root, 1))
+            if record.get("kind") == "SET_GLOBAL"
+        ]
+        streamed = _subscribed(opened, run_root, since=under_c1[0])
+    finally:
+        _close(opened)
+    body = streamed[1:]
+    assert not any(r.get("gap") for r in body)
+    # the cursor's own record is not re-delivered; period 2's is
+    assert [r["payload"]["name"] for r in body if r.get("kind") == "SET_GLOBAL"] == ["H"]
+    assert [r["period_id"] for r in body if r.get("rec") == "segment"] == [2]
+
+
+def test_pr49_a_cursor_below_the_earliest_retained_record_gets_the_gap_marker(
+    tmp_path: Path,
+) -> None:
+    """ss11: a client asking for an index below the earliest retained
+    record receives `{"gap": true, "earliest_retained": <index>}`.
+
+    A physical roll is the reachable case: the new root holds the seal it
+    opened from and none of the closing period's WAL, by design, so a
+    subscriber resuming there with a C1 cursor cannot be given what it
+    asked for. Silence would read as "nothing happened between your cursor
+    and the first line you got"."""
+    from dsl41.estate import roll_into_root
+
+    root_a = tmp_path / "a"
+    engine = _genesis(root_a)
+    engine.inject(Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": "1"}))
+    asyncio.run(engine.run_until_quiescent(T0))
+    asyncio.run(_seal(engine, _request(engine, _stage(root_a, C2_JIL))))
+    _close(engine)
+    anchor_dir = default_anchor_dir(root_a)
+    audit_period(root_a, 1, anchor=EstateAnchor(anchor_dir))
+    catalog, _ = _catalog(C2_JIL)
+    root_b = tmp_path / "b"
+    roll_into_root(root_b, anchor_dir=anchor_dir, catalog_of=lambda _r, _m: catalog)
+    rolled = asyncio.run(
+        resume_run(
+            catalog,
+            root_b,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            anchor_dir=anchor_dir,
+        )
+    )
+    try:
+        assert wal_segments(root_b) == [2]  # the roll imports no earlier WAL
+        first_index = read_journal(wal_path(root_b, 2))[0]["first_index"]
+        streamed = _subscribed(rolled, root_b, since=0)
+    finally:
+        _close(rolled)
+    assert streamed[1] == {"gap": True, "earliest_retained": first_index}
+    assert [r["period_id"] for r in streamed[2:] if r.get("rec") == "segment"] == [2]
+    # the boundary is pinned from BOTH sides, one index apart: a cursor at
+    # `first_index - 1` is contiguous with what the root holds and gets no
+    # marker; one at `first_index - 2` is missing exactly one record and
+    # does. A rule off by one either way reds here
+    assert not any(r.get("gap") for r in _subscribed(rolled, root_b, since=first_index - 1))
+    assert any(r.get("gap") for r in _subscribed(rolled, root_b, since=first_index - 2))
+    # ... and a cursor below index 1 is not a gap at all: index 1 is the
+    # first there ever is, so nothing was lost below it
+    fresh = tmp_path / "c"
+    plain = _genesis(fresh)
+    try:
+        assert not any(r.get("gap") for r in _subscribed(plain, fresh, since=-1))
+    finally:
+        _close(plain)
+
+
+def test_pr49_a_cursor_inside_the_live_period_reads_one_segment(tmp_path: Path) -> None:
+    """The backfill reads BACKWARDS and stops at the first segment holding
+    a record at or below the cursor.
+
+    Everything older sits before the positional cut, so reading it would
+    be work whose whole result is discarded -- and on an estate that has
+    crossed many boundaries, discarded work on the single-writer loop. It
+    is observable: a closed segment this root could not parse at all does
+    not stop a subscriber resuming inside the live period."""
+    run_root = tmp_path / "run"
+    opened = _two_periods(run_root)
+    try:
+        under_c2 = [
+            record["seq"]
+            for record in read_journal(wal_path(run_root, 2))
+            if record.get("kind") == "SET_GLOBAL"
+        ]
+        wal_path(run_root, 1).write_bytes(b"{not a record at all\n")
+        streamed = _subscribed(opened, run_root, since=under_c2[0])
+        assert streamed[0] == {"ok": True, "subscribed": True}
+        assert not any(r.get("ok") is False for r in streamed[1:])
+        assert not any(r.get("gap") for r in streamed[1:])
+        # and the counterpart, from the same damaged root: a cursor that
+        # DOES need the older segment meets it and is refused
+        refused = _subscribed(opened, run_root, since=0)
+        assert refused[1]["ok"] is False
+    finally:
+        _close(opened)
+
+
+def test_a_foreign_file_under_wal_refuses_the_backfill_on_the_stream(tmp_path: Path) -> None:
+    """The backfill now spans segments, so it can meet a file this estate
+    did not write.
+
+    The ack has already gone by then, so the refusal goes ON THE STREAM.
+    A handler that raised here would hang the client up with no answer at
+    all, which is the one thing control-protocol ss2 says must not
+    happen."""
+    run_root = tmp_path / "run"
+    opened = _two_periods(run_root)
+    try:
+        (run_root / "wal" / "notes.txt").write_text("an operator's note\n")
+        streamed = _subscribed(opened, run_root, since=0)
+        assert streamed[0] == {"ok": True, "subscribed": True}
+        assert streamed[1]["ok"] is False and "not a segment file" in streamed[1]["error"]
+        assert len(streamed) == 2  # refused, not refused-and-then-streamed
+        # the counterpart: remove it and the same subscription works
+        (run_root / "wal" / "notes.txt").unlink()
+        assert [
+            r["period_id"]
+            for r in _subscribed(opened, run_root, since=0)[1:]
+            if r.get("rec") == "segment"
+        ] == [1, 2]
+    finally:
+        _close(opened)
+
+
+def test_a_closed_segment_with_a_torn_tail_refuses_rather_than_skipping_records(
+    tmp_path: Path,
+) -> None:
+    """`read_journal` tolerates a torn FINAL line, which is right for the
+    file an appender is still appending to and wrong for a closed one.
+
+    In a closed segment a tolerated tail is a hole in the MIDDLE of the
+    concatenation, and the subscriber would be handed a stream that skips
+    records without being told. Every segment but the last ends in a
+    `seal`, so that is what is checked."""
+    run_root = tmp_path / "run"
+    opened = _two_periods(run_root)
+    try:
+        segment = wal_path(run_root, 1)
+        intact = segment.read_bytes()
+        lines = intact.splitlines()
+        assert json.loads(lines[-1])["rec"] == "seal"
+        segment.write_bytes(b"\n".join(lines[:-1]) + b"\n" + lines[-1][:20])
+        streamed = _subscribed(opened, run_root, since=0)
+        assert streamed[1]["ok"] is False
+        assert "a backfill across it would skip records silently" in streamed[1]["error"]
+        segment.write_bytes(intact)  # the gate, not the machinery
+        assert any(r.get("rec") == "seal" for r in _subscribed(opened, run_root, since=0))
+    finally:
+        _close(opened)

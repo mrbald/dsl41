@@ -115,7 +115,7 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HOST_VERBS, HostCommand
 from dsl41.seal import StagedNextPeriod
-from dsl41.runner_journal import read_journal
+from dsl41.runner_journal import read_backfill
 from dsl41.runner_preflight import and_success_skeleton
 
 #: sendevent verbs whose payload is a single catalog job (1:1 onto EventKind)
@@ -1020,7 +1020,16 @@ class ControlServer:
         across the backfill/live seam; unsequenced dispatch/drop/decision
         records in the race window are at-least-once (runner.py module
         docstring). The seam keys on `seq` and never on a record name, so
-        DL-118's `decision` inherited `result`'s guarantee unchanged."""
+        DL-118's `decision` inherited `result`'s guarantee unchanged.
+
+        The backfill spans SEGMENTS since DL-135. A cursor taken before a
+        boundary names an index in an earlier segment, and reading only
+        the active one answered such a subscriber with the records after
+        the boundary and no sign that anything came before them. I2 makes
+        the index estate-wide, so the cursor still means one thing across
+        the whole lineage and only the reader had to widen. What this root
+        no longer retains cannot be sent, and that case is the GAP MARKER
+        (period-model ss11) rather than a short stream."""
         lost = self._lineage_lost()  # a subscription response is a read too (PR-03)
         if lost is not None:
             await self._send(writer, lost)
@@ -1043,7 +1052,33 @@ class ControlServer:
             max_seq = since if since is not None else self.engine.frontiers.committed_index
             await self._send(writer, {"ok": True, "subscribed": True})
             if since is not None:
-                records = read_journal(journal.path)
+                try:
+                    backfill = read_backfill(journal.path, since=since)
+                except EngineError as exc:
+                    # the read now spans segments, so it can meet a file
+                    # this one did not write. The ack has gone, so the
+                    # refusal goes on the STREAM -- a handler that raised
+                    # here would hang the client up with no answer at all.
+                    # PR-03 holds for THIS response too: the read yielded,
+                    # and a displaced leader must answer the refusal a
+                    # displaced leader owes, not narrate a lineage it no
+                    # longer leads
+                    lost = self._lineage_lost()
+                    await self._send(writer, lost or {"ok": False, "error": str(exc)})
+                    return
+                records = backfill.records
+                if backfill.gap_from is not None:
+                    # ss11: a cursor below the earliest retained record is
+                    # told so, explicitly. Silence would read as "nothing
+                    # happened between your cursor and the first line you
+                    # got", which is the one thing that is not true. The
+                    # marker is a RESPONSE, so PR-03's fence runs in front
+                    # of it like every other one
+                    lost = self._lineage_lost()
+                    if lost is not None:
+                        await self._send(writer, lost)
+                        return
+                    await self._send(writer, {"gap": True, "earliest_retained": backfill.gap_from})
                 cut = 0
                 for index, record in enumerate(records):
                     seq = record.get("seq")

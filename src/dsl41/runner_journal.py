@@ -89,6 +89,7 @@ from dsl41.period import (
     Manifest,
     catalog_hash_at,
     check_segment_record,
+    estate_segments,
     genesis_manifest,
     is_opening,
     opening_at,
@@ -582,6 +583,189 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
                 " boundary (period-model ss11, PR-29)"
             )
     return records
+
+
+@dataclass(frozen=True)
+class Backfill:
+    """What one resuming subscriber is owed, and what this root retains
+    (DL-135, period-model ss11).
+
+    Both halves come out of ONE read. Two calls could see two directory
+    listings and answer about two estates -- and the answer to "is there a
+    gap" has to be about the very records that follow it."""
+
+    #: the lowest index this root can still serve, when the cursor is
+    #: BELOW it -- and None when it is not. The answer is the gap, not the
+    #: number: a caller handed a number has to re-derive the comparison,
+    #: and the comparison is what the marker is for (period-model ss11)
+    gap_from: int | None
+    #: every retained record that could sit after the cursor, oldest first
+    records: list[dict[str, Any]]
+
+
+def read_backfill(path: Path | str, *, since: int) -> Backfill:
+    """The records a subscriber resuming at `since` may still be owed
+    (DL-135).
+
+    `read_journal` reads ONE segment, which is what an appender, a replay
+    and an audit each want: I1 makes a segment a period. A subscriber
+    spans periods -- its cursor is an estate-wide index (I2) and may name
+    a segment the appender has moved on from -- and reading only the
+    active segment silently handed it a stream with the gap left out.
+
+    It reads BACKWARDS and stops, rather than reading the whole estate. A
+    segment is needed only until one is found that holds a record at or
+    below the cursor: everything older than that record sits before the
+    caller's positional cut, so reading it would be work whose entire
+    result is discarded. A cursor inside the live period therefore costs
+    one segment, and only `since` at the very beginning costs the estate.
+
+    Stopping early is also what says there is NO gap: a segment holding
+    the cursor is a root that retains it. The gap question is therefore
+    only ever asked when every segment has been read, and no segment this
+    root does not need is opened even to ask it.
+
+    Every segment before the last must END in a `seal`. `read_journal`
+    tolerates a torn FINAL line, which is right for the file an appender
+    is still appending to and wrong for a closed one: there, a tolerated
+    tail is a hole in the middle of the concatenation, and a subscriber
+    would be handed a stream that skips records without being told."""
+    segments = estate_segments(path)
+    from dsl41.period import read_sentinel, root_of_wal
+
+    root_estate = None
+    sentinel = read_sentinel(root_of_wal(resolve_wal(path)))
+    if sentinel is not None:
+        root_estate = sentinel.estate_id
+    chunks: list[list[dict[str, Any]]] = []
+    holds_cursor = False
+    numbers: list[int] = []
+    for position, segment in enumerate(reversed(segments)):
+        records = read_journal(segment)
+        if position > 0 and records[-1].get("rec") != "seal":
+            raise EngineError(
+                f"journal {segment}: a closed segment ends in a `seal` and this one"
+                f" ends in {records[-1].get('rec')!r} -- its tail is missing, and a"
+                " backfill across it would skip records silently (period-model ss11)"
+            )
+        opening = records[0]
+        claimed = opening.get("segment_no", opening.get("period_id"))
+        try:
+            named = int(segment.stem)
+        except ValueError:
+            named = None
+        if root_estate is not None and opening.get("rec") != "segment":
+            # a sentinel says this root is periodized: a `header` WAL under
+            # its segment name is a foreign or pre-adoption file, and
+            # serving it would stream an unaffiliated legacy lineage
+            raise EngineError(
+                f"journal {segment}: opens with {opening.get('rec')!r} under a"
+                " periodized root's sentinel -- a legacy stream does not belong to"
+                " this estate (period-model ss1.1, ss11)"
+            )
+        if (
+            root_estate is not None
+            and opening.get("rec") == "segment"
+            and opening.get("estate_id") != root_estate
+        ):
+            # the early stop can read ONE segment, so the per-adjacency
+            # estate check never runs there -- the sentinel is what binds
+            # even a single replaced file to this estate
+            raise EngineError(
+                f"journal {segment}: estate {opening.get('estate_id')!r} under a"
+                f" sentinel naming {root_estate} -- a stranger's segment under this"
+                " estate's name (period-model ss1.2)"
+            )
+        if named is not None and opening.get("rec") == "segment" and claimed != named:
+            # a foreign segment renamed into place parses and even seals;
+            # its own opening is what says which period it is
+            raise EngineError(
+                f"journal {segment}: names segment {named} and its opening says"
+                f" {claimed!r} -- a stranger's file under this estate's name"
+                " (period-model ss2.1)"
+            )
+        if named is not None:
+            numbers.append(named)
+        chunks.append(records)
+        if any(_seq_at_or_below(record, since) for record in records):
+            holds_cursor = True
+            break
+    if numbers and numbers != list(range(numbers[0], numbers[0] - len(numbers), -1)):
+        raise EngineError(
+            f"journal {path}: retained segments {sorted(numbers)} are not contiguous --"
+            " a missing middle segment is a hole a backfill would stream past"
+            " silently (period-model ss11, I1)"
+        )
+    for newer, older in zip(chunks, chunks[1:]):
+        # adjacency, both ways: the older segment's closing seal must be
+        # the one the newer opened from, and identities must agree --
+        # otherwise a valid sealed segment from ANOTHER estate splices a
+        # foreign lineage into the stream
+        seal_record = older[-1]
+        opening = newer[0]
+        if opening.get("rec") != "segment":
+            continue  # legacy header: one segment, never reaches here
+        # the FULL ss2.2 schema first: a `closes_at_index` rewritten to a
+        # bool or a string would otherwise skip the exact-int continuity
+        # comparison below instead of refusing
+        from dsl41.boundary import check_seal_record
+
+        check_seal_record(seal_record)
+        link = opening.get("opens_from_seal")
+        if not (
+            isinstance(link, dict)
+            and link.get("digest") == seal_record.get("digest")
+            and seal_record.get("next_period_id") == opening.get("period_id")
+        ):
+            raise EngineError(
+                f"journal {path}: segment {opening.get('period_id')!r} does not open"
+                f" from the seal that closes the one before it -- a spliced or foreign"
+                " lineage (period-model ss2.1, ss11)"
+            )
+        if seal_record.get("estate_id") != opening.get("estate_id"):
+            raise EngineError(
+                f"journal {path}: estate {seal_record.get('estate_id')!r} sealed and"
+                f" {opening.get('estate_id')!r} opened -- two estates in one stream"
+                " (period-model ss1.2)"
+            )
+        first = opening.get("first_index")
+        closes = seal_record.get("closes_at_index")
+        if (
+            isinstance(first, int)
+            and isinstance(closes, int)
+            and not isinstance(first, bool)
+            and not isinstance(closes, bool)
+            and first != closes + 1
+        ):
+            raise EngineError(
+                f"journal {path}: segment {opening.get('period_id')!r} starts its index"
+                f" range at {first} and the seal before it closes at {closes} -- the"
+                " index frontier is not continuous (I2)"
+            )
+    first = _first_index(chunks[-1][0])
+    # index 1 is the first index there ever is, so no cursor below it can
+    # name a record this root lost
+    gap = not holds_cursor and max(since, 0) < first - 1
+    return Backfill(
+        gap_from=first if gap else None,
+        records=[record for chunk in reversed(chunks) for record in chunk],
+    )
+
+
+def _seq_at_or_below(record: Mapping[str, Any], since: int) -> bool:
+    seq = record.get("seq")
+    return isinstance(seq, int) and not isinstance(seq, bool) and seq <= since
+
+
+def _first_index(opening: Mapping[str, Any]) -> int:
+    """A segment's own `first_index` -- the first index it may allocate,
+    and NOT the lowest `seq` in it: a period that admitted no input still
+    covers its whole index range, and I2 makes the number estate-wide, so
+    the two answers differ exactly where it matters. A legacy `header` log
+    carries none and never lost a record to a boundary, so it starts at
+    1."""
+    first = opening.get("first_index")
+    return first if isinstance(first, int) and not isinstance(first, bool) else 1
 
 
 def baseline_id(records: list[dict[str, Any]]) -> str:

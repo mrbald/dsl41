@@ -470,6 +470,18 @@ class LocalCommandAdapter:
         await proc.wait()  # the wrapper records the outcome, then exits
 
 
+def default_log_paths(job: str, run_number: int, run_root: Path) -> tuple[Path, Path]:
+    """Where a CMD run's output goes when the job names no file of its own:
+    `<run_root>/logs/<job>.<run_number>.{out,err}`.
+
+    Split out of `job_log_paths` because a second reader needs the
+    CONVENTION without a `JobIR` to resolve it from -- `retention.py` walks
+    the spool of an estate whose catalog it never loads. Two spellings of
+    one filename is how the two would come to disagree (DL-135)."""
+    logs_dir = run_root / "logs"
+    return (logs_dir / f"{job}.{run_number}.out", logs_dir / f"{job}.{run_number}.err")
+
+
 def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, str]:
     """ss6 append targets for a CMD run: std_out_file/std_err_file when set
     (vendor appends), else <run_root>/logs/<job>.<run_number>.{out,err}. One
@@ -479,11 +491,8 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
     out = err = None
     if isinstance(job_ir.exec_, ExecSpec):
         out, err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
-    logs_dir = run_root / "logs"
-    return (
-        out or str(logs_dir / f"{job_ir.name}.{run_number}.out"),
-        err or str(logs_dir / f"{job_ir.name}.{run_number}.err"),
-    )
+    fallback_out, fallback_err = default_log_paths(job_ir.name, run_number, run_root)
+    return (out or str(fallback_out), err or str(fallback_err))
 
 
 #: the FW adapter's append-only spool, one line per poll (period-model ss2.2)

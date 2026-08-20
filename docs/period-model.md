@@ -2348,7 +2348,7 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `runner_supervisor.py` | completed-run tombstones (PR-36) |
 | `runner_history.py`, `cli.py journal` | period-aware |
 | `runner_history.py` | `_job_fingerprints` becomes `period.job_fingerprints` (DL-131): §10.2's leaf test is named here under its original home, and a pure analysis pass may not import a private name out of a runner module |
-| `citation-index.md` | `PR-\d{2}[a-z]?` row |
+| `citation-index.md` | `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135) |
 | `CLAUDE.md` | read-first list |
 
 ## 16. Open questions

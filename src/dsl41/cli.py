@@ -2903,7 +2903,8 @@ def _closed_periods(run_root: Path) -> list[int]:
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Lineage-level operations: adopt a legacy root, and the break-glass reclaim.",
+    help="Lineage-level operations: adopt a legacy root, prune what retention"
+    " allows, and the break-glass reclaim.",
 )
 app.add_typer(estate_app, name="estate")
 
@@ -3190,3 +3191,111 @@ def estate_reclaim(
         f" {moved.next_period} may be opened again, and the next opening `segment`"
         f" will record that {moved.claimed_actor} said so"
     )
+
+
+@estate_app.command("prune")
+def estate_prune(
+    run_root: Path = _RUN_ROOT_OPT,
+    estate_anchor: Path = _ANCHOR_OPT,
+    dry_run: bool = typer.Option(False, "--dry-run", help="List every verdict and delete nothing."),
+    tombstones: bool = typer.Option(
+        False,
+        "--tombstones",
+        help="Remove SPAWN tombstones -- run directory, `.by_run_id` entry and"
+        " default logs -- whose period is attested and whose run is terminal.",
+    ),
+    quarantine: bool = typer.Option(
+        False,
+        "--quarantine",
+        help="Remove quarantined candidates: superseded staged periods no recovery references.",
+    ),
+    older_than_days: float = typer.Option(
+        None,
+        "--older-than-days",
+        help="Keep any run spool touched more recently than this. Your policy, not the model's.",
+    ),
+    keep_runs: int = typer.Option(
+        0,
+        "--keep-runs",
+        help="Keep the N newest run spools OF EACH JOB, whatever else says."
+        " Per job, because `run_number` is per job.",
+    ),
+) -> None:
+    """Delete what retention allows, and report what it does not
+    (period-model ss11a, ss12; PR-36b, PR-36c).
+
+    **Retention policy is yours; the floors are the model's.** Which
+    periods, spools and tombstones an estate keeps is a business decision,
+    so the flags above are how you state it. What may never go is
+    everything reachable from the lineage head -- the sentinel, the anchor
+    and any live claim, the sidecars this period opened from and will close
+    with, the current and committed-next manifests, an uncommitted
+    candidate's two files, their bundles, the latest attestation, and the
+    WAL and spool of any unattested period. This verb cannot reach them.
+
+    Three verdicts are reported. `floored` is refused by the model.
+    `held` has been released by the head moving on and is kept anyway,
+    because PR-Q3/E20 -- may a seal-only archive stand in for pruned
+    inputs? -- is open. `prunable` is licensed by name: a tombstone whose
+    period is attested and whose run has ended, and a quarantined
+    candidate.
+
+    Pruning a tombstone is not reversible and it is not free: that period
+    can no longer be re-derived from its own evidence, and its attestation
+    becomes the proof that stands for it. Attest first, then prune.
+
+    Exit 0 when every selected artifact was removed (or listed, under
+    `--dry-run`), 2 on a refusal and 2 when the filesystem refused a
+    removal -- and then the report says which ones went and which did not.
+    """
+    from dsl41.retention import CLASSES, Artifact, plan_retention, prune
+    from dsl41.runner_clock import EngineError
+
+    classes = [name for name, on in (("tombstones", tombstones), ("quarantine", quarantine)) if on]
+    if not classes and dry_run:
+        # a listing with no class named is a survey: it shows every
+        # licensed deletion, so the operator can pick from what is there
+        classes = sorted(CLASSES)
+    if not classes and not dry_run:
+        typer.echo(
+            "nothing selected: name at least one class (--tombstones, --quarantine)"
+            " or ask for --dry-run. A prune verb with a default set would be a"
+            " retention policy, and that is the operator's (period-model ss12)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    try:
+        plan = plan_retention(run_root, anchor_dir=estate_anchor)
+        report = prune(
+            plan,
+            classes=classes,
+            dry_run=dry_run,
+            older_than_days=older_than_days,
+            keep_runs=keep_runs,
+        )
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    def _lines(title: str, items: tuple[Artifact, ...]) -> None:
+        typer.echo(f"{title} ({len(items)}):")
+        for item in items:
+            typer.echo(f"  {item.render()}")
+
+    verb = "would remove" if report.dry_run else "removed"
+    _lines(verb, report.removed)
+    _lines("prunable, outside the flags given", report.kept)
+    _lines("held (floor lifted, PR-Q3/E20 open)", report.held)
+    _lines("floored (the model refuses)", report.floored)
+    if report.failed:
+        typer.echo(f"the filesystem refused ({len(report.failed)}):", err=True)
+        for item, reason in report.failed:
+            typer.echo(f"  {item.path}: {reason}", err=True)
+    typer.echo(
+        f"{verb} {len(report.removed)} artifact(s), {report.bytes_removed} byte(s);"
+        f" {len(report.floored)} floored, {len(report.held)} held"
+        f" -- estate {plan.estate_id}, period {plan.current_period},"
+        f" attested {sorted(plan.attested) or 'none'}"
+    )
+    if report.failed:
+        raise typer.Exit(2)

@@ -1949,3 +1949,56 @@ def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_pr03_a_backfill_error_from_a_displaced_leader_answers_the_refusal(
+    short_root: Path,
+) -> None:
+    """The backfill read yields, and a lineage replaced during it must
+    answer the PR-03 refusal -- not narrate an error about an estate this
+    process no longer leads."""
+    text = "insert_job: gap_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            import dsl41.runner_control as control_mod
+
+            def broken(*_args: object, **_kwargs: object):
+                raise EngineError("a stranger's segment")
+
+            real_backfill = control_mod.read_backfill
+            control_mod.read_backfill = broken  # type: ignore[assignment]
+            checks = {"n": 0}
+            real_lost = server._lineage_lost
+
+            def displaced_after_ack() -> dict | None:
+                checks["n"] += 1
+                if checks["n"] == 1:
+                    return real_lost()
+                return {"ok": False, "refused": True, "error": "no longer leads (PR-03 pin)"}
+
+            server._lineage_lost = displaced_after_ack  # type: ignore[method-assign]
+            try:
+                reader, writer = await asyncio.open_unix_connection(str(server.path))
+                try:
+                    writer.write(
+                        json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
+                    )
+                    await writer.drain()
+                    ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
+                    assert ack == {"ok": True, "subscribed": True}
+                    answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
+                    assert answer["ok"] is False and "no longer leads" in answer["error"]
+                    assert "stranger's segment" not in answer.get("error", "")
+                finally:
+                    writer.close()
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
+            finally:
+                control_mod.read_backfill = real_backfill  # type: ignore[assignment]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

@@ -694,6 +694,35 @@ def estate_wal(run_root: Path) -> Path:
     return active_wal(run_root) if read_sentinel(run_root) is not None else sentinel_path(run_root)
 
 
+def root_of_wal(wal: Path) -> Path:
+    """The estate root a WAL file belongs to -- the inverse of
+    `estate_wal`, and the only place the layout is read backwards.
+
+    A periodized segment is `<root>/wal/<n>.jsonl` and a legacy WAL is
+    `<root>/journal.jsonl`, so the parent's NAME is what tells the two
+    apart. `estate_wal` puts the layout behind one function on the way
+    down; this is the same rule on the way up, so a caller that holds a
+    segment and wants its siblings does not spell the shape inline
+    (DL-135)."""
+    wal = Path(wal)
+    return wal.parent.parent if wal.parent.name == WAL_DIR else wal.parent
+
+
+def estate_segments(path: Path | str) -> list[Path]:
+    """Every segment this root RETAINS, oldest first (ss1.1, I1).
+
+    `resolve_wal` answers "which file does an appender open"; this answers
+    "which files does the estate still hold", and a reader that wants the
+    whole period-crossing record sequence needs the second. A legacy root
+    -- where `journal.jsonl` IS the WAL -- holds exactly one, which is what
+    it always held."""
+    wal = resolve_wal(path)
+    root = root_of_wal(wal)
+    if wal.parent.name != WAL_DIR:
+        return [wal]
+    return [wal_path(root, segment_no) for segment_no in wal_segments(root)]
+
+
 def root_is_unused(run_root: Path) -> bool:
     """Whether this directory holds no estate: no sentinel and no legacy
     journal. The one question `run` asks before it stages a period."""

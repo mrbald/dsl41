@@ -468,7 +468,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - src/dsl41/runner_control.py — the ss10 control plane, both ends (DL-78): the
   unix-socket server (sendevent parity, status/trace/explain/spec/deps/timers/
   plan, subscribe), the wire vocabulary, and the two clients — a persistent
-  async one for the TUI and a one-shot blocking one for the CLI. The protocol
+  async one for the TUI and a one-shot blocking one for the CLI. `subscribe`'s
+  backfill spans WAL segments since DL-135 — bounded, newest segment first — and
+  a cursor below what the root still retains gets an explicit gap marker rather
+  than a short stream. The protocol
   is frozen in
   [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
   the outer counterpart to the lifecycle tier's supervisor protocol; every
@@ -558,6 +561,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   drain refusals, the `manifest/` split and the `result`+`effect` fold. Neither
   is a second semantic path: both hand the ordinary machinery a root it can
   resume, and adoption seals period 1 through the COMMON seal body
+- src/dsl41/retention.py — the retention floors and the prune verb (period-model
+  ss11a/ss12, DL-135): what may never be deleted, computed from one root rather
+  than asserted — the sentinel, the anchor and its live claim, the sidecars this
+  period opened from and will close with, the current and committed-next
+  manifests, an uncommitted candidate's two files, their bundles, the newest
+  attestation, and the WAL and spool of any unattested period. Three verdicts,
+  because the spec leaves a middle: floored (refused), held (released by the head
+  moving on and kept anyway while PR-Q3/E20 is open) and prunable (licensed by
+  name — an attested period's terminal SPAWN tombstone, a quarantined candidate).
+  Deleting a floored artifact is impossible rather than merely not done: the verb
+  iterates the prunable set alone, and the remover refuses a path that is not one,
+  is outside the run root, or holds a retained artifact beneath it
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/effect/effect_result/result/seal/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
@@ -565,7 +580,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   DL-130 — every reader accepts both). Since DL-133 the records live in
   `wal/<segment_no>.jsonl` and `journal.jsonl` holds the one-line `period_root`
   sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`,
-  and a legacy root — where `journal.jsonl` IS the WAL — is unchanged
+  and a legacy root — where `journal.jsonl` IS the WAL — is unchanged.
+  `read_journal` is one segment, which is what a replay and an audit each want;
+  `read_backfill` is what a subscriber resuming across a boundary wants — the
+  retained segments walked newest first and stopped at the one holding its
+  cursor, plus the gap when the cursor is below them all (DL-135)
 - src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
   the mutex (an flock held for the process lifetime, so nothing has to decide
   whether the previous holder is alive), the epoch allocated by being appended to
@@ -608,9 +627,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   and `query` (clients of a running engine's control socket), `supervise`
   (11f: `list`/`shutdown` a run-root's detached supervisor, read-only by default),
   `ui` (the ss11 Textual TUI attached to a running engine — `run --ui` starts both
-  in one terminal), and `serve` (11e: wraps textual-serve around the same app, one
+  in one terminal), `serve` (11e: wraps textual-serve around the same app, one
   `dsl41 ui` subprocess per browser session — optional `dsl41[ui]` extra, loopback
-  by default).
+  by default), and the boundary-era estate verbs — `seal` (live or offline, the
+  lock decides which), `audit` and `verify` (produce a checkpoint; consume one),
+  and `estate adopt` / `estate reclaim` / `estate prune` (DL-134, DL-135).
   Exit 2 = catalog load/usage failure everywhere, preflight refusals included.
   Exit 1 = findings for `lint`/`equiv`, and a mid-run engine failure for
   `run`/`rehearse`. `report` always exits 0 once generated: the report itself
@@ -829,8 +850,12 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   over ss7's write order — each pre-commit stage aborting and retrying, each
   post-commit one fail-stopping — candidate reuse and quarantine, the FW seal
   barrier parking a watch at its poll boundary, one held tick under C1 starting
-  exactly once after C2, and the `seal` control verb with its committed-retry
-  route
+  exactly once after C2, the `seal` control verb with its committed-retry
+  route, and a subscriber resuming across a boundary — the backfill spanning
+  segments and stopping at the one that holds the cursor, a rolled root
+  answering a cursor it cannot honour with the gap marker, and a foreign file
+  or a torn closed segment refused on the stream rather than by a hangup
+  (DL-135)
 - tests/test_estate.py — the estate verbs (period-model ss1.3/ss7/ss11, DL-134):
   the offline seal committing and refusing over one root, the live seal between
   two real processes with the engine exiting code 3, audit re-deriving a seal and
@@ -840,6 +865,19 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   the attestation gate on a roll, break-glass reclaim recorded in the anchor and
   in the next `segment`, and adoption end to end — fence, translate, seal — with
   its readiness-before-fence, drain and `adopting`-head refusals
+- tests/test_retention.py — the retention floors and `estate prune` (period-model
+  ss11a/ss12, DL-135): each itemized floor refused one case at a time and released
+  again once the head has moved past it and a later checkpoint covers it, the
+  tombstone floor over an unattested period and its lift after attestation, a
+  carried run held until the period it ended in has closed and been attested, a
+  run with no provenance and an unreadable index entry both floored, and the two
+  structural guards — a path outside the root, and a directory that holds a
+  retained artifact beneath it — then the operator's flags: `--keep-runs` per
+  job over two jobs at different run counts, an age threshold over an orphaned
+  index entry, and a removal the filesystem refuses reported while the rest of
+  that run stays whole. Every estate is built by the real machinery; the one
+  hand-written artifact is the supervisor's tombstone, reconstructed from the
+  binding the WAL already holds
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)

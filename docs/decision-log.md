@@ -5970,3 +5970,317 @@
   `attested` row over a merely-visible checkpoint survives a power cut
   the checkpoint does not. The idempotent early return fsyncs the
   observed checkpoint on the same rule.
+- DL-135 what may never be deleted, and the subscriber that stopped
+  losing a period (2026-08-20; period-model ss11a, ss12 and ss13's PR-36b,
+  PR-36c and PR-49's backfill half, built as U8). DL-134 left the estate
+  with verbs and no way to stop it growing, and with one reader that had
+  quietly become wrong when the WAL became many files.
+  (1) **A floor is computed, not asserted.** ss12 itemizes what may never
+  be pruned -- everything reachable from the lineage head -- and
+  `retention.py` reads one root and returns that list with a citation on
+  every row. The verb then iterates the PRUNABLE set alone, and `_remove`
+  proves three things before it unlinks: the verdict is prunable, the
+  path is under this run root, and the path holds no retained artifact
+  BENEATH it. The third is the one a plausible implementation skips:
+  removing a directory removes what is inside it, so a guard that
+  compared paths for equality would let `runs/` go while every floored
+  tombstone under it was named in the same plan (PR-36c).
+  (2) **Three verdicts, because ss12 leaves a middle.** `floored` is the
+  model's refusal. `prunable` is a deletion the spec licenses BY NAME:
+  PR-36b's tombstone whose period is attested and whose run is terminal,
+  and ss12's quarantined candidate that no recovery references. Everything
+  between them -- a closed period's WAL, a sidecar the head has moved
+  past, an older manifest, an unreferenced bundle, a superseded
+  checkpoint -- is `held`: the floor has lifted and PR-Q3/E20 is open, so
+  nothing here deletes it. Two verdicts would have forced a choice
+  between refusing what PR-36c says may go and deleting what PR-Q3 says
+  stays, and both would have been wrong.
+  (3) **The one asymmetry is the spec's, and is stated where it happens.**
+  ss12 floors "the WAL and spool of any unattested period (E20 gates the
+  rest)", which reads as holding an attested period's spool too; PR-36b
+  then says of a run directory and its index entry, in as many words,
+  "after the period is attested and the run terminal, it may go". The
+  itemized obligation wins for the spool. The WAL -- the input E20 is
+  actually about -- is held, and carries the `# PENDING: E20` marker so
+  that answering the question is a deliberate change here rather than a
+  drift.
+  (4) **Terminality is read off the SEALS, not off the spool.** A run
+  named in seal N's `executions` was live at that boundary, so it ended in
+  period N+1; a run no seal names ended inside the period that spawned it.
+  Either way ONE period is the last that can reference the run, and its
+  attestation is the whole gate -- producing a checkpoint requires the
+  predecessor's, so everything below is covered by induction. A rule that
+  asked `status.json` instead would have believed a file the estate never
+  admitted, and a rule that stopped at the birth period would release a
+  carried run's spool while the period whose audit needs it was still
+  open. A root that holds no seal for the ending period answers the same
+  way as one whose ending period is open, and the refusal says so: a
+  rolled root holds no successor seal by design, and "I cannot prove it
+  ended" is the same answer as "it has not" for a floor.
+  (5) **A directory with no provenance is floored, and so is an index
+  entry that will not parse.** ss11a's store is an idempotency store:
+  "no index entry" means "first application", so deleting one AUTHORIZES a
+  spawn of a job that already ran. Nothing here guesses which period would
+  have to be attested to release a run the retained WAL cannot show, and
+  an unreadable entry still NAMES a `run_id`.
+  (6) **`periods/.staging/` is floored and `periods/.quarantine/` is
+  not.** The install refuses when the staged bytes are gone, and its own
+  comment names a retention sweep as the thing that could have removed
+  them. Being quarantined is what says no recovery reads a candidate, so
+  ss12 releases it in the same sentence that floors the installed one.
+  (6a) **What pruning a tombstone costs is stated where an operator will
+  meet it.** `dsl41 runs` takes a row's start and end from `spawn.json`
+  and `status.json`, and `read_spool` already reads a pruned directory as
+  ABSENT rather than refusing -- "one corrupt directory should cost one
+  row's timings, not the whole report". So the row survives and its
+  timings do not, and the runbook says so beside the verb.
+  (7) **Policy is flags and nothing else.** `--tombstones`,
+  `--quarantine`, `--keep-runs`, `--older-than-days`. A run with no class
+  named deletes nothing and says why: a default set would be a retention
+  policy, and ss12 makes that the operator's. `--dry-run` with no class
+  is a survey and lists every licensed deletion, sizes included -- an
+  operator deciding whether to prune is asking how much it is worth. The
+  thresholds filter whole RUNS, so a directory is never removed while its
+  index entry stays -- ss11a spends its whole protocol keeping that pair
+  one-to-one. `--keep-runs` is per JOB, because `run_number` is per job:
+  one list ranked by run number compares numbers from different series,
+  and `--keep-runs 3` would then delete a quiet job's whole history while
+  keeping three of a busy one's. `--older-than-days` reads whichever of a
+  run's artifacts survive, so an index entry orphaned by a hand-deleted
+  directory is protected by the same threshold that protected the pair.
+  (7a) **A deletion the FILESYSTEM refuses is reported, not raised.**
+  Deletion is irreversible and partial, so the sweep records the refusal,
+  keeps the REST of that run, continues to the next one, and exits 2 with
+  a list. Stopping at the first error would leave an operator with a
+  traceback, some artifacts already gone and no way to tell which. A
+  deletion the PLAN refuses still raises: that is a floor being reached,
+  which is a defect rather than a fact about the disk. And a spool that is
+  a SYMLINK is floored rather than met at deletion time -- the plan reads
+  a name and the removal follows a link, so a spool that is a link is one
+  where those two are not the same object.
+  (8) **The verb reads the anchor and never locks it.** A live engine
+  holds the lineage lock for its process lifetime, so a prune that needed
+  it could only run against a stopped estate. Reading is sound because
+  attestation is monotone and because everything a running period creates
+  belongs to a period that is not attested -- floored for that reason
+  alone, without a race to lose.
+  (9) **The subscriber's backfill spans segments, and is BOUNDED.** `since`
+  has always been an estate-wide index (I2), and the backfill read the
+  ACTIVE segment's file -- so from the moment DL-133 made the WAL many
+  files, a client resuming with a cursor taken before a boundary was
+  answered with the new period's records and no sign that anything came
+  before them: silently, the exact gap it was resuming to avoid.
+  `read_backfill` walks the retained segments NEWEST FIRST and stops at
+  the one holding a record at or below the cursor. Everything older sits
+  before the caller's positional cut, so reading it would be work whose
+  whole result is discarded -- and the read runs on the single-writer
+  loop, where an estate that has crossed a year of boundaries would have
+  paid seconds for it. A cursor inside the live period costs one segment,
+  and only `since` at the very beginning costs the estate. Nothing else
+  moved -- the cut is still positional and the seam still keys on the
+  presence of `seq`, so DL-89's exactly-once and at-least-once guarantees
+  are word for word the ones that held before.
+  (10) **A cursor below what the root retains gets ss11's gap marker, and
+  the ANSWER is the gap.** `{"gap": true, "earliest_retained": <index>}`,
+  sent before the backfill. The number is the oldest retained segment's
+  `first_index` -- the first index it may allocate -- and not the lowest
+  `seq` in it: a period that admitted no input still covers its whole
+  range. `read_backfill` returns the gap rather than a number for the
+  caller to compare, because stopping early IS the proof that there is
+  none, and a caller handed a number would re-derive a comparison the
+  reader had already made. Index 1 is the first there is, so a cursor at
+  or below 0 is never a gap. The reachable case is a physical roll, which
+  imports the seal it opens from and none of the closing period's WAL by
+  design. The marker is a RESPONSE, so PR-03's fence runs in front of it
+  like every other one.
+  (10a) **The widened read can refuse, and it refuses ON THE STREAM.** It
+  opens files this subscription's own period did not write, so it can meet
+  a foreign name under `wal/` or a closed segment whose tail is missing.
+  The ack has gone by then, so an exception would hang the client up with
+  no answer -- the one thing control-protocol ss2 forbids. And a closed
+  segment must END in a `seal`: `read_journal` tolerates a torn FINAL
+  line, which is right for the file an appender is still appending to and
+  wrong for a closed one, where a tolerated tail is a hole in the MIDDLE
+  of the concatenation and the subscriber would be handed a stream that
+  skips records without being told.
+  (11) **`root_of_wal` is the layout read backwards, and it is named.**
+  `period.estate_wal` says which file a root's appender opens; going the
+  other way -- from a segment to the root that holds its siblings -- had
+  no function, so a caller would have spelled the directory shape inline.
+  DL-133 put the layout behind one function on the way down for exactly
+  that reason, and this is the same rule on the way up.
+  2846 -> 2884 passing, 32 new in `tests/test_retention.py` and six in
+  `tests/test_boundary.py`; ruff, mypy and arch_check clean. An external
+  adversarial round over the finished tree found three blockers and
+  fifteen lesser items, all folded in and each pinned where a test can see
+  it. The blockers: `--keep-runs` ranked every run of every job on ONE
+  list by run number and broke ties in set iteration order, so a quiet job
+  was starved by a busy one and a `--dry-run` could disagree with the run
+  that followed it; the widened backfill read the WHOLE estate
+  synchronously on the engine's single-writer loop and re-parsed the
+  oldest segment a second time to answer the gap question; and `prune` had
+  no error containment, so one `OSError` aborted the loop after partial
+  deletion with no report. The fifteen: `_subscribe` was unwrapped, so a
+  foreign file under `wal/` hung the client up with no answer at all; a
+  torn CLOSED segment truncated a stream silently; a symlinked spool
+  reached `rmtree` instead of being floored; the age threshold skipped an
+  orphaned index entry; an unreadable `stat` read as "ancient" instead of
+  failing closed; a `now=` parameter was declared and ignored; the default
+  log filename was spelled a second time beside
+  `runner_adapters.job_log_paths` (both now call `default_log_paths`); a
+  dry run reported zero bytes; a negative cursor produced a spurious gap
+  marker; the gap boundary was pinned only from above; the shared-bundle
+  case the bundle test's docstring described was one no fixture could
+  distinguish; a file named like a spool was refused with the wrong
+  reason; the `PR-Q\d` index row claimed a code marker PR-Q5 does not
+  have; the exit-4 runbook entry named a reuse collision where the
+  refusal is a stale baseline; and ss15's citation-index row did not
+  mention the new namespace. Deliberately NOT changed: `estate prune`
+  asks for no confirmation, because naming a class is the confirmation --
+  a verb that deleted by default and then asked would be the retention
+  policy ss12 says is the operator's. Every floor
+  and every gate is mutation-checked: neutralise it and exactly its case
+  reds -- the verdict gate, the containment gate, the run-root gate, the
+  carry lookup, the attestation requirement, the provenance refusal, the
+  E20 hold, the segment-spanning read and the gap marker, one at a time.
+  Deliberately not built: a retention SCHEDULER or any default policy
+  (ss12 makes it a business decision, and the runbook's ss2a is where it
+  is stated); pruning anything in the `held` bucket, which waits on
+  PR-Q3/E20; and the estate-WIDE prune across roots through the registry,
+  which is the same cross-root walk DL-134 deferred for
+  `audit`/`journal`/`runs` and is one unit for all four rather than a
+  fourth private walk.
+  The first external adversarial round found six blockers, all folded
+  in with pins: the planner refuses a WAL holding a SECOND SPAWN for one
+  (job, run_number) (I2 -- a silently-kept first binding would floor the
+  wrong effect); run-directory spellings are canonical (`b.01` never
+  shadows `b.1`) and index bodies are joined to the WAL effect's own
+  run_id (a body rewritten to a terminal run refuses the plan, ss11a's
+  pair both ways); deletion-authorizing seals are BOUND -- sentinel
+  estate, period filename, the WAL's own `seal` record, and the
+  successor's `opens_from_seal` (an imported seal on a rolled root binds
+  through the successor link alone) -- so a valid pair swapped in from
+  another estate refuses; the backfill verifies the chain it streams
+  (filename vs opening, contiguous retained numbers, each segment opening
+  from the seal that closes the one before it, one estate, continuous
+  index frontier); a backfill error after the ack re-proves the lineage
+  before it is sent (PR-03 per response); and a failed parent fsync
+  PROPAGATES, so an undurable removal is reported failed and wedges its
+  run rather than reported done.
+  The second round found four shadows, closed: an index BODY's own
+  run_id must equal its filename (a rewritten body keeping the tuple
+  refuses the plan); the backfill binds every opening record to the
+  SENTINEL's estate -- the early stop can read one segment, where no
+  adjacency check runs; every traversed closing `seal` record passes the
+  full ss2.2 schema before the continuity comparison (an off-type
+  `closes_at_index` refuses instead of skipping the check); and a
+  sidecar whose LOCAL WAL lacks exactly one naming `seal` record refuses
+  the plan -- an unbound sidecar authorizes no deletion.
+  The third round found five, closed: the plan is bound to the resolved
+  root's (st_dev, st_ino) and every removal re-proves it, so a run-root
+  symlink retargeted after planning refuses instead of deleting inside
+  the replacement estate; a SPAWN whose run_id is null floors its
+  tombstone ("provenance incomplete") instead of joining as unbound; an
+  index entry without its artifact_format_version is unreadable evidence
+  and floored; the local seal record passes the FULL ss2.2 schema before
+  the mirror comparison; and a `header` WAL under a periodized root's
+  sentinel refuses the backfill -- a legacy stream does not belong to a
+  sentineled estate.
+  The fourth round found the last two, closed: SPAWN identity evidence
+  is exact -- a boolean run_number (which aliases run 1 through an
+  isinstance check), an empty job, an out-of-grammar run_id each refuse
+  the plan; and removal is DESCRIPTOR-relative -- the root is opened
+  once, fstat-proved against the plan's inode, and every step to the
+  artifact walks openat with O_NOFOLLOW from that fd, so neither a
+  symlink retarget nor a rename-swap of any component after the proof
+  can redirect a deletion into another estate (a symlink AT the artifact
+  path is unlinked as a link, never followed).
+  The fifth round found the last two, closed: `relative_to` is lexical,
+  so a crafted `..` component is refused before the descriptor walk; and
+  every prunable artifact's own (st_dev, st_ino) is pinned at PLAN time
+  and re-proved through the held descriptor at removal -- another
+  directory renamed onto a prunable name after planning is recorded as
+  `ArtifactChanged` (a disk fact, the sweep continues and the run
+  wedges), never deleted under the plan's verdict.
+  The sixth round found two more TOCTOU corners, closed: removal
+  ISOLATES the named entry first (an atomic same-directory rename to a
+  scratch name), verifies the isolated entry's pinned identity, and
+  restores-and-refuses on mismatch -- no rename can swap the target
+  between the proof and the deletion; and the recursive walk checks
+  every entry against the plan's RETAINED identity set, so a floored or
+  held artifact moved inside a prunable tree after planning refuses
+  mid-walk (the tree's licensed content may already be partially gone
+  under the scratch name; the retained artifact itself is untouched and
+  the failure is reported).
+  The seventh round closed the last two rename corners: the scratch
+  name is uuid-fresh per removal and checked free first (a deterministic
+  name could be pre-seeded with a retained artifact for the isolation
+  rename to destroy; Python exposes no portable RENAME_NOREPLACE, and
+  guessing a fresh uuid inside the check-to-rename window is not a
+  practical attack); and the mismatch ROLLBACK renames back only when
+  the original name is still free -- an entry that appeared meanwhile
+  survives, the isolated replacement stays under its scratch name, and
+  the refusal reports that location.
+  The eighth round closed the final pair: a MISMATCHED isolation is
+  never renamed back at all -- without a no-replace primitive any
+  restore can clobber a newcomer, so the isolated entry stays under its
+  scratch name and the refusal reports the location; and the retained
+  identity set is RECURSIVE -- every inode at and beneath a floored or
+  held directory is pinned, so one file moved out of a retained bundle
+  into a prunable tree refuses mid-walk instead of being swept.
+  The ninth round closed the last hole: retained-tree traversal fails
+  CLOSED -- an unreadable subdirectory or entry refuses the whole plan
+  (silently skipping it would leave its children unpinned for a later
+  move-and-sweep); a file deleted mid-walk is exempt, since a gone inode
+  cannot be moved anywhere.
+  The tenth round removed the last exemption: an entry the walk listed
+  and the lstat cannot find refuses the plan too -- a vanish between
+  listing and lstat cannot be told apart from a rename into a prunable
+  tree, and only refusing covers both. (A retained artifact path absent
+  at the TOP level stays exempt: it was never listed as existing and has
+  no inode to move.)
+  The eleventh round removed the top-level exemption as well: every
+  artifact on the plan's list was observed by the scan moments earlier,
+  so an absence at pin time is concurrent mutation and refuses -- there
+  is no "legitimately absent" retained artifact.
+  The twelfth round closed the regress at its root: identity is
+  captured when the estate is FIRST observed -- plan_retention takes one
+  fail-closed snapshot walk of the whole root before any scan read,
+  retained identities are pinned from that snapshot (so an original
+  moved into a prunable tree during the scan KEEPS its pinned identity
+  and the removal walk refuses it), and a closing bracket re-proves that
+  every retained path still holds the observed inode (a byte-identical
+  substitution during the scan refuses: "the estate is being mutated
+  under the planner"). Retained paths outside the root -- the anchor,
+  claims -- and paths that appeared mid-scan pin through the live
+  fail-closed traversal, which cannot have been the target of a
+  pre-scan swap.
+  The thirteenth round moved capture into the enumeration itself: the
+  snapshot walks opened descriptors, each file identity is the d_ino the
+  `scandir` listing reports (no later pathname lookup to race), and a
+  descent re-proves each subdirectory -- opened under the parent's fd
+  with O_NOFOLLOW, its fstat must equal the listed identity or the plan
+  refuses ("identity changed between listing and descent", which also
+  catches a mount placed mid-tree). The snapshot now covers the ANCHOR
+  tree too, so outside-root retained artifacts are bracketed exactly
+  like in-root ones.
+  The fourteenth round completed the symmetry: PRUNABLE identity comes
+  from the observation snapshot too, and only while the disk still
+  agrees with it -- a foreign directory swapped in during the scan is
+  stamped None, and a None identity is an `ArtifactChanged` at removal
+  (recorded, the sweep continues), never a deletion of something the
+  plan did not observe. Every identity in the plan now traces to the one
+  pre-scan enumeration.
+  The fifteenth round added the inverse licence: the removal walk
+  deletes ONLY inodes the pre-scan enumeration observed somewhere in the
+  estate -- an unobserved artifact moved into a prunable tree after
+  planning refuses mid-walk and survives. With the retained set, the
+  observed set, the per-artifact stamps and the bracket, every deletion
+  now traces to the one observation: nothing is removed that was not
+  seen, and nothing seen as protected is removed.
+  The sixteenth round made the licence PER ARTIFACT: each prunable
+  artifact carries the snapshot identities observed at and beneath ITS
+  path, and the walk deletes only those -- an observed inode from a
+  class the operator did not select, moved inside a selected tree after
+  planning, refuses instead of riding along. The estate-wide allow-set
+  is gone.

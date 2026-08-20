@@ -455,6 +455,39 @@ its revisions and the effects it planned. The seam behaviour is
 change beyond the name. `effect_result` is unchanged. This is the wire break
 that took the protocol to v3.*)
 
+*(Amended by DL-135, at build of period-model §11.* **The backfill spans
+segments.** An estate's records live in `wal/<segment_no>.jsonl`, one
+segment per period, and the backfill reads every segment this root retains,
+oldest first. It used to read the active one alone, so a subscriber that
+resumed with a cursor taken before a boundary was answered with the new
+period's records and no sign that anything came before them — the gap it
+was resuming to avoid. Nothing else moved: `since` is still an index, the
+cut is still positional, and the seam still keys on the presence of `seq`,
+so the exactly-once and at-least-once guarantees above are word for word
+the ones that held before.
+
+**A cursor below the earliest retained record gets a gap marker.** The
+server sends one line, `{"gap": true, "earliest_retained": <index>}`,
+before the backfill, and then backfills everything it has. `earliest_retained`
+is the first index the oldest retained segment may allocate. A physical
+roll is the reachable case: the new root holds the seal it opened from and
+none of the closing period's WAL, by design (period-model §1.3), so a
+subscriber resuming there cannot be given what it asked for and is told
+so. Index 1 is the first index there is, so a cursor at or below 0 is
+never a gap. A client that does not read the marker sees an ordinary
+record it does not recognise and skips it, which is what it already does
+with any record kind it has no case for. The marker is a response like any
+other, so the leader re-proves the lineage in front of it (PR-03).
+
+**The backfill can now refuse on the stream.** It reads files this
+subscription's own period did not write, so it can meet a foreign name
+under `wal/` or a closed segment whose tail is missing. Either is
+`{"ok": false, "error": …}` sent *after* the ack and then a hangup —
+never a hangup with no answer, and never a stream that silently skips the
+records it could not read. The read is bounded: it walks segments newest
+first and stops at the one holding the cursor, so a cursor inside the live
+period costs one segment however long the lineage is.*)
+
 ## 6. Client obligations
 
 - Any transport error must drop the connection. Reusing a connection after

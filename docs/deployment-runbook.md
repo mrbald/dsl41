@@ -62,7 +62,96 @@ lineage (§6a).
 Run roots are `0700`, journals and job output `0600` — the WAL
 carries globals and every control input, so keep the service account's
 home to itself. A run root is the audit artifact of its night: retention
-is a business decision, not a cleanup script's.
+is a business decision, not a cleanup script's — see §2a.
+
+## 2a. Retention — the floors, and the prune verb
+
+*(Added by DL-135, at build of period-model §11a and §12.)* An estate root
+grows: one WAL segment per period, one spool directory per run, one
+`.by_run_id` entry per run, logs beside them. Nothing here removes any of
+it on a timer.
+
+**What you keep is your decision. What you may never delete is not.** The
+model states a floor, and the floor is everything reachable from the
+lineage head:
+
+| kept, always | why |
+|---|---|
+| `journal.jsonl` (the sentinel) | the one file that says this directory belongs to a lineage. Without it an older binary reads the root as unused and starts a second estate beside the live one |
+| the anchor directory — `anchor.json`, `anchor.lock`, and the claim a `claimed` head names | the lineage head and the lock that fences it. A crashed opener resumes through its claim |
+| the sidecar the current period opened from, and the one it will close with | recovery selects its seal by lineage and refuses without the sidecar |
+| the current period's manifest, and the next one its seal committed | the pins the next opening reads first |
+| an uncommitted candidate's `staged_manifest.json` and `candidate.json` | recovery after an install-before-seal crash is decided by exactly those two files |
+| the catalog bundles and `sources.json` those manifests name | recovery refuses without a catalog directory |
+| the newest attestation, and any after it | the chain checkpoint every later proof stands on |
+| the WAL and spool of any unattested period | its `audit` has not run yet, and this is what `audit` reads |
+| the spool of any live or carried execution | the run is not over |
+| a SPAWN tombstone whose effect can still be replayed | "no index entry" means "first application", so deleting one **authorizes a second spawn** of a job that already ran |
+
+Backing up a root means backing up the anchor too. It is a sibling of the
+root and not inside it, so `tar czf root.tgz /srv/dsl41/runs/<id>` takes
+the estate and leaves the fence behind.
+
+**The verb.**
+
+```sh
+dsl41 estate prune --run-root /srv/dsl41/runs/<id> --dry-run
+dsl41 estate prune --run-root /srv/dsl41/runs/<id> --tombstones --keep-runs 200
+dsl41 estate prune --run-root /srv/dsl41/runs/<id> --quarantine
+```
+
+`--dry-run` names every artifact and the verdict retention gives it, and
+deletes nothing.
+A run with no class named deletes nothing either and says so: a default
+set would be a retention policy, and the policy is yours. Add
+`--estate-anchor` wherever the rest of your commands need it.
+
+The three verdicts:
+
+- **floored** — the model refuses. The verb cannot be made to delete these,
+  by any flag.
+- **held** — the head has moved past it and a later checkpoint covers it,
+  and it is kept anyway. One question is open — may a seal-only archive
+  stand in for pruned inputs? — and until it is answered the inputs of a
+  period that must stay auditable stay. Closed periods' WAL segments,
+  older sidecars, older manifests and unreferenced bundles are all here.
+- **prunable** — deletion is licensed by name. Two classes today: a SPAWN
+  tombstone whose period is attested and whose run has ended
+  (`--tombstones`: the run directory, its `.by_run_id` entry and its
+  default logs, always together), and a quarantined candidate
+  (`--quarantine`).
+
+**"Attested" is what unlocks a tombstone.** Run `dsl41 audit` (§6a) first.
+Until a period is attested, its whole spool is floored, because that spool
+is what `audit` re-derives the period from. After it is attested, that
+period's finished runs may go — and once they are gone, the period can no
+longer be re-derived from its own evidence, and its attestation is the
+proof that stands for it. That is the trade, and it only goes one way.
+
+What you also lose is the run's TIMINGS in `dsl41 runs`: start and end
+come from `spawn.json` and `status.json`, and a pruned spool reads as
+absent. The row itself stays — it is the WAL's, not the spool's — and so
+does `dsl41 journal`, which replays records and reads no spool at all.
+
+`--keep-runs N` keeps the N newest run spools **of each job**, and
+`--older-than-days D` keeps anything touched more recently than D days.
+Both are your policy, not the model's. Both filter whole runs: a directory
+is never removed while its index entry stays.
+
+`--keep-runs` is per job because `run_number` is per job. One list ranked
+by run number would compare numbers from different series — a busy job's
+fifth run outranking a quiet job's first — and `--keep-runs 3` would then
+delete the quiet job's whole history.
+
+A removal the filesystem refuses — a permission, a directory that vanished
+under the sweep — is reported and the sweep goes on, and the rest of that
+run stays with it. The exit code is 2 and the report names each artifact
+that did not go.
+
+The verb reads the anchor and never locks it, so it runs against a live
+engine. It cannot reach that engine's work: everything a running period
+creates belongs to a period that is not attested, and is floored for that
+reason alone.
 
 ## 3. Starting the engine
 
@@ -361,6 +450,57 @@ dsl41 estate reclaim --estate-anchor /srv/dsl41/runs/<id>.anchor --force
 
 It is recorded in the anchor and again in the next `segment` record with
 the actor who claimed to authorize it.
+
+**Day 2.** *(Added by DL-135.)* The things that go wrong after the first
+boundary, and the move for each.
+
+*A seal exited 4.* The outcome is UNKNOWN — the seal may or may not have
+committed. Do not re-seal from scratch. Re-send the same request with the
+`--request-id` the command printed: a retry that finds the boundary
+committed is answered from the new period, and one that finds it did not
+performs it. Do not compose a new request: a fresh `request_id` is a
+different command, and once period N+1 is open the envelope it carries
+names the closed period's `baseline_id` and is refused as stale.
+
+*The engine exited 3 and the init system restarted it.* It will loop.
+Exit 3 is "sealed; period N+1 is ready to open", and the opening is an
+operator action. Put `RestartPreventExitStatus=2 3` in the unit file.
+
+*`audit` printed "the registry row could not be set".* The checkpoint IS
+written and durable, and the checkpoint is what `verify` and `run
+--open-from` read. Only the anchor's `attested` row is outstanding, and a
+live engine holds the lineage lock for its whole process lifetime. Re-run
+`dsl41 audit` when the lock is free; it is idempotent and finishes the row.
+
+*`dsl41 audit` does not name a period you expected.* With no `--period` it
+names only the periods this root holds a WAL for. A rolled root holds the
+seal it opened from and none of that period's evidence, by design — that
+seal is this root's to `verify` and the closing root's to audit. The
+anchor's registry says which root holds which period.
+
+*`audit` refuses naming a version.* Auditing an old period runs the
+interpreter that produced it. Keep the venv (§7's pattern) and run the
+audit from it; the refusal names the version to use.
+
+*A roll was refused after it wrote the target root's sentinel.* That
+directory is now owned by the claim that was attempting it, and §1.1's
+ownership rule refuses every later roll into it. Pick a fresh directory,
+or remove the abandoned one after checking it holds nothing but the
+sentinel and the import.
+
+*Every later command on a rolled root needs the anchor.* The anchor is the
+LINEAGE's, not the root's: `--estate-anchor /srv/dsl41/runs/<first>.anchor`
+on `run --resume`, `audit` and `estate prune` alike. Put it in the unit
+file beside the run root.
+
+*A client subscription resumed across a boundary.* Nothing to do: `since`
+is an estate-wide index and the backfill spans segments. A subscriber whose
+cursor is below what the root still retains — a rolled root, for instance
+— receives an explicit `{"gap": true, "earliest_retained": N}` line before
+the backfill (`control-protocol.md` §5).
+
+*The root is growing.* Attest, then prune (§2a). Nothing removes anything
+on a timer.
 
 ## 7. Upgrading dsl41 itself
 
