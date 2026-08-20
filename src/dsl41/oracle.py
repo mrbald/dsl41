@@ -165,6 +165,7 @@ from dsl41.ir import CatalogIR, JobIR, Semantics, Time
 
 from dsl41.oracle_state import (
     TERMINAL,
+    CarriedRows,
     Event,
     EventKind,
     JobRuntime,
@@ -259,9 +260,17 @@ TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", 
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
 
-    def __init__(self, catalog: CatalogIR) -> None:
+    def __init__(self, catalog: CatalogIR, *, carried: CarriedRows | None = None) -> None:
         self.catalog = catalog
         self.store = RuntimeState()
+        if carried is not None:
+            # period-model ss7 phase 3 step 3: carried rows install VERBATIM
+            # and BEFORE the genesis seed, so the seed below can skip them
+            # instead of overwriting them. A "construct then overwrite"
+            # opener moves every carried revision, and an operator's
+            # `expect` against a revision the seal published is then
+            # unholdable.
+            self.store.install(carried)
         # DL-87: the catalog seed IS an input -- the genesis one. Not
         # ceremony: it is what makes `revision(key) == 0` mean "absent" for a
         # global, and therefore what makes a conditional create expressible.
@@ -269,6 +278,8 @@ class Oracle:
         # been through an input; a never-declared name stays at 0.
         self.store.begin_input()
         for name, job_ir in catalog.jobs.items():
+            if carried is not None and name in carried.jobs:
+                continue  # ss7 phase 3 step 4: a carried row keeps its C1 flags
             # SEM-24: definition-time state seeds the SEM-20/21/22 flags
             initial = job_ir.sem.initial_status
             self.store.set_flags(
@@ -278,14 +289,20 @@ class Oracle:
                 on_noexec=initial == "ON_NOEXEC",
             )
         for name, value in catalog.globals_declared.items():
+            if carried is not None and name in carried.globals_:
+                continue  # only GENUINELY NEW rows are seeded (ss7 phase 3 step 4)
             self.store.set_global(name, value)
         self.store.commit_input()
         # the constructor's seed is not an input to the seed/advance latch
         self.store.finish_genesis()
+        if carried is not None:
+            self.store.seed_period(carried.period_id)
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
         self._queue: deque[Event] = deque()
-        self._now: datetime | None = None
+        #: ss3.3: feed times must be non-decreasing across the boundary, so
+        #: an opened interpreter starts from the instant the seal was taken
+        self._now: datetime | None = carried.now if carried is not None else None
         #: edge-trigger index (DL-13): entity key -> jobs whose `condition`
         #: references it. Keys: job names (incl. "name^INST"), "g:NAME".
         self._referencers: dict[str, list[str]] = {}

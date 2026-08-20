@@ -352,6 +352,25 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 The journal is an append-only JSONL WAL, one file per run. Record kinds:
 
+*(Amended by DL-133, at build of period-model §1.1 and §7.)* **One file per
+run is now one file per PERIOD, and the file at the old name is a
+sentinel.** A periodized root's records live in `wal/<segment_no>.jsonl`;
+`journal.jsonl` holds one line, the permanent `period_root` record
+`{rec, artifact_format_version, estate_id, see, adopted_from, claim_id}`.
+The NAME is kept deliberately: an old binary refuses `run` because a
+`journal.jsonl` exists and refuses `run --resume` because the first record
+is not `header`, and there is no instant at which the file is absent — so a
+root that sealed and exited never reads as *unused* to a build that would
+genesis into it. Every reader follows the sentinel's `see` through one
+function (`period.resolve_wal`), so a caller holding a run root, the
+sentinel or a segment reads the same records. A **legacy root**, where
+`journal.jsonl` IS the WAL, keeps working unchanged; the first record's
+kind is what tells the two layouts apart. Two record kinds join the list
+below: **`seal`** (period-model §2.2), the last record of a period's last
+segment and the boundary's commit point — **any record after one in the
+same segment is refused at the read**, not tolerated as a torn tail — and
+the sentinel itself, which is not in the WAL at all.
+
 - `segment` — the first record of every segment, and the whole identity of
   the period it opens: `{rec, segment_no, estate_id, period_id,
   baseline_id, catalog_hash, catalog_hash_version, source_bundle_hash,
@@ -500,6 +519,30 @@ umask-hopeful.
 
 **Resume** (`dsl41 run --resume <journal>`):
 
+*(Amended by DL-133, at build of period-model §11.)* **Four steps run
+before step 1 below, and they decide which segment step 1 is about.** The
+sentinel is read and §1.1's ownership rule applied to it, exactly as it is
+applied at creation; `anchor.lock` is taken and the anchor's `estate_id`
+must be this root's; the SEAL is selected by lineage from what this root
+holds — the active segment's `opens_from_seal` when it has one, else the
+newest **committed** `seal` record in this root's last segment, else this
+is period 1 before any seal and replay starts at genesis — verifying the
+sidecar's recomputed digest against the digest the naming record carries,
+and every field the two duplicate; and then the head is acted on, which
+repairs whichever window the last process died in (`open` with a `seal`
+record present performs the CAS the crashed sealer did not; `claimed` with
+our claim and a durable segment moves the head to `open`; `claimed` with
+another refuses, naming the holder). When the selected seal is committed
+and has no successor segment, resume **opens the next period** first: it
+claims the successor, writes `wal/<N+1>.jsonl` with its opening `segment`
+at T, moves the head, and seeds the interpreter from the sidecar — carried
+rows install verbatim, revisions included, and only genuinely new rows are
+seeded from the catalog. Step 1 then gates on THAT segment's pins, which
+are C2's. A root with no sentinel is a legacy root and skips all four:
+period-model §11's matrix would have `run --resume` refuse one until
+`dsl41 estate adopt` has run, and that refusal lands with the verb that can
+lift it — refusing first would strand every existing run root.
+
 1. On catalog-hash mismatch, refuse — no silent semantic drift. A changed
    estate re-baselines explicitly.
 2. Replay inputs in seq order through a fresh Oracle (original timestamps).
@@ -538,6 +581,17 @@ umask-hopeful.
      naming the supervisor's own reason (PR-36a). The FAILURE verdicts
      above remain for the tethered path and for identity-less chains,
      where nothing can be replayed safely.*)
+   *(Amended by DL-133, at build of period-model §3.5 — PR-33.)* **A live
+   wrapper under a TERMINAL row is re-driven regardless of the KILL
+   effect's recorded state**, and regardless of whether a KILL effect
+   exists at all. DL-96 made a *recorded* kill re-driven; this closes the
+   half it left. `_apply_kill` records `applied` when the cancellation is
+   delivered and the TERM/grace/KILL ladder runs on the way out of the
+   task, so an engine that dies mid-ladder leaves a live wrapper under a
+   terminal row with the effect already resolved — and re-driving only
+   PENDING kills read that state and walked past it. The row being terminal
+   is what makes the process an orphan: the sweep skips it as "already
+   replayed", and nothing else ever looks again.*
    All reconciliation injections journal with source=reconcile. Adoption
    never appears at this tier. When the supervisor (§6a Tier 1, 11f)
    exists, jobs survive engine restarts by *reattachment* — their parent

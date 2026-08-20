@@ -1898,3 +1898,54 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
         # the id is the only thing that makes a retry safe, so every outcome
         # that may still apply has to carry it and no other outcome may
         assert ("--request-id req-7" in err) is names_the_id, answer
+
+
+def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(
+    short_root: Path,
+) -> None:
+    """The accept-time check proves nothing about a lineage replaced
+    mid-stream: each backfill record and each live record re-proves the
+    anchor, and a displaced leader answers the PR-03 refusal and hangs up
+    instead of publishing records for an estate it no longer leads."""
+    text = "insert_job: fence_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            checks = {"count": 0}
+            real = server._lineage_lost
+
+            def displaced_after_ack() -> dict | None:
+                checks["count"] += 1
+                if checks["count"] == 1:
+                    return real()  # the accept-time check passes
+                return {
+                    "ok": False,
+                    "refused": True,
+                    "error": "this engine can no longer prove it leads (PR-03 pin)",
+                }
+
+            server._lineage_lost = displaced_after_ack  # type: ignore[method-assign]
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            try:
+                writer.write(
+                    json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
+                )
+                await writer.drain()
+                ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
+                assert ack == {"ok": True, "subscribed": True}
+                # the journal already holds the opening records, so the FIRST
+                # backfill response hits the re-proof and is the refusal
+                answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
+                assert answer["ok"] is False and "no longer prove" in answer["error"]
+                assert await asyncio.wait_for(reader.readline(), timeout=2.0) == b""  # hangup
+                assert checks["count"] >= 2  # re-proved per response, not per connection
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

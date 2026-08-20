@@ -52,6 +52,7 @@ from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_hosts import HostCommand
 from dsl41.oracle_state import RuntimeState
+from dsl41.period import active_wal
 
 if TYPE_CHECKING:
     from dsl41.ir import JobIR
@@ -512,7 +513,7 @@ class ModelRun:
         resume, which is the only moment it is safe to edit a run root's
         log -- no engine holds it, exactly as no engine held it in the crash
         this models."""
-        path = self.run_root / "journal.jsonl"
+        path = active_wal(self.run_root)
         records = [json.loads(line) for line in path.read_text().splitlines() if line]
         for index in range(len(records) - 1, -1, -1):
             if records[index].get("rec") == "effect_result":

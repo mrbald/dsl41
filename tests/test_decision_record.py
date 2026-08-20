@@ -69,6 +69,7 @@ from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import Effect
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import Journal, read_journal, read_outbox, replay_inputs
+from dsl41.period import active_wal
 from dsl41.runner_startup import (
     _preflight_identities,
     _reconcile,
@@ -260,7 +261,7 @@ def test_pr35_decision_and_effects_commit_together(tmp_path: Path) -> None:
     for append in range(1, len(kinds) - genesis + 1):
         run_root = tmp_path / f"crash{append}"
         assert _run_dying_at(run_root, append) == genesis
-        records = _records(run_root / "journal.jsonl")
+        records = _records(active_wal(run_root))
         assert [r["rec"] for r in records] == kinds[: genesis + append - 1]
 
         # the property, both ways round. No decided input has lost an intent
@@ -316,13 +317,13 @@ def test_pr35_a_torn_decision_line_is_cut_before_the_successor_appends(tmp_path:
     state to a successor: input replayed as an application, nothing
     inherited."""
     genesis = _run_dying_at(tmp_path / "intact", None)
-    intact = (tmp_path / "intact" / "journal.jsonl").read_bytes().split(b"\n")
+    intact = active_wal(tmp_path / "intact").read_bytes().split(b"\n")
     kinds = [json.loads(line)["rec"] for line in intact if line]
     at = kinds.index("decision")
     assert at > genesis
     torn_root = tmp_path / "torn"
     assert _run_dying_at(torn_root, at + 1 - genesis + 1) == genesis  # died after the decision
-    path = torn_root / "journal.jsonl"
+    path = active_wal(torn_root)
     lines = path.read_bytes().split(b"\n")
     assert json.loads(lines[at])["rec"] == "decision"
     clean = b"\n".join(lines[:at]) + b"\n"

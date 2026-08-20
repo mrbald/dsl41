@@ -45,10 +45,11 @@ import socket
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from dsl41.ir import CatalogIR
 from dsl41.period import catalog_hash_for
+from dsl41.runner_procid import mkdir_durable
 from dsl41.runner_clock import EngineError
 
 #: ss7 ledger header, the half `catalog_hash` does not cover: the version of
@@ -74,8 +75,21 @@ _ASSUMED_VERSION = 1
 LOCK_NAME = "leader.lock"
 
 
+class Proof(Protocol):
+    """What an appender re-proves before it writes, and drops when it stops.
+
+    `Journal` and the adapters hold one of these, never a `LeaderLock`
+    directly: since period-model ss1.3 an appender must prove TWO things --
+    that it leads this run root and that it still leads the lineage -- and
+    a writer typed to the single lock could only ever check one of them."""
+
+    def check(self) -> None: ...
+
+    def release(self) -> None: ...
+
+
 class LeaderLock:
-    """The run root's mutex, held for the process lifetime.
+    """One directory's mutex, held for the process lifetime.
 
     `acquire` is ss7's ACQUIRE on this substrate: exclusive, non-blocking,
     and either held or refused with the holder named. `check` is the
@@ -83,10 +97,26 @@ class LeaderLock:
     needs a way to notice, and on a filesystem the way to lose it is for
     the lock file to be replaced under us, leaving this process holding an
     exclusive lock on an unlinked inode while another holds one on the
-    name."""
+    name.
 
-    def __init__(self, run_root: Path) -> None:
-        self.path = run_root / LOCK_NAME
+    **Generalized to the anchor by DL-133** (period-model ss15's row): the
+    lineage lock is this pattern on the anchor directory, because that
+    pattern already solves what a bare `O_EXCL` does not -- replacement and
+    lifetime. Only the file name and the noun in the refusal move; the
+    run-root spelling is the default, so a legacy root's `leader.lock` is
+    byte-identical to what every earlier build wrote."""
+
+    def __init__(
+        self,
+        directory: Path,
+        name: str = LOCK_NAME,
+        *,
+        of: str = "run root",
+        held_by: str = "engine",
+    ) -> None:
+        self.path = directory / name
+        self.of = of
+        self.held_by = held_by
         self._fd: int | None = None
         self._ino: int | None = None
 
@@ -101,8 +131,8 @@ class LeaderLock:
         except OSError as exc:
             os.close(fd)
             raise EngineError(
-                f"{self.path.parent} is held by another engine ({self._holder()}):"
-                " one leader per run root (concurrency-model ss7)"
+                f"{self.path.parent} is held by another {self.held_by} ({self._holder()}):"
+                f" one leader per {self.of} (concurrency-model ss7)"
             ) from exc
         ino = os.fstat(fd).st_ino
         try:
@@ -147,13 +177,13 @@ class LeaderLock:
             current = os.stat(self.path).st_ino
         except FileNotFoundError as exc:
             raise EngineError(
-                f"{self.path} was deleted: this engine can no longer prove it leads"
-                " this run root, and another may already have claimed it"
+                f"{self.path} was deleted: this {self.held_by} can no longer prove it leads"
+                f" this {self.of}, and another may already have claimed it"
                 " (concurrency-model ss7)"
             ) from exc
         if current != self._ino:
             raise EngineError(
-                f"{self.path} was replaced: another engine may hold this run root"
+                f"{self.path} was replaced: another {self.held_by} may hold this {self.of}"
                 " (concurrency-model ss7)"
             )
 
@@ -187,10 +217,50 @@ def acquire_run_root(run_root: Path) -> LeaderLock:
     does that and is then refused has already acted on the estate it does
     not lead. The engine's own entry points acquire for themselves when no
     caller has."""
-    run_root.mkdir(parents=True, exist_ok=True)
+    # every entry down to the run root is a record: without the fsyncs a
+    # power cut can lose the directory every later durable write lives in.
+    # Unconditional, so a retry after a failed fsync repairs it rather than
+    # skipping it (mkdir_durable's contract).
+    mkdir_durable(str(run_root))
     lock = LeaderLock(run_root)
     lock.acquire()
     return lock
+
+
+class Fence:
+    """Every proof this process holds, re-proved together (period-model
+    ss1.3).
+
+    One appender, two things to prove: it leads this run root, and it still
+    leads the lineage the anchor names. Delete or replace either directory
+    and the incumbent stops on its next act -- DL-101's bargain, which does
+    not claim to un-run what already happened and does turn a divergence
+    into a recorded stop. Composing them here rather than at each call site
+    is what stops a writer from proving one and forgetting the other; a
+    legacy root with no anchor holds a fence of one lock and behaves exactly
+    as it did before."""
+
+    def __init__(self, *locks: LeaderLock) -> None:
+        self.locks = locks
+
+    def check(self) -> None:
+        for lock in self.locks:
+            lock.check()
+
+    def intact(self) -> bool:
+        """The same proof as a boolean, for the one caller that must DECIDE
+        rather than fail: a fence loss inside the boundary's reversible
+        interval fail-stops instead of reopening admission (period-model
+        ss7, DL-101's rule)."""
+        try:
+            self.check()
+        except EngineError:
+            return False
+        return True
+
+    def release(self) -> None:
+        for lock in self.locks:
+            lock.release()
 
 
 def next_epoch(records: list[dict[str, Any]]) -> int:

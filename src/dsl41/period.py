@@ -1,15 +1,19 @@
 """Period identity: what a period IS, and the artifacts that say so.
 
-Normative spec: `docs/period-model.md` ss1.1 (estate layout,
+Normative spec: `docs/period-model.md` ss1.1 (estate layout, the sentinel,
 `source_bundle_hash`, `catalog_hash` v2), ss2.1 (the `segment` record,
-`RuntimeProfile`, the two manifests). Built by DL-130.
+`RuntimeProfile`, the two manifests). Built by DL-130, extended by DL-133.
 
 A period's semantics are `(catalog_hash, runtime_hash,
 state_machine_version)`. This module owns all three identities, the two
-manifest models that carry them, and the estate layout they live in. It
-holds no boundary machinery: the seal, `wal/`, the sentinel and the anchor
-are later units, and every estate here has exactly one journal holding
-exactly one segment -- period 1.
+manifest models that carry them, and the estate layout they live in --
+which since DL-133 includes the `period_root` sentinel, `wal/`, `seals/`
+and the staging and quarantine directories. It owns the layout and NOT the
+boundary: the anchor, the cutoff barrier and the seal operation are
+`boundary.py`'s, and they address every path through the functions here.
+`own_or_refuse` lives here for the same reason -- ss1.1 states ONE
+ownership rule for every root and every anchor, and a rule written twice is
+a rule two callers will eventually spell differently.
 
 **`catalog_hash` v2** is sha256 over the ss3.2 canonical form of
 `CatalogIR` with `meta` projected to `{source_files}` only. `tool_version`
@@ -64,7 +68,7 @@ from dsl41.canon import (
 )
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
-from dsl41.runner_procid import durable_write
+from dsl41.runner_procid import durable_write, mkdir_durable
 
 #: every stored digest is spelled exactly this way; an address outside the
 #: grammar is not an address, and a native period must never open under one
@@ -482,6 +486,231 @@ def period_dir(run_root: Path, period_id: int) -> Path:
     return run_root / "periods" / f"{period_id:06d}"
 
 
+def seal_dir(run_root: Path) -> Path:
+    """`<root>/seals/` -- one sidecar per closed period (ss1.1)."""
+    return run_root / "seals"
+
+
+def seal_path(run_root: Path, period_id: int) -> Path:
+    """`<root>/seals/<period_id zero-padded to 6>.json` (ss1.1)."""
+    return seal_dir(run_root) / f"{period_id:06d}.json"
+
+
+def staging_dir(run_root: Path, stage_digest: str) -> Path:
+    """`<root>/periods/.staging/<stage digest>/` (ss7).
+
+    Named by the digest's hex half, on `bundle_dir`'s rule: a colon in an
+    archived path is read as a remote host by `rsync` and `scp`."""
+    return run_root / "periods" / ".staging" / stage_digest.split(":")[-1]
+
+
+def quarantine_dir(run_root: Path, stage_digest: str, manifest_digest: str) -> Path:
+    """`<root>/periods/.quarantine/<old stage digest>/<sha256 of its
+    manifest.json>/` (ss7).
+
+    Two levels, because candidates alternate: S1 -> S2 -> S1 -> S2 must
+    quarantine four times without a collision, and quarantining the same
+    bytes twice must be idempotent (PR-30d)."""
+    return (
+        run_root
+        / "periods"
+        / ".quarantine"
+        / stage_digest.split(":")[-1]
+        / manifest_digest.split(":")[-1]
+    )
+
+
+# -------------------------------------------------------- the sentinel and wal
+
+#: ss1.1: the permanent one-line sentinel every periodized root carries. The
+#: NAME is the legacy journal's, deliberately -- an old binary refuses `run`
+#: because a `journal.jsonl` exists and refuses `run --resume` because the
+#: first record is not `header`, and there is no instant at which the file is
+#: absent. A native root that sealed and exited would otherwise release
+#: `leader.lock` over a directory the shipped binary reads as UNUSED.
+SENTINEL_NAME: Final[str] = "journal.jsonl"
+
+#: ss1.1: `wal/000001.jsonl` is period 1, `000002` is period 2 (I1: one
+#: period, one segment, one number).
+WAL_DIR: Final[str] = "wal"
+
+#: The sentinel's `see` -- where the records went. One value today; it is a
+#: field rather than a constant so a reader FOLLOWS it instead of assuming
+#: it, which is what makes the layout the sentinel's to state.
+WAL_POINTER: Final[Literal["wal/"]] = "wal/"
+
+_WAL_NAME: Final = re.compile(r"^(\d{6})\.jsonl$")
+
+
+class Sentinel(BaseModel):
+    """ss1.1's `period_root` record: one line, one schema, every periodized
+    root.
+
+    It says three things a reader needs before it opens anything: which
+    estate owns this directory, where the records are, and -- for a root a
+    physical roll created -- which claim first opened it, so "this very
+    claim" is a fact the sentinel can prove rather than one inferred from
+    `estate_id` alone. An in-place opener takes a new claim every period
+    and keeps the claim that created the root, so for an in-place claim the
+    sentinel proves only that this estate owns this root, which is what it
+    needs to prove."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rec: Literal["period_root"] = "period_root"
+    artifact_format_version: int = ARTIFACT_FORMAT_VERSION
+    estate_id: str = Field(min_length=1)
+    see: Literal["wal/"] = WAL_POINTER
+    #: `legacy/journal.jsonl` on an adopted root, null otherwise; permanent
+    adopted_from: str | None = None
+    #: the claim that FIRST opened this root (a physical roll's), or null
+    claim_id: str | None = None
+
+
+def sentinel_path(run_root: Path) -> Path:
+    return run_root / SENTINEL_NAME
+
+
+def read_sentinel(run_root: Path) -> Sentinel | None:
+    """The root's sentinel, or None when it has none -- an unused root, or a
+    legacy one whose `journal.jsonl` IS the WAL.
+
+    Absence is a fact and corruption is not: a file that exists and holds a
+    `period_root` record this binary cannot read is an `EngineError` naming
+    it, never a degrade to "legacy"."""
+    path = sentinel_path(run_root)
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+    try:
+        payload = decode(first)
+    except CanonError:
+        return None  # a legacy journal's first record is not canonical JSON
+    if not isinstance(payload, dict) or payload.get("rec") != "period_root":
+        return None  # `segment` or `header`: this root's journal IS its WAL
+    try:
+        return Sentinel.model_validate(payload)
+    except ValidationError as exc:
+        raise EngineError(f"{path}: not a sentinel this binary can read ({exc})") from exc
+
+
+def write_sentinel(run_root: Path, sentinel: Sentinel) -> Path:
+    """The sentinel, ss3.2-canonical, by the liturgy.
+
+    NOT create-only here: the ownership rule (`own_or_refuse`) decides
+    whether this call may happen, under `leader.lock`, which is what
+    excludes a concurrent opener of the same root. Writing it any other way
+    -- a bare `open("x")` -- would pass every process-kill test and let a
+    power loss restore the previous pathname (ss11 step 3)."""
+    path = sentinel_path(run_root)
+    durable_write(str(path), canonical_bytes(sentinel.model_dump(mode="json")) + b"\n")
+    _fsync_dir(run_root)
+    return path
+
+
+def wal_path(run_root: Path, segment_no: int) -> Path:
+    """`<root>/wal/<segment_no zero-padded to 6>.jsonl` (ss1.1)."""
+    return run_root / WAL_DIR / f"{segment_no:06d}.jsonl"
+
+
+def wal_segments(run_root: Path) -> list[int]:
+    """Every segment this root holds, in order.
+
+    A file under `wal/` that is not `<six digits>.jsonl` is **foreign** and
+    refused rather than ignored: I1 makes the name the period number, and a
+    second candidate for one period is exactly what draft 4's size roll
+    could not recover from. Dot-files are the liturgy's own temporaries and
+    are not candidates."""
+    directory = run_root / WAL_DIR
+    try:
+        entries = sorted(directory.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise EngineError(f"{directory}: unreadable: {exc}") from exc
+    segments: list[int] = []
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        matched = _WAL_NAME.match(entry.name)
+        if matched is None:
+            raise EngineError(
+                f"{entry}: not a segment file -- `wal/` holds `<six digits>.jsonl`"
+                " and nothing else (period-model ss1.1, I1)"
+            )
+        segments.append(int(matched.group(1)))
+    return sorted(segments)
+
+
+def active_wal(run_root: Path) -> Path:
+    """The segment an appender opens: the newest this root holds, or
+    segment 1 on a root whose genesis has not written one yet."""
+    segments = wal_segments(run_root)
+    return wal_path(run_root, segments[-1] if segments else GENESIS_SEGMENT_NO)
+
+
+def resolve_wal(path: Path | str) -> Path:
+    """The WAL a caller means by `path` -- **the sentinel's `see`, followed
+    once, here** (ss1.1).
+
+    A caller may hold any of three things and mean the same file: an estate
+    root, that root's sentinel, or a WAL segment. A periodized root's
+    sentinel says where the records went; a legacy root's `journal.jsonl`
+    IS the records. Every reader in the tree goes through this, so the
+    layout is the sentinel's to state and no second module gets an opinion
+    about it."""
+    path = Path(path)
+    if path.is_dir():
+        return estate_wal(path)
+    if path.name == SENTINEL_NAME and read_sentinel(path.parent) is not None:
+        return active_wal(path.parent)
+    return path
+
+
+def estate_wal(run_root: Path) -> Path:
+    """The segment this root's appender opens: `wal/<newest>.jsonl` on a
+    periodized root, `journal.jsonl` on a legacy one -- where the journal
+    IS the WAL and always was."""
+    return active_wal(run_root) if read_sentinel(run_root) is not None else sentinel_path(run_root)
+
+
+def root_is_unused(run_root: Path) -> bool:
+    """Whether this directory holds no estate: no sentinel and no legacy
+    journal. The one question `run` asks before it stages a period."""
+    return not sentinel_path(run_root).exists()
+
+
+def own_or_refuse(
+    *, exists: bool, ours: bool, what: str, holder: str
+) -> Literal["create", "resume"]:
+    """ss1.1's ONE ownership rule, for every root and every anchor:
+
+    > absent -> create. Exact same estate and exact same incomplete
+    > transaction -> resume. Anything else -> refuse.
+
+    Written once because it is one rule. "Fresh root" was not a checkable
+    rule: E1 could take the free `leader.lock` of a dormant estate E2's
+    root R, overwrite R's sentinel and install its imports while E2's
+    anchor still named R (PR-01c); and an anchor that merely existed was an
+    existing estate whose detached work may still be alive, whatever its
+    incumbent's liveness said (PR-01b). The CALLER decides what "ours"
+    means, because only it knows which incomplete transaction it is
+    resuming."""
+    if not exists:
+        return "create"
+    if ours:
+        return "resume"
+    raise EngineError(
+        f"{what} already exists and is not ours ({holder}): absent creates,"
+        " our own incomplete transaction resumes, anything else refuses"
+        " (period-model ss1.1)"
+    )
+
+
 def write_bundle(run_root: Path, sources: Sequence[SourceFile]) -> str:
     """Materialize the immutable input bundle; return its address.
 
@@ -501,7 +730,10 @@ def write_bundle(run_root: Path, sources: Sequence[SourceFile]) -> str:
     first is not an error, because the bytes are the name."""
     address = source_bundle_hash(sources)
     directory = bundle_dir(run_root, address)
-    directory.parent.mkdir(parents=True, exist_ok=True)
+    # this may be the FIRST write into a fresh run root (the CLI stages
+    # before genesis), so the whole chain of created directories -- the
+    # run root included -- is made durable here, not left to genesis
+    mkdir_durable(str(directory.parent))
     os.chmod(directory.parent, 0o700)
     # EVERYTHING -- the completeness check included -- runs under
     # catalogs/.lock, and the publisher fsyncs before it releases. Three
@@ -549,15 +781,35 @@ def write_bundle(run_root: Path, sources: Sequence[SourceFile]) -> str:
 
 
 def bundle_source_paths(run_root: Path, source_bundle_hash: str) -> list[Path]:
-    """The bundle's stored files, in the order `sources.json` records --
-    which is the command-line order the hash was taken over.
+    """The bundle's STORED files, in the order `sources.json` records --
+    which is the command-line order the hash was taken over. Verified by
+    `_bundle_entries`."""
+    return [path for path, _ in _bundle_entries(run_root, source_bundle_hash)]
 
-    VERIFIED before they are handed out: each stored name is a plain
-    basename (a `../` in a hand-edited vector would otherwise walk out of
-    the bundle), each file's bytes match the recorded sha256, and the
-    framing hash over (recorded paths, stored bytes) reproduces the
-    address. The directory is immutable by contract; this is what makes a
-    reader's trust in that contract checkable rather than assumed."""
+
+def bundle_sources(run_root: Path, source_bundle_hash: str) -> list[SourceFile]:
+    """The bundle's inputs as the bundle SAW them: the ORIGINAL path each
+    was given under, and its post-placeholder text.
+
+    This is what a boundary re-parses (DL-133). `catalog_hash` v2 covers
+    spans, and a span names the file it was parsed from, so parsing the
+    stored copies under their stored names produces a catalog that can
+    never hash back to the staged pin -- the reason `load_catalog_from_manifest`
+    is explicitly not hash-gated. Parsed under the ORIGINAL names the
+    vector records, the same bytes reproduce the same hash, which is what
+    lets an engine validate exactly the staged bytes on a host where the
+    original files do not exist (ss7 phase 1)."""
+    return [source for _, source in _bundle_entries(run_root, source_bundle_hash)]
+
+
+def _bundle_entries(run_root: Path, source_bundle_hash: str) -> list[tuple[Path, SourceFile]]:
+    """Every stored file with the input it stands for, VERIFIED: each
+    stored name is a plain basename (a `../` in a hand-edited vector would
+    otherwise walk out of the bundle), each file's bytes match the recorded
+    sha256, and the framing hash over (recorded paths, stored bytes)
+    reproduces the address. The directory is immutable by contract; this is
+    what makes a reader's trust in that contract checkable rather than
+    assumed."""
     directory = bundle_dir(run_root, source_bundle_hash)
     payload = _read_canonical_file(directory / "sources.json")
     if payload is None:
@@ -605,7 +857,7 @@ def bundle_source_paths(run_root: Path, source_bundle_hash: str) -> list[Path]:
             f"{directory}: the stored files do not reproduce the address"
             f" {source_bundle_hash} -- the bundle is not the one its address names"
         )
-    return paths
+    return list(zip(paths, rebuilt, strict=True))
 
 
 def _bundle_names(sources: Sequence[SourceFile]) -> list[str]:

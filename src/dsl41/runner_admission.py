@@ -221,7 +221,9 @@ def addressed_key(kind: str, payload: Mapping[str, Any]) -> str:
     return RuntimeState.job_key(job)
 
 
-def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: str) -> Envelope:
+def parse_envelope(
+    request: Mapping[str, Any], *, addressed: str | None, baseline_id: str
+) -> Envelope:
     """Steps 1-2's framing half, for every external transport there will
     ever be (concurrency-model ss4, ss6). Raises `EnvelopeError` naming the
     field; the caller turns that into its own refusal shape.
@@ -277,7 +279,14 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
     )
 
 
-def _parse_expect(expect: Any, *, addressed: str) -> dict[str, int]:
+def _parse_expect(expect: Any, *, addressed: str | None) -> dict[str, int]:
+    if addressed is None:
+        if expect is not None:
+            raise EnvelopeError(
+                "expect is not allowed on a command that addresses no row:"
+                " a boundary is not a row mutation (period-model ss2.2)"
+            )
+        return {}
     if expect is None:
         raise EnvelopeError(
             f'expect is required: name the revision you read, as {{"{addressed}": N}}'

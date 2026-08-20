@@ -66,12 +66,21 @@ from dsl41.runner_adapters import (
 )
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_effects import Effect, EffectOutcome
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.period import (
+    GENESIS_PERIOD_ID,
+    GENESIS_SEGMENT_NO,
     RuntimeProfile,
+    Sentinel,
     StagedManifest,
+    estate_wal,
     check_manifest_against_segment,
     genesis_manifest,
     read_period_manifest,
+    opening_at,
+    read_sentinel,
+    wal_path,
+    wal_segments,
     write_period_manifest,
 )
 from dsl41.runner_journal import (
@@ -79,10 +88,29 @@ from dsl41.runner_journal import (
     last_journal_at,
     baseline_id,
     read_journal,
+    repair_tail,
+    scheduler_frontier,
     replay_inputs,
 )
+from dsl41.boundary import (
+    CommittedBoundary,
+    EstateAnchor,
+    EstateHome,
+    OpenedPeriod,
+    act_on_head,
+    claim_root,
+    default_anchor_dir,
+    open_next_period,
+    open_wal,
+    seal_record,
+    select_seal,
+)
+from dsl41.oracle_state import CarriedRows
+from dsl41.seal import OpenedRuntime, Seal
 from dsl41.runner_ledger import (
     STATE_MACHINE_VERSION,
+    Fence,
+    Proof,
     LeaderLock,
     acquire_run_root,
     check_leader_eligibility,
@@ -209,36 +237,105 @@ def start_run(
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
     staged: StagedManifest | None = None,
+    anchor_dir: Path | None = None,
 ) -> Engine:
-    """Create the run-root layout (journal.jsonl, periods/, runs/, logs/)
-    and an Engine wired to it. Refuses a run_root that already holds a
-    journal -- that is what --resume is for (no silent re-baselining).
+    """ss1.1's GENESIS TRANSACTION, in its order, plus an Engine wired to
+    what it created.
 
-    Genesis installs period 1 before it opens the log (period-model ss1.1):
-    the committed manifest first, then the `segment` record that names it,
-    both derived from ONE object so the two cannot disagree (PR-22).
-    `staged` is what the launcher pinned -- catalog hash, bundle address,
-    runtime profile; a caller with none gets the default profile over the
-    empty bundle.
+    Six ordered steps, and the order is the recovery argument:
 
-    Leadership (S6a) is acquired BEFORE that refusal, not after: the
-    refusal reads the estate's state, and one leader per run root is the
-    rule under which any such read is meaningful. Genesis is epoch 1. A
-    caller that already holds the run root passes its `lock` -- `dsl41 run`
-    takes leadership earlier still, before it starts a supervisor. Either
-    way a failure here releases it, because a caller that got this far and
-    was refused is on its way out."""
-    run_root.mkdir(parents=True, exist_ok=True)
+    1. `flock` `leader.lock` -- before the refusal, not after: the refusal
+       reads the estate's state, and one leader per run root is the rule
+       under which any such read is meaningful (DL-99);
+    2. the `period_root` SENTINEL, create-only under ss1.1's ownership
+       rule. It is the first durable act, so there is no instant at which
+       this root looks unused to an old binary -- which would start a fresh
+       genesis beside the lineage and admit work while detached C1
+       executions were still alive;
+    3. `anchor.lock` and the create-only CAS `absent -> open(1, root)`;
+    4. the bundle and `periods/000001/manifest.json`;
+    5. `wal/000001.jsonl` with its `segment` record;
+    6. the finalize CAS setting `periods[1].segment_durable = true`.
+
+    A crash after step 2 and before step 5 leaves a root no old binary can
+    use and that a RE-RUN of genesis completes idempotently, reading
+    `estate_id` back from the sentinel rather than minting a second
+    (PR-01a). Once a segment exists, ordinary `--resume` owns recovery and
+    this refuses -- that is what `--resume` is for, and no silent
+    re-baselining.
+
+    The manifest is installed before the log opens, and both are derived
+    from ONE object so the two cannot disagree (PR-22). `staged` is what
+    the launcher pinned -- catalog hash, bundle address, runtime profile; a
+    caller with none gets the default profile over the empty bundle.
+    `anchor_dir` defaults to the root's sibling (`boundary.default_anchor_dir`),
+    which is outside every archivable root, as ss1.1 requires. A failure
+    here releases both locks, because a caller that got this far and was
+    refused is on its way out."""
+    # the root is CREATED by acquire_run_root (mkdir_durable: every new
+    # entry fsynced), never pre-created here -- a plain mkdir first would
+    # make the durability helper see an existing directory and prove
+    # nothing about its dirent
+    lock = lock or acquire_run_root(run_root)
     # the run root holds the journal (global values, every control input),
     # job output, and data -- owner-only, loudly, not umask-hopefully
     os.chmod(run_root, 0o700)
-    lock = lock or acquire_run_root(run_root)
-    journal_path = run_root / "journal.jsonl"
-    if journal_path.exists():
+    anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
+    try:
+        root = claim_root(run_root)  # step 2
+        if wal_path(run_root, GENESIS_SEGMENT_NO).exists():
+            raise EngineError(
+                f"{wal_path(run_root, GENESIS_SEGMENT_NO)} already exists: resume it"
+                " (resume_run) or pick a fresh run root"
+            )
+        anchor.acquire()
+        anchor.create_open(estate_id=root.estate_id, root=run_root)  # step 3
+    except BaseException:
+        anchor.release()
         lock.release()
-        raise EngineError(
-            f"{journal_path} already exists: resume it (resume_run) or pick a fresh run root"
+        raise
+    fence = Fence(lock, anchor.lock)
+    try:
+        return _finish_genesis(
+            catalog,
+            run_root,
+            lock,
+            anchor,
+            fence,
+            root_estate_id=root.estate_id,
+            clock=clock,
+            adapters=adapters,
+            scheduler=scheduler,
+            hold_open=hold_open,
+            deadman_s=deadman_s,
+            staged=staged,
         )
+    except BaseException:
+        # a refused genesis holds nothing (same rule as the claim above):
+        # both raw-fd locks conflict with a retry in this same process, so
+        # leaving them held wedges every embedder and test that retries
+        anchor.release()
+        lock.release()
+        raise
+
+
+def _finish_genesis(
+    catalog: CatalogIR,
+    run_root: Path,
+    lock: LeaderLock,
+    anchor: EstateAnchor,
+    fence: Fence,
+    *,
+    root_estate_id: str,
+    clock: Clock,
+    adapters: Mapping[str, JobAdapter],
+    scheduler: Scheduler | None,
+    hold_open: bool,
+    deadman_s: float | None,
+    staged: StagedManifest | None,
+) -> Engine:
+    """ss1.1 steps 4-6 plus the Engine, split out so `start_run` can pair
+    the acquire with a release on every failure path."""
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     at = clock.now()
@@ -280,19 +377,22 @@ def start_run(
         state_machine_version=STATE_MACHINE_VERSION,
         staged=staged,
     )
-    write_period_manifest(run_root, manifest)
-    journal = Journal.create(
-        journal_path,
+    write_period_manifest(run_root, manifest)  # step 4
+    journal = Journal.create(  # step 5
+        open_wal(run_root, GENESIS_SEGMENT_NO),
         catalog=catalog,
         clock_domain=manifest.clock_domain,
         started_at=at,
-        lock=lock,
+        lock=fence,
         manifest=manifest,
+        estate_id=root_estate_id,
     )
     epoch = next_epoch([])  # the first term over a log that has none
     journal.leader(epoch=epoch, at=at)
     lock.note(epoch=epoch, at=at)
-    fsync_dir(run_root)  # the journal's directory entry is a record too
+    fsync_dir(journal.path.parent)  # the segment's directory entry is a record too
+    fsync_dir(run_root)
+    anchor.finalize(GENESIS_PERIOD_ID)  # step 6
     return Engine(
         catalog,
         clock=clock,
@@ -303,6 +403,13 @@ def start_run(
         hold_open=hold_open,
         deadman_s=deadman_s,
         epoch=epoch,
+        estate=EstateHome(
+            run_root=run_root,
+            anchor=anchor,
+            estate_id=root_estate_id,
+            manifest=manifest,
+        ),
+        fence=fence,
     )
 
 
@@ -319,6 +426,7 @@ async def resume_run(
     supervisor: SupervisorClient | None = None,
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
+    anchor_dir: Path | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -339,11 +447,22 @@ async def resume_run(
     # engine could append between the read and the acquire and this one would
     # allocate an epoch the log already used.
     lock = lock or acquire_run_root(run_root)
+    # ss11 steps 1-2, here rather than below, so the acquire/release pairing
+    # of BOTH proofs is one readable block: a refused resume must hold
+    # neither, or the next engine cannot lead a lineage this one could not.
+    anchor: EstateAnchor | None = None
     try:
+        sentinel = read_sentinel(run_root)
+        if sentinel is not None:
+            anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
+            anchor.acquire()
+            anchor.require(sentinel.estate_id)
         engine = await _resume_under_lock(
             catalog,
             run_root,
             lock,
+            sentinel=sentinel,
+            anchor=anchor,
             clock=clock,
             adapters=adapters,
             scheduler=scheduler,
@@ -354,7 +473,10 @@ async def resume_run(
             deadman_s=deadman_s,
         )
     except BaseException:
-        lock.release()  # a refused resume holds nothing: the next engine may lead
+        # a refused resume holds nothing: the next engine may lead
+        if anchor is not None:
+            anchor.release()
+        lock.release()
         raise
     return engine
 
@@ -364,6 +486,8 @@ async def _resume_under_lock(
     run_root: Path,
     lock: LeaderLock,
     *,
+    sentinel: Sentinel | None,
+    anchor: EstateAnchor | None,
     clock: Clock,
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None,
@@ -375,8 +499,32 @@ async def _resume_under_lock(
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
-    block rather than a `finally` wrapped around a hundred lines."""
-    records = read_journal(run_root / "journal.jsonl")
+    block rather than a `finally` wrapped around a hundred lines.
+
+    ss11 steps 1-4 run first, and in their order: the sentinel (ss1.1's
+    ownership rule applies to resume as to creation), the anchor and its
+    `estate_id`, the SEAL selected by lineage from what this root holds,
+    and then the head action that repairs whatever window the last process
+    died in. Only then does the ladder this function had before begin --
+    over the segment the lineage selected, which on a committed boundary is
+    the one this resume just opened. Steps 1 and 2 -- the sentinel and the
+    anchor -- are the CALLER's, because they are the other half of the
+    acquire/release pairing."""
+    fence = Fence(lock, anchor.lock) if anchor is not None else Fence(lock)
+    _drop_never_opened_segment(run_root)
+    records = read_journal(estate_wal(run_root))
+    lineage = select_seal(run_root, records)  # step 3
+    if anchor is not None and sentinel is not None:
+        act_on_head(anchor, run_root=run_root, estate_id=sentinel.estate_id, lineage=lineage)  # 4
+    carried: CarriedRows | None = None
+    opened_period: OpenedPeriod | None = None
+    journal: Journal | None = None
+    if lineage.opens_next:
+        assert anchor is not None and lineage.seal is not None
+        opened_period = _open_from_seal(run_root, anchor, lineage.seal, catalog, fence)
+        journal = opened_period.journal
+        records = read_journal(journal.path)
+        carried = _carried_rows(opened_period.opened)
     opening = records[0]
     check_leader_eligibility(opening, catalog=catalog)
     # PR-22's U4 half: the committed manifest is the engine's own output,
@@ -386,7 +534,10 @@ async def _resume_under_lock(
     # installs it BEFORE the log opens, so no crash leaves a segment that
     # never had one. A MISSING artifact degrades where a WRONG one
     # refuses (DL-113 decision 5).
-    manifest = read_period_manifest(run_root)
+    period_id = opening.get("period_id")
+    manifest = read_period_manifest(
+        run_root, period_id if isinstance(period_id, int) else GENESIS_PERIOD_ID
+    )
     if manifest is None and opening.get("rec") == "segment":
         # genesis installs the manifest BEFORE the log opens, so a segment
         # root without one is a root that LOST it -- pruned or damaged --
@@ -439,15 +590,18 @@ async def _resume_under_lock(
             f"journal is from the future ({last_at.isoformat()} > now): the machine"
             " clock moved backwards; refusing to feed non-decreasing time backwards"
         )
-    journal = Journal(
-        run_root / "journal.jsonl",
-        fsync_each=not clock.virtual,
-        baseline_id=baseline_id(records),
-        lock=lock,
-    )
+    if journal is None:
+        journal = Journal(
+            estate_wal(run_root),
+            fsync_each=not clock.virtual,
+            baseline_id=baseline_id(records),
+            lock=fence,
+        )
     # the term is allocated by being appended (ss1), before the first input
-    # this incarnation admits, so every record after it names its author
-    epoch = next_epoch(records)
+    # this incarnation admits, so every record after it names its author.
+    # I2 makes the epoch estate-monotone, so a new period's first term is
+    # `seal.epoch + 1` and never 1 again (ss2.4)
+    epoch = max(next_epoch(records), lineage.seal.epoch + 1 if lineage.seal is not None else 1)
     journal.leader(epoch=epoch, at=clock.now())
     lock.note(epoch=epoch, at=clock.now())
     engine = Engine(
@@ -460,6 +614,20 @@ async def _resume_under_lock(
         hold_open=hold_open,
         deadman_s=deadman_s,
         epoch=epoch,
+        carried=carried,
+        estate=(
+            EstateHome(
+                run_root=run_root,
+                anchor=anchor,
+                estate_id=sentinel.estate_id,
+                manifest=manifest,
+                prev_seal_digest=lineage.seal.digest if lineage.seal is not None else None,
+                prior_seal_record=(seal_record(lineage.seal) if lineage.seal is not None else None),
+            )
+            if anchor is not None and sentinel is not None and manifest is not None
+            else None
+        ),
+        fence=fence,
     )
     replay = replay_inputs(engine.oracle, records)
     # the log's position comes back with its contents (concurrency-model
@@ -473,6 +641,42 @@ async def _resume_under_lock(
     # orphaned for the rest of its life -- its job is already TERMINAL, so
     # reconciliation skips it, and nothing else would ever look again.
     engine.outbox = replay.outbox
+    if opened_period is not None:
+        # a period that opened from a seal has an EMPTY segment: its intents
+        # and its ghost-run gate come from the sidecar, which is exactly why
+        # ss3.3 carries them. The decision index is deliberately NOT carried
+        # -- `_by_index` is log-local, and ss9 handles retries across the
+        # boundary.
+        for effect in opened_period.opened.outbox_pending:
+            engine.outbox.record(effect)
+        # ss3.5: the APPLIED bindings cross too, or reconciliation meets a
+        # bound run with no SPAWN in the outbox and accepts whatever
+        # identity the LIST or the spool claims. Every bound and fw_watch
+        # entry reconstructs its effect and its applied resolution, so the
+        # preflight's identity gates hold the world to run_id A, not B.
+        for entry in opened_period.opened.executions:
+            if entry.kind == "pending_spawn":
+                continue  # its pending effect is in outbox_pending already
+            effect = Effect(
+                effect_id=entry.effect_id,
+                kind="SPAWN",
+                job=entry.job,
+                run_number=entry.run_number,
+                executor_id=getattr(entry, "executor_id", LOCAL_EXECUTOR_ID),
+                index=entry.index,
+                at=last_at,
+                run_id=entry.run_id,
+                generation=getattr(entry, "generation", 0),
+            )
+            engine.outbox.record(effect)
+            engine.outbox.resolve(
+                EffectOutcome(
+                    effect_id=entry.effect_id,
+                    state="applied",
+                    run_id=entry.run_id,
+                    detail="carried across the boundary as an applied binding (ss3.5)",
+                )
+            )
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -493,14 +697,28 @@ async def _resume_under_lock(
             and record.get("source") == "scheduler"
             and record.get("kind") == "STARTJOB"
         }
-        scheduler.reset(last_at, inclusive=True)
-        sweep_upto = max(clock.now(), last_at)  # virtual resume: now < last_at
+        frontier = scheduler_frontier(records)
+        # ss6 step 9: a period opened from a seal starts its scheduler
+        # STRICTLY AFTER T. C1's cutoff admitted every tick due at or
+        # before T -- that is what `scheduler_admitted_through` records --
+        # so an inclusive re-anchor at T would re-derive the tick C1 just
+        # ran and journal a `drop` saying the engine missed it. The
+        # inclusive anchor is for the OTHER case it was written for: a
+        # crash between same-instant siblings' appends, where the frontier
+        # is a tick this segment actually holds.
+        opened_at_t = opening.get("opens_from_seal") is not None and frontier == opening_at(opening)
+        scheduler.reset(frontier, inclusive=not opened_at_t)
+        sweep_upto = max(clock.now(), frontier)  # virtual resume: now < the frontier
         for tick_ev in scheduler.pop_due(sweep_upto):
             if (tick_ev.job(), tick_ev.at.isoformat()) in replayed_ticks:
                 continue  # replay already fed this tick
             reason = "scheduler tick missed while the engine was down; not fired late"
             engine.drops.append((tick_ev, reason))  # PENDING: E9
             journal.drop(tick_ev, reason)
+    # ss8's supervisor proof needs the CLIENT on the engine, and an
+    # embedder that resumes with one must not depend on the CLI's wiring
+    # for the seal to prove anything (PR-27)
+    engine.supervisor = supervisor
     await _reconcile(
         engine,
         records,
@@ -510,6 +728,80 @@ async def _resume_under_lock(
         supervisor=supervisor,
     )
     return engine
+
+
+def _drop_never_opened_segment(run_root: Path) -> None:
+    """ss11's matrix row: a torn or empty FIRST line means the segment
+    never opened -- re-open it from the boundary.
+
+    Such a file holds nothing a reader can use and nothing a writer may
+    append to: appending would put a second `segment` record in one file,
+    which is exactly the two-candidate state I1 exists to make impossible.
+    Removing it is safe because the opening is a pure function of the seal,
+    so what replaces it is byte-identical (PR-07). Only ever the NEWEST
+    segment, and only when an earlier one exists -- period 1 has no
+    boundary to re-open from, and its own empty-log case is genesis's."""
+    segments = wal_segments(run_root)
+    if len(segments) < 2:
+        return
+    path = wal_path(run_root, segments[-1])
+    repair_tail(path)  # a torn final line goes, exactly as replay drops one
+    if path.stat().st_size:
+        return
+    path.unlink()
+    fsync_dir(path.parent)
+
+
+def _open_from_seal(
+    run_root: Path,
+    anchor: EstateAnchor,
+    seal: Seal,
+    catalog: CatalogIR,
+    fence: Proof,
+) -> OpenedPeriod:
+    """ss11 step 5's opening half, in place: claim the successor and write
+    the opening segment from the seal this root closed with.
+
+    The committed manifest must already be installed -- the boundary
+    renamed it into `periods/N+1/` BEFORE the record that names it -- so a
+    missing one is a boundary whose artifacts were pruned under the head,
+    which the retention floor forbids and which recovery cannot invent."""
+    opening = seal.next_period
+    manifest = read_period_manifest(run_root, opening.period_id)
+    if manifest is None:
+        raise EngineError(
+            f"{run_root}: seal {seal.digest} commits period {opening.period_id} and"
+            f" periods/{opening.period_id:06d}/manifest.json is not there -- the"
+            " boundary's own artifacts are reachable from the lineage head and may"
+            " never be pruned (period-model ss12)"
+        )
+    return open_next_period(
+        run_root=run_root,
+        anchor=anchor,
+        committed=CommittedBoundary(seal=seal, record=seal_record(seal), manifest=manifest),
+        catalog=catalog,
+        lock=fence,
+    )
+
+
+def _carried_rows(opened: OpenedRuntime) -> CarriedRows:
+    """The sidecar's carried half, in the owner's own types (ss7 phase 3).
+
+    Translated HERE, at the seam, because the artifact tier imports the
+    classifier and the classifier imports the interpreter -- so the
+    interpreter never learns what a sidecar is."""
+    state = opened.state
+    return CarriedRows(
+        jobs=dict(state.jobs),
+        globals_=dict(state.globals),
+        hosts=opened.host_rows,
+        timers=state.timers,
+        timer_seq=state.timer_seq,
+        consumed=dict(state.consumed),
+        enqueue_counter=state.enqueue_counter,
+        period_id=opened.next_period.period_id,
+        now=state.now,
+    )
 
 
 async def _reconcile(
@@ -940,8 +1232,20 @@ async def _redrive_recorded_kills(
     status record at all and no live wrapper means nobody can say whether the
     signal landed, and `indeterminate` is the only honest answer: reporting
     it either way would invent a fact about a process nothing observed
-    (E7)."""
+    (E7).
+
+    *(Amended by DL-133, at build of period-model ss3.5 -- PR-33.)* **A live
+    wrapper under a TERMINAL row is re-driven regardless of the KILL
+    effect's recorded state**, and regardless of whether a KILL effect
+    exists at all. `_apply_kill` records `applied` when the cancellation is
+    delivered and the TERM/grace/KILL ladder runs on the way out of the
+    task, so an engine that dies mid-ladder leaves a live wrapper under a
+    terminal row -- and re-driving only PENDING kills read that state and
+    walked past it. The row being terminal is what makes the process an
+    orphan: reconciliation skips it as "already replayed", and nothing else
+    ever looks again."""
     assert engine.run_root is not None
+    redriven: set[str] = set()
     for effect in [e for e in engine.outbox.pending() if e.kind == "KILL"]:
         listing = supervised_live.get((effect.job, effect.run_number))
         job_ir = engine.oracle.catalog.jobs.get(effect.job)
@@ -961,6 +1265,7 @@ async def _redrive_recorded_kills(
             # supersession check (which reads `_live`) is not the right gate
             # at resume.
             run_id = str(listing["run_id"])
+            redriven.add(run_id)
             await adapter.kill(run_id)
             engine._resolve_effect(
                 EffectOutcome(
@@ -972,6 +1277,32 @@ async def _redrive_recorded_kills(
             )
             continue
         engine._resolve_effect(_kill_outcome_from_spool(engine.run_root, effect))
+    await _redrive_orphans(engine, supervised_live, redriven)
+
+
+async def _redrive_orphans(
+    engine: Engine, supervised_live: dict[tuple[str, int], dict[str, Any]], redriven: set[str]
+) -> None:
+    """PR-33: every live wrapper whose row is TERMINAL, killed at resume --
+    whatever the KILL effect says, and whether or not one exists.
+
+    Keyed the other way round from the loop above, deliberately. That loop
+    asks "which kills did the previous engine intend?"; this asks "which
+    processes are alive that nothing intends to be", which is the question
+    an `applied`, `retired` or absent KILL effect cannot answer. A run this
+    resume already killed is skipped rather than signalled twice."""
+    for (job, run_number), listing in sorted(supervised_live.items()):
+        run_id = str(listing.get("run_id") or "")
+        if not listing.get("wrapper_alive") or not run_id or run_id in redriven:
+            continue
+        row = engine.oracle.store.job.get(job)
+        if row is None or row.run_number != run_number or row.status not in TERMINAL:
+            continue
+        job_ir = engine.oracle.catalog.jobs.get(job)
+        adapter = engine.adapters.get(job_ir.job_type) if job_ir is not None else None
+        if isinstance(adapter, SupervisedCommandAdapter):
+            await adapter.kill(run_id)
+            redriven.add(run_id)
 
 
 def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:

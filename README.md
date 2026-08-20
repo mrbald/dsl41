@@ -530,14 +530,24 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   is derived rather than stored; the two ss3.3 exclusions (a host's
   `last_contact` and its deadman) are absent from the SHAPE; and
   `next_period.baseline_id` is re-derived from `{estate_id, period_id,
-  stage_digest}` on every read, never minted. The seal OPERATION — the cutoff
-  barrier, staging, the write liturgy, the record and the CLI verb — is the unit
-  above it and calls these two unchanged
+  stage_digest}` on every read, never minted. The seal OPERATION is
+  `boundary.py`, and it calls these two unchanged
+- src/dsl41/boundary.py — the boundary operation (period-model ss1.1/ss1.3/ss6–ss9/
+  ss11, DL-133): the lineage anchor and its four-state head under a lock, the
+  durable successor claim, the `period_root` sentinel and ss1.1's one ownership
+  rule, C2 staging, ss9's retry-horizon gate, the three pure validation phases,
+  ss3's three writes in the one order that is the durability argument, and ss11's
+  seal selection and head actions at resume. `seal.py` is the artifact; this is
+  what has to be true before a period may close, in what order the bytes hit the
+  disk, and who may open next
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
-  advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
+  advance/host/effect/effect_result/result/seal/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
   into the opening record (a `segment`, or a `header` on a log written before
-  DL-130 — every reader accepts both)
+  DL-130 — every reader accepts both). Since DL-133 the records live in
+  `wal/<segment_no>.jsonl` and `journal.jsonl` holds the one-line `period_root`
+  sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`,
+  and a legacy root — where `journal.jsonl` IS the WAL — is unchanged
 - src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
   the mutex (an flock held for the process lifetime, so nothing has to decide
   whether the previous holder is alive), the epoch allocated by being appended to
@@ -792,6 +802,17 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   own rule produces, over a sweep whose size is derived from the module's own
   rule count, so neither a rule added without a case nor a case caught by a
   neighbouring rule passes unnoticed
+- tests/test_boundary.py — the boundary operation (period-model ss1.1/ss1.3/ss6–ss9/
+  ss11, DL-133): the genesis transaction re-run at each of its crash points, the
+  ownership refusals for a root and an anchor, the anchor fence deleted under a
+  live incumbent, ss9's gate over its own truth table, a quiet boundary committing
+  through its three writes and reopening in place with the carry intact, two
+  openings of one seal producing byte-identical `segment` records, the crash matrix
+  over ss7's write order — each pre-commit stage aborting and retrying, each
+  post-commit one fail-stopping — candidate reuse and quarantine, the FW seal
+  barrier parking a watch at its poll boundary, one held tick under C1 starting
+  exactly once after C2, and the `seal` control verb with its committed-retry
+  route
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)

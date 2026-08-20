@@ -47,6 +47,7 @@ from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resol
 from dsl41.runner_clock import RealClock
 from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import read_journal, replay_inputs
+from dsl41.period import active_wal
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -658,7 +659,7 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
     try:
         assert driver.stdout is not None
         assert driver.stdout.readline().strip() == "DRIVER-READY"
-        journal_path = run_root / "journal.jsonl"
+        journal_path = active_wal(run_root)
 
         def fast_completion_journaled() -> bool:
             if not journal_path.exists():

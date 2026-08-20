@@ -5441,3 +5441,256 @@
   would let a later carry overwrite an R before the model ever saw it --
   so `close_runtime` refuses on `Classification.refused` and on duplicate
   verdicts, on the classifier's own object.
+
+- DL-133 the period gets a boundary: the anchor, the cutoff, and the three
+  writes that end a period (2026-08-20; period-model ss1.1, ss1.2, ss1.3,
+  ss6, ss7, ss8, ss9 and ss11 steps 1-4, built as U6b -- PR-01a, PR-01b,
+  PR-01c, PR-02, PR-02b, PR-02c, PR-03, PR-04, PR-05, PR-05b, PR-07's
+  operational half, PR-25, PR-25a, PR-26, PR-27, PR-28, PR-28b, PR-28d,
+  PR-28e, PR-29, PR-30, PR-30a, PR-30b, PR-30c, PR-30d, PR-30e, PR-30f,
+  PR-32, PR-33, PR-34's barrier half, PR-45's in-place rows and PR-46;
+  PR-27's engine-visible and supervisor clauses -- see (13) -- and PR-31
+  not at all, because a bound detached run crossing a boundary live is
+  first exercised with the `seal` CLI surface).
+  `seal.py` is the artifact; `boundary.py` is the OPERATION -- what must be
+  true before a period may close, in what order the bytes hit the disk,
+  which single writer performs the cutoff, and who may open next.
+  (1) **The layout moved, and `journal.jsonl` stayed.** A periodized root's
+  records live in `wal/000001.jsonl`; the file at the old name is the
+  one-line `period_root` SENTINEL. Keeping the NAME is the point: an old
+  binary refuses `run` because a `journal.jsonl` exists and refuses `run
+  --resume` because the first record is not `header`, and there is no
+  instant at which the file is absent. Every reader follows the sentinel's
+  `see` through ONE function, `period.resolve_wal`, so a caller holding a
+  run root, a sentinel or a segment reads the same records and none of them
+  gets an opinion about the layout. A legacy root -- `journal.jsonl` IS the
+  WAL -- keeps working unchanged, and the first record's kind is what tells
+  the two apart.
+  (2) **One ownership rule, one implementation.** ss1.1 states the rule
+  once -- absent creates, the same estate and the same incomplete
+  transaction resumes, anything else refuses -- and `period.own_or_refuse`
+  is it. The root and the anchor both call it and each supplies its own
+  answer to "is this ours", because only the caller knows which incomplete
+  transaction it is resuming. Genesis is now ss1.1's six-step transaction
+  in that order: `leader.lock`, the sentinel, `anchor.lock` plus the
+  create-only CAS, the bundle and manifest, the segment, the finalize CAS.
+  A crash anywhere in it re-runs idempotently and reads `estate_id` BACK
+  from the sentinel rather than minting a second (PR-01a).
+  (3) **The anchor is `LeaderLock`'s pattern, generalized** (ss15's row):
+  same file-replacement fence, same process-lifetime hold, a different name
+  and a different noun in the refusal. The run-root spelling is the
+  default, so a legacy root's `leader.lock` and its refusals are
+  byte-identical to what every earlier build wrote. What is new is
+  `Fence` -- BOTH proofs, re-proved together before every append and every
+  dispatch. One appender, two things to prove, and a writer typed to a
+  single lock could only ever check one of them (PR-03).
+  (4) **The barrier lives in the engine and the artifacts live in the
+  boundary.** ss6's cutoff is the one act that must observe a state nothing
+  else can move, so it runs inside the single-writer loop: freeze
+  admission at `_push` -- the one choke point every input passes, gated on
+  `envelope is not None` so the engine's own doors stay open -- park every
+  FW task at its poll boundary, drain, choose T, admit every tick <= T,
+  advance through T, drain again, re-check ss8, and hand a SNAPSHOT to
+  `boundary.commit_boundary`. The snapshot is taken without yielding, so
+  nothing can move between the last precondition and the bytes the seal
+  carries. The seal request is deliberately NOT on that queue: its decision
+  is the `seal` record, and excluding it from the drain is therefore
+  structural rather than a special case (PR-28e; draft 26 deadlocked on
+  exactly that).
+  (5) **`abort_boundary` is the caller's, and the fail-stop is not.** Every
+  non-commit exit before the `seal` append runs the abort -- it clears the
+  flag, reopens admission, restarts scheduler admission and unparks FW, and
+  it touches no row, because the barrier held no job. From the append
+  onward every failure is a `BoundaryFailStop`: an `fsync` error does not
+  prove the line absent, and reopening C1 behind a possibly-durable seal
+  line would append records after a seal, which recovery rightly refuses
+  (PR-28b, PR-28d).
+  (6) **The staged bytes are found where they now are.** ss7's reuse path
+  needs `staged_manifest.json` and `candidate.json` after the rename has
+  moved them out of `periods/.staging/`, which is exactly why the install
+  keeps both beside `manifest.json`. `staged_bytes_for` consults the
+  installed directory only when its candidate NAMES the request's digest,
+  so a stale install is never read as this request's staging; a retry with
+  a different digest quarantines the installed candidate two levels deep,
+  under `<old stage digest>/<sha256 of its manifest.json>/`, which cannot
+  collide when candidates alternate and is idempotent when the same bytes
+  are quarantined twice (PR-30d, PR-30f).
+  (7) **Two questions about a live run, one traversal.** The classifier asks
+  only "is this job executing", and no ss10 rule tells the three ss3.5
+  kinds apart -- so `executing_jobs` answers it from the WAL alone. That
+  matters: readiness runs BEFORE the sealer has waited an unbound SPAWN
+  out, and a classifier that needed `spawn.json` could not run there at
+  all. `executions_at` answers the other question -- what exactly this
+  execution IS -- and reads the spool for it. Both are built on one
+  liveness rule (`live_spawns`), so the two can never disagree about which
+  runs are live.
+  (8) **Phase 2's classification is committed, and checked to be.**
+  `validate_boundary` re-runs the classifier over the post-barrier state
+  and compares its result with the candidate sidecar's `classification`
+  field. A seal carrying phase 1's map is refused rather than trusted --
+  the barrier's own admissions can create latent intent phase 1 never saw
+  (PR-28a).
+  (9) **Four changes outside the two modules.** `Oracle.__init__` takes
+  `carried` rows and skips the genesis seed for every entity the seal
+  brought, so carried revisions install VERBATIM and an operator's `expect`
+  against a published revision stays holdable; `RuntimeState.install` is
+  the verb that does it, under the owner, legal exactly once and before any
+  input. `parse_envelope` gained `addressed=None` for the one command that
+  addresses no row -- a parameter rather than a second parser, because ss0
+  admits one mandate and not one per verb set, and "no row" therefore means
+  `expect` is REFUSED rather than optional. `replay_inputs` seeds its
+  frontiers from the opening record's own `first_index`, because I2 makes
+  indices monotone across the ESTATE and a segment that opens at 5311
+  replays from 5310. And `scheduler_frontier` replaces `last_journal_at`
+  for the scheduler's re-anchor: the frontier is the opening watermark,
+  the admitted ticks, the drops and the advances, and NOTHING else -- a
+  `leader` record at 02:10 was silently consuming a 02:05 tick (PR-25a).
+  (10) **Two frozen contracts move, each with its reason.** `deadman_s`
+  leaves the host semantic projection, joining `last_contact` in
+  `_UNPROJECTED_HOST`: it is observed liveness configuration, startup
+  registers it with no journal record, and a projected value therefore
+  moves a revision audit cannot derive (period-model ss3.3, PR-24b). And
+  `runner-design.md` ss7's ladder now re-drives **a live wrapper under a
+  terminal row regardless of the KILL effect's recorded state**, including
+  when no KILL effect exists -- `_apply_kill` records `applied` before its
+  TERM/grace/KILL ladder runs, so an engine that dies mid-ladder leaves
+  exactly that state, and re-driving only PENDING kills read it and walked
+  past it. One shipped test flipped with it, from "the process survives" to
+  "the orphan is re-driven", and says so in its own docstring (PR-33).
+  (11) **The read fence is the LINEAGE's proof, not both.** PR-03 wants a
+  `status` after the anchor is replaced refused rather than answered, and
+  the shipped rule for the RUN ROOT's proof is CM-14's -- dispatch stops on
+  the way into admission's first append. Checking both at the control
+  door broke that: the read a client composes its `expect` from was refused
+  too, so the mutation that was supposed to stop the engine was never sent
+  and a displaced leader ran on, answering nothing. So the door checks the
+  anchor alone, the append checks both, and each obligation is held where
+  its own spec puts it.
+  (12) **The anchor's default path is a project decision, not the spec's.**
+  ss1.1 says the anchor is outside every archivable root and names no path.
+  `--estate-anchor` overrides it; omitted, it is `<run-root>.anchor`, a
+  sibling of the root. Deterministic from the root, so an operator who
+  restarts with the same `--run-root` reaches the same lineage; outside the
+  directory they archive, so `tar`ing a root never carries the fence away
+  with it.
+  (13) **ss8's quiescence set at the cutoff.** The cutoff holds the
+  engine-visible clauses -- the input queue, every admitted attempt
+  decided, no unresolved KILL ladder, no indeterminate effect, every
+  applied CMD SPAWN bound or terminal -- and then the SUPERVISOR clauses
+  (a peer-review round moved these into U6b: the reachable control-seal
+  path is the verb operators get first, and a CLI deferral cannot cover
+  it). The CLI hands the engine its `SupervisorClient`, and
+  `_supervisor_proof` runs after quiescence and before the horizon gate:
+  the supervisor reachable, its LIST from the incarnation whose lease this
+  engine holds (a restarted supervisor's empty history is not proof), and
+  the LIST reconciled BOTH ways against the executions the seal will carry
+  -- a carried bound run missing from it, an identity split on `run_id`,
+  or a live run it holds that the seal does not carry each refuse. A dead
+  supervisor that owns nothing a seal needs does not block (PR-27a). What
+  ss8 still does NOT re-run at the cutoff is resume's whole reconciliation
+  sweep; in its place every spool read the seal performs is held to the
+  bound `run_id` at the read (`executions_at` refuses a stranger's
+  `watch.jsonl` or `spawn.json` by name, DL-118), so the sweep's
+  conclusion cannot be silently replaced between reconciliation and T.
+  The "no open RuntimeState transaction" clause remains structural: the
+  single writer runs the boundary, so no transaction can be open under
+  it.
+  (14) **A legacy root still resumes.** ss11's matrix says a `header`
+  journal is refused by `run --resume` until it is adopted. That refusal
+  belongs with `estate adopt`, which is U7's -- refusing first would strand
+  every existing run root with no verb to un-strand it. A root with no
+  sentinel therefore skips ss11 steps 1-4 and runs the ladder it always
+  ran, and `runner-design.md` ss7 records that.
+  Out of scope by construction, and unchanged from U6b's fence: the
+  physical roll (`run --open-from`), adoption and the `adopting` head's
+  WRITER, `audit`/`verify` and the attestation chain, `estate reclaim
+  --force`, and the `dsl41 seal` CLI surface -- the live `seal` control
+  verb IS built, and the same functions are what U7 wires its verbs to. The
+  `adopting` head is READ here so a resume refuses it by name rather than
+  meeting an unknown state and guessing.
+  2679 -> 2789 collected, 107 new in `tests/test_boundary.py`, one in
+  `tests/test_runner_control.py` and one in
+  `tests/test_runner_leadership.py`, all passing;
+  ruff, mypy and arch_check clean, and branch coverage of the eight gated
+  modules unchanged against the tree this unit started from. An adversarial
+  review pass found three blockers and fourteen lesser items, all folded
+  in: ss9's gate joined attempts on `index` where `Journal.admit` writes
+  `seq`, so it was DEAD in production while four synthetic-record tests
+  stayed green -- the helper had written both keys; `dsl41 runs` read
+  period 1's manifest beside period N's records and refused every estate
+  that had crossed a boundary; and ss11's "torn or empty FIRST line"
+  row was unimplemented, so a crash mid-write of the successor segment
+  refused instead of re-opening. Each fix is mutation-checked: neutralise
+  it and exactly its case reds. Phase 2 was also restructured -- the
+  classifier now runs BEFORE the sidecar it commits into, so "phase 2's
+  output is the committed classification" is true by construction where it
+  had been an equality check against a map the same call had produced --
+  and the candidate quarantine moved out of the plan and into the install,
+  so the one destructive act in the reversible interval happens after
+  phase 2 has passed.
+  A second, external adversarial round found ten blockers, all folded in
+  and each pinned by a test that reds if the fix is removed: the
+  unused-root predicate covers the whole estate surface (a sentinelless
+  root keeping a WAL, a seal, a committed period or a populated `runs/`
+  refuses genesis; what the launcher pre-stages -- `catalogs/`,
+  `periods/.staging/` -- is excluded by design); a sealed `bound`
+  execution is restored into C2's outbox as an APPLIED binding, not just
+  a carried row; recovery fsyncs the closing WAL before the head CAS
+  (readable is not durable, and a power cut after the CAS must not lose
+  the successor's naming seal); `Journal.seal` fsyncs unconditionally --
+  a virtual-domain journal buffers ordinary appends and the CAS follows
+  the seal line at once; the run root's directory entry for `seals/` is
+  fsynced when the first boundary creates it; EVERY pre-PONR exception
+  aborts the boundary, `OSError` included, and `durable_write` unlinks
+  its temp on failure and clears a stale one so a retry is never wedged
+  by its own O_EXCL; the seal's spool reads are held to the bound
+  `run_id` (13); the supervisor clauses moved into the engine (13); the
+  recovery comparison covers every duplicated record field -- `source`,
+  `request_id`, `claimed_actor`, `force_seal` -- not just the selecting
+  ones; and a subscription re-proves the anchor before EVERY response,
+  backfill and live, not only at accept.
+  A third round (the same reviewer over the fixed tree) found eight more,
+  same treatment: the CLI proves the FULL ss1.1 predicate before it
+  stages a bundle into a root or starts a supervisor against it (both are
+  acts on an estate the process may turn out not to lead; a used root
+  without `--resume` gets the same early refusal); a genesis that fails
+  after the claim releases both raw-fd locks, so a same-process retry is
+  never wedged; the ss8 mode table's "in place, tethered -- full drain"
+  is enforced -- a tethered estate with a live bound command refuses the
+  seal, since exit code 3 would cancel the run the seal just carried, and
+  a DETACHED estate whose engine holds no supervisor client refuses too
+  (unprovable, not vacuous); `resume_run` binds the client to the engine
+  in core, not only in the CLI; the quiescence-and-proof pair loops until
+  both hold at once, draining any completion that lands while the proof
+  awaits the supervisor; `Journal.seal` publishes to subscribers only
+  AFTER the fsync, so no subscriber is told about a boundary recovery may
+  discard; the record schema requires `catalog_hash_version` to be an
+  exact non-boolean integer; and the parents of a created run root and
+  anchor directory are fsynced, so a power cut cannot retain one lineage
+  half and lose the other's directory entry.
+  A fourth round found five shadows of the third's fixes, each closed at
+  the root: `Journal.create` fsyncs the opening `segment` record
+  unconditionally (it NAMES the segment; the head actions rely on the
+  file, and a virtual-domain journal buffers everything else), and the
+  boundary's crash-retry reuse of an existing segment fsyncs it before
+  the CAS; an input stamped AFTER the cutoff T that lands mid-seal
+  refuses the boundary (it is C2's; re-choosing T would move the boundary
+  under the request that composed it) where an input at or before T is
+  drained and re-proved; the seal loop re-settles after every proof, so a
+  task that dies while the proof awaits the supervisor surfaces before
+  the snapshot; `start_run` no longer pre-creates the root with a plain
+  mkdir (the durability helper would then prove nothing); and directory
+  creation is `mkdir_durable` -- every created component fsynced plus the
+  deepest pre-existing ancestor, unconditional on retry -- used by the
+  run root, the anchor directory and `write_bundle` (which may be the
+  first write into a fresh root, since the CLI stages before genesis).
+  A fifth round found the last shadow: `_settle` deleted a failed live
+  adapter task BEFORE re-raising, so the one observation of the failure
+  could be consumed by the seal's reversible-abort path -- leaving C1
+  running over an applied SPAWN whose task and completion were both gone.
+  It now raises first and deletes only on clean completion (what the
+  reaping list already did), so the corpse stays observable until the
+  raise escapes the loop and the engine dies loudly. A small ledger of
+  already-raised corpses keeps `shutdown` from raising the same failure a
+  second time to the caller who just observed it -- teardown collects,
+  it does not repeat.

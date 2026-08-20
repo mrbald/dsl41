@@ -85,7 +85,7 @@ by AutoSys nature, and the engine's single-writer loop serializes every
 injection. The lease guards the supervisor tier, which spawns without
 semantics.
 
-## 3. Mutating verbs: sendevent, host
+## 3. Mutating verbs: sendevent, host, seal
 
 ```json
 {"cmd": "sendevent", "v": 3, "baseline_id": "…", "epoch": 0,
@@ -220,7 +220,83 @@ produce a double run. Every one of these checks is a pure function of the
 row: replay has no live host to probe, so a gate that probed one would
 decide differently the second time.
 
+### `seal` (DL-133, period-model §2.2)
+
+*(Amended by DL-133, at build of period-model §7.)* A third mutating verb,
+and it is unlike the two above in three ways — each one a consequence of
+what a boundary is.
+
+```json
+{"cmd": "seal", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
+ "next_period": {…StagedNextPeriod…}, "stage_digest": "…",
+ "force_seal": false, "claimed_actor": "alice@ops-laptop"}
+
+{"ok": true, "kind": "seal", "decision": "applied", "period_id": 2,
+ "digest": "sha256:…", "next_period_id": 3, "next_baseline_id": "…",
+ "request_id": "…", …header…}
+```
+
+**It names an `expect` on nothing.** A seal addresses no row, so `expect`
+is not merely optional here — it is **refused**. §0's mandate is about a
+caller asserting what they read about an entity; a boundary reads no
+entity. Making it optional would turn the one command with no precondition
+into the door every other command could slip through, so the envelope
+parser takes "this command addresses no row" as an explicit input and
+rejects an `expect` that arrives anyway.
+
+**Its decision is a `seal` record, not a `decision` record.** Before the
+seal, a durable "applied" would name a boundary that never happened; after
+it, records after a seal are forbidden; and no record at all would leave a
+lost response unretryable despite the promised `request_id`. So the record
+IS the commit point, and it carries the request's identity — `request_id`,
+the fingerprint over the whole envelope, the claimed actor and
+`force_seal`.
+
+**A committed seal's exact retry is answered ahead of the baseline gate.**
+The generic v3 parser rejects a foreign `baseline_id` before it reads
+`request_id`, and a retry of the boundary that closed C1 necessarily
+carries B1 while C2 answers under B2 — so without a dedicated route the
+exact-retry promise would be unreachable at exactly the moment it matters.
+The engine of period N+1 keeps the `seal` record it opened from and checks
+an incoming `(request_id, fingerprint)` against it first; a match is
+answered `applied` from that record, and a match on the id under a
+different envelope is a **collision**, refused. Force is an authorization
+and the actor is attribution, and neither may be swapped under a retry.
+The lookup reaches exactly one seal back; an older seal's retry is refused
+as a stale baseline, which is a liveness loss and not a safety one.
+
+**An uncommitted seal request is unseen.** A request that crashed before
+its record left nothing behind, so its retry is a fresh request that
+attempts the boundary again. Only a committed seal is ever deduplicated,
+which is also why sealing twice is impossible: a second attempt finds the
+first's record if it landed.
+
+The client stages C2 first — the immutable bundle under `catalogs/`, then
+`staged_manifest.json` and `candidate.json` under
+`periods/.staging/<stage_digest>/` — and the engine validates **exactly
+those bytes**. On success the engine **exits with code 3** ("sealed;
+period N+1 is ready to open"), distinct from its 0/1/2 so an init system
+does not restart-loop a sealed engine, and without signalling detached
+work. It does not load C2 into itself: a transition is a restart, not a
+reload (DL-65). The answer's timeout is longer than a mutation's, because
+a boundary drains every admitted attempt and waits an unbound spawn and an
+unresolved KILL ladder out; a timeout is `unknown`, never a refusal.
+
 ## 4. Query verbs (frozen response shapes)
+
+*(Amended by DL-133, at build of period-model §1.3.)* **A read is refused
+when this engine can no longer prove it leads the estate's LINEAGE.** Every
+answer below carries the §2 read header — a baseline, an epoch and a log
+position — and those are exactly the coordinates a displaced leader may no
+longer speak for, so a `status` immediately after the anchor directory is
+deleted or replaced is refused rather than answered, and the refusal
+carries no header (PR-03). Two proofs, two rules: losing the RUN ROOT's
+proof is `concurrency-model.md` §7's, and it stops dispatch on the way into
+admission's first append rather than at this door — refusing there would
+leave a displaced leader answering nothing and stopping never, and would
+also refuse the read a client composes its `expect` from, so the very
+mutation that stops the engine could never be sent (CM-14). A `subscribe`
+response is a read and is refused on the same rule.
 
 Every query is a **pure projection**. None mutates, none inserts a store
 row. They are safe to serve from the engine's task because `feed()` never

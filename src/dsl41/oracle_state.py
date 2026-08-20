@@ -275,7 +275,15 @@ _UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
 #: unholdable and the WAL a heartbeat log. Excluding it is safe in the
 #: direction that matters: a fresher contact only ever DELAYS an eviction,
 #: and a replay re-seeds it at resume time, which is fresher still.
-_UNPROJECTED_HOST: frozenset[str] = _UNPROJECTED | {"last_contact"}
+#: and DL-133's other half (period-model ss3.3, PR-24b): `deadman_s` is the
+#: OBSERVED liveness configuration, read back from the host and never
+#: declared by the leader. `register_host` moves it, startup registers with
+#: no journal record, and a projected `deadman_s` therefore moves a revision
+#: audit cannot derive -- replaying from a seal that says revision 5, audit
+#: could not produce the 6 the next seal carries. Nothing an operator holds
+#: an `expect` against depends on it, and the eviction gate reads the
+#: current row value regardless of revision.
+_UNPROJECTED_HOST: frozenset[str] = _UNPROJECTED | {"last_contact", "deadman_s"}
 _PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
     name for name in JobRuntime.model_fields if name not in _UNPROJECTED
 )
@@ -283,6 +291,33 @@ _PROJECTED_HOST_FIELDS: tuple[str, ...] = tuple(
     name for name in HostRuntime.model_fields if name not in _UNPROJECTED_HOST
 )
 _DEFAULT_JOB = JobRuntime()
+
+
+class CarriedRows(BaseModel):
+    """What a seal carries into the next period, as this module's own types
+    (period-model ss3.3, ss7 phase 3 step 3).
+
+    `seal.py` holds the ARTIFACT; this is the same facts in the shapes the
+    owner can install. It is a separate model rather than the seal's
+    `SealedState` because the artifact tier imports the classifier, the
+    classifier imports the interpreter, and the interpreter importing the
+    artifact would close that ring -- so the boundary translates once, at
+    the seam, and the owner never learns what a sidecar is."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    jobs: dict[str, JobRuntime] = {}
+    globals_: dict[str, GlobalRuntime] = {}
+    hosts: dict[str, HostRuntime] = {}
+    #: ss3.2's order: `(due, token)`, never heap-array layout
+    timers: tuple[tuple[datetime, int, Event], ...] = ()
+    timer_seq: int = 0
+    consumed: dict[str, int] = {}
+    enqueue_counter: int = 0
+    period_id: int = 1
+    #: T. Feed times must be non-decreasing across the boundary, so the
+    #: opened interpreter starts from the instant the seal was taken at
+    now: datetime | None = None
 
 
 class RuntimeState:
@@ -771,6 +806,35 @@ class RuntimeState:
             raise ValueError("finish_genesis after seed_period: construction comes first")
         self._genesis_finished = True
         self._inputs_committed = 0
+
+    def install(self, carried: CarriedRows) -> None:
+        """Install carried rows VERBATIM -- revisions included -- as the
+        FIRST act of an assembly (period-model ss7 phase 3 step 3).
+
+        Not an input, and deliberately not expressible as one: the rows
+        arrive with the revisions the closing seal published, and an
+        operator holding an `expect` against one of those revisions must
+        find it unmoved. A "construct C2 then overwrite" opener seeds
+        carried entities through ordinary verbs, moves every revision it
+        touches, and makes every published revision unholdable.
+
+        The period is NOT seeded here: `finish_genesis` refuses a state
+        that has already been seeded, and the constructor's own catalog
+        seed still has to run over these rows. The assembler calls
+        `seed_period` after it (ss3.5's latch, DL-132)."""
+        if self._in_input or self._inputs_committed or self._period_seeded:
+            raise ValueError(
+                "install on a used state: carried rows are assembly's first act, and a"
+                " live state advances through its own inputs alone (period-model ss7)"
+            )
+        self._jobs = dict(carried.jobs)
+        self._globals = dict(carried.globals_)
+        self._hosts = dict(carried.hosts)
+        self._timers = sorted(carried.timers, key=lambda entry: (entry[0], entry[1]))
+        heapq.heapify(self._timers)
+        self._timer_seq = carried.timer_seq
+        self._consumed = dict(carried.consumed)
+        self._enqueue_counter = carried.enqueue_counter
 
     def seed_period(self, period_id: int) -> None:
         """Set the period a FRESH state is being assembled into (period-model

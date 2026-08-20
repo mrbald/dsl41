@@ -12,7 +12,7 @@ Two layers, deliberately split so the fold stays testable with no
 filesystem: `fold_run_rows` is a pure function of already-parsed journal
 records plus (optionally) a catalog and a trace -- both themselves plain
 data, never a live `Engine`. `read_run_root` is the thin I/O shell: it reads
-`journal.jsonl`, rebuilds the catalog from the run root's own stored
+the run root's active WAL segment, rebuilds the catalog from its own stored
 inputs (no estate-file argument needed, unlike `dsl41 journal`: DL-130's
 bundle, or DL-66's `manifest/` on a root that predates it), replays it
 through a fresh `Oracle` exactly as `dsl41 journal`
@@ -606,6 +606,22 @@ def load_catalog_from_manifest(run_root: Path) -> CatalogIR:
         raise RunHistoryError(f"{run_root}: cannot rebuild the catalog ({exc})") from exc
 
 
+def active_period_id(run_root: Path) -> int:
+    """Which period this root's ACTIVE segment holds (period-model I1).
+
+    1 on a legacy root and on a root that has never sealed, and the reason
+    this is a function: every artifact under `periods/` is addressed by the
+    period number, and a reader that defaulted to 1 after a boundary would
+    read period 1's manifest beside period N's records and refuse the root
+    as inconsistent."""
+    try:
+        opening = read_journal(run_root)[0]
+    except (OSError, EngineError) as exc:
+        raise RunHistoryError(f"{run_root}: {exc}") from exc
+    period_id = opening.get("period_id")
+    return period_id if isinstance(period_id, int) and not isinstance(period_id, bool) else 1
+
+
 def _period_manifest_or_refuse(run_root: Path) -> "Manifest | None":
     """`read_period_manifest`, with its refusal converted to this module's.
 
@@ -613,7 +629,7 @@ def _period_manifest_or_refuse(run_root: Path) -> "Manifest | None":
     prints it as exit 2; a decoder error escaping as itself would take
     down a whole multi-root `dsl41 runs` with a traceback."""
     try:
-        return read_period_manifest(run_root)
+        return read_period_manifest(run_root, active_period_id(run_root))
     except EngineError as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
 
@@ -663,7 +679,7 @@ def read_run_root(run_root: Path) -> list[RunRow]:
     one run root, folded into its run rows. The only function here that
     touches a filesystem end to end; `fold_run_rows` above stays pure."""
     try:
-        records = read_journal(run_root / "journal.jsonl")
+        records = read_journal(run_root)
     except (OSError, EngineError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
     spool = _read_all_spool(records)

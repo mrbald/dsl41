@@ -95,6 +95,9 @@ from collections.abc import AsyncIterator, Awaitable, Mapping
 from pathlib import Path
 from typing import Any, get_args
 
+from pydantic import ValidationError
+
+from dsl41.boundary import SealRequest
 from dsl41.canon import is_scalar_json, is_scalar_string
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
@@ -111,6 +114,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HOST_VERBS, HostCommand
+from dsl41.seal import StagedNextPeriod
 from dsl41.runner_journal import read_journal
 from dsl41.runner_preflight import and_success_skeleton
 
@@ -176,6 +180,15 @@ class ControlServer:
     #: timeout so the caller gets this sentence instead of a bare socket
     #: timeout, which would say only that something did not answer.
     DECISION_TIMEOUT_S = 5.0
+
+    #: A boundary is not a mutation and does not answer in 5s: it drains
+    #: every admitted attempt, waits an unbound spawn and an unresolved
+    #: KILL ladder out, and writes four artifacts. The client's other route
+    #: is the committed seal in the next period (ss2.2), so a timeout here
+    #: is `unknown` and never a refusal. Comfortably above the two
+    #: independent `QUIESCE_WAIT_S` budgets the barrier can spend, so a
+    #: HEALTHY seal never lands in the unknown branch.
+    SEAL_TIMEOUT_S = 180.0
 
     def __init__(
         self,
@@ -319,7 +332,27 @@ class ControlServer:
 
     async def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
         """Route one already-versioned request and stamp the ss6 read
-        header onto its answer."""
+        header onto its answer.
+
+        *(Amended by DL-133, at build of period-model ss1.3.)* **The fence
+        is re-proved before the answer, not only before an append.** Frozen
+        v2 makes these reads leader-only and stamps lineage coordinates on
+        each one, so a displaced leader that kept answering `status`,
+        `routes` and backfill until its next mutation would be serving
+        revisions from a lineage it no longer leads. A `status` immediately
+        after the anchor is replaced is REFUSED, not answered (PR-03).
+
+        **Two proofs, two rules, and the split is each spec's own.** The
+        RUN ROOT's proof is CM-14's: losing it stops dispatch on the way
+        into admission's first append, and that is what stops the
+        incumbent. This check is the LINEAGE's proof alone -- refusing the
+        run-root half here would leave a displaced leader answering nothing
+        and stopping never, and would also refuse the read a client
+        composes its `expect` from, so the mutation that was supposed to
+        stop the engine would never be sent.*"""
+        lost = self._lineage_lost()
+        if lost is not None:
+            return lost
         response = await self._dispatch(request)
         # ss6: every read publishes where the log has reached and which log it
         # is, so a client can tell a revision it may name from one it may not.
@@ -331,12 +364,37 @@ class ControlServer:
             "applied_index": self.engine.frontiers.applied_index,
         }
 
+    def _lineage_lost(self) -> dict[str, Any] | None:
+        """The refusal a displaced leader owes a reader, or None.
+
+        Deliberately WITHOUT the ss6 read header: the header publishes a
+        baseline, an epoch and a log position, and those are exactly the
+        coordinates this process may no longer speak for."""
+        estate = self.engine.estate
+        if estate is None or estate.anchor.lock.held is False:
+            return None
+        try:
+            estate.anchor.check()
+        except EngineError:
+            pass
+        else:
+            return None
+        return {
+            "ok": False,
+            "refused": True,
+            "error": "this engine can no longer prove it leads this estate's lineage:"
+            " the anchor was deleted or replaced. Nothing is answered from a lineage"
+            " this process does not lead (period-model ss1.3, PR-03)",
+        }
+
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         cmd = request.get("cmd")
         if cmd == "sendevent":
             return await self._sendevent(request)
         if cmd == "host":
             return await self._host(request)
+        if cmd == "seal":
+            return await self._seal(request)
         if cmd == "hosts":
             return self._hosts(request)
         if cmd == "status":
@@ -417,6 +475,91 @@ class ControlServer:
         except EnvelopeError as exc:
             return {"ok": False, "error": str(exc), "refused": True}
         return await self._decision(self.engine.submit_host(parsed, envelope), kind=parsed.verb)
+
+    async def _seal(self, request: dict[str, Any]) -> dict[str, Any]:
+        """ss2.2's `seal` verb: one period boundary, requested over the
+        socket and DECIDED by the `seal` record.
+
+        Three things make it unlike every other mutating verb, and each is
+        a consequence of what a boundary is. It names an `expect` on
+        NOTHING, because it addresses no row. Its decision is a `seal`
+        record rather than a `decision`, because before the seal a crash
+        would leave a durable "applied" for a boundary that never happened
+        and after it records after a seal are forbidden. And **a committed
+        seal's exact retry is answered ahead of the baseline gate**: the
+        generic v3 parser rejects a foreign `baseline_id` before it reads
+        `request_id`, and a retry of the boundary that closed C1
+        necessarily carries B1 while C2 answers under B2 -- so without a
+        dedicated route the promised exact-retry answer is unreachable
+        (PR-30a, PR-30e).
+
+        The CLI stages C2 first and names the staged bytes by
+        `stage_digest`; the engine validates exactly those bytes, performs
+        the cutoff in its single-writer loop, and then exits with code 3
+        ("sealed; period N+1 is ready to open"). It does NOT load C2 into
+        itself: a transition is a restart, not a reload (DL-65)."""
+        try:
+            parsed = SealRequest(
+                baseline_id=str(request.get("baseline_id")),
+                epoch=int(request["epoch"]),
+                request_id=str(request.get("request_id")),
+                next_period=StagedNextPeriod.model_validate(request.get("next_period")),
+                stage_digest=str(request.get("stage_digest")),
+                force_seal=bool(request.get("force_seal", False)),
+                claimed_actor=str(request.get("claimed_actor") or ""),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as exc:
+            return {"ok": False, "error": f"malformed seal request: {exc}", "refused": True}
+        answered = self._committed_seal(parsed)
+        if answered is not None:
+            return answered
+        try:
+            parse_envelope(request, addressed=None, baseline_id=self.engine.baseline_id)
+        except EnvelopeError as exc:
+            return {"ok": False, "error": str(exc), "refused": True}
+        try:
+            committed = await asyncio.wait_for(
+                self.engine.submit_seal(parsed), timeout=self.SEAL_TIMEOUT_S
+            )
+        except AdmissionRefused as exc:
+            return {"ok": False, "error": str(exc), "refused": True}
+        except EngineError as exc:
+            # a readiness or phase-2 refusal: C1 is still open and correct,
+            # and the cutoff work already admitted stays as legitimate C1
+            # activity (ss7's exit codes)
+            return {"ok": False, "error": str(exc), "refused": True}
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": f"no boundary outcome within {self.SEAL_TIMEOUT_S}s: the seal may"
+                " still commit -- re-read before retrying, and retry only under"
+                f" request_id {parsed.request_id}",
+            }
+        return _seal_answer(committed.record)
+
+    def _committed_seal(self, parsed: SealRequest) -> dict[str, Any] | None:
+        """ss2.2's retry route: the engine of period N+1 keeps the `seal`
+        record it opened from and answers an exact retry from it.
+
+        The lookup reaches exactly ONE seal back. A retry of an older seal
+        is refused as a stale baseline, which is a liveness loss and not a
+        safety one (PR-30e). An uncommitted seal request is UNSEEN: it left
+        nothing behind, its retry is a fresh request that attempts the
+        boundary again, and only a committed seal is ever deduplicated."""
+        estate = self.engine.estate
+        record = estate.prior_seal_record if estate is not None else None
+        if record is None or record.get("request_id") != parsed.request_id:
+            return None
+        if record.get("request_fingerprint") != parsed.fingerprint:
+            return {
+                "ok": False,
+                "refused": True,
+                "error": f"request_id {parsed.request_id} named the boundary that closed"
+                f" period {record.get('period_id')} under a different envelope: force is an"
+                " authorization and the actor is attribution, and neither may be swapped"
+                " under a retry (period-model ss2.2, PR-30c)",
+            }
+        return _seal_answer(record)
 
     async def _decision(self, submitted: Awaitable[ApplyResult], *, kind: str) -> dict[str, Any]:
         """Wait out one submitted mutation and shape its answer -- the half
@@ -878,6 +1021,10 @@ class ControlServer:
         records in the race window are at-least-once (runner.py module
         docstring). The seam keys on `seq` and never on a record name, so
         DL-118's `decision` inherited `result`'s guarantee unchanged."""
+        lost = self._lineage_lost()  # a subscription response is a read too (PR-03)
+        if lost is not None:
+            await self._send(writer, lost)
+            return
         journal = self.engine.journal
         if journal is None:
             await self._send(writer, {"ok": False, "error": "this run has no journal"})
@@ -903,12 +1050,25 @@ class ControlServer:
                     if isinstance(seq, int) and seq <= since:
                         cut = index + 1
                 for record in records[cut:]:
+                    lost = self._lineage_lost()
+                    if lost is not None:
+                        # PR-03 holds per RESPONSE, not per connection: the
+                        # accept-time check proves nothing about a lineage
+                        # replaced mid-stream, and a displaced leader that
+                        # kept backfilling would publish records for an
+                        # estate it no longer leads
+                        await self._send(writer, lost)
+                        return
                     seq = record.get("seq")
                     if isinstance(seq, int):
                         max_seq = max(max_seq, seq)
                     await self._send(writer, record)
             while True:
                 record = await queue.get()
+                lost = self._lineage_lost()
+                if lost is not None:
+                    await self._send(writer, lost)  # same PR-03 rule, live seam
+                    return
                 seq = record.get("seq")
                 if isinstance(seq, int):
                     if seq <= max_seq:
@@ -920,6 +1080,22 @@ class ControlServer:
 
 
 # ---------------------------------------------------------------- clients (ss10)
+
+
+def _seal_answer(record: Mapping[str, Any]) -> dict[str, Any]:
+    """ss2.2's answer shape, built from the `seal` record and nothing else
+    -- so a fresh commit and an exact retry answer identically, which is
+    the whole point of the retry route."""
+    return {
+        "ok": True,
+        "kind": "seal",
+        "decision": "applied",
+        "period_id": record["period_id"],
+        "digest": record["digest"],
+        "next_period_id": record["next_period_id"],
+        "next_baseline_id": record["next_baseline_id"],
+        "request_id": record["request_id"],
+    }
 
 
 class ControlClientError(RuntimeError):

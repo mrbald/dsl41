@@ -138,6 +138,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import time
 import uuid
 
 from collections.abc import Awaitable, Mapping
@@ -147,12 +148,33 @@ from pathlib import Path
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import CarriedRows, Event
+from dsl41.boundary import (
+    BoundaryFailStop,
+    CommittedBoundary,
+    EstateHome,
+    PeriodSealed,
+    SealRequest,
+    Snapshot,
+    StagedContext,
+    commit_boundary,
+    executions_at,
+    load_staged_catalog,
+    QUIESCE_WAIT_S,
+    executing_jobs,
+    retry_horizon_gate,
+    staged_bytes_for,
+    validate_staged,
+)
+from dsl41.classify import Baseline, CarriedState, carried_from_oracle
 from dsl41.runner_adapters import (
     AdapterContext,
     DetachSignal,
     Failed,
     JobAdapter,
+    SealBarrier,
+    SupervisorClient,
+    SupervisorUnavailable,
     Terminated,
 )
 from dsl41.runner_admission import (
@@ -182,16 +204,42 @@ from dsl41.runner_hosts import (
     routes_new_effects,
     seed_local_executor,
 )
+from dsl41.period import StagedManifest, staging_dir
 from dsl41.runner_journal import (
     Journal,
+    read_journal,
 )
+from dsl41.runner_ledger import Fence
+from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
+
+
+#: How many event-loop turns the sealed engine gives the control server to
+#: write its answer before the loop unwinds. Three, not one: the server
+#: awaits the future, shapes the answer and drains the writer, and each is
+#: its own turn. The client's other route is the committed seal in the next
+#: period (period-model ss2.2), so this is courtesy, never the contract.
+_ANSWER_TURNS = 3
 
 
 @dataclass
 class _LiveRun:
     run_number: int
     task: asyncio.Task[None]
+
+
+@dataclass
+class _PendingSeal:
+    """One boundary awaiting the single writer (period-model ss7).
+
+    Not a `_Pending`: a seal is not an oracle input and takes no index. Its
+    DECISION is the `seal` record, which is why it cannot ride the ordinary
+    admission order -- before the seal a crash would leave a durable
+    "applied" for a boundary that never happened, and after it records
+    after a seal are forbidden (ss2.2)."""
+
+    request: SealRequest
+    future: asyncio.Future[CommittedBoundary]
 
 
 @dataclass
@@ -250,6 +298,12 @@ class Engine:
     control socket until stopped, so "no work now" never means "no work can
     arrive" (ss10)."""
 
+    #: How long the sealer waits an unbound SPAWN, an unresolved KILL ladder
+    #: or a still-draining queue out before it refuses (period-model ss8).
+    #: It is milliseconds in practice; the bound exists so a wedged tier
+    #: refuses instead of hanging, and tests shorten it.
+    QUIESCE_WAIT_S: float = QUIESCE_WAIT_S
+
     def __init__(
         self,
         catalog: CatalogIR,
@@ -263,8 +317,11 @@ class Engine:
         executor_id: str = LOCAL_EXECUTOR_ID,
         deadman_s: float | None = None,
         epoch: int = INERT_EPOCH,
+        estate: EstateHome | None = None,
+        fence: Fence | None = None,
+        carried: CarriedRows | None = None,
     ) -> None:
-        self.oracle = Oracle(catalog)
+        self.oracle = Oracle(catalog, carried=carried)
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no
@@ -324,11 +381,41 @@ class Engine:
         #: cancelled tasks awaiting collection; _settle re-raises any
         #: non-CancelledError they die with (fail loudly, never swallow)
         self._reaping: list[asyncio.Task[None]] = []
+        #: task ids whose failure _settle has ALREADY raised: the corpse
+        #: stays in `_live`/`_reaping` so a catcher that treats the raise
+        #: as reversible (the seal's abort) cannot consume the only
+        #: observation -- but teardown must not raise the same failure a
+        #: second time to a caller who already saw it
+        self._corpses_raised: set[int] = set()
         #: concurrency-model ss5: what this engine intends to do to its
         #: execution hosts, and what came of it. Restored from the log on
         #: resume -- an engine that forgot a kill it had decided would leave a
         #: detached run orphaned for the rest of its life.
         self.outbox = Outbox()
+        #: period-model ss1.3: what this engine leads besides its own run
+        #: root. None on an engine with no lineage -- the bisimulation
+        #: harness, a rehearsal -- and a seal request then has nothing to
+        #: close.
+        self.estate = estate
+        #: ss8's supervisor clauses need the CLIENT, not just the adapter:
+        #: the seal must prove the LIST it reconciles against came from the
+        #: incarnation whose lease this engine holds (PR-27). None on a
+        #: tethered engine -- wrappers are this process's children and EOF
+        #: with it, so the clause is vacuous there.
+        self.supervisor: SupervisorClient | None = None
+        #: BOTH proofs, re-checked before every append, every dispatch and
+        #: every revision-bearing read: this run root's `leader.lock` and
+        #: the lineage's `anchor.lock` (PR-03). The journal holds the same
+        #: object, so an append and a dispatch cannot prove different things.
+        self.fence: Fence | None = fence
+        #: ss6 step 2's freeze. An ENGINE flag, not a row field: the barrier
+        #: freezes ADMISSION and holds no job, so an abort restores nothing
+        #: on any row and a committed seal carries every `on_hold` exactly
+        #: as the operator left it (PR-28c).
+        self.sealing = False
+        #: the same freeze, seen by an FW task at its poll boundary (ss3.5)
+        self.barrier = SealBarrier()
+        self._seal: _PendingSeal | None = None
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host
@@ -438,6 +525,452 @@ class Engine:
         next engine route work at a host that is not answering."""
         self._push(_Pending(at=self.clock.now(), request_id=None, host=cmd, source="reconcile"))
 
+    # ------------------------------------------------------ the boundary
+
+    def submit_seal(self, request: SealRequest) -> Awaitable[CommittedBoundary]:
+        """Queue ONE boundary and hand back its outcome (ss7, live mode).
+
+        Not `submit`: a seal takes no index, addresses no row and is
+        decided by the `seal` record rather than by a `decision`. What it
+        shares with a mutation is the only thing that matters here -- it
+        waits for the SINGLE WRITER, because the cutoff is the one act that
+        must observe a state nothing else can move."""
+        future: asyncio.Future[CommittedBoundary] = asyncio.get_running_loop().create_future()
+        if self._seal is not None:
+            future.set_exception(
+                AdmissionRefused(
+                    f"a boundary is already in flight (request_id"
+                    f" {self._seal.request.request_id}): one seal at a time"
+                )
+            )
+        else:
+            self._seal = _PendingSeal(request=request, future=future)
+            self._activity.set()
+        return future
+
+    def abort_boundary(self) -> None:
+        """ss7: EVERY non-commit exit inside the reversible interval runs
+        this, while the fence is still valid.
+
+        It clears the sealing flag, reopens control admission, restarts
+        scheduler admission and unparks FW tasks -- and it TOUCHES NO ROW,
+        because the barrier held no job (ss6). Draft 20 said "refuses, C1
+        still open" and a literal implementation returned exit 2 with the
+        engine frozen behind ss6 step 2; draft 21 ran the abort only on
+        validation failure, and an `ENOSPC` on the sidecar left a live
+        engine frozen behind a freeze it would never lift (PR-28b)."""
+        self.sealing = False
+        self.barrier.release()
+        self._activity.set()
+
+    async def _seal_boundary(self) -> None:
+        """One queued boundary, run to its outcome inside the loop.
+
+        Three exits and they are three different facts: a commit raises
+        `PeriodSealed` and the engine stops with code 3; a refusal answers
+        the request, aborts, and C1 carries on -- the cutoff work already
+        admitted stays as legitimate C1 activity; and a fail-stop after the
+        `seal` append propagates WITHOUT an abort, because reopening
+        admission behind a possibly-durable seal line is the one thing
+        recovery cannot repair."""
+        pending, self._seal = self._seal, None
+        assert pending is not None
+        try:
+            committed = await self._run_boundary(pending.request)
+        except BoundaryFailStop:
+            raise
+        except Exception as exc:
+            # not just EngineError: an OSError from a pre-PONR write, fsync
+            # or rename is exactly as reversible, and leaving admission
+            # frozen behind it turns a transient disk error into a wedged
+            # engine (ss7). commit_boundary wraps every post-PONR failure
+            # in BoundaryFailStop, so anything else IS pre-PONR.
+            if self.fence is not None and not self.fence.intact():
+                # DL-101's rule, inside the reversible interval: a leader
+                # that cannot prove it leads does not get to reopen
+                # admission. It cannot un-run what happened; it turns a
+                # divergence into a recorded stop (PR-28b)
+                raise
+            self.abort_boundary()
+            if not pending.future.done():
+                pending.future.set_exception(exc)
+            return
+        if not pending.future.done():
+            pending.future.set_result(committed)
+        # the control server's turn to write the answer before this loop
+        # unwinds: the socket drops when the engine exits, and the client's
+        # other route is the committed seal in the NEXT period (ss2.2)
+        for _ in range(_ANSWER_TURNS):
+            await asyncio.sleep(0)
+        raise PeriodSealed(committed)
+
+    async def _run_boundary(self, request: SealRequest) -> CommittedBoundary:
+        """ss6's steps 2-8, in the single-writer loop.
+
+        Step 1 is the OPERATOR's -- the runbook's hold set, placed before
+        the seal -- and this barrier never touches `on_hold`: it freezes
+        ADMISSION, which is an engine flag, and holds no job."""
+        estate = self.estate
+        if estate is None or self.journal is None:
+            raise AdmissionRefused(
+                "this engine leads no lineage: a run root with no estate anchor and no"
+                " WAL has no boundary to close (period-model ss1.3)"
+            )
+        if request.epoch != self.epoch:
+            # the same rule the ss4 order applies to every other external
+            # input, at the one place a seal passes: a boundary composed by
+            # a client still talking to a superseded leader is refused
+            raise AdmissionRefused(
+                f"epoch {request.epoch} is not this leader's {self.epoch}:"
+                " re-read and re-compose against the current leader"
+            )
+        staged_ctx, staged_manifest = self._readiness(request, estate)
+        self.sealing = True  # step 2
+        self.barrier.park()
+        await self._drain_admitted()
+        at = self.clock.now()  # step 3
+        await self._cutoff(at)  # steps 4-6
+        # step 7, and the ss8 proof, until BOTH hold at once: the proof
+        # awaits the supervisor, and a completion that lands during that
+        # await would otherwise be snapshotted un-drained -- or not at all
+        deadline = time.monotonic() + self.QUIESCE_WAIT_S
+        while True:
+            late = sorted(
+                p.ev.kind if p.ev is not None else "request" for _, _, p in self._queue if p.at > at
+            )
+            if late:
+                # C1 owns every instant <= T and nothing after it (ss6): an
+                # input stamped past the cutoff cannot be admitted into the
+                # period being sealed, and re-choosing T mid-seal would move
+                # the boundary under the request that composed it. Refuse;
+                # C1 reopens and the retry closes at a later T.
+                raise EngineError(
+                    f"input(s) {', '.join(late)} arrived stamped after the cutoff"
+                    " T: they are C2's, and this boundary refuses rather than"
+                    " snapshotting a state that has moved past its own T"
+                    " (period-model ss6)"
+                )
+            if self._queue:
+                # a completion at or before T that landed while the proof
+                # yielded is C1 work (its run is C1's, PR-33a) -- drained to
+                # its decision, then quiescence AND the proof are
+                # re-established over the state it moved
+                await self._drain_admitted()
+            await self._await_quiescence(estate)
+            await self._supervisor_proof(estate)  # ss8's supervisor clauses (PR-27)
+            # the proof AWAITED: a task that died in that window surfaces
+            # in _settle (which re-raises), and every quiescence condition
+            # is re-checked -- exit only when a full pass moved nothing
+            await self._settle()
+            if not self._queue and self._not_quiescent(estate) is None:
+                break
+            if time.monotonic() > deadline:
+                raise EngineError(
+                    "inputs keep arriving during the ss8 supervisor proof: the estate"
+                    f" is not settling within {self.QUIESCE_WAIT_S}s (period-model ss8)"
+                )
+        forced_gate = retry_horizon_gate(
+            read_journal(self.journal.path),
+            horizon_us=estate.manifest.runtime_profile.retry_horizon_us,
+            at=at,
+            force_seal=request.force_seal,
+        )
+        return commit_boundary(  # step 8
+            run_root=estate.run_root,
+            anchor=estate.anchor,
+            journal=self.journal,
+            estate_id=estate.estate_id,
+            closing=estate.manifest,
+            staged_ctx=staged_ctx,
+            staged_manifest=staged_manifest,
+            snapshot=self._snapshot(at, estate=estate),
+            prev_seal_digest=estate.prev_seal_digest,
+            forced_gate=forced_gate,
+            crash_point=self.crash_point,
+        )
+
+    def crash_point(self, _stage: str) -> None:
+        """The boundary crash matrix's seam, and nothing else
+        (`runner_supervisor._crash_point`'s twin).
+
+        A no-op in production. The ss11 matrix stops the operation exactly
+        between two durable writes instead of killing a process and hoping
+        it died in the window it meant."""
+
+    def _readiness(
+        self, request: SealRequest, estate: EstateHome
+    ) -> tuple[StagedContext, StagedManifest]:
+        """ss8's readiness, BEFORE the current period closes: phase 1 over
+        exactly the staged bytes the request's digest names.
+
+        A failure here refuses while C1 is still open and correct, which is
+        the whole point of running it first."""
+        if request.next_period.stage_digest != request.stage_digest:
+            raise AdmissionRefused(
+                f"the request stages {request.stage_digest} and its next_period digests to"
+                f" {request.next_period.stage_digest}: the candidate is not the one the"
+                " request names (period-model ss7)"
+            )
+        staged_manifest = staged_bytes_for(
+            estate.run_root, request.stage_digest, next_period=estate.manifest.period_id + 1
+        )
+        if staged_manifest is None:
+            raise AdmissionRefused(
+                f"{staging_dir(estate.run_root, request.stage_digest)}: nothing is staged"
+                " at this digest -- stage C2 before asking for the boundary that opens it"
+                " (period-model ss7)"
+            )
+        now = self.clock.now()
+        context = StagedContext(
+            staged=request.next_period,
+            staged_bytes=staged_manifest,
+            boundary_request=request.boundary_request,
+            request_fingerprint=request.fingerprint,
+            c1=Baseline(catalog=self.oracle.catalog, profile=estate.manifest.runtime_profile),
+            c2=load_staged_catalog(estate.run_root, staged_manifest),
+            carried_state=self._carried(now),
+            decision_index=self.decisions,
+            state_machine_version=estate.manifest.state_machine_version,
+            at=now,
+        )
+        validate_staged(context)
+        return context, staged_manifest
+
+    async def _drain_admitted(self) -> None:
+        """ss6 step 2's other half: drain every ALREADY-ADMITTED attempt to
+        its durable decision before any sidecar byte is written.
+
+        The active seal request is deliberately NOT waited on -- its
+        decision IS the `seal` record and cannot precede the sidecar, and
+        draft 26 deadlocked on exactly that (PR-28e). It is not on this
+        queue at all, which is what makes the exclusion structural rather
+        than a special case."""
+        deadline = time.monotonic() + self.QUIESCE_WAIT_S
+        while self._queue:
+            _, _, pending = heapq.heappop(self._queue)
+            await self._admit_and_apply(pending)
+            self._dispatch()
+            await self._settle()
+            if time.monotonic() > deadline:
+                raise EngineError(
+                    "the input queue is still filling after"
+                    f" {self.QUIESCE_WAIT_S}s of draining: the estate is not settling,"
+                    " and a boundary over a moving state is not a boundary"
+                    " (period-model ss6 step 2)"
+                )
+
+    async def _cutoff(self, at: datetime) -> None:
+        """ss6 steps 4-6: admit every scheduler tick due at or before T,
+        advance the oracle through T firing every due semantic timer, and
+        drain what that produced.
+
+        `Scheduler._next` cannot be re-derived at a boundary -- resume
+        re-anchors INCLUSIVE of `last_at` and dedups against the ticks the
+        journal holds, and a seal cuts that evidence away. So C1 consumes
+        every tick it owns here, and `scheduler_admitted_through: T` is the
+        only carried evidence the next period needs: C1 owns every tick
+        <= T, C2 owns every tick after it."""
+        if self.scheduler is not None:
+            for tick_ev in self.scheduler.pop_due(at):
+                self._enqueue(tick_ev, source="scheduler")
+            await self._drain_admitted()
+        # a time observation is an input (DL-44): the firings it causes must
+        # survive a crash, or replay would resurrect a job the oracle already
+        # killed on the way to the cutoff. Unguarded on purpose -- a machine
+        # clock that moved backwards refuses the boundary through
+        # `Frontiers.admit` rather than skipping the observation and
+        # committing a seal whose `now` is behind the log's own frontier
+        await self._admit_and_apply(_Pending(at=at, request_id=None))
+        self._dispatch()
+        await self._drain_admitted()
+
+    async def _await_quiescence(self, estate: EstateHome) -> None:
+        """ss8's "always" set, re-checked after the cutoff (ss6 step 7).
+
+        Three of its clauses are things the sealer WAITS OUT rather than
+        refuses -- a KILL ladder that has not resolved to a spool proof, an
+        applied CMD SPAWN whose adapter task has not yet written
+        `spawn.json`, and an FW poll between its observation and its
+        durable line. It is milliseconds, and snapshotting a half-run
+        ladder would mean carrying a grace deadline the next period cannot
+        honour (PR-27, PR-33a)."""
+        deadline = time.monotonic() + self.QUIESCE_WAIT_S
+        while True:
+            await self._settle()
+            self._dispatch()
+            reason = self._not_quiescent(estate)
+            if reason is None:
+                return
+            if time.monotonic() >= deadline:
+                raise EngineError(
+                    f"the estate is not quiescent at the cutoff: {reason}."
+                    " A seal refuses rather than snapshots a half-run ladder, an unbound"
+                    " spawn or a half-recorded poll (period-model ss8)"
+                )
+            await asyncio.sleep(0 if self.clock.virtual else 0.01)
+
+    async def _supervisor_proof(self, estate: EstateHome) -> None:
+        """ss8's supervisor clauses, at the seal (PR-27): the supervisor
+        reachable, its LIST from the incarnation whose lease this engine
+        holds, and that LIST reconciled BOTH ways against the executions
+        the seal will carry.
+
+        A reachable supervisor with an empty LIST is not proof: LIST shows
+        what THIS incarnation spawned, and a restarted supervisor has a new
+        incarnation and an empty history. Tethered engines return at once --
+        wrappers are this process's children, and quiescence already
+        settled them."""
+        carried = self._executions(estate)
+        if self.supervisor is None:
+            if estate.manifest.runtime_profile.execution_mode == "detached" and any(
+                e.kind in ("bound", "pending_spawn") for e in carried
+            ):
+                # a detached estate's live work is owned by a supervisor,
+                # and an engine holding no client cannot prove that
+                # supervisor reachable -- quiescence is unprovable, not
+                # vacuous (period-model ss8, PR-27)
+                raise EngineError(
+                    "this estate runs detached and the engine holds no supervisor"
+                    " client: the ss8 supervisor clauses cannot be proved over its"
+                    " live executions, so the seal refuses (period-model ss8, PR-27)"
+                )
+            return
+        bound = {(e.job, e.run_number): e for e in carried if e.kind == "bound"}
+        unresolved = bool(bound) or any(e.kind == "pending_spawn" for e in carried)
+        try:
+            listing = await self.supervisor.list_runs()
+        except SupervisorUnavailable as exc:
+            if not unresolved:
+                return  # it owns nothing a seal needs (PR-27a)
+            raise EngineError(
+                f"the supervisor is unreachable and this estate carries live detached"
+                f" work ({exc}): quiescence is unprovable, the seal refuses"
+                " (period-model ss8, PR-27)"
+            ) from exc
+        held = self.supervisor.incarnation
+        if held is None or listing.get("incarnation") != held:
+            raise EngineError(
+                f"the supervisor's LIST is from incarnation"
+                f" {listing.get('incarnation')!r} but this engine's lease names"
+                f" {held!r}: a restarted supervisor's history is not proof"
+                " (period-model ss8, PR-27)"
+            )
+        rows = {(str(r["job"]), int(r["run_number"])): r for r in listing.get("runs", [])}
+        for key, entry in sorted(bound.items()):
+            row = rows.get(key)
+            if row is None:
+                raise EngineError(
+                    f"{key[0]}.{key[1]}: bound run {entry.run_id} is not in the"
+                    " leased incarnation's LIST -- a carried non-terminal row the"
+                    " sweep cannot account for refuses the seal (period-model ss8)"
+                )
+            if row.get("run_id") != entry.run_id:
+                raise EngineError(
+                    f"{key[0]}.{key[1]}: the supervisor's LIST names run_id"
+                    f" {row.get('run_id')!r} but the bound run is {entry.run_id!r} --"
+                    " an identity split at the seal refuses (DL-118)"
+                )
+        for key, row in sorted(rows.items()):
+            if not row.get("wrapper_alive"):
+                continue  # history: its outcome resolves from the spool
+            ours = bound.get(key)
+            if ours is None or ours.run_id != row.get("run_id"):
+                raise EngineError(
+                    f"{key[0]}.{key[1]}: the supervisor holds live run"
+                    f" {row.get('run_id')!r} the seal's executions do not carry --"
+                    " the sweep found evidence quiescence cannot account for"
+                    " (period-model ss8, PR-27)"
+                )
+
+    def _not_quiescent(self, estate: EstateHome) -> str | None:
+        """Why this estate may not be sealed right now, or None."""
+        if self._queue:
+            return f"{len(self._queue)} input(s) still queued"
+        if self.frontiers.applied_index != self.frontiers.committed_index:
+            return (
+                f"attempt {self.frontiers.committed_index} is admitted and undecided"
+                f" (applied through {self.frontiers.applied_index})"
+            )
+        if self._reaping:
+            return f"{len(self._reaping)} KILL ladder(s) have not resolved"
+        indeterminate = [
+            effect.effect_id
+            for effect in self.outbox.effects()
+            if self.outbox.state_of(effect.effect_id) == "indeterminate"
+        ]
+        if indeterminate:
+            return f"indeterminate effect(s) {', '.join(sorted(indeterminate))}"
+        try:
+            carried = self._executions(estate)
+        except EngineError as exc:
+            return str(exc)
+        if estate.manifest.runtime_profile.execution_mode == "tethered":
+            # the ss8 mode table: "in place, tethered -- full drain".
+            # Stopping the engine cancels a tethered command (its wrapper is
+            # this process's child), so a seal that carried it as `bound`
+            # would name a run the exit code 3 then kills. Pending intents
+            # carry (PR-16c) -- no live command dies with the engine -- and
+            # FW watches carry (PR-34a) -- the file outlives the process.
+            live = sorted(f"{e.job}.{e.run_number}" for e in carried if e.kind == "bound")
+            if live:
+                return (
+                    f"tethered estate with live command(s) {', '.join(live)}: the seal"
+                    " waits for the full drain -- stopping the engine cancels them"
+                    " (period-model ss8 mode table)"
+                )
+        return None
+
+    def _executions(self, estate: EstateHome) -> tuple[Execution, ...]:
+        return executions_at(
+            run_root=estate.run_root,
+            outbox=self.outbox,
+            rows=self.oracle.store.job,
+            catalog=self.oracle.catalog,
+            interval_default=max(
+                1, round(estate.manifest.runtime_profile.fw_default_interval_us / 1_000_000)
+            ),
+        )
+
+    def _carried(self, at: datetime) -> CarriedState:
+        """The classifier's view of the estate at `at` (ss10.1).
+
+        The three execution sets come from the WAL alone, because no ss10
+        rule tells the three ss3.5 kinds apart and readiness runs before
+        the sealer has waited an unbound SPAWN out."""
+        executing = executing_jobs(self.outbox, self.oracle.store.job)
+        return carried_from_oracle(
+            self.oracle,
+            now=at,
+            pending_spawn=[job for job, state in executing.items() if state == "pending"],
+            bound=[job for job, state in executing.items() if state == "applied"],
+        )
+
+    def _snapshot(self, at: datetime, *, estate: EstateHome) -> Snapshot:
+        """The estate at T, taken WITHOUT yielding: everything below is a
+        synchronous read of state the single writer owns, so nothing can
+        move between the last precondition and the bytes the seal
+        carries."""
+        store = self.oracle.store
+        return Snapshot(
+            state=SealedState(
+                jobs=dict(store.job),
+                globals=dict(store.globals_),
+                hosts={host_id: SealedHost.of(row) for host_id, row in store.hosts.items()},
+                routes=implicit_routes(self.executor_id),
+                timers=tuple(store.timers()),
+                timer_seq=store.timer_seq,
+                consumed=dict(store.consumed),
+                enqueue_counter=store.enqueue_counter,
+                now=at,
+            ),
+            carried=self._carried(at),
+            outbox_pending=tuple(self.outbox.pending()),
+            executions=self._executions(estate),
+            closes_at_index=self.frontiers.applied_index,
+            at=at,
+            epoch=self.epoch,
+        )
+
     def note_executor_unreachable(self) -> None:
         """The leader has lost contact with its own execution host (ss8).
 
@@ -474,6 +1007,22 @@ class Engine:
         """Put one input on the time-ordered queue and wake the loop. The
         arrival counter breaks ties, so two inputs stamped alike keep the
         order they were raised in."""
+        if self.sealing and pending.envelope is not None:
+            # ss6 step 2, at the one choke point every input passes: the
+            # cutoff stops admitting EVERY externally requested attempt --
+            # rejected and no-op ones included, since each takes a durable
+            # decision. An attempt admitted after the cut would have its
+            # decision land after the seal or not at all (PR-28e). The
+            # engine's own doors stay open: the drain below has to finish,
+            # and an adapter completion is C1 work, not a request.
+            self._refuse(
+                pending,
+                AdmissionRefused(
+                    "this period is sealing: nothing externally requested is admitted"
+                    " after the cutoff (period-model ss6 step 2)"
+                ),
+            )
+            return
         self._queue_seq += 1
         heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
@@ -505,6 +1054,14 @@ class Engine:
         instant_budget = max(10_000, 100 * len(self.oracle.catalog.jobs))
         while True:
             await self._settle()
+            if self._seal is not None:
+                # the boundary runs INSIDE the single-writer loop: it is the
+                # one place that may freeze admission, choose T and snapshot
+                # a state nothing else can move (ss6). A commit raises
+                # `PeriodSealed` out of this loop; a refusal answers the
+                # request, aborts, and the loop carries on with C1 open.
+                await self._seal_boundary()
+                continue
             now = self.clock.now()
             if now != instant:
                 instant, instant_events = now, 0
@@ -532,6 +1089,7 @@ class Engine:
             )
             take_sched = (
                 not take_event
+                and not self.sealing  # ss6 step 2: scheduler admission is frozen too
                 and sched_due is not None
                 and sched_due <= horizon
                 and (head_at is None or sched_due < head_at)
@@ -614,6 +1172,10 @@ class Engine:
                     "nonzero FakeAdapter duration or break the cycle)"
                 )
 
+    def _note_corpse(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            self._corpses_raised.add(id(task))
+
     async def _settle(self) -> None:
         """Yield until every live adapter task is done or parked on the
         clock and every cancelled task is reaped. Sound because adapters may
@@ -628,18 +1190,29 @@ class Engine:
         while True:
             for job, run in list(self._live.items()):
                 if run.task.done():
-                    del self._live[job]
+                    # raise FIRST: a task that failed stays in `_live`, so a
+                    # catcher that treats the raise as reversible (the seal's
+                    # abort path) cannot consume the only observation -- the
+                    # loop's next settle re-raises the same corpse and the
+                    # engine dies loudly, never resuming over an applied
+                    # SPAWN whose task and completion are both gone
+                    self._note_corpse(run.task)
                     _raise_if_failed(run.task)
+                    del self._live[job]
             still_reaping: list[asyncio.Task[None]] = []
             for task in self._reaping:
                 if task.done():
+                    self._note_corpse(task)
                     _raise_if_failed(task)
                 else:
                     still_reaping.append(task)
             self._reaping = still_reaping
             if not self.clock.virtual:
                 return
-            if not self._reaping and len(self._live) == self.clock.pending_sleepers():
+            if (
+                not self._reaping
+                and len(self._live) == self.clock.pending_sleepers() + self.barrier.parked_tasks
+            ):
                 return
             await asyncio.sleep(0)
 
@@ -804,8 +1377,16 @@ class Engine:
         The shell's whole dispatch surface, and the only place an effect is
         applied. Ordering is not decoration -- ss5 makes per-run effect
         ordering mandatory, because a KILL decided after a SPAWN that
-        overtook it would stop a run that had not started."""
-        for effect in self.outbox.pending():
+        overtook it would stop a run that had not started.
+
+        The fence is re-proved HERE and not only in the journal writer
+        (period-model ss1.3): an append and a dispatch are two acts, and a
+        leader that lost the lineage between them would start a process for
+        an estate it no longer leads (PR-03)."""
+        pending = self.outbox.pending()
+        if pending and self.fence is not None:
+            self.fence.check()
+        for effect in pending:
             self._apply_effect(effect)
 
     def _apply_effect(self, effect: Effect) -> None:
@@ -949,7 +1530,9 @@ class Engine:
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
+        for task, result in zip(tasks, results, strict=True):
+            if id(task) in self._corpses_raised:
+                continue  # _settle already raised this failure to a caller
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 raise result
 
@@ -962,6 +1545,8 @@ class Engine:
             journal=self.journal,
             detach=self.detach,
             run_id=run_id,
+            barrier=self.barrier,
+            fence=self.fence,
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate

@@ -41,6 +41,7 @@ from dsl41.runner_startup import resume_run
 from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
 from dsl41.runner_clock import RealClock
 from dsl41.runner_journal import read_journal
+from dsl41.period import active_wal
 
 SUPERVISOR = Path(runner_supervisor.__file__)
 DRIVER = Path(__file__).parent / "runner_detached_driver.py"
@@ -1003,7 +1004,7 @@ def test_sigkill_engine_detached_survives_and_reattaches(short_root: Path) -> No
 
 
 def _append_records(run_root: Path, records: list[dict]) -> None:
-    with (run_root / "journal.jsonl").open("a", encoding="utf-8") as f:
+    with active_wal(run_root).open("a", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record, sort_keys=True) + "\n")
 
@@ -1181,11 +1182,23 @@ def test_a_recorded_kill_is_delivered_after_the_engine_that_decided_it_died(
     assert _kill_decided_before_the_crash(short_root, with_effect=True) is False
 
 
-def test_without_the_recorded_kill_the_run_is_orphaned(short_root: Path) -> None:
-    """The contrast that makes the test above non-vacuous, and the exact
-    behaviour before the outbox: identical journal, identical resume, minus
-    the one entry that says a kill was meant. The process survives."""
-    assert _kill_decided_before_the_crash(short_root, with_effect=False) is True
+def test_pr33_without_the_recorded_kill_the_orphan_is_still_re_driven(
+    short_root: Path,
+) -> None:
+    """The same estate minus the one entry that says a kill was meant --
+    and since DL-133 the process does NOT survive it.
+
+    This assertion was `is True` when the outbox was the only route: with
+    no recorded intent, nothing at resume had a reason to look at a live
+    wrapper again. period-model ss3.5 closes that as PR-33 -- **a live
+    wrapper under a TERMINAL row is re-driven regardless of the KILL
+    effect's recorded state**, and regardless of whether one exists -- and
+    it is the same leak from the other side: `_apply_kill` records
+    `applied` before its TERM/grace/KILL ladder runs, so an engine that
+    dies mid-ladder leaves exactly this state with the effect already
+    resolved. The test above stays as the recorded-intent route; this one
+    now pins the route that needs no record."""
+    assert _kill_decided_before_the_crash(short_root, with_effect=False) is False
 
 
 def test_detach_stop_sigint_then_resume_reattaches(short_root: Path) -> None:

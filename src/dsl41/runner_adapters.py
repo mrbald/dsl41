@@ -54,6 +54,7 @@ from dsl41 import runner_wrapper as _wrapper
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode, is_scalar_json
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_clock import Clock, EngineError
+from dsl41.runner_ledger import Proof
 
 if TYPE_CHECKING:  # annotation only: the WAL is the engine's, not an adapter's
     from dsl41.runner_journal import Journal
@@ -87,6 +88,53 @@ class DetachSignal:
 
 
 @dataclass
+class SealBarrier:
+    """ss6 step 2's park, seen from an adapter (period-model ss3.5, DL-133).
+
+    The engine sets `parked` before it chooses T; every FW task checks it
+    at its POLL BOUNDARY -- after the sleep and before the observation --
+    and waits there. Nothing else is needed to "await any poll in flight":
+    a poll's observation, its `watch.jsonl` append and its progress update
+    contain no `await`, so a poll cannot be in flight across a yield, and a
+    task still asleep cannot append before it wakes into this check.
+
+    Without the park a second qualifying poll lands after the snapshot, its
+    completion is never admitted because the engine exits, and audit
+    derives a completed watch where the seal carries a live one.
+
+    `parked_tasks` is how the engine's virtual-domain settle knows a task
+    that is neither running nor asleep on the clock is nonetheless going
+    nowhere."""
+
+    parked: bool = False
+    parked_tasks: int = 0
+    _released: "asyncio.Event | None" = None
+
+    def park(self) -> None:
+        self.parked = True
+        self._released = None
+
+    def release(self) -> None:
+        """`abort_boundary`'s half: the interval is reversible until the
+        `seal` append begins, and after an abort an FW poll proceeds
+        (PR-28b)."""
+        self.parked = False
+        if self._released is not None:
+            self._released.set()
+
+    async def wait(self) -> None:
+        if not self.parked:
+            return
+        if self._released is None:
+            self._released = asyncio.Event()
+        self.parked_tasks += 1
+        try:
+            await self._released.wait()
+        finally:
+            self.parked_tasks -= 1
+
+
+@dataclass
 class AdapterContext:
     """What an adapter may touch (ss6): the clock, and in the real domain
     the run-root layout (runs/, logs/) plus the WAL for dispatch records.
@@ -104,6 +152,14 @@ class AdapterContext:
     journal: Journal | None = None
     detach: DetachSignal | None = None
     run_id: str | None = None
+    #: ss6 step 2's park. None for the adapters that own no durable
+    #: position -- a boundary has nothing to hold them at.
+    barrier: SealBarrier | None = None
+    #: period-model ss1.3: the fence lives in the journal writer, and the
+    #: FW adapter appends to a spool the journal never sees. An append
+    #: after leadership was lost is evidence written by a non-leader, so
+    #: this adapter re-proves before every line (PR-03).
+    fence: Proof | None = None
 
 
 @dataclass(frozen=True)
@@ -687,6 +743,8 @@ class FileWatcherAdapter:
             _repair_watch_tail(log_path)
             log = read_watch_log(run_dir)
             if log is None:
+                if ctx.fence is not None:
+                    ctx.fence.check()  # the dispatch line is an append too
                 append_watch_line(
                     log_path,
                     {
@@ -723,6 +781,11 @@ class FileWatcherAdapter:
                     return 0  # the last durable poll completed it (PR-34a)
         while True:
             await ctx.clock.sleep_until(next_at)
+            if ctx.barrier is not None:
+                # THE poll boundary (ss6 step 2). Before the observation, so
+                # a parked watch owes the log nothing and resumes in C2 from
+                # exactly the line the seal counted.
+                await ctx.barrier.wait()
             at = ctx.clock.now()
             try:
                 size: int | None = os.stat(spec_ir.watch_file).st_size
@@ -731,9 +794,13 @@ class FileWatcherAdapter:
             qualifying = size is not None and size >= min_size
             stable = (stable + 1) if qualifying and size == previous else int(qualifying)
             if log_path is not None:
-                # WRITE-AHEAD per poll: the line lands before progress moves
-                # or a completion is emitted. An observation that changed the
-                # watch before it was durable is one audit cannot see.
+                # observe -> RE-CHECK THE FENCE -> append -> then move
+                # progress. Write-ahead per poll: an observation that changed
+                # the watch before it was durable is one audit cannot see;
+                # and a line appended after leadership was lost is evidence
+                # written by a non-leader (period-model ss3.5, PR-03).
+                if ctx.fence is not None:
+                    ctx.fence.check()
                 append_watch_line(
                     log_path,
                     {

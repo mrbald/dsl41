@@ -31,6 +31,7 @@ from dsl41.oracle_state import Event
 from dsl41.runner_adapters import WATCH_LOG, FileWatcherAdapter, read_watch_log
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_startup import resume_run, start_run
+from dsl41.period import active_wal
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -66,15 +67,11 @@ async def _close(engine) -> None:
 
 
 def _journal_records(run_root: Path) -> list[dict]:
-    return [
-        json.loads(line) for line in (run_root / "journal.jsonl").read_text().splitlines() if line
-    ]
+    return [json.loads(line) for line in active_wal(run_root).read_text().splitlines() if line]
 
 
 def _rewrite_journal(run_root: Path, records: list[dict]) -> None:
-    (run_root / "journal.jsonl").write_text(
-        "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
-    )
+    active_wal(run_root).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
 
 
 def _spawn_effect(records: list[dict]) -> dict:

@@ -548,3 +548,27 @@ def _evict_bound(engine) -> float:
     forced = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID, force=True)
     assert host_rejection_reason(store, forced, at) is None
     return bound - waited
+
+
+def test_pr01c_a_foreign_root_is_refused_before_staging_or_supervisor(short_root: Path) -> None:
+    """ss1.1: the CLI proves the root is claimable BEFORE it stages a
+    bundle into it or starts a supervisor against it -- both are acts on an
+    estate this process may turn out not to lead. A used root without
+    `--resume` gets the same early refusal."""
+    foreign = short_root / "foreign"
+    (foreign / "wal").mkdir(parents=True)
+    jil = short_root / "estate.jil"
+    jil.write_text(IDLE_JIL)
+    result = cli("run", "--run-root", str(foreign), "--detached", str(jil))
+    assert result.returncode == 2
+    assert "not an unused root" in result.stderr
+    assert not (foreign / "catalogs").exists()  # nothing was staged into it
+    assert not (foreign / "periods").exists()
+    assert not (foreign / "supervisor.sock").exists()  # and no supervisor acted on it
+    used = short_root / "used"
+    used.mkdir()
+    (used / "journal.jsonl").write_text('{"rec": "header"}\n')  # any estate, any dialect
+    again = cli("run", "--run-root", str(used), "--detached", str(jil))
+    assert again.returncode == 2
+    assert "already holds an estate" in again.stderr
+    assert not (used / "supervisor.sock").exists()

@@ -66,7 +66,7 @@ import os
 import socket
 import uuid
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +92,7 @@ from dsl41.period import (
     genesis_manifest,
     is_opening,
     opening_at,
+    resolve_wal,
     segment_record,
 )
 from dsl41.runner_clock import EngineError
@@ -99,7 +100,7 @@ from pydantic import ValidationError
 
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import HostCommand
-from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
@@ -132,10 +133,10 @@ class Journal:
         *,
         fsync_each: bool,
         baseline_id: str = "",
-        lock: LeaderLock | None = None,
+        lock: Proof | None = None,
     ) -> None:
         self.path = Path(path)
-        _repair_tail(self.path)
+        repair_tail(self.path)
         self._f = self.path.open("ab")
         os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
         self._fsync_each = fsync_each
@@ -163,9 +164,10 @@ class Journal:
         catalog: CatalogIR,
         clock_domain: str,
         started_at: datetime,
-        lock: LeaderLock | None = None,
+        lock: Proof | None = None,
         manifest: Manifest | None = None,
         estate_id: str | None = None,
+        opens_from_seal: Mapping[str, Any] | None = None,
     ) -> Journal:
         """Open a NEW log with its `segment` record (period-model ss2.1,
         DL-130). `segment` replaces `header`: a once-per-log header cannot
@@ -178,8 +180,13 @@ class Journal:
         two different things (PR-22); one that only has a catalog -- a
         rehearsal, an embedder, the bisimulation harness -- gets a default
         over the empty bundle and the default runtime profile. The
-        `estate_id` is minted here at genesis; there is no anchor to read
-        one back from yet."""
+        `estate_id` is the SENTINEL's since DL-133 -- genesis mints it
+        into `journal.jsonl` before this file exists and reads it back on
+        every retry (PR-01a) -- and is minted here only for the journal-only
+        callers that have no root to carry one. `opens_from_seal` is the
+        boundary's: null on segment 1, `{period_id, digest}` on every later
+        segment, copied verbatim from the seal the period opened from so the
+        two openings of one seal are byte-identical (PR-07)."""
         if manifest is None:
             manifest = genesis_manifest(
                 catalog,
@@ -219,8 +226,20 @@ class Journal:
         # a second copy here would be a second authority, and a pin nothing
         # reads is not a pin
         journal._write(
-            segment_record(manifest, estate_id=estate_id or str(uuid.uuid4()), at=started_at)
+            segment_record(
+                manifest,
+                estate_id=estate_id or str(uuid.uuid4()),
+                at=started_at,
+                opens_from_seal=opens_from_seal,
+            )
         )
+        # the opening record NAMES the segment, so it is durable before any
+        # head action -- genesis finalize, a claim's open -- can rely on the
+        # file's existence: a virtual-domain journal buffers everything
+        # else, and "the directory entry is durable" says nothing about the
+        # record inside it
+        journal._f.flush()
+        os.fsync(journal._f.fileno())
         return journal
 
     def leader(self, *, epoch: int, at: datetime) -> None:
@@ -350,6 +369,42 @@ class Journal:
             }
         )
 
+    def seal(self, record: Mapping[str, Any]) -> None:
+        """ss2.2's `seal`: the LAST record of a period's last segment, and
+        the boundary's COMMIT POINT.
+
+        It is a record and not a decision because a `seal` request cannot
+        be decided by an ordinary `decision`: before the seal, a crash
+        leaves a durable "applied" for a boundary that never happened;
+        after it, records after a seal are forbidden. The shape is
+        `boundary.check_seal_record`'s and is validated there, where the
+        boundary builds it; what this owes the caller is that nothing else
+        can be written through this door.
+
+        **Appending it is the point of no return** (ss7). The writer
+        flushes the whole line before `fsync`, and an `fsync` error does
+        not prove the line absent or non-durable -- so a failure here is an
+        UNKNOWN outcome that fail-stops, never an abort that would reopen
+        admission behind a seal line that then survives."""
+        if record.get("rec") != "seal":
+            raise EngineError(f"Journal.seal writes `seal` records, not {record.get('rec')!r}")
+        rec = dict(record)
+        if self._lock is not None:
+            self._lock.check()  # the same ss1 fence every append passes
+        self._f.write(json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n")
+        # UNCONDITIONALLY durable, whatever the journal's per-record policy:
+        # a virtual-domain journal buffers and fsyncs on close, and a seal
+        # made durable only at close would let the anchor's open->closed CAS
+        # land BEFORE the record that justifies it -- a successor named by a
+        # head whose naming line a power cut then removes. Durability comes
+        # BEFORE subscriber publication -- not `_write` -- because a
+        # subscriber handed a commit record whose fsync then fails has been
+        # told about a boundary recovery may discard.
+        self._f.flush()
+        os.fsync(self._f.fileno())
+        for queue in self._subscribers:
+            queue.put_nowait(rec)
+
     def effect_result(self, outcome: EffectOutcome) -> None:
         """What came of one attempt (concurrency-model ss5). Absent means
         `pending` -- the crash window -- which is exactly the distinction
@@ -437,7 +492,7 @@ class Journal:
             self._lock.release()  # the term ends where the log does (S6a)
 
 
-def _repair_tail(path: Path) -> None:
+def repair_tail(path: Path) -> None:
     """Make an existing WAL end on a line boundary before anything appends.
 
     `_write` puts `json + "\\n"` in one call, and a crash mid-write leaves a
@@ -473,9 +528,16 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
     invalid INTERIOR lines are corruption and raise loudly.
 
     The first record must be an opening one: a `segment` (DL-130) or the
-    legacy `header` every log written before it opens with."""
+    legacy `header` every log written before it opens with.
+
+    `path` may be an estate root, that root's sentinel, or a segment file:
+    `resolve_wal` follows the sentinel's `see` once, so a caller that holds
+    a run root and a caller that holds `wal/000002.jsonl` read the same
+    records and neither has to know which layout it met (period-model
+    ss1.1)."""
     records: list[dict[str, Any]] = []
-    raw = Path(path).read_bytes()
+    path = resolve_wal(path)
+    raw = path.read_bytes()
     lines = raw.split(b"\n")
     trailing = lines.pop() if lines and lines[-1] == b"" else None
     for index, line in enumerate(lines):
@@ -490,6 +552,16 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
     if not records or not is_opening(records[0]):
         raise EngineError(f"journal {path}: missing segment record")
     check_segment_record(records[0])  # exact ss2.1 shape; a header is exempt
+    for position, record in enumerate(records):
+        if record.get("rec") == "seal" and position != len(records) - 1:
+            # ss11's recovery matrix: a `seal` is the last record of its
+            # segment, so anything after one is a period that admitted work
+            # after its own boundary -- interior corruption, not a torn tail
+            raise EngineError(
+                f"journal {path}: {len(records) - position - 1} record(s) after the `seal`"
+                f" at line {position + 1}: the old period admits nothing after its"
+                " boundary (period-model ss11, PR-29)"
+            )
     return records
 
 
@@ -719,7 +791,18 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
     resurrect a killed job -- the case DL-44's amendment added the advance
     record for, now decided by record rather than by absence."""
     decisions = read_decisions(records)
-    replay = Replay(decisions=decisions, outbox=read_outbox(records))
+    # I2: indices are monotone across the ESTATE, not across the segment, so
+    # a segment that opens at 5311 replays from 5310 -- the number its own
+    # opening record carries. Derived from the record rather than passed in:
+    # a caller-supplied base would be a second authority for `first_index`,
+    # and a legacy `header` carries none, which is exactly 0.
+    first = records[0].get("first_index")
+    base = int(first) - 1 if isinstance(first, int) and not isinstance(first, bool) else 0
+    replay = Replay(
+        decisions=decisions,
+        outbox=read_outbox(records),
+        frontiers=Frontiers(committed_index=base, applied_index=base),
+    )
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
         applied = apply_attempt(oracle, attempt, decided=durable)
@@ -728,6 +811,29 @@ def replay_inputs(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
             replay.recovered.append(applied.result)
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
+
+
+def scheduler_frontier(records: list[dict[str, Any]]) -> datetime:
+    """ss6: the scheduler's durable frontier is SEMANTIC, not "the newest
+    timestamp in the file".
+
+    `last_journal_at` takes the maximum `at` over every record, `leader`
+    and `dispatch` included. So: T is 02:00, C2 opens at 02:10 and appends
+    `leader.at = 02:10`, the process dies before the missed-tick sweep, and
+    the next resume anchors at 02:10 -- a 02:05 tick is neither admitted nor
+    recorded as dropped. That is latent in every root written before
+    DL-133, and the watermark must not inherit it. The frontier is the
+    opening watermark, the admitted scheduler ticks, the `drop` records and
+    the `advance` records, and NOTHING ELSE (PR-25a)."""
+    stamps = [opening_at(records[0])]
+    for record in records:
+        rec = record.get("rec")
+        semantic = rec in ("drop", "advance") or (
+            rec == "input" and record.get("source") == "scheduler"
+        )
+        if semantic and isinstance(record.get("at"), str):
+            stamps.append(datetime.fromisoformat(record["at"]))
+    return max(stamps)
 
 
 def last_journal_at(records: list[dict[str, Any]]) -> datetime:

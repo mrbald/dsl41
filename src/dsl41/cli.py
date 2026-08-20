@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING, cast
 import typer
 
 from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
+from dsl41.boundary import PeriodSealed
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
+from dsl41.period import root_is_unused
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
@@ -467,7 +469,11 @@ def decompile(
 @app.command()
 def journal(
     journal_file: Path = typer.Argument(
-        ..., help="Run journal to replay (<run_root>/journal.jsonl)"
+        ...,
+        help="Run journal to replay: an estate root, its journal.jsonl sentinel, or a"
+        " wal/NNNNNN.jsonl segment. A root or a sentinel resolves to the ACTIVE"
+        " segment (the current period); name an earlier wal/NNNNNN.jsonl to replay"
+        " an earlier one.",
     ),
     files: list[Path] = typer.Argument(..., help="JIL files forming the catalog the run used"),
     permit_unknown: bool = _PERMIT_UNKNOWN,
@@ -1053,6 +1059,13 @@ def run(
     resume: bool = typer.Option(
         False, "--resume", help="Resume the run_root's journal (replay + reconcile, ss7)."
     ),
+    estate_anchor: Path = typer.Option(
+        None,
+        "--estate-anchor",
+        help="The lineage anchor directory (period-model ss1.3). Defaults to"
+        " <run-root>.anchor -- a sibling of the root, never inside it, because the"
+        " root is what an operator archives.",
+    ),
     ui: bool = typer.Option(
         False, "--ui", help="Attach the ss11 Textual TUI in this terminal (quit stops the run)."
     ),
@@ -1145,11 +1158,6 @@ def run(
         detached=detached,
         deadman_s=deadman,
     )
-    staged: "StagedManifest | None" = None
-    if not resume and not (run_root / "journal.jsonl").exists():
-        # a used run root is start_run's refusal to make -- never repaint
-        # its artifacts on the way to that refusal
-        staged = _stage_period(run_root, parsed, catalog, profile)
     try:
         raise typer.Exit(
             asyncio.run(
@@ -1165,8 +1173,9 @@ def run(
                     tz_aliases,
                     spec_texts=_spec_texts(parsed, catalog),
                     estate_fingerprint=fingerprint,
-                    staged=staged,
+                    parsed=parsed,
                     profile=profile,
+                    anchor_dir=estate_anchor,
                 )
             )
         )
@@ -1287,8 +1296,9 @@ async def _serve_run(
     tz_aliases: "dict[str, str] | None" = None,
     spec_texts: "dict[str, str] | None" = None,
     estate_fingerprint: "dict[str, str] | None" = None,
-    staged: "StagedManifest | None" = None,
+    parsed: "list[JilFile] | None" = None,
     profile: "RuntimeProfile | None" = None,
+    anchor_dir: "Path | None" = None,
 ) -> int:
     import asyncio
     import contextlib
@@ -1322,6 +1332,33 @@ async def _serve_run(
     except EngineError as exc:
         typer.echo(str(exc), err=True)
         return 2
+    # stage period 1 UNDER the lock (period-model ss1.1): a used run root is
+    # start_run's refusal to make, and repainting `catalogs/` on the way to
+    # that refusal is how the shipped binary used to write `manifest/` into
+    # a root it turned out not to lead. What is left behind on a refusal is
+    # content-addressed and never read -- residue the spec tolerates.
+    # OWNERSHIP first, the FULL ss1.1 predicate: a sentinelless root that
+    # keeps a WAL, a seal, a committed period or a populated runs/ is
+    # somebody's work, and both the staging below and the supervisor start
+    # after it are acts on an estate this process may turn out not to lead.
+    staged: "StagedManifest | None" = None
+    if not resume:
+        from dsl41.boundary import check_root_unused
+
+        try:
+            if not root_is_unused(run_root):
+                raise EngineError(
+                    f"{run_root}: already holds an estate -- genesis refuses a used"
+                    " root; resume it (`dsl41 run --resume`) or pick a fresh one"
+                    " (period-model ss1.1)"
+                )
+            check_root_unused(run_root)
+        except EngineError as exc:
+            typer.echo(str(exc), err=True)
+            lock.release()
+            return 2
+        if parsed is not None and profile is not None:
+            staged = _stage_period(run_root, parsed, catalog, profile)
     # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
     # supervisor that owns the wrapper lifelines, so an engine restart does
     # not kill the jobs. FW stays in-engine (no process to survive).
@@ -1378,6 +1415,7 @@ async def _serve_run(
             supervisor=client,
             deadman_s=running_deadman,
             lock=lock,
+            anchor_dir=anchor_dir,
         )
     else:
         engine = start_run(
@@ -1390,8 +1428,13 @@ async def _serve_run(
             deadman_s=running_deadman,
             lock=lock,
             staged=staged,
+            anchor_dir=anchor_dir,
         )
     if client is not None:
+        # ss8's supervisor clauses at the seal (PR-27): the boundary needs
+        # the CLIENT to prove the LIST it reconciles came from the leased
+        # incarnation, so the engine holds it, not just the adapter.
+        engine.supervisor = client
         # ss8's "positive contact with this host": every confirmed lease
         # exchange from here on stamps the routing row (S5b). Wired after the
         # engine exists, which is why the first ACQUIRE above does not -- the
@@ -1457,7 +1500,22 @@ async def _serve_run(
     if detached:
         engine.detach.stopping = True
     code = 0
-    if loop_task in done:  # hold_open never quiesces: this is a crash
+    sealed = loop_task in done and isinstance(loop_task.exception(), PeriodSealed)
+    if sealed:
+        # ss7: a committed boundary is a SUCCESSFUL terminal outcome, and
+        # its code is its own -- distinct from 0/1/2, so an init system does
+        # not restart-loop a sealed engine, and distinct from the crash
+        # branch below, which `hold_open` makes the only other way this loop
+        # can return. Detached work is NOT signalled: `detach.stopping` is
+        # already set above, so the supervised adapter abandons its await
+        # instead of killing a run the next period will reattach (PR-30b).
+        typer.echo(str(loop_task.exception()))
+        typer.echo(f"open it with `dsl41 run --resume --run-root {run_root} <new estate files>`")
+        code = 3
+        loop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, PeriodSealed):
+            await loop_task
+    elif loop_task in done:  # hold_open never quiesces: this is a crash
         typer.echo(f"engine failed: {loop_task.exception()}", err=True)
         code = 1
     else:
@@ -1579,7 +1637,7 @@ def rehearse(
                     catalog,
                     runtime_profile_from_cli(timezone=timezone, tz_aliases=tz_aliases),
                 )
-                if not (run_root / "journal.jsonl").exists()
+                if root_is_unused(run_root)
                 else None
             )
             engine = start_run(

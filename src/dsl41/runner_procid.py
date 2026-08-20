@@ -35,18 +35,61 @@ from typing import Any
 # ------------------------------------------------------------------ durability
 
 
+def mkdir_durable(path: str) -> None:
+    """Create a directory (parents included) with every new entry made
+    durable: each created component is fsynced, and so is the deepest
+    PRE-EXISTING ancestor -- its entry for the first new component is a
+    record too. Unconditional on retry: a call that created nothing still
+    fsyncs the parent, so a crash between an earlier mkdir and its fsync
+    is repaired rather than skipped."""
+    probe = os.path.abspath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    os.makedirs(path, exist_ok=True)
+
+    def _sync(directory: str) -> None:
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    walk = os.path.abspath(path)
+    while True:
+        _sync(walk)
+        if walk == probe:
+            break
+        walk = os.path.dirname(walk)
+    if probe == os.path.abspath(path):
+        _sync(os.path.dirname(probe) or ".")
+
+
 def durable_write(path: str, data: bytes) -> None:
     """The DL-41a durability liturgy: same-dir temp file, fsync(file),
     rename, fsync(directory). Requires a local filesystem."""
     directory = os.path.dirname(path) or "."
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        os.unlink(tmp)  # a failed EARLIER attempt by this same pid; O_EXCL would wedge retry
+    except FileNotFoundError:
+        pass
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # owner-only, not umask's call
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.rename(tmp, path)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)  # never leave a half-written temp to wedge or mislead
+        except FileNotFoundError:
+            pass
+        raise
     dfd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(dfd)

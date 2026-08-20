@@ -152,6 +152,26 @@ jobs afterwards with explicit, journaled `FORCE_STARTJOB`s.
 
 ## 6. JIL rollout — updating the estate
 
+*(Amended by DL-133, at build of period-model §7.)* **There is a second
+cycle, and it is the one this model is built around: seal → swap → open IN
+PLACE.** The window below still applies to the fresh-run-root cycle, and a
+fresh run root is still a correct thing to do; what it is no longer is the
+only way to change an estate. A boundary closes the running period at a
+chosen instant T and commits the next one, and `dsl41 run --resume` on the
+SAME root opens it. **The operator surface is not shipped yet**: DL-133
+built the mechanism and the engine's `seal` control verb, and the `dsl41
+seal` command that drives them arrives with the physical roll and the
+estate verbs. Until then this section describes where the window is going,
+and step 6 below is still what an operator runs. State does not reset: runtime globals, operator holds,
+`last_end_at`, armed latches, every box's `ran_members` and `run_number`
+all cross the boundary, because the boundary is a record rather than a
+directory. Two sentences in this section were true only of the old cycle
+and are corrected where they stand: **"latches die with the old
+baseline" is false across a seal** (step 1), and step 6's "new run root"
+is one of two openers (period-model §7). Both corrections stand whether or
+not the CLI verb exists, because the state they are about is the record's,
+not the directory's.
+
 There is no mid-run reload, by design: the running catalog is the truth
 until the engine stops, resume gates on the exact catalog hash, and a
 used run root refuses re-baselining. An estate change is therefore a
@@ -180,7 +200,15 @@ swapping files, not discovering problems.
    `ON_ICE` would — it marks the job satisfied immediately. Ticks
    landing on held jobs latch (flag `A` in `query status --brief`),
    which is fine: latches are run-root state and die with the old
-   baseline.
+   baseline. *(Corrected by DL-133.* They die with the old **run root**,
+   and a seal does not create one. Across a seal an armed latch
+   **survives**, deliberately: dropping it at the boundary would be an
+   implicit transition with no admitted input. So the operator's
+   `OFF_HOLD` in the new period produces exactly one start — that is the
+   whole point of the hold — and an operator who does NOT want the latch
+   disarms it explicitly, with a journaled command, **before** the seal.
+   The old sentence stays true of the fresh-run-root cycle below, where
+   the state is genuinely thrown away.)*
 2. **Drain**: let RUNNING work finish (`query status --brief -S $S`), or
    `KILLJOB` what the window cannot wait for — kill command jobs, not
    boxes (only `job_terminator` members die with a box).
@@ -205,6 +233,18 @@ holds the post-placeholder JIL that baseline actually ran — byte-exact,
 though with placeholders already resolved, so prefer the tag.
 
 ## 7. Upgrading dsl41 itself
+
+*(Amended by DL-133, at build of period-model §1.1.)* **The upgrade keeps
+the state.** `catalog_hash` v2 excludes `meta.tool_version`, and
+`dsl41_version` is not on the `segment` record at all, so a patch release
+does not move a period's pins and the conservative cycle below no longer
+needs a fresh run root to be safe about the format. Step 3's rollback is
+still the symlink; step 2's "fresh run root" becomes "stop, flip the
+symlink, `run --resume`" wherever the release notes do not say the WAL
+format moved. What still requires a full drain and a new estate is a
+**state-machine version** bump: one executable implements exactly one, and
+a seal whose `next_period` names a different one is refused at readiness
+(period-model §2.1).
 
 The journal header and manifest record the tool version, but resume
 gates on catalog hash and clock domain — not version. Do not lean on
