@@ -5127,3 +5127,41 @@
   category: U+0000–U+001F, U+007F, U+0080–U+009F. Reason: the category is the
   only reading with no second interpretation, and the `\u00XX` template names
   exactly that range. The golden vector (PR-08) pins it.
+- DL-129 SPAWN idempotency outlives the supervisor, and the watch keeps a log
+  (2026-08-20; period-model §11a and §2.2, built as PR-36 / PR-34 / PR-34a).
+  The supervisor's dedup was an entry in `self.runs`, so a bounded LIST and a
+  delayed duplicate SPAWN together made a second execution. The store is the
+  run **directory** now. A detached run's directory is created by the
+  supervisor on receipt (the engine keeps it for tethered runs only), and the
+  write order is `mkdir`, the `runs/.by_run_id/<run_id>` index, `receipt.json`,
+  the wrapper, `reply.json`, the answer — index before receipt, receipt before
+  the fork. A replay resolves through the index, never the incoming path, and
+  answers from the directory: the original `reply.json`, or the same two facts
+  reconstructed from `spawn.json`; `collision` for a second identity on either
+  side of the one-to-one map or a changed `spec_fingerprint`; `in_progress`
+  while the wrapper lives; `indeterminate` where the crash left no answer.
+  `run_id` is checked against the uuid4 grammar at the wire, and `run_dir`
+  must be the path the supervisor owns (compared resolved, not spelled: the
+  engine and the supervisor are told the run root separately). A receiptless
+  directory holding a wrapper record predates the protocol and is never
+  reused. `in_progress` is retryable, not a completion -- the detached adapter
+  awaits the outcome of the run that is already forked rather than failing a
+  live process. The index directory grows one entry per run and the retention
+  floor bounds it; the only scan of it is the orphan case, after a crash. The three new files are §3.2-canonical
+  and liturgy-written; the wrapper's two are unchanged. LIST keeps live runs
+  plus a bounded window of recent completions. The FW adapter gains the
+  append-only `watch.jsonl` — a `start` line on dispatch, then one write-ahead
+  line per poll, no-change polls included — so `next_poll_at` and the
+  stable-poll count are derived from evidence rather than from a task's
+  memory. The §11 ladder reads it: a `start` line resolves the pending SPAWN
+  it names, and a completing final line is injected as the completion. The
+  engine side closes PR-36a: at resume, a supervised run whose bound effect
+  has no spool evidence is REPLAYED through the idempotent SPAWN rather than
+  failed by guesswork; the wire spec is validated against the whole frozen
+  §2 schema (unknown keys refused — the typed float encoding is only
+  injective over pinned key types) before anything durable; corruption is
+  never read as absence (an unreadable index entry answers indeterminate,
+  never first-application); every record consulted for an answer or a
+  signal must NAME the run; and the watch fold refuses a line of unknown
+  kind or foreign identity. The
+  per-poll anchor-fence re-check and the §6 seal barrier are not built here.

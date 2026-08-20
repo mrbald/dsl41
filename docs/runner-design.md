@@ -208,6 +208,19 @@ warns instead (§8).
 the size is stable across two consecutive polls ([?] steady-size reading
 pinned — E6). The adapter completes with exit 0.
 
+*(Amended by DL-129, at build of period-model §2.2.)* **Its progress is
+evidence, not memory.** Last observed size and stable-poll count decide when
+a watch completes, and a restart reset both. So the watch has a spool, and it
+is append-only: `runs/<job>.<run_number>/watch.jsonl`, a `start` line on
+dispatch — the first durable act, so a dispatched watch always has one — then
+one line per poll, fsynced, *including* polls that changed nothing. The line
+is appended **before** progress moves or a completion is emitted, so an
+observation that changed the watch is never one an audit cannot see.
+`next_poll_at` is exactly: after `start` and no poll line, `start.at`; after
+a poll line, `poll.at + interval`. A torn final line truncates on open, as
+the WAL's does. A resumed watch reconstructs from the log and appends no
+second `start`.
+
 **FakeAdapter** (tests, rehearse): scripted `(job, run_number) →
 (duration, exit_code)`, with instant success as the default. Scenario
 files reuse the event-script shapes that the oracle trace tests already
@@ -250,7 +263,10 @@ From day one, the supervisor speaks a **versioned line protocol over a
 named unix socket** (0600 + same-uid peer-cred check), not an inherited
 socketpair. The reason: the protocol plus the spool format
 (spawn.json/status.json) is the tier's public contract and future
-extraction boundary (DL-42). Clients split into **unlimited read-only
+extraction boundary (DL-42; *amended by DL-129*: the supervisor also writes
+`receipt.json`, `reply.json` and the `runs/.by_run_id/<run_id>` index, and
+those three plus the run directory itself are what make SPAWN idempotent
+across its own restart). Clients split into **unlimited read-only
 observers** and **exactly one controller**. Mutating verbs require a
 controller lease (controller_id, expiry, fencing token). Mutations carry
 the token and an idempotency key. This lease is a v1 correctness feature,
@@ -488,6 +504,15 @@ umask-hopeful.
      oracle actually performed or observed. Also never a status that can
      satisfy a success-dependent downstream. FAILURE routes the estate's
      common f()-recovery paths. Either way, the runner reports loudly.
+     *(Amended by DL-129.* One rung sits above this now for a SUPERVISED
+     run whose durable effect bound a `run_id` and whose spool holds
+     neither `spawn.json` nor `status.json`: the SPAWN is **replayed** —
+     period-model §11a made it idempotent, so the supervisor's directory
+     answers first-application, duplicate, in-progress, or
+     indeterminate/collision, and the run happens once, resumes, or fails
+     naming the supervisor's own reason (PR-36a). The FAILURE verdicts
+     above remain for the tethered path and for identity-less chains,
+     where nothing can be replayed safely.*)
    All reconciliation injections journal with source=reconcile. Adoption
    never appears at this tier. When the supervisor (§6a Tier 1, 11f)
    exists, jobs survive engine restarts by *reattachment* — their parent
@@ -520,6 +545,27 @@ the case this sentence was reasoning about, and it keeps it.
 it the outbox is drained only on the way out of the next admitted input: a
 re-driven start would wait on unrelated traffic, which on a quiet estate is
 hours and on one whose only remaining work was the lost run is forever.*)
+
+*(Amended by DL-129, at build of period-model §2.2/§11a.* An FW watch leaves
+a run directory now — its spool (§6) — so the sweep finds watches too, and
+the ladder gains two rules for them. A pending FW SPAWN whose run directory
+holds a `start` line carrying the effect's `run_id` is **resolved applied by
+that line**: a watch spawns no process, so `spawn.json` is not the evidence
+that it was dispatched, and without the rule the barrier re-launches a live
+watch as an untraced start — two `start` lines and a fold nothing can
+reproduce (PR-34). A `watch.jsonl` whose last line is a **completing**
+observation while the row is still RUNNING is the sibling window — the poll
+was appended, the engine died before the STATUS input — and the completion is
+**injected from the log**, exactly as a CMD's is injected from `status.json`
+(PR-34a). Re-polling would decide the watch again against a world that has
+moved on.
+
+The detached CMD path also stops creating its own run directory: the
+supervisor creates it on receipt, because that directory is the SPAWN
+tombstone and an engine that made it first could die before sending, leaving
+the retry's supervisor to read "directory exists, no receipt" — indeterminate
+— for a run that provably never reached the host (§11a, PR-36). The tethered
+path keeps engine ownership: there is no supervisor in it.*)
 
 ## 8. Preflight — refuse loudly, run honestly
 

@@ -59,6 +59,17 @@ stdlib-only.
 }
 ```
 
+*(Amended by DL-129, at build of period-model §11a.)* `run_id` is checked
+against a **filename-safe grammar** at the wire —
+`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, the
+canonical uuid4 string form the adapter has always minted. It names a
+directory entry now (§3), so anything else is refused before anything is
+created. `run_dir` must be `<run_root>/runs/<job>.<run_number>`: the
+supervisor owns that path, and one `run_id` maps to one `(job, run_number)`
+maps to one directory, in both directions. The two are compared as **resolved
+paths**, not as strings — the engine and the supervisor are told the run root
+separately, and `./r`, `/abs/r` and a symlinked `/tmp/r` are one directory.
+
 - `lifeline_fd`: the read end of a pipe. Its **write end lives in exactly
   one process — the spawner** (fd-hygiene invariant, leak-tested). EOF on
   this fd means that the parent died, `kill -9` included.
@@ -76,6 +87,56 @@ ambiguous crash semantics). Each file is a single JSON object, with
 sort_keys and one trailing newline. Consumers must ignore unknown fields
 (forward compatibility). `version` increases only on an incompatible
 change.
+
+*(Amended by DL-129, at build of period-model §11a.)* Three files join the
+spool, and the **supervisor** writes them, not the wrapper: `receipt.json`
+and `reply.json` in `run_dir`, and the `run_id` index entry
+`runs/.by_run_id/<run_id>`. Each is one object in the **§3.2 canonical form**
+(`docs/period-model.md`) — UTF-8, keys sorted at every depth, no whitespace,
+**no trailing newline** — written by the liturgy above, and each carries
+`artifact_format_version`. The wrapper's own two files keep the format of
+this section (`sort_keys`, one trailing newline) and are unchanged. A
+detached run's directory is created by the supervisor on receipt; the engine
+keeps that ownership only for tethered runs.
+
+### receipt.json — written by the supervisor BEFORE it forks the wrapper
+
+```json
+{"artifact_format_version": 1, "run_id": "…",
+ "spec_fingerprint": "sha256:…",
+ "received_at": "2026-08-20T12:23:55.123456+00:00"}
+```
+
+`spec_fingerprint` is sha256 over the §3.2 canonical form of the §2 input
+spec with `lifeline_fd` removed (the supervisor fills that field, so a retry
+carrying one must not read as a different spec). §3.2's value grammar has no
+floats and `grace_seconds` is one, so a float is fingerprinted as the tagged
+string `"float:" + float.hex()` — exact, and nothing but this fingerprint
+reads it.
+
+### reply.json — written by the supervisor after the fork
+
+```json
+{"artifact_format_version": 1, "run_id": "…",
+ "wrapper_pid": 4242, "spawned_at": "2026-08-20T12:23:55.987654+00:00"}
+```
+
+The answer as first given. A replayed SPAWN is answered from this file.
+
+### runs/.by_run_id/&lt;run_id&gt; — the run_id index
+
+```json
+{"artifact_format_version": 1, "run_id": "…", "job": "…", "run_number": 3}
+```
+
+The first durable thing a SPAWN writes, and the only route from a `run_id`
+back to its directory. **"No index entry" means "first application"**, so
+deleting one authorizes a spawn: it may not be pruned while the SPAWN effect
+that names it can still be replayed (period-model §11a, §12). The directory
+therefore grows one entry per run, and the retention floor is what bounds it.
+Reading it is a single lookup by name; the whole directory is scanned in one
+case only — an orphan run directory, to find whether another `run_id` already
+claims it — and that case exists only after a crash.
 
 ### spawn.json — written by the wrapper immediately after spawning
 
@@ -214,7 +275,13 @@ is not desynced).
   spawned since THIS supervisor started. A supervisor restart implies that
   all prior wrappers received EOF and recorded. The spool is the
   cross-restart truth, and LIST shows live state only. `wrapper_rc` is
-  null while the wrapper is alive.
+  null while the wrapper is alive. *(Amended by DL-129, at build of
+  period-model §11a.)* Every live run, plus a bounded window of the most
+  recent completions: a completed entry may be evicted once its exit is
+  recorded and pushed, because LIST was never the idempotency store. Older
+  completions are read from the spool. A SIGNAL for an evicted run answers
+  `unknown_run`, exactly as it does for any run of an incarnation that has
+  ended.
 - `PING` → `{ok, version: 1, incarnation, deadman_s}`.
 
 `deadman_s` (S5b, DL-95) rides both read verbs: the interval this supervisor
@@ -275,6 +342,45 @@ checked first, and then a stale/expired token →
   A replayed SPAWN with a known run_id spawns nothing and returns the
   original result plus `"duplicate": true`.
   → `{ok, run_id, wrapper_pid, spawned_at}`.
+
+  *(Amended by DL-129, at build of period-model §11a.)* **The idempotency
+  store is the run directory, not `self.runs`.** LIST must stay bounded on a
+  root that never rolls, so completed entries leave memory — and an in-memory
+  dedup turns a delayed duplicate SPAWN into a second execution the moment
+  they do. On receipt the supervisor writes, in this order: `mkdir
+  runs/<job>.<run_number>` (no `exist_ok`); the `run_id` index entry (§3) —
+  **index before receipt**, because the first durable thing that names a run
+  must be the thing every later lookup goes through; `receipt.json`,
+  **before** the fork; the wrapper; `reply.json`; then the answer. A replay
+  resolves the directory **through the index**, never through the incoming
+  path, and answers from the directory, not from memory:
+
+  | directory state | answer |
+  | --- | --- |
+  | index, receipt with an equal `spec_fingerprint`, `reply.json` | duplicate: the original result fields from `reply.json` |
+  | equal fingerprint, `spawn.json`, no `reply.json` | duplicate: `wrapper_pid` and `spawned_at := started_at` from `spawn.json` — equivalent, and said rather than promised |
+  | the incoming path holds a receipt (or an index) for a different `run_id` | `collision` |
+  | the same `run_id` against a different `(job, run_number)` | `collision` |
+  | `receipt.json` with a different fingerprint | `collision` |
+  | equal fingerprint, no `spawn.json`, wrapper alive | `in_progress` — no second spawn |
+  | equal fingerprint, no `spawn.json`, nothing alive | `indeterminate` — the crash landed between receipt and fork; nothing may re-spawn, and the engine's E7 policy decides the run |
+  | index entry → a directory with no `receipt.json` | `indeterminate` |
+  | index entry → a directory that does not exist | impossible by write order; `indeterminate` if ever seen |
+  | no index entry, no receipt, but a `spawn.json` or `status.json` | `indeterminate` — a directory from before this protocol, engine-made and receiptless; forking into it would overwrite the first run's records |
+  | no index entry, no receipt, nothing else | first application — an orphan directory with neither is reused, because nothing durable names its run |
+
+  The duplicate envelope is frozen: `{ok, run_id, wrapper_pid, spawned_at,
+  "duplicate": true}`. Each new refusal is `{ok: false, error, detail}` with
+  `error` ∈ {`bad_run_id`, `bad_spec`, `collision`, `in_progress`,
+  `indeterminate`}. `in_progress` is **retryable and not a completion**: the
+  wrapper is alive, so a client must wait for its outcome rather than record
+  a failure for a running process. `collision` and `indeterminate` are final,
+  and the engine's E7 policy owns what the run then becomes. A fork or a
+  tombstone write that fails keeps the existing
+  `{ok: false, error: "spawn_failed: <reason>"}`, and this tier ANSWERS such a
+  failure rather than dying of it — its own death would EOF the lifeline of
+  every wrapper it holds. Idempotency therefore outlives LIST presence and a
+  supervisor **restart**: the entry is gone, and the directory answers.
 - `SIGNAL {token, run_id, sig}` with `sig` ∈ {`TERM`, `KILL`} — the
   supervisor compares the recorded command (pid, start-time) from
   `spawn.json` with the live process (the PID-reuse guard, reimplemented

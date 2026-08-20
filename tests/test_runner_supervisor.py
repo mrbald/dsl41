@@ -35,7 +35,7 @@ from datetime import datetime
 
 from test_runner_lifecycle import module_imports, procid_import_branches
 
-from dsl41 import runner_procid, runner_supervisor, runner_wrapper
+from dsl41 import canon, runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
 from dsl41.runner_startup import resume_run
 from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
@@ -181,12 +181,21 @@ def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
 def test_supervisor_imports_are_stdlib_only() -> None:
     """DL-42 item 3 / spec ss1: the supervisor is the future extraction
     boundary alongside the wrapper -- stdlib only, nothing from dsl41. Its
-    one non-stdlib RUNTIME import is the sibling stdlib-only runner_procid it
-    shares with the wrapper (DL-72; that module's own boundary is pinned in
+    non-stdlib RUNTIME imports are the two sibling stdlib-only modules it
+    reaches by the DL-72 by-path rule: runner_procid, which it shares with
+    the wrapper (that module's own boundary is pinned in
     tests/test_runner_lifecycle.py, whose reader also owns the runtime-vs-
-    type-time distinction the next test relies on)."""
+    type-time distinction the next test relies on), and canon, the one
+    implementation of the ss3.2 canonical form the DL-129 tombstone files
+    are written in -- copying an encoder into this tier would have been a
+    second implementation of a byte format audit compares against."""
     non_stdlib = sorted(module_imports(SUPERVISOR) - set(sys.stdlib_module_names))
-    assert non_stdlib == ["runner_procid"], f"supervisor imports outside stdlib: {non_stdlib}"
+    assert non_stdlib == ["canon", "runner_procid"], (
+        f"supervisor imports outside stdlib: {non_stdlib}"
+    )
+    assert sorted(module_imports(Path(canon.__file__)) - set(sys.stdlib_module_names)) == [], (
+        "canon must stay stdlib-only to be importable inside the tier"
+    )
 
 
 def test_supervisor_procid_calls_are_type_checked() -> None:
@@ -475,7 +484,6 @@ def test_signal_in_the_spawn_window_is_not_ready_not_a_noop(short_root: Path) ->
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "slowspawn.1"
-        rd.mkdir(parents=True)
         spawned = cli.send(
             {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(rd, "sleep 30", grace=0.5)}
         )
@@ -515,10 +523,12 @@ def test_signal_for_a_dead_wrapper_with_no_record_is_a_noop(short_root: Path) ->
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "gone.1"
-        rd.mkdir(parents=True)
-        # a spec the wrapper rejects: it exits without a spawn record
+        # a spec the wrapper rejects: it exits without a spawn record. The
+        # supervisor's own ss2 schema gate (DL-129) must NOT catch it -- a
+        # wrong-type field never reaches the wrapper now -- so the rejection
+        # is the wrapper's version check, which the schema cannot see past.
         bad = _spec(rd, "true")
-        bad["command"] = None  # spec error -> wrapper exits 2, writes nothing
+        bad["version"] = 999  # spec error -> wrapper exits 2, writes nothing
         spawned = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": bad})
         assert spawned["ok"]
         run_id = spawned["run_id"]
@@ -543,7 +553,6 @@ def test_spawn_idempotency_replay(short_root: Path) -> None:
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "j.1"
-        rd.mkdir()
         spec = _spec(rd, "echo hi; exit 0")
         first = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": spec})
         assert first["ok"] and "duplicate" not in first
@@ -564,7 +573,6 @@ def test_mutating_verbs_require_a_token(short_root: Path) -> None:
     cli = RawClient(short_root)
     try:
         rd = short_root / "runs" / "j.1"
-        rd.mkdir()
         # DL-80: the incarnation is PUBLIC (PING/LIST hand it out) -- learn it
         # so this test isolates the TOKEN gate, which is the secret half
         cli.send({"v": 1, "cmd": "PING"})
@@ -597,7 +605,6 @@ def test_signal_pid_reuse_guard_refuses_spoofed_spawn(short_root: Path) -> None:
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "j.1"
-        rd.mkdir()
         # SPAWN a real (short) run to register the run_id, then overwrite its
         # spawn.json with a spoof pointing at the innocent pid + a stale token
         spec = _spec(rd, "sleep 30")
@@ -642,7 +649,6 @@ def test_shutdown_orderly_records_signaled_never_parent_lost(short_root: Path) -
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "j.1"
-        rd.mkdir()
         cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(rd, "sleep 30")})
         wait_for(lambda: (rd / "spawn.json").exists())
         assert cli.send({"v": 1, "cmd": "SHUTDOWN", "token": tok}) == {"ok": True}
@@ -691,7 +697,6 @@ def test_shutdown_waits_for_late_spawn_record(short_root: Path) -> None:
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
         rd = short_root / "runs" / "j.1"
-        rd.mkdir()
         spawned = cli.send(
             {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(rd, "sleep 30", grace=0.5)}
         )
@@ -837,7 +842,6 @@ def test_cm10_the_deadman_fires_and_takes_its_wrappers_with_it(short_root: Path)
     try:
         tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 300})["token"]
         run_dir = short_root / "runs" / "long.1"
-        run_dir.mkdir(parents=True)
         spawned = cli.send(
             {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(run_dir, "sleep 300", grace=0.5)}
         )
@@ -905,6 +909,10 @@ def test_a_deadman_interval_must_be_positive(short_root: Path) -> None:
 
 
 def _spec(run_dir: Path, command: str, grace: float = 2.0) -> dict:
+    """A wrapper input spec for `run_dir`. The directory is NOT created here:
+    since DL-129 the supervisor creates a detached run's directory on receipt,
+    so a test that made it first would exercise the crash-orphan branch
+    instead of the ordinary one."""
     import uuid
 
     return {

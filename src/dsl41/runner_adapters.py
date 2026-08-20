@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
-from dsl41.canon import is_scalar_json
+from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode, is_scalar_json
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_clock import Clock, EngineError
 
@@ -228,14 +228,26 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
 
 
 def _build_run_spec(
-    job_ir: JobIR, run_number: int, ctx: AdapterContext, *, grace_seconds: float
+    job_ir: JobIR,
+    run_number: int,
+    ctx: AdapterContext,
+    *,
+    grace_seconds: float,
+    create_run_dir: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     """The run_dir/log-path/wrapper-spec construction shared by the tethered
     (LocalCommandAdapter) and detached (SupervisedCommandAdapter) CMD paths --
     everything the wrapper input spec needs EXCEPT lifeline_fd, which each
     caller fills from the end that owns the pipe's write side (engine tethered,
     supervisor detached). Kept as one function so the two paths can never
-    diverge on run-dir layout, profile composition, or log targets (ss6a)."""
+    diverge on run-dir layout, profile composition, or log targets (ss6a).
+
+    `create_run_dir=False` is the DETACHED path (period-model ss11a, DL-129):
+    the run directory is the SPAWN tombstone, and the supervisor creates it on
+    receipt. An engine that made it first could create it, die before sending,
+    and leave the retry's supervisor reading "directory exists, no receipt" --
+    indeterminate -- for a run that provably never reached the host. The
+    tethered path keeps engine ownership: there is no supervisor in it."""
     if ctx.run_root is None:
         raise EngineError("command dispatch needs a run_root (real domain only)")
     spec_ir = job_ir.exec_
@@ -247,10 +259,11 @@ def _build_run_spec(
     if spec_ir.profile:
         command = f". {spec_ir.profile} && {command}"  # PENDING: E5
     run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
-    run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
-    fsync_dir(run_dir)
-    fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
-    (ctx.run_root / "logs").mkdir(exist_ok=True)
+    if create_run_dir:
+        run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
+        fsync_dir(run_dir)
+        fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
+    (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
         "version": _wrapper.SPEC_VERSION,
@@ -417,6 +430,222 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
     )
 
 
+#: the FW adapter's append-only spool, one line per poll (period-model ss2.2)
+WATCH_LOG = "watch.jsonl"
+
+#: ss6's steady-size rule as a number: two consecutive qualifying polls at the
+#: same size complete the watch ([?] E6). The spool records the count, so the
+#: rule is read the same way live and at resume.
+FW_STABLE_POLLS = 2
+
+
+@dataclass(frozen=True)
+class WatchLog:
+    """`watch.jsonl` folded (period-model ss2.2): what a watch has observed,
+    derived from the log rather than from a live adapter's memory.
+
+    Draft 4 carried the same progress in a local variable fed by unjournaled
+    `os.stat` calls, and an audit replaying the START input could not tell
+    whether the seal should say `previous_size=10`, `null`, or a completed
+    watch. The fold is a pure function of a PREFIX of the log, and
+    `watch_seq` names the prefix -- `at <= T` is not a unique log position."""
+
+    run_id: str | None
+    start_at: datetime
+    #: the last poll's line, or None when only the `start` line is durable
+    last_at: datetime | None
+    size: int | None
+    qualifying: bool
+    stable_polls: int
+    #: the count of durable lines (ss2.2's `watch_seq`)
+    watch_seq: int
+
+    @property
+    def complete(self) -> bool:
+        """The last durable line is a COMPLETING observation: the watch is
+        over, whether or not the engine lived to say so (PR-34a)."""
+        return self.stable_polls >= FW_STABLE_POLLS
+
+    def next_poll_at(self, interval_s: int) -> datetime:
+        """ss2.2, exactly: after `start` and no poll line, `start.at` (the
+        first poll is immediate); after a poll line, `poll.at + interval`."""
+        if self.last_at is None:
+            return self.start_at
+        return self.last_at + timedelta(seconds=interval_s)
+
+
+def read_watch_log(run_dir: Path) -> WatchLog | None:
+    """Fold a run directory's `watch.jsonl`, or None when the watch has not
+    been dispatched (no file, or no `start` line yet).
+
+    A torn FINAL line is dropped, exactly as `read_journal` drops one: the
+    append is write-ahead, so the progress it would have recorded never
+    happened. A torn INTERIOR line is corruption and raises."""
+    path = run_dir / WATCH_LOG
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        # EACCES/EIO is a log that EXISTS and cannot be read. "Undispatched"
+        # here would re-dispatch a live watch over unreadable evidence.
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+    lines = raw.split(b"\n")
+    trailing = lines.pop() if lines and lines[-1] == b"" else None
+    records: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        if not line:
+            raise EngineError(f"{path}: empty interior line {index + 1}")
+        if index == len(lines) - 1 and trailing is None and not _is_json(line):
+            break  # torn final append: the poll it recorded never landed
+        try:
+            record = decode(line)
+        except CanonError as exc:
+            # a COMPLETE line the ss3.2 ingress refuses -- an unimplemented
+            # artifact_format_version (PR-08d), a lone surrogate -- is not a
+            # torn one. Dropping it would delete evidence a future binary
+            # wrote; it refuses loudly instead, wherever it sits.
+            raise EngineError(f"{path}: line {index + 1}: {exc}") from exc
+        if not isinstance(record, dict):
+            raise EngineError(f"{path}: line {index + 1} is not an object")
+        records.append(record)
+    if not records:
+        return None
+    for position, record in enumerate(records, start=1):
+        # required, not merely implemented-if-present: `decode` refuses a
+        # version it does not implement but passes an absent one, and an
+        # unversioned line is unsupported evidence (PR-08d)
+        if record.get("artifact_format_version") != ARTIFACT_FORMAT_VERSION:
+            raise EngineError(
+                f"{path}: line {position} carries artifact_format_version"
+                f" {record.get('artifact_format_version')!r}"
+            )
+    start = records[0]
+    if start.get("kind") != "start":
+        # a log whose first line is not `start` was not written by this
+        # adapter: the ss2.2 contract says a dispatched watch's first durable
+        # act is the start line, so anything else is corruption or a foreign
+        # writer -- loud, not None (None means "not dispatched", which would
+        # re-dispatch over a stranger's log)
+        raise EngineError(f"{path}: first line is {start.get('kind')!r}, not 'start'")
+    run_id = start.get("run_id")
+    if run_id is not None and not isinstance(run_id, str):
+        raise EngineError(f"{path}: start line run_id is not a string or null")
+    last: dict[str, Any] | None = None
+    derived_stable = 0
+    previous_size: int | None = None
+    for position, record in enumerate(records[1:], start=2):
+        # every later line is a poll of THIS watch, in full: a line of an
+        # unknown kind, a foreign run_id, or a malformed field is evidence
+        # the fold cannot hold -- and a poll naming another run must never
+        # complete this one (DL-118)
+        if record.get("kind") != "poll":
+            raise EngineError(f"{path}: line {position} kind {record.get('kind')!r}")
+        if record.get("run_id") != run_id:
+            raise EngineError(
+                f"{path}: line {position} names run_id {record.get('run_id')!r}"
+                f" but the start line named {run_id!r}"
+            )
+        size = record.get("size")
+        if not (size is None or (isinstance(size, int) and not isinstance(size, bool))):
+            raise EngineError(f"{path}: line {position} size {size!r}")
+        qualifying = record.get("qualifying")
+        if not isinstance(qualifying, bool):
+            raise EngineError(f"{path}: line {position} qualifying is not a boolean")
+        exists = record.get("exists")
+        if not isinstance(exists, bool):
+            raise EngineError(f"{path}: line {position} exists is not a boolean")
+        # the writer's own invariants, enforced on read: an observation
+        # cannot have a size without a file or qualify without a size --
+        # and without this, two `qualifying: true, size: null` lines derive
+        # a stable pair (None == None) and inject a SUCCESS for a file that
+        # was never there
+        if (size is None) != (not exists):
+            raise EngineError(f"{path}: line {position}: exists {exists!r} with size {size!r}")
+        if qualifying and size is None:
+            raise EngineError(f"{path}: line {position}: qualifying with no size")
+        # the completion state is DERIVED from the observations, and the
+        # recorded count is checked against it: a forged line saying
+        # `qualifying: false, stable_polls: 2` would otherwise inject a
+        # SUCCESS from an observation that observed nothing (ss2.2 -- the
+        # fold is a pure function of the log, so a count the observations
+        # cannot produce is a log that disagrees with itself)
+        derived_stable = (
+            (derived_stable + 1) if qualifying and size == previous_size else int(qualifying)
+        )
+        previous_size = size if qualifying else None
+        if record.get("stable_polls") != derived_stable:
+            raise EngineError(
+                f"{path}: line {position} records stable_polls"
+                f" {record.get('stable_polls')!r} but the observations derive"
+                f" {derived_stable}"
+            )
+        last = record
+    return WatchLog(
+        run_id=run_id,
+        start_at=_watch_at(path, start),
+        last_at=_watch_at(path, last) if last is not None else None,
+        size=last.get("size") if last is not None else None,
+        qualifying=bool(last.get("qualifying")) if last is not None else False,
+        stable_polls=int(last.get("stable_polls", 0)) if last is not None else 0,
+        watch_seq=len(records),
+    )
+
+
+def _is_json(line: bytes) -> bool:
+    """Whether `line` is syntactically complete. Tornness is a SYNTAX
+    question: a line the ss3.2 ingress refuses for its content is a whole
+    line, and treating it as torn would truncate it away."""
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
+
+
+def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
+    at = record.get("at")
+    if not isinstance(at, str):
+        raise EngineError(f"{path}: a {record.get('kind')!r} line has no timestamp")
+    return datetime.fromisoformat(at)
+
+
+def _repair_watch_tail(path: Path) -> None:
+    """Make the log end on a line boundary before anything appends, the same
+    rule the WAL's tail repair follows: a reader drops a torn final line, and
+    the bytes must agree with that reading before the next line lands, or the
+    fragment and its successor become one corrupt interior line."""
+    if not path.exists():
+        return
+    with path.open("r+b") as f:
+        data = f.read()
+        if not data or data.endswith(b"\n"):
+            return
+        cut = data.rfind(b"\n") + 1
+        if _is_json(data[cut:]):
+            f.write(b"\n")  # a whole line that lost only its newline
+        else:
+            f.truncate(cut)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def append_watch_line(path: Path, record: dict[str, Any]) -> None:
+    """One ss3.2-canonical line, fsynced (period-model ss2.2). Append-only,
+    so there is no rename to make it atomic; a torn tail is truncated on the
+    next open instead. 0600 at creation, like every other spool file
+    (DL-66)."""
+    data = canonical_bytes(record) + b"\n"
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class FileWatcherAdapter:
     """ss6 FW adapter: poll every watch_interval seconds (default 60 [?]
     PENDING: E6) until watch_file exists with size >= watch_file_min_size
@@ -424,7 +653,17 @@ class FileWatcherAdapter:
     polls ([?] steady-size reading pinned -- E6). Completes with exit 0.
     Clock-driven (ctx.clock.sleep_until), so the same code runs in both
     time domains; polling is an idempotent read, which is why resume may
-    re-dispatch an incomplete watch (module docstring)."""
+    re-dispatch an incomplete watch (module docstring).
+
+    Its progress is EVIDENCE, not memory (period-model ss2.2, DL-129). The
+    first durable act on dispatch is a `start` line in
+    `runs/<job>.<run_number>/watch.jsonl`, and then one line per poll,
+    fsynced, INCLUDING polls that changed nothing -- appended before
+    progress is updated or completion is emitted, so an observation that
+    moved the watch is never one an audit cannot see. A resumed watch
+    reconstructs from the log and appends no second `start`. Without a
+    run_root there is no spool and the watch is memory-only: that is the
+    virtual-domain harness, which has no run-root layout to write into."""
 
     def __init__(self, *, default_interval_s: int = 60) -> None:
         self.default_interval_s = default_interval_s  # PENDING: E6
@@ -436,24 +675,101 @@ class FileWatcherAdapter:
         interval = spec_ir.watch_interval or self.default_interval_s
         min_size = spec_ir.watch_file_min_size or 0
         previous: int | None = None
+        stable = 0
+        run_id = ctx.run_id
+        log_path: Path | None = None
+        next_at = ctx.clock.now()
+        if ctx.run_root is not None:
+            run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fsync_dir(run_dir.parent)
+            log_path = run_dir / WATCH_LOG
+            _repair_watch_tail(log_path)
+            log = read_watch_log(run_dir)
+            if log is None:
+                append_watch_line(
+                    log_path,
+                    {
+                        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                        "at": next_at,
+                        "kind": "start",
+                        "run_id": run_id,
+                    },
+                )
+                fsync_dir(run_dir)  # the log's own directory entry is a record
+            else:
+                # RESUMED: the log is the watch. Its `start` line is the
+                # dispatch (ss11's ladder resolves the SPAWN by it), so no
+                # second one is ever appended and the run keeps the identity
+                # it was dispatched under -- which must BE the identity this
+                # launch carries (DL-118): a log that appeared in the window
+                # since the preflight and names another run is a stranger's,
+                # and adopting it would poll a watch the WAL never dispatched.
+                if run_id is not None and log.run_id != run_id:
+                    # exact, None included: a bound launch met a log, so the
+                    # log was written under this protocol and must name the
+                    # run -- an idless one is legacy or foreign either way,
+                    # and adopting it consumes a fate the WAL never dispatched
+                    raise EngineError(
+                        f"{job_ir.name}.{run_number}: watch.jsonl names run_id"
+                        f" {log.run_id!r} but this run is {run_id!r} -- refusing to"
+                        " adopt a stranger's watch (DL-118)"
+                    )
+                run_id = log.run_id
+                previous = log.size if log.qualifying else None
+                stable = log.stable_polls
+                next_at = log.next_poll_at(interval)
+                if log.complete:
+                    return 0  # the last durable poll completed it (PR-34a)
         while True:
+            await ctx.clock.sleep_until(next_at)
+            at = ctx.clock.now()
             try:
                 size: int | None = os.stat(spec_ir.watch_file).st_size
             except OSError:
                 size = None
-            if size is not None and size >= min_size:
-                if previous == size:
-                    return 0
-                previous = size
-            else:
-                previous = None
-            await ctx.clock.sleep_until(ctx.clock.now() + timedelta(seconds=interval))
+            qualifying = size is not None and size >= min_size
+            stable = (stable + 1) if qualifying and size == previous else int(qualifying)
+            if log_path is not None:
+                # WRITE-AHEAD per poll: the line lands before progress moves
+                # or a completion is emitted. An observation that changed the
+                # watch before it was durable is one audit cannot see.
+                append_watch_line(
+                    log_path,
+                    {
+                        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                        "at": at,
+                        "exists": size is not None,
+                        "kind": "poll",
+                        "qualifying": qualifying,
+                        "run_id": run_id,
+                        "size": size,
+                        "stable_polls": stable,
+                    },
+                )
+            previous = size if qualifying else None
+            if stable >= FW_STABLE_POLLS:
+                return 0
+            next_at = at + timedelta(seconds=interval)
+
+
+#: how many 1-second waits between LIST re-checks on a duplicate-born await
+_LIST_RECHECK_EVERY = 5
 
 
 class SupervisorUnavailable(RuntimeError):
     """The supervisor socket is gone (never came up, refused, or died
     mid-run). The engine survives it: pending runs resolve from the spool
     ladder (spec ss3), the tethered fallback for the detached path."""
+
+
+class SpawnInProgress(SupervisorUnavailable):
+    """ss11a's `in_progress`: this SPAWN's wrapper is already forked and has
+    not recorded yet, so the supervisor gives no answer -- and NOT a failure.
+    The run is alive; failing it here would report a completion for a process
+    still running, which is the one thing the outcome channel may never do.
+    A subclass, so every existing `except SupervisorUnavailable` still covers
+    it, and only the caller that can wait treats it differently."""
 
 
 class SupervisorConn:
@@ -874,7 +1190,13 @@ class SupervisorClient:
     async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
         resp = await self._request({"cmd": "SPAWN", "token": self.token, "spec": spec})
         if not resp.get("ok"):
-            raise SupervisorUnavailable(f"SPAWN refused: {resp}")
+            # ss11a gave SPAWN refusals of its own -- collision, in_progress,
+            # indeterminate -- and an operator reading the job's cause must
+            # find which one, not a transport story that did not happen
+            refusal = f"SPAWN refused: {resp.get('error')} ({resp.get('detail')})"
+            if resp.get("error") == "in_progress":
+                raise SpawnInProgress(refusal)
+            raise SupervisorUnavailable(refusal)
         return resp
 
     async def signal(self, run_id: str, sig: str) -> dict[str, Any]:
@@ -941,23 +1263,63 @@ class SupervisedCommandAdapter:
         if ctx.run_root is None:
             raise EngineError("SupervisedCommandAdapter needs a run_root (real domain only)")
         key = (job_ir.name, run_number)
+        # a wait whose push is NOT promised re-asks LIST periodically
+        # (_await_outcome): a duplicate's run may predate this incarnation,
+        # and a reattach's wrapper can die in the window between the startup
+        # LIST and the future registration below -- its push then lands on
+        # no consumer and is dropped (pushes are droppable notifications,
+        # ss5). Only a fresh spawn's push is promised: its future is
+        # registered BEFORE the fork.
+        recheck = False
         reattach_id = self.reattach.pop(key, None)
         if reattach_id is not None:
             # the run never stopped (its parent is the supervisor); just await
             # its outcome -- no reconciliation injection (E4 dissolved, ss3)
             run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
             run_id = reattach_id
+            recheck = True
         else:
             run_dir, spec = _build_run_spec(
-                job_ir, run_number, ctx, grace_seconds=self.grace_seconds
+                job_ir,
+                run_number,
+                ctx,
+                grace_seconds=self.grace_seconds,
+                create_run_dir=False,  # the supervisor owns it (ss11a, DL-129)
             )
             run_id = spec["run_id"]
             self.client.exit_future(run_id)  # register BEFORE spawn so no push is missed
+            reply: dict[str, Any] = {}
             try:
                 reply = await self.client.spawn(spec)
+            except SpawnInProgress:
+                # ss11a: the wrapper for THIS run_id is already forked. There is
+                # nothing to spawn and nothing to fail -- await its outcome like
+                # any other run of ours, with no wrapper_pid to journal yet.
+                pass
             except SupervisorUnavailable as exc:
                 self.client.forget_exit(run_id)
-                return Failed(f"wrapper spawn failed: supervisor unavailable ({exc})")
+                return Failed(f"wrapper spawn failed: {exc}")
+            recheck = bool(reply.get("duplicate"))
+            if recheck and not await self._listed_alive(run_id):
+                # ss11a answered from the DIRECTORY, and nothing is alive to
+                # push an exit or write a record: awaiting would poll forever
+                # for a file no process will produce (the reply survived a
+                # crash its wrapper did not). Dead evidence is the spool
+                # ladder's to judge, exactly as on the supervisor-lost path.
+                # A TRANSIENT list failure lands in the await below instead,
+                # which re-asks (`recheck_listing`) rather than deciding on
+                # an answer it never got.
+                self.client.forget_exit(run_id)
+                result, _ended = await resolve_spool(
+                    job_ir.name,
+                    run_number,
+                    run_dir,
+                    _procid.current_boot_id(),
+                    settle_seconds=self.settle_seconds,
+                    grace_seconds=self.grace_seconds,
+                    expected_run_id=run_id,
+                )
+                return result
             if ctx.journal is not None:
                 ctx.journal.dispatch(
                     job_ir.name,
@@ -973,18 +1335,48 @@ class SupervisedCommandAdapter:
         # one side effect resume is allowed to have, and it was the one the
         # reattached run could not receive.
         try:
-            return await self._await_outcome(run_id, run_dir, job_ir.name, run_number)
+            return await self._await_outcome(
+                run_id, run_dir, job_ir.name, run_number, recheck_listing=recheck
+            )
         except asyncio.CancelledError:
             if ctx.detach is not None and ctx.detach.stopping:
                 raise  # ss3 case b: the job continues under the supervisor
             await self.kill(run_id)  # ss3 case a: the oracle decided terminal
             raise
 
+    async def _listed_alive(self, run_id: str) -> bool:
+        """Whether the supervisor currently LISTs this run's wrapper as
+        alive. Conservative on failure: an unreachable supervisor answers
+        True, because `_await_outcome` already handles that path (lost ->
+        reconnect -> spool) and a false "dead" would skip a live run's
+        push."""
+        try:
+            listing = await self.client.list_runs()
+        except SupervisorUnavailable:
+            return True
+        return any(
+            r.get("run_id") == run_id and r.get("wrapper_alive") for r in listing.get("runs", [])
+        )
+
     async def _await_outcome(
-        self, run_id: str, run_dir: Path, job: str, run_number: int
+        self,
+        run_id: str,
+        run_dir: Path,
+        job: str,
+        run_number: int,
+        *,
+        recheck_listing: bool = False,
     ) -> AdapterResult:
         fut = self.client.exit_future(run_id)
         status_path = run_dir / "status.json"
+        # `recheck_listing` is any wait whose push is not promised -- a
+        # duplicate-born one (the run may predate this incarnation) or a
+        # reattach (the wrapper can die before the future above existed, and
+        # a push with no consumer is dropped). The LIST is re-asked
+        # periodically and a definitive "not alive" falls to the spool
+        # ladder. A fresh spawn never needs it: its future is registered
+        # before the fork, so its push is guaranteed.
+        recheck_countdown = _LIST_RECHECK_EVERY
         try:
             while True:
                 # post-poison a lost connection no longer implies a dead
@@ -1015,6 +1407,17 @@ class SupervisedCommandAdapter:
                     return Failed(  # PENDING: E7
                         f"exit_status_unobservable (wrapper exited rc={rc} without a status record)"
                     )
+                if recheck_listing and not self.client.lost.is_set():
+                    recheck_countdown -= 1
+                    if recheck_countdown <= 0:
+                        recheck_countdown = _LIST_RECHECK_EVERY
+                        if not await self._listed_alive(run_id):
+                            # definitive: the supervisor answered and the run
+                            # is not alive anywhere. Dead evidence is the
+                            # spool ladder's; waiting on would be forever.
+                            # (_listed_alive answers True on a TRANSIENT
+                            # LIST failure, so this never fires on one.)
+                            break
         finally:
             self.client.forget_exit(run_id)
         # the supervisor connection was lost AND could not be re-established

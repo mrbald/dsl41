@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from dsl41 import runner_procid as _procid
-from dsl41.ir import CatalogIR
+from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle_state import Event, TERMINAL
 from dsl41.runner import Engine
 from dsl41.runner_adapters import (
@@ -61,6 +61,7 @@ from dsl41.runner_adapters import (
     Terminated,
     load_json,
     outcome_from_status,
+    read_watch_log,
     resolve_spool,
 )
 from dsl41.runner_clock import Clock, EngineError
@@ -371,26 +372,34 @@ async def _reconcile(
                 cmd_adapter.reattach[(job, run_number)] = str(reattach["run_id"])
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
-        if job_ir.job_type == "FW":  # pragma: no cover -- see below
-            # Unreachable: this candidate set is built from dispatch records
-            # and run directories, and an FW watch spawns no process, so it
-            # produces neither. A job's TYPE changing between runs would be
-            # the only way in, and the ss7 hash gate refuses that resume. The
-            # reachable FW case is `_resume_untraced_starts`, which is where
-            # a watch with nothing on disk actually lands, and it is tested.
-            adapter = engine.adapters.get("FW")
-            if adapter is None:
-                raise EngineError(  # refuse loudly: never leave it hanging
-                    f"incomplete FW run {job}.{run_number}: no FW adapter registered"
-                    " to re-dispatch it"
-                )
-            engine._launch(job_ir, run_number, adapter)  # idempotent read
+        if job_ir.job_type == "FW":
+            _resume_watch(engine, job_ir, run_number, run_dir, last_at)
+            continue
+        bound = _spawn_effect_for(engine, job, run_number)
+        cmd_adapter = engine.adapters.get(job_ir.job_type)
+        if (
+            isinstance(cmd_adapter, SupervisedCommandAdapter)
+            and bound is not None
+            and bound.run_id is not None
+            and not _spool_has_evidence(run_dir)
+        ):
+            # PR-36a: the intent is durable and bound, the host holds NO
+            # evidence a wrapper ever ran (no spawn.json, no status.json --
+            # the supervisor may have died between its mkdir and the fork),
+            # and SPAWN is idempotent now (ss11a). So the effect is REPLAYED
+            # rather than guessed at: the supervisor answers first-application
+            # (the run happens, once), duplicate (we await the run that
+            # already did), in-progress (likewise), or indeterminate/collision
+            # (the run fails naming the reason -- E7's policy, with the
+            # supervisor's own words). The FAILURE verdict this branch used
+            # to reach fabricated a fate for a run the host could still
+            # answer for.
+            engine._launch(job_ir, run_number, cmd_adapter, run_id=bound.run_id)
             continue
         # the ladder resolves this run's fate from its directory; the
         # directory's claim to BE this run's was checked by the preflight,
         # and the bound id rides along so a record that appears BETWEEN the
         # preflight and this read is held to the same identity
-        bound = _spawn_effect_for(engine, job, run_number)
         result, ended_at = await resolve_spool(
             job,
             run_number,
@@ -424,6 +433,66 @@ async def _reconcile(
     # its trace. Superseded ones retire on the way through, and a drained or
     # quarantined host holds its own, in the one gate that owns that call.
     engine._dispatch()
+
+
+def _spool_has_evidence(run_dir: Path | None) -> bool:
+    """Whether a wrapper left any trace in this directory. The PR-36a replay
+    is only for runs the host provably never recorded: the moment either
+    record exists, the spool ladder owns the verdict."""
+    if run_dir is None:
+        return False
+    return (run_dir / "spawn.json").exists() or (run_dir / "status.json").exists()
+
+
+def _resume_watch(
+    engine: Engine,
+    job_ir: JobIR,
+    run_number: int,
+    run_dir: Path | None,
+    last_at: datetime,
+) -> None:
+    """One incomplete FW run, from its spool (period-model ss2.2).
+
+    A dispatched watch leaves a run directory now, so this is where a resumed
+    watch lands: the sweep finds the directory, and the log says whether the
+    watch is over."""
+    job = job_ir.name
+    if run_dir is None and engine.run_root is not None:
+        # the same fallback the preflight makes: a candidate that came from a
+        # dispatch record without a run_dir still has one, and without it the
+        # inject-from-log branch below would never be reached
+        run_dir = engine.run_root / "runs" / f"{job}.{run_number}"
+    watch = read_watch_log(run_dir) if run_dir is not None else None
+    bound = _spawn_effect_for(engine, job, run_number)
+    if watch is not None and bound is not None:
+        # re-checked at THIS read, not only at the preflight: a log that
+        # appeared in the window between the two is held to the same
+        # identity, or its fate would be injected as this run's
+        _refuse_identity_split(bound, watch.run_id, "the spool's watch.jsonl")
+    if watch is not None and watch.complete:
+        # PR-34a: the last durable line is a completing observation and the row
+        # is still RUNNING -- the engine died between the poll and the STATUS
+        # input. Inject the completion FROM THE LOG, exactly as a CMD's is
+        # injected from status.json; re-polling would decide the watch again
+        # against a world that has moved on.
+        extras: dict[str, object] = {"exit_code": 0}
+        if watch.last_at is not None:
+            extras["ended_at"] = watch.last_at.isoformat()
+        _inject_completion(
+            engine, job, run_number, extras, at=watch.last_at or last_at, last_at=last_at
+        )
+        return
+    adapter = engine.adapters.get("FW")
+    if adapter is None:
+        raise EngineError(  # refuse loudly: never leave it hanging
+            f"incomplete FW run {job}.{run_number}: no FW adapter registered to re-dispatch it"
+        )
+    # idempotent read: the adapter reconstructs progress from the log and
+    # appends no second `start` line. The bound id rides along for the one
+    # case with no log to reconstruct from -- a run directory made and then
+    # crashed on, before the `start` line -- where a watch dispatched with no
+    # identity would write `run_id: null` and split from the WAL (DL-118).
+    engine._launch(job_ir, run_number, adapter, run_id=bound.run_id if bound else None)
 
 
 def _inject_completion(
@@ -472,7 +541,8 @@ def _resume_untraced_starts(
                     f"incomplete FW run {job}.{rt.run_number}: no FW adapter registered"
                     " to re-dispatch it"
                 )
-            engine._launch(job_ir, rt.run_number, adapter)
+            bound = _spawn_effect_for(engine, job, rt.run_number)
+            engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id if bound else None)
             continue
         if job_ir.job_type not in engine.adapters:
             continue  # no dispatch row live either: parity with the running engine
@@ -485,11 +555,27 @@ def _resume_untraced_starts(
             # gates a fresh effect passes, so a drained or quarantined host
             # still HOLDS it (ss8) and this sweep does not need to know that.
             continue
+        bound = _spawn_effect_for(engine, job, rt.run_number)
+        adapter = engine.adapters.get(job_ir.job_type)
+        if (
+            isinstance(adapter, SupervisedCommandAdapter)
+            and bound is not None
+            and bound.run_id is not None
+        ):
+            # PR-36a again, with even less on disk: the intent is durable and
+            # bound but nothing anywhere names a wrapper. Replaying through
+            # the idempotent SPAWN is strictly safer than the FAILURE verdict
+            # -- the supervisor's directory, not this engine's guess, says
+            # whether the run already exists.
+            engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
+            continue
         # FAILED. No pending intent, so the log never said a spawn was meant
         # to happen -- a journal written before the outbox existed (S5c), or
-        # an effect already resolved whose spool has since gone. That is the
-        # case runner-design ss7 was reasoning about when it chose to fail a
-        # start rather than silently re-run it, and it still does.
+        # an effect already resolved whose spool has since gone -- and either
+        # no supervisor path or no bound identity to replay against
+        # (pre-DL-118). That is the case runner-design ss7 was reasoning
+        # about when it chose to fail a start rather than silently re-run
+        # it, and for these chains it still does.
         _inject_completion(
             engine,
             job,
@@ -562,6 +648,11 @@ def _preflight_identities(
                 doc = load_json(directory / name)
                 if doc is not None:
                     _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
+            # an FW watch spawns no process; its `start` line is the record
+            # that names the run, and it is present evidence like any other
+            watch = read_watch_log(directory)
+            if watch is not None:
+                _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
         listing = supervised_live.get((job, run_number))
         if listing is not None:  # alive or dead: a row is a claim either way
             _refuse_identity_split(effect, listing.get("run_id"), "the supervisor's LIST")
@@ -583,12 +674,33 @@ def _reconcile_applied_spawns(
         if (effect.job, effect.run_number) not in candidates:
             continue
         spawned = load_json(spool / "spawn.json") if spool is not None else None
+        if spawned is not None:
+            # re-checked at THIS read, not only at the preflight (DL-118):
+            # evidence that appeared in the window between them is held to
+            # the bound identity BEFORE anything durable is recorded --
+            # including present-but-idless evidence, which the strict gate
+            # refuses. Without this, the applied outcome lands first and the
+            # later gates refuse only after the WAL has moved.
+            _refuse_identity_split(effect, spawned.get("run_id"), "the spool's spawn.json")
+        run_id = (spawned or {}).get("run_id")
+        detail = "reconciled from the spool: the run reached the host"
+        if spawned is None and spool is not None:
+            # ss11's FW rule (PR-34): a watch writes no spawn.json, and its
+            # `start` line is what says the dispatch happened. Without this the
+            # ladder treats the pending SPAWN as an applied-SPAWN candidate,
+            # finds no spawn.json, and re-launches the watch as an untraced
+            # start -- two `start` lines and a fold nothing can reproduce.
+            watch = read_watch_log(spool)
+            if watch is not None:
+                _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
+                run_id = watch.run_id
+                detail = "reconciled from the watch log: the start line is the dispatch"
         engine._resolve_effect(
             EffectOutcome(
                 effect_id=effect.effect_id,
                 state="applied",
-                run_id=(spawned or {}).get("run_id"),
-                detail="reconciled from the spool: the run reached the host",
+                run_id=run_id,
+                detail=detail,
             )
         )
 
