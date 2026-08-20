@@ -26,7 +26,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from .ir import CalendarIR, CatalogIR
 
@@ -806,6 +806,146 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
         holiday=holiday,
         adjust=adjust,
         bound=bound,
+    )
+
+
+def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any, ...]:
+    """The extended-calendar surface this rule engine READS, canonicalized
+    with the SAME parsers that evaluate it -- for the DL-131 classifier,
+    whose calendar node must call two spellings of one rule set one value.
+
+    One authority, exported: the classifier comparing raw attribute text
+    would refuse a live boundary over `MON|TUE` respelled `MON | TUE`, a
+    reordered day list, a re-cased action, or `adjust: 00` -- all of which
+    this engine derives identical dates from. Tolerant on purpose: a piece
+    these parsers refuse keeps its raw (collapsed, lowered) spelling as its
+    key -- the LOUD refusal is `compile_calendar`'s, at preflight, and a
+    classifier must not crash where the gate is elsewhere. Rules compare as
+    a SET of canonical token tuples (the fold is any-of and tokens
+    case-fold); `{}` reads as `()` and the word operators as their symbols,
+    exactly as `_tokenize`/`_parse_rule` do."""
+
+    def canonical_token(token: str) -> str:
+        if token in "&|()":
+            return token
+        lowered = token.lower()
+        return {"and": "&", "or": "|"}.get(lowered, lowered)
+
+    def parsed_rules() -> tuple[tuple[str, ...], ...]:
+        rules: set[tuple[str, ...]] = set()
+        for line in cal.conditions:
+            for part in line.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    rules.add(tuple(canonical_token(t) for t in _tokenize(cal.name, part)))
+                except CalendarRuleError:
+                    rules.add((" ".join(part.split()).lower(),))
+        if not rules:
+            # `compile_calendar`'s own fallback: no rules means the DAILY
+            # include, so an omitted rule list and an explicit
+            # `condition: daily` are one calendar
+            rules.add(("daily",))
+        return tuple(sorted(rules))
+
+    workday_raw = cal.attrs.get("workday", "").strip()
+    # `compile_calendar`'s own default: an omitted workday IS Monday-Friday,
+    # so spelling the default out is not a change
+    workday: Any = frozenset(range(5))
+    if workday_raw:
+        try:
+            workday = _parse_workday(cal.name, workday_raw)
+        except CalendarRuleError:
+            workday = workday_raw.lower()
+
+    # shielding REACH resolves through the holiday set itself, not the
+    # spelling of the reference: a holcal naming an empty calendar gives
+    # `holiday: S` nothing to keep, and the compiled dates are identical
+    # with or without it. An unresolvable reference (no catalog handed in,
+    # a missing or extended holcal) keeps the syntactic presence -- the
+    # refusal-safe direction; the loud verdict on the reference itself is
+    # `compile_calendar`'s.
+    holcal_raw = cal.attrs.get("holcal", "").strip()
+    has_holcal = bool(holcal_raw)
+    holidays: frozenset[date] | None = None  # None = unresolvable, be conservative
+    if has_holcal and catalog is not None:
+        hol = catalog.calendars.get(_unquote(holcal_raw))
+        if hol is not None and hol.kind == "standard":
+            try:
+                holidays = standard_days(hol)
+            except (ValueError, CalendarRuleError):
+                holidays = None  # unreadable rows: keep syntactic presence
+            else:
+                has_holcal = bool(holidays)
+
+    def action(key: str, *, shields_something: bool = False) -> Any:
+        raw = cal.attrs.get(key, "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = _parse_action(cal.name, key, raw)
+        except CalendarRuleError:
+            return raw.lower()
+        if parsed != "s":
+            return parsed
+        # "s" is the keep-as-is pass-through, but the two keys differ in
+        # REACH. `non_workday: S` is always `_dispose`'s else-branch --
+        # identical to no action. `holiday: S` on a holiday KEEPS the day
+        # and `continue`s PAST the non_workday branch, so it is distinct
+        # exactly when there is something to shield FROM: a holcal to hit
+        # AND a non_workday action that would alter the day (o filters,
+        # n/w/p walk -- DL-58's shielding family). With either absent, the
+        # skipped branch was a no-op and S is no action at all.
+        return parsed if shields_something else None
+
+    non_workday_action = action("non_workday")
+
+    def action_touches_a_holiday() -> bool:
+        """Whether the non_workday action would ALTER any resolved holiday
+        that the rule set ADMITS -- the exact domain `holiday: S`'s skip
+        shields (`_dispose`): "o" drops days IN the workday set, n/w/p walk
+        days OUTSIDE it, and either only ever sees a day the include/
+        exclude predicate produced as a candidate. The holiday set is
+        finite, so candidacy evaluates exactly, through the engine's own
+        compile. Unresolvable pieces (raw workday, unreadable holcal, an
+        uncompilable calendar, an unknown action spelling) answer True --
+        the refusal-safe direction; a replace-walk that happens to land on
+        an already-included day is an accepted false-refusal corner, never
+        a false carry."""
+        if holidays is None or not isinstance(workday, frozenset) or catalog is None:
+            return True
+        try:
+            compiled = compile_calendar(cal, catalog)
+        except CalendarRuleError:
+            return True
+        candidates = frozenset(d for d in holidays if compiled._included(d))
+        if non_workday_action == "o":
+            return any(d.weekday() in workday for d in candidates)
+        if non_workday_action in _REPLACE:
+            return any(d.weekday() not in workday for d in candidates)
+        return True  # an unparsed action spelling: assume reach
+
+    adjust_raw = cal.attrs.get("adjust", "").strip()
+    adjust: Any = 0
+    if adjust_raw:
+        try:
+            adjust = int(adjust_raw)
+        except ValueError:
+            adjust = adjust_raw
+    return (
+        workday,
+        non_workday_action,
+        action(
+            "holiday",
+            shields_something=has_holcal
+            and non_workday_action is not None
+            and action_touches_a_holiday(),
+        ),
+        _unquote(cal.attrs.get("holcal", "").strip()) or None,
+        _unquote(cal.attrs.get("cyccal", "").strip()) or None,
+        adjust,
+        parsed_rules(),
     )
 
 

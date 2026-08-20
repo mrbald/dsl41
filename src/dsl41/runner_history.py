@@ -83,7 +83,7 @@ Five decisions, each with its reason here; the decision itself is
    deliberately conservative (`period.catalog_hash_v2` -- "an estate
    that changed in ANY way re-baselines"), so a release touching twelve jobs
    of eight hundred moves it for all eight hundred, and a break on it marks
-   every job in the estate as changed. See `_job_fingerprints` for what the
+   every job in the estate as changed. See `period.job_fingerprints` for what the
    per-job hash can and cannot say -- in particular that it fingerprints the
    RESOLVED definition, so an estate whose placeholders vary per run gets no
    more than `catalog_hash` already gave it. Rows are sorted by
@@ -108,8 +108,6 @@ Five decisions, each with its reason here; the decision itself is
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -127,6 +125,7 @@ from dsl41.period import (
     bundle_dir,
     bundle_source_paths,
     is_opening,
+    job_fingerprints,
     opening_at,
     read_period_manifest,
 )
@@ -201,51 +200,6 @@ class _TraceWindow:
     started_by: str
     ended_at: datetime | None
     status: str | None
-
-
-def _strip_spans(value: Any) -> Any:
-    """Every `SourceSpan`/`CondSpan` field in the IR is named exactly `span`
-    (`ir.py`, `conditions.py`), so dropping that key recursively drops all
-    position metadata. A job that only MOVED in its file must fingerprint the
-    same as before it moved."""
-    if isinstance(value, dict):
-        return {k: _strip_spans(v) for k, v in value.items() if k != "span"}
-    if isinstance(value, list):
-        return [_strip_spans(v) for v in value]
-    return value
-
-
-def _job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
-    """Per-job definition fingerprints -- `period.catalog_hash_v2`'s
-    technique (sha256 over a canonical JSON dump) applied one level down.
-
-    The estate-wide hash exists to gate resume and it is deliberately
-    conservative: it moves for ANY change anywhere in the estate. That makes
-    it the wrong thing to mark a *job's* series with. A release touching
-    twelve jobs of eight hundred moves it for all eight hundred, so a break
-    line computed from it fires on every job and tells the reader nothing
-    about the one they are looking at.
-
-    **The limit, stated rather than discovered.** The bundle holds the
-    POST-placeholder JIL, so this fingerprints the RESOLVED
-    definition. An estate whose placeholders vary per run -- `examples/
-    nightbank` bakes the run root into `profile`, `std_out_file` and
-    `std_err_file`, so every job's resolved text differs between any two run
-    roots -- makes every job look changed, and the break line degrades to
-    exactly what `catalog_hash` already said. Where placeholders come from a
-    stable site.properties, which is the deployment this is for, it says what
-    it claims to. The row carries both hashes so a reader can tell the two
-    situations apart.
-
-    What this is NOT is a definition diff. "Changed how, and can the state
-    carry across it" is the catalog-diff classification that a re-baseline
-    needs, and it is not built."""
-    return {
-        name: hashlib.sha256(
-            json.dumps(_strip_spans(job_ir.model_dump(mode="json")), sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        for name, job_ir in catalog.jobs.items()
-    }
 
 
 def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "catalog"] | None:
@@ -537,7 +491,7 @@ def fold_run_rows(
         raise RunHistoryError("run history requires a journal starting with a segment record")
     catalog_hash = str(records[0]["catalog_hash"])
     trace_windows = _trace_windows_by_job(trace)
-    fingerprints = {} if catalog is None else _job_fingerprints(catalog)
+    fingerprints = {} if catalog is None else job_fingerprints(catalog)
     fidelity: Literal["full", "records_only"] = "records_only" if catalog is None else "full"
     rows: list[RunRow] = []
     if catalog is not None:

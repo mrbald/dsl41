@@ -512,6 +512,15 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   command-line order) and the content-addressed input bundle it addresses,
   the typed frozen `RuntimeProfile` and its `runtime_hash`, the staged and
   committed manifest models, and the `segment` record every new log opens with
+- src/dsl41/classify.py — boundary classification (period-model ss10, DL-131): the
+  graph IR-G cannot give — job, box containment, global, external instance, resource,
+  machine, calendar/cycle, timezone basis and one node per RuntimeProfile field, each
+  with a stated "changed when" — with edges running from a job TO what it depends on,
+  the profile fields included. Two closures: a job's forward closure answers the R gate
+  ("is anything live job J depends on changed?"), a changed node's reverse closure plus
+  condition truth under both catalogs answers the boundary-truth diff ("whose readiness
+  flips?"). Verdicts are R (executing), A with a named assumption (latent intent) or
+  carry, one per job. Pure analysis: no disk, no socket, no clock
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/effect/effect_result/result/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
@@ -754,6 +763,13 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   drain. Two tests keep it honest — every fault must be planned, and every
   fault must actually FIRE, because a driver whose faults had quietly become
   no-ops would still report 48 green runs of a happy path
+- tests/test_classification.py — the ss10 classifier (period-model, DL-131): every
+  tier row with a CONTRAST (one estate, one change, two livenesses, two verdicts), the
+  PR-37a profile sweep derived from `RuntimeProfile.model_fields` — each field reaches
+  exactly the jobs the spec names, is modelled as a node, and `retry_horizon_us` reaches
+  no job — the PR-37
+  non-job node kinds, every ss10.3 named case with its sentence, both closure directions
+  including a case where they disagree, and containment nested two deep
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)

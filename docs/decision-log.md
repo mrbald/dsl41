@@ -5236,3 +5236,78 @@
   same reason. Out of scope by construction: the seal, `wal/`, the sentinel, the
   anchor, `periods/.staging/` and adoption. 2325 -> 2410 passed; ruff,
   mypy and arch_check clean.
+- DL-131 the classifier reads a graph nobody had, in two directions
+  (2026-08-20; period-model ss10, built as PR-37, PR-37a, PR-38..PR-44).
+  `classify.py` answers one question per boundary: C1 is open and holds
+  live work, C2 is staged -- may the boundary commit, and what must the
+  seal record about what it carried? Three answers, R / A / carry, one per
+  job of either catalog, in name order, so phase 2's map is reproducible
+  byte for byte.
+  (1) **The graph is built for the purpose.** Neither the per-job
+  fingerprint nor IR-G computes the blast radius: IR-G has job and global
+  nodes only, and no resource, machine, calendar, cycle, external instance,
+  timezone or runtime-profile node exists there. So the module builds its
+  own -- ten node kinds, each with a stated "changed when" -- and takes
+  IR-G for the BOX TOPOLOGY alone. The condition atoms are walked
+  DIRECTLY off `JobIR.iter_conditions()` (condition, box_success,
+  box_failure) -- never off IR-G's edge list, which diverts a local
+  unqualified n() into `mutex_groups` (M07) and keeps no edge for it: a
+  reader that "reversed IR-G" would carry a boundary over `b: condition:
+  n(a)` while b executes and C2 changes a.
+  (2) **The edges run FROM a job TO what it depends on**, the profile
+  fields included, so a live CMD's forward closure reaches
+  `profile:cmd_grace_us` and a C2 that changes only the kill ladder's grace
+  cannot commit over a live run. The reversed spelling reaches no profile
+  field from any job and passes every other obligation, which is why
+  `test_pr37a_profile_edges_run_from_job_to_field` asserts the CLOSURE and
+  not only a verdict.
+  (3) **Two directions, both computed.** The R gate is a job's forward
+  closure; the boundary-truth diff is a changed node's reverse closure plus
+  condition truth under both catalogs at the one carried state. Neither
+  substitutes for the other and
+  `test_ss10_2_forward_and_reverse_answer_different_questions` shows a case
+  each way.
+  (4) **Truth has one authority.** The diff evaluates through the
+  interpreter itself -- a throwaway `Oracle` seeded with the carried rows
+  -- rather than a second evaluator: SEM-05's iced predecessor, SEM-06's
+  undefined atom and the lookback ladder are semantics, and a classifier
+  that re-derived them would answer a question the engine does not ask.
+  Six readings the spec left open are recorded rather than hidden. A box
+  containment node's value is the containment RELATION under it, not the
+  member SET: moving a leaf from an inner box up to the outer one leaves
+  the outer set identical and is exactly the "at any nesting depth" case
+  the rule is about. A member depends on two facts about its box -- the
+  containment set and the box's own definition -- because the box's
+  condition and schedule gate the member. The graph unions C1's and C2's
+  edges, which can only add a changed node to a closure, never hide one. A
+  resource node is `(amount, res_type)`: the release-policy default IS
+  `res_type` (`capacity._release_policy`), so the pair says all three
+  things ss10.2 names. The timezone basis stays a node beside the two
+  profile fields it is computed from, because ss10.2 lists both and a
+  report that named only a field would not say what moved. And the armed
+  assumption is keyed on a moved SCHEDULE or CONDITION, ss10.3's own two
+  things: an armed job whose command changed is still an A, but telling an
+  operator "the C1 trigger survives under C2 gating" when the gating is
+  what did not move misnames the risk, so that case takes the general
+  sentence. Ghosts and changed-but-not-live are disjoint lists, and a job
+  only C2 has is out of the readiness diff -- it has no C1 truth to differ
+  from. A carried row is seeded for the truth
+  diff even when C2 no longer has the job: the ghost row is RETAINED across
+  the boundary, so the opened period holds it and an atom naming it reads
+  it -- SEM-06's "undefined is false" is about a job with no row, not about
+  a job with no definition, and L001 refuses the condition that would make
+  the difference visible. `runner_history._job_fingerprints` moved to
+  `period.job_fingerprints` unchanged, because a pure analysis pass may not
+  import a private name out of a runner module, and the leaf test is
+  identity, which is what `period.py` holds; ss10.2 names it under its old
+  home, so ss15 carries the amendment and `ops-model.md` ss8a.4 is
+  corrected. `citation-index.md` gains the `C[12]` row: C1 and C2 are the
+  vocabulary this programme is written in, and the gate is right that a
+  token nobody can resolve is not one. Out of scope by construction: the
+  seal operation that calls this (ss6/ss7), the carried-state snapshot the
+  seal builds, and PR-26 -- one tick under C1 while held, exactly one start
+  after C2 opens -- which is a runtime obligation and needs an engine.
+  2442 -> 2509 passed; ruff, mypy and arch_check clean. An adversarial
+  review pass found no blocker and one leaking test -- a SEM-05 arm whose
+  two cases were both false under the rule and without it -- rebuilt so
+  that removing the ice branch from the interpreter reds it.

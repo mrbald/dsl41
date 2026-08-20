@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -120,6 +121,57 @@ def catalog_hash_v2(catalog: CatalogIR) -> str:
     payload = catalog.model_dump(mode="json")
     payload["meta"] = {"source_files": list(catalog.meta.source_files)}
     return hash_over(payload)
+
+
+def _strip_spans(value: Any) -> Any:
+    """Every `SourceSpan`/`CondSpan` field in the IR is named exactly `span`
+    (`ir.py`, `conditions.py`), so dropping that key recursively drops all
+    position metadata. A job that only MOVED in its file must fingerprint the
+    same as before it moved."""
+    if isinstance(value, dict):
+        return {k: _strip_spans(v) for k, v in value.items() if k != "span"}
+    if isinstance(value, list):
+        return [_strip_spans(v) for v in value]
+    return value
+
+
+def job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
+    """Per-job definition fingerprints -- `catalog_hash_v2`'s technique
+    (sha256 over a canonical JSON dump) applied one level down.
+
+    The estate-wide hash exists to gate resume and it is deliberately
+    conservative: it moves for ANY change anywhere in the estate. That makes
+    it the wrong thing to mark a *job's* series with, and the wrong leaf test
+    for a classifier. A release touching twelve jobs of eight hundred moves
+    it for all eight hundred, so a break line computed from it fires on every
+    job and tells the reader nothing about the one they are looking at, and a
+    boundary computed from it would drain every live run in the estate.
+
+    **The limit, stated rather than discovered.** The bundle holds the
+    POST-placeholder JIL, so this fingerprints the RESOLVED
+    definition. An estate whose placeholders vary per run -- `examples/
+    nightbank` bakes the run root into `profile`, `std_out_file` and
+    `std_err_file`, so every job's resolved text differs between any two run
+    roots -- makes every job look changed, and the break line degrades to
+    exactly what `catalog_hash` already said. Where placeholders come from a
+    stable site.properties, which is the deployment this is for, it says what
+    it claims to. The row carries both hashes so a reader can tell the two
+    situations apart.
+
+    What this is NOT is a definition diff. "Changed how, and can the state
+    carry across it" is the classification `classify.py` builds a graph for
+    (period-model ss10.2, which names this function the leaf test); this
+    answers only "did this job's definition move".
+
+    It lived in `runner_history.py` as `_job_fingerprints` until DL-131,
+    which needed it in a module a pure analysis pass may import. ss10.2
+    still names it there and ss15 carries the amendment."""
+    return {
+        name: hashlib.sha256(
+            json.dumps(_strip_spans(job_ir.model_dump(mode="json")), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        for name, job_ir in catalog.jobs.items()
+    }
 
 
 def catalog_hash_at(version: int, catalog: CatalogIR) -> str:

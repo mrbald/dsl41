@@ -1712,8 +1712,11 @@ Nodes and what moves them:
 | runtime profile, **per field** | `default_tz`, `tz_aliases` → every job with `start_times`, `start_mins` or a calendar; `as_machine`, `machine_policy`, `execution_mode`, `deadman_us`, `cmd_grace_us`, `reconcile_settle_us`, `spawn_window_us` → every CMD job; `fw_default_interval_us` → every FW job; **`retry_horizon_us` → no job** — it is boundary policy, and a field that reached every job would turn a horizon tweak into a full live-work drain |
 
 Edges, **from a job to what it depends on**, every one of them, the profile
-fields included: its condition's job, global and `name^INST` atoms (IR-G,
-reversed); its box, and a box to each member (both directions, nested); its
+fields included: its condition's job, global and `name^INST` atoms —
+*(amended by DL-131, at build:* walked directly off `JobIR.iter_conditions()`
+(condition, `box_success`, `box_failure`), never off IR-G's edge list, which
+diverts a local unqualified `n()` into `mutex_groups` (M07) and keeps no edge
+for it; IR-G remains the box-topology input*)*; its box, and a box to each member (both directions, nested); its
 `resources:` entries; its `machine:` and that machine's members; its calendars
 and cycles; the timezone basis for every job with `start_times`, `start_mins`
 or a calendar; and **from each job to each runtime-profile field** the table
@@ -2344,6 +2347,7 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `capacity.py`, `oracle_state.py` | §5 |
 | `runner_supervisor.py` | completed-run tombstones (PR-36) |
 | `runner_history.py`, `cli.py journal` | period-aware |
+| `runner_history.py` | `_job_fingerprints` becomes `period.job_fingerprints` (DL-131): §10.2's leaf test is named here under its original home, and a pure analysis pass may not import a private name out of a runner module |
 | `citation-index.md` | `PR-\d{2}[a-z]?` row |
 | `CLAUDE.md` | read-first list |
 

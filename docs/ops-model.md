@@ -970,8 +970,9 @@ ownership question in one line: **C1 owns every tick ≤ T, C2 owns every tick
 ### 8a.4 The classifier needs more than the fingerprint
 
 Stage 2 needs "did *this job's* definition change", and DL-113 built part of
-that for the run-history break line: `runner_history._job_fingerprints`, sha256
-over one job's lowered IR with `span` keys stripped.
+that for the run-history break line: `period.job_fingerprints` — written in
+`runner_history` as `_job_fingerprints` and lifted by DL-131 — sha256 over one
+job's lowered IR with `span` keys stripped.
 
 *(Narrowed after peer review.)* It is **not sufficient**, and the primitive's
 own docstring says why — it is "NOT a definition diff". It hashes
