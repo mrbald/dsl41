@@ -1917,3 +1917,67 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
     # SEM-35's city ladder still resolves the per-job zone: an empty alias
     # table read as a PRESENT map would refuse this catalog outright
     assert str(captured["scheduler"]._plans["j1"].tz) == "Europe/Zurich"
+
+
+def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-137 slice follow-up. The detached wiring's supervisor calls moved
+    from cli.py -- outside the DL-105 coverage gate -- into runner_startup,
+    the gated tier, so the order they always had becomes a pinned fact: the
+    supervisor comes up BEFORE the lease is taken (an acquire against a
+    socket that is not there is a refusal, not a boot), and `close()`
+    returns the lease BEFORE closing the transport (a closed transport
+    cannot release)."""
+    from dsl41 import runner_adapters
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source(_SOLO_JIL)
+    profile = RuntimeProfile(execution_mode="detached", deadman_us=41_000_000)
+    calls: list[str] = []
+
+    async def _ensure(self: Any) -> None:
+        calls.append("ensure_running")
+
+    async def _acquire(self: Any) -> None:
+        calls.append("acquire")
+
+    async def _release(self: Any) -> None:
+        calls.append("release")
+
+    async def _close(self: Any) -> None:
+        calls.append("close")
+
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _ensure)
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "acquire", _acquire)
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "release", _release)
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "close", _close)
+
+    async def _drive() -> None:
+        wiring = await wire_from_profile(tmp_path, catalog, profile)
+        assert calls == ["ensure_running", "acquire"]
+        assert wiring.client is not None
+        assert wiring.deadman_s == 41.0
+        await wiring.close()
+        assert calls == ["ensure_running", "acquire", "release", "close"]
+
+    asyncio.run(_drive())
+
+
+def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The SupervisorUnavailable arm of the same wiring: refuse with the
+    house error, never hand back a half-wired engine."""
+    from dsl41 import runner_adapters
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source(_SOLO_JIL)
+    profile = RuntimeProfile(execution_mode="detached")
+
+    async def _boom(self: Any) -> None:
+        raise runner_adapters.SupervisorUnavailable("no socket answered")
+
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _boom)
+    with pytest.raises(EngineError, match="supervisor unavailable: no socket answered"):
+        asyncio.run(wire_from_profile(tmp_path, catalog, profile))
