@@ -115,6 +115,30 @@ def test_pending_timers_term_run_time_armed_and_visible_while_running() -> None:
     assert o.pending_timers() == [(T0 + timedelta(minutes=10), "pt_a", "term_run_time")]
 
 
+def test_pending_timers_keeps_the_firing_order_of_equal_time_timers() -> None:
+    """DL-143: `pending_timers()` is the DISPATCH order, ties included.
+
+    Two deadlines due at the same instant fire in ordering-token order --
+    the order they were armed in -- and that order decides resource
+    release, box cascades and who starts (period-model ss3.2). The reader
+    used to re-sort its own already-ordered input by `(due, job, kind)`,
+    which is a no-op on the due key and silently replaced the token order
+    with alphabetical order by job name: the ss11 jobs table then showed a
+    firing order the engine would not use. `zz` is armed FIRST here, so a
+    reader that sorts by name puts `aa` in front of it."""
+    text = (
+        "insert_job: zz\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n\n"
+        "insert_job: aa\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n"
+    )
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="zz"))
+    o.feed(ev("STARTJOB", 0, job="aa"))  # same instant, so the same deadline
+    due = T0 + timedelta(minutes=10)
+    assert [(d, job) for d, job, _ in o.pending_timers()] == [(due, "zz"), (due, "aa")]
+    # and it is the store's own order, not a second opinion about it
+    assert [e.payload["job"] for _, _, e in o.store.timers()] == ["zz", "aa"]
+
+
 def test_pending_timers_stale_by_run_hides_a_deadline_from_a_superseded_run() -> None:
     """(oracle.py's own pending_timers docstring): a restart bumps
     run_number, so a still-unfired deadline armed for an EARLIER run must be

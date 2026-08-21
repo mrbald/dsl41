@@ -6956,3 +6956,59 @@
   2991 -> 3012 collected; the correlated forgery, the record edit
   under an honest sidecar, the unattested named-alone refusal and the
   two-fault tail precedence all pinned red-first.
+- DL-143 the night under the boundary: ss14's B1 and B2 are built
+  (2026-08-21; period-model ss14 scenario B, the unit DL-136 item (9)
+  deferred as "the size of DL-133's"; three adversarial rounds, four
+  blockers folded).
+  B1 is TWO scenarios, not one: the live closure at once, on the real
+  clock, under a REAL detached supervisor (ss8's mode table makes a
+  tethered B into A with extra steps); and the exactly-T cutoff alone
+  in the virtual domain, because T is clock.now() at the barrier and a
+  timer due AT T is only a choice there. The estate is nightbank's 81
+  jobs unchanged, wired through wire_from_profile -- the night under
+  test is the night an operator starts. Every id is read off the
+  estate; _check_b_estate holds each job to its row's shape, sleep
+  floors included, so a future estate edit cannot silently shrink the
+  headroom. The KILL is decided in the same turn the boundary is asked
+  for, so the barrier's own drain meets an unresolved ladder, and the
+  sealer's quiescence reason is recorded because "waited" is invisible
+  from outside. The exactly-T row pins ss6 steps 4-5 as a RULE: two
+  region deadlines fall ON T and fire in C1, the third a minute later
+  is carried unfired and fires in C2, and the arming order is not name
+  order so the equal-instant assertion pins the ordering token.
+  The R gate's pass is EARNED: C2 changes one job outside every live
+  forward closure, and the pin reads the Classification the boundary
+  COMMITS -- changed_nodes exactly that node, changed_not_live, and
+  changed == () across EVERY executing- and latent-tier verdict, not a
+  hand-picked list (a latent job the list forgot, holding a live
+  timer, whose closure reached the change would have committed as an
+  A-assumption unseen; B_DEFERRED's membership is asserted so the
+  widening cannot go vacuous).
+  B2 is four tests, one per ss14 row. EVERY row names which of ss8's
+  two refusal points answered -- readiness appends NOTHING, a
+  post-cutoff refusal keeps the cutoff's own admitted work -- via one
+  shared helper (_assert_c1_still_open: head open, no seal artifact or
+  record, sealing false, barrier unparked, the WAL record-for-record
+  or grown); three rows also assert the live process, and the
+  restarted-supervisor row asserts the estate and the FW watch
+  instead, because its own act is what takes the wrappers.
+  ONE PRODUCT DEFECT found and fixed: Oracle.pending_timers() ended in
+  a re-sort of its already-ordered input, replacing ss3.2's equal-time
+  ordering token with job-name order on ties -- the ss10 status query
+  and the ss11 jobs table showed a firing order the engine would not
+  use, against the function's own "display truth must be the dispatch
+  truth". Fixed in oracle.py, pinned in test_runner.py (zz armed
+  before aa) and over the worked estate. No spec change: the fix
+  restores what ss3.2 says.
+  FOUR TEST/FIXTURE DEFECTS found by leak-check and review, fixed: an
+  untouched-pin that could not tell ss8's two refusal points apart; a
+  byte-identical C2 that made the R gate's pass unearned; the closure
+  pin's hand-picked list (above); and the detached supervisor spawned
+  OUTSIDE its own cleanup guard -- a failed wiring leaked a live
+  supervisor, proved by process count (reverted: one; fixed: zero).
+  The mutation harness itself was rebuilt to snapshot-restore after
+  its git-checkout restore silently discarded an uncommitted fix once.
+  3012 -> 3019 collected; twelve scenario mutations plus the four
+  blocker leak-checks, each red on the assertion that names it; the B
+  block adds ~14s, five consecutive runs identical, no process
+  survives teardown.

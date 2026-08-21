@@ -724,7 +724,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_runner.py — phase-11a runner suite: oracle additions
   (next_timer_due/advance), VirtualClock, engine dispatch/cancellation/horizon
   discipline, the stale-completion gate, and the feed-only vs advance+feed and
-  oracle-vs-engine hypothesis properties
+  oracle-vs-engine hypothesis properties. `pending_timers` reports the
+  DISPATCH order, ties included: two deadlines due at one instant keep their
+  ordering token rather than being re-sorted by job name (DL-143)
 - tests/test_runner_lifecycle.py — phase-11b lifecycle tier: wrapper process matrix
   (pgid separation, parent-loss kills, fd hygiene), the DL-42 phase-boundary kill
   matrix, spoofed-record/boot-flip guards, the engine-SIGKILL crash-recovery
@@ -927,6 +929,16 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   process over the same 81-job estate: the offline seal of a stopped night,
   the retention survey and its no-class refusal, a roll refused until the
   closing night is attested, and break-glass reclaim after a crashed roll.
+  Then period-model ss14's scenario B (DL-143). B1 seals a DETACHED night
+  mid-flight under a real supervisor: a long command live and reattached, a
+  KILL ladder the sealer waits out, a crossing FW watch, a QUE_WAIT pair, a
+  live box with an INACTIVE member and a `pending_spawn` on a drained host,
+  with a forced seal and a late C1 retry. Its "two timers due at exactly T"
+  row is a second scenario in the virtual domain, because T is the clock at
+  the barrier and the instant is a choice only there. B2 is four tests, one
+  per ss14 row, each refusing the same estate over one change and each
+  pinning which of ss8's two refusal points answered -- readiness appends
+  nothing, a post-cutoff refusal keeps the cutoff's own admitted work.
   A last test holds the RUNBOOK to the CLI: every `dsl41 <verb>` it types
   must be a command this build has
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and

@@ -2260,6 +2260,23 @@ INACTIVE job with a semantic timer (PR-41); a `pending_spawn` on a passive
 host, unchanged (PR-32); two timers due at exactly T; a `--force-seal` and a
 late C1 retry (PR-06, PR-30).
 
+Built in `tests/test_nightbank_boundary.py` (DL-143), as two scenarios and
+not one: `test_b1_the_boundary_commits_over_a_night_in_flight` takes the
+whole live closure at once, detached under a real supervisor, with real
+commands and a real watch; `test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s`
+takes the exactly-T row alone. T is `clock.now()` at the barrier, so the
+instant is a CHOICE only in the virtual domain — there the estate's own
+`must_complete_times: "+20"` region boxes are armed to fall on T exactly,
+with a third one minute later, and §6's rule is what the test pins: the two
+fire inside C1 and the third is carried unfired and fires in C2.
+
+"Touching none of the live closure" means C2 touches **something**: an
+identical C2 moves no graph node, so the R gate would pass with nothing to
+classify and §10.2's closure would never be computed. C2 changes one job —
+the estate's iced, decommissioned report — and on an 81-job estate the
+jobs outside every live forward closure are a **short list**, because a
+shared machine or a shared box reaches almost everything.
+
 **B2 — the boundary that refuses.** The same estate, one change at a time,
 each a separate seal attempt that must refuse: C2 changes the `pending_spawn`'s
 command (PR-39a); C2 changes the live box's INACTIVE member (PR-42's R half);
@@ -2267,6 +2284,23 @@ the supervisor is restarted before the seal so `LIST` is empty (PR-27); an
 applied SPAWN has not yet written `spawn.json` (PR-27). Draft 4 put all of these
 into one scenario and called it end-to-end evidence; it was a refusal scenario
 mislabelled.
+
+Built in `tests/test_nightbank_boundary.py` (DL-143): one `test_b2_*` per
+row, each over B1's live closure, each asserting the refusal **by name**,
+and each naming WHICH of §8's two refusal points answered — because they
+leave different logs. Readiness refuses before the barrier and appends
+nothing at all; a refusal after the cutoff leaves the cutoff's own admitted
+work, which is legitimate C1 activity and not damage. A row that asked only
+for "no `seal` record" could not tell the two apart, and an R gate that
+moved from phase 1 to phase 2 would pass it.
+
+Three of the four rows then assert the live closure the refusal left alone —
+the long command still running as a **process**, not just as a row. The
+fourth cannot, and the reason is the row itself: restarting the supervisor
+takes its wrappers with it, which is exactly why the boundary must not
+commit over their carried rows. That row asserts the estate and the FW
+watch instead, and it is the one that pays for the literal reading of "the
+watch still watches" — a new durable `watch.jsonl` line after the refusal.
 
 **C — the lineage** (the fence). A quiet physical roll after attestation
 (PR-02a, PR-02d); a fork attempt from a second root (PR-01);

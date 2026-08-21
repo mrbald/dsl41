@@ -360,7 +360,12 @@ class Oracle:
         rules -- a heap entry a fire would discard as stale (run_number moved
         on; deadline's run no longer RUNNING) is not pending, it is dead
         weight awaiting its lazy pop. The ss10 status query renders this for
-        the ss11 jobs table; display truth must be the dispatch truth."""
+        the ss11 jobs table; display truth must be the dispatch truth --
+        which is why the order is `store.timers()`'s and is NOT re-sorted
+        here. On a TIE that order carries the ordering token, the firing
+        order of equal-time timers (period-model ss3.2); a `sorted()` over
+        `(due, job, kind)` reads as a no-op on an already-due-ordered list
+        and silently replaced it with job-name order (DL-143)."""
         live: list[tuple[datetime, str, str]] = []
         for due, _, ev in self.store.timers():
             job = ev.payload.get("job")
@@ -383,7 +388,7 @@ class Oracle:
             if check in ("must_complete", "term_run_time") and rt.status != "RUNNING":
                 continue  # the run already ended; the check fires as a no-op
             live.append((due, job, str(check)))
-        return sorted(live)
+        return live
 
     def advance(self, now: datetime) -> list[Event]:
         """Fire timers due <= now without an external event (runner-design
