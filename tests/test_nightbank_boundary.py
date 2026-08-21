@@ -566,6 +566,58 @@ def test_the_roll_is_refused_until_the_closing_night_is_attested(night_base: Pat
     assert stored.periods["2"].root == str(rolled_root.resolve())
 
 
+def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: Path) -> None:
+    """RUNBOOK exercise 19 step 5: after a roll the estate is two
+    directories, and which root holds which period is the anchor's
+    registry to answer rather than the operator's to remember (PR-02f).
+
+    All four readers are addressed the same way -- the lineage ANCHOR
+    named where a run root would go -- and every one of them covers the
+    whole estate or refuses. The last step is the one that matters most
+    over a real estate: take a registered root away and the total does not
+    quietly shrink, it stops and says which root is gone."""
+    run_root, props = _night(night_base)
+    _genesis(run_root, props, events=_operator_events())
+    assert _seal_offline(run_root, props).exit_code == 0
+    anchor_dir = default_anchor_dir(run_root)
+    assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
+    rolled = night_base / "roll"
+    _roll(rolled, anchor_dir, props)
+
+    audited = _invoke("audit", "--estate-anchor", str(anchor_dir))
+    assert audited.exit_code == 0, audited.output
+    assert f"period 1 in {run_root.resolve()} attested:" in audited.output
+    assert f"period 2 in {rolled.resolve()}: not closed, nothing to audit" in audited.output
+
+    listed = _invoke("estate", "prune", "--estate-anchor", str(anchor_dir), "--dry-run")
+    assert listed.exit_code == 0, listed.output
+    assert f"  {run_root.resolve()}: period 1, attested [1]" in listed.output
+    assert f"  {rolled.resolve()}: period 2, attested [1]" in listed.output
+    assert "2 root(s) planned" in listed.output
+
+    replayed = _invoke(
+        "journal", str(anchor_dir), *[str(path) for path in SMALL_FILES], "-p", str(props)
+    )
+    assert replayed.exit_code == 0, replayed.output
+    assert (
+        f"period 2 in {rolled.resolve()}: {wal_path(rolled.resolve(), 2)} (not replayed)"
+        in replayed.output
+    )
+    assert "the replay stops at the period 1/2 boundary" in replayed.output
+
+    assert _invoke("runs", str(anchor_dir)).exit_code == 0
+
+    shutil.move(str(run_root), str(night_base / "archived"))
+    for argv in (
+        ("audit", "--estate-anchor", str(anchor_dir)),
+        ("runs", str(anchor_dir)),
+        ("estate", "prune", "--estate-anchor", str(anchor_dir), "--dry-run"),
+    ):
+        refused = _invoke(*argv)
+        assert refused.exit_code == 2, refused.output
+        assert f"period 1: registry root {run_root.resolve()} is missing" in refused.output
+
+
 # -------------------------------------------- RUNBOOK 20: break-glass
 
 

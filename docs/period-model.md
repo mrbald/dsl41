@@ -576,7 +576,16 @@ replacement and lifetime:
   the head moved on, so estate-wide `journal`, `audit` and `runs` could not
   discover which root holds period N. The registry maps every period to the
   root that holds its segment, seal and attestation, and every cross-period
-  reader takes its roots from there.
+  reader takes its roots from there. **One walk reads it.** `audit`,
+  `journal`, `runs` and `estate prune` each address the whole estate the same
+  way — the lineage ANCHOR named where a run root would go — and each takes
+  its roots from that one walk, in period order. A row is passed over only
+  while it is provisional, and then said out loud; a root the registry names
+  that is missing, holds no sentinel, holds one that cannot be read, belongs
+  to another estate, or lacks the segment of the period it is registered for
+  refuses BY NAME. Four private walks would be four opinions about what a
+  missing root means, and the reader that decided "skip it" would answer with
+  a smaller estate and no way to tell.
 - Local filesystem only. `runner_ledger.py` already says the flock fence is not
   one on NFS; an NFS anchor is refused at startup (PR-04).
 
@@ -2065,7 +2074,7 @@ renumbered and never re-used for a different property.
 | PR-02b | the `open → closed` CAS: crash after the `seal` record and before the head moves; resume performs the CAS and the successor claim then proceeds |
 | PR-02c | anchor durability under **power loss**, not process kill: with `fsync(dir)` removed from any one head transition the test fails; a successor's registry row appears in the same write as `claimed → open`; period 1's row is provisional (`segment_durable: false`) and flips **in genesis's finalize CAS immediately after its segment** — an implementation that flips it at period 1's close after a running engine, or never, fails; cross-period readers ignore it until it flips |
 | PR-02d | `run --open-from` refuses a closing period with no `audit.json`, **and** one whose `audit.json` fails `verify` — a file that merely exists is not enough |
-| PR-02f | estate-wide `audit`, `journal` and `runs` find period 1's root through the registry after native genesis, and still after a physical roll of period 2 |
+| PR-02f | estate-wide `audit`, `journal`, `runs` and `estate prune` find period 1's root through the registry after native genesis, and still after a physical roll of period 2; ONE walk serves all four, a root that holds two periods is read once, and a provisional row is ignored and named. A registry root that is **missing** or **foreign** refuses BY NAME in every one of the four — that is what proves each verb consumes the walk; sentinel-less, unreadable, short-of-segment, a registry hole, and a run root named where the anchor goes refuse at the walk they all share. The estate-wide readers report the whole estate or stop: `audit` treats a busy lineage lock as one period's outstanding row and audits the rest, `journal` names every segment before it replays any of one, and `estate prune` reports the roots it already swept when a later one refuses |
 | PR-02e | **producer-negative**: `audit` of period 2 refuses to emit an attestation over a missing, invalid or mismatched attestation 1. **consumer-positive**: two consecutive physical rolls with both earlier roots unavailable — C `verify`s attestation 2 alone and accepts the chain below it |
 | PR-03 | the anchor directory is deleted under a live incumbent: it stops on its next append, its next dispatch, its next revision-bearing read — a `status` immediately after replacement is refused, not answered — **and its next FW `watch.jsonl` append**, with the replacement injected between the observation and the line |
 | PR-04 | an NFS anchor path is refused at startup |

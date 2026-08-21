@@ -17,12 +17,16 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from dsl41.ast_jil import JilFile, JilParseError, parse
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
+
+if TYPE_CHECKING:
+    from dsl41.boundary import EstateWalk
 
 
 # ------------------------------------------------- the shared options
@@ -140,6 +144,42 @@ def import_tui_or_exit_2():
             refuse("the TUI needs the optional [ui] extra: pip install 'dsl41[ui]'")
         ) from exc
     return runner_tui
+
+
+# ------------------------------------------ addressing the whole estate
+
+
+def walk_estate_or_exit_2(anchor_dir: Path) -> "EstateWalk":
+    """ss1.3's archive registry, resolved for a verb, or exit 2.
+
+    `audit`, `journal`, `runs` and `estate prune` each gained an
+    estate-wide mode (PR-02f) and all four enter it the same way: the
+    lineage ANCHOR stands where a run root would. This is the one door --
+    the walk's refusal becomes this surface's exit 2, and the note about
+    a PROVISIONAL registry row is said once here rather than four times.
+
+    A provisional row is not a refusal: ss1.3 marks genesis's row
+    `segment_durable: false` until its first segment lands and tells every
+    cross-period reader to ignore it until then. It is still said out
+    loud, because "the estate has three periods and this total covers two"
+    is a fact an operator needs and cannot otherwise see.
+    """
+    from dsl41.boundary import walk_estate
+    from dsl41.runner_clock import EngineError
+
+    try:
+        walk = walk_estate(anchor_dir)
+    except EngineError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    if walk.provisional:
+        listed = ", ".join(str(number) for number in walk.provisional)
+        typer.echo(
+            f"note: period(s) {listed} have a registry row whose first segment is not"
+            " durable yet, and every cross-period reader ignores a row until it is"
+            " -- they are not in this total (period-model ss1.3)",
+            err=True,
+        )
+    return walk
 
 
 # ----------------------------------------- an answer becomes an exit code

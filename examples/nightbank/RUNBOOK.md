@@ -738,6 +738,36 @@ uv run dsl41 run --resume --run-root <run>/engine-p2 --estate-anchor $R.anchor \
     examples/nightbank/estate/small/*.jil -p $P
 ```
 
+5. Read the ESTATE rather than one of its roots. It is now two
+   directories, and which root holds which period is the anchor's
+   registry to answer:
+
+```sh
+uv run dsl41 audit --estate-anchor $R.anchor
+uv run dsl41 runs $R.anchor
+uv run dsl41 estate prune --estate-anchor $R.anchor --dry-run
+uv run dsl41 journal $R.anchor examples/nightbank/estate/small/*.jil -p $P
+```
+
+   One rule for all four: **name the lineage ANCHOR where you would name
+   a run root.** `audit` re-derives period 1 in the old root and reports
+   period 2 as still open; `runs` folds both roots into one table; `prune`
+   reports one result over both, with each root's floors computed in its
+   own root; `journal` names every segment in period order and replays up
+   to the first boundary, printing where it stopped and how to continue.
+
+   Then move the old root away and run any of them again:
+
+```
+period 1: registry root <run>/engine is missing -- the registry names it
+and the estate-wide read covers every period or none. Name the roots you
+still have one at a time instead (period-model ss1.3)
+```
+
+   That is the point of the estate-wide form: it covers the whole lineage
+   or it stops. A total that quietly left a root out would be worse than
+   no total at all. Move it back and the commands answer again.
+
 *Why.* A roll leaves the closing period's WAL, spool and manifests behind
 in the old root, so the new root can never re-derive period 1 — it holds
 none of period 1's inputs. What it imports instead is the attestation, and

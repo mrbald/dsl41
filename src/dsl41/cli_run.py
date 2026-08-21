@@ -30,6 +30,7 @@ from dsl41.cli_common import (
     load_tz_aliases,
     refuse,
     say_next,
+    walk_estate_or_exit_2,
 )
 from dsl41.ir import CatalogIR
 from dsl41.period import root_is_unused
@@ -37,6 +38,7 @@ from dsl41.period import root_is_unused
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from dsl41.boundary import EstateWalk
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
 
@@ -816,7 +818,8 @@ def journal(
         help="Run journal to replay: an estate root, its journal.jsonl sentinel, or a"
         " wal/NNNNNN.jsonl segment. A root or a sentinel resolves to the ACTIVE"
         " segment (the current period); name an earlier wal/NNNNNN.jsonl to replay"
-        " an earlier one.",
+        " an earlier one. Name the lineage ANCHOR directory instead and the read is"
+        " ESTATE-WIDE: every root the registry holds, in period order.",
     ),
     files: list[Path] = typer.Argument(..., help="JIL files forming the catalog the run used"),
     permit_unknown: bool = PERMIT_UNKNOWN,
@@ -829,7 +832,69 @@ def journal(
     are pure functions of the input sequence, so they are derived here, never
     stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
     explicitly.
+
+    **Pointed at the ESTATE it names every segment in the lineage.** Given
+    the anchor directory it walks ss1.3's archive registry -- every period,
+    in period order, with the root that holds it -- so period 1 is found
+    after a physical roll without knowing which root it went to (PR-02f).
+    The REPLAY still stops at the first boundary, where it stops today: one
+    oracle crossing a `segment` record has to switch catalogs mid-stream
+    and seed the period's carried rows, which is a change to the replay
+    contract and a unit of its own (period-model ss11; DL-136). The stop is
+    printed, never silent, with the command that replays the next period.
     """
+    from dsl41.boundary import is_anchor_dir
+
+    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
+    if is_anchor_dir(journal_file):
+        _replay_estate(walk_estate_or_exit_2(journal_file), catalog)
+        return
+    _replay_segment(journal_file, catalog)
+
+
+def _replay_estate(walk: "EstateWalk", catalog: CatalogIR) -> None:
+    """Every segment the registry names, in period order -- and then the
+    trace of the one the replay contract reaches.
+
+    **The enumeration comes first and completes.** It is the estate-wide
+    half: each period, the root that holds it and the segment file,
+    whether or not this build can replay it. Replaying inside that loop
+    put the whole listing behind one segment's catalog gate -- and the
+    verb takes ONE catalog for a lineage whose periods differ by catalog
+    almost by definition, so the common case printed period 1's refusal
+    and nothing else. What is NOT here is a replay that crosses a
+    boundary, and that is said before the replay rather than after it, so
+    a refused replay still leaves an operator the stream and the way
+    on."""
+    from dsl41.period import wal_path
+
+    for position, entry in enumerate(walk.periods):
+        segment = wal_path(entry.root, entry.period_id)
+        tail = " (not replayed)" if position else ""
+        typer.echo(f"period {entry.period_id} in {entry.root}: {segment}{tail}")
+    first = walk.periods[0]
+    if len(walk.periods) > 1:
+        after = walk.periods[1]
+        typer.echo(
+            f"the replay stops at the period {first.period_id}/{after.period_id}"
+            " boundary: crossing a `segment` record means switching catalogs"
+            " mid-stream and seeding the period's carried rows, which is a change to"
+            " the replay contract and a unit of its own (period-model ss11; DL-136)."
+            " Replay the next period on its own: `dsl41 journal"
+            f" {wal_path(after.root, after.period_id)} <the files it opened with>`",
+            err=True,
+        )
+    _replay_segment(
+        wal_path(first.root, first.period_id),
+        catalog,
+        where=f"period {first.period_id} in {first.root}",
+    )
+
+
+def _replay_segment(journal_file: Path, catalog: CatalogIR, *, where: str = "") -> None:
+    """One segment, replayed through a fresh Oracle. ONE implementation:
+    the estate-wide read differs in which segments it names, never in what
+    replaying one of them means."""
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
     from dsl41.period import catalog_hash_for, opening_at
@@ -837,18 +902,18 @@ def journal(
     from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
     from dsl41.runner_journal import read_journal, replay_inputs
 
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
+    named = f"{where}: " if where else ""
     try:
         records = read_journal(journal_file)
     except (OSError, EngineError) as exc:
-        raise typer.Exit(refuse(exc)) from exc
+        raise typer.Exit(refuse(exc, prefix=where)) from exc
     opening = records[0]
     # like for like (period-model ss1.1): the recipe is the one the
     # `segment` itself pins, never the one this build happens to write
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         typer.echo(
-            "catalog hash mismatch: the estate differs from the one this journal ran"
-            " (runner-design ss7: no silent semantic drift)",
+            f"{named}catalog hash mismatch: the estate differs from the one this"
+            " journal ran (runner-design ss7: no silent semantic drift)",
             err=True,
         )
         raise typer.Exit(2)
@@ -862,7 +927,7 @@ def journal(
     try:
         replay_inputs(oracle, records)
     except OracleError as exc:
-        raise typer.Exit(refuse(exc, prefix="replay failed")) from exc
+        raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
     for entry in oracle.trace():
         typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
 
@@ -912,7 +977,10 @@ def _runs_table(rows: list[RunRow]) -> list[str]:
 
 def runs(
     run_roots: list[Path] = typer.Argument(
-        ..., help="One or more run roots (dsl41 run --run-root TARGET)."
+        ...,
+        help="One or more run roots (dsl41 run --run-root TARGET) -- or the lineage"
+        " ANCHOR directory ALONE, which reads every root the registry names, in"
+        " period order.",
     ),
     job: str = typer.Option(None, "--job", help="Filter to one job's rows."),
     since: str = typer.Option(
@@ -935,12 +1003,29 @@ def runs(
     Multiple run roots on one command line is the point: every row sorts by
     (job, started_at) across ALL of them, so a series that crosses a baseline
     change comes back segmented rather than blended into one misleading
-    line -- never silently, and never refused."""
+    line -- never silently, and never refused.
+
+    **Pointed at the ESTATE it needs no list at all.** Name the lineage
+    anchor directory and the roots come from ss1.3's archive registry, in
+    period order, so a lineage that has rolled reads as one table and
+    period 1's root is found rather than remembered (PR-02f). A root the
+    registry names and the disk does not refuses by name."""
     from datetime import UTC
     from datetime import datetime as datetime_mod
 
+    from dsl41.boundary import is_anchor_dir
     from dsl41.runner_history import RunHistoryError, read_run_roots
 
+    anchors = [path for path in run_roots if is_anchor_dir(path)]
+    if anchors and len(run_roots) > 1:
+        typer.echo(
+            f"{anchors[0]} is a lineage anchor: name it ALONE. It already names every"
+            " root of the estate, and mixing it with roots would fold some of them"
+            " twice (period-model ss1.3)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    roots = list(walk_estate_or_exit_2(anchors[0]).roots()) if anchors else list(run_roots)
     since_at = None
     if since is not None:
         try:
@@ -950,7 +1035,7 @@ def runs(
         if since_at.tzinfo is not None:  # journal timestamps are naive UTC
             since_at = since_at.astimezone(UTC).replace(tzinfo=None)
     try:
-        rows = read_run_roots(run_roots, job=job, since=since_at)
+        rows = read_run_roots(roots, job=job, since=since_at)
     except RunHistoryError as exc:
         raise typer.Exit(refuse(exc)) from exc
 

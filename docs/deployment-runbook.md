@@ -106,6 +106,13 @@ A run with no class named deletes nothing either and says so: a default
 set would be a retention policy, and the policy is yours. Add
 `--estate-anchor` wherever the rest of your commands need it.
 
+*(DL-141.)* Name
+`--estate-anchor` **alone**, with no `--run-root`, and the sweep covers
+every root the registry names, in period order, as one result (§6a). Each
+root is still planned on its own: the floors, the refusals and the
+descriptor the removal walks are per root, and so is `--keep-runs`, which
+then keeps N per job **per root** — more than asked, never less.
+
 The three verdicts:
 
 - **floored** — the model refuses. The verb cannot be made to delete these,
@@ -226,7 +233,14 @@ survive into operation.
   different location (runner-design §7, a deliberate defer). Keep the
   estate tag checked out where `sources.json`'s recorded paths say it was;
   the stored copies are for inspection and for restoring that checkout,
-  not a drop-in replay input.
+  not a drop-in replay input. *(Amended at the build of PR-02f.)* Name
+  the lineage ANCHOR directory instead of a root and the read is
+  estate-wide: every
+  period, its root and its segment, in registry order. The REPLAY still
+  stops at the first boundary — one oracle crossing a `segment` record has
+  to switch catalogs mid-stream, which is a change to the replay contract
+  and a unit of its own — and it prints the command that replays the next
+  period.
 - Offline history: `dsl41 runs <root>... [--job NAME] [--since ISO8601]
   [--format table|json|csv]` folds one or more run roots' journal +
   manifest + spool into one row per job run — "how long did it take, run
@@ -240,6 +254,11 @@ survive into operation.
   A root that has crossed a boundary holds one WAL segment per period, and
   every retained one is read: each period is folded under its own
   catalog, so a series crosses a seal exactly as it crosses a run root.
+  *(Amended at the build of PR-02f.)* Name the lineage ANCHOR directory
+  in place of the roots and the list comes from the registry: one table
+  across every root
+  of the estate, in period order, and a root that holds two periods is
+  folded once. Name it alone — mixing it with roots is refused.
 
 ## 5. Routine operations
 
@@ -406,6 +425,39 @@ LINEAGE's, not the root's, so every later `--resume` of the new root needs
 `--estate-anchor /srv/dsl41/runs/<old>.anchor`. Put it in the unit file
 with the run root.
 
+**Reading the whole estate.** *(DL-141.)* After a roll the estate is more than one directory, and which root
+holds which period is the anchor's registry to answer, not yours. Four
+verbs read it, and all four are addressed the same way — **name the
+lineage ANCHOR where you would name a run root**:
+
+```sh
+A=/srv/dsl41/runs/<first>.anchor
+dsl41 audit --estate-anchor $A                  # every closed period, in its own root
+dsl41 journal $A /srv/dsl41/estate/*.jil        # every segment, in period order
+dsl41 runs $A                                   # one table across every root
+dsl41 estate prune --estate-anchor $A --dry-run # one retention result
+```
+
+`audit` and `estate prune` already take `--estate-anchor`, so naming it
+with **no `--run-root`** is their estate-wide form; `runs` and `journal`
+take their root as an argument, so the anchor goes there instead. A verb
+given neither address refuses rather than guessing.
+
+Each of the four covers every period or refuses: a root the registry names
+that is missing, holds no sentinel, holds one that cannot be read, belongs
+to another estate, or has lost the segment it is registered for stops the
+command by name. Nothing is skipped quietly — a total that silently left a
+root out is worse than no total. If you have archived a root away on
+purpose, use the single-root form for the roots you still have.
+
+Two limits, stated where you meet them. `dsl41 journal` names every
+segment but **replays only up to the first boundary**: one oracle crossing
+a `segment` record has to switch catalogs mid-stream, which is a change to
+the replay contract; the command prints where it stopped and how to replay
+the next period. And `estate prune` plans each root separately — the
+floors, the refusals and `--keep-runs` are per root — because a plan is
+bound to the root it was computed over.
+
 **Adoption is retired (DL-138).** `dsl41 estate adopt` took a run root
 written before the periodized layout — a `header` journal and `manifest/` —
 and translated it into period 1 of a new lineage. No dsl41 estate ran in
@@ -461,6 +513,8 @@ written and durable, and the checkpoint is what `verify` and `run
 --open-from` read. Only the anchor's `attested` row is outstanding, and a
 live engine holds the lineage lock for its whole process lifetime. Re-run
 `dsl41 audit` when the lock is free; it is idempotent and finishes the row.
+An estate-wide audit does not stop there: every other period is still
+audited, and the last line says how many rows are outstanding.
 
 *`dsl41 audit` does not name a period you expected.* With no `--period` it
 names only the periods this root holds a WAL for. A rolled root holds the
@@ -481,7 +535,8 @@ sentinel and the import.
 *Every later command on a rolled root needs the anchor.* The anchor is the
 LINEAGE's, not the root's: `--estate-anchor /srv/dsl41/runs/<first>.anchor`
 on `run --resume`, `audit` and `estate prune` alike. Put it in the unit
-file beside the run root.
+file beside the run root. To read the estate rather than one of its roots,
+name that anchor and no root at all (§6a, "Reading the whole estate").
 
 *A client subscription resumed across a boundary.* Nothing to do: `since`
 is an estate-wide index and the backfill spans segments. A subscriber whose

@@ -76,6 +76,7 @@ from dsl41.classify import Baseline, CarriedState, Classification, classify
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.period import (
     CATALOG_HASH_VERSION,
+    SENTINEL_NAME,
     WAL_DIR,
     Manifest,
     RuntimeProfile,
@@ -965,6 +966,204 @@ def _holder_of(anchor: Anchor | None) -> str:
     if anchor is None:
         return "nobody"
     return f"estate {anchor.estate_id}, head {_spell(anchor.head)}"
+
+
+# --------------------------------------------------- the estate-wide walk
+
+
+@dataclass(frozen=True)
+class EstatePeriod:
+    """One resolved registry row: which period, which root holds it, and
+    what the row already says about it."""
+
+    period_id: int
+    root: Path
+    row: PeriodRow
+
+
+@dataclass(frozen=True)
+class EstateWalk:
+    """One lineage, root by root, in period order.
+
+    `periods` holds an entry per registry row whose segment is durable.
+    `provisional` holds the NUMBERS of the rows that are not: ss1.3 says a
+    row is provisional until its period's first segment lands and that
+    every cross-period reader ignores it until then, so they are named
+    here rather than dropped."""
+
+    anchor_dir: Path
+    estate_id: str
+    periods: tuple[EstatePeriod, ...]
+    provisional: tuple[int, ...]
+
+    def roots(self) -> tuple[Path, ...]:
+        """Every root this lineage names, first appearance first.
+
+        Deduplicated, because a root that opened three periods in place is
+        one directory, and a reader that folded it once per period would
+        report every row three times."""
+        seen: dict[Path, None] = {}
+        for entry in self.periods:
+            seen.setdefault(entry.root, None)
+        return tuple(seen)
+
+
+def is_anchor_dir(path: Path) -> bool:
+    """Whether `path` addresses a LINEAGE ANCHOR rather than a run root.
+
+    The one predicate the estate-wide verbs read their argument with: an
+    anchor directory holds `anchor.json`, a run root holds
+    `journal.jsonl`, and ss1.1 puts the anchor outside every archivable
+    root, so the two are never one directory. A directory holding both is
+    not something this layout can produce, and `walk_estate` refuses it by
+    name rather than guessing which one the caller meant."""
+    return (Path(path) / ANCHOR_NAME).is_file()
+
+
+def walk_estate(anchor_dir: Path) -> EstateWalk:
+    """ss1.3's archive registry, read as a lineage: every period this
+    estate holds, in period order, with the root that holds it (PR-02f).
+
+    **One walk, four verbs.** `audit`, `journal`, `runs` and `estate
+    prune` each gained an estate-wide mode and all four take their roots
+    from here. Four private walks would each grow their own idea of what a
+    missing root means, and the one that decided "skip it" would report an
+    estate smaller than the estate -- the silent loss this project refuses
+    everywhere else.
+
+    **A provisional row is ignored and NAMED, never skipped quietly.**
+    ss1.3 inserts genesis's row before any segment exists and marks it
+    `segment_durable: false`; every cross-period reader ignores it until
+    the finalize CAS flips it. That is the spec, so such a row is not a
+    refusal -- it is reported in `provisional`, and the verbs say so.
+
+    **Every other row must resolve, or the walk refuses BY NAME.** A root
+    that is missing, holds no sentinel, holds one this binary cannot read,
+    belongs to another estate, or does not hold the segment of the period
+    it is registered for stops the walk, naming which period, which root
+    and why. An operator who archived a root away still has the
+    single-root verbs; what they may not have is a total that quietly left
+    that root out.
+
+    The anchor is READ and never LOCKED, for the reason `plan_retention`
+    gives: a live engine holds the lineage lock for its whole process
+    lifetime, so a walk that took it could only ever run against a stopped
+    estate. The registry is append-mostly and each row is written before
+    anything relies on it, so a row this read sees is a row that stays."""
+    anchor_dir = Path(anchor_dir)
+    if sentinel_path(anchor_dir).is_file():
+        if not is_anchor_dir(anchor_dir):
+            # the likeliest typo of all: the RUN ROOT named where its
+            # lineage's anchor goes. Saying "no anchor here" would be true
+            # and useless; the anchor's default place is a fact this can
+            # state
+            raise EngineError(
+                f"{anchor_dir} is a run ROOT, not a lineage anchor: it holds a"
+                f" `{SENTINEL_NAME}` sentinel and no `{ANCHOR_NAME}`. Name the"
+                f" anchor -- `{default_anchor_dir(anchor_dir)}` unless this"
+                " deployment put it elsewhere (period-model ss1.1)"
+            )
+        raise EngineError(
+            f"{anchor_dir} holds both `{ANCHOR_NAME}` and `{SENTINEL_NAME}`: an anchor"
+            " is a SIBLING of every root it fences (period-model ss1.1), so this is"
+            " not a directory this layout produces and neither reading of it is safe"
+            " to guess"
+        )
+    stored = EstateAnchor(anchor_dir).read()
+    if stored is None:
+        raise EngineError(
+            f"{anchor_dir}: no anchor -- the registry is what says which root holds"
+            " which period, and an estate-wide read has no roots without it"
+            " (period-model ss1.3)"
+        )
+    rows: list[tuple[int, PeriodRow]] = []
+    for key, row in stored.periods.items():
+        if not key.isdigit() or str(int(key)) != key:
+            # canonical spelling only, the same rule `split_run_dir` reads
+            # run directories by: `01` aliases `1`, and two keys naming one
+            # period would put two roots in one place in the walk
+            raise EngineError(
+                f"{anchor_dir}: registry key {key!r} is not a period number --"
+                " ss1.3 keys the archive registry by the period spelled as a"
+                " decimal, and this row belongs to no period"
+            )
+        rows.append((int(key), row))
+    numbers = {number for number, _ in rows}
+    if numbers and numbers != set(range(1, max(numbers) + 1)):
+        # a row is INSERTED when a root first owns a period and never
+        # removed, so the keys of a registry this binary wrote are
+        # 1..max with no hole. A hole is an edited anchor, and walking
+        # it would report an estate whose middle is missing as whole
+        raise EngineError(
+            f"{anchor_dir}: the registry names periods {sorted(numbers)} and a"
+            " lineage has no holes -- rows are inserted when a root first owns a"
+            " period and never removed (period-model ss1.3)"
+        )
+    periods: list[EstatePeriod] = []
+    provisional: list[int] = []
+    for period_id, row in sorted(rows, key=lambda pair: pair[0]):
+        if not row.segment_durable:
+            provisional.append(period_id)
+            continue
+        periods.append(
+            EstatePeriod(period_id=period_id, root=_prove_root(stored, period_id, row), row=row)
+        )
+    if not periods:
+        raise EngineError(
+            f"{anchor_dir}: the registry names no period whose segment is durable"
+            f" (provisional: {provisional or 'none'}) -- there is no estate to walk"
+            " yet (period-model ss1.3)"
+        )
+    return EstateWalk(
+        anchor_dir=anchor_dir,
+        estate_id=stored.estate_id,
+        periods=tuple(periods),
+        provisional=tuple(provisional),
+    )
+
+
+def _prove_root(stored: Anchor, period_id: int, row: PeriodRow) -> Path:
+    """The registry's claim about one period, checked against the disk.
+
+    Five ways it can be wrong and one refusal each, because "which root
+    holds period N" is the only thing the registry is FOR: an operator who
+    reads a total has to know it covered every period, and a reader that
+    degraded any of these to a skip would answer with a smaller estate and
+    no way to tell."""
+    root = Path(row.root)
+    where = f"period {period_id}: registry root {root}"
+    if not root.is_dir():
+        raise EngineError(
+            f"{where} is missing -- the registry names it and the estate-wide read"
+            " covers every period or none. Name the roots you still have one at a"
+            " time instead (period-model ss1.3)"
+        )
+    try:
+        sentinel = read_sentinel(root)
+    except EngineError as exc:
+        raise EngineError(f"{where} holds a sentinel this binary cannot read: {exc}") from exc
+    if sentinel is None:
+        raise EngineError(
+            f"{where} holds no `{SENTINEL_NAME}` sentinel -- the one file that says a"
+            " directory belongs to a lineage (period-model ss1.1)"
+        )
+    if sentinel.estate_id != stored.estate_id:
+        raise EngineError(
+            f"{where} belongs to estate {sentinel.estate_id}, and this lineage is"
+            f" {stored.estate_id}: two geneses are two estates (period-model ss1.2)"
+        )
+    segment = wal_path(root, period_id)
+    # a closed period's WAL is `held` today and no retention class can
+    # reach it (ss12; PR-Q3/E20 is the open question about lifting that).
+    # If it is ever lifted, this precondition becomes the thing that makes
+    # a legitimately pruned root refuse the whole lineage, and it is this
+    # check -- not the walk's callers -- that has to move
+    if not segment.is_file():
+        raise EngineError(
+            f"{where} holds no `{segment.name}` -- the registry says this root holds"
+            " this period's segment, and segment N is period N (period-model ss1.3, I1)"
+        )
+    return root
 
 
 # ------------------------------------------------------- the estate root

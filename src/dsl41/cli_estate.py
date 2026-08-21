@@ -27,11 +27,13 @@ from dsl41.cli_common import (
     read_header_of,
     refuse,
     say_next,
+    walk_estate_or_exit_2,
 )
 from dsl41.ir import lower_catalog
 
 if TYPE_CHECKING:
-    from dsl41.boundary import SealRequest
+    from dsl41.boundary import EstateAnchor, EstateWalk, SealRequest
+    from dsl41.retention import Artifact, PruneReport, RetentionPlan
     from dsl41.ir import CatalogIR
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
@@ -43,13 +45,24 @@ if TYPE_CHECKING:
 
 _RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root (period-model ss1.1).")
 
+#: the same option where the verb ALSO has an estate-wide mode: omitting it
+#: and naming the anchor alone is how a caller points at the lineage rather
+#: than at one of its roots (PR-02f)
+_ESTATE_ROOT_OPT = typer.Option(
+    None,
+    "--run-root",
+    help="The estate root (period-model ss1.1). Omit it and name --estate-anchor"
+    " alone to work ESTATE-WIDE: every root the registry names, in period order.",
+)
+
 _ANCHOR_OPT = typer.Option(
     None,
     "--estate-anchor",
     help="The lineage anchor directory (period-model ss1.3). Defaults to"
     " <run-root>.anchor -- a sibling of the root, never inside it, because the"
     " root is what an operator archives. A ROLLED root's anchor is the lineage's"
-    " and must be named explicitly.",
+    " and must be named explicitly. Named ALONE, with no --run-root, it is how"
+    " this verb addresses the whole estate.",
 )
 
 _ACTOR_OPT = typer.Option(
@@ -487,7 +500,7 @@ def _catalog_from_root(run_root: Path, source_bundle_hash: str) -> "CatalogIR":
 
 
 def audit(
-    run_root: Path = _RUN_ROOT_OPT,
+    run_root: Path = _ESTATE_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
     period: int = typer.Option(
         None, "--period", help="Audit exactly this period. Omit to audit every closed one."
@@ -514,35 +527,134 @@ def audit(
     attestation, which is what a rolled root can do and a full audit is
     not.
 
+    **Pointed at the ESTATE it audits every root.** With `--estate-anchor`
+    and no `--run-root` it takes its periods from ss1.3's archive registry
+    -- every period, in period order, each re-derived in the root that
+    holds it -- so a lineage that has rolled is audited as one estate and
+    period 1 is found without knowing which root it went to (PR-02f). A
+    root the registry names and the disk does not refuses by name; nothing
+    is skipped quietly.
+
     Exit 0 when every period asked for is attested, 2 on any refusal.
     """
-    from dsl41.attest import Unattested, audit_period
     from dsl41.boundary import EstateAnchor, default_anchor_dir
     from dsl41.period import closed_periods
+
+    if run_root is None and estate_anchor is None:
+        typer.echo(
+            "name a --run-root, or --estate-anchor alone to audit every root the"
+            " registry names (period-model ss1.3, PR-02f)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    # the anchor below is taken by `audit_period` for the ONE write that
+    # needs it and released again, so auditing a closed period while a later
+    # one is live is possible: a leader holds the lineage lock for its life
+    skipped: list[str] = []
+    if run_root is None:
+        walk = walk_estate_or_exit_2(estate_anchor)
+        anchor = EstateAnchor(estate_anchor)
+        targets, skipped = _closed_across_roots(walk, period)
+        where = f"{walk.anchor_dir} (estate {walk.estate_id})"
+    else:
+        anchor = EstateAnchor(estate_anchor or default_anchor_dir(run_root))
+        chosen = [period] if period is not None else closed_periods(run_root)
+        targets = [(period_id, run_root) for period_id in chosen]
+        where = str(run_root)
+    if not targets:
+        for line in skipped:
+            typer.echo(line)
+        typer.echo(f"{where}: no closed period to audit", err=True)
+        raise typer.Exit(2)
+    try:
+        _attest_each(targets, anchor, name_root=run_root is None)
+    finally:
+        # in a `finally` because a refusal partway through the walk is
+        # exactly when "and here is what was not audited" is worth having
+        for line in skipped:
+            typer.echo(line)
+
+
+def _closed_across_roots(
+    walk: "EstateWalk", period: "int | None"
+) -> tuple[list[tuple[int, Path]], list[str]]:
+    """The registry's periods that are CLOSED, each with its own root --
+    and a line for each period that is not.
+
+    An OPEN period is not audit's to re-derive and never was: the
+    single-root verb reads `closed_periods` for the same reason. But a
+    total that dropped one without a word would leave an operator counting
+    periods and finding one missing, so what was not audited is reported
+    with what was. The lines come back rather than being printed here, so
+    they land AFTER the attestations instead of ahead of them."""
+    from dsl41.period import closed_periods
+
+    if period is not None and not any(entry.period_id == period for entry in walk.periods):
+        why = (
+            "has a registry row whose first segment is not durable yet, and every"
+            " cross-period reader ignores a row until it is"
+            if period in walk.provisional
+            else "is in no registry row of this lineage"
+        )
+        typer.echo(f"{walk.anchor_dir}: period {period} {why} (period-model ss1.3)", err=True)
+        raise typer.Exit(2)
+    targets: list[tuple[int, Path]] = []
+    skipped: list[str] = []
+    for entry in walk.periods:
+        if period is not None and entry.period_id != period:
+            continue
+        if entry.period_id in closed_periods(entry.root):
+            targets.append((entry.period_id, entry.root))
+        else:
+            skipped.append(
+                f"period {entry.period_id} in {entry.root}: not closed, nothing to audit"
+            )
+    return targets, skipped
+
+
+def _attest_each(
+    targets: list[tuple[int, Path]], anchor: "EstateAnchor", *, name_root: bool
+) -> None:
+    """Re-derive each (period, root) in turn and report it.
+
+    ONE loop for both modes: the estate-wide read differs from the
+    single-root one in where its pairs come from and in nothing else, and
+    a second copy of this would be the second place the `Unattested`
+    bookkeeping case has to be remembered."""
+    from dsl41.attest import Unattested, audit_period
     from dsl41.runner_clock import EngineError
 
-    periods = [period] if period is not None else closed_periods(run_root)
-    if not periods:
-        typer.echo(f"{run_root}: no closed period to audit", err=True)
-        raise typer.Exit(2)
-    # the anchor is taken by `audit_period` for the ONE write that needs it
-    # and released again, so auditing a closed period while a later one is
-    # live is possible: a leader holds the lineage lock for its whole life
-    anchor = EstateAnchor(estate_anchor or default_anchor_dir(run_root))
+    outstanding = 0
     try:
-        for period_id in periods:
-            attestation = audit_period(run_root, period_id, anchor=anchor)
+        for period_id, root in targets:
+            at = f" in {root}" if name_root else ""
+            try:
+                attestation = audit_period(root, period_id, anchor=anchor)
+            except Unattested as exc:
+                # the checkpoint IS written and durable; only the registry
+                # row is not, and the row is bookkeeping. `Unattested` means
+                # the lineage lock was busy, which is the ORDINARY state of
+                # an estate with a live engine in it -- so it is this
+                # period's note and never the walk's reason to stop. It used
+                # to end the loop, which on an estate-wide audit meant one
+                # busy lock left every later period unaudited under exit 0
+                typer.echo(str(exc), err=True)
+                outstanding += 1
+                continue
             typer.echo(
-                f"period {period_id} attested: {attestation.digest}"
+                f"period {period_id}{at} attested: {attestation.digest}"
                 f" (seal {attestation.seal_digest}, chain through"
                 f" {attestation.chain_through_period})"
             )
-    except Unattested as exc:
-        # the checkpoint IS written; only the registry row is not, and the
-        # row is bookkeeping. Loud on stderr, and not a failure
-        typer.echo(str(exc), err=True)
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
+    if outstanding:
+        typer.echo(
+            f"{outstanding} checkpoint(s) are durable with the registry row"
+            " outstanding: re-run this when the lineage lock is free -- the audit is"
+            " idempotent and finishes the row (period-model ss1.3)",
+            err=True,
+        )
 
 
 def verify(
@@ -644,7 +756,7 @@ def estate_reclaim(
 
 
 def estate_prune(
-    run_root: Path = _RUN_ROOT_OPT,
+    run_root: Path = _ESTATE_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
     dry_run: bool = typer.Option(False, "--dry-run", help="List every verdict and delete nothing."),
     tombstones: bool = typer.Option(
@@ -667,7 +779,8 @@ def estate_prune(
         0,
         "--keep-runs",
         help="Keep the N newest run spools OF EACH JOB, whatever else says."
-        " Per job, because `run_number` is per job.",
+        " Per job, because `run_number` is per job -- and per ROOT in the"
+        " estate-wide mode, which keeps more than asked and never less.",
     ),
 ) -> None:
     """Delete what retention allows, and report what it does not
@@ -693,13 +806,29 @@ def estate_prune(
     can no longer be re-derived from its own evidence, and its attestation
     becomes the proof that stands for it. Attest first, then prune.
 
+    **Pointed at the ESTATE it plans every root.** With `--estate-anchor`
+    and no `--run-root` it takes its roots from ss1.3's archive registry,
+    in period order, and reports ONE result (PR-02f). Each root is still
+    planned on its own: the floors, the refusals and the descriptor the
+    removal walks are per root, because a plan is bound to the (st_dev,
+    st_ino) of the root it was computed over and one plan spanning two
+    roots could not hold that binding. `--keep-runs` is per job and per
+    ROOT for the same reason, which keeps more than asked and never less.
+
     Exit 0 when every selected artifact was removed (or listed, under
     `--dry-run`), 2 on a refusal and 2 when the filesystem refused a
     removal -- and then the report says which ones went and which did not.
     """
-    from dsl41.retention import CLASSES, Artifact, plan_retention, prune
+    from dsl41.retention import CLASSES, plan_retention, prune
     from dsl41.runner_clock import EngineError
 
+    if run_root is None and estate_anchor is None:
+        typer.echo(
+            "name a --run-root, or --estate-anchor alone to prune every root the"
+            " registry names (period-model ss1.3, PR-02f)",
+            err=True,
+        )
+        raise typer.Exit(2)
     classes = [name for name, on in (("tombstones", tombstones), ("quarantine", quarantine)) if on]
     if not classes and dry_run:
         # a listing with no class named is a survey: it shows every
@@ -713,37 +842,118 @@ def estate_prune(
             err=True,
         )
         raise typer.Exit(2)
-    try:
-        plan = plan_retention(run_root, anchor_dir=estate_anchor)
-        report = prune(
-            plan,
-            classes=classes,
-            dry_run=dry_run,
-            older_than_days=older_than_days,
-            keep_runs=keep_runs,
-        )
-    except EngineError as exc:
-        raise typer.Exit(refuse(exc)) from exc
+    if run_root is None:
+        roots = walk_estate_or_exit_2(estate_anchor).roots()
+    else:
+        roots = (run_root,)
+    done: list[tuple[RetentionPlan, PruneReport]] = []
+    stopped: str | None = None
+    for root in roots:
+        # the try is INSIDE the loop, so a refusal on the third root still
+        # reports what the first two deleted. Deletion is irreversible and
+        # this verb's whole promise is that the report says which artifacts
+        # went and which did not -- a refusal that discarded that would be
+        # the one moment the promise is worth something
+        try:
+            plan = plan_retention(root, anchor_dir=estate_anchor)
+            report = prune(
+                plan,
+                classes=classes,
+                dry_run=dry_run,
+                older_than_days=older_than_days,
+                keep_runs=keep_runs,
+            )
+        except EngineError as exc:
+            stopped = str(exc)
+            break
+        done.append((plan, report))
+    if not done:
+        # nothing was planned, so there is no report to keep: the refusal
+        # alone, exactly as a single root has always answered it
+        if stopped is None:
+            # `roots` is never empty -- the walk refuses a registry with no
+            # durable period, and the single-root form has its one root --
+            # so an empty `done` is a break, and a break sets `stopped`
+            raise AssertionError("a prune that planned no root and refused nothing")
+        raise typer.Exit(refuse(stopped))
+    failed = _print_prune(done, dry_run=dry_run, estate_wide=run_root is None, stopped=stopped)
+    if failed or stopped is not None:
+        raise typer.Exit(2)
 
-    def _lines(title: str, items: tuple[Artifact, ...]) -> None:
+
+def _print_prune(
+    done: "list[tuple[RetentionPlan, PruneReport]]",
+    *,
+    dry_run: bool,
+    estate_wide: bool,
+    stopped: str | None,
+) -> bool:
+    """One report over every root that was planned. Answers whether the
+    filesystem refused anything."""
+
+    def _lines(title: str, items: "tuple[Artifact, ...]") -> None:
         typer.echo(f"{title} ({len(items)}):")
         for item in items:
             typer.echo(f"  {item.render()}")
 
-    verb = "would remove" if report.dry_run else "removed"
-    _lines(verb, report.removed)
-    _lines("prunable, outside the flags given", report.kept)
-    _lines("held (floor lifted, PR-Q3/E20 open)", report.held)
-    _lines("floored (the model refuses)", report.floored)
-    if report.failed:
-        typer.echo(f"the filesystem refused ({len(report.failed)}):", err=True)
-        for item, reason in report.failed:
+    reports = [report for _, report in done]
+    verb = "would remove" if dry_run else "removed"
+    # `removed` cannot collide across roots -- every prunable artifact is
+    # under the root that planned it -- so the merge is a no-op there and
+    # the byte total below is over the same set. The lists that DO collide
+    # are the floored ones: two roots of one lineage floor one anchor
+    removed = _merged(*(report.removed for report in reports))
+    held = _merged(*(report.held for report in reports))
+    floored = _merged(*(report.floored for report in reports))
+    failed = tuple(pair for report in reports for pair in report.failed)
+    _lines(verb, removed)
+    _lines("prunable, outside the flags given", _merged(*(report.kept for report in reports)))
+    _lines("held (floor lifted, PR-Q3/E20 open)", held)
+    _lines("floored (the model refuses)", floored)
+    if failed:
+        typer.echo(f"the filesystem refused ({len(failed)}):", err=True)
+        for item, reason in failed:
             typer.echo(f"  {item.path}: {reason}", err=True)
-    typer.echo(
-        f"{verb} {len(report.removed)} artifact(s), {report.bytes_removed} byte(s);"
-        f" {len(report.floored)} floored, {len(report.held)} held"
-        f" -- estate {plan.estate_id}, period {plan.current_period},"
-        f" attested {sorted(plan.attested) or 'none'}"
+    if estate_wide:
+        typer.echo(f"roots planned ({len(done)}):")
+        for plan, _ in done:
+            typer.echo(
+                f"  {plan.run_root}: period {plan.current_period},"
+                f" attested {sorted(plan.attested) or 'none'}"
+            )
+    if stopped is not None:
+        refuse(stopped)
+    first = done[0][0]
+    tail = (
+        f" -- estate {first.estate_id}, {len(done)} root(s) planned"
+        if estate_wide
+        else f" -- estate {first.estate_id}, period {first.current_period},"
+        f" attested {sorted(first.attested) or 'none'}"
     )
-    if report.failed:
-        raise typer.Exit(2)
+    typer.echo(
+        f"{verb} {len(removed)} artifact(s),"
+        f" {sum(report.bytes_removed for report in reports)} byte(s);"
+        f" {len(floored)} floored, {len(held)} held{tail}"
+    )
+    return bool(failed)
+
+
+def _merged(*verdicts: "tuple[Artifact, ...]") -> "tuple[Artifact, ...]":
+    """One verdict list across every root that was planned, in walk order
+    and without a repeat.
+
+    The anchor is a SIBLING of every root it fences, so two roots of one
+    lineage each floor the same `anchor.json` and the same `anchor.lock`.
+    Concatenating would report one estate's two floored anchors, and a
+    count an operator cannot reconcile with the disk is a report that
+    lies."""
+    seen: set[tuple[str, str]] = set()
+    out: list[Artifact] = []
+    for verdict in verdicts:
+        for item in verdict:
+            key = (str(item.path), item.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return tuple(out)

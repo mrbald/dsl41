@@ -6871,3 +6871,39 @@
   map that forbids the ladder -- an empty mapping FILE asserting
   "resolve no cities" was never expressible on purpose, and a corner
   nobody can state is not a contract (pinned in the serve wiring test).
+- DL-141 the estate answers as one: the cross-root walk lands for four
+  verbs (2026-08-21; PR-02f's estate-wide half, the one unit DL-134 and
+  DL-135 both deferred rather than build as four private walks).
+  ONE walk: `boundary.walk_estate` reads the anchor without locking it,
+  proves every registry row (`_prove_root`), folds a root that opened
+  several periods in place to one appearance, reports provisional rows,
+  and refuses BY NAME -- missing root, no sentinel, unreadable sentinel,
+  foreign estate, no segment for the registered period, and at the
+  anchor: absent, a run root in the anchor slot, anchor+sentinel in one
+  directory, a non-decimal key, a hole in the registry. Nothing is
+  skipped silently. `cli_common.walk_estate_or_exit_2` is the one door
+  to the CLI. The shape: name the lineage ANCHOR where you would name a
+  run root -- `--estate-anchor` on `audit` and `estate prune`, the
+  anchor directory in the positional slot for `runs` and `journal`; no
+  new flag, every single-root invocation unchanged (pinned).
+  Per verb: `audit` walks every closed period ascending so the
+  attestation chain crosses a roll, names open periods, and its
+  first-busy-lock behavior is FIXED -- `Unattested` was handled outside
+  the loop, so a live estate's ordinary state ended the walk at exit 0
+  claiming completion, in the single-root verb too, a pre-existing
+  defect this unit found and closed with an "N rows outstanding" tail.
+  `journal` enumerates every segment in period order and completes the
+  enumeration BEFORE replaying period 1 -- the old order died on the
+  first refusing replay, also pre-existing; mid-stream catalog
+  switching stays DL-136's own unit and the stop names the command
+  that replays the next period. `runs` takes the anchor in the root
+  slot and refuses mixing it with roots. `estate prune` plans per root
+  (DL-135's floors and inode binding cannot span roots), merges the
+  report deduplicated by (path, kind), and a later root's refusal no
+  longer discards the report of roots already acted on -- the report
+  prints, then exit 2. `--keep-runs` ranks per root: keeps more, never
+  less; a global ranking would need a planner spanning roots, which
+  the inode binding forbids. The held bucket stays untouched (E20 open,
+  PR-Q3). 2963 -> 2991 collected; seventeen walk mutations red; the
+  two-root fixtures roll through the REAL boundary and read every id
+  off the estate.
