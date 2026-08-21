@@ -3029,6 +3029,45 @@ def test_a_seal_records_catalog_hash_version_is_an_exact_integer(tmp_path: Path)
             check_seal_record({**record, "catalog_hash_version": wrong})
 
 
+def test_the_two_ss2_record_liturgies_are_one_engine(tmp_path: Path) -> None:
+    """DL-137: `check_segment_record` (ss2.1) and `check_seal_record`
+    (ss2.2) spelled the same exact-schema walk in two bodies -- unknown
+    key first, then per field missing before mistyped, with the record
+    kind and the citation in every message.
+
+    One engine now (`period.check_record_fields`), and this is what makes
+    that structural rather than a claim: the SAME three faults are injected
+    into both records and both refusals are compared against one template.
+    A weakened, reworded or reordered engine reds both halves of this test
+    at once, which is exactly what two hand-written copies could not do."""
+    from dsl41.boundary import check_seal_record, seal_record
+    from dsl41.period import check_segment_record
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+    liturgies = (
+        (check_segment_record, read_journal(wal_path(run_root, 1))[0], "segment", "ss2.1"),
+        (check_seal_record, seal_record(boundary.seal), "seal", "ss2.2"),
+    )
+    for check, record, kind, section in liturgies:
+        check(record)  # the writer's own shape passes
+        cite = f"period-model {section}"
+        faults = (
+            ({**record, "surprise": 1}, f"{kind} record carries unknown surprise"),
+            (
+                {k: v for k, v in record.items() if k != "estate_id"},
+                f"{kind} record missing estate_id ({cite})",
+            ),
+            ({**record, "estate_id": 7}, f"{kind} record: estate_id is 7 ({cite})"),
+        )
+        for faulty, expected in faults:
+            with pytest.raises(EngineError) as refused:
+                check(faulty)
+            assert str(refused.value) == expected
+
+
 def test_genesis_fsyncs_the_parents_of_the_root_and_the_anchor(tmp_path: Path, monkeypatch) -> None:
     """The parent's entry for a created run root or anchor directory is a
     record too: without its fsync a power cut can retain one lineage half

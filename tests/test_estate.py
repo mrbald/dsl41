@@ -1093,6 +1093,41 @@ def test_an_attestation_has_exactly_one_byte_form(tmp_path: Path) -> None:
         Attestation.model_validate({**body, "audited_at": "2026-08-21T10:00:00"})
 
 
+def test_the_two_ss3_2_ingresses_ask_one_question() -> None:
+    """DL-137: `Seal.from_bytes` and `Attestation.from_bytes` each ended
+    with the same rule -- the FILE'S OWN BYTES must be the canonical
+    serialization -- and each spelled it itself.
+
+    One predicate now (`canon.is_canonical_file`), asked by both. The
+    proof is a padded copy of each artifact: `json.loads` says it is the
+    same document, so the digest still matches and every tamper check
+    passes, and only this rule stands between one artifact and two byte
+    forms of it. A predicate that answered `True` reds both halves here,
+    plus each owner's own case. The two REFUSALS stay apart, and the
+    assertions below hold them apart: a message that named the wrong
+    artifact would send an operator to the wrong file."""
+    from test_seal_artifact import GOLDEN_BYTES
+
+    from dsl41.seal import Seal
+
+    padded_seal = GOLDEN_BYTES.decode("utf-8").replace('"epoch":7,', '"epoch": 7,', 1)
+    padded_attestation = GOLDEN_ATTESTATION.decode("utf-8").replace(
+        '"period_id":2,', '"period_id": 2,', 1
+    )
+    assert json.loads(padded_seal) == json.loads(GOLDEN_BYTES)  # same document...
+    assert json.loads(padded_attestation) == json.loads(GOLDEN_ATTESTATION)
+    assert padded_seal.encode() != GOLDEN_BYTES  # ...different file
+    assert padded_attestation.encode() != GOLDEN_ATTESTATION
+
+    with pytest.raises(EngineError, match="one byte string"):
+        Seal.from_bytes(padded_seal)
+    with pytest.raises(EngineError, match="one byte form"):
+        Attestation.from_bytes(padded_attestation, where="padded")
+    # and the genuine bytes still pass, both doors
+    assert Seal.from_bytes(GOLDEN_BYTES).digest == json.loads(GOLDEN_BYTES)["digest"]
+    assert Attestation.from_bytes(GOLDEN_ATTESTATION, where="golden") == _golden()
+
+
 def test_a_crashed_audit_retry_still_flips_the_attested_row(tmp_path: Path) -> None:
     """ss1.3: the artifact lands before the CAS, so a crash between the
     two leaves the row unflipped -- and an idempotent retry that returned

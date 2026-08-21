@@ -124,6 +124,7 @@ from dsl41.period import (
     Manifest,
     bundle_dir,
     bundle_source_paths,
+    disagreements,
     is_opening,
     job_fingerprints,
     opening_at,
@@ -879,7 +880,7 @@ def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
         or seal.period_id != period_id
         or seal.estate_id != opening.get("estate_id")
         or seal.closed_at.isoformat() != opening.get("at")
-        or any(getattr(staged, name) != opening.get(name) for name in shared)
+        or bool(disagreements(staged, opening, shared))
     )
     if grafted:
         # the digest alone binds the FILE'S bytes, not its place in this

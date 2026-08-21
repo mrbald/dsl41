@@ -1049,6 +1049,57 @@ def test_pr22_every_field_the_manifest_shares_with_the_opening_is_checked(field:
         _open(seal, manifest=wrong)
 
 
+def test_the_artifact_comparisons_are_one_walk() -> None:
+    """DL-137: the tree compared two artifacts field by field in seven
+    dialects. One walk now (`period.disagreements`), and this pins that it
+    is really shared rather than merely available.
+
+    TWO fields are moved at once, and both owners -- `seal._check_manifest`
+    (PR-22) and `period.check_manifest_against_segment` (ss2.1) -- must
+    report BOTH, in their own field order, with their own wording. A walk
+    that stopped at the first disagreement, dropped a field or reordered
+    the pair reds both halves together. The wordings stay apart on
+    purpose: which artifact to go and look at is what the message says,
+    and only the owner knows that."""
+    from dsl41.period import check_manifest_against_segment
+    from dsl41.period import disagreements as walk
+
+    seal = _seal()
+    manifest = _opening_manifest(_open(seal))
+    record = segment_record(manifest, estate_id="e", at=datetime(2026, 8, 20, 4, 0))
+    _open(seal, manifest=manifest)  # both agree, both silent
+    check_manifest_against_segment(manifest, record)
+
+    moved = manifest.model_copy(
+        update={"clock_domain": "wall", "first_index": manifest.first_index + 1}
+    )
+    detail = (
+        f"clock_domain: manifest 'wall' vs {{side}} {manifest.clock_domain!r};"
+        f" first_index: manifest {moved.first_index} vs {{side}} {manifest.first_index}"
+    )
+    with pytest.raises(EngineError) as refused_by_seal:
+        _open(seal, manifest=moved)
+    assert str(refused_by_seal.value) == (
+        "the committed manifest disagrees with the boundary that committed it"
+        f" ({detail.format(side='next_period')}): this manifest is not this seal's (PR-22)"
+    )
+    with pytest.raises(EngineError) as refused_by_period:
+        check_manifest_against_segment(moved, record)
+    assert str(refused_by_period.value) == (
+        "period manifest disagrees with the journal's segment record"
+        f" ({detail.format(side='segment')}): this manifest is not this segment's"
+        " (period-model ss2.1)"
+    )
+
+    # the two sides are read differently ON PURPOSE: a mapping's absent key
+    # is a value that disagrees, a model's missing field is a caller bug
+    assert walk(manifest, {}, ["clock_domain"]) == [
+        ("clock_domain", manifest.clock_domain, None)
+    ]
+    with pytest.raises(AttributeError):
+        walk(manifest, manifest, ["no_such_field"])
+
+
 # ------------------------------------- 8. ss7 step 6, one failure each
 
 #: One injected failure per load invariant (PR-22), each with the message

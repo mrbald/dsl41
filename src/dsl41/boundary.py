@@ -85,6 +85,8 @@ from dsl41.period import (
     bundle_sources,
     catalog_hash_v2,
     check_manifest_self_consistent,
+    check_record_fields,
+    disagreements,
     is_hash_address,
     own_or_refuse,
     period_dir,
@@ -1423,15 +1425,14 @@ def validate_staged(ctx: StagedContext) -> Classification:
                 f"{name} carries artifact_format_version {value}: this binary implements"
                 f" {ARTIFACT_FORMAT_VERSION} (period-model ss8, PR-08d)"
             )
-    disagreements = [
-        f"{field}: candidate {getattr(staged, field)!r} vs staged bytes {getattr(bytes_, field)!r}"
-        for field in StagedNextPeriod.model_fields
-        if getattr(staged, field) != getattr(bytes_, field)
+    disagree = [
+        f"{field}: candidate {named!r} vs staged bytes {stored!r}"
+        for field, named, stored in disagreements(staged, bytes_, StagedNextPeriod.model_fields)
     ]
-    if disagreements:
+    if disagree:
         raise EngineError(
             f"the request names a candidate the staged bytes do not describe"
-            f" ({'; '.join(disagreements)}): the engine validates exactly the staged"
+            f" ({'; '.join(disagree)}): the engine validates exactly the staged"
             " bytes the fingerprint names (period-model ss7)"
         )
     recomputed = catalog_hash_v2(ctx.c2)
@@ -1584,11 +1585,11 @@ def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str,
             " estate-monotone (period-model ss3.4, PR-05b)"
         )
     check_seal_record(record)
-    disagreements = _record_disagreements(sidecar, record)
-    if disagreements:
+    disagree = _record_disagreements(sidecar, record)
+    if disagree:
         raise EngineError(
             f"the `seal` record disagrees with the sidecar it names"
-            f" ({'; '.join(disagreements)}): recovery selects the sidecar by these"
+            f" ({'; '.join(disagree)}): recovery selects the sidecar by these"
             " fields and refuses a wrong one (period-model ss2.2)"
         )
     if not (sidecar.state.now == sidecar.scheduler_admitted_through == ctx.at):
@@ -1722,14 +1723,7 @@ def check_seal_record(record: Mapping[str, Any]) -> None:
     type, and no field this schema does not describe."""
     if record.get("rec") != "seal":
         raise EngineError(f"not a seal record: rec is {record.get('rec')!r}")
-    extras = sorted(set(record) - set(_SEAL_SCHEMA) - {"rec"})
-    if extras:
-        raise EngineError(f"seal record carries unknown {', '.join(extras)}")
-    for key, check in _SEAL_SCHEMA.items():
-        if key not in record:
-            raise EngineError(f"seal record missing {key} (period-model ss2.2)")
-        if not check(record[key]):
-            raise EngineError(f"seal record: {key} is {record[key]!r} (period-model ss2.2)")
+    check_record_fields(record, _SEAL_SCHEMA, where="seal record", cite="period-model ss2.2")
 
 
 def _record_disagreements(seal: Seal, record: Mapping[str, Any]) -> list[str]:
@@ -2291,22 +2285,21 @@ def _check_existing_segment(
     # `check_manifest_against_segment` for the same question, by accident
     # rather than argument
     shared = sorted(set(type(opening).model_fields) & SEGMENT_FIELDS)
-    disagreements = [
-        f"{field}: segment {segment.get(field)!r} vs the boundary's {getattr(opening, field)!r}"
-        for field in shared
-        if segment.get(field) != getattr(opening, field)
+    disagree = [
+        f"{field}: segment {found!r} vs the boundary's {ours!r}"
+        for field, found, ours in disagreements(segment, opening, shared)
     ]
     if segment.get("opens_from_seal") != dict(link):
-        disagreements.append(
+        disagree.append(
             f"opens_from_seal: segment {segment.get('opens_from_seal')!r} vs {dict(link)!r}"
         )
     stamped = None if forced is None else forced.model_dump(mode="json")
     if segment.get("reclaimed") != stamped:
-        disagreements.append(f"reclaimed: segment {segment.get('reclaimed')!r} vs {stamped!r}")
-    if disagreements:
+        disagree.append(f"reclaimed: segment {segment.get('reclaimed')!r} vs {stamped!r}")
+    if disagree:
         raise EngineError(
             f"{path} already holds a segment this boundary did not open"
-            f" ({'; '.join(disagreements)}): a segment whose pins disagree with the"
+            f" ({'; '.join(disagree)}): a segment whose pins disagree with the"
             " preceding seal's next_period is refused (period-model ss3.4)"
         )
 
@@ -2380,11 +2373,11 @@ def check_record_names_sidecar(seal: Seal, record: Mapping[str, Any], run_root: 
     (ss2.2/ss11): recovery selects the sidecar by these fields, audit
     refuses a rewritten record before re-derivation attests the stored
     one. One name (DL-137): this was a three-symbol forwarding chain."""
-    disagreements = _record_disagreements(seal, record)
-    if disagreements:
+    disagree = _record_disagreements(seal, record)
+    if disagree:
         raise EngineError(
             f"{seal_path(run_root, seal.period_id)} disagrees with the `seal` record that"
-            f" names it ({'; '.join(disagreements)}): a self-consistent sidecar that is"
+            f" names it ({'; '.join(disagree)}): a self-consistent sidecar that is"
             " not this boundary's is refused (period-model ss11)"
         )
 

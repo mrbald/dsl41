@@ -131,6 +131,27 @@ def check_artifact_version(value: object) -> None:
         )
 
 
+def is_canonical_file(data: bytes | str, canonical: bytes) -> bool:
+    """ss3.2's ONE-BYTE-FORM rule, asked once (DL-137).
+
+    A digest is computed over the CANONICAL serialization, so a
+    whitespace-padded copy, a key-reordered copy and a copy that omits a
+    defaulted key all carry the digest of the real artifact and pass every
+    tamper check. What separates the artifact from its look-alikes is that
+    the file's own bytes ARE the canonical bytes, and this is where the
+    two closed-artifact readers -- `seal.Seal.from_bytes` and
+    `attest.Attestation.from_bytes` -- ask that.
+
+    A predicate rather than a refusal: each owner names its own artifact
+    and cites its own section, and that wording is what tells an operator
+    which file on their disk to go and look at.
+
+    `data` is the bytes as they were read; a `str` is measured as its
+    UTF-8 encoding, which is the only encoding ss3.2 has."""
+    raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+    return raw == canonical
+
+
 def decode(data: bytes | str) -> object:
     """Decode canonical JSON, refusing what ss3.2 refuses at ingress.
 

@@ -74,6 +74,7 @@ from dsl41.period import (
     RuntimeProfile,
     Sentinel,
     StagedManifest,
+    disagreements,
     estate_wal,
     check_manifest_against_segment,
     genesis_manifest,
@@ -305,10 +306,11 @@ def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], wh
 
 
 def _profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
+    """Which profile fields moved -- names only, because the caller reports
+    the drift rather than the values. The walk is `period.disagreements`
+    (DL-137), the same one every artifact comparison uses."""
     return sorted(
-        name
-        for name in type(derived).model_fields
-        if getattr(derived, name) != getattr(pinned, name)
+        name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields)
     )
 
 

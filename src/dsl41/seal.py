@@ -78,6 +78,7 @@ from dsl41.canon import (
     decode,
     digest,
     hash_over,
+    is_canonical_file,
     with_digest,
 )
 from dsl41.classify import Classification, Verdict
@@ -86,6 +87,7 @@ from dsl41.period import (
     CATALOG_HASH_VERSION,
     Manifest,
     check_manifest_self_consistent,
+    disagreements,
     is_hash_address,
 )
 from dsl41.runner_clock import EngineError
@@ -882,8 +884,7 @@ class Seal(BaseModel):
         except CanonError as exc:
             raise EngineError(f"seal artifact: {exc}") from exc
         seal = cls.from_payload(document)
-        expected = seal.to_bytes()
-        if raw != expected:
+        if not is_canonical_file(raw, seal.to_bytes()):
             raise EngineError(
                 "seal artifact: the bytes are not the ss3.2 canonical serialization"
                 " -- same digest, different file; a sidecar is one byte string (ss3.2)"
@@ -1432,13 +1433,12 @@ _SHARED_WITH_MANIFEST: Final[tuple[str, ...]] = tuple(
 
 
 def _check_manifest(manifest: Manifest, opening: CommittedNextPeriod) -> None:
-    disagreements = [
-        f"{field}: manifest {getattr(manifest, field)!r} vs next_period {getattr(opening, field)!r}"
-        for field in _SHARED_WITH_MANIFEST
-        if getattr(manifest, field) != getattr(opening, field)
+    disagree = [
+        f"{field}: manifest {mine!r} vs next_period {theirs!r}"
+        for field, mine, theirs in disagreements(manifest, opening, _SHARED_WITH_MANIFEST)
     ]
-    if disagreements:
+    if disagree:
         raise EngineError(
             "the committed manifest disagrees with the boundary that committed it"
-            f" ({'; '.join(disagreements)}): this manifest is not this seal's (PR-22)"
+            f" ({'; '.join(disagree)}): this manifest is not this seal's (PR-22)"
         )

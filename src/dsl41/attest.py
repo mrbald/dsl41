@@ -69,6 +69,7 @@ from dsl41.canon import (
     canonical_bytes,
     decode,
     digest as digest_over,
+    is_canonical_file,
     with_digest,
 )
 from dsl41.classify import Baseline, carried_from_oracle, classify
@@ -81,6 +82,7 @@ from dsl41.period import (
     seal_path,
     wal_path,
     check_manifest_against_segment,
+    disagreements,
     is_hash_address,
     opening_at,
 )
@@ -232,8 +234,7 @@ class Attestation(BaseModel):
                 f" {attestation.digest} -- an attestation that disagrees with itself"
                 " proves nothing (period-model ss11)"
             )
-        raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        if raw != attestation.to_bytes():
+        if not is_canonical_file(data, attestation.to_bytes()):
             # a payload that omits a defaulted key (or otherwise differs
             # from the canonical serialization) still model-validates and
             # still digests right, because the digest is computed over the
@@ -718,7 +719,6 @@ def _diff(rederived: Seal, stored: Seal) -> list[str]:
     tampered artifact or a version skew."""
     left, right = rederived.to_payload(), stored.to_payload()
     return [
-        f"{field}: re-derived {left.get(field)!r} vs stored {right.get(field)!r}"
-        for field in sorted(set(left) | set(right))
-        if left.get(field) != right.get(field)
+        f"{field}: re-derived {mine!r} vs stored {theirs!r}"
+        for field, mine, theirs in disagreements(left, right, sorted(set(left) | set(right)))
     ] or ["the canonical forms differ"]

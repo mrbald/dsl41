@@ -55,7 +55,7 @@ import re
 import shutil
 import uuid
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
@@ -1239,6 +1239,42 @@ def check_segment_version(record: Mapping[str, Any]) -> None:
     check_catalog_hash_version(version, where="segment record")
 
 
+def check_record_fields(
+    record: Mapping[str, Any],
+    schema: Mapping[str, Callable[[Any], bool]],
+    *,
+    where: str,
+    cite: str,
+) -> None:
+    """The EXACT-SCHEMA walk both ss2 record liturgies spell (DL-137).
+
+    Three refusals, in this order and no other: an unknown key first (a
+    record this schema does not describe is not blessed by having every
+    required field), then per field in the schema's own order, missing
+    before mistyped. `rec` is never an unknown key -- it is what selected
+    the schema.
+
+    `where` names the record kind and `cite` the section that defines it,
+    so every message says which record and which rule. The two callers are
+    `check_segment_record` (ss2.1) and `boundary.check_seal_record`
+    (ss2.2); they spelled this walk twice, and two spellings of one
+    strictness is how one of them ends up weaker.
+
+    Not `runner_journal.check_record`, which is a different liturgy: that
+    one dispatches a record's KIND (DL-138 D1), this one validates the
+    FIELDS of a record whose kind is already known."""
+    extras = sorted(set(record) - set(schema) - {"rec"})
+    if extras:
+        # exact means exact: an unknown key is a record this schema does not
+        # describe, and "required fields present" alone would bless it
+        raise EngineError(f"{where} carries unknown {', '.join(extras)}")
+    for key, check in schema.items():
+        if key not in record:
+            raise EngineError(f"{where} missing {key} ({cite})")
+        if not check(record[key]):
+            raise EngineError(f"{where}: {key} is {record[key]!r} ({cite})")
+
+
 def check_segment_record(record: Mapping[str, Any]) -> None:
     """A `segment` must BE a ss2.1 segment: every field present with its
     exact type. Run where the record is first read (`read_journal`), so no
@@ -1250,16 +1286,7 @@ def check_segment_record(record: Mapping[str, Any]) -> None:
     # D4 FIRST, always: which recipe this record is written in decides
     # whether this schema describes it at all (`check_segment_version`)
     check_segment_version(record)
-    extras = sorted(set(record) - set(_SEGMENT_SCHEMA) - {"rec"})
-    if extras:
-        # exact means exact: an unknown key is a record this schema does not
-        # describe, and "required fields present" alone would bless it
-        raise EngineError(f"segment record carries unknown {', '.join(extras)}")
-    for key, check in _SEGMENT_SCHEMA.items():
-        if key not in record:
-            raise EngineError(f"segment record missing {key} (period-model ss2.1)")
-        if not check(record[key]):
-            raise EngineError(f"segment record: {key} is {record[key]!r} (period-model ss2.1)")
+    check_record_fields(record, _SEGMENT_SCHEMA, where="segment record", cite="period-model ss2.1")
     # the D4 dispatch already ran, at the top: a retired recipe refuses by
     # name there exactly as it does at `Journal.create` and at
     # `catalog_hash_at` (DL-138)
@@ -1315,6 +1342,39 @@ def opening_at(record: Mapping[str, Any]) -> datetime:
     return datetime.fromisoformat(stamp)
 
 
+def _field_of(source: object, field: str) -> Any:
+    """One field, off either side of a comparison. A mapping is read with
+    `.get` -- an absent key is a value, and it disagrees with whatever the
+    other side holds. A model is read with `getattr` and NO default: a
+    field the model does not declare is a caller bug, not a disagreement,
+    and it must not read as `None` matching a `None`."""
+    return source.get(field) if isinstance(source, Mapping) else getattr(source, field)
+
+
+def disagreements(left: object, right: object, fields: Iterable[str]) -> list[tuple[str, Any, Any]]:
+    """The field-by-field comparison walk, once (DL-137).
+
+    Returns `(field, left value, right value)` for every field the two
+    sides do not agree on, in the order `fields` gives -- so a caller's
+    own field order is its own, and so is its refusal. This function
+    compares; it never words the refusal, because the wording is what
+    tells an operator which of the two artifacts to go and look at.
+
+    Either side may be a model or a mapping (`_field_of`), which is what
+    lets one walk serve manifest-vs-record, model-vs-model and
+    payload-vs-payload comparisons alike.
+
+    Deliberately NOT short-circuiting: a caller that only needs a verdict
+    spends one full walk, and every caller that reports gets ALL the
+    disagreeing fields rather than the first."""
+    found: list[tuple[str, Any, Any]] = []
+    for field in fields:
+        lhs, rhs = _field_of(left, field), _field_of(right, field)
+        if lhs != rhs:
+            found.append((field, lhs, rhs))
+    return found
+
+
 #: The fields a committed manifest and its segment record must agree on
 #: (PR-22). Every shared field, not a chosen few: a disagreement in any one
 #: of them means the manifest is not this segment's.
@@ -1329,14 +1389,13 @@ def check_manifest_against_segment(manifest: Manifest, segment: Mapping[str, Any
 
     Both sides are named in the refusal. "The manifest disagrees" is not
     actionable; which field, and what each said, is."""
-    disagreements = [
-        f"{field}: manifest {getattr(manifest, field)!r} vs segment {segment.get(field)!r}"
-        for field in _SHARED_FIELDS
-        if getattr(manifest, field) != segment.get(field)
+    disagree = [
+        f"{field}: manifest {mine!r} vs segment {theirs!r}"
+        for field, mine, theirs in disagreements(manifest, segment, _SHARED_FIELDS)
     ]
-    if disagreements:
+    if disagree:
         raise EngineError(
             "period manifest disagrees with the journal's segment record"
-            f" ({'; '.join(disagreements)}): this manifest is not this segment's"
+            f" ({'; '.join(disagree)}): this manifest is not this segment's"
             " (period-model ss2.1)"
         )

@@ -324,7 +324,13 @@ def _resume_profile_error(
     change period semantics with every identity gate green. A root with no
     manifest predates DL-130 and has no pin to hold. The deadman compares
     at its OBSERVED value, for the reason `_observed_profile` gives."""
-    from dsl41.period import RuntimeProfile, read_period_manifest, runtime_hash, to_us
+    from dsl41.period import (
+        RuntimeProfile,
+        disagreements,
+        read_period_manifest,
+        runtime_hash,
+        to_us,
+    )
     from dsl41.runner_clock import EngineError
 
     try:
@@ -343,10 +349,10 @@ def _resume_profile_error(
     if runtime_hash(observed) == manifest.runtime_hash:
         return None
     pinned = manifest.runtime_profile
+    # names only: the caller reports WHICH options moved, and the walk is
+    # `period.disagreements` like every other artifact comparison (DL-137)
     moved = sorted(
-        name
-        for name in type(observed).model_fields
-        if getattr(observed, name) != getattr(pinned, name)
+        name for name, _, _ in disagreements(observed, pinned, type(observed).model_fields)
     )
     return (
         "runtime-profile mismatch: this resume was launched with different"
