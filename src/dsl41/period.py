@@ -690,6 +690,27 @@ def wal_segments(run_root: Path) -> list[int]:
     return sorted(segments)
 
 
+def closed_periods(run_root: Path) -> list[int]:
+    """Every period this root can AUDIT, in order: a committed seal AND the
+    segment whose evidence re-derives it.
+
+    A rolled root holds the seal it opened from and none of that period's
+    WAL or spool, by design (period-model ss1.3), so the imported seal is
+    this root's to `verify` and another root's to audit. Naming it here
+    would make `dsl41 audit` on a rolled root refuse work it was never
+    asked to do."""
+    directory = seal_dir(run_root)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        int(entry.stem)
+        for entry in directory.glob("*.json")
+        if entry.stem.isdigit()
+        and not entry.name.endswith(".audit.json")
+        and wal_path(run_root, int(entry.stem)).exists()
+    )
+
+
 def active_wal(run_root: Path) -> Path:
     """The segment an appender opens: the newest this root holds, or
     segment 1 on a root whose genesis has not written one yet."""

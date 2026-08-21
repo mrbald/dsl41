@@ -36,7 +36,8 @@ import pytest
 from typer.testing import CliRunner
 
 from dsl41.canon import canonical_bytes
-from dsl41.cli import _observed_profile, _stage_period, app
+from dsl41.boundary import stage_period
+from dsl41.cli import _observed_profile, _serve_run, app
 from dsl41.ir import CatalogIR, CatalogMeta, lower_catalog, lower_source
 from dsl41.period import (
     CATALOG_HASH_VERSION,
@@ -711,7 +712,7 @@ def test_genesis_writes_the_bundle_the_manifest_and_a_segment(tmp_path: Path) ->
     run_root = tmp_path / "run"
     jil = parse(_SOLO_JIL, file="estate.jil")
     catalog = _catalog()
-    staged = _stage_period(run_root, [jil], catalog, RuntimeProfile())
+    staged = stage_period(run_root, [jil], catalog, RuntimeProfile())
     _close(_start(run_root, catalog, staged=staged))
 
     manifest = read_period_manifest(run_root)
@@ -745,7 +746,7 @@ def test_a_segment_journal_replays_resumes_and_folds(tmp_path: Path) -> None:
     jil_path = tmp_path / "estate.jil"
     jil_path.write_text(_SOLO_JIL)
     catalog = _catalog(file=str(jil_path))
-    staged = _stage_period(
+    staged = stage_period(
         run_root, [parse(_SOLO_JIL, file=str(jil_path))], catalog, RuntimeProfile()
     )
     engine = _start(run_root, catalog, staged=staged)
@@ -1841,3 +1842,77 @@ def test_a_bad_machine_policy_is_a_refusal_on_every_verb(tmp_path: Path) -> None
     )
     assert result.exit_code == 2
     assert "expected strict|local-eligible" in result.output
+
+
+def test_serve_wires_every_adapter_window_from_the_pinned_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-137: `dsl41 run` built its adapters and its scheduler BARE while
+    the profile pinned the windows -- a latent divergence whose values
+    coincided only because both sides read the same defaults.
+
+    One builder now (`runner_startup.wire_from_profile`), and this drives a
+    profile off every default so the coincidence becomes an equality: the
+    engine is wired with the grace, the settle window, the FW interval, the
+    timezone and the deadman the PROFILE carries, not with the constructor
+    defaults. The `timezone: Zurich` job pins the other half of the same
+    question -- the profile cannot spell "no --timezone-map", so an empty
+    alias table has to read as ABSENT or SEM-35's unique-city ladder is
+    silently retired for every per-job zone."""
+    from dsl41 import runner_adapters, runner_startup
+
+    catalog = lower_source(
+        _SOLO_JIL + 'date_conditions: 1\ndays_of_week: all\nstart_times: "03:00"\n'
+        "timezone: Zurich\n"
+    )
+    profile = RuntimeProfile(
+        default_tz="Europe/Zurich",
+        execution_mode="detached",
+        deadman_us=41_000_000,
+        cmd_grace_us=7_000_000,
+        reconcile_settle_us=11_000_000,
+        fw_default_interval_us=23_000_000,
+    )
+
+    clients: list[Any] = []
+
+    class _FakeSupervisorClient:
+        supervisor_deadman_s = None
+
+        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+            self.run_root = run_root
+            self.deadman_s = deadman_s
+            clients.append(self)
+
+        async def ensure_running(self) -> None:
+            return None
+
+        async def acquire(self) -> None:
+            return None
+
+    captured: dict[str, Any] = {}
+
+    def _capture(catalog_arg: Any, root: Path, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        raise EngineError("pin test: stop before the loop")
+
+    # BOTH bindings: the one the wiring builder holds, and the one in the
+    # adapter module a bare construction would reach for -- so this test
+    # fails on the WINDOWS if the wiring ever goes bare again, not on a
+    # supervisor that never came up
+    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_startup, "start_run", _capture)
+
+    with pytest.raises(EngineError, match="stop before the loop"):
+        asyncio.run(_serve_run(catalog, tmp_path / "root", False, [], profile=profile))
+
+    assert captured["adapters"]["CMD"].grace_seconds == 7.0
+    assert captured["adapters"]["CMD"].settle_seconds == 11.0
+    assert captured["adapters"]["FW"].default_interval_s == 23
+    assert captured["scheduler"].default_tz == "Europe/Zurich"
+    # the supervisor is started on the profile's deadman, not on a default
+    assert [c.deadman_s for c in clients] == [41.0]
+    # SEM-35's city ladder still resolves the per-job zone: an empty alias
+    # table read as a PRESENT map would refuse this catalog outright
+    assert str(captured["scheduler"]._plans["j1"].tz) == "Europe/Zurich"

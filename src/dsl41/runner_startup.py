@@ -44,9 +44,10 @@ import contextlib
 import os
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
@@ -160,6 +161,89 @@ def _derive_runtime_profile(
     # fiction over the real five seconds
     values["spawn_window_us"] = to_us(SupervisedCommandAdapter._SPAWN_WINDOW_S)
     return RuntimeProfile.model_validate(values)
+
+
+@dataclass
+class Wiring:
+    """The components a `RuntimeProfile` says an incarnation runs with.
+
+    A profile, not a set of flags, because the profile is what a period is
+    IDENTIFIED by (ss2.1): an offline sealer meets an estate that already
+    decided and reads the manifest's, and a process that wired from its own
+    defaults would refuse the estate it was asked to close."""
+
+    adapters: dict[str, JobAdapter]
+    scheduler: Scheduler
+    client: SupervisorClient | None
+    deadman_s: float | None
+
+    async def close(self) -> None:
+        if self.client is not None:
+            await self.client.release()
+            await self.client.close()
+
+
+async def wire_from_profile(
+    run_root: Path, catalog: CatalogIR, profile: RuntimeProfile
+) -> Wiring:
+    """Build adapters, scheduler and (when the profile says detached) the
+    supervisor client from `profile`.
+
+    The inverse of `_derive_runtime_profile`, and since DL-137 the ONE
+    place a real run's components are constructed: `dsl41 run`, its resume
+    and the offline sealer all come through here, so a window that moves in
+    the profile moves in the components. It does NOT make the profile agree
+    with the period's pin -- `run` passes the profile the LAUNCHER built and
+    `_profile_drift` in `resume_run` is still what holds it to the pin;
+    what this removes is a second construction of the same components whose
+    values merely happened to agree."""
+    from datetime import UTC, datetime
+
+    from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
+
+    deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
+    client = None
+    # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
+    # supervisor that owns the wrapper lifelines, so an engine restart does
+    # not kill the jobs. FW stays in-engine (no process to survive).
+    if profile.execution_mode == "detached":
+        client = SupervisorClient(run_root, deadman_s=deadman_s)
+        try:
+            await client.ensure_running()
+            await client.acquire()
+        except SupervisorUnavailable as exc:
+            raise EngineError(f"supervisor unavailable: {exc}") from exc
+        cmd: object = SupervisedCommandAdapter(
+            client,
+            grace_seconds=profile.cmd_grace_us / 1_000_000,
+            settle_seconds=profile.reconcile_settle_us / 1_000_000,
+        )
+    else:
+        cmd = LocalCommandAdapter(grace_seconds=profile.cmd_grace_us / 1_000_000)
+    adapters = {
+        "CMD": cmd,
+        "FW": FileWatcherAdapter(
+            default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
+        ),
+    }
+    scheduler = Scheduler(
+        catalog,
+        start=datetime.now(UTC).replace(tzinfo=None),
+        default_tz=profile.default_tz,
+        # SEM-35's unique-city default applies only with NO map, and the
+        # profile cannot spell "no map": an absent `--timezone-map` is an
+        # EMPTY table on it. An empty dict passed on would retire that
+        # ladder for every per-job zone -- so empty reads as absent, which
+        # is what `dsl41 run` has always done and what the offline sealer,
+        # closing an estate opened that way, was silently NOT doing.
+        tz_aliases=dict(profile.tz_aliases) or None,
+    )
+    return Wiring(
+        adapters=cast("dict[str, JobAdapter]", adapters),
+        scheduler=scheduler,
+        client=client,
+        deadman_s=deadman_s,
+    )
 
 
 def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: str) -> None:

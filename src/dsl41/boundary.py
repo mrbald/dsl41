@@ -64,7 +64,7 @@ from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from dsl41.ast_jil import JilParseError, parse
+from dsl41.ast_jil import JilFile, JilParseError, parse, render_preserve
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
@@ -93,8 +93,10 @@ from dsl41.period import (
     seal_dir,
     seal_path,
     sentinel_path,
+    stage_manifest,
     staging_dir,
     wal_path,
+    write_bundle,
     write_period_manifest,
     write_sentinel,
     SEGMENT_FIELDS,
@@ -105,7 +107,7 @@ from dsl41.runner_clock import EngineError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.runner_journal import Journal, opens_with_rec, read_journal
-from dsl41.runner_ledger import LeaderLock, Proof
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, Proof
 from dsl41.runner_procid import (
     current_boot_id,
     durable_write,
@@ -1109,6 +1111,36 @@ class Candidate(BaseModel):
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     stage_digest: str
     next_period: StagedNextPeriod
+
+
+def stage_period(
+    run_root: Path,
+    parsed: list[JilFile],
+    catalog: CatalogIR,
+    profile: RuntimeProfile,
+) -> StagedManifest:
+    """Materialize period 1's inputs and pin its identity (period-model
+    ss1.1, DL-130) -- the self-contained artifact DL-66 asked for, now
+    content-addressed.
+
+    `catalogs/<source_bundle_hash>/` holds the POST-PLACEHOLDER source this
+    run loaded, byte-exact (render_preserve is F1), beside `sources.json`;
+    the directory is addressed by those very bytes, so a relaunch on
+    unchanged inputs reuses it and never rewrites it. The engine installs
+    the committed `periods/000001/manifest.json` at genesis, because
+    `baseline_id` and `first_index` are its to know, not the launcher's.
+
+    The original paths are recorded because `catalog_hash` covers
+    `SourceSpan.file`: byte-exact replay against a relocated copy still
+    needs them (relocation-independent hashing is a DELIBERATE defer -- it
+    orphans every existing journal's resume gate)."""
+    sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
+    return stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=profile,
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
 
 
 def staged_next_from(staged_manifest: StagedManifest) -> StagedNextPeriod:

@@ -31,7 +31,8 @@ from typer.testing import CliRunner
 
 from dsl41 import runner_history
 from dsl41.ast_jil import parse
-from dsl41.cli import _stage_period, app
+from dsl41.boundary import stage_period
+from dsl41.cli import app
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle_state import Event, TraceEntry
 from dsl41.runner_adapters import LocalCommandAdapter
@@ -718,7 +719,7 @@ def test_an_open_run_prefers_spools_started_at_with_no_ended_at_to_mix(tmp_path:
 async def _run_real_and_manifest(
     text: str, run_root: Path, jobs: list[str], *, file: str = "estate.jil"
 ) -> None:
-    """Stage the period the way `dsl41 run` does (`cli._stage_period`:
+    """Stage the period the way `dsl41 run` does (`boundary.stage_period`:
     the content-addressed input bundle), then start_run -- which installs
     `periods/000001/manifest.json` -- inject STARTJOB for every named job,
     run to quiescence, shut down and close the journal. The shared shape
@@ -729,7 +730,7 @@ async def _run_real_and_manifest(
     clock = RealClock()
     # the staged profile must BE the wiring below (the DL-130 gate refuses
     # a fiction): grace 2s, exactly what the adapter runs
-    staged = _stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
+    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
     engine = start_run(
         catalog,
         run_root,

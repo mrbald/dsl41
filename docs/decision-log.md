@@ -6855,3 +6855,19 @@
   hand-written per-effect check. It already refuses rather than degrades,
   so it is a third SPELLING of one question and not a second ANSWER; it
   converts to the shared decoder when that file is next opened.
+- DL-140 an empty map is not "no map": tz_aliases at the wiring boundary
+  (2026-08-21; found while landing DL-137's verb-body-moves slice).
+  `RuntimeProfile` cannot spell "no `--timezone-map`" -- an absent map
+  normalizes to an empty table -- and `resolve_timezone` enables SEM-35's
+  unique-city ladder only when `aliases is None`. The old wiring passed
+  `dict(profile.tz_aliases)` bare, so a profile-wired engine silently
+  disabled city resolution the launch flags never asked to disable. The
+  ONE wiring builder (`runner_startup.wire_from_profile`, moved from cli
+  by this slice) now passes `dict(profile.tz_aliases) or None`: an empty
+  table wires as "no map" and the ladder stays on. Consequences, both
+  deliberate: the offline sealer resolves per-job city zones on an
+  estate `dsl41 run` had itself opened (it refused before); and
+  `--timezone-map <empty file>` now reads as "no map" rather than as a
+  map that forbids the ladder -- an empty mapping FILE asserting
+  "resolve no cities" was never expressible on purpose, and a corner
+  nobody can state is not a contract (pinned in the serve wiring test).

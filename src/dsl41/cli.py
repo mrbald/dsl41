@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -38,10 +37,8 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
     from dsl41.boundary import SealRequest
     from dsl41.runner import Engine
-    from dsl41.runner_adapters import JobAdapter, SupervisorClient
     from dsl41.runner_ledger import LeaderLock
     from dsl41.seal import StagedNextPeriod
-    from dsl41.runner_scheduler import Scheduler
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
 
@@ -99,40 +96,6 @@ def _load_catalog_and_ast_or_exit_2(
         # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
-
-
-def _stage_period(
-    run_root: Path,
-    parsed: "list[JilFile]",
-    catalog: CatalogIR,
-    profile: "RuntimeProfile",
-) -> "StagedManifest":
-    """Materialize period 1's inputs and pin its identity (period-model
-    ss1.1, DL-130) -- the self-contained artifact DL-66 asked for, now
-    content-addressed.
-
-    `catalogs/<source_bundle_hash>/` holds the POST-PLACEHOLDER source this
-    run loaded, byte-exact (render_preserve is F1), beside `sources.json`;
-    the directory is addressed by those very bytes, so a relaunch on
-    unchanged inputs reuses it and never rewrites it. The engine installs
-    the committed `periods/000001/manifest.json` at genesis, because
-    `baseline_id` and `first_index` are its to know, not the launcher's.
-
-    The original paths are recorded because `catalog_hash` covers
-    `SourceSpan.file`: byte-exact replay against a relocated copy still
-    needs them (relocation-independent hashing is a DELIBERATE defer -- it
-    orphans every existing journal's resume gate)."""
-    from dsl41.ast_jil import render_preserve
-    from dsl41.period import SourceFile, stage_manifest, write_bundle
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
-
-    sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
-    return stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=profile,
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
 
 
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
@@ -1197,16 +1160,12 @@ def run(
                     catalog,
                     run_root,
                     resume,
-                    timezone,
                     warns,
-                    ui,
-                    detached,
-                    deadman,
-                    tz_aliases,
+                    profile=profile,
+                    ui=ui,
                     spec_texts=_spec_texts(parsed, catalog),
                     estate_fingerprint=fingerprint,
                     parsed=parsed,
-                    profile=profile,
                     anchor_dir=estate_anchor,
                     open_from=open_from,
                 )
@@ -1340,41 +1299,42 @@ async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
     resume: bool,
-    timezone: str | None,
     warns: list,
+    *,
+    profile: "RuntimeProfile",
     ui: bool = False,
-    detached: bool = False,
-    deadman: "float | None" = None,
-    tz_aliases: "dict[str, str] | None" = None,
     spec_texts: "dict[str, str] | None" = None,
     estate_fingerprint: "dict[str, str] | None" = None,
     parsed: "list[JilFile] | None" = None,
-    profile: "RuntimeProfile | None" = None,
     anchor_dir: "Path | None" = None,
     open_from: "Path | None" = None,
 ) -> int:
+    """`dsl41 run`, from the acquire to the last teardown.
+
+    The profile is REQUIRED and is the ONE source of every launch option
+    this function reads: timezone, alias table, tethered-vs-detached, the
+    asked deadman, every adapter window. A `detached` flag beside a profile
+    saying `tethered` would wire a supervised adapter and then tear down as
+    if no supervisor existed -- DL-137's divergence, one level up."""
     import asyncio
     import contextlib
     import signal as signal_mod
 
     from datetime import datetime
 
-    from dsl41.runner_startup import start_run
+    from dsl41.boundary import stage_period
+    from dsl41.period import RuntimeProfile, to_us
+    from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
-    from dsl41.runner_adapters import (
-        FileWatcherAdapter,
-        LocalCommandAdapter,
-        SupervisedCommandAdapter,
-        SupervisorClient,
-        SupervisorUnavailable,
-    )
     from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.runner_scheduler import Scheduler
 
     from dsl41.runner_ledger import acquire_run_root
 
     clock = RealClock()
+    detached = profile.execution_mode == "detached"
+    # the ASKED deadman; `_running_deadman` reads back what the host runs
+    deadman = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
     if open_from is not None:
         # the roll's READ-ONLY preflight runs before anything is created:
         # a refusal -- the unattested-closing refusal above all -- must
@@ -1448,12 +1408,8 @@ async def _serve_run(
             typer.echo(str(exc), err=True)
             lock.release()
             return 2
-        if parsed is not None and profile is not None:
-            staged = _stage_period(run_root, parsed, catalog, profile)
-    # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
-    # supervisor that owns the wrapper lifelines, so an engine restart does
-    # not kill the jobs. FW stays in-engine (no process to survive).
-    client: SupervisorClient | None = None
+        if parsed is not None:
+            staged = stage_period(run_root, parsed, catalog, profile)
     supervisor_deadman = deadman
     if resume:
         # start a MISSING supervisor with the deadman the period PINNED, not
@@ -1473,29 +1429,32 @@ async def _serve_run(
         if pinned is not None:
             pinned_us = pinned.runtime_profile.deadman_us
             supervisor_deadman = None if pinned_us is None else pinned_us / 1_000_000
-    if detached:
-        client = SupervisorClient(run_root, deadman_s=supervisor_deadman)
-        try:
-            await client.ensure_running()
-            await client.acquire()
-        except SupervisorUnavailable as exc:
-            typer.echo(f"supervisor unavailable: {exc}", err=True)
-            return 2
-        adapters: dict[str, JobAdapter] = {
-            "CMD": SupervisedCommandAdapter(client),
-            "FW": FileWatcherAdapter(),
-        }
-    else:
-        adapters = {"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()}
-    scheduler = Scheduler(catalog, start=clock.now(), default_tz=timezone, tz_aliases=tz_aliases)
+    # ONE wiring builder (DL-137): genesis, resume and the offline sealer
+    # all build adapters and scheduler from the PROFILE, so a window that
+    # moves on the pin moves in the components that run. The deadman is the
+    # single field re-pinned here, for the reason above.
+    pinned_deadman_us = None if supervisor_deadman is None else to_us(supervisor_deadman)
+    try:
+        wiring = await wire_from_profile(
+            run_root,
+            catalog,
+            RuntimeProfile.model_validate(
+                {**profile.model_dump(), "deadman_us": pinned_deadman_us}
+            ),
+        )
+    except EngineError as exc:
+        typer.echo(str(exc), err=True)
+        return 2
+    client = wiring.client
+    adapters = wiring.adapters
+    scheduler = wiring.scheduler
     running_deadman = _running_deadman(client, deadman, run_root)
     staged = _observed_profile(staged, running_deadman)
-    if resume and profile is not None:
+    if resume:
         error = _resume_profile_error(run_root, profile, running_deadman)
         if error is not None:
             typer.echo(error, err=True)
             return 2
-    if resume:
         engine = await _resume_run(
             catalog,
             run_root,
@@ -1675,6 +1634,7 @@ def rehearse(
 
     from datetime import UTC, datetime, timedelta
 
+    from dsl41.boundary import stage_period
     from dsl41.oracle_state import Event, OracleError
     from dsl41.period import runtime_profile_from_cli
     from dsl41.runner import Engine
@@ -1722,7 +1682,7 @@ def rehearse(
             # FRESH root: an existing journal is start_run's refusal to
             # make, and nothing is written on the way to it.
             staged = (
-                _stage_period(
+                stage_period(
                     run_root,
                     parsed,
                     catalog,
@@ -2324,10 +2284,10 @@ def _stage_next(
     Content-addressed, so a repeat is idempotent and a concurrent client
     writing the same bytes is harmless -- which is what makes it safe to do
     this against a LIVE engine's root without holding its lock."""
-    from dsl41.boundary import stage_next_period
+    from dsl41.boundary import stage_next_period, stage_period
 
     catalog, parsed, _ = _load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
-    staged_manifest = _stage_period(run_root, parsed, catalog, profile)
+    staged_manifest = stage_period(run_root, parsed, catalog, profile)
     staged = stage_next_period(run_root, staged_manifest=staged_manifest)
     return staged, staged_manifest, catalog
 
@@ -2576,7 +2536,7 @@ async def _offline_seal(
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.runner_history import active_period_id
     from dsl41.period import read_period_manifest
-    from dsl41.runner_startup import resume_run
+    from dsl41.runner_startup import resume_run, wire_from_profile
 
     try:
         pinned = read_period_manifest(run_root, active_period_id(run_root))
@@ -2597,7 +2557,7 @@ async def _offline_seal(
     wiring = None
     try:
         catalog = _catalog_from_root(run_root, pinned.source_bundle_hash)
-        wiring = await _wire_from_profile(run_root, catalog, pinned.runtime_profile)
+        wiring = await wire_from_profile(run_root, catalog, pinned.runtime_profile)
         engine = await resume_run(
             catalog,
             run_root,
@@ -2726,79 +2686,6 @@ def _catalog_from_root(run_root: Path, source_bundle_hash: str) -> "CatalogIR":
     return lower_catalog([parse(source.text, file=source.path) for source in sources])
 
 
-@dataclass
-class _Wiring:
-    """The components a period's PINNED profile says it runs with.
-
-    Derived from the manifest rather than from flags, because an offline
-    sealer meets an estate that already decided: the resume gate compares
-    the wiring it finds against the pin, and a process that wired from its
-    own defaults would refuse the estate it was asked to close."""
-
-    adapters: "dict[str, JobAdapter]"
-    scheduler: "Scheduler"
-    client: "SupervisorClient | None"
-    deadman_s: "float | None"
-
-    async def close(self) -> None:
-        if self.client is not None:
-            await self.client.release()
-            await self.client.close()
-
-
-async def _wire_from_profile(
-    run_root: Path, catalog: "CatalogIR", profile: "RuntimeProfile"
-) -> _Wiring:
-    """Build adapters, scheduler and (when the period is detached) the
-    supervisor client from `profile`."""
-    from datetime import UTC, datetime
-
-    from dsl41.runner_adapters import (
-        FileWatcherAdapter,
-        LocalCommandAdapter,
-        SupervisedCommandAdapter,
-        SupervisorClient,
-        SupervisorUnavailable,
-    )
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_scheduler import Scheduler
-
-    deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
-    client = None
-    if profile.execution_mode == "detached":
-        client = SupervisorClient(run_root, deadman_s=deadman_s)
-        try:
-            await client.ensure_running()
-            await client.acquire()
-        except SupervisorUnavailable as exc:
-            raise EngineError(f"supervisor unavailable: {exc}") from exc
-        cmd: object = SupervisedCommandAdapter(
-            client,
-            grace_seconds=profile.cmd_grace_us / 1_000_000,
-            settle_seconds=profile.reconcile_settle_us / 1_000_000,
-        )
-    else:
-        cmd = LocalCommandAdapter(grace_seconds=profile.cmd_grace_us / 1_000_000)
-    adapters = {
-        "CMD": cmd,
-        "FW": FileWatcherAdapter(
-            default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
-        ),
-    }
-    scheduler = Scheduler(
-        catalog,
-        start=datetime.now(UTC).replace(tzinfo=None),
-        default_tz=profile.default_tz,
-        tz_aliases=dict(profile.tz_aliases),
-    )
-    return _Wiring(
-        adapters=cast("dict[str, JobAdapter]", adapters),
-        scheduler=scheduler,
-        client=client,
-        deadman_s=deadman_s,
-    )
-
-
 @app.command()
 def audit(
     run_root: Path = _RUN_ROOT_OPT,
@@ -2832,9 +2719,10 @@ def audit(
     """
     from dsl41.attest import Unattested, audit_period
     from dsl41.boundary import EstateAnchor, default_anchor_dir
+    from dsl41.period import closed_periods
     from dsl41.runner_clock import EngineError
 
-    periods = [period] if period is not None else _closed_periods(run_root)
+    periods = [period] if period is not None else closed_periods(run_root)
     if not periods:
         typer.echo(f"{run_root}: no closed period to audit", err=True)
         raise typer.Exit(2)
@@ -2901,29 +2789,6 @@ def verify(
         f"{attestation_path(run_root, period)} verifies: seal {attestation.seal_digest},"
         f" chain through period {attestation.chain_through_period},"
         f" produced by dsl41 {attestation.dsl41_version}"
-    )
-
-
-def _closed_periods(run_root: Path) -> list[int]:
-    """Every period this root can AUDIT, in order: a committed seal AND the
-    segment whose evidence re-derives it.
-
-    A rolled root holds the seal it opened from and none of that period's
-    WAL or spool, by design (period-model ss1.3), so the imported seal is
-    this root's to `verify` and another root's to audit. Naming it here
-    would make `dsl41 audit` on a rolled root refuse work it was never
-    asked to do."""
-    from dsl41.period import wal_path
-
-    directory = run_root / "seals"
-    if not directory.is_dir():
-        return []
-    return sorted(
-        int(entry.stem)
-        for entry in directory.glob("*.json")
-        if entry.stem.isdigit()
-        and not entry.name.endswith(".audit.json")
-        and wal_path(run_root, int(entry.stem)).exists()
     )
 
 
