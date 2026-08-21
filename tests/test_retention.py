@@ -1198,6 +1198,97 @@ def test_backfill_refuses_a_traversed_seal_record_off_schema(tmp_path: Path) -> 
         read_backfill(run_root / "journal.jsonl", since=0)
 
 
+def test_backfill_refuses_a_segment_whose_opening_names_a_different_number(tmp_path: Path) -> None:
+    """ss2.1: a foreign segment renamed into place parses and even seals;
+    its own opening is what says which segment it actually is -- a filename
+    and an opening that disagree is a stranger's file under this estate's
+    name, even though its estate_id still matches the sentinel and so
+    passes that earlier, separate check.
+
+    `segment_no`, `period_id` and `opens_from_seal.period_id` must all agree
+    WITH EACH OTHER too (I1, checked inside `read_journal` on the single
+    file) -- so all three move together here, to the same wrong lineage,
+    leaving that single-file check satisfied and isolating the cross-file
+    check `read_backfill` alone owns: the number in the FILENAME."""
+    from dsl41.canon import canonical_bytes as canon
+    from dsl41.runner_journal import read_backfill
+
+    run_root = tmp_path / "run"
+    _periods(run_root, 2)
+    target = wal_path(run_root, 2)
+    records = read_journal(target)
+    assert records[0].get("rec") == "segment"
+    link = {**records[0]["opens_from_seal"], "period_id": 98}
+    records[0] = {**records[0], "segment_no": 99, "period_id": 99, "opens_from_seal": link}
+    target.write_bytes(b"".join(canon(r) + b"\n" for r in records))
+    with pytest.raises(EngineError, match="a stranger's file under this estate's name"):
+        read_backfill(run_root / "journal.jsonl", since=0)
+
+
+def test_backfill_refuses_a_forged_opens_from_seal_digest(tmp_path: Path) -> None:
+    """ss2.1/ss11: a segment's `opens_from_seal.digest` must be the seal it
+    actually chains from, not merely a well-shaped one -- a forged digest
+    that still passes the segment's own schema is a spliced or foreign
+    lineage the chain proof must catch."""
+    from dsl41.canon import canonical_bytes as canon
+    from dsl41.runner_journal import read_backfill
+
+    run_root = tmp_path / "run"
+    _periods(run_root, 2)
+    target = wal_path(run_root, 2)
+    records = read_journal(target)
+    assert records[0].get("rec") == "segment"
+    link = dict(records[0]["opens_from_seal"])
+    link["digest"] = "sha256:" + "0" * 64
+    records[0] = {**records[0], "opens_from_seal": link}
+    target.write_bytes(b"".join(canon(r) + b"\n" for r in records))
+    with pytest.raises(EngineError, match="does not open from the seal"):
+        read_backfill(run_root / "journal.jsonl", since=0)
+
+
+def test_backfill_refuses_a_seal_and_its_next_segment_naming_different_estates(
+    tmp_path: Path,
+) -> None:
+    """ss1.2 at the chain, not just at the sentinel: a closing seal whose
+    OWN estate_id disagrees with the segment it closed into is two estates
+    concatenated into one stream, even though each segment's own opening
+    still matches the sentinel that bound it (the earlier, separate
+    check)."""
+    from dsl41.canon import canonical_bytes as canon
+    from dsl41.runner_journal import read_backfill
+
+    run_root = tmp_path / "run"
+    _periods(run_root, 2)
+    target = wal_path(run_root, 1)
+    records = read_journal(target)
+    assert records[-1].get("rec") == "seal"
+    records[-1] = {**records[-1], "estate_id": "00000000-0000-4000-8000-000000000000"}
+    target.write_bytes(b"".join(canon(r) + b"\n" for r in records))
+    with pytest.raises(EngineError, match="two estates in one stream"):
+        read_backfill(run_root / "journal.jsonl", since=0)
+
+
+def test_backfill_refuses_a_seal_whose_closes_at_index_skips_the_next_segments_first(
+    tmp_path: Path,
+) -> None:
+    """I2: continuity is by the EXACT index, not by adjacency alone -- a
+    forged `closes_at_index` that still passes the seal's own schema, and
+    still names the right next period and digest, must be caught against
+    the next segment's own `first_index`."""
+    from dsl41.canon import canonical_bytes as canon
+    from dsl41.runner_journal import read_backfill
+
+    run_root = tmp_path / "run"
+    _periods(run_root, 2)
+    target = wal_path(run_root, 1)
+    records = read_journal(target)
+    assert records[-1].get("rec") == "seal"
+    records[-1] = {**records[-1], "closes_at_index": records[-1]["closes_at_index"] + 5}
+    target.write_bytes(b"".join(canon(r) + b"\n" for r in records))
+    with pytest.raises(EngineError, match="index frontier is not continuous"):
+        read_backfill(run_root / "journal.jsonl", since=0)
+
+
 def test_a_sidecar_whose_local_wal_lost_its_seal_record_refuses(tmp_path: Path) -> None:
     """ss2.2/ss12: a sidecar with a LOCAL WAL that lacks its naming record
     is not a committed boundary this lineage wrote -- and an unbound
@@ -1747,3 +1838,22 @@ def test_the_index_dir_constants_agree_across_the_tier_boundary() -> None:
     from dsl41.runner_supervisor import _INDEX_DIR
 
     assert INDEX_DIR == _INDEX_DIR
+
+
+# ------------------------------------------------- coverage-gate pins
+
+
+def test_a_reopened_periods_missing_manifest_refuses_resume(tmp_path: Path) -> None:
+    """ss7 phase 3 (runner_startup._reopened): a period that opened from a
+    seal is re-seeded from that seal at EVERY resume, not only the one that
+    first opened it -- so its committed manifest must still be there the
+    SECOND time too. Missing it then is a period whose artifacts were
+    pruned under a live lineage, which retention's own floor forbids."""
+    run_root = tmp_path / "run"
+    engine = _open_period_one(run_root)
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+    _close(_resume(run_root, C2_JIL))  # opens period 2 for the first time
+    (period_dir(run_root, 2) / "manifest.json").unlink()
+    with pytest.raises(EngineError, match="re-seeded from that seal at every resume"):
+        _resume(run_root, C2_JIL)  # re-resuming an ALREADY open period

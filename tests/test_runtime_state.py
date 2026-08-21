@@ -728,6 +728,51 @@ def test_a_timer_with_no_job_in_its_payload_arms_and_fires_without_touching_one(
     assert store.commit_input() == []
 
 
+def test_a_timer_naming_a_job_with_no_row_yet_skips_the_capacity_check() -> None:
+    """The heap touches "job:X" for whatever name a timer's payload carries
+    (concurrency-model ss3), even a name no verb has ever created a row for --
+    `runtime()` says as much: the oracle addresses entities with no catalog
+    entry. The DL-120 capacity check at commit walks every touched job key,
+    so it must skip a row that is still absent rather than crash on it; the
+    row is only created afterward, when the revision bump reads it into
+    being."""
+    store = RuntimeState()
+    due = T0 + timedelta(minutes=5)
+    store.begin_input()
+    store.enqueue_timer(due, _timer("never-run", due))
+    assert store.commit_input() == ["job:never-run"]  # the heap moved, so the key did
+    assert store.runtime("never-run").reservations == ()  # a fresh default row, not a crash
+
+
+def test_release_reservations_on_a_row_holding_nothing_is_a_no_op() -> None:
+    """The mirror of `enqueue_waiter`'s idempotence below: a row with no
+    reservations has nothing to release. `oracle.py` only calls this verb
+    after `_pool.holds()` says a row holds units, so the guard is never
+    reached through the full interpreter -- but the store's own contract
+    (docstring: "Clear a run's vector on the edge that leaves
+    STARTING/RUNNING") must hold for a caller that reaches it directly."""
+    store = RuntimeState()
+    store.transition("j", "RUNNING", T0)
+    before = store.runtime("j")
+    store.release_reservations("j", "SUCCESS")  # nothing held, nothing to do
+    assert store.runtime("j") is before  # untouched: no rebuild, not just no diff
+
+
+def test_enqueue_waiter_is_idempotent_a_queued_job_keeps_its_rank() -> None:
+    """Docstring's own claim: "a job already queued keeps the rank it was
+    given, because its position was decided when it first failed admission."
+    `oracle.py` never re-enqueues a job already in QUE_WAIT (`_attempt_start`
+    refuses before `_start` runs), so this is the store's own contract,
+    exercised directly."""
+    store = RuntimeState()
+    store.enqueue_waiter("j")
+    first_rank = store.runtime("j").waiter_seq
+    assert first_rank is not None
+    store.enqueue_waiter("other")  # advances the allocator
+    store.enqueue_waiter("j")  # already queued: must NOT take the next rank
+    assert store.runtime("j").waiter_seq == first_rank
+
+
 def test_quarantine_and_reinstate_are_each_idempotent() -> None:
     """Repeated unreachability is ONE fact, and the producer is a retry loop
     that gives up five times over (S5d) -- a second quarantine that moved a

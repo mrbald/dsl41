@@ -910,11 +910,6 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
     )
 
 
-def _seq_at_or_below(record: Mapping[str, Any], since: int) -> bool:
-    seq = record.get("seq")
-    return isinstance(seq, int) and not isinstance(seq, bool) and seq <= since
-
-
 def _first_index(opening: Mapping[str, Any]) -> int:
     """A segment's own `first_index` -- the first index it may allocate,
     and NOT the lowest `seq` in it: a period that admitted no input still

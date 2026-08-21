@@ -349,6 +349,18 @@ def test_read_journal_refuses_interior_corruption(tmp_path: Path) -> None:
         read_journal(path)
 
 
+def test_read_journal_refuses_a_non_object_json_line(tmp_path: Path) -> None:
+    """(read_journal ss2 dispatch): a line that IS valid JSON but not an
+    object has no `rec` to dispatch on -- refused by its own message, not
+    mistaken for the syntactically corrupt (undecodable) case above."""
+    path = _write_two_input_journal(tmp_path)
+    lines = path.read_bytes().split(b"\n")
+    lines[1] = b"[1, 2, 3]"  # valid JSON, not an object -- an interior line
+    path.write_bytes(b"\n".join(lines))
+    with pytest.raises(EngineError, match="is not a record object"):
+        read_journal(path)
+
+
 def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
     """(read_journal docstring): every journal must open with a header
     record; a file that starts with anything else is refused."""
@@ -359,6 +371,51 @@ def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
     )
     with pytest.raises(EngineError, match="missing segment"):
         read_journal(path)
+
+
+def test_opens_with_rec_is_none_for_a_path_that_cannot_be_opened(tmp_path: Path) -> None:
+    """(opens_with_rec docstring): the ONE place the first line is sniffed
+    for its kind, RAW -- so it reports the kind whatever the record is (even
+    a retired one, unlike `read_journal`), and None for anything that is not
+    a JSON object naming one. A file that does not exist is the OSError
+    case: no root has ever been claimed there, which is a fact this
+    function reports as absence, not as an error of its own."""
+    from dsl41.runner_journal import opens_with_rec
+
+    missing = tmp_path / "no-such-directory" / "journal.jsonl"
+    assert opens_with_rec(missing) is None
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        "not json at all",
+        "[1, 2, 3]",  # valid JSON, but not an object
+        '"just a string"',  # valid JSON, still not an object
+    ],
+)
+def test_opens_with_rec_is_none_for_a_first_line_that_names_no_kind(
+    tmp_path: Path, first_line: str
+) -> None:
+    """(opens_with_rec docstring): None for a first line that is not JSON,
+    and for one that IS valid JSON but not an object -- neither has a `rec`
+    to report."""
+    path = tmp_path / "journal.jsonl"
+    path.write_text(first_line + "\n")
+    from dsl41.runner_journal import opens_with_rec
+
+    assert opens_with_rec(path) is None
+
+
+def test_opens_with_rec_reports_a_retired_kind_raw(tmp_path: Path) -> None:
+    """A `header`-opened root is a recognised pre-period one (D5, DL-138):
+    `opens_with_rec` says so plainly, judging nothing -- that verdict is
+    each caller's own tombstone to write."""
+    path = tmp_path / "journal.jsonl"
+    path.write_text('{"rec": "header", "baseline_id": "b"}\n')
+    from dsl41.runner_journal import opens_with_rec
+
+    assert opens_with_rec(path) == "header"
 
 
 # ------------------------------------------------------------- 3. catalog_hash
@@ -673,6 +730,21 @@ def test_the_preflight_caveats_a_run_started_under_are_in_the_log(tmp_path: Path
     assert record["rec"] == "preflight"
     assert [i["code"] for i in record["items"]] == ["machine", "timezone"]
     assert [i["severity"] for i in record["items"]] == ["WARN", "WARN"]
+
+
+def test_seal_writes_and_notifies_with_no_lock_held(tmp_path: Path) -> None:
+    """The ss1 fence in `seal` is conditional on a lock actually being held
+    (`self._lock is not None`): a lock-less journal -- a rehearsal or the
+    bisimulation harness, per the constructor's own docstring -- has nothing
+    to check, and `seal` must still write the record and fan it out."""
+    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    assert journal._lock is None
+    queue = journal.subscribe()
+    journal.seal({"rec": "seal", "period_id": 1})
+    journal.close()
+    assert queue.get_nowait() == {"rec": "seal", "period_id": 1}
+    [line] = (tmp_path / "j.jsonl").read_text().splitlines()
+    assert json.loads(line) == {"rec": "seal", "period_id": 1}
 
 
 def test_unsubscribing_something_that_never_subscribed_is_a_no_op(tmp_path: Path) -> None:

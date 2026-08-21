@@ -727,6 +727,66 @@ def test_read_outbox_refuses_a_native_decision_with_an_identity_less_effect() ->
         read_outbox([{k: v for k, v in decision.items() if k != "effects"}])
 
 
+def test_read_outbox_refuses_a_decision_carrying_a_malformed_effect() -> None:
+    """`generation` is STRICT (Effect docstring): lax pydantic would wave
+    `false` through every exact-0 comparison the fold makes below it, so a
+    decision carrying one is not a shape this writer ever produced --
+    refused as a malformed effect, not silently coerced to generation 0."""
+    malformed = {
+        "effect_id": "e1:SPAWN:j.1",
+        "kind": "SPAWN",
+        "job": "j",
+        "run_number": 1,
+        "executor_id": "local",
+        "index": 1,
+        "at": T0.isoformat(),
+        "run_id": _RID,
+        "generation": False,
+    }
+    decision = {
+        "rec": "decision",
+        "index": 1,
+        "request_id": "r1",
+        "decision": "applied",
+        "reason": None,
+        "revisions": {},
+        "legacy_batch": False,
+        "effects": [malformed],
+    }
+    with pytest.raises(EngineError, match="malformed effect"):
+        read_outbox([decision])
+
+
+def test_read_outbox_refuses_a_run_id_outside_the_ss11a_grammar() -> None:
+    """Any run_id a decision carries is checked against the ss11a grammar,
+    not just against Effect's own field type (a bare `str`): a freehand
+    string would pass that type check and then diverge from every real
+    identity comparison downstream."""
+    effect = {
+        "effect_id": "e1:SPAWN:j.1",
+        "kind": "SPAWN",
+        "job": "j",
+        "run_number": 1,
+        "executor_id": "local",
+        "index": 1,
+        "at": T0.isoformat(),
+        "run_id": "not-a-uuid",
+        "generation": 0,
+    }
+    decision = {
+        "rec": "decision",
+        "index": 1,
+        "request_id": "r1",
+        "decision": "applied",
+        "reason": None,
+        "revisions": {},
+        "legacy_batch": False,
+        "effects": [effect],
+    }
+    with pytest.raises(EngineError, match="ss11a grammar"):
+        read_outbox([decision])
+
+
 def test_pr36a_the_reconcile_barrier_refuses_a_split_and_appends_nothing(tmp_path: Path) -> None:
     """The whole barrier, run against a real journal-backed engine whose own
     decision bound the run's id -- and against the state that actually

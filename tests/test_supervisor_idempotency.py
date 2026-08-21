@@ -1092,6 +1092,52 @@ def test_pr36a_an_untraced_bound_spawn_replays_instead_of_failing(tmp_path: Path
     assert engine.oracle.store.job["j"].status == "SUCCESS"
 
 
+def test_pr36a_a_supervisor_known_dead_run_with_no_local_trace_still_replays(
+    tmp_path: Path,
+) -> None:
+    """S6c: candidates are the union of local evidence (dispatch records,
+    the `runs/` listing) AND what the HOST says it is running. A run the
+    supervisor still LISTs -- dead now -- but this local root never
+    dispatched and never made a directory for gets a run_dir=None
+    candidate purely from that LIST row, and `_spool_has_evidence(None)`
+    must read that as "nothing to check", not crash on the missing
+    directory (`_resume_untraced_starts` is a DIFFERENT ladder, for
+    candidates absent everywhere including the supervisor)."""
+    import asyncio as _asyncio
+    from datetime import timedelta
+
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_startup import resume_run
+
+    catalog, t0, bound = _crashed_run_root(tmp_path)
+
+    class _DeadListing:
+        async def list_runs(self) -> dict:
+            return {"runs": [{"job": "j", "run_number": 1, "wrapper_alive": False, "run_id": bound}]}
+
+    probe = _probe_adapter()
+
+    async def scenario():
+        engine = await resume_run(
+            catalog,
+            tmp_path / "run",
+            clock=VirtualClock(start=t0 + timedelta(minutes=1)),
+            adapters={"CMD": probe},
+            supervisor=_DeadListing(),  # type: ignore[arg-type]
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        await engine.run_until_quiescent(t0 + timedelta(minutes=2))
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        return engine
+
+    engine = _asyncio.run(scenario())
+    assert probe.calls == [("j", 1, bound)]
+    assert engine.oracle.store.job["j"].status == "SUCCESS"
+
+
 def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: Path) -> None:
     """reply.json survived a crash its wrapper did not: a fresh supervisor
     answers duplicate, no exit push will ever come, and no record will ever

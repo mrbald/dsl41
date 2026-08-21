@@ -159,6 +159,11 @@ def test_the_outbox_holds_one_run_one_identity_both_directions() -> None:
     outbox.record(_effect("KILL", index=2, run_id=rid_a, generation=0))
     # and identity-less records (pre-DL-118) claim nothing
     outbox.record(_effect("KILL", index=4, run_number=3))
+    # but a NEW identity-less intent for a run ALREADY identified is not
+    # planned by this code: the planner looks a KILL's id up from the SPAWN
+    # that bound it, so this can only be corruption or a foreign writer
+    with pytest.raises(EngineError, match="identity-less intent for an identified run"):
+        outbox.record(_effect("KILL", index=5, run_id=None))
 
 
 def test_a_reused_effect_id_with_different_content_refuses() -> None:

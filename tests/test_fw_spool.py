@@ -412,6 +412,65 @@ def test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id(
     assert lines[0]["run_id"] == effect["run_id"]
 
 
+def test_resume_watch_falls_back_to_the_conventional_run_dir_when_none_is_named(
+    tmp_path: Path,
+) -> None:
+    """The same fallback `_preflight_identities` makes for every candidate:
+    a run_dir that came back None still has a conventional directory,
+    `<run_root>/runs/<job>.<run_number>`, and `_resume_watch` must derive it
+    rather than treat "no run_dir named" as "nothing to resume" -- proven
+    here by reading a COMPLETE watch log placed only at that conventional
+    path and observing the completion get enqueued from it. (The resume
+    ladder only ever hands this function a None run_dir through
+    `supervised_live`, a route an FW watch -- never supervisor-managed --
+    has no ordinary way into; exercised at the function directly.)"""
+    from dsl41.runner_adapters import append_watch_line
+    from dsl41.runner_startup import _resume_watch
+
+    run_root = tmp_path / "run"
+    engine = start_run(
+        _catalog(tmp_path / "watched"),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"FW": FileWatcherAdapter()},
+    )
+    job_ir = engine.oracle.catalog.jobs["w"]
+    log_path = run_root / "runs" / "w.1" / "watch.jsonl"
+    log_path.parent.mkdir(parents=True)
+    append_watch_line(
+        log_path,
+        {"artifact_format_version": ARTIFACT_FORMAT_VERSION, "at": T0, "kind": "start", "run_id": None},
+    )
+    for seconds, stable in ((60, 1), (120, 2)):
+        append_watch_line(
+            log_path,
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "at": T0 + timedelta(seconds=seconds),
+                "kind": "poll",
+                "run_id": None,
+                "size": 6,
+                "qualifying": True,
+                "exists": True,
+                "stable_polls": stable,
+            },
+        )
+    last_at = T0 + timedelta(seconds=120)
+
+    _resume_watch(engine, job_ir, 1, None, T0)  # run_dir=None: must fall back
+
+    assert len(engine._queue) == 1
+    _, _, pending = engine._queue[0]
+    assert pending.ev is not None
+    assert (pending.ev.kind, pending.ev.source) == ("STATUS", "reconcile")
+    assert pending.ev.payload == {
+        "job": "w",
+        "run_number": 1,
+        "exit_code": 0,
+        "ended_at": last_at.isoformat(),
+    }
+
+
 def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
     tmp_path: Path,
 ) -> None:

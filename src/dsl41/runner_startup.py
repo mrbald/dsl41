@@ -982,16 +982,27 @@ def _resume_watch(
         # injected from status.json; re-polling would decide the watch again
         # against a world that has moved on.
         extras: dict[str, object] = {"exit_code": 0}
-        if watch.last_at is not None:
-            extras["ended_at"] = watch.last_at.isoformat()
-        _inject_completion(
-            engine, job, run_number, extras, at=watch.last_at or last_at, last_at=last_at
-        )
+        if watch.last_at is None:
+            # WatchLog.complete requires stable_polls >= FW_STABLE_POLLS (2),
+            # and read_watch_log derives stable_polls only from POLL lines,
+            # so a complete watch has at least one poll line and last_at (set
+            # from that line) cannot be None here (WatchLog.complete invariant).
+            raise AssertionError(
+                "a complete watch has at least one poll line, so last_at cannot"
+                " be None (WatchLog.complete invariant)"
+            )
+        extras["ended_at"] = watch.last_at.isoformat()
+        _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
         return
     adapter = engine.adapters.get("FW")
     if adapter is None:
-        raise EngineError(  # refuse loudly: never leave it hanging
-            f"incomplete FW run {job}.{run_number}: no FW adapter registered to re-dispatch it"
+        # _require_adapters runs at both genesis and resume, before
+        # reconciliation ever reaches here, and refuses a catalog that runs
+        # an FW job with no FW adapter wired. This function is reached only
+        # for job_ir.job_type == "FW", so that adapter cannot be absent here.
+        raise AssertionError(
+            "_require_adapters already refuses a resume with an FW job and no FW"
+            " adapter wired, so adapter cannot be None here"
         )
     # idempotent read: the adapter reconstructs progress from the log and
     # appends no second `start` line. The bound id rides along for the one
@@ -1043,9 +1054,14 @@ def _resume_untraced_starts(
         if job_ir.job_type == "FW":
             adapter = engine.adapters.get("FW")
             if adapter is None:
-                raise EngineError(
-                    f"incomplete FW run {job}.{rt.run_number}: no FW adapter registered"
-                    " to re-dispatch it"
+                # _require_adapters runs at both genesis and resume, before
+                # reconciliation ever reaches here, and refuses a catalog
+                # that runs an FW job with no FW adapter wired. This branch
+                # is reached only for job_ir.job_type == "FW", so that
+                # adapter cannot be absent here.
+                raise AssertionError(
+                    "_require_adapters already refuses a resume with an FW job and no"
+                    " FW adapter wired, so adapter cannot be None here"
                 )
             bound = _spawn_effect_for(engine, job, rt.run_number)
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id if bound else None)

@@ -842,6 +842,27 @@ def test_a_manifest_for_another_catalog_never_opens_a_log(tmp_path: Path) -> Non
         )
 
 
+def test_a_manifest_for_another_clock_domain_never_opens_a_log(tmp_path: Path) -> None:
+    """The same refusal, on the other identity a manifest and a run must
+    share: `fsync_each` is derived from the domain the OPENER names
+    (Journal.create docstring -- "fsync per record in the real domain ...
+    buffered in rehearse"), so a manifest committed for one domain must not
+    silently open a log in the other."""
+    from dsl41.runner_journal import Journal
+
+    manifest = _staged(_catalog()).commit(
+        period_id=1, baseline_id="b-1", clock_domain="virtual", segment_no=1, first_index=1
+    )
+    with pytest.raises(EngineError, match="not this run's"):
+        Journal.create(
+            tmp_path / "journal.jsonl",
+            catalog=_catalog(),
+            clock_domain="real",
+            started_at=T0,
+            manifest=manifest,
+        )
+
+
 # --------------------------------------------- 6. the resume gate's comparison
 
 

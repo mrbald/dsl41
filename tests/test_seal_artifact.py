@@ -1847,3 +1847,35 @@ def test_finish_genesis_is_one_shot() -> None:
         store.finish_genesis()
     with pytest.raises(ValueError, match="used state"):
         store.seed_period(99)
+
+
+def test_finish_genesis_after_seed_period_is_refused() -> None:
+    """The mirror check on the same latch: construction is meant to come
+    BEFORE the period is seeded, so a caller who seeds first and only then
+    calls `finish_genesis` must be refused too -- else the seed would be
+    laundered as part of "construction" it never was."""
+    from dsl41.oracle_state import RuntimeState
+
+    store = RuntimeState()
+    store.seed_period(4)
+    with pytest.raises(ValueError, match="construction comes first"):
+        store.finish_genesis()
+
+
+def test_seed_period_refuses_inside_an_input_and_below_one() -> None:
+    """The two guards on `seed_period` that a normal assembly never
+    exercises: called mid-input (assembly always precedes inputs), and
+    called with a period below 1 (I2 counts periods from 1)."""
+    from dsl41.oracle_state import RuntimeState
+
+    store = RuntimeState()
+    store.begin_input()
+    try:
+        with pytest.raises(ValueError, match="assembly precedes inputs"):
+            store.seed_period(2)
+    finally:
+        store.commit_input()
+
+    fresh = RuntimeState()
+    with pytest.raises(ValueError, match="periods count from 1"):
+        fresh.seed_period(0)

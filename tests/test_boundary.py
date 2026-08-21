@@ -2768,6 +2768,38 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
     assert boundary.seal.executions[0].run_id == effect.run_id
 
 
+def test_pr27_a_dead_wrapper_in_the_list_is_history_not_unaccounted_evidence(
+    tmp_path: Path,
+) -> None:
+    """The LIST may carry a row for a run whose wrapper already exited --
+    its outcome resolves from the spool, not from this proof -- so that row
+    must not read as live evidence quiescence cannot account for, even
+    though it names a run this seal does not carry at all. The lineage
+    above already proves the SAME shape refuses when `wrapper_alive` is
+    True (job b, run 7); this is the other side of that branch."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, profile=DETACHED)
+    effect = _bind_a(engine, run_root)
+    staged = _stage(run_root, C2_JIL, profile=DETACHED)
+    engine.supervisor = _StubSupervisor(  # type: ignore[assignment]
+        listing={
+            "incarnation": "inc-1",
+            "runs": [
+                {"run_id": effect.run_id, "job": "a", "run_number": 1, "wrapper_alive": True},
+                {
+                    "run_id": str(uuid.uuid4()),
+                    "job": "b",
+                    "run_number": 7,
+                    "wrapper_alive": False,
+                },
+            ],
+        }
+    )
+    boundary = asyncio.run(_seal(engine, _request(engine, staged)))
+    _close(engine)
+    assert boundary.seal.executions[0].run_id == effect.run_id
+
+
 def test_pr27a_a_dead_supervisor_that_owns_nothing_does_not_block_the_seal(
     tmp_path: Path,
 ) -> None:
@@ -2914,6 +2946,38 @@ def test_an_input_arriving_during_the_supervisor_proof_is_drained_before_the_sna
     _close(engine)
     assert stub.injected
     assert boundary.seal.state.globals["LATE"].value == "in"  # drained, then sealed
+
+
+def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Path) -> None:
+    """The counterpart to the single latecomer above: if a NEW input lands on
+    every pass -- drained, then another arrives during the very next proof --
+    the estate never reaches quiescence with an empty queue at once, and the
+    ss8 loop must not spin forever. It refuses once QUIESCE_WAIT_S has passed
+    (period-model ss8)."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    engine.QUIESCE_WAIT_S = 0.05  # the wait is real; the refusal is what ends it
+
+    class _NeverSettles(_StubSupervisor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def list_runs(self) -> dict[str, Any]:
+            self.calls += 1  # every call re-arms the queue: nothing ever settles
+            engine.inject(
+                Event(
+                    at=T0, kind="SET_GLOBAL", payload={"name": "LATE", "value": str(self.calls)}
+                )
+            )
+            return await super().list_runs()
+
+    stub = _NeverSettles()
+    engine.supervisor = stub  # type: ignore[assignment]
+    message = asyncio.run(_refused(engine, _request(engine, _stage(run_root, C2_JIL))))
+    assert "inputs keep arriving during the ss8 supervisor proof" in message
+    assert stub.calls > 1  # more than one pass really happened before the timeout
+    _close(engine)
 
 
 def test_a_seal_whose_fsync_fails_reaches_no_subscriber(tmp_path: Path, monkeypatch) -> None:
