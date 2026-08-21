@@ -743,6 +743,136 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
     return records
 
 
+def check_segment_tail(segment: Path, records: Sequence[Mapping[str, Any]]) -> None:
+    """A CLOSED segment ends in its `seal` (ss11).
+
+    `read_journal` tolerates a torn FINAL line, which is right for the file
+    an appender is still appending to and wrong for a closed one: there a
+    tolerated tail is a hole in the MIDDLE of the concatenation, and a
+    reader would be handed a stream that skips records without being told.
+
+    ONE helper and ONE text, POSITIONED PER CALLER (DL-139, DL-142): each
+    reader knows a segment is closed at a different point -- the
+    subscriber's backfill when it has already read a newer one, the
+    cross-period replay when the segment it is about to read is not the
+    last it was given -- and the check belongs at each of those points, not
+    at whichever one happens to be shared. The refusal is the same sentence
+    either way, because it is the same corruption."""
+    if records[-1].get("rec") != "seal":
+        raise EngineError(
+            f"journal {segment}: a closed segment ends in a `seal` and this one"
+            f" ends in {records[-1].get('rec')!r} -- its tail is missing, and a"
+            " backfill across it would skip records silently (period-model ss11)"
+        )
+
+
+def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | None:
+    """One segment file, checked against WHERE IT SITS: the estate its
+    root's sentinel names, and the period its own filename claims.
+
+    ONE implementation, because this is a fact about a file and not about
+    a reader (DL-139, the discipline `check_segment_adjacency` beside it
+    follows). The subscriber's backfill needs it because its early stop can
+    read a SINGLE segment, where no adjacency check ever runs -- and
+    `dsl41 journal`'s cross-period replay needs it for the same reason plus
+    one more: a whole root whose segments were ALL rewritten to a
+    stranger's `estate_id` agrees with itself at every boundary, so the
+    sentinel is the only thing left that says whose lineage this is.
+
+    Returns the period the filename names, or None for a file whose name is
+    not a number -- a sentinel-less root's `journal.jsonl`, which no
+    boundary-era layout produces and its owner refuses by name (DL-138).
+    Callers that number segments read it from here rather than parsing the
+    stem a second time."""
+    from dsl41.period import read_sentinel, root_of_wal
+
+    try:
+        named = int(segment.stem)
+    except ValueError:
+        return None
+    sentinel = read_sentinel(root_of_wal(segment))
+    if sentinel is not None and opening.get("estate_id") != sentinel.estate_id:
+        raise EngineError(
+            f"journal {segment}: estate {opening.get('estate_id')!r} under a"
+            f" sentinel naming {sentinel.estate_id} -- a stranger's segment under this"
+            " estate's name (period-model ss1.2)"
+        )
+    claimed = opening.get("segment_no", opening.get("period_id"))
+    if claimed != named:
+        # a foreign segment renamed into place parses and even seals;
+        # its own opening is what says which period it is
+        raise EngineError(
+            f"journal {segment}: names segment {named} and its opening says"
+            f" {claimed!r} -- a stranger's file under this estate's name"
+            " (period-model ss2.1)"
+        )
+    return named
+
+
+def check_segment_adjacency(
+    older: Sequence[Mapping[str, Any]], newer: Sequence[Mapping[str, Any]], *, where: str
+) -> None:
+    """Two consecutive segments of one lineage, checked BOTH ways: the
+    older's closing seal must be the one the newer opened from, the two
+    must name one estate, and the index frontier must be continuous.
+
+    ONE implementation, because a boundary is one fact and two readers
+    that answered differently about it would disagree about the same
+    corruption (DL-139). The subscriber's backfill meets it inside a run
+    root, where the roll never happened; `dsl41 journal`'s cross-period
+    replay meets it ACROSS roots, where the older segment is in the root
+    the lineage rolled out of. Neither adjacency is more trusted than the
+    other: a rolled boundary is the same record pair in two files.
+
+    The older segment must already have been through `check_segment_tail`:
+    a closed segment whose tail was torn has no seal record to be adjacent
+    TO, and each caller runs that check at the point in its own read where
+    it first knows the segment is closed.
+
+    `where` names the stream the caller is reading -- the refusal has to
+    say WHOSE chain broke, and a reader that spans roots cannot answer
+    that from the records alone."""
+    seal_record = older[-1]
+    opening = newer[0]
+    # the FULL ss2.2 schema first: a `closes_at_index` rewritten to a
+    # bool or a string would otherwise skip the exact-int continuity
+    # comparison below instead of refusing
+    from dsl41.boundary import check_seal_record
+
+    check_seal_record(seal_record)
+    link = opening.get("opens_from_seal")
+    if not (
+        isinstance(link, dict)
+        and link.get("digest") == seal_record.get("digest")
+        and seal_record.get("next_period_id") == opening.get("period_id")
+    ):
+        raise EngineError(
+            f"{where}: segment {opening.get('period_id')!r} does not open"
+            f" from the seal that closes the one before it -- a spliced or foreign"
+            " lineage (period-model ss2.1, ss11)"
+        )
+    if seal_record.get("estate_id") != opening.get("estate_id"):
+        raise EngineError(
+            f"{where}: estate {seal_record.get('estate_id')!r} sealed and"
+            f" {opening.get('estate_id')!r} opened -- two estates in one stream"
+            " (period-model ss1.2)"
+        )
+    opens_at = opening.get("first_index")
+    closes = seal_record.get("closes_at_index")
+    if (
+        isinstance(opens_at, int)
+        and isinstance(closes, int)
+        and not isinstance(opens_at, bool)
+        and not isinstance(closes, bool)
+        and opens_at != closes + 1
+    ):
+        raise EngineError(
+            f"{where}: segment {opening.get('period_id')!r} starts its index"
+            f" range at {opens_at} and the seal before it closes at {closes} -- the"
+            " index frontier is not continuous (I2)"
+        )
+
+
 @dataclass(frozen=True)
 class Backfill:
     """What one resuming subscriber is owed, and what this root retains
@@ -783,52 +913,22 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
     only ever asked when every segment has been read, and no segment this
     root does not need is opened even to ask it.
 
-    Every segment before the last must END in a `seal`. `read_journal`
-    tolerates a torn FINAL line, which is right for the file an appender
-    is still appending to and wrong for a closed one: there, a tolerated
-    tail is a hole in the middle of the concatenation, and a subscriber
-    would be handed a stream that skips records without being told."""
+    Every segment before the last must END in a `seal` -- asked here, of
+    each segment as it is read and before any other check touches it, so a
+    doubly-faulted segment names the fault that makes the stream a lie."""
     segments = estate_segments(path)
-    from dsl41.period import read_sentinel, root_of_wal
-
-    root_estate = None
-    sentinel = read_sentinel(root_of_wal(resolve_wal(path)))
-    if sentinel is not None:
-        root_estate = sentinel.estate_id
     chunks: list[list[dict[str, Any]]] = []
     holds_cursor = False
     numbers: list[int] = []
     for position, segment in enumerate(reversed(segments)):
         records = read_journal(segment)
-        if position > 0 and records[-1].get("rec") != "seal":
-            raise EngineError(
-                f"journal {segment}: a closed segment ends in a `seal` and this one"
-                f" ends in {records[-1].get('rec')!r} -- its tail is missing, and a"
-                " backfill across it would skip records silently (period-model ss11)"
-            )
+        # the OLD precedence, restored (DL-142 review): a torn tail is
+        # decided BEFORE identity, sequence and contiguity, so a segment
+        # with two faults reports the one that makes the stream a lie
+        if position > 0:
+            check_segment_tail(segment, records)
         opening = records[0]
-        claimed = opening.get("segment_no", opening.get("period_id"))
-        try:
-            named = int(segment.stem)
-        except ValueError:
-            named = None
-        if root_estate is not None and opening.get("estate_id") != root_estate:
-            # the early stop can read ONE segment, so the per-adjacency
-            # estate check never runs there -- the sentinel is what binds
-            # even a single replaced file to this estate
-            raise EngineError(
-                f"journal {segment}: estate {opening.get('estate_id')!r} under a"
-                f" sentinel naming {root_estate} -- a stranger's segment under this"
-                " estate's name (period-model ss1.2)"
-            )
-        if named is not None and claimed != named:
-            # a foreign segment renamed into place parses and even seals;
-            # its own opening is what says which period it is
-            raise EngineError(
-                f"journal {segment}: names segment {named} and its opening says"
-                f" {claimed!r} -- a stranger's file under this estate's name"
-                " (period-model ss2.1)"
-            )
+        named = check_segment_identity(segment, opening)
         if named is not None:
             numbers.append(named)
         first = _first_index(opening)
@@ -857,49 +957,7 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
             " silently (period-model ss11, I1)"
         )
     for newer, older in zip(chunks, chunks[1:]):
-        # adjacency, both ways: the older segment's closing seal must be
-        # the one the newer opened from, and identities must agree --
-        # otherwise a valid sealed segment from ANOTHER estate splices a
-        # foreign lineage into the stream
-        seal_record = older[-1]
-        opening = newer[0]
-        # the FULL ss2.2 schema first: a `closes_at_index` rewritten to a
-        # bool or a string would otherwise skip the exact-int continuity
-        # comparison below instead of refusing
-        from dsl41.boundary import check_seal_record
-
-        check_seal_record(seal_record)
-        link = opening.get("opens_from_seal")
-        if not (
-            isinstance(link, dict)
-            and link.get("digest") == seal_record.get("digest")
-            and seal_record.get("next_period_id") == opening.get("period_id")
-        ):
-            raise EngineError(
-                f"journal {path}: segment {opening.get('period_id')!r} does not open"
-                f" from the seal that closes the one before it -- a spliced or foreign"
-                " lineage (period-model ss2.1, ss11)"
-            )
-        if seal_record.get("estate_id") != opening.get("estate_id"):
-            raise EngineError(
-                f"journal {path}: estate {seal_record.get('estate_id')!r} sealed and"
-                f" {opening.get('estate_id')!r} opened -- two estates in one stream"
-                " (period-model ss1.2)"
-            )
-        opens_at = opening.get("first_index")
-        closes = seal_record.get("closes_at_index")
-        if (
-            isinstance(opens_at, int)
-            and isinstance(closes, int)
-            and not isinstance(opens_at, bool)
-            and not isinstance(closes, bool)
-            and opens_at != closes + 1
-        ):
-            raise EngineError(
-                f"journal {path}: segment {opening.get('period_id')!r} starts its index"
-                f" range at {opens_at} and the seal before it closes at {closes} -- the"
-                " index frontier is not continuous (I2)"
-            )
+        check_segment_adjacency(older, newer, where=f"journal {path}")
     first = _first_index(chunks[-1][0])
     # index 1 is the first index there ever is, so no cursor below it can
     # name a record this root lost

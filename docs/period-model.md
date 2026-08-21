@@ -1827,7 +1827,34 @@ new-format estate that crashes before its first seal with no path back:
 8. dispatch.
 
 **Replay across periods** (`dsl41 journal`, `dsl41 audit`) walks segments and
-switches catalogs at each `segment` record.
+switches catalogs at each `segment` record. *(Built as DL-142.)* The
+crossing is the opening above and not a second path: state folds through
+the seal by `open_from_seal` exactly as an engine's does, and the next
+period's catalog is loaded from the content-addressed bundle the opening
+`segment` pins (§1.1) — like for like by hash, never a catalog the reader
+was handed. A boundary is crossed only over a seal that proves out — the
+digest the naming record carries, the chain from the seal record that
+closes the predecessor, and `next_period` agreement with the opening
+segment — and an unprovable one refuses by name. Refuse-don't-degrade is
+not weaker on a diagnosis surface: a read-only replay across a forged seal
+narrates a forged continuation with exactly the confidence of a true one.
+And the seal itself must be **re-derived, not merely self-consistent**,
+before the crossing: rewrite a sidecar canonically, recompute its digest,
+and copy that digest into the closing `seal` record and the successor's
+opening, and every binding above still agrees — all four were forged
+together. Two proofs close that, chosen by what the read is holding. When
+the predecessor's evidence IS being replayed — the ordinary lineage walk,
+in place or across a roll — the predecessor seal is **re-derived from the
+period's own WAL, spool and manifests, in the root that holds them**, and
+a stored sidecar that is not what they produce is refused naming the
+fields; that re-derivation also compares the `seal` RECORD with the
+sidecar field by field (§2.2), so a rewritten record over an honest
+sidecar refuses there too. When a later segment is named **alone**, the
+predecessor's inputs are not read, nothing re-derives anything, and the
+argument that lets a replay cross without an attestation is false — so the
+predecessor's **attestation is required** and its absence is a refusal
+that names it. The cost is real and stated: an unpruned lineage replays
+each period twice, once to re-derive its seal and once to narrate it.
 
 **"Verified" means re-derived, not self-consistent.** A sidecar whose digest
 matches its own canonical form proves integrity, not derivation. A seal is

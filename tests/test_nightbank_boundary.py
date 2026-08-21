@@ -595,15 +595,18 @@ def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: 
     assert f"  {rolled.resolve()}: period 2, attested [1]" in listed.output
     assert "2 root(s) planned" in listed.output
 
-    replayed = _invoke(
-        "journal", str(anchor_dir), *[str(path) for path in SMALL_FILES], "-p", str(props)
-    )
+    # DL-142: the estate files are no longer typed at all -- each period's
+    # catalog comes from its own bundle -- and the replay CROSSES the roll
+    replayed = _invoke("journal", str(anchor_dir))
     assert replayed.exit_code == 0, replayed.output
+    assert f"period 2 in {rolled.resolve()}: {wal_path(rolled.resolve(), 2)}" in replayed.output
+    assert "(not replayed)" not in replayed.output
+    assert "the replay stops" not in replayed.output
+    closing = read_journal(wal_path(run_root, 1))[-1]
     assert (
-        f"period 2 in {rolled.resolve()}: {wal_path(rolled.resolve(), 2)} (not replayed)"
-        in replayed.output
-    )
-    assert "the replay stops at the period 1/2 boundary" in replayed.output
+        f"period 1 sealed at index {closing['closes_at_index']};"
+        f" period 2 opens in {rolled.resolve()}"
+    ) in replayed.output
 
     assert _invoke("runs", str(anchor_dir)).exit_code == 0
 

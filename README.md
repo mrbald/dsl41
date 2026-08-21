@@ -556,8 +556,12 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   `audit` produces and `verify` consumes, and the two rules that are not one.
   Producing a checkpoint re-derives the period's seal from the four inputs ss11
   names — the opening seal, the complete ordered WAL, the immutable spool, and
-  the C1/C2 manifests, plus the sentinel for the single `source` derivation —
-  and requires the predecessor checkpoint present and verified; consuming one
+  the C1/C2 manifests, plus the sentinel for the single `source` derivation.
+  `prove_derived` is that comparison as a GATE rather than as a step of one
+  verb (DL-142): `audit` asks it before it writes a checkpoint and `dsl41
+  journal` asks it before it crosses a boundary, so a sidecar forged
+  consistently with its record and the successor's opening gets one refusal
+  wherever it is met. Producing also requires the predecessor checkpoint present and verified; consuming one
   accepts it ALONE, which is what lets a rolled root verify a chain whose
   earlier roots are gone. "Verified" means re-derived: a sidecar that matches
   its own canonical form proves integrity, not derivation
@@ -588,10 +592,17 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   `decision`'s `legacy_batch` is pinned three ways. Since DL-133 the records live in
   `wal/<segment_no>.jsonl` and `journal.jsonl` holds the one-line `period_root`
   sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`.
-  `read_journal` is one segment, which is what a replay and an audit each want;
-  `read_backfill` is what a subscriber resuming across a boundary wants — the
+  `read_journal` is one segment, which is what an appender and an audit each
+  want; `read_backfill` is what a subscriber resuming across a boundary wants — the
   retained segments walked newest first and stopped at the one holding its
-  cursor, plus the gap when the cursor is below them all (DL-135)
+  cursor, plus the gap when the cursor is below them all (DL-135). Both meet
+  three shared checks (DL-142): `check_segment_tail` (a closed segment ends in
+  its `seal` — one text, positioned per caller), `check_segment_identity` (this
+  file sits in the estate its sentinel names and holds the period its name
+  claims) and `check_segment_adjacency` (the newer opens from the older's seal,
+  one estate, a continuous index frontier) — extracted so the subscriber inside
+  a root and the cross-period replay across roots cannot disagree about one
+  broken chain
 - src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
   the mutex (an flock held for the process lifetime, so nothing has to decide
   whether the previous holder is alive), the epoch allocated by being appended to
@@ -632,7 +643,8 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   `lint`, `equiv`, `report`, `uc` (the U3a
   record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
   `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
-  preprocessor), `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,
+  preprocessor), `journal` (render-by-replay of a run WAL, crossing period
+  boundaries over re-derived seals — DL-142), `run` (headless executor: wall clock,
   real processes, control socket, stop with SIGINT/SIGTERM, and `--detached` runs CMD
   jobs under a supervisor that survives engine restarts), `rehearse` (virtual
   clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
@@ -721,6 +733,18 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
   catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
   `journal` CLI
+- tests/test_journal_replay.py — `dsl41 journal` ACROSS a boundary (DL-142): the
+  carry folded through the seal and the catalog switched, both read off one
+  trace over a real two-period estate; the optional-catalog ruling; and one
+  refusal per way a boundary can fail to prove out (torn tail — including the
+  two-fault precedence, broken chain, a `seal` record edited under an honest
+  sidecar, a correlated forgery of sidecar+record+opening that only
+  re-derivation catches, a segment named alone with an unattested predecessor,
+  grafted sidecar, missing sidecar, a root naming a stranger's estate, missing
+  bundle, a bundle that is not its address, a bundle that does not rebuild the
+  pinned catalog hash, missing opening manifest, a supplied catalog that
+  disagrees with the pin) — plus a three-period read that crosses two
+  boundaries and the rule that a refused crossing is never announced
 - tests/test_ledger.py — phase-12 stage S6: one leader per run root (a second
   engine refused, with the holder named), the ordering that makes it worth having
   (a refused resume leaves the log, the estate and the spool untouched), the

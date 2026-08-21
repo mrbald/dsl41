@@ -3536,6 +3536,20 @@ def test_a_closed_segment_with_a_torn_tail_refuses_rather_than_skipping_records(
         streamed = _subscribed(opened, run_root, since=0)
         assert streamed[1]["ok"] is False
         assert "a backfill across it would skip records silently" in streamed[1]["error"]
+        # PRECEDENCE, pinned (DL-142 review): the tail is decided BEFORE
+        # identity, sequence and contiguity. A segment that is BOTH torn
+        # and mis-identified names the tail -- the fault that makes the
+        # stream a lie -- and not the one a later check happens to reach
+        torn = segment.read_bytes()
+        both = [json.loads(line) for line in torn.splitlines()[:-1]]
+        both[0] = {**both[0], "estate_id": "e-stranger"}
+        from dsl41.canon import canonical_bytes
+
+        segment.write_bytes(b"".join(canonical_bytes(record) + b"\n" for record in both))
+        two_faults = _subscribed(opened, run_root, since=0)
+        assert two_faults[1]["ok"] is False
+        assert "a backfill across it would skip records silently" in two_faults[1]["error"]
+        assert "stranger's segment" not in two_faults[1]["error"]
         segment.write_bytes(intact)  # the gate, not the machinery
         assert any(r.get("rec") == "seal" for r in _subscribed(opened, run_root, since=0))
     finally:

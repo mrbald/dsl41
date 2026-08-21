@@ -746,15 +746,19 @@ uv run dsl41 run --resume --run-root <run>/engine-p2 --estate-anchor $R.anchor \
 uv run dsl41 audit --estate-anchor $R.anchor
 uv run dsl41 runs $R.anchor
 uv run dsl41 estate prune --estate-anchor $R.anchor --dry-run
-uv run dsl41 journal $R.anchor examples/nightbank/estate/small/*.jil -p $P
+uv run dsl41 journal $R.anchor
 ```
 
    One rule for all four: **name the lineage ANCHOR where you would name
    a run root.** `audit` re-derives period 1 in the old root and reports
    period 2 as still open; `runs` folds both roots into one table; `prune`
    reports one result over both, with each root's floors computed in its
-   own root; `journal` names every segment in period order and replays up
-   to the first boundary, printing where it stopped and how to continue.
+   own root; `journal` names every segment in period order and replays
+   every one of them, printing each boundary as it crosses it (`period 1
+   sealed at index I; period 2 opens in <run>/engine-p2`). It takes no
+   estate files: since DL-142 each period's catalog comes from that
+   period's own bundle, which is what lets one command replay a lineage
+   whose periods ran under different catalogs.
 
    Then move the old root away and run any of them again:
 

@@ -299,6 +299,40 @@ def verify_attestation(run_root: Path, period_id: int) -> Attestation:
     return attestation
 
 
+def prove_derived(run_root: Path, period_id: int, *, stored: Seal | None = None) -> Seal:
+    """ss11's "verified means re-derived", as a GATE rather than as a step
+    of one verb.
+
+    A sidecar whose digest matches its own canonical form proves INTEGRITY,
+    never DERIVATION: rewrite the artifact canonically, recompute its
+    digest, and copy that digest into the `seal` record and the successor's
+    opening, and every binding check in the tree still passes. The only
+    thing that does not is the period's own evidence, and this is where it
+    is asked.
+
+    ONE implementation and ONE refusal, because it is one question (DL-139,
+    DL-142). `audit` asks it before it writes a checkpoint; `dsl41
+    journal`'s cross-period replay asks it before it crosses a boundary,
+    for the reason a diagnosis surface has to: a narrated continuation over
+    a correlated forgery reads exactly like a true one.
+
+    `rederive_seal` does the work and the record/sidecar agreement check
+    (`check_record_names_sidecar`) on the way -- so a rewritten `seal`
+    RECORD over an honest sidecar refuses here too, and earlier, naming the
+    fields."""
+    if stored is None:
+        stored = read_seal(run_root, period_id)
+    rederived = rederive_seal(run_root, period_id, stored=stored)
+    if rederived.digest != stored.digest:
+        raise EngineError(
+            f"{seal_path(run_root, period_id)} does not re-derive"
+            f" ({'; '.join(_diff(rederived, stored))}): a sidecar whose digest matches"
+            " its own canonical form proves integrity, not derivation -- and this one"
+            " is not what the period's own evidence produces (period-model ss11)"
+        )
+    return stored
+
+
 def audit_period(
     run_root: Path, period_id: int, *, anchor: EstateAnchor | None = None
 ) -> Attestation:
@@ -349,14 +383,7 @@ def audit_period(
     previous: Attestation | None = None
     if period_id > 1:
         previous = verify_attestation(run_root, period_id - 1)
-    rederived = rederive_seal(run_root, period_id, stored=stored)
-    if rederived.digest != stored.digest:
-        raise EngineError(
-            f"{seal_path(run_root, period_id)} does not re-derive"
-            f" ({'; '.join(_diff(rederived, stored))}): a sidecar whose digest matches"
-            " its own canonical form proves integrity, not derivation -- and this one"
-            " is not what the period's own evidence produces (period-model ss11)"
-        )
+    prove_derived(run_root, period_id, stored=stored)
     # the induction, WRITTEN DOWN: one more than the predecessor reaches,
     # and 1 at the base case. It is `period_id` on a chain with no gap, and
     # `verify_attestation` above is what proved the predecessor had none --

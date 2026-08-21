@@ -225,22 +225,39 @@ survive into operation.
   `dsl41 query status --brief -S $S`, `query is-success -J <job> -S $S`
   (shell exit codes), `query subscribe -S $S` (live journal stream) for
   feeding the site monitoring.
-- Offline audit: `dsl41 journal <root>/journal.jsonl <estate files>`
-  replays the WAL with no engine — but it is hash-gated against the
-  exact estate *at its recorded paths*: the catalog hash covers source
-  file identity, so the byte-exact copies under
-  `<root>/catalogs/<source_bundle_hash>/` do not pass directly from a
-  different location (runner-design §7, a deliberate defer). Keep the
-  estate tag checked out where `sources.json`'s recorded paths say it was;
-  the stored copies are for inspection and for restoring that checkout,
-  not a drop-in replay input. *(Amended at the build of PR-02f.)* Name
-  the lineage ANCHOR directory instead of a root and the read is
-  estate-wide: every
-  period, its root and its segment, in registry order. The REPLAY still
-  stops at the first boundary — one oracle crossing a `segment` record has
-  to switch catalogs mid-stream, which is a change to the replay contract
-  and a unit of its own — and it prints the command that replays the next
-  period.
+- Offline audit: `dsl41 journal <root> [estate files]` replays the WAL
+  with no engine. *(Amended by DL-142.)* **The estate files are
+  optional.** Omit them and every period's catalog is loaded from that
+  period's own bundle under `<root>/catalogs/<source_bundle_hash>/`,
+  by the hash its opening `segment` pins — the bundle re-parses under the
+  ORIGINAL paths `sources.json` records, so it reproduces that hash
+  exactly. Give them and they are the FIRST replayed period's catalog,
+  hash-gated against its pin as before; later periods still come from
+  their own bundles, and a supplied catalog that disagrees with a pin
+  refuses rather than winning. `--permit-unknown` and `-p` therefore apply
+  to the files you SUPPLY and to nothing else: a bundle holds the exact
+  post-placeholder bytes the period ran, already past the launch gate. What is still true is the *path*
+  sensitivity: passing the stored copies yourself, from
+  `<root>/catalogs/<hash>/`, parses them under the STORED names and will
+  not match (runner-design §7, a deliberate defer) — let the verb load
+  them instead.
+  **The replay CROSSES boundaries.** A root argument replays every
+  segment the root retains, in period order; at each boundary the state
+  folds through the seal exactly as an engine opening the period does,
+  the next period's catalog is loaded from its bundle, and the boundary is
+  printed (`period N sealed at index I; period N+1 opens in <root>`). Name
+  one `wal/NNNNNN.jsonl` to replay exactly that period — it opens from
+  its own seal too, and because nothing re-derives that seal there, it
+  needs the predecessor **attested** (`dsl41 audit`) and says so if it is
+  not. Name the lineage ANCHOR directory instead of a root and the read is
+  estate-wide: every period, its root and its segment, in registry order,
+  replayed as one lineage across the roll. A boundary is crossed only over
+  a seal that proves out — the digest the record names, the record's own
+  fields against the sidecar, the chain, `next_period` agreement, and the
+  seal **re-derived from the period's own evidence** (§11), which is what
+  catches a sidecar, record and opening forged consistently together.
+  Anything less refuses by name. The re-derivation costs one extra replay
+  per crossed boundary.
 - Offline history: `dsl41 runs <root>... [--job NAME] [--since ISO8601]
   [--format table|json|csv]` folds one or more run roots' journal +
   manifest + spool into one row per job run — "how long did it take, run
@@ -433,7 +450,7 @@ lineage ANCHOR where you would name a run root**:
 ```sh
 A=/srv/dsl41/runs/<first>.anchor
 dsl41 audit --estate-anchor $A                  # every closed period, in its own root
-dsl41 journal $A /srv/dsl41/estate/*.jil        # every segment, in period order
+dsl41 journal $A                                # every segment, replayed in period order
 dsl41 runs $A                                   # one table across every root
 dsl41 estate prune --estate-anchor $A --dry-run # one retention result
 ```
@@ -450,13 +467,13 @@ command by name. Nothing is skipped quietly — a total that silently left a
 root out is worse than no total. If you have archived a root away on
 purpose, use the single-root form for the roots you still have.
 
-Two limits, stated where you meet them. `dsl41 journal` names every
-segment but **replays only up to the first boundary**: one oracle crossing
-a `segment` record has to switch catalogs mid-stream, which is a change to
-the replay contract; the command prints where it stopped and how to replay
-the next period. And `estate prune` plans each root separately — the
-floors, the refusals and `--keep-runs` are per root — because a plan is
-bound to the root it was computed over.
+One limit, stated where you meet it: `estate prune` plans each root
+separately — the floors, the refusals and `--keep-runs` are per root —
+because a plan is bound to the root it was computed over. `dsl41 journal`
+names every segment and **replays all of them** (DL-142): each boundary is
+folded through its seal, the next period's catalog comes from its own
+bundle, and the crossing is printed. It needs no estate-file argument, for the
+same reason `runs` does not — the estate holds its own catalogs.
 
 **Adoption is retired (DL-138).** `dsl41 estate adopt` took a run root
 written before the periodized layout — a `header` journal and `manifest/` —

@@ -36,11 +36,13 @@ from dsl41.ir import CatalogIR
 from dsl41.period import root_is_unused
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from dsl41.boundary import EstateWalk
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner_history import RunRow
+    from dsl41.seal import CarriedRows
 
 
 # ------------------------------------------------------------------- runner (phase 11)
@@ -816,12 +818,18 @@ def journal(
     journal_file: Path = typer.Argument(
         ...,
         help="Run journal to replay: an estate root, its journal.jsonl sentinel, or a"
-        " wal/NNNNNN.jsonl segment. A root or a sentinel resolves to the ACTIVE"
-        " segment (the current period); name an earlier wal/NNNNNN.jsonl to replay"
-        " an earlier one. Name the lineage ANCHOR directory instead and the read is"
+        " wal/NNNNNN.jsonl segment. A root or a sentinel replays EVERY segment the"
+        " root retains, in period order; name one wal/NNNNNN.jsonl to replay exactly"
+        " that period. Name the lineage ANCHOR directory instead and the read is"
         " ESTATE-WIDE: every root the registry holds, in period order.",
     ),
-    files: list[Path] = typer.Argument(..., help="JIL files forming the catalog the run used"),
+    files: list[Path] = typer.Argument(
+        None,
+        help="JIL files forming the catalog the FIRST replayed period ran under."
+        " OPTIONAL since DL-142: omitted, every period's catalog is loaded from the"
+        " estate's own content-addressed bundle, by the hash that period's opening"
+        " `segment` pins.",
+    ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
@@ -833,103 +841,362 @@ def journal(
     stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
     explicitly.
 
-    **Pointed at the ESTATE it names every segment in the lineage.** Given
-    the anchor directory it walks ss1.3's archive registry -- every period,
-    in period order, with the root that holds it -- so period 1 is found
-    after a physical roll without knowing which root it went to (PR-02f).
-    The REPLAY still stops at the first boundary, where it stops today: one
-    oracle crossing a `segment` record has to switch catalogs mid-stream
-    and seed the period's carried rows, which is a change to the replay
-    contract and a unit of its own (period-model ss11; DL-136). The stop is
-    printed, never silent, with the command that replays the next period.
+    **It CROSSES boundaries** (period-model ss11; DL-142). At each `segment`
+    record the replay folds state through the seal exactly as an engine
+    opening the period does -- `open_from_seal`, the one opener -- loads the
+    next period's catalog from the bundle that segment pins, and continues.
+    The boundary is narrated, never silent -- and only once it has been
+    crossed. A boundary is crossed only over a seal that proves out: the
+    digest the record names, the record's own fields against the sidecar
+    (ss2.2), the chain, `next_period` agreement, and the seal RE-DERIVED
+    from the period's own evidence -- or, for a later segment named alone,
+    its predecessor's attestation. Anything less refuses by name, because a
+    read-only replay across a forged seal would narrate a forged
+    continuation just as confidently as a true one.
+
+    **The catalog argument is optional and never wins over a pin.** The
+    estate has held its own inputs since DL-130 and a bundle re-parses under
+    the ORIGINAL paths `sources.json` records, so it reproduces the very
+    `catalog_hash` the segment pins -- which is what lets this verb answer
+    with no estate-file argument at all, as `dsl41 runs` already does. Files GIVEN are the FIRST replayed period's catalog and are
+    hash-gated against its pin exactly as before; later periods still come
+    from their own bundles, because one supplied catalog cannot be many
+    periods' catalogs. Files OMITTED, every period including the first comes
+    from its bundle. `--permit-unknown` and `-p` therefore govern the files
+    a caller SUPPLIES and nothing else: a bundle is the bytes the period
+    ran, already through the launch gate and already post-placeholder.
+
+    **Pointed at the ESTATE it replays the whole lineage.** Given the anchor
+    directory it walks ss1.3's archive registry -- every period, in period
+    order, with the root that holds it -- so period 1 is found after a
+    physical roll without knowing which root it went to (PR-02f), and the
+    roll is crossed like any other boundary.
     """
     from dsl41.boundary import is_anchor_dir
 
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
+    catalog = load_catalog_or_exit_2(files, permit_unknown, properties) if files else None
     if is_anchor_dir(journal_file):
         _replay_estate(walk_estate_or_exit_2(journal_file), catalog)
         return
-    _replay_segment(journal_file, catalog)
+    _replay_lineage(_segments_named(journal_file), catalog)
 
 
-def _replay_estate(walk: "EstateWalk", catalog: CatalogIR) -> None:
-    """Every segment the registry names, in period order -- and then the
-    trace of the one the replay contract reaches.
+def _segments_named(target: Path) -> list[Path]:
+    """Which segments the caller meant by one path.
+
+    A ROOT or a sentinel means the whole root -- every period it retains, in
+    order. That is the same correction DL-136 made to `dsl41 runs`: a reader
+    that resolved a root to its ACTIVE segment was right while a root held
+    one journal and became silently wrong the moment a root held one per
+    period, answering about the current night and saying nothing about the
+    nights before it. A `wal/NNNNNN.jsonl` names exactly one period and
+    still replays exactly that one."""
+    from dsl41.period import estate_segments, resolve_wal
+
+    resolved = resolve_wal(target)
+    whole_root = Path(target).is_dir() or Path(target) != resolved
+    return estate_segments(target) if whole_root else [resolved]
+
+
+def _replay_estate(walk: "EstateWalk", catalog: "CatalogIR | None") -> None:
+    """Every segment the registry names, in period order, replayed as one
+    lineage.
 
     **The enumeration comes first and completes.** It is the estate-wide
-    half: each period, the root that holds it and the segment file,
-    whether or not this build can replay it. Replaying inside that loop
-    put the whole listing behind one segment's catalog gate -- and the
-    verb takes ONE catalog for a lineage whose periods differ by catalog
-    almost by definition, so the common case printed period 1's refusal
-    and nothing else. What is NOT here is a replay that crosses a
-    boundary, and that is said before the replay rather than after it, so
-    a refused replay still leaves an operator the stream and the way
-    on."""
+    half: each period, the root that holds it and the segment file, whether
+    or not the replay below reaches it. Replaying inside that loop put the
+    whole listing behind one segment's gate, so a refused replay printed
+    period 1's refusal and nothing else. What is named is exactly what is
+    replayed -- the walk's rows, not the disk's -- so a segment the registry
+    has not finalized cannot appear in one half and be missing from the
+    other."""
     from dsl41.period import wal_path
 
-    for position, entry in enumerate(walk.periods):
+    for entry in walk.periods:
         segment = wal_path(entry.root, entry.period_id)
-        tail = " (not replayed)" if position else ""
-        typer.echo(f"period {entry.period_id} in {entry.root}: {segment}{tail}")
-    first = walk.periods[0]
-    if len(walk.periods) > 1:
-        after = walk.periods[1]
-        typer.echo(
-            f"the replay stops at the period {first.period_id}/{after.period_id}"
-            " boundary: crossing a `segment` record means switching catalogs"
-            " mid-stream and seeding the period's carried rows, which is a change to"
-            " the replay contract and a unit of its own (period-model ss11; DL-136)."
-            " Replay the next period on its own: `dsl41 journal"
-            f" {wal_path(after.root, after.period_id)} <the files it opened with>`",
-            err=True,
-        )
-    _replay_segment(
-        wal_path(first.root, first.period_id),
+        typer.echo(f"period {entry.period_id} in {entry.root}: {segment}")
+    # LABELLED even for a one-period lineage: an estate-wide answer names
+    # the period it is about, and a walk of a lineage that has not rolled
+    # yet is still an estate-wide answer
+    _replay_lineage(
+        [wal_path(entry.root, entry.period_id) for entry in walk.periods],
         catalog,
-        where=f"period {first.period_id} in {first.root}",
+        labelled=True,
     )
 
 
-def _replay_segment(journal_file: Path, catalog: CatalogIR, *, where: str = "") -> None:
-    """One segment, replayed through a fresh Oracle. ONE implementation:
-    the estate-wide read differs in which segments it names, never in what
-    replaying one of them means."""
-    from dsl41.oracle import Oracle
-    from dsl41.oracle_state import OracleError
-    from dsl41.period import catalog_hash_for, opening_at
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-    from dsl41.runner_journal import read_journal, replay_inputs
+def _label(segment: Path) -> str:
+    """`period N in ROOT` for one segment file, read off the layout alone
+    (I1: segment N is period N).
 
-    named = f"{where}: " if where else ""
+    Only a MANY-segment read is labelled, and every many-segment list comes
+    from `estate_segments` or from the walk -- both of which spell
+    `wal/NNNNNN.jsonl` and nothing else. A root with no `wal/` yields ONE
+    file, which this never sees."""
+    from dsl41.period import root_of_wal
+
+    return f"period {int(segment.stem)} in {root_of_wal(segment)}"
+
+
+def _replay_lineage(
+    segments: "Sequence[Path]", catalog: "CatalogIR | None", *, labelled: bool = False
+) -> None:
+    """One lineage's segments, replayed as ONE run of the state machine.
+
+    A period does not start from nothing and does not keep its predecessor's
+    catalog. So each segment gets a fresh interpreter opened from the seal
+    the segment names -- the same `open_from_seal` fold an engine performs
+    (period-model ss7 phase 3) -- under the catalog its own bundle holds,
+    and the traces concatenate. Crossing a boundary is therefore the spec's
+    own opening, not a second way to do it.
+
+    Every boundary is PROVED before it is crossed: the segment must sit
+    where it says it does (`check_segment_identity`), the seal record that
+    closes the older segment must be the one the newer opens from, with one
+    estate and a continuous index frontier (`check_segment_adjacency`), and
+    the sidecar on disk must be the seal that opening stands on
+    (`prove_opening`). Refuse-don't-degrade applies to a diagnosis surface
+    as much as to an engine (DL-139): a narrated continuation across a
+    forged seal reads exactly like a true one.
+
+    **The crossing is announced only once it has happened.** The period is
+    OPENED first -- catalog and carry, both of which can refuse -- and the
+    line prints after. Printed before, it stated as fact the very crossing
+    the refusal on the next line denied. It goes to STDOUT with the trace
+    and not to stderr, deliberately: a reader who dropped stderr would be
+    handed two periods' transitions concatenated with no seam, which is the
+    "shorter trace that looks whole" this unit exists to stop.
+
+    `labelled` forces the per-period prefix on a read whose segments happen
+    to number one -- an estate-wide walk of a lineage with a single period
+    is still an estate-wide answer, and its refusals name the period."""
+    from dsl41.period import root_of_wal
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_journal import (
+        check_segment_adjacency,
+        check_segment_identity,
+        check_segment_tail,
+        read_journal,
+    )
+
+    labelled = labelled or len(segments) > 1
+    previous: list[dict] | None = None
+    previous_segment: Path | None = None
+    for position, segment in enumerate(segments):
+        where = _label(segment) if labelled else ""
+        try:
+            records = read_journal(segment)
+            if position < len(segments) - 1:
+                # this reader knows a segment is CLOSED by its place in the
+                # list it was given, which is before it replays the segment
+                # -- so a torn tail refuses ahead of the trace rather than
+                # after it (`check_segment_tail`: positioned per caller)
+                check_segment_tail(segment, records)
+            check_segment_identity(segment, records[0])
+            if previous is not None:
+                check_segment_adjacency(
+                    previous, records, where=f"journal {previous_segment} -> {segment}"
+                )
+        except (OSError, EngineError) as exc:
+            raise typer.Exit(refuse(exc, prefix=where)) from exc
+        root = root_of_wal(segment)
+        if records[0].get("opens_from_seal") is not None:
+            _prove_crossing(
+                root,
+                records[0],
+                predecessor=(
+                    None if previous_segment is None else root_of_wal(previous_segment)
+                ),
+                where=where,
+            )
+        opened = _open_period(
+            root, records[0], catalog if position == 0 else None, where=where
+        )
+        if previous is not None:
+            typer.echo(
+                f"period {previous[-1]['period_id']} sealed at index"
+                f" {previous[-1]['closes_at_index']}; period"
+                f" {records[0]['period_id']} opens in {root}"
+            )
+        _run_period(records, opened, where=where)
+        previous, previous_segment = records, segment
+
+
+def _prove_crossing(
+    root: Path, opening: dict, *, predecessor: "Path | None", where: str
+) -> None:
+    """ss11's "verified means RE-DERIVED, not self-consistent", asked of the
+    seal this period opens from -- before the period is opened and before
+    the crossing is announced.
+
+    Every other check on this path proves INTEGRITY and BINDING: the
+    sidecar digests to what the record names, the record is what the
+    opening names, the fields agree. A forger who rewrites the sidecar
+    canonically, recomputes its digest and copies that digest into both the
+    closing `seal` record and the successor's opening passes all of them,
+    and the replay would then narrate state that no run ever produced. Two
+    proofs close that, and which one is available is a fact about what this
+    read is holding:
+
+    * **the predecessor's evidence is being replayed** (the ordinary
+      lineage walk, in place or across a roll) -- `attest.prove_derived`
+      rebuilds the predecessor seal from the period's own WAL, spool and
+      manifests, in the root that HOLDS them, and refuses when the stored
+      sidecar is not what they produce. `rederive_seal` also runs
+      `check_record_names_sidecar` on the way, so a rewritten `seal` RECORD
+      over an honest sidecar refuses here too, naming the fields.
+    * **a later segment was named ALONE** -- the predecessor's inputs are
+      not being read, so there is nothing to re-derive from and the "the
+      replay reads the inputs" argument that lets this verb cross without
+      an attestation is simply false. What stands for a period whose
+      evidence this read does not hold is the attestation (ss11), so it is
+      required here and its absence is a refusal that names it.
+
+    The cost is stated where it is paid: an unpruned lineage replays each
+    period twice, once to re-derive its seal and once to narrate it."""
+    from dsl41.attest import prove_derived, verify_attestation
+    from dsl41.runner_clock import EngineError
+
+    link = opening["opens_from_seal"]
+    period_id = int(link["period_id"])
     try:
-        records = read_journal(journal_file)
+        if predecessor is None:
+            verify_attestation(root, period_id)
+        else:
+            prove_derived(predecessor, period_id)
     except (OSError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=where)) from exc
-    opening = records[0]
-    # like for like (period-model ss1.1): the recipe is the one the
-    # `segment` itself pins, never the one this build happens to write
-    if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
+
+
+def _open_period(
+    root: Path, opening: dict, supplied: "CatalogIR | None", *, where: str
+) -> "tuple[CatalogIR, CarriedRows | None]":
+    """ss7 phase 3, offline: what this period opened with -- its catalog and
+    its carried rows -- or a refusal naming which of them could not be
+    proved. Nothing is printed here, so a boundary that cannot be opened is
+    never announced as opened."""
+    return (
+        _period_catalog(root, opening, supplied, where=where),
+        _period_carry(root, opening, where=where),
+    )
+
+
+def _run_period(
+    records: list[dict], opened: "tuple[CatalogIR, CarriedRows | None]", *, where: str
+) -> None:
+    """ONE period, replayed and printed. ONE implementation: a
+    single-segment read and a lineage that crosses four boundaries differ
+    in which segments they name, never in what replaying one of them
+    means."""
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_state import OracleError
+    from dsl41.period import opening_at
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
+    from dsl41.runner_journal import replay_inputs
+
+    catalog, carried = opened
+    named = f"{where}: " if where else ""
+    oracle = Oracle(catalog, carried=carried)
+    # reproducing a log means reproducing the genesis the engine replayed it
+    # onto, not only the catalog: a routing-table input lands on a table that
+    # already holds this engine's own executor (concurrency-model ss8), and a
+    # replay without it would decide "no such host" where the run decided
+    # otherwise. The stamp only reaches `last_contact`, which no input reads.
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
+    try:
+        replay_inputs(oracle, records)
+    except (OracleError, EngineError) as exc:
+        raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
+    for entry in oracle.trace():
+        typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+
+
+def _period_catalog(
+    root: Path, opening: dict, supplied: "CatalogIR | None", *, where: str
+) -> CatalogIR:
+    """This period's catalog: the caller's files when they gave any, else
+    the estate's own bundle -- and in BOTH cases like for like against the
+    hash the `segment` itself pins (period-model ss1.1), never the one this
+    build happens to write.
+
+    The two mismatches keep two texts on purpose. They send a reader to two
+    different artifacts: a supplied catalog that disagrees is a checkout at
+    the wrong revision, and a BUNDLE that disagrees is the estate's own
+    stored bytes failing to rebuild what they ran as -- corruption, or a
+    build whose lowering moved under a pin that did not.
+
+    A bundle is loaded with `permit_unknown`, always, and not from the CLI
+    flag: these are the exact bytes this period RAN, the gate that decided
+    whether an unknown attribute was acceptable ran once at launch, and
+    re-asking it here would make `dsl41 journal` refuse a root that `dsl41
+    runs` answers about (`load_catalog_from_manifest` made the same call).
+    The `catalog_hash` pin below is what proves like for like; the flag
+    still governs the files a caller supplies."""
+    from dsl41.boundary import load_bundle_catalog
+    from dsl41.period import catalog_hash_for
+    from dsl41.runner_clock import EngineError
+
+    named = f"{where}: " if where else ""
+    if supplied is None:
+        try:
+            catalog = load_bundle_catalog(
+                root, str(opening["source_bundle_hash"]), permit_unknown=True
+            )
+        except EngineError as exc:
+            raise typer.Exit(refuse(exc, prefix=where)) from exc
+        if opening["catalog_hash"] != catalog_hash_for(opening, catalog):
+            typer.echo(
+                f"{named}the bundle {opening['source_bundle_hash']} does not reproduce"
+                " the catalog hash this segment pins -- the stored inputs are not the"
+                " ones this period ran (period-model ss1.1)",
+                err=True,
+            )
+            raise typer.Exit(2)
+        return catalog
+    if opening["catalog_hash"] != catalog_hash_for(opening, supplied):
         typer.echo(
             f"{named}catalog hash mismatch: the estate differs from the one this"
             " journal ran (runner-design ss7: no silent semantic drift)",
             err=True,
         )
         raise typer.Exit(2)
-    oracle = Oracle(catalog)
-    # reproducing a log means reproducing the genesis the engine replayed it
-    # onto, not only the catalog: a routing-table input lands on a table that
-    # already holds this engine's own executor (concurrency-model ss8), and a
-    # replay without it would decide "no such host" where the run decided
-    # otherwise. The stamp only reaches `last_contact`, which no input reads.
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(opening))
+    return supplied
+
+
+def _period_carry(root: Path, opening: dict, *, where: str) -> "CarriedRows | None":
+    """The rows this period OPENED with, or None for period 1.
+
+    `attest.carried_from_opening` is the one derivation of that fact and
+    `open_from_seal` is the one opener; this adds only the ss11 proofs a
+    reader owes before it trusts a sidecar it did not write. A period
+    replayed from an EMPTY oracle derives revisions and run numbers the log
+    never recorded and refuses at the first admitted input that touches a
+    carried entity (DL-136) -- so a later segment named ALONE was already
+    unreplayable, and this is what makes the command DL-141 printed work."""
+    from dsl41.attest import carried_from_opening
+    from dsl41.period import check_manifest_against_segment, read_period_manifest
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_history import RunHistoryError, prove_opening
+
+    if opening.get("opens_from_seal") is None:
+        return None  # period 1: opened from a catalog and nothing else
+    period_id = int(opening["period_id"])
     try:
-        replay_inputs(oracle, records)
-    except OracleError as exc:
-        raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
-    for entry in oracle.trace():
-        typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+        prove_opening(root, opening)
+        manifest = read_period_manifest(root, period_id)
+        if manifest is None:
+            raise EngineError(
+                f"{root}: periods/{period_id:06d}/manifest.json is not there -- the"
+                " opening seal is folded against this period's committed manifest and"
+                " the boundary's own artifacts may never be pruned (period-model"
+                " ss11, ss12)"
+            )
+        # PR-22: the manifest and the segment are ONE object written twice
+        check_manifest_against_segment(manifest, opening)
+        return carried_from_opening(root, opening, manifest)
+    except (OSError, EngineError, RunHistoryError) as exc:
+        raise typer.Exit(refuse(exc, prefix=where)) from exc
 
 
 class RunsFormat(str, Enum):

@@ -6907,3 +6907,52 @@
   PR-Q3). 2963 -> 2991 collected; seventeen walk mutations red; the
   two-root fixtures roll through the REAL boundary and read every id
   off the estate.
+- DL-142 the replay crosses the boundary: `dsl41 journal` walks a
+  lineage (2026-08-21; period-model ss11 -- the unit DL-136 (6) named
+  and DL-141 printed a stop for; two adversarial rounds, three
+  blockers folded).
+  At each `segment` the verb OPENS the next period the spec's own way
+  -- `carried_from_opening` -> `open_from_seal`, then that period's
+  catalog from the bundle the segment pins -- and continues; the
+  crossing prints, on stdout with the trace, and only AFTER the period
+  opened: printed before, it stated as fact the crossing the next line
+  refused.
+  Crossing is GATED, because a read-only replay over a forged seal
+  narrates a forged continuation as confidently as a true one
+  (DL-139), and INTEGRITY is not enough: rewrite a sidecar
+  canonically, recompute its digest and copy it into the closing
+  `seal` record and the successor's opening, and every binding check
+  agrees. So the crossing proves DERIVATION. `attest.prove_derived` --
+  `audit`'s own re-derivation comparison, lifted out of `audit_period`
+  so one question has one refusal -- rebuilds the predecessor seal
+  from that period's WAL, spool and manifests in the root that HOLDS
+  them, and `rederive_seal` runs `check_record_names_sidecar` on the
+  way, so a `seal` RECORD edited under an honest sidecar refuses
+  naming the field. When a later segment is named ALONE nothing
+  re-derives anything and the "the replay reads the inputs" licence is
+  false, so the predecessor's ATTESTATION is required and its absence
+  is named. Cost, stated: an unpruned lineage replays each period
+  twice. Limit, stated: evidence legitimately pruned after attestation
+  refuses the lineage walk's crossing -- the named-alone mode is the
+  attestation-gated workaround; no generic-catch fallback, because
+  "pruned" and "disagrees" must not share an exception path.
+  Around it, `check_segment_tail`, `check_segment_identity` and
+  `check_segment_adjacency` -- all three EXTRACTED from
+  `read_backfill`, the tail one POSITIONED per caller at each reader's
+  own "this segment is closed" point and keeping the backfill's
+  verbatim text, so a doubly-faulted segment names the tail in both
+  readers -- plus `prove_opening`, made public and reader-neutral.
+  THE CATALOG ARGUMENT IS OPTIONAL and never beats a pin: a bundle
+  re-parses under the ORIGINAL paths, so it reproduces the very
+  `catalog_hash` the segment carries. Files given gate the FIRST
+  period only; later periods always come from their own bundles.
+  Bundles load `permit_unknown` unconditionally -- the bytes already
+  passed the launch gate, and the CLI flag there would have made
+  `journal` refuse a root `runs` answers about.
+  A ROOT argument now replays EVERY segment it retains; one
+  `wal/NNNNNN.jsonl` still replays one period and now seeds itself
+  from its own seal, which is what makes DL-141's printed command
+  work. Estate-wide reads label periods even when the lineage has one.
+  2991 -> 3012 collected; the correlated forgery, the record edit
+  under an honest sidecar, the unattested named-alone refusal and the
+  two-fault tail precedence all pinned red-first.

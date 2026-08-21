@@ -815,7 +815,7 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
             f"{run_root}: run history requires a journal starting with a segment record"
         )
     period_id = records[0]["period_id"]
-    _prove_opening(run_root, records[0])
+    prove_opening(run_root, records[0])
     spool = _read_all_spool(records)
     period_manifest = _period_manifest_or_refuse(run_root, period_id)
     if period_manifest is None:
@@ -850,12 +850,23 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
     return fold_run_rows(records, catalog=catalog, trace=trace, spool=spool, carried=carried)
 
 
-def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
-    """A period whose opening NAMES a seal must hold that sidecar, BEFORE
-    any degradation branch runs: the manifest-missing path returns
-    `records_only` rows, and without this proof it would return them from
-    an opening this root cannot prove -- the same hole `_opening_rows`
-    closes for the full-fidelity path (period-model ss11, PR-50)."""
+def prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
+    """A period whose opening NAMES a seal must hold that sidecar, and the
+    sidecar must BE the seal this opening stands on (period-model ss11).
+
+    The ss11 ladder, offline: the digest the naming record carries, the
+    period and estate the sidecar claims, the instant it closed, and every
+    `next_period` field the opening `segment` repeats. ONE implementation
+    across every offline reader (DL-139): run history calls it BEFORE any
+    degradation branch -- the manifest-missing path returns `records_only`
+    rows, and without this proof it would return them from an opening this
+    root cannot prove -- and `dsl41 journal`'s cross-period replay calls it
+    at every boundary it crosses, for the reason DL-139 gives about
+    diagnosis surfaces: a replay that narrated a forged continuation would
+    be worse than one that refused.
+
+    Public and reader-neutral: the refusal names the root and the record,
+    never the tool that met them."""
     link = opening.get("opens_from_seal")
     if not isinstance(link, Mapping):
         return  # period 1: opened from nothing
@@ -866,8 +877,8 @@ def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
     except (OSError, EngineError, ValueError, TypeError) as exc:
         raise RunHistoryError(
             f"{run_root}: this period opens from seal {digest!r} of period"
-            f" {period_id!r} and that sidecar cannot be read ({exc}) -- history"
-            " refuses an unproved opening (period-model ss11, PR-50)"
+            f" {period_id!r} and that sidecar cannot be read ({exc}) -- an"
+            " unproved opening (period-model ss11, PR-50)"
         ) from exc
     staged = seal.next_period
     # the projection is DERIVED, never listed: every `next_period` field
@@ -892,7 +903,7 @@ def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
             f"{run_root}: the sidecar at period {period_id!r} is not the seal this"
             f" opening stands on (seal: period {seal.period_id}, estate"
             f" {seal.estate_id}, opens {seal.next_period.period_id}) -- an identity"
-            " graft, history refuses the unproved opening (period-model ss11, PR-50)"
+            " graft, an unproved opening (period-model ss11, PR-50)"
         )
 
 

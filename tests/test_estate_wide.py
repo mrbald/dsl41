@@ -44,12 +44,14 @@ from dsl41.period import (
     Sentinel,
     attestation_path,
     read_sentinel,
+    seal_path,
     sentinel_path,
     wal_path,
     write_sentinel,
 )
 from dsl41.runner_adapters import LocalCommandAdapter
 from dsl41.runner_clock import EngineError, RealClock
+from dsl41.runner_journal import read_journal
 from dsl41.runner_procid import durable_write
 from dsl41.runner_startup import resume_run
 
@@ -489,42 +491,76 @@ def test_a_busy_lineage_lock_does_not_end_the_estate_wide_audit(tmp_path: Path) 
     assert stored.periods["1"].attested and stored.periods["2"].attested
 
 
-def test_pr02f_journal_names_every_segment_and_stops_where_the_replay_does(
+def test_dl142_journal_names_every_segment_and_replays_across_the_roll(
     tmp_path: Path,
 ) -> None:
     """`journal` pointed at the estate names the whole record stream --
-    every period, its root and its segment, in period order -- and replays
-    as far as the replay contract reaches.
+    every period, its root and its segment, in period order -- and REPLAYS
+    it, roll included (DL-142).
 
-    The REPLAY still stops at the first boundary, where it stops today: one
-    oracle crossing a `segment` record has to switch catalogs mid-stream
-    and seed the period's carried rows, which DL-136 named as a unit of its
-    own. The stop is printed with the command that continues, because a
-    shorter trace that looks whole is the failure mode here."""
+    A physical roll is not a second kind of boundary: the seal record that
+    closes period 1 is in root A and the segment that opens period 2 is in
+    root B, and the same adjacency proof binds the pair across two
+    directories as binds it inside one. `j2` is defined only in C2 and runs
+    only in period 2, so it is narrated at all only if the catalog switched
+    in root B -- under the C1 the caller supplied there is no such job."""
     line = _lineage(tmp_path)
 
     out = _invoke("journal", str(line.anchor), str(line.c1))
     assert out.exit_code == 0, out.output
     assert f"period 1 in {line.root_a}: {wal_path(line.root_a, 1)}" in out.output
-    assert f"period 2 in {line.root_b}: {wal_path(line.root_b, 2)} (not replayed)" in out.output
-    # period 1 is REPLAYED, not merely named
+    assert f"period 2 in {line.root_b}: {wal_path(line.root_b, 2)}" in out.output
+    assert "(not replayed)" not in out.output
+    # period 1, in root A, under the catalog the caller supplied
     assert "j1 INACTIVE->STARTING" in out.output and "j1 RUNNING->SUCCESS" in out.output
-    assert "the replay stops at the period 1/2 boundary" in out.output
-    assert "DL-136" in out.output
-    assert f"dsl41 journal {wal_path(line.root_b, 2)}" in out.output
+    # the boundary is narrated, and it names the root the lineage rolled INTO
+    closing = read_journal(wal_path(line.root_a, 1))[-1]
+    assert closing["rec"] == "seal"
+    assert (
+        f"period 1 sealed at index {closing['closes_at_index']};"
+        f" period 2 opens in {line.root_b}"
+    ) in out.output
+    # period 2, in root B, under root B's own bundle: j2 is C2's alone
+    assert "j2 INACTIVE->STARTING" in out.output and "j2 RUNNING->SUCCESS" in out.output
+    # DL-141's stop is gone -- the replay continues instead of naming a command
+    assert "the replay stops" not in out.output and "DL-136" not in out.output
 
-    # a REFUSED replay does not shorten the enumeration. The verb takes one
-    # catalog for a lineage whose periods differ by catalog almost by
-    # definition, so this is the ordinary case and not a corner: the whole
-    # stream is named, the stop is explained, and only the trace is missing
+    # a REFUSED replay does not shorten the enumeration: the whole stream
+    # is named first, and only the trace is missing. C2 is a real catalog
+    # of this estate and is still not period 1's, so the supplied files
+    # lose to the pin rather than quietly re-baselining the read
     mismatched = _invoke("journal", str(line.anchor), str(line.c2))
     assert mismatched.exit_code == 2
     assert f"period 1 in {line.root_a}: catalog hash mismatch" in mismatched.output
     assert f"period 1 in {line.root_a}: {wal_path(line.root_a, 1)}" in mismatched.output
-    assert f"period 2 in {line.root_b}: {wal_path(line.root_b, 2)} (not replayed)" in (
-        mismatched.output
-    )
-    assert "the replay stops at the period 1/2 boundary" in mismatched.output
+    assert f"period 2 in {line.root_b}: {wal_path(line.root_b, 2)}" in mismatched.output
+    assert "STARTING" not in mismatched.output
+
+    # and with NO files at all the estate answers out of its own bundles,
+    # in both roots, with the same trace (DL-130; DL-142's ruling)
+    unaided = _invoke("journal", str(line.anchor))
+    assert unaided.exit_code == 0, unaided.output
+    assert unaided.output == out.output
+
+
+def test_dl142_journal_refuses_a_rolled_boundary_it_cannot_prove(tmp_path: Path) -> None:
+    """The roll is where the trust rule earns its keep: root B holds an
+    IMPORTED sidecar and none of period 1's evidence, so the sidecar is the
+    only thing standing between the reader and a forged continuation.
+
+    Remove it and the estate-wide replay refuses BY NAME at the period that
+    could not be proved -- after period 1's trace, which is honest and
+    stays, and before period 2's, which would have been narrated out of an
+    opening this root cannot prove (period-model ss11; DL-139)."""
+    line = _lineage(tmp_path)
+    seal_path(line.root_b, 1).unlink()
+
+    out = _invoke("journal", str(line.anchor), str(line.c1))
+    assert out.exit_code == 2
+    assert f"period 2 in {line.root_b}" in out.output
+    assert "unproved opening" in out.output
+    assert "j1 RUNNING->SUCCESS" in out.output  # period 1 answered
+    assert "j2" not in out.output  # and the forged continuation did not
 
 
 def test_pr02f_runs_folds_every_root_into_one_table(tmp_path: Path) -> None:
