@@ -1007,6 +1007,63 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
     return index
 
 
+def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
+    """The typed effects one `decision` planned (period-model ss2.3).
+
+    ONE decoder for one question. "Is this decision's effect list valid" has
+    exactly one answer, and every reader of a `decision` gets it here:
+    `read_outbox` rebuilds the outbox from it, `runner_history` reads the
+    executor and the bound run_id out of the same list. History walked it
+    raw until DL-139 and skipped whatever did not look right, so a corrupt
+    log came out as a run with no executor rather than as a refusal.
+
+    It REFUSES, never degrades, because a decision is durable evidence. A
+    `decision` record has exactly one shape: a LIST `effects`. `.get(...) or
+    []` would read a corrupt or foreign record as an empty native decision
+    -- intents silently lost, provenance silently invented -- so the shape
+    is checked, not defaulted around.
+
+    No `where` argument: the record names itself by `index`, so the same
+    corrupt record gets the SAME refusal whichever reader met it. `rec` and
+    `legacy_batch` are `check_record`'s, upstream of every caller
+    (DL-138)."""
+    effects_field = record.get("effects")
+    if not isinstance(effects_field, list):
+        raise EngineError(
+            f"decision at index {record.get('index')}: effects is"
+            f" {type(effects_field).__name__}, not a list (DL-118)"
+        )
+    parsed_effects: list[Effect] = []
+    for effect in effects_field:
+        try:
+            parsed = Effect.model_validate(effect)
+        except ValidationError as exc:
+            # strict fields surface here: `generation: false` or "0"
+            # must not coerce past the fold's exact-0 gate
+            raise EngineError(
+                f"decision at index {record.get('index')}: malformed effect: {exc}"
+            ) from exc
+        if parsed.run_id is not None and not is_valid_run_id(parsed.run_id):
+            # any run_id a decision carries is in the ss11a grammar
+            raise EngineError(
+                f"decision at index {record.get('index')}: effect"
+                f" {parsed.effect_id} carries run_id {parsed.run_id!r} outside"
+                " the ss11a grammar (DL-118)"
+            )
+        if parsed.generation is None or (parsed.kind == "SPAWN" and parsed.run_id is None):
+            # the writer refuses these shapes (Journal.decision), so
+            # a native decision carrying one was not written by this
+            # code: corruption or a foreign writer. Accepting it
+            # would let resume mint an identity AFTER the
+            # transaction -- the exact hole DL-118 closed.
+            raise EngineError(
+                f"decision at index {record.get('index')}: native effect"
+                f" {parsed.effect_id} carries no birth identity (DL-118)"
+            )
+        parsed_effects.append(parsed)
+    return parsed_effects
+
+
 def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> Outbox:
     """The effects this log intended, and what became of them (ss5).
 
@@ -1025,47 +1082,13 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
 
     One decision shape, not two: the standalone `effect` record and the
     `legacy_batch: true` fold that read it are retired dialects, refused by
-    name at `check_record` before anything reaches here (DL-138)."""
+    name at `check_record` before anything reaches here (DL-138). The
+    per-effect shape is `decision_effects`, shared with run history since
+    DL-139."""
     outbox = outbox if outbox is not None else Outbox()
     for record in records:
         if record.get("rec") == "decision":
-            # a `decision` record has exactly one shape (ss2.3): a LIST
-            # `effects`. `.get(...) or []` here would read a corrupt or
-            # foreign record as an empty native decision -- intents silently
-            # lost, provenance silently invented -- so the shape is checked,
-            # not defaulted around. `legacy_batch` is `check_record`'s.
-            effects_field = record.get("effects")
-            if not isinstance(effects_field, list):
-                raise EngineError(
-                    f"decision at index {record.get('index')}: effects is"
-                    f" {type(effects_field).__name__}, not a list (DL-118)"
-                )
-            for effect in effects_field:
-                try:
-                    parsed = Effect.model_validate(effect)
-                except ValidationError as exc:
-                    # strict fields surface here: `generation: false` or "0"
-                    # must not coerce past the fold's exact-0 gate
-                    raise EngineError(
-                        f"decision at index {record.get('index')}: malformed effect: {exc}"
-                    ) from exc
-                if parsed.run_id is not None and not is_valid_run_id(parsed.run_id):
-                    # any run_id a decision carries is in the ss11a grammar
-                    raise EngineError(
-                        f"decision at index {record.get('index')}: effect"
-                        f" {parsed.effect_id} carries run_id {parsed.run_id!r} outside"
-                        " the ss11a grammar (DL-118)"
-                    )
-                if parsed.generation is None or (parsed.kind == "SPAWN" and parsed.run_id is None):
-                    # the writer refuses these shapes (Journal.decision), so
-                    # a native decision carrying one was not written by this
-                    # code: corruption or a foreign writer. Accepting it
-                    # would let resume mint an identity AFTER the
-                    # transaction -- the exact hole DL-118 closed.
-                    raise EngineError(
-                        f"decision at index {record.get('index')}: native effect"
-                        f" {parsed.effect_id} carries no birth identity (DL-118)"
-                    )
+            for parsed in decision_effects(record):
                 outbox.record(parsed)
         elif record.get("rec") == "effect_result":
             outbox.resolve(

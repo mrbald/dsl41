@@ -6808,3 +6808,50 @@
   the kind raw; each owner compares it to `header` and keeps its own
   wording, and the two owners' tests carry the `result` and `effect`
   residue cases beside the garbage one.
+
+- DL-139 one decoder for a decision's effects: run history refuses what
+  `read_outbox` refuses (2026-08-21; the DL-137 deferred slice named
+  "whether history should REFUSE or degrade is a judgement, recorded, not
+  snuck" -- this is the judgement).
+  THE RULING. `runner_history` REFUSES a malformed `decision`, exactly as
+  `read_outbox` does. It does not skip the effect and print the row.
+  FOUR REASONS. (1) Refuse-don't-degrade on DURABLE EVIDENCE is this
+  estate's standing rule; a decision is durable evidence. (2) After DL-138
+  the record-level checks -- the kind, `legacy_batch` -- are already
+  centralized at `read_journal`'s `check_record` for every consumer, so the
+  per-effect shape was the last split read. (3) History is an
+  operator-facing TRUTH SURFACE: an effect silently dropped is a row with
+  no executor or no bound run_id, which mis-reports where a run went and
+  which process was its own -- no silent loss applies to a report, not only
+  to a write path. (4) Two readers answering "is this decision valid"
+  differently is the copies-of-one-question defect DL-137 and DL-138 spent
+  their whole length killing. Forensic inspection of a corrupt log is a
+  different tool's job; it is not the default of the history reader.
+  THE MECHANISM is one shared decoder, not a second copy of the checks:
+  `runner_journal.decision_effects(record)` returns the typed `Effect`s of
+  one decision and refuses the list that is not a list, the effect that
+  does not validate, a `run_id` outside the ss11a grammar, and the DL-118
+  birth identity a native effect always carries. `read_outbox` calls it,
+  with its wording unchanged; history's two raw loops -- the executor read
+  in `_leaf_rows` and `_bound_run_ids` -- call it and let the refusal
+  through. `_note_executor` is deleted: its whole body was the duck-read a
+  typed effect makes unnecessary, and DL-138 had already emptied its other
+  half. The decoder takes no `where`: the record names itself by `index`,
+  so ONE corrupt record gets ONE refusal text whichever reader met it, and
+  a test asserts the three readers' messages are equal rather than similar.
+  At the I/O shell `read_run_root` wraps that refusal in `RunHistoryError`
+  naming the root, like every other refusal in that module -- `dsl41 runs`
+  reads several roots in one command and "decision at index 5" does not say
+  whose.
+  WHAT STAYS LENIENT, ON PURPOSE, so the next review does not re-find it:
+  the duck-reads on records that are NOT a `decision` -- the STATUS
+  payload's job/run_number (a run-number-less operator CHANGE_STATUS is
+  legal, SEM-01), the spool's timestamps, a `dispatch` without a `run_dir`,
+  a stranger's spool record reading as absent. Those are MISSING facts,
+  which decision 3 and decision 5 of the module require a projection to
+  survive; this entry is about CORRUPT ones.
+  NOT IN SCOPE, named so it is not mistaken for an oversight:
+  `retention._spawn_periods` parses decision effects with its own
+  hand-written per-effect check. It already refuses rather than degrades,
+  so it is a third SPELLING of one question and not a second ANSWER; it
+  converts to the shared decoder when that file is next opened.

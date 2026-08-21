@@ -134,7 +134,7 @@ from dsl41.period import (
 from dsl41.runner_adapters import load_json
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-from dsl41.runner_journal import read_journal, replay_inputs
+from dsl41.runner_journal import decision_effects, read_journal, replay_inputs
 
 
 class RunHistoryError(Exception):
@@ -366,17 +366,6 @@ def _leaf_status(
     return "RUNNING", None
 
 
-def _note_executor(effect: Mapping[str, Any], executor_by_key: dict[tuple[str, int], str]) -> None:
-    """Bind one run to the host its SPAWN named, from the effect nested in
-    the `decision` that planned it (DL-118). It read the standalone `effect`
-    record too until DL-138 retired that dialect."""
-    if effect.get("kind") != "SPAWN":
-        return
-    job, run_number = effect.get("job"), effect.get("run_number")
-    if isinstance(job, str) and isinstance(run_number, int):
-        executor_by_key[(job, run_number)] = str(effect.get("executor_id"))
-
-
 def _leaf_rows(
     records: list[dict[str, Any]],
     catalog: CatalogIR | None,
@@ -425,9 +414,12 @@ def _leaf_rows(
             }
         elif rec == "decision":
             # the executor a run was bound to rides on the SPAWN effect inside
-            # the decision that planned it (DL-118)
-            for effect in record.get("effects") or []:
-                _note_executor(effect, executor_by_key)
+            # the decision that planned it (DL-118). Typed and validated by
+            # the shared decoder, which refuses a malformed effect rather than
+            # reporting the run without the host it ran on (DL-139)
+            for effect in decision_effects(record):
+                if effect.kind == "SPAWN":
+                    executor_by_key[(effect.job, effect.run_number)] = effect.executor_id
 
     rows: list[RunRow] = []
     for key in order:
@@ -567,16 +559,18 @@ def read_spool(
 
 def _bound_run_ids(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
     """(job, run_number) -> the run_id its durable SPAWN bound, from the
-    decisions in the log (DL-118). Empty for a pre-DL-118 journal."""
+    decisions in the log (DL-118), through the shared decoder (DL-139).
+
+    Every SPAWN carries a run_id -- the decoder refuses one that does not --
+    so the None test below is what tells the type checker that, not a
+    tolerance."""
     bound: dict[tuple[str, int], str] = {}
     for record in records:
         if record.get("rec") != "decision":
             continue
-        for effect in record.get("effects") or []:
-            if effect.get("kind") == "SPAWN" and effect.get("run_id") is not None:
-                bound[(str(effect.get("job")), int(effect.get("run_number", 0)))] = str(
-                    effect.get("run_id")
-                )
+        for effect in decision_effects(record):
+            if effect.kind == "SPAWN" and effect.run_id is not None:
+                bound[(effect.job, effect.run_number)] = effect.run_id
     return bound
 
 
@@ -789,7 +783,14 @@ def read_run_root(run_root: Path) -> list[RunRow]:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
     rows: list[RunRow] = []
     for records in _split_segments(stream):
-        rows.extend(_read_segment(run_root, records))
+        try:
+            rows.extend(_read_segment(run_root, records))
+        except EngineError as exc:
+            # the shared `decision_effects` refusal arrives here as itself
+            # (DL-139). Named with the root, like every other refusal this
+            # module raises: `dsl41 runs` reads several roots in one command
+            # and "decision at index 5" alone does not say whose
+            raise RunHistoryError(f"{run_root}: {exc}") from exc
     return rows
 
 
