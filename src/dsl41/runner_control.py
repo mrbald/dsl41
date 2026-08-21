@@ -17,7 +17,7 @@ Phase 11c (ss10; DL-45 pins the decisions):
 
 - Control plane (ss10): unix socket in the run root, mode 0600, JSON
   lines. sendevent parity verbs map 1:1 onto oracle EventKind and are
-  injected source=control (journaled by the take_event path like every
+  injected source=control (journaled by the queued-input path like every
   input; the engine's single-writer loop serializes them -- deliberately
   no controller lease here, DL-41a). Queries (status/trace/explain/plan)
   read the oracle store between feeds -- safe because feed() never yields.

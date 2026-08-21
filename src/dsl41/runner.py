@@ -128,10 +128,10 @@ The ss10 control plane -- the socket server, its wire vocabulary, and both
 clients -- moved to runner_control.py (DL-78) and is frozen in
 docs/control-protocol.md. What stays relevant here: control injections
 arrive through Engine.inject(source="control") and are journaled by the
-take_event path like every other input, and the single-writer loop
-serializes them, which is why that tier deliberately carries no controller
-lease (DL-41a). Query handlers read the oracle store between feeds -- safe
-because feed() never yields.
+queued-input path (`_Do.EVENT`) like every other input, and the
+single-writer loop serializes them, which is why that tier deliberately
+carries no controller lease (DL-41a). Query handlers read the oracle
+store between feeds -- safe because feed() never yields.
 """
 
 from __future__ import annotations
@@ -144,6 +144,7 @@ import uuid
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
 
 from dsl41.ir import CatalogIR, JobIR
@@ -280,6 +281,35 @@ class _Pending:
     source: str | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
+
+
+class _Do(Enum):
+    """What the loop does next (DL-137). One name per alternative, so the
+    act is decided once -- in `Engine._next_work`, which owns the whole
+    choice -- and carried out once, in `run_until_quiescent`."""
+
+    #: take the queue head -- an input already raised
+    EVENT = auto()
+    #: advance to the calendar tick and enqueue its STARTJOB(s)
+    TICK = auto()
+    #: fire the due oracle timer as a verbless time observation
+    TIMER = auto()
+    #: nothing more before the horizon: return what this call emitted
+    QUIESCE = auto()
+    #: block until `at` or queue activity, then choose again
+    WAIT = auto()
+
+
+@dataclass(frozen=True)
+class _Work:
+    """One choice and the instant it is about: the tick for TICK, the
+    effective due instant for TIMER, the wake target for WAIT (None where
+    the real domain knows no instant at all and waits on activity alone).
+    EVENT and QUIESCE carry none -- the queue head and "nothing" name
+    themselves."""
+
+    do: _Do
+    at: datetime | None = None
 
 
 def _raise_if_failed(task: asyncio.Task[None]) -> None:
@@ -1027,6 +1057,118 @@ class Engine:
         heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
 
+    def _next_work(self, horizon: datetime, now: datetime) -> _Work:
+        """Choose the loop's next act. One decision, five named outcomes,
+        where the 11c loop had three chained-negation booleans in front of
+        two fall-through branches (DL-137).
+
+        The booleans were `take_event`, `take_sched` and `fire_timer`, each
+        re-stating the negation of the ones before it. Read them as three
+        INDEPENDENT predicates over one observation:
+
+          E  a queued input is takeable -- the queue head is at or before
+             the horizon, no later than any timer, no later than any tick,
+             and (real domain only) already due;
+          S  a calendar tick is takeable -- admission is not frozen, the
+             tick is at or before the horizon, STRICTLY before the queue
+             head, no later than any timer, and (real domain) already due;
+          T  a timer firing is takeable -- something is due, its effective
+             instant is at or before the horizon, it is not held lazy by the
+             frontier rule, and (real domain) already due.
+
+        The old chain is then exactly the priority order E > S > T:
+
+            E S T | old branch taken | choice
+            ------+------------------+-----------------------------------
+            0 0 0 | fell through     | QUIESCE or WAIT (see below)
+            0 0 1 | fire_timer       | TIMER
+            0 1 0 | take_sched       | TICK
+            0 1 1 | take_sched       | TICK  (T masked by take_sched)
+            1 0 0 | take_event       | EVENT
+            1 0 1 | take_event       | EVENT (T masked by take_event)
+            1 1 0 | IMPOSSIBLE       | --
+            1 1 1 | IMPOSSIBLE       | --
+
+        The last two rows cannot happen by construction, not by luck. E and
+        S both require the OTHER's instant to be non-None before they
+        compare against it, so with both true the queue head and the tick
+        both exist -- and then E asks `head_at <= sched_due` while S asks
+        `sched_due < head_at`. A tick and a queued input stamped at the same
+        instant are E's, by S's strict `<`: the input feeds first and the
+        tick waits one iteration. No priority between E and S is being
+        chosen here; there is nothing to choose between.
+
+        The `0 0 0` row keeps its own two-way split unchanged. The virtual
+        domain is quiescent the moment nothing is takeable -- nothing can
+        move without the clock. The real domain is quiescent only when no
+        work exists AND none can appear; `hold_open` says more can always
+        appear (ss10: run mode waits instead of returning). Otherwise the
+        loop WAITS on the earliest instant it knows, or on the horizon when
+        a live adapter's completion could still land inside it (DL-45), and
+        chooses again. `WAIT` with no instant is the real domain's "nothing
+        due at all": it waits on activity alone, PAST the horizon, which is
+        what the pre-DL-137 loop did -- the horizon shortcut sits under
+        `target is not None` there too, and is preserved, not tidied.
+
+        Commit discipline (DL-45): the real domain commits to work only once
+        its instant is due -- an earlier instant is waited out
+        interruptibly, so a control injection or completion arriving
+        mid-wait re-plans instead of feeding behind an already-journaled
+        advance. Virtual jumps never yield, so the 11a determinism pins are
+        untouched by those gates."""
+        head_at = self._queue[0][0] if self._queue else None
+        due = [
+            t
+            for t in (self.oracle.next_timer_due(), self.clock.next_sleeper_due())
+            if t is not None
+        ]
+        raw_due = min(due) if due else None
+        eff_due = max(raw_due, now) if raw_due is not None else None
+        sched_due = self.scheduler.next_occurrence() if self.scheduler is not None else None
+        if (
+            head_at is not None
+            and head_at <= horizon
+            and (eff_due is None or head_at <= eff_due)
+            and (sched_due is None or head_at <= sched_due)
+            and (self.clock.virtual or head_at <= now)
+        ):
+            return _Work(_Do.EVENT)
+        if (
+            not self.sealing  # ss6 step 2: scheduler admission is frozen too
+            and sched_due is not None
+            and sched_due <= horizon
+            and (head_at is None or sched_due < head_at)
+            and (eff_due is None or sched_due <= eff_due)
+            and (self.clock.virtual or sched_due <= now)
+        ):
+            return _Work(_Do.TICK, at=sched_due)
+        if (
+            raw_due is not None
+            and eff_due is not None
+            and eff_due <= horizon
+            and (raw_due > now or horizon > now)
+            and (self.clock.virtual or eff_due <= now)
+        ):
+            return _Work(_Do.TIMER, at=eff_due)
+        if self.clock.virtual or (
+            not self.hold_open
+            and not self._live
+            and not self._queue
+            and raw_due is None
+            and sched_due is None
+        ):
+            return _Work(_Do.QUIESCE)
+        target = min((t for t in (eff_due, head_at, sched_due) if t is not None), default=None)
+        if target is not None and target > horizon:
+            # nothing KNOWN this side of the horizon -- but a live adapter's
+            # completion has no due timestamp and can still land inside it,
+            # so with live tasks wait out the horizon instead of abandoning
+            # them (DL-45; the completion-at-horizon contract predates 11c)
+            if not self._live or now >= horizon:
+                return _Work(_Do.QUIESCE)
+            target = horizon
+        return _Work(_Do.WAIT, at=target)
+
     async def run_until_quiescent(self, horizon: datetime) -> list[Event]:
         """Process every queued event, due oracle timer, and adapter
         completion at or before `horizon`; return the oracle events emitted.
@@ -1041,6 +1183,10 @@ class Engine:
         deadlines (due == now at arming) lazy, matching the oracle, and
         keeps past-due timers (negative offsets lower fine) from tripping
         advance()'s backwards-time check.
+
+        What the loop does each iteration is `_next_work`'s single choice;
+        its docstring carries the truth table and the frontier rule's place
+        in it.
 
         The zero-delay-cycle guard: a condition cycle over instant
         completions generates unbounded work at one frozen virtual instant
@@ -1065,102 +1211,46 @@ class Engine:
             now = self.clock.now()
             if now != instant:
                 instant, instant_events = now, 0
-            head_at = self._queue[0][0] if self._queue else None
-            due = [
-                t
-                for t in (self.oracle.next_timer_due(), self.clock.next_sleeper_due())
-                if t is not None
-            ]
-            raw_due = min(due) if due else None
-            eff_due = max(raw_due, now) if raw_due is not None else None
-            sched_due = self.scheduler.next_occurrence() if self.scheduler is not None else None
-            # commit discipline (DL-45): the real domain commits to work only
-            # once its instant is due -- an earlier instant is waited for
-            # interruptibly in the tail branch, so a control injection or
-            # completion arriving mid-wait re-plans instead of feeding behind
-            # an already-journaled advance. Virtual jumps never yield, so the
-            # 11a determinism pins are untouched by the extra gates.
-            take_event = (
-                head_at is not None
-                and head_at <= horizon
-                and (eff_due is None or head_at <= eff_due)
-                and (sched_due is None or head_at <= sched_due)
-                and (self.clock.virtual or head_at <= now)
-            )
-            take_sched = (
-                not take_event
-                and not self.sealing  # ss6 step 2: scheduler admission is frozen too
-                and sched_due is not None
-                and sched_due <= horizon
-                and (head_at is None or sched_due < head_at)
-                and (eff_due is None or sched_due <= eff_due)
-                and (self.clock.virtual or sched_due <= now)
-            )
-            fire_timer = (
-                not take_event
-                and not take_sched
-                and raw_due is not None
-                and eff_due is not None
-                and eff_due <= horizon
-                and (raw_due > now or horizon > now)
-                and (self.clock.virtual or eff_due <= now)
-            )
-            if take_event:
+            work = self._next_work(horizon, now)
+            if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
                 self._dispatch()
-            elif take_sched:
+            elif work.do is _Do.TICK:
                 # the calendar tick is next: enqueue its STARTJOB(s), stamped
                 # at the tick, and let the next iteration take them like any
                 # external input (journal-first at feed; feed() fires timers
                 # due <= tick first, identical to oracle-direct scripts)
-                assert sched_due is not None and self.scheduler is not None
-                await self.clock.wait_until(sched_due)
-                for tick_ev in self.scheduler.pop_due(sched_due):
+                assert work.at is not None and self.scheduler is not None
+                await self.clock.wait_until(work.at)
+                for tick_ev in self.scheduler.pop_due(work.at):
                     self._enqueue(tick_ev, source="scheduler")
-            elif fire_timer:
-                assert eff_due is not None
+            elif work.do is _Do.TIMER:
+                assert work.at is not None
                 # a time observation is an input (DL-44 amendment): the timer
                 # firings it causes must survive a crash, or resume replay
                 # would resurrect a job the oracle already killed. It is
                 # admitted exactly like an operator command -- an attempt with
                 # no verb (concurrency-model ss4)
-                out = await self._admit_and_apply(_Pending(at=eff_due, request_id=None))
+                out = await self._admit_and_apply(_Pending(at=work.at, request_id=None))
                 emitted.extend(out)
                 self._dispatch()
-            elif self.clock.virtual or (
-                not self.hold_open
-                and not self._live
-                and not self._queue
-                and raw_due is None
-                and sched_due is None
-            ):
+            elif work.do is _Do.QUIESCE:
                 # virtual quiescence: nothing can move without the clock;
-                # real quiescence: no work exists and none can appear --
-                # unless hold_open, where the control socket can always
-                # produce more (run mode waits instead of returning)
+                # real quiescence: no work exists and none can appear, or
+                # everything left is beyond the horizon (_next_work's `0 0 0`
+                # row) -- unless hold_open, where the control socket can
+                # always produce more (run mode waits instead of returning)
                 return emitted
             else:
-                # real domain: block until queue activity or the next due
-                # instant; a completed adapter task also fires _activity so
-                # _settle can re-raise adapter failures promptly. Future-due
-                # work routes here too (commit discipline above): the wait is
-                # interruptible, the committed branches never sleep.
-                next_wake = [t for t in (eff_due, head_at, sched_due) if t is not None]
-                target = min(next_wake, default=None)
-                if target is not None and target > horizon:
-                    # nothing KNOWN this side of the horizon -- but a live
-                    # adapter's completion has no due timestamp and can still
-                    # land inside it, so with live tasks wait out the horizon
-                    # instead of abandoning them (DL-45; the
-                    # completion-at-horizon contract predates 11c)
-                    if not self._live or now >= horizon:
-                        return emitted
-                    target = horizon
+                # real domain: block until queue activity or the instant
+                # _next_work chose -- the earliest due one, or the horizon
+                # with live tasks. A completed adapter task also fires
+                # _activity so _settle can re-raise adapter failures promptly.
                 self._activity.clear()
                 await self.clock.wait_until(
-                    target if target is not None else datetime.max, interrupt=self._activity
+                    work.at if work.at is not None else datetime.max, interrupt=self._activity
                 )
                 continue  # a pure wait is not same-instant work: skip the budget
             instant_events += 1

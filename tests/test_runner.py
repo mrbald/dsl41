@@ -25,6 +25,8 @@ two tests that compare directly against Oracle-direct traces/emitted events.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -35,9 +37,10 @@ from hypothesis import strategies as st
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, OracleError
-from dsl41.runner import Engine
+from dsl41.runner import Engine, _Work
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
-from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from dsl41.runner_scheduler import Scheduler
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -958,5 +961,307 @@ def test_shutdown_cancels_the_live_task_before_it_can_complete() -> None:
         assert out == []
         assert engine.oracle.store.job["sd"].status == "RUNNING"
         assert engine.drops == []
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------------ 6. the _next_work choice (DL-137)
+
+
+def _choices(engine: Engine) -> list[tuple[str, datetime | None]]:
+    """Record what the loop CHOSE without changing what it chooses: the spy
+    calls the engine's own `_next_work` and hands its answer back untouched.
+    Each test below then drives the PUBLIC loop over a state built to force
+    one row of that method's truth table, and asserts the sequence of
+    choices the loop made -- the mapping is exercised through
+    run_until_quiescent, never against itself."""
+    seen: list[tuple[str, datetime | None]] = []
+    real = engine._next_work
+
+    def spy(horizon: datetime, now: datetime) -> _Work:
+        work = real(horizon, now)
+        seen.append((work.do.name, work.at))
+        return work
+
+    engine._next_work = spy  # type: ignore[method-assign]
+    return seen
+
+
+def test_dl137_row_e_a_queued_input_alone_is_the_event_row() -> None:
+    """Truth-table row `1 0 0`: the queue head is takeable and nothing else
+    is -- no scheduler, so no tick, and the only due instant is the inert
+    adapter's park at datetime.max, far beyond the horizon. EVENT, then the
+    virtual domain's QUIESCE (nothing can move without the clock)."""
+
+    async def scenario() -> None:
+        text = "insert_job: nw_e\njob_type: c\ncommand: x\nmachine: m1\n"
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": adapter, "FW": adapter},
+        )
+        seen = _choices(engine)
+        engine.inject(ev("STARTJOB", 0, job="nw_e"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+
+        assert seen == [("EVENT", None), ("QUIESCE", None)]
+        assert engine.oracle.store.job["nw_e"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_et_a_queued_input_wins_over_a_timer_due_inside_the_horizon() -> None:
+    """Rows `1 0 1` then `0 0 1`. nw_park holds RUNNING under an inert
+    adapter with term_run_time 10, so a timer is due at T0+10 -- inside the
+    second call's horizon and takeable on its own. With an input queued at
+    T0+5 the input goes first (E masks T, exactly as `take_event` masked
+    `fire_timer`); the timer then fires on the next iteration."""
+    text = (
+        "insert_job: nw_park\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 10\n\n"
+        "insert_job: nw_late\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": adapter, "FW": adapter},
+        )
+        engine.inject(ev("STARTJOB", 0, job="nw_park"))
+        await engine.run_until_quiescent(T0)
+        # T is armed and, at the horizon below, takeable: this is the row's
+        # premise, not a side effect of it
+        assert engine.oracle.next_timer_due() == T0 + timedelta(minutes=10)
+
+        seen = _choices(engine)
+        engine.inject(ev("STARTJOB", 5, job="nw_late"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=15))
+
+        assert seen == [
+            ("EVENT", None),
+            ("TIMER", T0 + timedelta(minutes=10)),
+            ("QUIESCE", None),
+        ]
+        assert engine.oracle.store.job["nw_park"].status == "TERMINATED"
+        assert engine.oracle.store.job["nw_late"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_s_a_calendar_tick_alone_is_the_tick_row() -> None:
+    """Row `0 1 0`: nothing queued, nothing running and so no timer armed,
+    one 09:00 tick inside the horizon. TICK, then the STARTJOB it enqueued
+    is taken like any other input (EVENT), then QUIESCE."""
+    text = (
+        "insert_job: nw_s\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+    )
+    start = datetime(2026, 7, 1, 8, 0)
+
+    async def scenario() -> None:
+        catalog = lower_source(text)
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        seen = _choices(engine)
+        await engine.run_until_quiescent(start + timedelta(hours=2))
+
+        tick = datetime(2026, 7, 1, 9, 0)
+        assert seen == [("TICK", tick), ("EVENT", None), ("QUIESCE", None)]
+        assert engine.oracle.store.job["nw_s"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_st_a_calendar_tick_wins_over_a_timer_due_later() -> None:
+    """Row `0 1 1`: nw_hold is RUNNING with a term_run_time timer due at
+    09:30 -- takeable inside the horizon -- and a calendar tick is due at
+    09:00. The tick is earlier, so it goes first (S masks T, exactly as
+    `take_sched` masked `fire_timer`); the STARTJOB it enqueues is then row
+    `1 0 1` again, and the timer fires last."""
+    text = (
+        "insert_job: nw_hold\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 90\n\n"
+        "insert_job: nw_tick\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+    )
+    start = datetime(2026, 7, 1, 8, 0)
+
+    async def scenario() -> None:
+        catalog = lower_source(text)
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        engine.inject(Event(at=start, kind="STARTJOB", payload={"job": "nw_hold"}))
+        await engine.run_until_quiescent(start)
+        assert engine.oracle.next_timer_due() == datetime(2026, 7, 1, 9, 30)
+
+        seen = _choices(engine)
+        await engine.run_until_quiescent(start + timedelta(hours=2))
+
+        assert seen == [
+            ("TICK", datetime(2026, 7, 1, 9, 0)),
+            ("EVENT", None),
+            ("TIMER", datetime(2026, 7, 1, 9, 30)),
+            ("QUIESCE", None),
+        ]
+        assert engine.oracle.store.job["nw_hold"].status == "TERMINATED"
+        assert engine.oracle.store.job["nw_tick"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first() -> None:
+    """The observable half of the two IMPOSSIBLE rows (`1 1 0`, `1 1 1`). E
+    and S ask contradictory things of the same pair of instants -- E wants
+    the queue head no LATER than the tick, S wants the tick STRICTLY before
+    the queue head -- so they cannot both hold. At the tie, where the old
+    chain's `not take_event` would have been the only thing separating them,
+    it is E's: the input feeds and the tick waits one iteration."""
+    text = (
+        "insert_job: nw_tie_sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n\n'
+        "insert_job: nw_tie_inj\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    start = datetime(2026, 7, 1, 8, 0)
+    tick = datetime(2026, 7, 1, 9, 0)
+
+    async def scenario() -> None:
+        catalog = lower_source(text)
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        seen = _choices(engine)
+        engine.inject(Event(at=tick, kind="STARTJOB", payload={"job": "nw_tie_inj"}))
+        await engine.run_until_quiescent(start + timedelta(hours=2))
+
+        assert seen == [
+            ("EVENT", None),
+            ("TICK", tick),
+            ("EVENT", None),
+            ("QUIESCE", None),
+        ]
+        assert engine.oracle.store.job["nw_tie_inj"].status_at == tick
+        assert engine.oracle.store.job["nw_tie_sched"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_none_the_real_domain_waits_for_an_input_not_yet_due() -> None:
+    """Row `0 0 0` in the real domain, the WAIT outcome. The queue holds an
+    input stamped 0.4s ahead: nothing is takeable (the real domain commits
+    to work only once its instant is due, DL-45) and the loop is not
+    quiescent (the queue is not empty), so it waits on that instant, takes
+    the input when it arrives, takes the completion the adapter enqueues,
+    and only then QUIESCEs -- real quiescence is no work AND none possible."""
+    text = "insert_job: nw_real\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        clock = RealClock()
+        adapter = FakeAdapter({("nw_real", 1): (0.0, 0)})
+        engine = Engine(lower_source(text), clock=clock, adapters={"CMD": adapter, "FW": adapter})
+        seen = _choices(engine)
+        at = clock.now() + timedelta(seconds=0.4)
+        engine.inject(Event(at=at, kind="STARTJOB", payload={"job": "nw_real"}))
+        await engine.run_until_quiescent(at + timedelta(seconds=5))
+
+        assert seen[0] == ("WAIT", at)
+        assert seen[-1] == ("QUIESCE", None)
+        # the start and its completion; a WAIT may sit between them, because
+        # a real completion enqueues whenever the task gets there
+        assert [do for do, _ in seen].count("EVENT") == 2
+        assert engine.oracle.store.job["nw_real"].status == "SUCCESS"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_none_the_real_domain_returns_when_all_work_is_beyond_the_horizon() -> None:
+    """Row `0 0 0` in the real domain, the other outcome it can take there:
+    the only known instant lies past the horizon and no adapter task is
+    live, so nothing can still land inside it. QUIESCE at once -- no wait,
+    no wall time -- with the input left queued for a later call.
+
+    QUIESCE alone cannot say WHICH rule returned it: real quiescence and
+    the horizon shortcut are one value here. The sibling test above is the
+    discriminator -- there the queue holds work due INSIDE the horizon, so
+    only the shortcut may not fire, and a quiescence rule that forgot to
+    ask whether the queue is empty turns its first WAIT into a QUIESCE."""
+    text = "insert_job: nw_far\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        clock = RealClock()
+        adapter = FakeAdapter(default=None)
+        engine = Engine(lower_source(text), clock=clock, adapters={"CMD": adapter, "FW": adapter})
+        seen = _choices(engine)
+        now = clock.now()
+        engine.inject(
+            Event(at=now + timedelta(hours=1), kind="STARTJOB", payload={"job": "nw_far"})
+        )
+        started = time.monotonic()
+        # the failure this guards is a HANG, not a slow return: a loop that
+        # chose WAIT here would wait on `now + 1h` with nothing ever setting
+        # _activity, and the elapsed assertion below would never be reached
+        async with asyncio.timeout(5):
+            emitted = await engine.run_until_quiescent(now + timedelta(seconds=1))
+
+        assert time.monotonic() - started < 0.5  # it did not wait out the horizon either
+        assert emitted == []
+        assert seen == [("QUIESCE", None)]
+        assert engine.oracle.store.job["nw_far"].status == "INACTIVE"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_dl137_row_none_hold_open_waits_past_the_horizon_with_no_instant_known() -> None:
+    """Row `0 0 0` once more, the WAIT that carries NO instant. Real domain,
+    nothing queued, nothing due, `hold_open` set: no work exists, but ss10
+    says more can always arrive on the control socket, so the loop is not
+    quiescent and waits on activity alone -- past its own horizon, which is
+    already behind it here. Pre-DL-137 behaviour, preserved deliberately:
+    the horizon shortcut applies only when some instant IS known."""
+    text = "insert_job: nw_open\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        clock = RealClock()
+        adapter = FakeAdapter(default=None)
+        engine = Engine(
+            lower_source(text),
+            clock=clock,
+            adapters={"CMD": adapter, "FW": adapter},
+            hold_open=True,
+        )
+        seen = _choices(engine)
+        loop_task = asyncio.ensure_future(engine.run_until_quiescent(clock.now()))
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if seen:
+                break
+
+        assert seen == [("WAIT", None)]
+        assert not loop_task.done()  # the horizon is behind it and it waits anyway
+        loop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop_task
+        await engine.shutdown()
 
     asyncio.run(scenario())
