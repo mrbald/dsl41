@@ -78,11 +78,13 @@ from dsl41.period import (
     CATALOG_HASH_VERSION,
     SENTINEL_NAME,
     WAL_DIR,
+    ArchiveReceipt,
     Manifest,
     RuntimeProfile,
     Sentinel,
     SourceFile,
     StagedManifest,
+    archive_receipt_path,
     bundle_sources,
     catalog_hash_v2,
     check_manifest_self_consistent,
@@ -974,11 +976,19 @@ def _holder_of(anchor: Anchor | None) -> str:
 @dataclass(frozen=True)
 class EstatePeriod:
     """One resolved registry row: which period, which root holds it, and
-    what the row already says about it."""
+    what the row already says about it.
+
+    `archived` is the period's ARCHIVE RECEIPT when it has one (ss12,
+    DL-144): the inputs were deleted under a named retention class and the
+    attestation stands in for them. It is read whether or not the inputs
+    are still on disk, because the receipt is IRREVERSIBLE -- restoring
+    files beside one does not un-archive a period, and every reader here
+    reports the tier the receipt names."""
 
     period_id: int
     root: Path
     row: PeriodRow
+    archived: ArchiveReceipt | None = None
 
 
 @dataclass(frozen=True)
@@ -1105,8 +1115,9 @@ def walk_estate(anchor_dir: Path) -> EstateWalk:
         if not row.segment_durable:
             provisional.append(period_id)
             continue
+        root, receipt = _prove_root(stored, period_id, row)
         periods.append(
-            EstatePeriod(period_id=period_id, root=_prove_root(stored, period_id, row), row=row)
+            EstatePeriod(period_id=period_id, root=root, row=row, archived=receipt)
         )
     if not periods:
         raise EngineError(
@@ -1122,14 +1133,22 @@ def walk_estate(anchor_dir: Path) -> EstateWalk:
     )
 
 
-def _prove_root(stored: Anchor, period_id: int, row: PeriodRow) -> Path:
+def _prove_root(
+    stored: Anchor, period_id: int, row: PeriodRow
+) -> tuple[Path, ArchiveReceipt | None]:
     """The registry's claim about one period, checked against the disk.
 
     Five ways it can be wrong and one refusal each, because "which root
     holds period N" is the only thing the registry is FOR: an operator who
     reads a total has to know it covered every period, and a reader that
     degraded any of these to a skip would answer with a smaller estate and
-    no way to tell."""
+    no way to tell.
+
+    The sixth answer is the ARCHIVE (ss12, DL-144): a registered period
+    whose segment is gone because an archive deleted it, proved by the
+    receipt that licensed the deletion. Without a receipt the same disk is
+    LOSS and refuses, because accidental loss must never read as
+    archiving."""
     root = Path(row.root)
     where = f"period {period_id}: registry root {root}"
     if not root.is_dir():
@@ -1152,18 +1171,43 @@ def _prove_root(stored: Anchor, period_id: int, row: PeriodRow) -> Path:
             f"{where} belongs to estate {sentinel.estate_id}, and this lineage is"
             f" {stored.estate_id}: two geneses are two estates (period-model ss1.2)"
         )
+    # the receipt is read whether or not the segment survives: DL-144 makes
+    # the archive IRREVERSIBLE, so a restored input beside a receipt does
+    # not move the period back to the derivation-verified tier
+    # the receipt is proved whether or not the segment survives: DL-144
+    # makes the archive IRREVERSIBLE, so a restored input beside a receipt
+    # does not move the period back to the derivation-verified tier -- and
+    # a receipt this walk cannot prove is not a fact it may report either.
+    # `verify_archive_receipt` is the ONE door (attest.py): the sentinel's
+    # estate, the sidecar, PR-02e's consumer rule over the attestation,
+    # the digest and chain the receipt names, and -- when a file is being
+    # excused -- that the list names THAT path
+    from dsl41.attest import verify_archive_receipt
+
     segment = wal_path(root, period_id)
-    # a closed period's WAL is `held` today and no retention class can
-    # reach it (ss12; PR-Q3/E20 is the open question about lifting that).
-    # If it is ever lifted, this precondition becomes the thing that makes
-    # a legitimately pruned root refuse the whole lineage, and it is this
-    # check -- not the walk's callers -- that has to move
-    if not segment.is_file():
-        raise EngineError(
-            f"{where} holds no `{segment.name}` -- the registry says this root holds"
-            " this period's segment, and segment N is period N (period-model ss1.3, I1)"
+    try:
+        receipt = verify_archive_receipt(
+            # `licensing` is belt-and-braces here and says so: ss12a's
+            # two shapes both name period N's segment, so a receipt for N
+            # always licenses THIS file. The argument is what keeps the
+            # walk correct on the day that shape rule is relaxed, and the
+            # door's own test is what pins it
+            root, period_id, licensing=None if segment.is_file() else segment
         )
-    return root
+    except EngineError as exc:
+        raise EngineError(f"{where}: {exc}") from exc
+    if segment.is_file():
+        return root, receipt
+    if receipt is not None:
+        return root, receipt
+    raise EngineError(
+        f"{where} holds no `{segment.name}` -- the registry says this root holds"
+        " this period's segment, and segment N is period N. No archive receipt"
+        f" licenses its absence (`{archive_receipt_path(root, period_id).name}`),"
+        " so this is LOSS and not an archive: retention writes the receipt before"
+        " it deletes anything, exactly so the two can be told apart"
+        " (period-model ss1.3, ss12, I1)"
+    )
 
 
 # ------------------------------------------------------- the estate root

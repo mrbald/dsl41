@@ -523,7 +523,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   and refused by name (DL-138); `source_bundle_hash` (length-framed, in
   command-line order) and the content-addressed input bundle it addresses,
   the typed frozen `RuntimeProfile` and its `runtime_hash`, the staged and
-  committed manifest models, and the `segment` record every new log opens with
+  committed manifest models, the `segment` record every new log opens with, and
+  since DL-144 the ARCHIVE RECEIPT (`seals/<period>.archive.json`) that says a
+  period's inputs were deleted by policy rather than lost
 - src/dsl41/classify.py — boundary classification (period-model ss10, DL-131): the
   graph IR-G cannot give — job, box containment, global, external instance, resource,
   machine, calendar/cycle, timezone basis and one node per RuntimeProfile field, each
@@ -578,11 +580,17 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   manifests, an uncommitted candidate's two files, their bundles, the newest
   attestation, and the WAL and spool of any unattested period. Three verdicts,
   because the spec leaves a middle: floored (refused), held (released by the head
-  moving on and kept anyway while PR-Q3/E20 is open) and prunable (licensed by
-  name — an attested period's terminal SPAWN tombstone, a quarantined candidate).
-  Deleting a floored artifact is impossible rather than merely not done: the verb
-  iterates the prunable set alone, and the remover refuses a path that is not one,
-  is outside the run root, or holds a retained artifact beneath it
+  moving on and kept anyway, because no class licenses it — the row says which
+  dependency is in the way) and prunable (licensed by name — an attested period's
+  terminal SPAWN tombstone, a quarantined candidate, and since DL-144 the INPUTS
+  of an archived period). Deleting a floored artifact is impossible rather than
+  merely not done: the verb iterates the prunable set alone, and the remover
+  refuses a path that is not one, is outside the run root, or holds a retained
+  artifact beneath it. DL-144 closed PR-Q3/E20 by policy: `estate prune
+  --archive-inputs` writes `seals/<period>.archive.json` before it deletes
+  anything, the receipt plus that period's attestation and sidecar become a
+  permanent floor, the period drops to the **attestation-verified** tier for
+  good, and every reader names the gap instead of answering shorter
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
   advance/host/decision/effect_result/seal/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written

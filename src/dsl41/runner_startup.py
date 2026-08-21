@@ -812,8 +812,19 @@ def _drop_never_opened_segment(run_root: Path) -> None:
     which is exactly the two-candidate state I1 exists to make impossible.
     Removing it is safe because the opening is a pure function of the seal,
     so what replaces it is byte-identical (PR-07). Only ever the NEWEST
-    segment, and only when an earlier one exists -- period 1 has no
-    boundary to re-open from, and its own empty-log case is genesis's."""
+    segment, and only when an earlier one exists.
+
+    "An earlier one exists" is load-bearing and is not a proxy for "not
+    period 1", though it reads like one. What re-opens the period after
+    the file goes is `select_seal` over `estate_wal`, which falls back to
+    the PREVIOUS segment and finds the `seal` record there. A root holding
+    exactly one segment -- a rolled root, or an archived one -- has no
+    previous segment to fall back to, and deleting its only file leaves
+    `active_wal` naming a genesis segment that is not there. Such a root
+    REFUSES the torn opening instead ("missing segment record"), which is a
+    refusal and not damage. Lifting that would mean teaching `select_seal`
+    to open from the anchor head, which is a different unit (noted by
+    DL-144, not built by it)."""
     segments = wal_segments(run_root)
     if len(segments) < 2:
         return

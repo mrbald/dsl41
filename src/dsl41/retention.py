@@ -22,20 +22,46 @@ Three verdicts, not two, because ss12 leaves a middle:
 
 - **floored** -- ss12 or ss11a forbids it. `prune` cannot reach it.
 - **held** -- the floor has lifted (the head moved past it and a later
-  checkpoint covers it) and PR-Q3/E20 is still open, so nothing here
-  deletes it. That open question asks whether a seal-only archive may
-  stand in for pruned inputs; until it is answered, the inputs of a period
-  that must stay auditable stay.
-- **prunable** -- the spec licenses deletion by name: a SPAWN tombstone
-  whose period is attested and whose run is terminal (PR-36b, ss11a), and
-  a quarantined candidate no recovery references (ss12).
+  checkpoint covers it) and no retention class licenses the deletion. Held
+  is not a refusal and not a permission: it is the honest middle, and
+  after DL-144 it is where the artifacts sit that this version deliberately
+  does not offer -- a sidecar or a manifest a later period's re-derivation
+  still reads, a superseded checkpoint, a content-addressed bundle, and
+  anything whose archive is blocked by an itemized dependency below.
+- **prunable** -- a rule licenses deletion by name: a SPAWN tombstone whose
+  period is attested and whose run is terminal (PR-36b, ss11a), a
+  quarantined candidate no recovery references (ss12), and -- since DL-144
+  -- the INPUTS of an archived period under the `archive-inputs` class.
 
 The one asymmetry is deliberate and is the spec's. ss12 floors "the WAL and
-spool of any unattested period (E20 gates the rest)", which would hold an
-attested period's spool too; PR-36b then says of a run directory and its
-index entry, in as many words, "after the period is attested and the run
-terminal, it may go". The itemized obligation wins for the spool, and the
-WAL -- the input E20 is actually about -- is held.
+spool of any unattested period", which would hold an attested period's
+spool too; PR-36b then says of a run directory and its index entry, in as
+many words, "after the period is attested and the run terminal, it may go".
+The itemized obligation wins for the spool.
+
+**The archive (ss12, DL-144).** PR-Q3 asked whether a seal-only archive may
+stand in for pruned inputs. The answer is YES, CONDITIONALLY, BY EXPLICIT
+POLICY, and this module is where the conditions live:
+
+- **The receipt is the point of no return.** `seals/<period>.archive.json`
+  is written DURABLY BEFORE the first deletion and names the estate, the
+  period, the seal digest, the attestation it stands on, the class, and the
+  EXACT licensed artifact list. A retry after a partial sweep re-reads it
+  and completes. Missing evidence with NO receipt is loss and REFUSES --
+  accidental loss must never read as archiving.
+- **The receipt, the period's attestation and its sidecar are a PERMANENT
+  floor.** Deleting any of them would leave a period with neither inputs
+  nor proof, so `_remove` cannot reach them and never will.
+- **Eligibility is itemized, not "everything held".** Exactly two artifact
+  kinds are in the class -- the WAL of a covered period, and a COMMITTED
+  candidate's `staged_manifest.json` and `candidate.json` under the same
+  cover -- and the WAL carries four dependencies of its own (below).
+  Content-addressed bundles are ruled OUT in v1: a bundle is shared by
+  reference and deciding its reachability across an archived period is a
+  race this class does not take.
+- **The act is per period and all-or-nothing.** A receipt exists exactly
+  when a period's inputs were archived, so "archived" is one crisp state a
+  reader can report a TIER from (`attest.verified_tier`).
 
 Deleting a floored artifact is structurally impossible through this module:
 `prune` iterates the plan's `prunable` items alone, and `_remove` refuses a
@@ -70,7 +96,11 @@ from dsl41.boundary import (
 from dsl41.runner_procid import fsync_dir
 from dsl41.runner_effects import RUN_ID_RE
 from dsl41.period import (
+    ARCHIVE_CLASS,
     SENTINEL_NAME,
+    WAL_DIR,
+    ArchiveReceipt,
+    archive_receipt_path,
     attestation_path,
     bundle_dir,
     period_dir,
@@ -82,9 +112,10 @@ from dsl41.period import (
     wal_path,
     wal_segments,
     split_run_dir,
+    write_archive_receipt,
 )
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import opens_with_rec, read_journal
+from dsl41.runner_journal import dsl41_version, opens_with_rec, read_journal
 from dsl41.seal import Seal
 
 #: the run_id -> (job, run_number) index the supervisor writes FIRST
@@ -100,6 +131,10 @@ Verdict = Literal["floored", "held", "prunable"]
 CLASSES: Final[dict[str, tuple[str, ...]]] = {
     "tombstones": ("run", "run_index", "run_log"),
     "quarantine": ("quarantine",),
+    #: DL-144's archive. Two kinds and no more, and every eligibility
+    #: condition is itemized in `_archive_eligibility` -- "everything the
+    #: head has moved past" was the rule this class was NOT given
+    ARCHIVE_CLASS: ("wal", "candidate"),
 }
 
 
@@ -162,6 +197,11 @@ class RetentionPlan:
     current_period: int
     #: every period whose attestation this root holds AND which verifies
     attested: frozenset[int]
+    #: every period this root holds a BOUND archive receipt for (ss12,
+    #: DL-144): its inputs are gone by policy and its attestation stands
+    #: in for them. Kept on the plan so a sweep can tell "the point of no
+    #: return is behind this period" from "it is in front of it"
+    archived: frozenset[int]
     artifacts: tuple[Artifact, ...]
 
     def floors(self) -> tuple[Artifact, ...]:
@@ -204,6 +244,11 @@ class PruneReport:
     #: selected, licensed, and refused by the OPERATING SYSTEM, with the
     #: reason. A partial sweep has to be reportable
     failed: tuple[tuple[Artifact, str], ...]
+    #: selected and NOT licensed: the archive class asked for, and an
+    #: itemized dependency in the way (ss12, DL-144). A different fact
+    #: from `failed` -- nothing was attempted and nothing is broken; the
+    #: operator has an order to follow, and the reason names it
+    refused: tuple[tuple[Artifact, str], ...]
     bytes_removed: int
     dry_run: bool
 
@@ -265,15 +310,28 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
             " estate by another's head (period-model ss1.2)"
         )
     segments = wal_segments(run_root)
-    if not segments:
+    periods = _periods_held(run_root, segments)
+    registry = _registry_periods(stored)
+    archived = _archive_receipts(run_root, periods, stored)
+    _check_no_silent_loss(run_root, registry, segments, archived)
+    if not segments and not archived:
         raise EngineError(
             f"{run_root}: the sentinel names `wal/` and this root holds no segment"
-            " -- an interrupted genesis, not an estate to prune (period-model ss1.1)"
+            " and no archive receipt -- an interrupted genesis, not an estate to"
+            " prune (period-model ss1.1)"
         )
-    current = segments[-1]
-    periods = _periods_held(run_root, segments)
+    if not segments:
+        # every segment this root ever held was ARCHIVED, receipts and all
+        # -- an old root of a rolled lineage, swept after its periods were
+        # attested. There is still a plan to compute here (its sidecars,
+        # attestations and receipts are a permanent floor), and refusing
+        # would make one archived root refuse the estate-wide sweep
+        current = max(periods)
+    else:
+        current = segments[-1]
     attested = _attested_periods(run_root, periods)
     seals = _seals_held(run_root, periods, estate_id=sentinel.estate_id)
+    born = _spawn_periods(run_root, segments)
     scan = _Scan(
         run_root=run_root,
         anchor_dir=anchor_dir,
@@ -282,8 +340,14 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
         current=current,
         attested=attested,
         seals=seals,
-        opening=_opening_period(run_root, current),
+        opening=_opening_period(run_root, current) if segments else None,
+        born=born,
+        archived=archived,
+        archive={},
+        head=max((number for number, _ in registry), default=current),
+        covered_through=_covered_through(sentinel.estate_id, registry),
     )
+    scan = replace(scan, archive=_archive_eligibility(scan))
     artifacts: list[Artifact] = []
     artifacts += _lineage_artifacts(scan, stored.head)
     artifacts += _period_artifacts(scan)
@@ -328,6 +392,7 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
         retained_idents=retained_idents,
         current_period=current,
         attested=frozenset(attested),
+        archived=frozenset(archived),
         artifacts=tuple(sorted(stamped, key=lambda item: (str(item.path), item.kind))),
     )
 
@@ -513,6 +578,26 @@ class _Scan:
     #: the period the CURRENT segment opened from, off its own
     #: `opens_from_seal` -- null on a root whose current period is 1
     opening: int | None
+    #: `(job, run_number) -> (birth period, run_id)`, read once: the
+    #: archive's spool-order dependency and the tombstone floor ask the
+    #: same question of it, and two reads could disagree
+    born: dict[tuple[str, int], tuple[int, Any]]
+    #: every period this root holds an archive RECEIPT for (ss12, DL-144)
+    archived: dict[int, ArchiveReceipt]
+    #: `period -> None when its inputs may be archived, else WHY NOT`.
+    #: A string here is what the `held` verdict says out loud, so an
+    #: operator reads the blocking dependency rather than a silence
+    archive: dict[int, str | None]
+    #: the highest period ss1.3's registry names, whatever root holds it:
+    #: the estate's head period, which is NOT this root's newest segment
+    #: once a lineage has rolled
+    head: int
+    #: the highest period whose attestation verifies ANYWHERE in the
+    #: estate, or None. The chain is an induction, so that one checkpoint
+    #: covers every period below it -- and it is an ESTATE fact, because a
+    #: rolled root's successor holds the checkpoint that covers its last
+    #: period and a per-root answer would floor that period forever
+    covered_through: int | None
 
 
 def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
@@ -537,6 +622,274 @@ def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
             if len(stem) == 6 and stem.isdigit():
                 held.add(int(stem))
     return sorted(held)
+
+
+def _archive_receipts(
+    run_root: Path, periods: Sequence[int], stored: Any
+) -> dict[int, ArchiveReceipt]:
+    """Every archive receipt this root holds, PROVED before it is believed
+    (ss12, DL-144).
+
+    `attest.verify_archive_receipt` is the one door, shared with the walk,
+    the tier, `journal` and `runs`: a receipt these five agreed on
+    differently is a receipt one of them honours and another refuses, and
+    round one of DL-144 shipped exactly that. What this adds is the ANCHOR:
+    the verifier binds the receipt to the root's SENTINEL, and a plan is
+    computed under an anchor that must be the same estate."""
+    from dsl41.attest import verify_archive_receipt
+
+    out: dict[int, ArchiveReceipt] = {}
+    for period_id in periods:
+        receipt = verify_archive_receipt(run_root, period_id)
+        if receipt is None:
+            continue
+        if receipt.estate_id != stored.estate_id:
+            raise EngineError(
+                f"{archive_receipt_path(run_root, period_id)}: estate"
+                f" {receipt.estate_id} under an anchor naming {stored.estate_id} -- a"
+                " stranger's receipt excuses nothing here (period-model ss12)"
+            )
+        out[period_id] = receipt
+    return out
+
+
+def _registry_periods(stored: Any) -> list[tuple[int, Any]]:
+    """ss1.3's archive registry as `(period, ROW)`, ascending, provisional
+    rows dropped.
+
+    The whole row, not the root: `seal_digest` is what the lineage
+    COMMITTED for that period, and a cover that read only the path could
+    be sent to a same-estate root holding a different branch's seal and
+    checkpoint (DL-144). A projection that throws the digest away is
+    how that field stopped being load-bearing.
+
+    Canonical decimal keys only, the rule `walk_estate` reads the registry
+    by: `01` aliases `1`, and two keys naming one period would put two
+    roots in one place."""
+    out: list[tuple[int, Any]] = []
+    for key, row in getattr(stored, "periods", {}).items():
+        if key.isdigit() and str(int(key)) == key and row.segment_durable:
+            out.append((int(key), row))
+    return sorted(out, key=lambda pair: pair[0])
+
+
+def _covered_through(estate_id: str, registry: Sequence[tuple[int, Any]]) -> int | None:
+    """The highest period whose attestation VERIFIES **on a root this
+    estate proves**, or None (ss1.3's induction, DL-144).
+
+    An ESTATE question, deliberately, and the one place this module reads
+    outside the root it plans. A rolled root's last period is covered by a
+    checkpoint the SUCCESSOR root holds, so a per-root answer would floor
+    that period forever -- which is the "held for a reason nobody can name"
+    the archive class exists to end.
+
+    **The row says where to look AND which seal is the lineage's.** Round
+    one of DL-144 verified the checkpoint and not the ROOT it came from, so
+    a row edited to point at another estate's directory could supply an
+    internally-valid later attestation and RELEASE this estate's WAL. Round
+    two closed the root and left the row's `seal_digest` unread, so a row
+    pointed at a SAME-ESTATE, same-period root holding a different BRANCH's
+    seal and checkpoint could release WAL the lineage never committed. Both
+    are one unproved artifact authorizing a deletion, which is the one
+    thing the whole floor exists to prevent. Four bindings now stand
+    between a row and a cover:
+
+    1. the root carries a `period_root` sentinel of THIS estate;
+    2. the sidecar under that period's number is this estate's and that
+       period's -- `read_seal` parses a sidecar and never asks whose;
+    3. its digest is the one ss1.3's ROW committed for that period, which
+       is what makes the branch the lineage's and not merely a branch;
+    4. `verify_attestation` binds the checkpoint to that sidecar and to its
+       own `chain_through_period`.
+
+    A root that is MISSING or unreadable is skipped, not refused: a rolled
+    lineage's old directory may legitimately be off-line, and "I cannot
+    prove a cover from here" only ever holds MORE. A row whose root is
+    PRESENT and fails any of the four REFUSES -- that is an edited row, and
+    it is exactly the attack above.
+
+    Read DESCENDING and stopped at the first checkpoint that verifies,
+    because that one covers every period below it by induction -- so the
+    ordinary estate pays one open period's missing file and one read."""
+    for period_id, row in reversed(registry):
+        root = Path(row.root)
+        if not root.is_dir():
+            continue  # off-line, archived away: proves nothing, releases nothing
+        sentinel = read_sentinel(root)
+        if sentinel is None or sentinel.estate_id != estate_id:
+            raise EngineError(
+                f"{root}: registered for period {period_id} of estate {estate_id} and"
+                f" it belongs to {'no lineage' if sentinel is None else sentinel.estate_id}"
+                " -- a registry row that resolves to a stranger's root proves nothing"
+                " here, and retention refuses to plan while one authorizes a deletion"
+                " (period-model ss1.2, ss1.3, ss12)"
+            )
+        if row.seal_digest is None or not attestation_path(root, period_id).exists():
+            # an unsealed period covers nothing, and neither does one this
+            # root holds no checkpoint for: keep looking further down
+            continue
+        try:
+            seal = read_seal(root, period_id)
+        except (OSError, EngineError):
+            continue  # a sidecar that will not parse binds no checkpoint
+        if seal.estate_id != estate_id or seal.period_id != period_id:
+            raise EngineError(
+                f"{seal_path(root, period_id)}: attests period {seal.period_id} of"
+                f" estate {seal.estate_id} where this lineage expects period"
+                f" {period_id} of {estate_id} -- a foreign pair in a registered root"
+                " (period-model ss1.2, ss12)"
+            )
+        if row.seal_digest != seal.digest:
+            raise EngineError(
+                f"{seal_path(root, period_id)} digests to {seal.digest} and ss1.3's"
+                f" registry committed {row.seal_digest} for period {period_id} -- a"
+                " sidecar of this estate that this LINEAGE never closed with. Another"
+                " branch's checkpoint covers another branch's periods, and releasing"
+                " a WAL on it would delete evidence of the run that did happen"
+                " (period-model ss1.3, ss12)"
+            )
+        try:
+            verify_attestation(root, period_id)
+        except (OSError, EngineError):
+            # a checkpoint that proves nothing unlocks nothing: keep
+            # looking further down rather than releasing on it
+            continue
+        return period_id
+    return None
+
+
+def _check_no_silent_loss(
+    run_root: Path,
+    registry: Sequence[tuple[int, Any]],
+    segments: Sequence[int],
+    archived: Mapping[int, ArchiveReceipt],
+) -> None:
+    """ss12's refuse-don't-degrade half: a period this root OWNS whose WAL
+    is gone with no receipt licensing its absence (DL-144).
+
+    Ownership comes from ss1.3's archive registry and from nowhere else. A
+    ROLLED root legitimately holds a predecessor's sidecar and attestation
+    and none of that period's WAL -- that pair is exactly what a roll
+    imports -- so "this root has no segment for period N" is only a fact
+    about loss when the registry says period N lives HERE.
+
+    Refusing rather than shrugging is the whole point: a plan computed over
+    an estate that quietly lost a segment would compute the tombstone floor
+    for effects it can no longer see, and release a replayable SPAWN."""
+    resolved = _resolved(run_root)
+    held = set(segments)
+    for period_id, row in registry:
+        if _resolved(Path(row.root)) != resolved or period_id in held:
+            continue
+        receipt = archived.get(period_id)
+        if receipt is not None and receipt.licenses(run_root, wal_path(run_root, period_id)):
+            continue
+        raise EngineError(
+            f"{wal_path(run_root, period_id)}: the registry says this root holds"
+            f" period {period_id}'s segment and it is not here. No archive receipt"
+            f" licenses its absence (`{archive_receipt_path(run_root, period_id).name}`),"
+            " so this is LOSS and not an archive -- retention writes the receipt"
+            " before it deletes anything, exactly so the two can be told apart"
+            " (period-model ss1.3, ss12)"
+        )
+
+
+def _archive_eligibility(scan: _Scan) -> dict[int, str | None]:
+    """DL-144's ITEMIZED eligibility, per period: None when the inputs may
+    be archived, else the dependency that says not yet.
+
+    Four conditions, each a real dependency of a real reader, and each
+    named in the verdict so an operator reads what to do next:
+
+    1. **behind the head.** The current period's own inputs are the ones
+       every recovery path opens from.
+    2. **covered by a LATER chain checkpoint.** ss12 floors the latest
+       checkpoint and everything after it; a period is archivable only once
+       a checkpoint above it carries the induction past it, which is the
+       same condition that lets its own superseded checkpoint be `held`.
+    3. **the spool went first** (PR-36b's order). The
+       tombstone floor resolves a run directory to a period THROUGH the
+       SPAWN effect in that period's WAL. Archive the WAL first and every
+       tombstone it explains becomes provenance-unknown and floored
+       forever, which is a floor nothing can ever lift. So archiving
+       refuses while any run directory, index entry or default log of a run
+       born in this period survives, and the refusal names them.
+    4. **the archived periods are a PREFIX of what the root retains.** A
+       hole in the middle of the retained segments is a hole every
+       segment-spanning reader would have to be taught to cross -- the
+       subscriber backfill's contiguity proof, its adjacency chain, and
+       ss11's gap marker, which is defined at the OLDEST retained record
+       and nowhere else. Archiving oldest-first keeps every one of those
+       contracts word for word, and the sweep deletes ascending so no
+       crash window opens a hole either.
+
+    An ARCHIVED period gets no entry at all: `_licensed_artifacts` answers
+    for it from the receipt, which is the recovery authority, and a second
+    opinion here is a second authority. It leaves the prefix satisfied for
+    the periods above it, because the point of no return is behind it."""
+    out: dict[int, str | None] = {}
+    prefix_ok = True
+    for period_id in scan.segments:
+        if period_id in scan.archived:
+            # no verdict is owed: `_licensed_artifacts` answers for an
+            # archived period, off the receipt. The prefix stays satisfied,
+            # because the point of no return is behind this one
+            continue
+        why = _archive_blocker(scan, period_id)
+        if why is None and not prefix_ok:
+            why = (
+                "an older period this root retains is not archivable, and the archive"
+                " runs oldest-first so the retained segments never grow a hole"
+            )
+        out[period_id] = why
+        if why is not None:
+            prefix_ok = False
+    return out
+
+
+def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
+    """Conditions 1-3 of `_archive_eligibility`, for one period."""
+    if period_id >= scan.head:
+        return "the estate's head period: its inputs are what every recovery opens from"
+    # the period the current segment OPENED FROM is deliberately not
+    # excluded here: ss12 floors the seal SIDECAR a period opened from, and
+    # a sidecar is not a WAL. Resume, the carry and history all fold from
+    # the sidecar (ss11 step 3), and none of them reads the predecessor's
+    # segment -- so an `opening` guard would have floored an in-place
+    # lineage's every period forever, which is the "held for a reason
+    # nobody can name" this class exists to end
+    if period_id not in scan.attested:
+        return "unattested: nothing stands in for inputs that were never proved"
+    if scan.covered_through is None or scan.covered_through <= period_id:
+        return (
+            f"no chain checkpoint above period {period_id} covers it"
+            " -- attest a later period first"
+        )
+    remaining = _spool_remaining(scan, period_id)
+    if remaining:
+        shown = ", ".join(str(path) for path in remaining[:4])
+        more = f" (+{len(remaining) - 4} more)" if len(remaining) > 4 else ""
+        return (
+            f"its spool is still on disk and must be pruned first (PR-36b order):"
+            f" {shown}{more}"
+        )
+    return None
+
+
+def _spool_remaining(scan: _Scan, period_id: int) -> list[Path]:
+    """Every tombstone artifact of a run BORN in this period that is still
+    on disk, sorted.
+
+    Read from the WAL's own SPAWN effects, which is the join the tombstone
+    floor uses -- so what this lists is exactly what stops being explicable
+    the moment the WAL goes."""
+    return sorted(
+        path
+        for (job, run_number), (birth, run_id) in scan.born.items()
+        if birth == period_id
+        for path in _spool_paths(scan.run_root, job, run_number, run_id)
+        if path.exists()
+    )
 
 
 def _attested_periods(run_root: Path, periods: Sequence[int]) -> set[int]:
@@ -684,7 +1037,15 @@ def _period_artifacts(scan: _Scan) -> list[Artifact]:
     for period_id in scan.periods:
         out += _sidecar_artifact(scan, period_id)
         out += _attestation_artifact(scan, period_id, latest_attested)
+        out += _receipt_artifact(scan, period_id)
         out += _manifest_artifacts(scan, period_id, floored_bundles)
+        if period_id in scan.archived:
+            # ARCHIVED: the RECEIPT is the recovery authority, so the list
+            # comes from it and not from what the disk still happens to
+            # look like. That is what the point of no return means
+            out += _licensed_artifacts(scan, period_id)
+            continue
+        out += _candidate_artifacts(scan, period_id, floored_bundles)
         if period_id in scan.segments:
             out.append(_wal_artifact(scan, period_id))
     out += _bundle_artifacts(scan, floored_bundles)
@@ -719,13 +1080,27 @@ def _sidecar_artifact(scan: _Scan, period_id: int) -> list[Artifact]:
                 period_id=period_id,
             )
         ]
+    if period_id in scan.archived:
+        return [
+            Artifact(
+                path=path,
+                kind="sidecar",
+                verdict="floored",
+                rule="DL-144",
+                why="this period was archived: its sidecar is a PERMANENT floor",
+                period_id=period_id,
+            )
+        ]
     return [
         Artifact(
             path=path,
             kind="sidecar",
             verdict="held",
-            rule="PR-Q3",
-            why="behind the head, and an audit input while E20 is open",
+            rule="DL-144",
+            why=(
+                "behind the head, and the OPENING SEAL the next period"
+                " re-derives from -- no class licenses removing one"
+            ),
             period_id=period_id,
         )
     ]
@@ -748,13 +1123,87 @@ def _attestation_artifact(
                 period_id=period_id,
             )
         ]
+    if period_id in scan.archived:
+        return [
+            Artifact(
+                path=path,
+                kind="attestation",
+                verdict="floored",
+                rule="DL-144",
+                why=(
+                    "this period was archived: this checkpoint IS what stands in for"
+                    " its inputs, and is a PERMANENT floor"
+                ),
+                period_id=period_id,
+            )
+        ]
     return [
         Artifact(
             path=path,
             kind="attestation",
             verdict="held",
-            rule="PR-Q3",
-            why=f"checkpoint {latest_attested} covers it by induction",
+            rule="DL-144",
+            why=(
+                f"checkpoint {latest_attested} covers it by induction; no class"
+                " licenses removing a checkpoint"
+            ),
+            period_id=period_id,
+        )
+    ]
+
+
+def _licensed_artifacts(scan: _Scan, period_id: int) -> list[Artifact]:
+    """Every path an archived period's receipt LICENSED that is still on
+    disk (ss12a, DL-144).
+
+    Enumerated from the receipt and from nothing else, because the receipt
+    is the recovery authority: a sweep that crashed between deleting
+    `candidate.json` and `staged_manifest.json` leaves a disk on which the
+    ordinary derivation says there is no candidate here at all -- and the
+    staged file would then be listed by no later plan, held by no floor,
+    and reachable by no verb. That is an artifact the estate can neither
+    keep on purpose nor finish removing.
+
+    The verdict is `prunable` unconditionally: the point of no return is
+    behind this period, and what is left is the deletion a retry
+    completes. Eligibility is not re-litigated -- `_archive_eligibility`
+    says the same thing for the same reason."""
+    receipt = scan.archived[period_id]
+    out: list[Artifact] = []
+    for relative in receipt.archived:
+        path = scan.run_root / relative
+        if not path.exists():
+            continue  # already gone: the archive finished this one
+        out.append(
+            Artifact(
+                path=path,
+                kind="wal" if relative.startswith(f"{WAL_DIR}/") else "candidate",
+                verdict="prunable",
+                rule="DL-144",
+                why="the receipt is durable; completing the archive",
+                period_id=period_id,
+            )
+        )
+    return out
+
+
+def _receipt_artifact(scan: _Scan, period_id: int) -> list[Artifact]:
+    """`seals/<period>.archive.json` -- a PERMANENT floor (ss12, DL-144).
+
+    The receipt is what tells a reader that this period's missing inputs
+    were archived and not lost. Delete it and the same disk reads as
+    accidental loss, which every reader here refuses -- so the archive
+    would have made the estate unreadable rather than smaller."""
+    path = archive_receipt_path(scan.run_root, period_id)
+    if period_id not in scan.archived:
+        return []
+    return [
+        Artifact(
+            path=path,
+            kind="receipt",
+            verdict="floored",
+            rule="DL-144",
+            why="the archive receipt: without it this period's absence reads as loss",
             period_id=period_id,
         )
     ]
@@ -781,18 +1230,18 @@ def _manifest_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list[
                 path=path,
                 kind="manifest",
                 verdict="floored" if reachable else "held",
-                rule="ss12" if reachable else "PR-Q3",
+                rule="ss12" if reachable else "DL-144",
                 why=(
                     "the current period's pins"
                     if period_id == scan.current
                     else "the committed-next period's pins"
                     if reachable
-                    else "behind the head, and an audit input while E20 is open"
+                    else "behind the head; the archive class does not cover a period"
+                    " manifest in v1 -- opening a later period folds against it"
                 ),
                 period_id=period_id,
             )
         )
-    out += _candidate_artifacts(scan, period_id, bundles)
     return out
 
 
@@ -813,18 +1262,45 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
     staged = read_staged_manifest(directory)
     if not committed and staged is not None:
         bundles.add(staged.source_bundle_hash)
-    why = (
-        "the seal that installed this candidate has committed"
-        if committed
-        else "recovery after an install-before-seal crash is decided by these two files"
-    )
+    if not committed:
+        return [
+            Artifact(
+                path=directory / name,
+                kind="candidate",
+                verdict="floored",
+                rule="ss12",
+                why="recovery after an install-before-seal crash is decided by these two files",
+                period_id=period_id,
+            )
+            for name in ("staged_manifest.json", "candidate.json")
+        ]
+    # committed, so recovery no longer reads them: DL-144 puts them in the
+    # archive class UNDER THE SAME COVER as this period's WAL, because the
+    # archive is one act per period and a receipt that licensed half of a
+    # period's inputs would make "archived" a state a reader cannot report
+    # an ARCHIVED period never reaches here: `_licensed_artifacts` answers
+    # for it, off the receipt, so the two can never disagree about what
+    # was licensed
+    blocked = scan.archive.get(period_id, "this root retains no segment for this period")
+    if blocked is None:
+        return [
+            Artifact(
+                path=directory / name,
+                kind="candidate",
+                verdict="prunable",
+                rule="DL-144",
+                why="the seal that installed it committed, and this period's inputs are archivable",
+                period_id=period_id,
+            )
+            for name in ("staged_manifest.json", "candidate.json")
+        ]
     return [
         Artifact(
             path=directory / name,
             kind="candidate",
-            verdict="held" if committed else "floored",
-            rule="PR-Q3" if committed else "ss12",
-            why=why,
+            verdict="held",
+            rule="DL-144",
+            why=f"the seal that installed it committed, and the archive is blocked: {blocked}",
             period_id=period_id,
         )
         for name in ("staged_manifest.json", "candidate.json")
@@ -834,23 +1310,42 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
 def _wal_artifact(scan: _Scan, period_id: int) -> Artifact:
     """One segment (I1: segment N is period N).
 
-    Unattested, ss12 floors it. Attested, the floor is what PR-Q3/E20 is
-    the open question ABOUT -- may a seal-only archive stand in for pruned
-    inputs -- so it is held rather than offered."""
-    # PENDING: E20 -- carried as period-model PR-Q3. Answering it yes makes
-    # an attested period's WAL prunable under a class of its own; answering
-    # it no makes this floor permanent. Either way the change is here, and
-    # is deliberate: the documented default until then is to keep the file
-    attested = period_id in scan.attested
+    Unattested, ss12 floors it. Attested, DL-144's `archive-inputs` class
+    may license it -- but only against every itemized dependency in
+    `_archive_eligibility`, and the `held` verdict names the one that is
+    not met rather than saying nothing."""
+    path = wal_path(scan.run_root, period_id)
+    # an ARCHIVED period is always in `attested`: `_archive_receipts`
+    # refuses a plan whose receipt has no checkpoint that holds together,
+    # so there is no second case to spell here
+    if period_id not in scan.attested:
+        return Artifact(
+            path=path,
+            kind="wal",
+            verdict="floored",
+            rule="ss12",
+            why="the WAL of an unattested period",
+            period_id=period_id,
+        )
+    blocked = scan.archive.get(period_id, "this root retains no segment for this period")
+    if blocked is not None:
+        return Artifact(
+            path=path,
+            kind="wal",
+            verdict="held",
+            rule="DL-144",
+            why=f"attested, and the archive is blocked: {blocked}",
+            period_id=period_id,
+        )
     return Artifact(
-        path=wal_path(scan.run_root, period_id),
+        path=path,
         kind="wal",
-        verdict="held" if attested else "floored",
-        rule="PR-Q3" if attested else "ss12",
+        verdict="prunable",
+        rule="DL-144",
         why=(
-            "attested, and the input E20 asks about"
-            if attested
-            else "the WAL of an unattested period"
+            "the receipt is durable; completing the archive"
+            if period_id in scan.archived
+            else "attested, covered by a later checkpoint, spool pruned: archivable"
         ),
         period_id=period_id,
     )
@@ -876,11 +1371,13 @@ def _bundle_artifacts(scan: _Scan, floored: set[str]) -> list[Artifact]:
                 path=entry,
                 kind="bundle",
                 verdict="floored" if reachable else "held",
-                rule="ss12" if reachable else "PR-Q3",
+                rule="ss12" if reachable else "DL-144",
                 why=(
                     "the bundle and sources.json a reachable manifest names"
                     if reachable
-                    else "no reachable manifest names it, and it is an audit input"
+                    else "no reachable manifest names it; content-addressed bundles are"
+                    " OUT of the archive class in v1 -- a bundle is shared by reference"
+                    " and its reachability across an archived period is a race"
                 ),
             )
         )
@@ -940,7 +1437,7 @@ def _spool_artifacts(scan: _Scan) -> list[Artifact]:
     runs = scan.run_root / "runs"
     if not runs.is_dir():
         return []
-    born = _spawn_periods(scan)
+    born = scan.born
     carried = _last_carrier(scan)
     out: list[Artifact] = []
     for entry in sorted(runs.iterdir()):
@@ -1039,7 +1536,9 @@ def _run_verdict(
     )
 
 
-def _spawn_periods(scan: _Scan) -> dict[tuple[str, int], tuple[int, Any]]:
+def _spawn_periods(
+    run_root: Path, segments: Sequence[int]
+) -> dict[tuple[str, int], tuple[int, Any]]:
     """`(job, run_number) -> (the period whose WAL holds its SPAWN effect,
     the run_id that effect bound)`.
 
@@ -1047,8 +1546,8 @@ def _spawn_periods(scan: _Scan) -> dict[tuple[str, int], tuple[int, Any]]:
     was read out of IS the answer; the run_id rides along because it is
     the join the index entries are held to (ss11a's one-to-one pair)."""
     born: dict[tuple[str, int], tuple[int, Any]] = {}
-    for period_id in scan.segments:
-        for record in read_journal(wal_path(scan.run_root, period_id)):
+    for period_id in segments:
+        for record in read_journal(wal_path(run_root, period_id)):
             if record.get("rec") != "decision":
                 continue
             for effect in record.get("effects") or ():
@@ -1072,7 +1571,7 @@ def _spawn_periods(scan: _Scan) -> dict[tuple[str, int], tuple[int, Any]]:
                     # authorizes nothing and the plan refuses to be
                     # computed over it (period-model ss11a, ss12)
                     raise EngineError(
-                        f"{wal_path(scan.run_root, period_id)}: SPAWN with job"
+                        f"{wal_path(run_root, period_id)}: SPAWN with job"
                         f" {job!r}, run_number {run_number!r}, run_id {run_id!r} --"
                         " malformed identity evidence, retention refuses to plan"
                         " (period-model ss11a, ss12)"
@@ -1087,7 +1586,7 @@ def _spawn_periods(scan: _Scan) -> dict[tuple[str, int], tuple[int, Any]]:
                     # silently kept the FIRST would compute the tombstone
                     # floor for the wrong effect and prune a replayable one
                     raise EngineError(
-                        f"{wal_path(scan.run_root, period_id)}: a second SPAWN for"
+                        f"{wal_path(run_root, period_id)}: a second SPAWN for"
                         f" {job}.{run_number} (run_id {run_id!r}; period {seen[0]}"
                         f" already bound {seen[1]!r}) -- retention refuses to plan"
                         " over an estate that violates I2 (period-model ss12)"
@@ -1290,15 +1789,41 @@ def prune(
     selected = _selected(
         plan, classes=classes, older_than_days=older_than_days, keep_runs=keep_runs
     )
-    chosen = {(str(item.path), item.kind) for item in selected}
+    refused: list[tuple[Artifact, str]] = []
+    if ARCHIVE_CLASS in set(classes):
+        # the POINT OF NO RETURN, and the eligibility RE-CHECK in front of
+        # it. Both happen here rather than in the plan because the plan is
+        # pure and this writes: a receipt is durable before the first
+        # deletion of the period it licenses, and what it licenses is
+        # re-proved against the live disk one moment earlier
+        selected, refused = _archive_receipts_first(plan, selected, dry_run=dry_run)
+    # the refused ones count as CHOSEN: the operator named their class, so
+    # they are not "prunable, outside the flags given" -- reporting them in
+    # both buckets said the sweep both skipped them and was never asked
+    chosen = {(str(item.path), item.kind) for item in [*selected, *(i for i, _ in refused)]}
     removed: list[Artifact] = []
     failed: list[tuple[Artifact, str]] = []
     wedged: set[tuple[str, int]] = set()
+    #: the lowest period whose archived WAL could NOT be removed. Every
+    #: later one then stays too: the archive's whole ordering promise is
+    #: that the retained segments are a contiguous suffix at every
+    #: instant, and deleting period N+1's segment over a period N that
+    #: refused is exactly the hole that promise exists to prevent
+    stuck: int | None = None
     bytes_removed = 0
     for item in selected:
         size = _size_of(item.path)
         if dry_run:
             bytes_removed += size
+            continue
+        if item.kind == "wal" and stuck is not None:
+            failed.append(
+                (
+                    item,
+                    f"period {stuck}'s segment could not be removed, and the archive"
+                    " deletes oldest-first so the retained segments never grow a hole",
+                )
+            )
             continue
         if item.run is not None and item.run in wedged:
             # one artifact of this run already refused, so the rest of it
@@ -1313,6 +1838,8 @@ def prune(
             failed.append((item, str(exc)))
             if item.run is not None:
                 wedged.add(item.run)
+            if item.kind == "wal" and item.period_id is not None:
+                stuck = item.period_id if stuck is None else min(stuck, item.period_id)
             continue
         bytes_removed += size
         removed.append(item)
@@ -1322,9 +1849,206 @@ def prune(
         floored=plan.floors(),
         held=plan.held(),
         failed=tuple(failed),
+        refused=tuple(refused),
         bytes_removed=bytes_removed,
         dry_run=dry_run,
     )
+
+
+def _archive_receipts_first(
+    plan: RetentionPlan, selected: list[Artifact], *, dry_run: bool
+) -> tuple[list[Artifact], list[tuple[Artifact, str]]]:
+    """DL-144's point of no return: for every period whose inputs this
+    sweep would delete, RE-CHECK eligibility and write the receipt --
+    durably, before the first deletion of that period.
+
+    Periods are handled ASCENDING, and so is the deletion that follows,
+    because that is what keeps the retained segments a contiguous suffix
+    at every instant: delete the oldest first and no crash window ever
+    leaves a hole in the middle for a segment-spanning reader to meet.
+
+    The re-check is INDEPENDENT of the plan and reads the live disk: the
+    attestation of the period, the attestation of the checkpoint that
+    covers it, the spool of every run born in the period, and the archived
+    prefix. A period whose cover was questioned between the plan and this
+    moment REFUSES -- it is dropped from the sweep and its reason is
+    reported. Every period BELOW it still goes and every period ABOVE it
+    refuses too, naming the one below rather than repeating its reason:
+    that is the prefix rule doing its job, and a sweep that skipped the
+    refusal and archived the periods above it would open the hole the rule
+    exists to prevent.
+
+    A period that ALREADY has a receipt writes nothing: the point of no
+    return is behind it, and what is left is the deletion a retry
+    completes."""
+    from dsl41.attest import verify_archive_receipt
+
+    kept: list[Artifact] = []
+    refused: list[tuple[Artifact, str]] = []
+    by_period: dict[int, list[Artifact]] = {}
+    for item in selected:
+        if item.kind in CLASSES[ARCHIVE_CLASS] and item.period_id is not None:
+            by_period.setdefault(item.period_id, []).append(item)
+        else:
+            kept.append(item)
+    # "archived" means THE RECEIPT IS DURABLE, not "the file is gone", and
+    # that is what the prefix condition is asked against as the sweep
+    # walks up. A re-check that looked for absent FILES would refuse every
+    # period after the first in one call, because every deletion still
+    # lies ahead of every receipt
+    done = set(plan.archived)
+    for period_id in sorted(by_period):
+        items = by_period[period_id]
+        # the receipt is re-read from DISK, not taken from the plan: a
+        # sweep whose plan predates another sweep's receipt is the loser
+        # of a lock-free race, and what governs it is the stored list.
+        # PROVED through the same door as every other consumer -- this
+        # path decides that DELETIONS may proceed, so of all of them it is
+        # the one that may least take a receipt on trust
+        stored = verify_archive_receipt(plan.run_root, period_id)
+        if stored is not None:
+            done.add(period_id)
+            unlicensed = [
+                item for item in items if not stored.licenses(plan.run_root, item.path)
+            ]
+            if unlicensed:
+                kept += [item for item in items if item not in unlicensed]
+                refused += [
+                    (
+                        item,
+                        f"{archive_receipt_path(plan.run_root, period_id)} already"
+                        f" licensed period {period_id} and does not name this artifact"
+                        " -- the stored list is what a retry completes from, and this"
+                        " sweep is not that retry (period-model ss12)",
+                    )
+                    for item in unlicensed
+                ]
+                continue
+            kept += items
+            continue
+        blocker = _recheck_archive(plan, period_id, done)
+        if blocker is not None:
+            refused += [(item, blocker) for item in items]
+            continue
+        if dry_run:
+            done.add(period_id)
+            kept += items
+            continue
+        try:
+            _write_receipt(plan, period_id, items)
+        except (OSError, EngineError) as exc:
+            refused += [(item, str(exc)) for item in items]
+            continue
+        done.add(period_id)
+        kept += items
+    return kept, refused
+
+
+def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str | None:
+    """`_archive_eligibility`'s conditions, asked again of the LIVE disk
+    one moment before the receipt is written (DL-144).
+
+    Written against the disk rather than against the plan on purpose: a
+    re-check that re-read the plan would prove only that the plan had not
+    changed, which it cannot."""
+    if not wal_path(plan.run_root, period_id).exists():
+        # gone since the plan, and no receipt licensed it (the caller
+        # reads one first). Not this sweep's to archive, and certainly not
+        # its to receipt: the estate has to be re-planned, where the
+        # absence is met as LOSS by name
+        return (
+            f"{wal_path(plan.run_root, period_id)} is gone since the plan was computed"
+            " and no receipt licenses its absence -- re-plan (period-model ss12)"
+        )
+    try:
+        verify_attestation(plan.run_root, period_id)
+    except (OSError, EngineError) as exc:
+        return f"period {period_id}'s own attestation no longer verifies ({exc})"
+    # the SAME estate-spine check as the plan's, over the LIVE anchor and
+    # never over a snapshot the plan carried: a row redirected between the
+    # two would otherwise supply the cover that licenses this very
+    # deletion, which is the whole reason a re-check exists (DL-144)
+    stored = EstateAnchor(plan.anchor_dir).read()
+    if stored is None or stored.estate_id != plan.estate_id:
+        return (
+            f"{plan.anchor_dir}: the lineage head is gone or names another estate since"
+            " the plan was computed -- nothing may be archived without it"
+            " (period-model ss1.3)"
+        )
+    try:
+        covered = _covered_through(plan.estate_id, _registry_periods(stored))
+    except EngineError as exc:
+        return str(exc)
+    if covered is None or covered <= period_id:
+        return (
+            f"no chain checkpoint above period {period_id} covers it any more"
+            " -- attest a later period first"
+        )
+    remaining = sorted(
+        path
+        for (job, run_number), (birth, run_id) in _spawn_periods(
+            plan.run_root, [period_id]
+        ).items()
+        if birth == period_id
+        for path in _spool_paths(plan.run_root, job, run_number, run_id)
+        if path.exists()
+    )
+    if remaining:
+        shown = ", ".join(str(path) for path in remaining[:4])
+        return f"its spool is back on disk and must be pruned first (PR-36b order): {shown}"
+    older = [
+        number
+        for number in wal_segments(plan.run_root)
+        if number < period_id and number not in done
+    ]
+    if older:
+        return (
+            f"this root retains unarchived period(s) {older} below {period_id}, and the"
+            " archive runs oldest-first so the retained segments never grow a hole"
+        )
+    return None
+
+
+def _spool_paths(run_root: Path, job: str, run_number: int, run_id: Any) -> list[Path]:
+    """Every tombstone path one run owns: the directory, the index entry
+    and the default logs. ONE spelling, read by the plan's blocker and by
+    the re-check, so the two can never disagree about what "pruned" means."""
+    from dsl41.runner_adapters import default_log_paths
+
+    runs = run_root / "runs"
+    out = [runs / f"{job}.{run_number}", *default_log_paths(job, run_number, run_root)]
+    if isinstance(run_id, str):
+        out.append(runs / INDEX_DIR / run_id)
+    return out
+
+
+def _write_receipt(plan: RetentionPlan, period_id: int, items: Sequence[Artifact]) -> None:
+    """The receipt for one period, durable before anything of that period
+    is deleted (ss12, DL-144).
+
+    `durable_create` and not a write: a receipt already at the name is a
+    previous archive of this period, and overwriting it would replace the
+    list a retry completes from. The caller has already read the stored
+    receipt and acted on it, so reaching a `FileExistsError` here means two
+    sweeps wrote in the same instant -- which the caller reports as a
+    refusal for the loser, because its own plan is now stale."""
+    from datetime import UTC, datetime
+
+    attestation = verify_attestation(plan.run_root, period_id)
+    receipt = ArchiveReceipt(
+        estate_id=plan.estate_id,
+        period_id=period_id,
+        seal_digest=attestation.seal_digest,
+        attestation_digest=attestation.digest,
+        chain_through_period=attestation.chain_through_period,
+        retention_class=ARCHIVE_CLASS,
+        archived=tuple(
+            sorted({item.path.relative_to(plan.run_root).as_posix() for item in items})
+        ),
+        archived_at=datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="microseconds"),
+        dsl41_version=dsl41_version(),
+    )
+    write_archive_receipt(plan.run_root, receipt)
 
 
 def _selected(

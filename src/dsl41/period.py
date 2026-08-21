@@ -57,21 +57,31 @@ import uuid
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
     canonical_bytes,
     decode,
+    digest as digest_over,
     hash_over,
+    is_canonical_file,
+    with_digest,
 )
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
-from dsl41.runner_procid import durable_write, fsync_dir, mkdir_durable
+from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
 
 #: every stored digest is spelled exactly this way; an address outside the
 #: grammar is not an address, and a native period must never open under one
@@ -526,6 +536,293 @@ def attestation_path(run_root: Path, period_id: int) -> Path:
     return seal_dir(run_root) / f"{period_id:06d}.audit.json"
 
 
+def check_stamp(value: str, field: str) -> None:
+    """ss3.2's timestamp spelling: naive UTC with exactly six fractional
+    digits.
+
+    ONE implementation, called by every artifact that carries one --
+    `Attestation.audited_at` and `ArchiveReceipt.archived_at` today -- so
+    two artifacts of one estate cannot drift into two spellings, and a
+    canonicalization change moves them together."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} {value!r}: {exc}") from exc
+    if parsed.tzinfo is not None or "." not in value:
+        raise ValueError(f"{field} {value!r}: naive UTC with six fractional digits (ss3.2)")
+    if len(value.rsplit(".", 1)[1]) != 6:
+        raise ValueError(f"{field} {value!r}: exactly six fractional digits")
+
+
+#: the retention class DL-144 opened, spelled once. The receipt carries it
+#: so a reader meeting an archived period knows WHICH policy removed the
+#: inputs and not merely that something did (period-model ss12).
+ARCHIVE_CLASS: Final[str] = "archive-inputs"
+
+
+def archivable_names(period_id: int) -> tuple[str, str, str]:
+    """The three paths ss12a's `archive-inputs` class may ever delete for
+    one period, spelled relative to the run root: the segment, and the
+    committed candidate's two files.
+
+    ONE spelling, shared by the receipt's own shape rule and by the
+    recovery that enumerates from a receipt -- a second copy is how the
+    artifact and the sweep come to disagree about what was licensed."""
+    return (
+        f"{WAL_DIR}/{period_id:06d}.jsonl",
+        f"periods/{period_id:06d}/candidate.json",
+        f"periods/{period_id:06d}/staged_manifest.json",
+    )
+
+
+def archive_receipt_path(run_root: Path, period_id: int) -> Path:
+    """`<root>/seals/<period_id zero-padded to 6>.archive.json` -- the
+    ARCHIVE RECEIPT (period-model ss12, DL-144).
+
+    Beside the sidecar and the attestation it stands on, under the same
+    zero-padded name, on `attestation_path`'s rule: a reader holding one of
+    the three names the other two without a second index, and a physical
+    roll carries the set together.
+
+    The receipt is the point of no return of an archive. It is written
+    DURABLY BEFORE the first deletion, so a crash mid-sweep leaves an
+    estate that says what was licensed to go, and a retry finishes it.
+    Missing evidence with NO receipt is loss and refuses -- accidental loss
+    must never read as archiving."""
+    return seal_dir(run_root) / f"{period_id:06d}.archive.json"
+
+
+class ArchiveReceipt(BaseModel):
+    """ss12's archive receipt: what was deleted, whose proof stands in for
+    it, and under which policy (DL-144).
+
+    `digest` is not a field, on `Seal`'s and `Attestation`'s rule: it is a
+    pure function of everything else, and a stored copy would be a second
+    authority the artifact could disagree with itself about.
+
+    `archived` is the EXACT licensed list, spelled relative to the run root
+    and sorted. Relative, because an estate root is a thing operators move
+    and archive; exact, because a retry after a partial deletion completes
+    from this list and from nothing else."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    artifact_format_version: int = ARTIFACT_FORMAT_VERSION
+    estate_id: str = Field(min_length=1)
+    period_id: int = Field(ge=1)
+    #: the sidecar this period closed with -- kept forever, and the thing
+    #: the attestation below is bound to
+    seal_digest: str
+    #: the attestation reference: the proof that stands in for the inputs
+    attestation_digest: str
+    #: how far the attestation's induction reached when the archive ran.
+    #: Diagnostic and load-bearing for a reader deciding whether the
+    #: checkpoint that licensed this archive still covers the period
+    chain_through_period: int = Field(ge=1)
+    retention_class: str = Field(min_length=1)
+    #: every path this archive licensed for deletion, relative to the run
+    #: root, sorted, no repeat
+    archived: tuple[str, ...]
+    #: ss3.2's spelling: naive UTC with exactly six fractional digits
+    archived_at: str
+    #: the interpreter that wrote the receipt, for the same reason the
+    #: attestation carries one
+    dsl41_version: str
+
+    @model_validator(mode="after")
+    def _artifact_invariants(self) -> "ArchiveReceipt":
+        for name in ("artifact_format_version", "period_id", "chain_through_period"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
+        for name in ("seal_digest", "attestation_digest"):
+            if not is_hash_address(getattr(self, name)):
+                raise ValueError(f"{name} {getattr(self, name)!r}: not a sha256 address")
+        if self.chain_through_period < self.period_id:
+            raise ValueError(
+                f"chain_through_period {self.chain_through_period} is below the period"
+                f" it covers ({self.period_id}): a checkpoint that does not reach this"
+                " period licenses nothing (period-model ss12)"
+            )
+        if not self.archived:
+            raise ValueError(
+                "archived is empty: a receipt that licenses no deletion is not a"
+                " receipt, and its presence would say a period was archived when"
+                " nothing was (period-model ss12)"
+            )
+        if len(set(self.archived)) != len(self.archived) or list(self.archived) != sorted(
+            self.archived
+        ):
+            raise ValueError(
+                f"archived {self.archived!r}: the licensed list is sorted and has no"
+                " repeat -- one artifact, one entry"
+            )
+        for entry in self.archived:
+            parts = PurePosixPath(entry).parts
+            if entry.startswith("/") or not parts or any(part in ("..", ".") for part in parts):
+                raise ValueError(
+                    f"archived entry {entry!r}: a relative path inside the run root,"
+                    " never absolute and never traversing out of it"
+                )
+        # ss12a's ALL-OR-NOTHING rule, in the artifact rather than in the
+        # verb that writes it. "Archived" has to be one crisp state a
+        # reader can report a TIER from, and a receipt licensing a
+        # candidate pair without the WAL -- or naming another period's
+        # files, or a file of no shape this class deletes -- would make it
+        # a spectrum. Two shapes validate and no others (DL-144)
+        wal, candidate, staged = archivable_names(self.period_id)
+        shapes = ({wal}, {wal, candidate, staged})
+        if set(self.archived) not in shapes:
+            raise ValueError(
+                f"archived {self.archived!r}: period {self.period_id}'s archive is"
+                f" ALL-OR-NOTHING, so the licensed list is exactly ({wal},) or"
+                f" ({candidate}, {staged}, {wal}) -- a receipt naming anything else"
+                " describes a state this class never produces (period-model ss12a)"
+            )
+        if not self.dsl41_version:
+            raise ValueError("dsl41_version is empty: the interpreter that wrote it is recorded")
+        check_stamp(self.archived_at, "archived_at")
+        return self
+
+    @property
+    def digest(self) -> str:
+        """`"sha256:" + hexdigest` over the canonical bytes with only the
+        top-level `digest` key removed (ss3.2, PR-08b)."""
+        return digest_over(self.model_dump(mode="json"))
+
+    def to_bytes(self) -> bytes:
+        return canonical_bytes(with_digest(self.model_dump(mode="json")))
+
+    def licenses(self, run_root: Path, path: Path) -> bool:
+        """Whether this receipt names `path` as one of the artifacts it
+        licensed. Relative to the root the caller is holding, because the
+        receipt spells its list that way."""
+        try:
+            relative = Path(path).relative_to(run_root)
+        except ValueError:
+            return False
+        return relative.as_posix() in self.archived
+
+    @classmethod
+    def from_bytes(cls, data: bytes | str, *, where: str) -> "ArchiveReceipt":
+        """Parse and CHECK: the canonical form, the version, and the
+        artifact's own digest.
+
+        A receipt is what stands between an archive and a loss, so a
+        receipt that disagrees with its own bytes is never read past."""
+        try:
+            payload = decode(data)
+        except CanonError as exc:
+            raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
+        if not isinstance(payload, dict):
+            raise EngineError(f"{where}: not a JSON object")
+        stamped = payload.pop("digest", None)
+        version = payload.get("artifact_format_version")
+        if version != ARTIFACT_FORMAT_VERSION:
+            raise EngineError(
+                f"{where}: artifact_format_version {version!r}: this binary implements"
+                f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
+            )
+        listed = payload.get("archived")
+        if isinstance(listed, list):
+            payload["archived"] = tuple(listed)
+        try:
+            receipt = cls.model_validate(payload)
+        except ValidationError as exc:
+            raise EngineError(
+                f"{where}: not an archive receipt this binary can read ({exc})"
+            ) from exc
+        if stamped != receipt.digest:
+            raise EngineError(
+                f"{where}: stamped digest {stamped!r} but the bytes digest to"
+                f" {receipt.digest} -- a receipt that disagrees with itself licensed"
+                " nothing (period-model ss12)"
+            )
+        if not is_canonical_file(data, receipt.to_bytes()):
+            raise EngineError(
+                f"{where}: the file's bytes are not the receipt's canonical"
+                " serialization -- one artifact has one byte form (period-model ss3.2)"
+            )
+        return receipt
+
+
+def read_archive_receipt(run_root: Path, period_id: int) -> "ArchiveReceipt | None":
+    """This period's archive receipt, or None when there is none.
+
+    Absence is a fact -- most periods are not archived. A file that exists
+    and does not parse is NOT a fact and refuses: a reader that fell back
+    to "no receipt" over an unreadable one would read a real archive as
+    accidental loss, and a reader that fell back the other way would read
+    loss as an archive. Both are wrong, so neither happens."""
+    path = archive_receipt_path(run_root, period_id)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+    receipt = ArchiveReceipt.from_bytes(raw, where=str(path))
+    if receipt.retention_class != ARCHIVE_CLASS:
+        # bound HERE and not in one consumer: a reader that honoured a
+        # receipt written by a policy it does not implement would accept
+        # an absence under rules it cannot check, and every reader that
+        # accepts an absence goes through this door (period-model ss12)
+        raise EngineError(
+            f"{path}: retention class {receipt.retention_class!r} -- this binary"
+            f" implements {ARCHIVE_CLASS!r}, and a receipt written by a policy it does"
+            " not know licenses nothing it can check (period-model ss12)"
+        )
+    if receipt.period_id != period_id:
+        raise EngineError(
+            f"{path}: receipts period {receipt.period_id} under another period's"
+            " filename -- an archive receipt licenses one period and is named for it"
+            " (period-model ss12)"
+        )
+    return receipt
+
+
+def write_archive_receipt(run_root: Path, receipt: "ArchiveReceipt") -> Path:
+    """The receipt, durable BEFORE any deletion (period-model ss12).
+
+    `durable_create`, not a write: a receipt already there is a previous
+    archive of this period, and overwriting it would replace the list a
+    retry completes from. The caller re-reads instead."""
+    mkdir_durable(str(seal_dir(run_root)))
+    path = archive_receipt_path(run_root, receipt.period_id)
+    durable_create(str(path), receipt.to_bytes())
+    return path
+
+
+def wrote_period(run_root: Path, period_id: int) -> bool:
+    """Whether THIS root is the one that ran period N, read from the one
+    local fact that says so: `periods/<N>/manifest.json`.
+
+    Genesis and every in-place opening install the committed manifest in
+    the root that runs the period; a physical roll imports the SUCCESSOR's
+    manifest and never the predecessor's (ss1.3). So a root-local reader
+    with no registry to ask -- `dsl41 journal ROOT`, `dsl41 audit
+    --run-root R` -- can still tell "this period's evidence is gone from
+    the root that wrote it" from "this root never held it", which is the
+    difference between LOSS and an imported seal (ss12a, DL-144)."""
+    return (period_dir(run_root, period_id) / "manifest.json").is_file()
+
+
+def archived_periods(run_root: Path) -> list[int]:
+    """Every period this root holds an archive receipt for, in order.
+
+    The FILE, not its verdict, on `attestation_periods`' rule: whether the
+    receipt proves what it claims is the reading caller's question, and a
+    lister that verified first could not report one that does not."""
+    directory = seal_dir(run_root)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        int(entry.name.split(".")[0])
+        for entry in directory.glob("*.archive.json")
+        if entry.name.split(".")[0].isdigit()
+    )
+
+
 def staging_dir(run_root: Path, stage_digest: str) -> Path:
     """`<root>/periods/.staging/<stage digest>/` (ss7).
 
@@ -690,6 +987,25 @@ def wal_segments(run_root: Path) -> list[int]:
     return sorted(segments)
 
 
+def sealed_periods(run_root: Path) -> list[int]:
+    """Every period this root holds a SIDECAR for, in order -- whether or
+    not it also holds the segment that re-derives it.
+
+    `closed_periods` answers "which periods can this root audit"; this
+    answers "which periods did this root close", which is the wider set
+    and the one a reader needs when it has to notice that a period's
+    evidence is MISSING (ss12, DL-144). A list that shrank with the
+    evidence could not report the loss."""
+    directory = seal_dir(run_root)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        int(entry.stem)
+        for entry in directory.glob("*.json")
+        if entry.stem.isdigit() and not entry.name.endswith(".audit.json")
+    )
+
+
 def closed_periods(run_root: Path) -> list[int]:
     """Every period this root can AUDIT, in order: a committed seal AND the
     segment whose evidence re-derives it.
@@ -702,13 +1018,11 @@ def closed_periods(run_root: Path) -> list[int]:
     directory = seal_dir(run_root)
     if not directory.is_dir():
         return []
-    return sorted(
-        int(entry.stem)
-        for entry in directory.glob("*.json")
-        if entry.stem.isdigit()
-        and not entry.name.endswith(".audit.json")
-        and wal_path(run_root, int(entry.stem)).exists()
-    )
+    return [
+        period_id
+        for period_id in sealed_periods(run_root)
+        if wal_path(run_root, period_id).exists()
+    ]
 
 
 def attestation_periods(run_root: Path) -> list[int]:

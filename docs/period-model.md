@@ -1,6 +1,6 @@
 # Period model — the seal, the segment, and the optional run root
 
-Status: **frozen (2026-08-20, DL-114).** Draft 30, converged. Intended to become normative in the way
+Status: **frozen (2026-08-20, DL-114).** Draft 31, converged. Intended to become normative in the way
 `docs/concurrency-model.md` and `docs/control-protocol.md` are: once frozen,
 each change to a frozen item requires a decision-log entry. It supersedes
 `docs/ops-model.md` §1–§3 and §8a–§8b as the *mechanism*; that document stays
@@ -277,6 +277,17 @@ directory is doing a job that belongs to a record.
   sentinel's `adopted_from` and the `adopt` seal source; `legacy_batch` stays
   on `decision`, required and false. `docs/protocol-evolution.md` is the
   contract the retirement ran under and records it as the first executed one.
+- **Draft 31** — PR-Q3 closes, as a POLICY DECISION and not a deduction
+  (DL-144). A seal-only archive **may** stand in for pruned inputs,
+  conditionally. §11's "verified" splits into two named tiers —
+  *derivation-verified* and *attestation-verified* — because one word for two
+  proofs of two strengths is how an estate stops being able to say which
+  periods it can still re-derive. §12 gains the archive: a receipt that is the
+  point of no return, a permanent floor of three artifacts per archived
+  period, an itemized eligibility list, and readers that name the gap rather
+  than answering shorter. Nothing here was deduced from the earlier text —
+  §12's own words allowed either answer, which is why the question was open —
+  and no live estate was needed to close it.
 
 ## 1. Identities
 
@@ -1856,9 +1867,30 @@ predecessor's **attestation is required** and its absence is a refusal
 that names it. The cost is real and stated: an unpruned lineage replays
 each period twice, once to re-derive its seal and once to narrate it.
 
-**"Verified" means re-derived, not self-consistent.** A sidecar whose digest
-matches its own canonical form proves integrity, not derivation. A seal is
-*verified* when `audit` has reproduced **every digest-covered field** of it,
+**"Verified" means re-derived, not self-consistent — and it has two named
+tiers (DL-144).** A sidecar whose digest matches its own canonical form proves
+integrity, not derivation. There are exactly two ways an estate can stand
+behind a closed period, they are not the same strength, and they are **spelled
+differently everywhere**, because a reader handed one word for both cannot tell
+which periods the estate can still re-derive:
+
+- **derivation-verified** — the period's own inputs are present and `audit`
+  reproduced the seal from them. This is the tier defined field by field
+  below, and the only tier a checkpoint may be *produced* at.
+- **attestation-verified** — **seal-only**. The period's inputs were archived
+  under §12's retention class; what stands for the period is its attestation,
+  accepted by PR-02e's **consumer** rule and by nothing else: the checkpoint's
+  own digest, its binding to the seal it names, and its `chain_through_period`.
+  It is **not** a recursive walk — the induction was established when the
+  checkpoint was produced — and it is not a weaker reading of the rule below;
+  it is the other rule, the one a rolled root has always used for an imported
+  seal. A period at this tier can never return to the first tier: the archive
+  is irreversible (§12), so restoring the files does not restore the claim.
+  Every reader reports the tier by name; nothing reports a shorter answer
+  silently.
+
+A seal is *derivation-verified* when `audit` has reproduced **every
+digest-covered field** of it,
 field by field — **except the scalars of `boundary_request`** (`claimed_actor`,
 `force_seal` and `request_id`), which are
 authoritative boundary *input* originating in a request no WAL record
@@ -1923,6 +1955,9 @@ release discipline this implies, and it closes what draft 3 left open as PR-Q4.
 | torn final line in the active segment | truncate to the last complete record |
 | torn or empty **first** line of a new segment | the segment never opened; re-open from the boundary |
 | corrupt line inside a **closed** segment | that period is unauditable; later periods resume from a **verified** seal only, else refused (above) |
+| a closed period's WAL absent, its **archive receipt** present and licensing it | archived (§12): the period stands at the attestation-verified tier; `audit` verifies the checkpoint, `journal` narrates an unreplayable gap and crosses on that checkpoint, `runs` names the missing coverage, `estate prune` re-plans the root |
+| a closed period's WAL absent, **no receipt** | **loss, not an archive**: refused by name at the walk, at the replay and at the plan. The receipt is written before any deletion precisely so the two can never be confused |
+| an archive receipt present and its attestation or sidecar absent | refuse: the three are one permanent floor, and a period with neither inputs nor proof is loss |
 | seal digest mismatch | refuse |
 | committed `seal`, sidecar **missing** | refuse; the boundary is unrecoverable |
 | sidecar self-consistent but ≠ record's digest | refuse |
@@ -2063,11 +2098,152 @@ presented against a different `(job, run_number)`, and a fingerprint collision.
   quarantined and no recovery references it** — recovery after
   install-before-seal is decided by those two files; their catalog bundles and `sources.json`; the latest attestation
   chain checkpoint and every attestation after it; the WAL and spool of any
-  unattested period (E20 gates the rest); the spool of any live or carried
+  unattested period; the spool of any live or carried
   execution; and any SPAWN tombstone whose effect can still be replayed
   (§11a). Recovery refuses without a sidecar or a catalog directory; a
   retention rule that could delete them while obeying the tombstone floor was a
   rule that could delete the only artifacts able to open the head (PR-36c).
+
+### 12a. The archive — PR-Q3's answer (DL-144)
+
+**Yes, conditionally, by explicit policy.** A seal-only archive may stand in
+for pruned inputs. This is a decision, not a deduction: the text above allowed
+either answer, and "never" was rejected as policy rather than argued away. The
+period drops to §11's **attestation-verified** tier and stays there.
+
+**The receipt is the point of no return.** `seals/<period_id>.archive.json` is
+a §3.2-family artifact — `artifact_format_version`, canonical serialization,
+`digest` over the canonical bytes with only the top-level `digest` removed —
+carrying `{estate_id, period_id, seal_digest, attestation_digest,
+chain_through_period, retention_class, archived, archived_at, dsl41_version}`.
+`archived` is the **exact licensed artifact list**, relative to the run root,
+sorted, no repeat, and of exactly one of **two shapes** — the period's segment
+alone, or its segment together with its committed candidate's two files. The
+all-or-nothing rule lives in the artifact and not only in the verb that writes
+it: any other list describes a state this class never produces, and a reader
+that weighed such a receipt would be reporting a tier for a period that is
+half-archived. It is written **durably before the first deletion** of the
+period it licenses, and it is the **recovery authority** — a later plan
+enumerates what is left to delete FROM the receipt, never from what the disk
+still happens to look like. A crash between the receipt and the deletions leaves an
+estate that says what was licensed to go, and a re-plan completes it from the
+receipt alone. A crash **before** the receipt is an estate where nothing
+happened.
+
+**Missing evidence with no receipt is LOSS and refuses.** Refuse-don't-degrade:
+accidental loss must never read as archiving. Ownership decides which absence
+is even a question, and there are two tests of it because there are two kinds
+of reader. A reader holding the **anchor** — the estate walk, the planner —
+reads §1.3's registry row: a period whose row names *this* root owes this root
+its segment. A reader holding only a **root** — `dsl41 journal ROOT`, `dsl41
+audit --run-root` — reads `periods/<N>/manifest.json`, which genesis and every
+in-place opening install in the root that runs the period and a physical roll
+never imports for a predecessor. Both answer the same question and neither
+guesses; a rolled root legitimately holds a predecessor's sidecar and
+attestation and none of that period's WAL, and both tests say so.
+
+**A receipt is PROVED before any reader acts on it, through one shared door.**
+Seven bindings: the receipt's own canonical bytes, digest, class and filename;
+its `estate_id` against this root's **sentinel**; the sidecar's **own**
+`estate_id` and `period_id` — reading a sidecar parses it and never asks whose,
+so without this a foreign seal-and-attestation pair with the receipt restamped
+onto it satisfies every other check; its `seal_digest` against that sidecar;
+the **attestation**, by PR-02e's consumer rule (`verify_attestation` exactly —
+not a recursive walk); its `attestation_digest` and `chain_through_period`
+against that checkpoint; and, where a specific absent file is being excused,
+that the list names **that** path. Every consumer applies all seven — the
+estate walk, the retention plan and its live re-check, the tier, `audit` and
+its re-derivation, `journal` and `runs` — because readers that bound a receipt
+differently would make the estate's answer depend on which verb an operator
+typed, and a function that is safe only behind one of its callers is not safe.
+A receipt that is present and does not prove out is never treated as absent: it
+refuses.
+
+**Three artifacts per archived period join the floor PERMANENTLY** and may
+never be pruned by any class, now or later: the **receipt**, the period's
+**attestation**, and its **seal sidecar**. Delete the receipt and the archive
+reads as loss; delete either of the other two and the period has neither inputs
+nor proof.
+
+**Eligibility is itemized per artifact dependency, not "everything the head has
+moved past".** The class is named **`archive-inputs`** and is selected **per
+period**. DL-135's default stands: no class named, nothing deleted. Exactly two
+kinds are in it, and the act is **all-or-nothing per period**, so "archived" is
+one state a reader can report a tier from:
+
+| artifact | in the class when |
+| --- | --- |
+| `wal/<period>.jsonl` | the period is **attested** *in this root*; a **later** chain checkpoint covers it *anywhere in the estate*; every run **born** in it has had its directory, `.by_run_id` entry and default logs pruned already; every older period this root retains is already archived; and it is below the estate's **head** period |
+| a **committed** candidate's `staged_manifest.json` + `candidate.json` | that period's WAL is in the class — the same cover, in the same receipt |
+
+The cover is an **estate** fact and the period's own attestation is a **root**
+fact, and the difference is the roll: a rolled root's last period is covered by
+a checkpoint the SUCCESSOR root holds, so a per-root cover would floor that
+period forever. §1.3's registry row says **where to look and which seal the
+lineage committed**, and both halves are load-bearing: the path alone would let
+an edited row fetch a cover from somewhere else, and the row's `seal_digest` is
+what makes a branch *this* lineage's rather than merely *a* branch. Four
+bindings stand between a row and a cover: a `period_root` sentinel of this
+estate; a sidecar that is this estate's and that period's; that sidecar's
+digest equal to the digest **the row committed**; and `verify_attestation`
+binding the checkpoint to that sidecar and to its own `chain_through_period`.
+A row whose root is **present** and fails any of the four REFUSES the plan —
+otherwise an edited row could point at a stranger's root, or at a same-estate
+root holding a second valid pair for that period, and release WAL belonging to
+the branch that actually ran. A row whose root is **missing** is skipped, not
+refused: an off-line directory proves no cover, which only ever holds more. The
+live re-check before the receipt reads the anchor again rather than a snapshot
+the plan carried, because the window it exists to close is exactly a row moved
+in between.
+
+Ruled **out** in v1, and stated so a later version knows what it is changing:
+**content-addressed bundles** (shared by reference; deciding reachability
+across an archived period is a race this class does not take) and the period
+**manifest** (a later period's opening folds against it). Anything whose
+attestation or checkpoint cover is absent stays floored or held exactly as
+before.
+
+**Two ordering rules, each a real dependency:**
+
+1. **The spool goes first** (PR-36b's order). The tombstone floor resolves a
+   run directory to a period *through the SPAWN effect in that period's WAL*.
+   Archive the WAL first and every tombstone it explains becomes
+   provenance-unknown and floored forever — a floor nothing can lift. So
+   archiving a period's WAL **refuses** while any run directory or index entry
+   of that period survives, and the refusal **names what remains**.
+2. **Oldest first, and the deletions run in that order too.** The archived
+   periods are a **prefix** of what a root retains, so the retained segments
+   stay a contiguous suffix at every instant — including inside a crash window.
+   That is what keeps §11's subscriber contract word for word: the gap marker
+   is defined at the *oldest retained record*, and the backfill's contiguity
+   and adjacency proofs never meet a hole. A deletion that the filesystem
+   refuses stops every later period's deletion for the same reason.
+
+**Eligibility is RE-CHECKED against the live disk immediately before the
+receipt is written**, independently of the plan: the period's attestation, the
+covering checkpoint, the spool, and the prefix. A period whose cover was
+questioned in between refuses and is named. Every period **below** it still
+goes; every period **above** it refuses too, naming the one below rather than
+repeating its reason — that is the prefix rule, and a sweep that stepped over
+the refusal would open the hole the rule exists to prevent.
+
+**The archive is IRREVERSIBLE.** Restored files beside a receipt do not remove
+the archived state. The receipt governs: every reader reports
+*attestation-verified* for that period, whatever is on disk. The restored
+inputs may still be **read** — nothing forbids looking at them — but they are
+not a claim the estate makes, because the weaker claim was already published
+and a tier that flickered with the contents of a directory would be no tier at
+all.
+
+**Readers name the gap; none answers shorter in silence** (PR-02f's family):
+the estate walk accepts an archived row and refuses an unreceipted one;
+`audit` verifies the checkpoint and reports the tier **by name**, in wording it
+shares with no derivation-verified line; `journal` prints an explicit
+unreplayable-gap notice **on stdout with the trace** and crosses the next
+boundary by the attestation-gated route §11 already defines for a segment named
+alone; `runs` names the coverage it does not have; `estate prune` re-plans an
+archived root without refusing, including a root whose every period is
+archived.
 
 ## 13. Obligations
 
@@ -2198,7 +2374,7 @@ renumbered and never re-used for a different property.
 | PR-35 | a decision and its effects survive a crash together or not at all (CM-17) |
 | PR-36 | §11a as a crash matrix: killed after `mkdir`, after the index entry, after `receipt.json`, after the wrapper spawn, after `spawn.json`, after `reply.json` and after the answer — then the supervisor is restarted and the SPAWN replayed, **both against the same path and against a different `(job, run_number)`**, and **a different `run_id` against the same path**; each row answers as the §11a table says, no row spawns twice, no directory ever carries two keys; plus the engine dying between a tethered `mkdir` and SPAWN, a fingerprint collision, a duplicate answered in the frozen `duplicate: true` envelope, and a `run_id` outside the grammar refused at the wire |
 | PR-36b | deleting a run directory or index entry for a replayable SPAWN is refused by the retention floor; after the period is attested and the run terminal, it may go |
-| PR-36c | pruning refuses each artifact reachable from the head — sentinel, anchor, claim, opening and closing sidecars, current and next manifests, an uncommitted candidate's `staged_manifest.json` and `candidate.json`, bundles, `sources.json`, the latest attestation checkpoint — one case each; after the head moves past them and a later checkpoint covers them, they may go |
+| PR-36c | pruning refuses each artifact reachable from the head — sentinel, anchor, claim, opening and closing sidecars, current and next manifests, an uncommitted candidate's `staged_manifest.json` and `candidate.json`, bundles, `sources.json`, the latest attestation checkpoint — one case each. Once the head has moved past them and a later checkpoint covers them, each becomes **`held`** and is released only where §12a's class names it: an attested period's WAL and a **committed** candidate's two files may go under `archive-inputs`; a sidecar, a period manifest, a superseded checkpoint and a bundle stay held, each verdict naming the rule that decided it and never a retired open question (DL-144) |
 | PR-36a | **engine-side, from the durable effect**: the engine dies after the supervisor wrote R1's index and before the engine recorded the outcome; resume replays the SPAWN effect — which carries R1 — and the supervisor answers duplicate; no R2 is ever minted. The test starts from replay of the WAL, never from a variable holding R1 |
 
 ### 13.7 Classification
@@ -2240,6 +2416,11 @@ renumbered and never re-used for a different property.
 | # | obligation |
 | --- | --- |
 | PR-51 | every existing test — `test_cm*`, `test_sem*`, subscriber, journal, history, supervisor, TUI — stays green |
+| PR-53 | **the receipt is the point of no return.** No artifact of a period is deleted before its `seals/<period>.archive.json` is durable; the receipt is a §3.2 artifact whose stored bytes are its canonical serialization and whose digest is its own, and whose `archived` list validates in exactly the two shapes above and no other; a crash **between the receipt and the deletions** re-plans and COMPLETES from the receipt — **including a crash between the two candidate files**, where the ordinary derivation can no longer see the pair at all and only the receipt still names the survivor. A crash **before** the receipt leaves an estate where nothing happened, and a second sweep never rewrites a receipt already there |
+| PR-54 | **eligibility is itemized and re-checked.** One case per §12a condition: unattested (the ss12 floor answers first, and the archive is never asked), no LATER checkpoint, an unarchived older period, and — one at a time — a surviving run directory, `.by_run_id` entry or default log of a run born in the period. Each holds the WAL at `held` with the blocking dependency NAMED, and the spool cases name the artifact that remains. A period eligible at plan time whose covering checkpoint is invalidated before the receipt REFUSES and is reported; every period above it refuses with it, by the prefix rule. A committed candidate's two files ride the same cover; bundles and period manifests stay held |
+| PR-55a | **one door, seven bindings.** Table-driven over a receipt whose integrity is intact and whose BINDING is not — a wrong `seal_digest`, a wrong `attestation_digest`, a wrong `chain_through_period`, a foreign `estate_id`, a **correlated foreign seal-and-attestation pair** with the receipt restamped onto it, and bytes that do not parse: each refuses in the walk, the plan, the tier, `audit`, `journal`, `runs` and `estate prune`, with the same reason, and **none of them answers shorter instead**. `audit_period` and the re-derivation refuse it as FUNCTIONS, with no CLI in front of them. A receipt naming a file it does not license excuses nothing. The cover, likewise: a registry row redirected to a **present** root of another estate, **or to a same-estate root holding a second valid pair for that period**, refuses the plan and the live re-check, and releases nothing |
+| PR-55 | **permanent floors and irreversibility.** The receipt, the archived period's attestation and its seal sidecar are unreachable by `prune` — one case each, `_remove` refused rather than merely not asked. Restoring the archived inputs beside the receipt leaves every reader at the **attestation-verified** tier. A receipt whose attestation or sidecar is absent refuses. Deleting a WAL over an older period whose deletion failed does not happen: the retained segments are a contiguous suffix after every partial sweep |
+| PR-56 | **no reader answers shorter in silence.** Over a multi-period archive, in place and across a physical roll: the estate walk resolves an archived registry row and refuses an unreceipted absence BY NAME; `audit` reports the archived period at the attestation-verified tier in wording it shares with no derivation-verified line, and still audits the rest; `journal` prints the unreplayable gap on STDOUT and crosses the next boundary by the predecessor's attestation; `runs` names the coverage it lacks; `estate prune` re-plans an archived root, including one whose every period is archived. The subscriber's backfill answers a cursor below the archive with §11's gap marker at the oldest RETAINED record — unchanged, and only because the archive is a prefix — and a live engine still resumes, because recovery selects its seal by the sidecar. Accidental loss with no receipt refuses in the walk, in `audit` and in `journal`, each naming the receipt it did not find |
 | PR-52 | `scripts/arch_check.py`'s ownership gate covers `consumed`, `routes`, `enqueue_counter`, `start_period`, `reservations`, `waiter_seq` and the execution/FW-spool models: a mutable one reachable outside its owner fails the build |
 
 ## 14. The worked estate
@@ -2332,6 +2513,9 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `runner_history.py`, `cli.py journal` | period-aware |
 | `runner_history.py` | `_job_fingerprints` becomes `period.job_fingerprints` (DL-131): §10.2's leaf test is named here under its original home, and a pure analysis pass may not import a private name out of a runner module |
 | `protocol-evolution.md` | **new** (DL-138): the per-protocol compatibility matrix, the lifecycle a dialect enters service by, the retirement gate, the pre-production reset clause, and the tombstone-registry rule |
+| `retention.py` | the `archive-inputs` class, the receipt, the permanent floors and the itemized eligibility (§12a, DL-144); `estate prune --archive-inputs` |
+| `period.py` | `ArchiveReceipt`, `seals/<period>.archive.json` and its readers (§12a) |
+| `deployment-runbook.md` §2a | the archive is an operator verb with an order in front of it: attest, prune tombstones, then archive — and it cannot be undone |
 | `citation-index.md` | `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135); the PR row states what a retired row cites (DL-138) |
 | `CLAUDE.md` | read-first list |
 
@@ -2342,9 +2526,15 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
   what lets audit re-derive `forced_gate` under any later ambient setting
   (PR-47e). The gate stays soft.
 - ~~**PR-Q2**~~ — closed by I1: there is no size roll; to roll, seal.
-- **PR-Q3** — E20: may a seal-only archive stand in for pruned inputs? Until
-  answered, inputs for any period that must stay auditable are not pruned, and
-  §11's "verified" definition depends on the answer.
+- ~~**PR-Q3**~~ — closed **by policy** on 2026-08-21 (DL-144), and recorded as a
+  decision rather than as a deduction: nothing in this document implied either
+  answer, which is why it was open, and no live estate could have settled it —
+  it was a design question, not an observation question. **Yes, conditionally.**
+  A seal-only archive may stand in for pruned inputs under §12a's
+  `archive-inputs` class: a durable receipt before any deletion, an itemized
+  eligibility list, three artifacts on a permanent floor, and readers that name
+  the gap. §11's "verified" is now two named tiers, and an archived period
+  stands at *attestation-verified*. E20 in `ops-model.md` §11 closes with it.
 - ~~**PR-Q4**~~ — closed in §11: audit runs the interpreter that produced the
   period, and old versions stay installable.
 - **PR-Q5** — the anchor in a paired-site deployment: single-site until the

@@ -42,6 +42,7 @@ from dsl41.ir import lower_catalog
 from dsl41.oracle_state import Event
 from dsl41.period import (
     Sentinel,
+    archive_receipt_path,
     attestation_path,
     read_sentinel,
     seal_path,
@@ -372,7 +373,7 @@ def test_pr02f_audit_attests_every_period_in_the_root_that_holds_it(tmp_path: Pa
 
     first = _invoke("audit", "--estate-anchor", str(line.anchor))
     assert first.exit_code == 0, first.output
-    assert f"period 1 in {line.root_a} attested:" in first.output
+    assert f"period 1 in {line.root_a} attested, derivation-verified:" in first.output
     assert f"period 2 in {line.root_b}: not closed, nothing to audit" in first.output
 
     assert (
@@ -389,13 +390,14 @@ def test_pr02f_audit_attests_every_period_in_the_root_that_holds_it(tmp_path: Pa
     )
     second = _invoke("audit", "--estate-anchor", str(line.anchor))
     assert second.exit_code == 0, second.output
-    assert f"period 2 in {line.root_b} attested:" in second.output
+    assert f"period 2 in {line.root_b} attested, derivation-verified:" in second.output
     assert "chain through 2" in second.output  # the chain crossed the roll
     assert attestation_path(line.root_b, 2).exists()
     assert not attestation_path(line.root_a, 2).exists()
 
     one = _invoke("audit", "--estate-anchor", str(line.anchor), "--period", "1")
-    assert one.exit_code == 0 and f"period 1 in {line.root_a} attested:" in one.output
+    assert one.exit_code == 0
+    assert f"period 1 in {line.root_a} attested, derivation-verified:" in one.output
     assert "period 2" not in one.output
     absent = _invoke("audit", "--estate-anchor", str(line.anchor), "--period", "9")
     assert absent.exit_code == 2
@@ -773,7 +775,7 @@ def test_the_single_root_invocations_are_unchanged(tmp_path: Path) -> None:
 
     audited = _invoke("audit", "--run-root", str(line.root_a))
     assert audited.exit_code == 0
-    assert audited.output.startswith("period 1 attested: sha256:")
+    assert audited.output.startswith("period 1 attested, derivation-verified: sha256:")
     assert str(line.root_a) not in audited.output
 
     # a rolled root holds the seal it opened from and none of that period's
@@ -842,3 +844,288 @@ def test_a_foreign_estates_anchor_is_not_a_second_reading_of_this_one(tmp_path: 
 
     durable_write(str(sentinel_path(line.root_b)), held)
     assert walk_estate(line.anchor).roots() == (line.root_a, line.root_b)
+
+
+# --------------------------------------------- the archive, across a roll (DL-144)
+
+
+def test_pr56_an_archived_period_in_another_root_reads_through_the_walk(
+    tmp_path: Path,
+) -> None:
+    """DL-144 across a physical roll: period 1's inputs are archived in
+    root A while root B holds the checkpoint that covers them.
+
+    Two things a single-root build gets wrong and this pins. The COVER is
+    an estate fact -- attestation 2 lives in root B, and a per-root rule
+    would floor root A's only period forever. And the WALK is what makes
+    the archived row readable at all: `_prove_root` accepts a registered
+    period whose segment is gone when the receipt proves it, so all four
+    estate-wide verbs still cover the whole estate rather than stopping at
+    root A."""
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path, read_archive_receipt
+    from dsl41.retention import plan_retention, prune
+
+    line = _lineage(tmp_path)
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
+            "--next", str(line.c3),
+        ).exit_code
+        == 0
+    )
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert attestation_path(line.root_b, 2).exists()
+    assert not attestation_path(line.root_a, 2).exists()
+
+    # period 1's spool goes first (PR-36b's order), then its inputs
+    assert (
+        _invoke(
+            "estate", "prune", "--run-root", str(line.root_a),
+            "--estate-anchor", str(line.anchor), "--tombstones",
+        ).exit_code
+        == 0
+    )
+    plan = plan_retention(line.root_a, anchor_dir=line.anchor)
+    offered = [item for item in plan.prunable() if item.kind == "wal"]
+    assert [item.period_id for item in offered] == [1], plan.artifacts
+    report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert report.refused == () and report.failed == ()
+    assert not wal_path(line.root_a, 1).exists()
+    receipt = read_archive_receipt(line.root_a, 1)
+    assert receipt is not None and receipt.archived == ("wal/000001.jsonl",)
+
+    walk = walk_estate(line.anchor)
+    assert [(entry.period_id, entry.root) for entry in walk.periods] == [
+        (1, line.root_a),
+        (2, line.root_b),
+    ]
+    assert walk.periods[0].archived is not None and walk.periods[1].archived is None
+
+    audited = _invoke("audit", "--estate-anchor", str(line.anchor))
+    assert audited.exit_code == 0, audited.output
+    assert f"period 1 in {line.root_a} inputs archived, attestation-verified:" in audited.output
+    assert archive_receipt_path(line.root_a, 1).name in audited.output
+    assert f"period 2 in {line.root_b} attested, derivation-verified:" in audited.output
+
+    replayed = _invoke("journal", str(line.anchor))
+    assert replayed.exit_code == 0, replayed.output
+    assert "[inputs archived: unreplayable]" in replayed.stdout
+    assert replayed.stdout.count("UNREPLAYABLE GAP") == 1
+    # it CROSSED: period 2's trace is there, on the attestation root B holds
+    assert "j2 INACTIVE->STARTING" in replayed.stdout
+
+    listed = _invoke("runs", str(line.anchor))
+    assert listed.exit_code == 0
+    assert "period 1 has no rows -- its inputs were archived" in listed.output
+    assert [row.split()[0] for row in listed.stdout.splitlines()[1:] if row.strip()] == ["j2"]
+
+    swept = _invoke("estate", "prune", "--estate-anchor", str(line.anchor), "--dry-run")
+    assert swept.exit_code == 0, swept.output
+    assert "roots planned (2):" in swept.output
+
+
+def test_pr56_a_root_whose_every_period_is_archived_still_plans(tmp_path: Path) -> None:
+    """DL-144: an old root of a rolled lineage, swept down to its proofs.
+
+    Its sidecar, attestation and receipt are a permanent floor and there is
+    still a plan to compute over them. A planner that refused a root with
+    no segment -- which is what "an interrupted genesis" used to mean --
+    would make one archived root refuse the whole estate-wide sweep."""
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
+    from dsl41.retention import plan_retention, prune
+
+    line = _lineage(tmp_path)
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
+            "--next", str(line.c3),
+        ).exit_code
+        == 0
+    )
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "estate", "prune", "--run-root", str(line.root_a),
+            "--estate-anchor", str(line.anchor), "--tombstones",
+        ).exit_code
+        == 0
+    )
+    prune(
+        plan_retention(line.root_a, anchor_dir=line.anchor),
+        classes=(ARCHIVE_CLASS,),
+        dry_run=False,
+    )
+    assert wal_path(line.root_a, 1).parent.is_dir()
+    assert not any(wal_path(line.root_a, 1).parent.glob("*.jsonl"))
+
+    plan = plan_retention(line.root_a, anchor_dir=line.anchor)
+    # root A holds `periods/000002/` -- the seal installed it before the
+    # roll -- so the plan's newest period is 2 even with no segment at all
+    assert plan.current_period == 2 and plan.archived == frozenset({1})
+    floored = {item.path for item in plan.floors()}
+    assert archive_receipt_path(line.root_a, 1) in floored
+    assert attestation_path(line.root_a, 1) in floored
+    assert seal_path(line.root_a, 1) in floored
+
+    swept = _invoke("estate", "prune", "--estate-anchor", str(line.anchor), "--dry-run")
+    assert swept.exit_code == 0, swept.output
+    assert "roots planned (2):" in swept.output
+
+    # `dsl41 runs` on a root with NO segments answers with an empty table,
+    # and that answer is bought with the receipts: an unreadable one must
+    # not buy the same table, because the two would be indistinguishable
+    empty = _invoke("runs", str(line.root_a))
+    assert empty.exit_code == 0, empty.output
+    assert "period 1 has no rows -- its inputs were archived" in empty.output
+    durable_write(str(archive_receipt_path(line.root_a, 1)), b"{not canonical\n")
+    unreadable = _invoke("runs", str(line.root_a))
+    assert unreadable.exit_code == 2, unreadable.output
+    assert "000001.archive.json" in unreadable.output
+    assert not unreadable.stdout.strip()  # no table at all, honest or otherwise
+
+
+def test_pr56_a_lost_period_in_a_fully_archived_root_still_refuses(tmp_path: Path) -> None:
+    """DL-144 review: the loss refusal must not collapse when the loss is
+    total.
+
+    `audit --run-root` used to build its list from `closed_periods`, which
+    is empty exactly when every closed period has lost its segment -- so a
+    root whose only period was archived and then lost its receipt answered
+    "no closed period to audit" instead of naming the loss. The bound comes
+    from the SIDECARS now, and a sidecar is a permanent floor."""
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
+    from dsl41.retention import plan_retention, prune
+
+    line = _lineage(tmp_path)
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
+            "--next", str(line.c3),
+        ).exit_code
+        == 0
+    )
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "estate", "prune", "--run-root", str(line.root_a),
+            "--estate-anchor", str(line.anchor), "--tombstones",
+        ).exit_code
+        == 0
+    )
+    prune(
+        plan_retention(line.root_a, anchor_dir=line.anchor),
+        classes=(ARCHIVE_CLASS,),
+        dry_run=False,
+    )
+    archived = _invoke("audit", "--run-root", str(line.root_a))
+    assert archived.exit_code == 0, archived.output
+    assert "inputs archived, attestation-verified:" in archived.output
+
+    archive_receipt_path(line.root_a, 1).unlink()  # the archive becomes a loss
+    lost = _invoke("audit", "--run-root", str(line.root_a))
+    assert lost.exit_code == 2, lost.output
+    assert "this is LOSS and not an archive" in lost.output
+    assert "no closed period to audit" not in lost.output
+
+
+def _forge_branch(run_root: Path, period_id: int) -> str:
+    """A SECOND valid seal+attestation pair for one period of THIS estate,
+    correlated so every artifact agrees with every other.
+
+    The sidecar differs only in a `boundary_request` input scalar -- one of
+    the fields period-model §11 exempts from re-derivation and audit
+    carries -- so it is a seal this estate could have closed with and did
+    not. A fresh attestation is minted over it, so the pair verifies on its
+    own terms end to end. What says it is the wrong BRANCH is §1.3's
+    registry row, and nothing else on disk does.
+
+    Returns the forged digest."""
+    from dsl41.attest import Attestation, read_attestation
+    from dsl41.boundary import read_seal
+    from dsl41.runner_journal import dsl41_version
+
+    real = read_seal(run_root, period_id)
+    forged = real.model_copy(
+        update={
+            "boundary_request": real.boundary_request.model_copy(
+                update={"claimed_actor": "another-branch"}
+            )
+        }
+    )
+    assert forged.digest != real.digest
+    durable_write(str(seal_path(run_root, period_id)), forged.to_bytes())
+    previous = read_attestation(run_root, period_id - 1)
+    durable_write(
+        str(attestation_path(run_root, period_id)),
+        Attestation(
+            seal_digest=forged.digest,
+            period_id=period_id,
+            chain_through_period=period_id,
+            prev_attestation_digest=None if previous is None else previous.digest,
+            state_machine_version=forged.state_machine_version,
+            dsl41_version=dsl41_version(),
+            audited_at="2026-08-22T00:00:00.000000",
+        ).to_bytes(),
+    )
+    return forged.digest
+
+
+def test_b7_a_wrong_branch_pair_in_a_registered_root_releases_nothing(
+    tmp_path: Path,
+) -> None:
+    """B7: §1.3's registry row does not only say WHERE -- its committed
+    `seal_digest` is what makes a branch THIS lineage's.
+
+    DL-144's B3 closed the ROOT: a row pointing at another estate's
+    directory refuses. It left the row's own digest unread, so a
+    SAME-ESTATE, same-period pair that this lineage never closed with
+    still granted the cover -- and root A's WAL, evidence of the run that
+    did happen, would be deleted on the strength of a checkpoint over a
+    branch that did not.
+
+    The forgery lives in root B, which is where a cross-root cover is read
+    and where no local `seal` RECORD contradicts a rewritten sidecar. It
+    verifies on its own terms end to end, which is the point: nothing but
+    the row can tell it apart."""
+    from dsl41.attest import verify_attestation
+    from dsl41.boundary import EstateAnchor
+    from dsl41.period import ARCHIVE_CLASS
+    from dsl41.retention import plan_retention, prune
+
+    line = _lineage(tmp_path)
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
+            "--next", str(line.c3),
+        ).exit_code
+        == 0
+    )
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "estate", "prune", "--run-root", str(line.root_a),
+            "--estate-anchor", str(line.anchor), "--tombstones",
+        ).exit_code
+        == 0
+    )
+    plan = plan_retention(line.root_a, anchor_dir=line.anchor)
+    assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1]
+
+    committed = EstateAnchor(line.anchor).require().row(2).seal_digest
+    forged = _forge_branch(line.root_b, 2)
+    assert committed is not None and committed != forged
+    assert verify_attestation(line.root_b, 2).seal_digest == forged  # proves out alone
+
+    with pytest.raises(EngineError, match="this LINEAGE never closed with"):
+        plan_retention(line.root_a, anchor_dir=line.anchor)
+    # the LIVE re-check asks the same question: a plan taken before the
+    # forgery may not carry a cover past it
+    report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert report.removed == ()
+    assert report.refused and all("never closed with" in why for _, why in report.refused)
+    assert wal_path(line.root_a, 1).exists()
+    assert not archive_receipt_path(line.root_a, 1).exists()

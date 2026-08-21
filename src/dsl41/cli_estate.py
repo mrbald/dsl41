@@ -33,6 +33,7 @@ from dsl41.ir import lower_catalog
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateAnchor, EstateWalk, SealRequest
+    from dsl41.attest import Attestation
     from dsl41.retention import Artifact, PruneReport, RetentionPlan
     from dsl41.ir import CatalogIR
     from dsl41.period import RuntimeProfile, StagedManifest
@@ -527,6 +528,13 @@ def audit(
     attestation, which is what a rolled root can do and a full audit is
     not.
 
+    **An ARCHIVED period is reported at the other tier, by name (DL-144).**
+    Its inputs were deleted under `estate prune --archive-inputs`, so there
+    is nothing to re-derive from and the checkpoint is what stands for it.
+    This verb verifies that checkpoint and says **attestation-verified**,
+    never the word it uses for a period it re-derived: two proofs of two
+    strengths do not share a sentence.
+
     **Pointed at the ESTATE it audits every root.** With `--estate-anchor`
     and no `--run-root` it takes its periods from ss1.3's archive registry
     -- every period, in period order, each re-derived in the root that
@@ -538,7 +546,6 @@ def audit(
     Exit 0 when every period asked for is attested, 2 on any refusal.
     """
     from dsl41.boundary import EstateAnchor, default_anchor_dir
-    from dsl41.period import closed_periods
 
     if run_root is None and estate_anchor is None:
         typer.echo(
@@ -558,7 +565,11 @@ def audit(
         where = f"{walk.anchor_dir} (estate {walk.estate_id})"
     else:
         anchor = EstateAnchor(estate_anchor or default_anchor_dir(run_root))
-        chosen = [period] if period is not None else closed_periods(run_root)
+        # ARCHIVED periods are named too: `closed_periods` asks for a
+        # sidecar AND the segment that re-derives it, which an archived
+        # period no longer has. Dropping it here would answer with a
+        # smaller estate than the one on disk (DL-144)
+        chosen = [period] if period is not None else _root_periods(run_root)
         targets = [(period_id, run_root) for period_id in chosen]
         where = str(run_root)
     if not targets:
@@ -573,6 +584,25 @@ def audit(
         # exactly when "and here is what was not audited" is worth having
         for line in skipped:
             typer.echo(line)
+
+
+def _root_periods(run_root: Path) -> list[int]:
+    """Which periods a SINGLE-ROOT audit is about.
+
+    Three sets, because "closed" alone answers with a smaller estate than
+    the one on disk. `closed_periods` wants a sidecar and the segment that
+    re-derives it; an ARCHIVED period has the sidecar and no segment on
+    purpose; and a period this root WROTE whose segment is gone with no
+    receipt is loss, which has to be met and refused rather than dropped
+    from the list (DL-144)."""
+    from dsl41.period import archived_periods, closed_periods, sealed_periods, wrote_period
+
+    # the bound comes from the SIDECARS this root holds, never from
+    # `closed_periods`: that list is empty exactly when every closed period
+    # has lost its segment, so a range taken from it would collapse
+    # precisely in the case this set exists to catch (DL-144 review)
+    lost = {period_id for period_id in sealed_periods(run_root) if wrote_period(run_root, period_id)}
+    return sorted(set(closed_periods(run_root)) | set(archived_periods(run_root)) | lost)
 
 
 def _closed_across_roots(
@@ -603,7 +633,10 @@ def _closed_across_roots(
     for entry in walk.periods:
         if period is not None and entry.period_id != period:
             continue
-        if entry.period_id in closed_periods(entry.root):
+        # an ARCHIVED period is closed and is not re-derivable, so it is a
+        # target rather than a skip: `_attest_each` verifies its checkpoint
+        # and reports the attestation-verified tier (DL-144)
+        if entry.archived is not None or entry.period_id in closed_periods(entry.root):
             targets.append((entry.period_id, entry.root))
         else:
             skipped.append(
@@ -621,14 +654,29 @@ def _attest_each(
     single-root one in where its pairs come from and in nothing else, and
     a second copy of this would be the second place the `Unattested`
     bookkeeping case has to be remembered."""
-    from dsl41.attest import Unattested, audit_period
+    from dsl41.attest import (
+        ATTESTATION_VERIFIED,
+        DERIVATION_VERIFIED,
+        Unattested,
+        audit_period,
+        verified_tier,
+    )
     from dsl41.runner_clock import EngineError
 
     outstanding = 0
     try:
         for period_id, root in targets:
             at = f" in {root}" if name_root else ""
+            tier = verified_tier(root, period_id)
             try:
+                # SEAL-ONLY or not, this is the same call: `audit_period`
+                # re-derives when the inputs are there and consumes the
+                # stored checkpoint when they are not (PR-02e), and only
+                # ONE of the two paths may report itself as a derivation.
+                # Skipping it for an archived period would also skip the
+                # `attested` row a busy lineage lock left unflipped, and
+                # "the audit is idempotent and finishes the row" would
+                # stop being true for exactly those periods
                 attestation = audit_period(root, period_id, anchor=anchor)
             except Unattested as exc:
                 # the checkpoint IS written and durable; only the registry
@@ -642,8 +690,10 @@ def _attest_each(
                 outstanding += 1
                 continue
             typer.echo(
-                f"period {period_id}{at} attested: {attestation.digest}"
-                f" (seal {attestation.seal_digest}, chain through"
+                _archived_line(root, period_id, at, attestation)
+                if tier == ATTESTATION_VERIFIED
+                else f"period {period_id}{at} attested, {DERIVATION_VERIFIED}:"
+                f" {attestation.digest} (seal {attestation.seal_digest}, chain through"
                 f" {attestation.chain_through_period})"
             )
     except EngineError as exc:
@@ -655,6 +705,26 @@ def _attest_each(
             " idempotent and finishes the row (period-model ss1.3)",
             err=True,
         )
+
+
+def _archived_line(root: Path, period_id: int, at: str, attestation: "Attestation") -> str:
+    """One archived period, verified and reported at ss11's OTHER tier
+    (DL-144).
+
+    The wording shares no phrase with the derivation-verified line beside
+    it. An operator scanning a hundred rows must be able to see which
+    periods this estate can still re-derive and which ones it has traded
+    for a checkpoint, and two lines that differed by one adjective would
+    not carry that."""
+    from dsl41.attest import ATTESTATION_VERIFIED
+    from dsl41.period import archive_receipt_path
+
+    return (
+        f"period {period_id}{at} inputs archived, {ATTESTATION_VERIFIED}:"
+        f" {attestation.digest} (seal {attestation.seal_digest}, chain through"
+        f" {attestation.chain_through_period}, receipt"
+        f" {archive_receipt_path(root, period_id).name}) -- not re-derivable"
+    )
 
 
 def verify(
@@ -770,6 +840,14 @@ def estate_prune(
         "--quarantine",
         help="Remove quarantined candidates: superseded staged periods no recovery references.",
     ),
+    archive_inputs: bool = typer.Option(
+        False,
+        "--archive-inputs",
+        help="ARCHIVE a covered period: write its receipt, then delete its WAL and"
+        " its committed candidate files. IRREVERSIBLE -- the period drops to the"
+        " attestation-verified tier and can never be re-derived. Prune its"
+        " tombstones first.",
+    ),
     older_than_days: float = typer.Option(
         None,
         "--older-than-days",
@@ -797,10 +875,22 @@ def estate_prune(
 
     Three verdicts are reported. `floored` is refused by the model.
     `held` has been released by the head moving on and is kept anyway,
-    because PR-Q3/E20 -- may a seal-only archive stand in for pruned
-    inputs? -- is open. `prunable` is licensed by name: a tombstone whose
-    period is attested and whose run has ended, and a quarantined
-    candidate.
+    because no retention class licenses it -- and the row says which
+    dependency is in the way. `prunable` is licensed by name: a tombstone
+    whose period is attested and whose run has ended, a quarantined
+    candidate, and the INPUTS of a period the archive covers.
+
+    **`--archive-inputs` is the one irreversible verdict (DL-144).** It
+    answers PR-Q3 -- may a seal-only archive stand in for pruned inputs? --
+    with yes, conditionally, by explicit policy. A period is archived only
+    when it is attested, a LATER chain checkpoint covers it, its spool is
+    already pruned, and every older period this root retains is archived.
+    The receipt (`seals/<period>.archive.json`) is written before the first
+    deletion and is what tells every reader afterwards that the absence is
+    an archive and not a loss; it, the sidecar and the attestation may
+    never be pruned. After it, the period reads at the
+    **attestation-verified** tier and can never be re-derived. Restoring
+    the files does not undo it.
 
     Pruning a tombstone is not reversible and it is not free: that period
     can no longer be re-derived from its own evidence, and its attestation
@@ -819,6 +909,7 @@ def estate_prune(
     `--dry-run`), 2 on a refusal and 2 when the filesystem refused a
     removal -- and then the report says which ones went and which did not.
     """
+    from dsl41.period import ARCHIVE_CLASS
     from dsl41.retention import CLASSES, plan_retention, prune
     from dsl41.runner_clock import EngineError
 
@@ -829,16 +920,25 @@ def estate_prune(
             err=True,
         )
         raise typer.Exit(2)
-    classes = [name for name, on in (("tombstones", tombstones), ("quarantine", quarantine)) if on]
+    classes = [
+        name
+        for name, on in (
+            ("tombstones", tombstones),
+            ("quarantine", quarantine),
+            (ARCHIVE_CLASS, archive_inputs),
+        )
+        if on
+    ]
     if not classes and dry_run:
         # a listing with no class named is a survey: it shows every
         # licensed deletion, so the operator can pick from what is there
         classes = sorted(CLASSES)
     if not classes and not dry_run:
         typer.echo(
-            "nothing selected: name at least one class (--tombstones, --quarantine)"
-            " or ask for --dry-run. A prune verb with a default set would be a"
-            " retention policy, and that is the operator's (period-model ss12)",
+            "nothing selected: name at least one class (--tombstones, --quarantine,"
+            f" --{ARCHIVE_CLASS}) or ask for --dry-run. A prune verb with a default"
+            " set would be a retention policy, and that is the operator's"
+            " (period-model ss12)",
             err=True,
         )
         raise typer.Exit(2)
@@ -906,10 +1006,18 @@ def _print_prune(
     held = _merged(*(report.held for report in reports))
     floored = _merged(*(report.floored for report in reports))
     failed = tuple(pair for report in reports for pair in report.failed)
+    refused = tuple(pair for report in reports for pair in report.refused)
     _lines(verb, removed)
     _lines("prunable, outside the flags given", _merged(*(report.kept for report in reports)))
-    _lines("held (floor lifted, PR-Q3/E20 open)", held)
+    _lines("held (floor lifted, no class licenses it)", held)
     _lines("floored (the model refuses)", floored)
+    if refused:
+        # NOT the filesystem: nothing was attempted and nothing is broken.
+        # The archive asked for a period whose eligibility changed between
+        # the plan and the receipt, and the operator has an order to follow
+        typer.echo(f"the archive refused ({len(refused)}):", err=True)
+        for item, reason in refused:
+            typer.echo(f"  {item.path}: {reason}", err=True)
     if failed:
         typer.echo(f"the filesystem refused ({len(failed)}):", err=True)
         for item, reason in failed:
@@ -935,7 +1043,11 @@ def _print_prune(
         f" {sum(report.bytes_removed for report in reports)} byte(s);"
         f" {len(floored)} floored, {len(held)} held{tail}"
     )
-    return bool(failed)
+    # an archive refusal exits 2 for the same reason a filesystem one does:
+    # the operator asked for something that did not happen, and a zero exit
+    # would say it did. A DRY RUN did not ask -- it surveyed -- so its
+    # refusals print and its exit stays 0
+    return bool(failed) or (bool(refused) and not dry_run)
 
 
 def _merged(*verdicts: "tuple[Artifact, ...]") -> "tuple[Artifact, ...]":

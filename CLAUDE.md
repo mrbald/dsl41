@@ -76,7 +76,10 @@ it.
   via quarantine + the report footer). Q8b–Q8d close mechanically once a
   live instance exists: autocal date-set diff (dossier §9 + the runbook).
   E8 stays open runner-side (TERMINATED pin, FAILURE-leaning evidence
-  recorded). DL-59 (2026-07-30, project decision — no live instance is
+  recorded); E20 has LEFT the open list — DL-144 (2026-08-21) closed it
+  and period-model PR-Q3 by policy, not by observation, and the
+  `# PENDING: E20` marker is gone with it.
+  DL-59 (2026-07-30, project decision — no live instance is
   available; the scheduler must load and schedule an ordinary estate):
   open COMPOSITION corners in the scheduler path carry documented
   deterministic defaults, never refusals — Q8b runs the pipeline order

@@ -1349,8 +1349,13 @@ Continuing the runner E-series (`runner-design.md` §15, extended by
 - ~~**E19**~~ — *closed by period-model §10.3: a member changed while its box
   is executing is **R**, even when the member is INACTIVE; a box run never
   observes two versions of anything in its closure (PR-42).*
-- **E20** — retention of the seal chain vs. the inputs. *Carried as period-model
-  PR-Q3; it gates pruning and the meaning of "verified".*
+- ~~**E20**~~ — *closed by period-model §12a (DL-144, 2026-08-21), as a POLICY
+  decision and not an observation: a seal-only archive **may** stand in for
+  pruned inputs, under a named `archive-inputs` class with a durable receipt in
+  front of every deletion, an itemized eligibility list and a permanent floor
+  of three artifacts per archived period. "Verified" is now two named tiers,
+  and an archived period stands at attestation-verified. It was never a live-
+  instance question, and it is out of the runbook's list.*
 - ~~**E23**~~ — *closed by period-model §11: `audit` runs the interpreter that
   produced the period and refuses otherwise, naming the version; old versions
   stay installable. And by §2.1's scope cut: an SM bump is not a transition.*

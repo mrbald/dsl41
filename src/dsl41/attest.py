@@ -76,8 +76,12 @@ from dsl41.classify import Baseline, carried_from_oracle, classify
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows
 from dsl41.period import (
+    SENTINEL_NAME,
+    ArchiveReceipt,
     Manifest,
+    archive_receipt_path,
     attestation_path,
+    check_stamp,
     read_period_manifest,
     seal_path,
     wal_path,
@@ -85,6 +89,9 @@ from dsl41.period import (
     disagreements,
     is_hash_address,
     opening_at,
+    read_archive_receipt,
+    read_sentinel,
+    wrote_period,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
@@ -106,6 +113,158 @@ from dsl41.seal import (
 #: rather than a constant because the whole point of writing it down is
 #: that a later, narrower proof must not be readable as this one.
 FULL: Final[str] = "full"
+
+#: ss11's two NAMED tiers of "verified" (DL-144). They are two different
+#: proofs of two different strengths, and they are spelled differently on
+#: purpose: a reader that printed one word for both would let an estate
+#: whose inputs are gone read exactly like an estate that still holds them.
+#:
+#: - `derivation-verified`: the period's own inputs are present and the
+#:   seal was re-derived from them (ss11's four inputs).
+#: - `attestation-verified`: seal-only. The inputs were archived under a
+#:   named retention class, and what stands for the period is the
+#:   attestation, accepted by PR-02e's CONSUMER rule -- its own digest, its
+#:   binding to the seal it names, and its `chain_through_period`. NOT a
+#:   recursive walk: the induction was established when the checkpoint was
+#:   produced.
+DERIVATION_VERIFIED: Final[str] = "derivation-verified"
+ATTESTATION_VERIFIED: Final[str] = "attestation-verified"
+
+
+def verify_archive_receipt(
+    run_root: Path, period_id: int, *, licensing: Path | None = None
+) -> ArchiveReceipt | None:
+    """ss12a's receipt, PROVED -- the one door for every reader that treats
+    a receipt as authority (DL-144).
+
+    None means there is no receipt, which is a fact about most periods. A
+    receipt that is there and does not prove out is not a fact and
+    REFUSES: a reader that fell back to "no receipt" over a broken one
+    would read a real archive as accidental loss, and one that fell back
+    the other way would read loss as an archive.
+
+    SIX bindings, and they are the reason this is one function rather than
+    a check each caller writes for itself. Round one of DL-144 had five
+    consumers agreeing on none of them, so a receipt with a forged
+    attestation digest shortened `runs` output while the planner refused
+    it:
+
+    1. the receipt's own bytes and digest, its `retention_class` and its
+       filename-vs-`period_id` -- `read_archive_receipt`'s door;
+    2. the ESTATE: the receipt's `estate_id` is this root's SENTINEL's, so
+       a stranger's receipt copied in excuses nothing here;
+    3. the SEAL: `seal_digest` is the sidecar this root holds. The sidecar
+       is a permanent floor, so it is always there to be asked;
+    4. the ATTESTATION, by PR-02e's CONSUMER rule and not by a recursive
+       walk -- `verify_attestation` exactly, because a seal-only period is
+       the case that rule was written for;
+    5. `attestation_digest` and `chain_through_period` are that
+       checkpoint's. The receipt names the proof that LICENSED the
+       deletion, and a different one beside it is a swapped proof;
+    6. `licensing`, when the caller is excusing a specific absent file:
+       the receipt has to name THAT path. A receipt whose list covers only
+       a candidate pair does not excuse a missing WAL.
+    """
+    receipt = read_archive_receipt(run_root, period_id)
+    if receipt is None:
+        return None
+    where = archive_receipt_path(run_root, period_id)
+    sentinel = read_sentinel(run_root)
+    if sentinel is None:
+        raise EngineError(
+            f"{where}: an archive receipt in a root with no `{SENTINEL_NAME}` sentinel"
+            " -- nothing here says which lineage it belongs to (period-model ss1.1, ss12)"
+        )
+    if receipt.estate_id != sentinel.estate_id:
+        raise EngineError(
+            f"{where}: estate {receipt.estate_id} under a sentinel naming"
+            f" {sentinel.estate_id} -- a stranger's receipt excuses nothing here"
+            " (period-model ss12)"
+        )
+    if not seal_path(run_root, period_id).exists():
+        raise EngineError(
+            f"{seal_path(run_root, period_id)}: period {period_id} was archived"
+            f" ({where.name}) and its sidecar is gone -- the receipt, the sidecar and"
+            " the attestation are ONE permanent floor, and a period with neither"
+            " inputs nor proof is loss (period-model ss12)"
+        )
+    seal = read_seal(run_root, period_id)
+    if seal.estate_id != receipt.estate_id or seal.period_id != period_id:
+        # `read_seal` parses a sidecar; it does not ask WHOSE. Without this
+        # the whole chain below is self-consistent about the wrong estate:
+        # drop a foreign seal and its matching attestation into this root,
+        # restamp the receipt onto them, and every other binding here
+        # agrees -- the receipt names that seal, that seal carries that
+        # checkpoint, the checkpoint chains through this period. The one
+        # thing none of them says is that the pair belongs to this lineage
+        raise EngineError(
+            f"{seal_path(run_root, period_id)}: attests period {seal.period_id} of"
+            f" estate {seal.estate_id} where this receipt claims period {period_id} of"
+            f" {receipt.estate_id} -- a foreign sidecar under this period's name, and"
+            " a receipt restamped onto it excuses nothing (period-model ss1.2, ss12)"
+        )
+    if receipt.seal_digest != seal.digest:
+        raise EngineError(
+            f"{where}: stands on seal {receipt.seal_digest} and"
+            f" {seal_path(run_root, period_id)} digests to {seal.digest} -- the receipt"
+            " is not this boundary's (period-model ss12)"
+        )
+    try:
+        attestation = verify_attestation(run_root, period_id)
+    except EngineError as exc:
+        # PR-02e's consumer rule is what stands in for the deleted inputs,
+        # so its refusal is re-raised naming the ARCHIVE. "period N is not
+        # attested" is true and sends an operator to `dsl41 audit`, which
+        # for an archived period can never succeed -- the message has to
+        # say that the period's only remaining proof is gone or broken
+        raise EngineError(
+            f"{where.name} archived period {period_id} and its attestation is gone or"
+            f" does not hold together ({exc}) -- what stands in for the deleted inputs"
+            " is that checkpoint, it may never be pruned, and no re-derivation can"
+            " replace it (period-model ss12)"
+        ) from exc
+    if receipt.attestation_digest != attestation.digest:
+        raise EngineError(
+            f"{where}: stands on attestation {receipt.attestation_digest} and this root"
+            f" holds {attestation.digest} -- the proof that stands in for the deleted"
+            " inputs is not the one that licensed the deletion (period-model ss12)"
+        )
+    if receipt.chain_through_period != attestation.chain_through_period:
+        raise EngineError(
+            f"{where}: says the checkpoint chains through"
+            f" {receipt.chain_through_period} and it chains through"
+            f" {attestation.chain_through_period} -- the receipt and the proof it names"
+            " disagree about how far the induction reached (period-model ss1.3, ss12)"
+        )
+    if licensing is not None and not receipt.licenses(run_root, licensing):
+        raise EngineError(
+            f"{licensing} is not there, and {where.name} does not license it"
+            f" (it licensed {', '.join(receipt.archived)}) -- this is LOSS and not an"
+            " archive: retention writes the receipt before it deletes anything,"
+            " exactly so the two can be told apart (period-model ss12)"
+        )
+    return receipt
+
+
+def verified_tier(run_root: Path, period_id: int) -> str:
+    """Which of ss11's two tiers this period stands at (DL-144).
+
+    THE RECEIPT DECIDES, not the disk. An archive is irreversible: files
+    restored beside a receipt do not move a period back to
+    `derivation-verified`, because the estate has already published the
+    weaker claim and a tier that flickered with what happens to be on disk
+    would be no claim at all. The restored inputs may still be READ -- a
+    reader is free to look at them -- but the tier this function reports
+    stays the receipt's.
+
+    And the receipt has to PROVE OUT before it decides anything: reporting
+    the weaker tier on the word of an artifact nobody checked would be the
+    one place this design takes a claim on trust."""
+    return (
+        ATTESTATION_VERIFIED
+        if verify_archive_receipt(run_root, period_id) is not None
+        else DERIVATION_VERIFIED
+    )
 
 
 class Unattested(EngineError):
@@ -181,17 +340,7 @@ class Attestation(BaseModel):
             )
         if not self.dsl41_version:
             raise ValueError("dsl41_version is empty: the producing interpreter is load-bearing")
-        try:
-            parsed = datetime.fromisoformat(self.audited_at)
-        except ValueError as exc:
-            raise ValueError(f"audited_at {self.audited_at!r}: {exc}") from exc
-        if parsed.tzinfo is not None or "." not in self.audited_at:
-            raise ValueError(
-                f"audited_at {self.audited_at!r}: naive UTC with six fractional digits"
-                " (ss3.2's spelling)"
-            )
-        if len(self.audited_at.rsplit(".", 1)[1]) != 6:
-            raise ValueError(f"audited_at {self.audited_at!r}: exactly six fractional digits")
+        check_stamp(self.audited_at, "audited_at")
         return self
 
     @property
@@ -351,6 +500,36 @@ def audit_period(
     liturgy first, and only then does the anchor row flip, so no state has
     an `attested` row without the artifact that justifies it."""
     stored = read_seal(run_root, period_id)
+    # PROVED, not read: this receipt decides whether the loss branch below
+    # is skipped and an attestation returned, so `audit` may least of all
+    # take one on trust. `verified_tier` refusing first in the CLI is not
+    # a guard -- it is another caller, and a library function that is only
+    # safe behind one of its callers is not safe (DL-144)
+    segment = wal_path(run_root, period_id)
+    receipt = verify_archive_receipt(
+        run_root, period_id, licensing=None if segment.exists() else segment
+    )
+    if receipt is None and not segment.exists():
+        # NOT re-derivable, and this is decided BEFORE the idempotent
+        # early-return below: a stored attestation over inputs that are
+        # gone would otherwise be reported as derivation-verified by a run
+        # that derived nothing. Which absence it is depends on who wrote
+        # the period, and only one of the two is a fault (DL-144)
+        if wrote_period(run_root, period_id):
+            raise EngineError(
+                f"{wal_path(run_root, period_id)}: this root ran period {period_id}"
+                " and its segment is not here. No archive receipt licenses the"
+                f" absence (`{archive_receipt_path(run_root, period_id).name}`), so"
+                " this is LOSS and not an archive -- retention writes the receipt"
+                " before it deletes anything (period-model ss11, ss12)"
+            )
+        raise EngineError(
+            f"{wal_path(run_root, period_id)}: period {period_id}'s WAL is not in"
+            " this root -- audit re-derives from the period's own evidence, and an"
+            " imported seal carries none of it. Verify its attestation instead"
+            f" (`dsl41 verify --run-root {run_root} --period {period_id}`), or audit"
+            " in the root the registry names (period-model ss1.3, ss11)"
+        )
     if stored.state_machine_version != STATE_MACHINE_VERSION:
         # ss11: auditing an old period runs the interpreter that produced
         # it. Cross-version audit inside one binary is a non-goal, and the
@@ -492,6 +671,19 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
         # C1's whole proof set, and importing that on every roll is
         # retention policy rather than a boundary mechanism. What the root
         # CAN do with an imported checkpoint is `verify` it (ss1.3)
+        if verify_archive_receipt(run_root, period_id, licensing=path) is not None:
+            # ARCHIVED, not absent: the inputs went under a named retention
+            # class and the receipt says so. Two different facts about one
+            # missing file, and an operator meeting the roll's wording here
+            # would go looking for a root that does not exist (DL-144)
+            raise EngineError(
+                f"{path}: period {period_id}'s inputs were ARCHIVED"
+                f" ({archive_receipt_path(run_root, period_id).name}) -- what stands"
+                " for this period is its attestation, at the attestation-verified"
+                " tier, and re-derivation is over for it by policy. Verify it instead"
+                f" (`dsl41 verify --run-root {run_root} --period {period_id}`)"
+                " (period-model ss11, ss12)"
+            )
         raise EngineError(
             f"{path}: period {period_id}'s WAL is not in this root -- audit"
             " re-derives from the period's own evidence, and an imported seal"

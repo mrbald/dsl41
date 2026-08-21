@@ -84,6 +84,7 @@ lineage head:
 | an uncommitted candidate's `staged_manifest.json` and `candidate.json` | recovery after an install-before-seal crash is decided by exactly those two files |
 | the catalog bundles and `sources.json` those manifests name | recovery refuses without a catalog directory |
 | the newest attestation, and any after it | the chain checkpoint every later proof stands on |
+| an ARCHIVED period's receipt, attestation and sidecar | *(DL-144.)* Its inputs are gone by policy. Delete the receipt and the absence reads as accidental LOSS and every reader refuses; delete either of the other two and the period has neither inputs nor proof |
 | the WAL and spool of any unattested period | its `audit` has not run yet, and this is what `audit` reads |
 | the spool of any live or carried execution | the run is not over |
 | a SPAWN tombstone whose effect can still be replayed | "no index entry" means "first application", so deleting one **authorizes a second spawn** of a job that already ran |
@@ -98,6 +99,7 @@ the estate and leaves the fence behind.
 dsl41 estate prune --run-root /srv/dsl41/runs/<id> --dry-run
 dsl41 estate prune --run-root /srv/dsl41/runs/<id> --tombstones --keep-runs 200
 dsl41 estate prune --run-root /srv/dsl41/runs/<id> --quarantine
+dsl41 estate prune --run-root /srv/dsl41/runs/<id> --archive-inputs   # irreversible
 ```
 
 `--dry-run` names every artifact and the verdict retention gives it, and
@@ -118,15 +120,46 @@ The three verdicts:
 - **floored** — the model refuses. The verb cannot be made to delete these,
   by any flag.
 - **held** — the head has moved past it and a later checkpoint covers it,
-  and it is kept anyway. One question is open — may a seal-only archive
-  stand in for pruned inputs? — and until it is answered the inputs of a
-  period that must stay auditable stay. Closed periods' WAL segments,
-  older sidecars, older manifests and unreferenced bundles are all here.
-- **prunable** — deletion is licensed by name. Two classes today: a SPAWN
+  and no class licenses deleting it. Every held row says WHICH dependency
+  is in the way, so a WAL that reads "no chain checkpoint above period 3
+  covers it" is telling you to attest a later period. Older sidecars,
+  older manifests and unreferenced bundles live here permanently in this
+  version — the archive class does not cover them.
+- **prunable** — deletion is licensed by name. Three classes: a SPAWN
   tombstone whose period is attested and whose run has ended
   (`--tombstones`: the run directory, its `.by_run_id` entry and its
-  default logs, always together), and a quarantined candidate
-  (`--quarantine`).
+  default logs, always together), a quarantined candidate
+  (`--quarantine`), and an archivable period's INPUTS
+  (`--archive-inputs`, below).
+
+**`--archive-inputs`: the one deletion you cannot undo.** *(DL-144, closing
+period-model PR-Q3.)* It deletes an attested period's WAL segment and its
+committed `staged_manifest.json` + `candidate.json`, after writing
+`seals/<period>.archive.json` — the **receipt** — durably first. Afterwards
+the period reads at the **attestation-verified** tier: `dsl41 audit` says
+so by name, `dsl41 journal` narrates an unreplayable gap and crosses to
+the next period on the checkpoint, `dsl41 runs` names the coverage it no
+longer has, and nothing can ever re-derive that period again. Restoring
+the files does not undo it — the receipt governs.
+
+The order is fixed and the verb tells you where you are in it:
+
+1. `dsl41 audit` the period, **and a later one** — a chain checkpoint
+   above it is what stands in for the inputs;
+2. `dsl41 estate prune --tombstones` for that period's runs. Until they
+   are gone the archive refuses and names what remains: the tombstone
+   floor resolves a run directory to a period through the SPAWN effect in
+   that period's WAL, so archiving the WAL first would strand every
+   tombstone it explains, floored forever;
+3. archive the OLDEST unarchived period first. The verb enforces this — the
+   archived periods are a prefix of what a root retains, so the segments
+   that remain are always contiguous and every segment-spanning reader
+   keeps working.
+
+If a segment goes missing with **no** receipt, that is loss and not an
+archive, and every reader refuses by name rather than replaying a lineage
+that quietly starts later than it did. That is the whole reason the
+receipt is written before the first deletion.
 
 **"Attested" is what unlocks a tombstone.** Run `dsl41 audit` (§6a) first.
 Until a period is attested, its whole spool is floored, because that spool

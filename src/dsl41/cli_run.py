@@ -891,11 +891,59 @@ def _segments_named(target: Path) -> list[Path]:
     period, answering about the current night and saying nothing about the
     nights before it. A `wal/NNNNNN.jsonl` names exactly one period and
     still replays exactly that one."""
-    from dsl41.period import estate_segments, resolve_wal
+    from dsl41.period import (
+        WAL_DIR,
+        archived_periods,
+        estate_segments,
+        resolve_wal,
+        root_of_wal,
+        wal_path,
+    )
 
     resolved = resolve_wal(target)
     whole_root = Path(target).is_dir() or Path(target) != resolved
-    return estate_segments(target) if whole_root else [resolved]
+    if not whole_root:
+        return [resolved]
+    held = estate_segments(target)
+    if not all(path.parent.name == WAL_DIR for path in held):
+        # a root with no periodized sentinel answers with `journal.jsonl`
+        # itself, whose stem is not a period number. There is no lineage
+        # here to have archived anything, and the reader below refuses it
+        # by name -- which a numeric sort would have turned into a
+        # traceback out of a diagnosis verb
+        return list(held)
+    # an ARCHIVED period retains no file and is still a period of this
+    # root. Naming its segment here is what makes the replay ANNOUNCE the
+    # unreplayable gap instead of answering with a shorter lineage that
+    # looks whole (DL-144)
+    root = root_of_wal(resolved)
+    gone = {wal_path(root, number) for number in archived_periods(root)}
+    gone |= {wal_path(root, number) for number in _lost_below(root, held)}
+    return sorted({*held, *gone}, key=lambda path: int(path.stem))
+
+
+def _lost_below(root: Path, held: "Sequence[Path]") -> list[int]:
+    """Period numbers BELOW the oldest segment this root retains for which
+    the root still holds a committed period manifest (DL-144).
+
+    A root-local read has no registry to ask who owns a period, and this is
+    the one local fact that answers it: genesis and every in-place opening
+    write `periods/<N>/manifest.json` into the root that ran period N,
+    while a ROLLED root imports only the successor's. So a manifest here
+    with no segment and no receipt is THIS root's period, gone -- which
+    `_announce_gap` then refuses as loss rather than replaying a lineage
+    that starts later than it did.
+
+    BELOW the oldest retained segment and nowhere else, because that is
+    where an archive lives (the archived periods are a prefix, ss12a) and
+    because a COMMITTED-NEXT period legitimately has a manifest and no
+    segment yet -- and it is always above."""
+    from dsl41.period import wrote_period
+
+    if not held:
+        return []
+    oldest = min(int(path.stem) for path in held)
+    return [number for number in range(1, oldest) if wrote_period(root, number)]
 
 
 def _replay_estate(walk: "EstateWalk", catalog: "CatalogIR | None") -> None:
@@ -914,7 +962,17 @@ def _replay_estate(walk: "EstateWalk", catalog: "CatalogIR | None") -> None:
 
     for entry in walk.periods:
         segment = wal_path(entry.root, entry.period_id)
-        typer.echo(f"period {entry.period_id} in {entry.root}: {segment}")
+        archived = ""
+        if entry.archived is not None:
+            # two different disks, two different words: the receipt says
+            # the period is archived either way, and only the missing file
+            # makes it unreplayable
+            archived = (
+                "  [inputs archived, still on disk]"
+                if segment.is_file()
+                else "  [inputs archived: unreplayable]"
+            )
+        typer.echo(f"period {entry.period_id} in {entry.root}: {segment}{archived}")
     # LABELLED even for a one-period lineage: an estate-wide answer names
     # the period it is about, and a walk of a lineage that has not rolled
     # yet is still an estate-wide answer
@@ -982,8 +1040,24 @@ def _replay_lineage(
     labelled = labelled or len(segments) > 1
     previous: list[dict] | None = None
     previous_segment: Path | None = None
+    # the caller's catalog gates the first period this read actually
+    # REPLAYS, which is not list slot 0 once a gap can sit in front of it:
+    # gating on the slot handed the first replayed period `None` and
+    # skipped the hash check the argument exists for (DL-144 review)
+    first = True
     for position, segment in enumerate(segments):
         where = _label(segment) if labelled else ""
+        if _periodized(segment) and not segment.is_file():
+            # an ARCHIVED period, or a lost one. `_announce_gap` refuses
+            # unless a receipt licenses the absence, and otherwise prints
+            # the gap and drops `previous`, which is what makes the NEXT
+            # boundary cross by its predecessor's attestation instead of
+            # by a re-derivation there is no evidence for (DL-142, DL-144).
+            # A path that is NOT `wal/NNNNNN.jsonl` names no period and
+            # falls through to `read_journal`, which refuses it by name
+            _announce_gap(segment, where=where)
+            previous, previous_segment = None, None
+            continue
         try:
             records = read_journal(segment)
             if position < len(segments) - 1:
@@ -1009,9 +1083,10 @@ def _replay_lineage(
                 ),
                 where=where,
             )
-        opened = _open_period(
-            root, records[0], catalog if position == 0 else None, where=where
-        )
+        if _periodized(segment):
+            _announce_archived(segment, where=where)
+        opened = _open_period(root, records[0], catalog if first else None, where=where)
+        first = False
         if previous is not None:
             typer.echo(
                 f"period {previous[-1]['period_id']} sealed at index"
@@ -1020,6 +1095,93 @@ def _replay_lineage(
             )
         _run_period(records, opened, where=where)
         previous, previous_segment = records, segment
+
+
+def _periodized(segment: Path) -> bool:
+    """Whether this path is a `wal/<six digits>.jsonl` that NAMES a period.
+
+    A root with no periodized sentinel resolves to `journal.jsonl` itself
+    (period-model ss1.1, DL-138), and every archive question below is
+    keyed on a period number that such a path does not have. Asked here so
+    the readers can go on refusing it by name instead of raising out of an
+    `int()` (DL-144 review)."""
+    from dsl41.period import WAL_DIR
+
+    return segment.parent.name == WAL_DIR and segment.stem.isdigit()
+
+
+def _announce_gap(segment: Path, *, where: str) -> None:
+    """One archived period, named on STDOUT as an unreplayable gap
+    (period-model ss12, DL-144).
+
+    On stdout with the trace, on DL-142's rule: a reader who dropped
+    stderr would otherwise be handed the periods on either side of the gap
+    concatenated with no seam, which is the "shorter trace that looks
+    whole" this verb exists to stop.
+
+    A segment that is simply GONE is a different fact and refuses. The
+    receipt is what separates the two, and it has to LICENSE this very
+    file: a receipt that archived only a candidate pair does not excuse a
+    WAL that went missing by accident."""
+    from dsl41.attest import verify_archive_receipt
+    from dsl41.period import archive_receipt_path, root_of_wal
+    from dsl41.runner_clock import EngineError
+
+    root = root_of_wal(segment)
+    period_id = int(segment.stem)
+    try:
+        # the ONE door (attest.py): a receipt that does not prove out is
+        # not a licence, and narrating a gap on its word would be this
+        # verb reporting an archive where the estate has a hole
+        receipt = verify_archive_receipt(root, period_id, licensing=segment)
+    except (OSError, EngineError) as exc:
+        raise typer.Exit(refuse(exc, prefix=where)) from exc
+    if receipt is None:
+        typer.echo(
+            f"{where}: {segment} is not there, and no archive receipt licenses its"
+            f" absence (`{archive_receipt_path(root, period_id).name}`) -- this is"
+            " LOSS and not an archive: retention writes the receipt before it deletes"
+            " anything, exactly so the two can be told apart (period-model ss12)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    typer.echo(
+        f"period {period_id} in {root}: inputs archived"
+        f" ({archive_receipt_path(root, period_id).name}) -- UNREPLAYABLE GAP, no"
+        " trace for this period; it stands at the attestation-verified tier and the"
+        " next boundary is crossed by that checkpoint (period-model ss11, ss12)"
+    )
+
+
+def _announce_archived(segment: Path, *, where: str) -> None:
+    """An archived period whose segment is STILL on disk, named before it
+    is replayed (DL-144).
+
+    That state is the crash window between the receipt and the deletions,
+    and it is also what a restored file looks like -- the archive is
+    irreversible, so the period reads at the attestation-verified tier
+    whatever is beside it. The inputs may still be READ, which is why this
+    narrates rather than refuses; but a trace printed with no word about
+    the tier would be the one output that disagrees with `audit`."""
+    from dsl41.attest import verify_archive_receipt
+    from dsl41.period import archive_receipt_path, root_of_wal
+    from dsl41.runner_clock import EngineError
+
+    root = root_of_wal(segment)
+    period_id = int(segment.stem)
+    try:
+        receipt = verify_archive_receipt(root, period_id)
+    except (OSError, EngineError) as exc:
+        raise typer.Exit(refuse(exc, prefix=where)) from exc
+    if receipt is None or not receipt.licenses(root, segment):
+        return
+    typer.echo(
+        f"period {period_id} in {root}: inputs ARCHIVED"
+        f" ({archive_receipt_path(root, period_id).name}) and this segment is still on"
+        " disk -- the archive is irreversible, so the period stands at the"
+        " attestation-verified tier; what follows is read from evidence the estate no"
+        " longer stands behind (period-model ss11, ss12)"
+    )
 
 
 def _prove_crossing(
@@ -1281,7 +1443,7 @@ def runs(
     from datetime import datetime as datetime_mod
 
     from dsl41.boundary import is_anchor_dir
-    from dsl41.runner_history import RunHistoryError, read_run_roots
+    from dsl41.runner_history import RunHistoryError, archived_coverage, read_run_roots
 
     anchors = [path for path in run_roots if is_anchor_dir(path)]
     if anchors and len(run_roots) > 1:
@@ -1303,8 +1465,15 @@ def runs(
             since_at = since_at.astimezone(UTC).replace(tzinfo=None)
     try:
         rows = read_run_roots(roots, job=job, since=since_at)
+        missing = archived_coverage(roots)
     except RunHistoryError as exc:
         raise typer.Exit(refuse(exc)) from exc
+
+    for line in missing:
+        # NAMED, never dropped: an archived period contributes no rows, and
+        # a table that was quietly shorter for it would be exactly the
+        # silent loss this project refuses everywhere else (DL-144)
+        typer.echo(f"warning: {line}", err=True)
 
     if any(row.fidelity == "records_only" for row in rows):
         # Loud on stderr as well as on the row, because the one degraded

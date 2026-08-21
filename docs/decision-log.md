@@ -7012,3 +7012,250 @@
   blocker leak-checks, each red on the assertion that names it; the B
   block adds ~14s, five consecutive runs identical, no process
   survives teardown.
+- DL-144 the archive: a seal-only period, by policy, with a receipt in
+  front of it (2026-08-21; period-model ss11's tier split, ss12a and
+  ss13's PR-53..PR-56 -- PR-Q3/E20 closed after one adversarial round,
+  six blockers folded).
+  **A POLICY DECISION, recorded as one.** PR-Q3 asked whether a seal-only
+  archive may stand in for pruned inputs. Nothing in the frozen text
+  implied either answer -- which is exactly why it was open -- so this
+  entry does not argue one out of ss12. It CHOOSES: **yes,
+  conditionally.** And E20 is reclassified while it closes: it was filed
+  as an ops question awaiting a live estate, and it never was one. No
+  observation could have settled it.
+  The elimination, in the open. **E1** (unconditional yes) contradicts
+  DL-142's ruling that a replay crosses on derivation and not on
+  integrity: an archive with no gate would hand every reader the weaker
+  proof and never say so. **E3** (delete by default once attested)
+  contradicts DL-135 (7): a default set IS a retention policy, and ss12
+  makes that the operator's. **E4** (keep one word "verified" and let it
+  quietly weaken) contradicts PR-Q3's own text, which says the DEFINITION
+  depends on the answer -- so the answer owes a definition, not a
+  silence. **E5** (archive a period whose checkpoint cover is absent)
+  stays floored: an attestation is what stands in for the inputs, and
+  there is nothing to stand in with. **E2** ("never") is REJECTED AS
+  POLICY and not deduced away: an estate that must keep every input
+  forever is a real position, it is simply not this project's, and the
+  cost of holding it is unbounded storage on an append-only lineage.
+  (1) **The receipt is the point of no return, not a log line.**
+  `seals/<period>.archive.json` is a ss3.2-family artifact -- version,
+  canonical bytes, its own digest -- binding the estate, the period, the
+  seal digest, the attestation it stands on, the class name and the EXACT
+  licensed artifact list, and it is durable BEFORE the first deletion.
+  The list validates in exactly TWO shapes -- the segment alone, or the
+  segment with the committed candidate's two files -- and the rule lives
+  in the ARTIFACT rather than only in the verb that writes it: a receipt
+  licensing a candidate pair without the segment describes a
+  half-archived period, and "archived" has to be the one crisp state
+  every reader reports a TIER from. It is also the RECOVERY AUTHORITY: a
+  later plan enumerates what is left to delete FROM the receipt, never
+  from what the disk still looks like. A
+  crash between receipt and deletions re-plans and COMPLETES from the
+  receipt; a crash before it leaves an estate where nothing happened.
+  Missing evidence with NO receipt REFUSES as loss, in the walk, in
+  `audit`, in `journal` and in the planner -- accidental loss must never
+  read as archiving, and writing the receipt first is what makes the two
+  distinguishable at all. Ownership decides whose absence is even a
+  question: ss1.3's registry row, never a guess, because a ROLLED root
+  legitimately holds a predecessor's sidecar and none of its WAL.
+  (2) **Three artifacts per archived period join the floor PERMANENTLY.**
+  The receipt, the attestation and the seal sidecar. Delete the receipt
+  and the archive reads as loss; delete either of the others and the
+  period has neither inputs nor proof. `_remove` cannot reach them --
+  refused, not merely not asked.
+  (2a) **ONE door proves a receipt, and every consumer goes through it.**
+  `attest.verify_archive_receipt`, SEVEN bindings: the receipt's own
+  bytes, digest, class and filename; its `estate_id` against this root's
+  SENTINEL; the SIDECAR's own `estate_id` and `period_id`, because
+  reading a sidecar parses it and never asks whose; its `seal_digest`
+  against that sidecar; the attestation by PR-02e's CONSUMER rule
+  (`verify_attestation` exactly -- not a recursive walk); its
+  `attestation_digest` and `chain_through_period` against that
+  checkpoint; and the licensed path, where a specific absence is being
+  excused. A receipt that is present and does not prove out is never
+  treated as absent -- it refuses.
+  (3) **Eligibility is ITEMIZED per artifact dependency.** Two kinds are
+  in the class and no more: an attested period's WAL under a LATER chain
+  checkpoint, and a COMMITTED candidate's `staged_manifest.json` +
+  `candidate.json` under the same cover, in the same receipt. The act is
+  all-or-nothing per period, so "archived" is one crisp state a reader
+  can report a TIER from. Content-addressed bundles are ruled OUT in v1
+  -- shared by reference, and their reachability across an archived
+  period is a race this class declines to take -- and so is the period
+  manifest, which a later period's opening folds against. Anything whose
+  cover is absent stays floored or held as before.
+  (4) **Two orderings, each a real dependency, and both enforced through
+  a crash.** The spool goes FIRST (PR-36b's order): the tombstone floor
+  resolves a run directory to a period THROUGH the SPAWN effect in that
+  period's WAL, so archiving the WAL first would make every tombstone it
+  explains provenance-unknown and floored FOREVER -- a floor nothing can
+  lift. The refusal names what remains. And the archive runs
+  oldest-first, DELETIONS INCLUDED, so the retained segments are a
+  contiguous suffix at every instant: that is what keeps ss11's
+  subscriber contract word for word (the gap marker is defined at the
+  OLDEST retained record, and the backfill's contiguity and adjacency
+  proofs never meet a hole). A filesystem refusal on one period's segment
+  stops every later one for the same reason. The prefix rule is a real
+  dependency and not tidiness: without it a mid-lineage archive would
+  have needed a protocol change to a frozen document.
+  (5) **The re-check is INDEPENDENT of the plan.** Immediately before the
+  receipt, against the live disk: the period's attestation, the covering
+  checkpoint, the spool of every run born in the period, and the prefix.
+  A re-check that re-read the plan would prove only that the plan had not
+  changed, which it cannot. A period whose cover is questioned in between
+  refuses and is reported under its own heading (`the archive refused`,
+  which is NOT `the filesystem refused` -- nothing was attempted and
+  nothing is broken). Every period BELOW it still goes and every period
+  above it refuses with it, naming the one below: that is the prefix rule,
+  not a second failure, and a sweep that stepped over the refusal would
+  open the hole the rule exists to prevent.
+  (6) **"Verified" becomes two NAMED tiers.** *derivation-verified*
+  (inputs present, seal re-derived) and *attestation-verified*
+  (seal-only, PR-02e's CONSUMER rule -- the checkpoint's own digest, its
+  binding to the seal, its `chain_through_period`; NOT a recursive walk).
+  They share no phrase in any output. An operator scanning a hundred rows
+  has to see which periods the estate can still re-derive, and two lines
+  differing by one adjective would not carry that.
+  (7) **The archive is IRREVERSIBLE, and the receipt governs.** Files
+  restored beside a receipt do not un-archive a period: every reader
+  still reports attestation-verified. The restored inputs may still be
+  READ -- nothing forbids looking -- but they are not a claim the estate
+  makes, because the weaker claim is already published and a tier that
+  flickered with the contents of a directory would be no tier at all.
+  (8) **No reader answers shorter in silence.** `boundary._prove_root`
+  gains the archived row and refuses an unreceipted absence by name;
+  `audit` reports the tier and keeps auditing the rest; `journal` prints
+  an explicit unreplayable-gap notice ON STDOUT with the trace (DL-142's
+  rule: a reader who dropped stderr would get two periods concatenated
+  with no seam) and crosses the next boundary by the attestation-gated
+  route DL-142 built for a segment named ALONE -- the two features fit
+  without a new mechanism, which is the strongest evidence the design was
+  right; `runs` names the coverage it lacks; `estate prune` re-plans an
+  archived root, including one whose every period is archived.
+  (9) **One product defect the unit's own reading found and fixed.** The
+  first cut excluded the period the current segment OPENED FROM. ss12
+  floors the seal SIDECAR a period opened from, and a sidecar is not a
+  WAL -- resume, the carry and history all fold from the sidecar (ss11
+  step 3) and none of them reads the predecessor's segment. Left in, that
+  guard would have floored an in-place lineage's every period forever,
+  which is precisely the "held for a reason nobody can name" this class
+  exists to end.
+  (9a) **One PRE-EXISTING defect found, NOT fixed, and written down.**
+  `runner_startup._drop_never_opened_segment` guards on "two or more
+  segments", which reads like a proxy for "not period 1" and is not one: a
+  ROLLED root holds exactly one segment and a torn opening there is never
+  repaired. The obvious fix -- test the segment NUMBER -- is UNSOUND, and
+  the attempt is what proved it: deleting the only segment leaves
+  `active_wal` naming a genesis segment that is not there, and
+  `select_seal` re-opens by falling back to the PREVIOUS segment, which
+  such a root does not have. The root refuses instead ("missing segment
+  record"), which is a refusal and not damage. Lifting it means teaching
+  `select_seal` to open from the anchor head, which is a different unit.
+  The archive does not make it reachable: an in-place root always retains
+  at least two segments (the head period and the one below it, which no
+  checkpoint above covers yet), and a fully archived root retains none.
+  The guard now says all of this where it stands.
+  (9b) **The adversarial round found one HIGH and six MEDIUM, all fixed.**
+  `dsl41 journal ROOT` raised a `ValueError` on a root with no periodized
+  sentinel, because the archive taught it to build its segment list by
+  period NUMBER and such a root resolves to `journal.jsonl` -- a
+  diagnosis surface turning a named refusal into a traceback, which is
+  refuse-don't-degrade inverted. Then: a refused artifact was reported in
+  BOTH `refused` and "prunable, outside the flags given"; a supplied
+  catalog was silently dropped when the first LISTED period was an
+  archived gap, so the hash gate the argument exists for never ran;
+  `runs` claimed a coverage gap from the receipt alone, contradicting
+  `journal` and `audit` in the receipt-written/deletion-failed window
+  (coverage is a fact about ROWS, so it now reads the segment); the
+  loss-scan bound in `audit --run-root` came from `closed_periods`, which
+  is empty exactly when the loss is total, so a fully archived root that
+  then lost its receipt answered "nothing to audit"; the receipt's
+  `retention_class` was bound in the PLANNER alone, so the walk, `audit`
+  and `journal` honoured a receipt written by a policy they cannot check
+  (the binding moved into `read_archive_receipt`, the one door); and
+  skipping `audit_period` for an archived period skipped the `attested`
+  row a busy lineage lock leaves unflipped. The review also caught two
+  test tautologies and three docstring claims about paths the tests do
+  not take, and one doc claim -- "every other period still goes" -- that
+  the prefix rule contradicts.
+  (9c) **The SECOND adversarial round found four blockers, one of them
+  severe, and each is a rule that was stated and not enforced.**
+  **B3, the severe one: a cover that trusted an unproved root.** The
+  chain checkpoint that covers a period may live in another root after a
+  roll, so item (3)'s cover is an estate fact -- and round one read the
+  registry row, went to the directory it named, and verified whatever
+  attestation was there. (The row's own `seal_digest` stayed unread until
+  (9d)'s B7; the registry says where to look AND which seal the lineage
+  committed, and both halves are load-bearing.) A row edited to point at ANOTHER ESTATE's root
+  could then offer an internally valid later checkpoint and RELEASE this
+  estate's WAL: an unproved root authorizing a deletion, which is the one
+  thing the floor exists to prevent. Every candidate root is now held to
+  the walk's own spine before its checkpoint is read -- sentinel, this
+  estate's `estate_id`, and a sidecar of this estate under that period's
+  number -- and a row resolving to a PRESENT stranger's root refuses the
+  plan, while a MISSING root is skipped because proving no cover only
+  ever holds more. The live re-check reads the anchor AGAIN rather than a
+  snapshot the plan carried, since a row moved between plan and receipt
+  is exactly the window it exists to close; the plan's registry field is
+  gone, because a snapshot the re-check consults is a second authority.
+  **B2: five consumers, five different ideas of what a receipt proves.**
+  The binding lived in the planner alone, so a receipt naming a proof
+  this root does not hold shortened `runs` output, narrated a gap in
+  `journal`, reported the weaker tier in `audit` and resolved a registry
+  row in the walk -- while `estate prune` refused the same file. Four
+  readers agreeing on nothing is worse than one of them being wrong: it
+  makes the estate's answer depend on which verb was typed. Closed by
+  (2a)'s door. `period.archived_periods` stays a LISTER of files, and
+  every decision reads a proved list instead -- an unreadable receipt
+  must not buy an empty table indistinguishable from an honest one.
+  **B1** is folded into (1). **B4: recovery did not survive a crash
+  BETWEEN the two candidate files.** `_candidate_artifacts` returned
+  early when `candidate.json` was absent, so a sweep that deleted it and
+  died left `staged_manifest.json` listed by no plan, held by no floor
+  and reachable by no verb -- an artifact the estate could neither keep
+  on purpose nor finish removing. Enumeration now comes off the receipt,
+  which is what a point of no return means.
+  (9d) **The THIRD round found three more, all in the same class: a
+  binding that was stated and not asked.**
+  **B5: the sidecar's own identity.** `read_seal` parses a sidecar; it
+  never asks WHOSE. So a real second genesis's seal and attestation for
+  this period, dropped in with the receipt restamped onto them, satisfied
+  all six of (2a)'s bindings -- the receipt named that seal, that seal
+  carried that checkpoint, the checkpoint chained through this period,
+  and the receipt claimed this estate. The door now requires
+  `seal.estate_id == receipt.estate_id` and `seal.period_id ==
+  period_id`, and the correlated pair is driven through every consumer by
+  the same parametrized case as the other five.
+  **B6: two functions still read the receipt directly.** `audit_period`
+  used it to skip the loss branch and RETURN an attestation, and
+  `rederive_seal` used it to decide whether a missing WAL reads as
+  ARCHIVED or as a rolled root. The CLI missed both because
+  `verified_tier` refuses one frame earlier -- and a caller is not a
+  guard: a library function that is safe only behind one of its callers
+  is not safe. Both go through the door now, with WAL licensing when the
+  segment is absent, and both are tested as FUNCTIONS.
+  **B7: the row's committed seal digest was load-bearing and unread.**
+  (9c)'s B3 closed the ROOT a cover comes from and left the ROW's
+  `seal_digest` discarded by the projection that fed it. So a row pointed
+  at a SAME-ESTATE, same-period root holding a second valid seal and
+  attestation -- a branch this lineage never closed with -- still granted
+  the cover, and the WAL of the branch that DID run would be deleted on
+  the strength of a checkpoint over one that did not. The projection
+  keeps the whole row, the digest is required to equal the sidecar's at
+  planning AND at the live re-check, and item (3)'s D1 text is amended
+  with it: the registry row does not "only say WHERE". The forged pair in
+  the pin verifies on its own terms end to end, and lives in the ROLLED
+  root, where no local `seal` RECORD contradicts a rewritten sidecar --
+  which is exactly where a cross-root cover is read.
+  (10) **Two v1 rulings and their seams.** Bundles stay held: unfreezing
+  them needs a reachability rule that survives an archived period, and
+  the seam is a reference count the plan does not keep today. Period
+  manifests stay held: they are one of ss11's four re-derivation inputs
+  and the opening of the NEXT period folds against them, so releasing
+  them is a separate question about what an opening may stand on. Both
+  are named in ss12a so a later version knows what it is changing.
+  (11) **What leaves the ledger.** `# PENDING: E20` is deleted from
+  `retention.py`; nothing in the tree cites PR-Q3 as an open rule any
+  more -- the `held` verdicts that used to cite it now cite DL-144 and
+  say which dependency is in the way. ops-model ss11's E20 closes with
+  it.

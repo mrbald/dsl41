@@ -607,7 +607,7 @@ def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: 
 
     audited = _invoke("audit", "--estate-anchor", str(anchor_dir))
     assert audited.exit_code == 0, audited.output
-    assert f"period 1 in {run_root.resolve()} attested:" in audited.output
+    assert f"period 1 in {run_root.resolve()} attested, derivation-verified:" in audited.output
     assert f"period 2 in {rolled.resolve()}: not closed, nothing to audit" in audited.output
 
     listed = _invoke("estate", "prune", "--estate-anchor", str(anchor_dir), "--dry-run")

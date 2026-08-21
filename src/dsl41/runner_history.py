@@ -769,8 +769,17 @@ def read_run_root(run_root: Path) -> list[RunRow]:
     is there and the verdict is not. And the cost is one replay per
     retained period -- `--job` and `--since` filter after the fold, so a
     long-lived estate pays for its whole history to answer about one run."""
+    from dsl41.period import wal_segments
     from dsl41.runner_journal import read_backfill
 
+    if not wal_segments(run_root) and _archived_here(run_root):
+        # every period this root held was ARCHIVED (DL-144). There are no
+        # rows here and there is no fault either -- the caller names the
+        # missing coverage, and a backfill over an empty segment list would
+        # raise instead of saying so. `_archived_here` PROVES each receipt:
+        # an unreadable one turning into an empty table is a shorter answer
+        # bought with a file nobody checked
+        return []
     try:
         # ONE validated read for the whole estate: `read_backfill` is where
         # DL-135 put the chain proofs -- sentinel-bound openings, filename
@@ -934,6 +943,55 @@ def _opening_rows(
             f" ({exc}) -- history refuses an unproved opening rather than replaying"
             " it from an empty state (period-model ss11, PR-50)"
         ) from exc
+
+
+def _archived_here(run_root: Path) -> list[int]:
+    """Every period of this root whose archive receipt PROVES OUT, in
+    order (DL-144).
+
+    `period.archived_periods` lists the receipt FILES, which is what a
+    lister owes. Every decision below reads this instead: an unreadable or
+    unbound receipt must never buy a shorter answer, and it refuses here
+    as `RunHistoryError` so `dsl41 runs` names it rather than printing a
+    table with a period quietly missing."""
+    from dsl41.attest import verify_archive_receipt
+    from dsl41.period import archived_periods
+
+    out: list[int] = []
+    for period_id in archived_periods(run_root):
+        try:
+            proved = verify_archive_receipt(run_root, period_id)
+        except EngineError as exc:
+            raise RunHistoryError(f"{run_root}: {exc}") from exc
+        if proved is not None:
+            out.append(period_id)
+    return out
+
+
+def archived_coverage(run_roots: Sequence[Path]) -> list[str]:
+    """One line per period whose inputs were archived, naming the coverage
+    this history therefore does NOT have (period-model ss12, DL-144).
+
+    `dsl41 runs` folds a row out of a period's own WAL, so an archived
+    period contributes none. The table is shorter for it, and the whole
+    rule of this project is that a shorter answer is never a silent one --
+    so the periods that are missing are named, with the receipt that says
+    why they are missing rather than lost."""
+    from dsl41.period import archive_receipt_path, wal_path
+
+    return [
+        f"{run_root}: period {period_id} has no rows -- its inputs were archived"
+        f" ({archive_receipt_path(run_root, period_id).name}), so this history covers"
+        " every period this estate retains and not that one"
+        for run_root in run_roots
+        for period_id in _archived_here(run_root)
+        # the RECEIPT says archived; the SEGMENT says whether the rows are
+        # gone. In the crash window between the two -- receipt durable,
+        # deletion not done -- the fold still produces this period's rows,
+        # and claiming otherwise would be the report lying in the direction
+        # this whole warning exists to prevent (DL-144 review)
+        if not wal_path(run_root, period_id).is_file()
+    ]
 
 
 def read_run_roots(

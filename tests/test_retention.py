@@ -29,9 +29,10 @@ import pytest
 
 from typer.testing import CliRunner
 
-from dsl41.attest import audit_period
+from dsl41.attest import audit_period, verify_attestation
 from dsl41.boundary import (
     ClaimedHead,
+    read_seal,
     EstateAnchor,
     ClosedHead,
     OpenHead,
@@ -42,7 +43,11 @@ from dsl41.canon import canonical_bytes
 from dsl41.cli import app
 from dsl41.period import (
     RuntimeProfile,
+    archivable_names,
+    archive_receipt_path,
     attestation_path,
+    read_sentinel,
+    read_archive_receipt,
     bundle_dir,
     period_dir,
     read_period_manifest,
@@ -53,6 +58,7 @@ from dsl41.period import (
     write_bundle,
 )
 from dsl41.retention import CLASSES, Artifact, plan_retention, prune
+from pydantic import ValidationError
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_journal
@@ -360,8 +366,13 @@ def test_pr36c_an_uncommitted_candidate_keeps_its_two_files_until_the_seal_commi
     committed = plan_retention(run_root)
     for name in ("staged_manifest.json", "candidate.json"):
         entry = _by_path(committed, period_dir(run_root, 2) / name)
-        assert entry.verdict == "held"
-        assert entry.why == "the seal that installed this candidate has committed"
+        # committed, so recovery no longer reads them -- and DL-144 puts
+        # them in the archive class UNDER THE SAME COVER as period 2's WAL,
+        # which is the current period here, so the archive is blocked and
+        # the verdict says which dependency blocks it
+        assert entry.verdict == "held" and entry.rule == "DL-144"
+        assert "the seal that installed it committed" in entry.why
+        assert "this root retains no segment for this period" in entry.why
 
 
 def test_pr36c_a_bundle_a_reachable_manifest_names_is_floored(tmp_path: Path) -> None:
@@ -423,7 +434,7 @@ def test_pr36c_the_latest_attestation_is_floored_and_a_superseded_one_is_not(
     two = plan_retention(run_root)
     superseded = _by_path(two, attestation_path(run_root, 1))
     assert superseded.verdict == "held"
-    assert superseded.why == "checkpoint 2 covers it by induction"
+    assert superseded.why.startswith("checkpoint 2 covers it by induction")
     assert _by_path(two, attestation_path(run_root, 2)).verdict == "floored"
 
 
@@ -688,17 +699,20 @@ def test_an_index_entry_this_binary_cannot_read_is_floored(tmp_path: Path) -> No
 def test_the_wal_of_an_unattested_period_is_floored_and_an_attested_one_is_held(
     tmp_path: Path,
 ) -> None:
-    """ss12 floors the WAL of any unattested period, and gates the rest on
-    E20 -- may a seal-only archive stand in for pruned inputs?
+    """ss12 floors the WAL of any unattested period; an attested one with
+    no checkpoint ABOVE it is held, and the verdict names why (DL-144).
 
-    Until that is answered an attested period's WAL is HELD rather than
-    offered: it is the input the open question is about. The pin exists so
-    that answering E20 is a deliberate change here and not a drift."""
+    Period 1 here is attested and period 2 is the current one, so no chain
+    checkpoint covers period 1 yet: the archive class is real and this
+    estate is still not eligible for it. A build that offered every
+    attested WAL would pass a test that only asked "is it prunable
+    eventually"."""
     run_root = tmp_path / "run"
     _periods(run_root, 2, attest_through=1)
     plan = plan_retention(run_root)
     attested = _by_path(plan, wal_path(run_root, 1))
-    assert attested.verdict == "held" and attested.rule == "PR-Q3"
+    assert attested.verdict == "held" and attested.rule == "DL-144"
+    assert "no chain checkpoint above period 1 covers it" in attested.why
     open_period = _by_path(plan, wal_path(run_root, 2))
     assert open_period.verdict == "floored" and open_period.rule == "ss12"
     assert plan.prunable() == ()  # nothing in a quiet two-period estate
@@ -1857,3 +1871,1346 @@ def test_a_reopened_periods_missing_manifest_refuses_resume(tmp_path: Path) -> N
     (period_dir(run_root, 2) / "manifest.json").unlink()
     with pytest.raises(EngineError, match="re-seeded from that seal at every resume"):
         _resume(run_root, C2_JIL)  # re-resuming an ALREADY open period
+
+
+# ================================================== the archive (DL-144)
+#
+# PR-53..PR-56. PR-Q3/E20 is closed by policy: a seal-only archive may
+# stand in for pruned inputs, under conditions this block holds the code
+# to one at a time. Every estate here is built by the real machinery and
+# every id is read off it -- the receipt binds a seal digest and an
+# attestation digest, and a fixture that minted either would prove only
+# that the string comparison runs.
+
+
+def _archivable(run_root: Path, periods: int = 4) -> None:
+    """A root whose period 1 (and 2) are archivable: several boundaries,
+    attested through the second-newest closed period, so a LATER chain
+    checkpoint covers the ones below it."""
+    _periods(run_root, periods, attest_through=periods - 1)
+
+
+def _archive(run_root: Path, *, dry_run: bool = False):
+    from dsl41.period import ARCHIVE_CLASS
+
+    return prune(plan_retention(run_root), classes=(ARCHIVE_CLASS,), dry_run=dry_run)
+
+
+def test_pr53_the_receipt_is_durable_before_the_first_deletion(tmp_path: Path) -> None:
+    """PR-53: the point of no return is an artifact, and it is written
+    FIRST.
+
+    The receipt names the estate, the period, the seal, the attestation it
+    stands on and the exact licensed list -- and everything in that list is
+    then, and only then, deleted. A build that deleted first and receipted
+    after would pass every "the archive works" test and lose an estate on
+    its first crash."""
+    from dsl41.canon import canonical_bytes as canon_bytes
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path, read_archive_receipt
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    seen: list[tuple[str, bool]] = []
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+
+    def watching(plan, item):
+        # at EVERY deletion the receipt for that period must already be on
+        # disk -- that is the ordering the whole class rests on
+        seen.append((str(item.path), archive_receipt_path(run_root, item.period_id).exists()))
+        real_remove(plan, item)
+
+    retention_mod._remove = watching  # type: ignore[assignment]
+    try:
+        report = _archive(run_root)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+
+    assert seen and all(present for _, present in seen), seen
+    assert report.refused == () and report.failed == ()
+    receipt = read_archive_receipt(run_root, 1)
+    assert receipt is not None
+    assert receipt.period_id == 1 and receipt.retention_class == ARCHIVE_CLASS
+    assert receipt.estate_id == plan_retention(run_root).estate_id
+    assert receipt.seal_digest == read_seal(run_root, 1).digest
+    assert receipt.archived == ("wal/000001.jsonl",)
+    # ss3.2: one artifact, one byte form, and the digest is over the file
+    raw = archive_receipt_path(run_root, 1).read_bytes()
+    assert raw == receipt.to_bytes()
+    # the stamped digest is over the canonical bytes with only the
+    # TOP-LEVEL `digest` removed, exactly as every other ss3.2 artifact
+    body = {key: value for key, value in receipt.model_dump(mode="json").items()}
+    assert canon_bytes({**body, "digest": receipt.digest}) == raw
+    assert receipt.digest not in canon_bytes(body).decode()
+    assert not wal_path(run_root, 1).exists()
+
+
+def test_pr53_a_crash_between_the_receipt_and_the_deletions_completes(tmp_path: Path) -> None:
+    """PR-53: a retry re-reads the receipt and finishes the sweep.
+
+    The re-plan must offer exactly the artifacts the receipt still names,
+    saying so, and it must NOT write a second receipt over the first: the
+    stored list is what a retry completes from."""
+    from dsl41.period import archive_receipt_path, read_archive_receipt
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+
+    def crashing(plan, item):
+        raise OSError("power loss between the receipt and the deletions")
+
+    retention_mod._remove = crashing  # type: ignore[assignment]
+    try:
+        first = _archive(run_root)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+    assert first.removed == () and first.failed
+    stamped = archive_receipt_path(run_root, 1).read_bytes()
+    assert wal_path(run_root, 1).exists()  # nothing went
+
+    resumed = plan_retention(run_root)
+    wal = _by_path(resumed, wal_path(run_root, 1))
+    assert wal.verdict == "prunable" and wal.rule == "DL-144"
+    assert wal.why == "the receipt is durable; completing the archive"
+    report = _archive(run_root)
+    assert not wal_path(run_root, 1).exists()
+    # the receipt is the SAME artifact, byte for byte: a rewrite would
+    # re-stamp `archived_at` and replace the list a retry completes from
+    assert archive_receipt_path(run_root, 1).read_bytes() == stamped
+    assert report.refused == ()
+    assert read_archive_receipt(run_root, 1) is not None
+
+
+def test_pr53_the_point_of_no_return_is_behind_a_receipted_period(tmp_path: Path) -> None:
+    """PR-53: once the receipt is durable, eligibility stops being asked.
+
+    Crash between the receipt and the deletions, then put a tombstone of
+    that period BACK on disk -- the very dependency that had to be pruned
+    before the archive was allowed. The sweep must still complete: the
+    receipt has already published the weaker claim, and a plan that
+    re-litigated the conditions would leave an estate that can neither
+    finish the archive nor undo it."""
+    from dsl41.period import ARCHIVE_CLASS, read_archive_receipt
+
+    run_root = tmp_path / "run"
+    engine = _open_period_one(run_root)
+    _run_job(engine, "b")
+    effect = _spawn_effects(run_root, 1)[0]
+    for boundary_no in range(1, 4):
+        text = [C2_JIL, C3_JIL][(boundary_no - 1) % 2]
+        asyncio.run(
+            _seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}"))
+        )
+        _close(engine)
+        engine = _resume(run_root, text)
+    _close(engine)
+    for period_id in (1, 2, 3):
+        _attest(run_root, period_id)
+
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+    retention_mod._remove = lambda plan, item: (_ for _ in ()).throw(OSError("power loss"))
+    try:
+        prune(plan_retention(run_root), classes=(ARCHIVE_CLASS,), dry_run=False)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+    assert read_archive_receipt(run_root, 1) is not None
+    assert wal_path(run_root, 1).exists()
+
+    _tombstone(run_root, effect)  # the pruned spool, back on disk
+    resumed = plan_retention(run_root)
+    # and the receipted period does not block the ones ABOVE it either:
+    # the prefix is satisfied by the point of no return, not by the file
+    assert _by_path(resumed, wal_path(run_root, 2)).verdict == "prunable"
+    finished = prune(resumed, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert finished.refused == () and finished.failed == ()
+    assert not wal_path(run_root, 1).exists()
+    assert not wal_path(run_root, 2).exists()
+
+
+def test_pr53_two_sweeps_racing_one_receipt_do_not_write_two_lists(tmp_path: Path) -> None:
+    """PR-53: the plan is read without a lock, so two sweeps can both see
+    no receipt and both reach the write.
+
+    The loser must act on the WINNER's list rather than on its own: the
+    stored list is what a retry completes from, and a loser whose own
+    selection the stored receipt does not license refuses instead of
+    deleting under a licence nobody issued.
+
+    The race is staged rather than threaded -- a plan computed before the
+    receipt landed IS the loser's plan, exactly -- so what runs here is the
+    stored-receipt path and not `durable_create`'s `FileExistsError`, which
+    only a same-instant write reaches and which the caller reports as a
+    refusal."""
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    losers = [plan_retention(run_root), plan_retention(run_root)]  # before any receipt
+    assert all(plan.archived == frozenset() for plan in losers)
+    _archive(run_root)  # the winner writes both receipts and deletes
+    assert not wal_path(run_root, 1).exists()
+
+    # the loser now runs its stale plan: the receipts are there, its own
+    # artifacts are gone, and it neither rewrites a receipt nor refuses
+    stamped = archive_receipt_path(run_root, 1).read_bytes()
+    report = prune(losers[0], classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert archive_receipt_path(run_root, 1).read_bytes() == stamped
+    assert report.refused == ()
+
+    # and a loser whose selection the STORED receipt does not license
+    # refuses rather than deleting under a licence nobody issued. The
+    # winner here took the OTHER legal shape -- the segment alone, without
+    # period 2's committed candidate pair -- so the loser's two candidate
+    # items are outside the licence that was actually issued
+    receipt = read_archive_receipt(run_root, 2)
+    assert receipt is not None
+    assert set(receipt.archived) == set(archivable_names(2))
+    segment_only = receipt.model_copy(update={"archived": ("wal/000002.jsonl",)})
+    durable_write(str(archive_receipt_path(run_root, 2)), segment_only.to_bytes())
+    second = prune(losers[1], classes=(ARCHIVE_CLASS,), dry_run=False)
+    refused = {str(item.path): why for item, why in second.refused}
+    for name in ("candidate.json", "staged_manifest.json"):
+        path = str(period_dir(run_root, 2) / name)
+        assert path in refused, refused
+        assert "does not name this artifact" in refused[path]
+    assert archive_receipt_path(run_root, 2).read_bytes() == segment_only.to_bytes()
+
+
+def test_pr53_an_archived_period_never_blocks_the_ones_above_it(tmp_path: Path) -> None:
+    """PR-53: eligibility stops being asked of a receipted period, and the
+    PREFIX above it stays open.
+
+    The state under test is a sweep that got period 1's receipt down, could
+    not delete its segment, and never reached period 2's receipt. Put
+    period 1's pruned spool back and every itemized condition it once met
+    now fails -- so a plan that re-litigated it would mark it blocked, and
+    the prefix rule would then hold period 2 for a period whose archive is
+    already committed. That is a floor nothing could ever lift, on an
+    artifact the estate has already published the weaker claim about."""
+    from dsl41.period import ARCHIVE_CLASS, read_archive_receipt
+
+    run_root = tmp_path / "run"
+    engine = _open_period_one(run_root)
+    _run_job(engine, "b")
+    effect = _spawn_effects(run_root, 1)[0]
+    for boundary_no in range(1, 4):
+        text = [C2_JIL, C3_JIL][(boundary_no - 1) % 2]
+        asyncio.run(
+            _seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}"))
+        )
+        _close(engine)
+        engine = _resume(run_root, text)
+    _close(engine)
+    for period_id in (1, 2, 3):
+        _attest(run_root, period_id)
+    _tombstone(run_root, effect)
+    prune(plan_retention(run_root), classes=("tombstones",), dry_run=False)
+
+    import dsl41.retention as retention_mod
+
+    real_write = retention_mod.write_archive_receipt
+
+    def only_the_first(run_root_, receipt):
+        if receipt.period_id > 1:
+            raise OSError("power loss between the two receipts")
+        real_write(run_root_, receipt)
+
+    real_remove = retention_mod._remove
+
+    def refusing_the_segment(plan_, item):
+        # the segment survives too, so period 1 is archived AND still has
+        # the very file its eligibility would be re-argued over
+        if item.kind == "wal":
+            raise OSError("the filesystem refused period 1's segment")
+        real_remove(plan_, item)
+
+    retention_mod.write_archive_receipt = only_the_first  # type: ignore[assignment]
+    retention_mod._remove = refusing_the_segment  # type: ignore[assignment]
+    try:
+        prune(plan_retention(run_root), classes=(ARCHIVE_CLASS,), dry_run=False)
+    finally:
+        retention_mod.write_archive_receipt = real_write  # type: ignore[assignment]
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+    assert read_archive_receipt(run_root, 1) is not None
+    assert read_archive_receipt(run_root, 2) is None
+    assert wal_path(run_root, 1).exists()
+
+    _tombstone(run_root, effect)  # period 1's spool, back on disk
+    resumed = plan_retention(run_root)
+    assert _by_path(resumed, wal_path(run_root, 1)).verdict == "prunable"
+    assert _by_path(resumed, wal_path(run_root, 2)).verdict == "prunable"
+    finished = prune(resumed, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert finished.refused == () and finished.failed == ()
+    assert not wal_path(run_root, 1).exists()
+    assert not wal_path(run_root, 2).exists()
+
+
+def test_pr53_a_crash_before_the_receipt_leaves_nothing_behind(tmp_path: Path) -> None:
+    """PR-53: the other side of the point of no return.
+
+    Fail while the receipt is being written and the estate is exactly what
+    it was: every input present, no receipt, and the period still
+    derivation-verified."""
+    from dsl41.attest import DERIVATION_VERIFIED, verified_tier
+    from dsl41.period import archive_receipt_path, read_archive_receipt
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    import dsl41.period as period_mod
+
+    real_write = period_mod.write_archive_receipt
+
+    def failing(run_root_, receipt):
+        raise OSError("power loss inside the receipt write")
+
+    import dsl41.retention as retention_mod
+
+    retention_mod.write_archive_receipt = failing  # type: ignore[assignment]
+    try:
+        report = _archive(run_root)
+    finally:
+        retention_mod.write_archive_receipt = real_write  # type: ignore[assignment]
+
+    assert report.removed == ()
+    assert {item.period_id for item, _ in report.refused} == {1, 2}
+    assert not archive_receipt_path(run_root, 1).exists()
+    assert read_archive_receipt(run_root, 1) is None
+    assert wal_path(run_root, 1).exists()
+    assert verified_tier(run_root, 1) == DERIVATION_VERIFIED
+
+
+def test_pr54_the_archive_refuses_until_the_spool_is_pruned(tmp_path: Path) -> None:
+    """PR-54, and PR-36b's ORDER: a period's WAL may not be archived while
+    a run born in it still has a tombstone on disk.
+
+    The tombstone floor resolves a run directory to a period through the
+    SPAWN effect in that period's WAL. Archive the WAL first and every
+    tombstone it explains becomes provenance-unknown and floored FOREVER --
+    a floor nothing can lift. The refusal names what remains, and the same
+    estate archives cleanly the moment the spool goes."""
+    run_root = tmp_path / "run"
+    engine = _open_period_one(run_root)
+    _run_job(engine, "b")
+    effect = _spawn_effects(run_root, 1)[0]
+    run_dir = _tombstone(run_root, effect)
+    for boundary_no in range(1, 4):
+        text = [C2_JIL, C3_JIL][(boundary_no - 1) % 2]
+        asyncio.run(_seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}")))
+        _close(engine)
+        engine = _resume(run_root, text)
+    _close(engine)
+    for period_id in (1, 2, 3):
+        _attest(run_root, period_id)
+
+    blocked = _by_path(plan_retention(run_root), wal_path(run_root, 1))
+    assert blocked.verdict == "held" and blocked.rule == "DL-144"
+    assert "its spool is still on disk and must be pruned first" in blocked.why
+    assert str(run_dir) in blocked.why
+    assert _archive(run_root).removed == ()
+    assert wal_path(run_root, 1).exists()
+
+    # each of the THREE tombstone artifacts blocks on its own, because
+    # each on its own is a run this WAL is the only explanation of: the
+    # directory, the `.by_run_id` entry, and the default log
+    index = run_root / "runs" / ".by_run_id" / effect["run_id"]
+    log = run_root / "logs" / f"{effect['job']}.{effect['run_number']}.out"
+    assert index.exists() and log.exists()
+    aside = tmp_path / "aside"
+    for position, alone in enumerate((run_dir, index, log)):
+        # moved OUT of the estate, never renamed inside it: a `.aside`
+        # suffix on an index entry breaks ss11a's filename-is-the-run_id
+        # rule, and the planner would refuse for that reason instead
+        holding = aside / str(position)
+        holding.mkdir(parents=True)
+        others = [path for path in (run_dir, index, log) if path != alone]
+        for path in others:
+            shutil.move(str(path), str(holding / path.name))
+        still = _by_path(plan_retention(run_root), wal_path(run_root, 1))
+        assert still.verdict == "held", alone
+        assert str(alone) in still.why, alone
+        for path in others:
+            shutil.move(str(holding / path.name), str(path))
+
+    # the SAME estate, one step later: prune the tombstones, then archive
+    prune(plan_retention(run_root), classes=("tombstones",), dry_run=False)
+    assert not run_dir.exists() and not index.exists() and not log.exists()
+    freed = _by_path(plan_retention(run_root), wal_path(run_root, 1))
+    assert freed.verdict == "prunable"
+    assert _archive(run_root).removed
+    assert not wal_path(run_root, 1).exists()
+
+
+def test_pr54_a_cover_questioned_between_the_plan_and_the_receipt_refuses(
+    tmp_path: Path,
+) -> None:
+    """PR-54: eligibility is RE-CHECKED against the live disk immediately
+    before the receipt, independently of the plan.
+
+    A re-check that re-read the plan would prove only that the plan had not
+    changed, which it cannot. Here the covering checkpoint is corrupted
+    after planning: the archive refuses, names the period, writes no
+    receipt and deletes nothing."""
+    from dsl41.period import archive_receipt_path, attestation_path as attest_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    plan = plan_retention(run_root)
+    assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1, 2]
+
+    # the checkpoint that COVERS period 1 stops proving anything, and so
+    # does every one above it: the estate is left with no cover at all
+    for period_id in (2, 3):
+        attest_path(run_root, period_id).write_bytes(b'{"artifact_format_version":1}\n')
+    from dsl41.period import ARCHIVE_CLASS
+
+    report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert report.removed == ()
+    assert report.refused
+    assert all(
+        "no chain checkpoint above period" in why or "no longer verifies" in why
+        for _, why in report.refused
+    ), report.refused
+    assert not archive_receipt_path(run_root, 1).exists()
+    assert wal_path(run_root, 1).exists()
+
+
+def test_pr54_eligibility_is_itemized_and_every_block_names_its_dependency(
+    tmp_path: Path,
+) -> None:
+    """PR-54: "everything the head has moved past" was the rule this class
+    was NOT given.
+
+    One estate, four verdicts, each naming the dependency in the way --
+    unattested, the estate head, no later checkpoint, and an unarchived
+    older period. A build that offered every attested WAL would pass a test
+    that only asked whether the archive ever works."""
+    run_root = tmp_path / "run"
+    _archivable(run_root, periods=4)
+    plan = plan_retention(run_root)
+    assert _by_path(plan, wal_path(run_root, 4)).why == "the WAL of an unattested period"
+    third = _by_path(plan, wal_path(run_root, 3))
+    assert third.verdict == "held"
+    assert "no chain checkpoint above period 3 covers it" in third.why
+    assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1, 2]
+
+    # the PREFIX rule: hold period 1 back and period 2 is held with it,
+    # because the archive runs oldest-first
+    (run_root / "seals" / "000001.audit.json").unlink()
+    held_back = plan_retention(run_root)
+    first = _by_path(held_back, wal_path(run_root, 1))
+    second = _by_path(held_back, wal_path(run_root, 2))
+    assert first.verdict == "floored" and first.why == "the WAL of an unattested period"
+    assert second.verdict == "held"
+    assert "an older period this root retains is not archivable" in second.why
+
+
+def test_pr55_the_receipt_the_attestation_and_the_sidecar_are_unreachable(
+    tmp_path: Path,
+) -> None:
+    """PR-55: three artifacts per archived period, floored PERMANENTLY.
+
+    Delete the receipt and the archive reads as loss; delete either of the
+    others and the period has neither inputs nor proof. `_remove` refuses
+    each one rather than merely not being asked."""
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    plan = plan_retention(run_root)
+    for path, why in (
+        (archive_receipt_path(run_root, 1), "reads as loss"),
+        (attestation_path(run_root, 1), "PERMANENT floor"),
+        (seal_path(run_root, 1), "PERMANENT floor"),
+    ):
+        item = _by_path(plan, path)
+        assert item.verdict == "floored" and item.rule == "DL-144", item
+        assert why in item.why
+        with pytest.raises(EngineError, match="removes prunable artifacts and nothing else"):
+            _force_remove(plan, item)
+
+
+def test_pr55_restoring_the_inputs_does_not_undo_the_archive(tmp_path: Path) -> None:
+    """PR-55: the archive is IRREVERSIBLE and the RECEIPT governs.
+
+    Files put back beside a receipt do not move a period back to
+    derivation-verified: the weaker claim is already published, and a tier
+    that flickered with the contents of a directory would be no tier at
+    all. The restored inputs may still be READ, which is why the plan
+    offers the WAL for the deletion the receipt already licensed rather
+    than refusing the estate."""
+    from dsl41.attest import ATTESTATION_VERIFIED, verified_tier
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    keep = wal_path(run_root, 1).read_bytes()
+    _archive(run_root)
+    assert verified_tier(run_root, 1) == ATTESTATION_VERIFIED
+
+    wal_path(run_root, 1).write_bytes(keep)  # restored beside the receipt
+    assert verified_tier(run_root, 1) == ATTESTATION_VERIFIED
+    audited = _invoke("audit", "--run-root", str(run_root), "--period", "1")
+    assert audited.exit_code == 0
+    assert "attestation-verified" in audited.output
+    assert "derivation-verified" not in audited.output
+    restored = _by_path(plan_retention(run_root), wal_path(run_root, 1))
+    assert restored.verdict == "prunable"
+    assert restored.why == "the receipt is durable; completing the archive"
+
+
+def test_pr55_a_swapped_checkpoint_under_a_receipt_refuses(tmp_path: Path) -> None:
+    """PR-55: the receipt names the checkpoint that LICENSED the archive.
+
+    A different one beside it is a swapped proof, and every verdict for
+    that period would then be computed against an attestation nobody
+    archived under. Absence is checked one test above; this is the case a
+    presence check alone would let through."""
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    receipt = read_archive_receipt(run_root, 1)
+    assert receipt is not None
+    swapped = receipt.model_copy(update={"attestation_digest": "sha256:" + "ab" * 32})
+    durable_write(str(archive_receipt_path(run_root, 1)), swapped.to_bytes())
+    with pytest.raises(EngineError, match="is not the one that licensed the deletion"):
+        plan_retention(run_root)
+
+
+def test_pr55_an_archived_period_whose_proof_is_gone_refuses(tmp_path: Path) -> None:
+    """PR-55: a receipt with no checkpoint beside it is not an archived
+    period -- it is a period whose only remaining proof was deleted, and no
+    re-derivation can replace it because the receipt says the inputs are
+    gone."""
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    attestation_path(run_root, 1).unlink()
+    with pytest.raises(EngineError, match="its attestation is gone or does not hold together"):
+        plan_retention(run_root)
+
+
+def test_pr56_every_reader_names_the_archived_period_and_its_tier(tmp_path: Path) -> None:
+    """PR-56: a multi-period archive, read by all four verbs.
+
+    None of them may answer shorter in silence. `audit` reports the tier by
+    name and shares no phrase with the derivation-verified line; `journal`
+    prints an unreplayable gap ON STDOUT and crosses the next boundary on
+    the checkpoint; `runs` names the coverage it lacks; `estate prune`
+    re-plans the root without refusing."""
+    from dsl41.boundary import walk_estate
+    from dsl41.period import archive_receipt_path, archived_periods
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    assert archived_periods(run_root) == [1, 2]
+
+    walk = walk_estate(default_anchor_dir(run_root))
+    assert [entry.archived is not None for entry in walk.periods] == [True, True, False, False]
+
+    audited = _invoke("audit", "--run-root", str(run_root))
+    assert audited.exit_code == 0, audited.output
+    lines = [line for line in audited.output.splitlines() if line.startswith("period ")]
+    assert len(lines) == 3
+    assert all("inputs archived, attestation-verified:" in line for line in lines[:2])
+    assert "not re-derivable" in lines[0]
+    assert lines[2].startswith("period 3 attested, derivation-verified:")
+    assert "attestation-verified" not in lines[2]
+
+    replayed = _invoke("journal", str(run_root))
+    assert replayed.exit_code == 0, replayed.output
+    assert replayed.stdout.count("UNREPLAYABLE GAP") == 2
+    assert "period 3 sealed at index" in replayed.stdout  # it crossed and continued
+
+    listed = _invoke("runs", str(run_root))
+    assert listed.exit_code == 0
+    assert listed.output.count("its inputs were archived") == 2
+
+    swept = _invoke("estate", "prune", "--run-root", str(run_root), "--dry-run")
+    assert swept.exit_code == 0, swept.output
+    assert f"{archive_receipt_path(run_root, 1)}" in swept.output
+
+
+def test_pr56_a_missing_segment_with_no_receipt_refuses_as_loss(tmp_path: Path) -> None:
+    """PR-56: accidental loss must NEVER read as archiving.
+
+    The same disk state -- a registered period with no segment -- is an
+    archive with a receipt and a LOSS without one, and the receipt is
+    written before any deletion exactly so the two can be told apart. All
+    three readers refuse, each naming the receipt it did not find."""
+    from dsl41.boundary import walk_estate
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    archive_receipt_path(run_root, 1).unlink()  # the archive becomes a loss
+
+    with pytest.raises(EngineError, match="this is LOSS and not an archive"):
+        walk_estate(default_anchor_dir(run_root))
+    with pytest.raises(EngineError, match="this is LOSS and not an archive"):
+        plan_retention(run_root)
+    replayed = _invoke("journal", str(run_root))
+    assert replayed.exit_code == 2
+    assert "this is LOSS and not an archive" in replayed.output
+    audited = _invoke("audit", "--run-root", str(run_root), "--period", "1")
+    assert audited.exit_code == 2
+    assert "this is LOSS and not an archive" in audited.output
+    # and the loss is not quietly dropped from a WHOLE-root audit either:
+    # a list built from "closed" alone would answer with a smaller estate
+    whole = _invoke("audit", "--run-root", str(run_root))
+    assert whole.exit_code == 2
+    assert "this is LOSS and not an archive" in whole.output
+
+
+def test_pr56_a_receipt_that_does_not_license_the_missing_file_is_not_a_licence(
+    tmp_path: Path,
+) -> None:
+    """PR-56: the receipt has to name THIS file, not merely exist.
+
+    A receipt whose list covers only a candidate pair does not excuse a WAL
+    that went missing by accident, so the licence is checked against the
+    LIST. A reader that took the receipt's presence as the answer would
+    read exactly that loss as an archive -- and the list is what the whole
+    artifact is for.
+
+    Two disks are compared here and they differ in one file: period 3,
+    which no receipt names at all, and period 2, whose receipt is rewritten
+    to license only its candidate pair."""
+    from dsl41.boundary import walk_estate
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    # (a) no receipt at all for period 3
+    kept = wal_path(run_root, 3).read_bytes()
+    wal_path(run_root, 3).unlink()
+    with pytest.raises(EngineError, match="No archive receipt licenses its absence"):
+        walk_estate(default_anchor_dir(run_root))
+    durable_write(str(wal_path(run_root, 3)), kept)
+    assert walk_estate(default_anchor_dir(run_root)).periods  # the estate is whole again
+
+    # (b) a receipt NARROWED to the candidate pair is not a weaker
+    # licence -- since B1 it is not a receipt at all. ss12a's archive is
+    # all-or-nothing, so a list that drops the segment describes a state
+    # this class never produces, and the artifact itself refuses before
+    # any reader can weigh what it licenses
+    receipt = read_archive_receipt(run_root, 2)
+    assert receipt is not None and set(receipt.archived) == set(archivable_names(2))
+    narrowed = receipt.model_copy(
+        update={"archived": tuple(e for e in receipt.archived if not e.startswith("wal/"))}
+    )
+    durable_write(str(archive_receipt_path(run_root, 2)), narrowed.to_bytes())
+    with pytest.raises(EngineError, match="ALL-OR-NOTHING"):
+        walk_estate(default_anchor_dir(run_root))
+
+    # (c) the licence check itself, asked of the door directly. A receipt
+    # of the OTHER legal shape excuses its segment and nothing else, so a
+    # reader excusing any other absence on it is refused by name
+    durable_write(str(archive_receipt_path(run_root, 2)), receipt.to_bytes())
+    from dsl41.attest import verify_archive_receipt
+
+    segment_only = read_archive_receipt(run_root, 1)
+    assert segment_only is not None and segment_only.archived == ("wal/000001.jsonl",)
+    assert verify_archive_receipt(run_root, 1, licensing=wal_path(run_root, 1)) is not None
+    with pytest.raises(EngineError, match="does not license it"):
+        verify_archive_receipt(
+            run_root, 1, licensing=period_dir(run_root, 1) / "candidate.json"
+        )
+
+
+def test_pr55_a_stranger_receipt_licenses_nothing(tmp_path: Path) -> None:
+    """PR-55: a receipt authorizes a reader to accept an absence, so it is
+    bound before it is believed -- this estate, this period, this seal, and
+    the attestation this root actually holds."""
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    receipt = read_archive_receipt(run_root, 1)
+    assert receipt is not None
+    foreign = receipt.model_copy(update={"estate_id": "not-this-estate"})
+    durable_write(str(archive_receipt_path(run_root, 1)), foreign.to_bytes())
+    with pytest.raises(EngineError, match="a stranger's receipt excuses nothing here"):
+        plan_retention(run_root)
+
+
+def test_pr53_the_receipt_is_a_closed_artifact_like_every_other(tmp_path: Path) -> None:
+    """PR-53, ss3.2: the receipt is read the way a seal and an attestation
+    are read, because it decides the same kind of question.
+
+    A stamped digest that does not match the bytes it stamps, a version
+    this binary does not implement, and a second byte form of one logical
+    artifact each refuse -- a receipt is what stands between an archive and
+    a loss, so it is never read past."""
+    from dsl41.period import ArchiveReceipt, archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    raw = archive_receipt_path(run_root, 1).read_bytes()
+    receipt = ArchiveReceipt.from_bytes(raw, where="round trip")
+    assert receipt == read_archive_receipt(run_root, 1)
+
+    with pytest.raises(EngineError, match="disagrees with itself"):
+        ArchiveReceipt.from_bytes(
+            raw.replace(b'"retention_class":"archive-inputs"', b'"retention_class":"other-name"'),
+            where="x",
+        )
+    with pytest.raises(EngineError, match="artifact_format_version"):
+        ArchiveReceipt.from_bytes(
+            raw.replace(b'"artifact_format_version":1', b'"artifact_format_version":2'),
+            where="x",
+        )
+    with pytest.raises(EngineError, match="canonical serialization"):
+        ArchiveReceipt.from_bytes(raw + b"\n", where="x")
+    with pytest.raises(EngineError, match="not ss3.2-canonical JSON"):
+        ArchiveReceipt.from_bytes(b"{,}", where="x")
+
+    # the list is sorted, has no repeat, and is relative to the run root:
+    # a retry completes from exactly it, so an absolute or traversing
+    # entry would send the deletion somewhere the plan never proved
+    for bad in (("b", "a"), ("a", "a"), ("/abs",), ("../out",), ()):
+        with pytest.raises(ValueError):
+            ArchiveReceipt.model_validate({**receipt.model_dump(mode="json"), "archived": bad})
+
+
+def test_pr53_a_receipt_under_another_periods_filename_refuses(tmp_path: Path) -> None:
+    """PR-53: a receipt licenses ONE period and is named for it. A file
+    filed under another period's name is not that period's licence."""
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    receipt = read_archive_receipt(run_root, 1)
+    assert receipt is not None
+    durable_write(str(archive_receipt_path(run_root, 3)), receipt.to_bytes())
+    with pytest.raises(EngineError, match="under another period's filename"):
+        read_archive_receipt(run_root, 3)
+
+
+def test_pr55_a_refused_segment_stops_every_later_one(tmp_path: Path) -> None:
+    """PR-55: the retained segments are a contiguous suffix after every
+    PARTIAL sweep, not only after a complete one.
+
+    The archive deletes oldest-first for that reason. When the filesystem
+    refuses period 1's segment, period 2's stays too -- deleting it would
+    leave `wal/` holding 1 and 3 with a hole between them, which every
+    segment-spanning reader would have to be taught to cross."""
+    from dsl41.period import ARCHIVE_CLASS
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    plan = plan_retention(run_root)
+    assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1, 2]
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+
+    def refusing_the_oldest(plan_, item):
+        if item.kind == "wal" and item.period_id == 1:
+            raise OSError("the filesystem refused period 1's segment")
+        real_remove(plan_, item)
+
+    retention_mod._remove = refusing_the_oldest  # type: ignore[assignment]
+    try:
+        report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+
+    assert wal_path(run_root, 1).exists() and wal_path(run_root, 2).exists()
+    reasons = {str(item.path): why for item, why in report.failed}
+    assert "the filesystem refused period 1's segment" in reasons[str(wal_path(run_root, 1))]
+    assert "deletes oldest-first" in reasons[str(wal_path(run_root, 2))]
+    assert [int(path.stem) for path in sorted((run_root / "wal").glob("*.jsonl"))] == [1, 2, 3, 4]
+
+
+def test_pr56_the_subscriber_and_the_resume_survive_an_archive(tmp_path: Path) -> None:
+    """PR-56: the two readers that are NOT reported on by `estate prune`.
+
+    A REGRESSION guard rather than a rule pin, and it says so: no single
+    mutation of the archive can make it red, because the two rules that
+    keep these readers working -- the prefix and the oldest-first deletion
+    -- are pinned by tests of their own. What this holds is the property
+    those two rules exist FOR.
+
+    The subscriber's backfill answers a cursor below the archive with
+    ss11's gap marker, at the oldest RETAINED record -- which is the
+    contract it already had, unchanged, and which holds only because the
+    archived periods are a prefix and never a hole. And a live engine
+    resumes over an archived lineage: recovery selects its seal by the
+    SIDECAR the active segment names (ss11 step 3), and a sidecar is not a
+    WAL."""
+    from dsl41.runner_journal import read_backfill
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    opening = read_journal(wal_path(run_root, 3))[0]
+
+    owed = read_backfill(run_root / "journal.jsonl", since=0)
+    assert owed.gap_from == opening["first_index"]  # named, never streamed past
+    assert owed.records and owed.records[0] == opening
+    inside = read_backfill(run_root / "journal.jsonl", since=owed.gap_from + 1)
+    assert inside.gap_from is None  # a cursor the root still retains: no gap
+
+    _close(_resume(run_root, C2_JIL))
+
+
+def test_a_root_that_is_not_an_estate_still_refuses_journal_by_name(tmp_path: Path) -> None:
+    """DL-144 review: the archive taught `journal ROOT` to build its own
+    segment list, and a list built by period NUMBER meets a root that has
+    none.
+
+    A directory with no periodized sentinel resolves to `journal.jsonl`
+    itself, whose stem is not a number. Sorting on it turned a named
+    refusal -- the thing a diagnosis surface owes -- into a traceback."""
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    bare = _invoke("journal", str(empty))
+    assert bare.exit_code == 2
+    assert "journal" in bare.output
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "journal.jsonl").write_text('{"rec":"header","catalog_hash":"x"}\n')
+    retired = _invoke("journal", str(legacy))
+    assert retired.exit_code == 2
+    assert "DL-138" in retired.output  # the retirement, by name -- not a traceback
+
+
+def test_an_archive_refusal_is_not_also_reported_as_unselected(tmp_path: Path) -> None:
+    """DL-144 review: `kept` is "prunable, outside the flags given", and a
+    refused artifact is inside them.
+
+    Reporting it in both buckets told the operator the sweep had both
+    skipped it for want of a flag and refused it with one, which is two
+    contradictory answers about one file."""
+    from dsl41.period import ARCHIVE_CLASS, attestation_path as attest_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    plan = plan_retention(run_root)
+    for period_id in (2, 3):
+        attest_path(run_root, period_id).write_bytes(b'{"artifact_format_version":1}\n')
+    report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert report.refused
+    refused = {(str(item.path), item.kind) for item, _ in report.refused}
+    assert refused
+    assert not refused & {(str(item.path), item.kind) for item in report.kept}
+
+
+def test_pr56_readers_agree_in_the_receipt_written_crash_window(tmp_path: Path) -> None:
+    """DL-144 review: three readers, one disk, one story.
+
+    In the window the design names -- receipt durable, deletions not done
+    -- the segment is still there and `runs` still folds its rows. A
+    warning taken from the receipt alone said those rows were gone while
+    printing them. What the readers owe here is the opposite: name the
+    TIER (which the receipt decides) and do not claim a coverage gap that
+    is not there (which the disk decides)."""
+    from dsl41.period import ARCHIVE_CLASS
+
+    run_root = tmp_path / "run"
+    engine = _open_period_one(run_root)
+    _run_job(engine, "b")
+    effect = _spawn_effects(run_root, 1)[0]
+    _tombstone(run_root, effect)
+    for boundary_no in range(1, 4):
+        text = [C2_JIL, C3_JIL][(boundary_no - 1) % 2]
+        asyncio.run(
+            _seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}"))
+        )
+        _close(engine)
+        engine = _resume(run_root, text)
+    _close(engine)
+    for period_id in (1, 2, 3):
+        _attest(run_root, period_id)
+    prune(plan_retention(run_root), classes=("tombstones",), dry_run=False)
+
+    before = _invoke("runs", str(run_root))
+    assert before.exit_code == 0
+
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+    retention_mod._remove = lambda plan, item: (_ for _ in ()).throw(OSError("power loss"))
+    try:
+        prune(plan_retention(run_root), classes=(ARCHIVE_CLASS,), dry_run=False)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+    assert wal_path(run_root, 1).exists()  # the window: receipt yes, deletion no
+
+    listed = _invoke("runs", str(run_root))
+    assert listed.exit_code == 0
+    # the fold is over the same segments, so it is the same answer -- and
+    # a warning that claimed a coverage gap would be describing a table
+    # that did not change
+    assert listed.stdout == before.stdout
+    assert "its inputs were archived" not in listed.output
+
+    replayed = _invoke("journal", str(run_root))
+    assert replayed.exit_code == 0, replayed.output
+    assert "UNREPLAYABLE GAP" not in replayed.stdout  # it is replayable, and is replayed
+    assert "inputs ARCHIVED" in replayed.stdout
+    assert "attestation-verified tier" in replayed.stdout
+
+    audited = _invoke("audit", "--run-root", str(run_root), "--period", "1")
+    assert audited.exit_code == 0
+    assert "inputs archived, attestation-verified:" in audited.output
+
+
+def test_a_receipt_of_an_unknown_class_licenses_nothing_in_any_reader(tmp_path: Path) -> None:
+    """DL-144 review: the class was bound in the PLANNER alone, so the
+    walk, `audit` and `journal` all honoured a receipt written by a policy
+    this binary does not implement while `estate prune` refused it.
+
+    A reader that accepts an absence under rules it cannot check is the
+    one asymmetry this artifact must not have -- so the binding sits in
+    `read_archive_receipt`, the door every reader goes through."""
+    from dsl41.boundary import walk_estate
+    from dsl41.period import archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    receipt = read_archive_receipt(run_root, 1)
+    assert receipt is not None
+    stranger = receipt.model_copy(update={"retention_class": "some-future-policy"})
+    durable_write(str(archive_receipt_path(run_root, 1)), stranger.to_bytes())
+
+    for reader in (
+        lambda: read_archive_receipt(run_root, 1),
+        lambda: walk_estate(default_anchor_dir(run_root)),
+        lambda: plan_retention(run_root),
+    ):
+        with pytest.raises(EngineError, match="retention class 'some-future-policy'"):
+            reader()
+    for args in (
+        ("journal", str(run_root)),
+        ("audit", "--run-root", str(run_root), "--period", "1"),
+    ):
+        result = _invoke(*args)
+        assert result.exit_code == 2, (args, result.output)
+        assert "some-future-policy" in result.output, args
+
+
+# ============================ DL-144 review round two: B1..B4
+
+
+def test_b1_the_receipt_permits_two_shapes_and_no_others(tmp_path: Path) -> None:
+    """B1: ss12a's archive is ALL-OR-NOTHING, and the ARTIFACT says so.
+
+    A receipt licensing a candidate pair without the segment -- or another
+    period's files, or a path of no shape this class deletes -- describes a
+    state the class never produces. Left to the verb that writes it,
+    "archived" would be a spectrum rather than the one crisp state every
+    reader reports a TIER from, and a hand-edited receipt would move a
+    period onto it."""
+    from dsl41.period import ArchiveReceipt, archivable_names
+
+    wal, candidate, staged = archivable_names(2)
+    body = {
+        "estate_id": "e",
+        "period_id": 2,
+        "seal_digest": "sha256:" + "a" * 64,
+        "attestation_digest": "sha256:" + "b" * 64,
+        "chain_through_period": 3,
+        "retention_class": "archive-inputs",
+        "archived_at": "2026-08-21T10:00:00.000000",
+        "dsl41_version": "0.1.0",
+    }
+    for legal in ((wal,), tuple(sorted((wal, candidate, staged)))):
+        assert ArchiveReceipt(**body, archived=legal).archived == legal
+    for illegal in (
+        (candidate, staged),  # the pair without the segment
+        (candidate,),
+        (staged,),
+        ("wal/000003.jsonl",),  # another period's segment
+        ("periods/000003/candidate.json", "periods/000003/staged_manifest.json", wal),
+        (candidate, "logs/j.1.out", staged, wal),  # a kind the class never deletes
+        (wal, "wal/000002.jsonl.bak"),
+    ):
+        with pytest.raises(ValidationError, match="ALL-OR-NOTHING"):
+            ArchiveReceipt(**body, archived=tuple(sorted(illegal)))
+
+
+def _corrupt_receipt(run_root: Path, period_id: int, **fields: Any) -> None:
+    """Rewrite one period's receipt with `fields` changed, re-stamping its
+    digest so the artifact still agrees with itself.
+
+    The point of every B2 case: integrity is not the property under test.
+    A receipt that digests correctly and names the wrong PROOF is what a
+    consumer trusting the file rather than the binding would honour."""
+    from dsl41.period import archive_receipt_path
+
+    receipt = read_archive_receipt(run_root, period_id)
+    assert receipt is not None
+    durable_write(
+        str(archive_receipt_path(run_root, period_id)),
+        receipt.model_copy(update=fields).to_bytes(),
+    )
+
+
+def _restamp(**fields: Any):
+    """One receipt field changed and the artifact re-stamped."""
+
+    def apply(run_root: Path, tmp_path: Path) -> None:
+        _corrupt_receipt(run_root, 1, **fields)
+
+    return apply
+
+
+def _foreign_pair(run_root: Path, tmp_path: Path) -> None:
+    """B5: a CORRELATED forgery -- a real second genesis's seal and
+    attestation for period 1, dropped in, with the receipt re-stamped onto
+    them.
+
+    Every binding the door had before B5 agrees with this disk: the
+    receipt names that sidecar, that sidecar carries that checkpoint, the
+    checkpoint chains through this period, and the receipt claims this
+    estate. `read_seal` parses a sidecar and never asks WHOSE, so the one
+    fact none of them states is that the pair belongs to another lineage.
+
+    The pair is produced by a real genesis and a real `audit`, never hand
+    written: a forged pair that could not have been produced would prove
+    only that some validator rejects it."""
+    from dsl41.attest import read_attestation
+
+    stranger = tmp_path / "stranger-pair"
+    _periods(stranger, 3, attest_through=2)
+    for source, target in (
+        (seal_path(stranger, 1), seal_path(run_root, 1)),
+        (attestation_path(stranger, 1), attestation_path(run_root, 1)),
+    ):
+        durable_write(str(target), source.read_bytes())
+    foreign_seal = read_seal(run_root, 1)
+    foreign_attestation = read_attestation(run_root, 1)
+    assert foreign_attestation is not None
+    assert foreign_seal.estate_id != read_sentinel(run_root).estate_id
+    _corrupt_receipt(
+        run_root,
+        1,
+        seal_digest=foreign_seal.digest,
+        attestation_digest=foreign_attestation.digest,
+        chain_through_period=foreign_attestation.chain_through_period,
+    )
+
+
+#: every way one receipt can fail to be the proof it claims, and the
+#: fragment the shared door answers each with. Integrity is intact in all
+#: of them -- what is broken is the BINDING
+B2_CORRUPTIONS: Any = [
+    ("seal", _restamp(seal_digest="sha256:" + "cd" * 32), "is not this boundary's"),
+    (
+        "attestation",
+        _restamp(attestation_digest="sha256:" + "ef" * 32),
+        "is not the one that licensed the deletion",
+    ),
+    (
+        "chain",
+        _restamp(chain_through_period=9),
+        "disagree about how far the induction reached",
+    ),
+    (
+        "estate",
+        _restamp(estate_id="some-other-estate"),
+        "a stranger's receipt excuses nothing",
+    ),
+    ("foreign-pair", _foreign_pair, "a foreign sidecar under this period's name"),
+]
+
+
+@pytest.mark.parametrize("name,corrupt,fragment", B2_CORRUPTIONS)
+def test_b2_every_receipt_consumer_refuses_the_same_broken_binding(
+    tmp_path: Path, name: str, corrupt: Any, fragment: str
+) -> None:
+    """B2: ONE door, and every reader that treats a receipt as authority
+    goes through it.
+
+    Round one bound the receipt in the PLANNER alone. So a receipt naming
+    a proof this root does not hold shortened `runs` output, narrated a
+    gap in `journal`, reported the weaker tier in `audit` and resolved a
+    registry row in the walk -- while `estate prune` refused the very same
+    file. Four readers agreeing on nothing is worse than any one of them
+    being wrong, because it makes the estate's answer depend on which verb
+    an operator happened to type."""
+    from dsl41.attest import verified_tier
+    from dsl41.boundary import walk_estate
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    corrupt(run_root, tmp_path)
+
+    for reader in (
+        lambda: read_archive_receipt(run_root, 1) and walk_estate(default_anchor_dir(run_root)),
+        lambda: plan_retention(run_root),
+        lambda: verified_tier(run_root, 1),
+    ):
+        with pytest.raises(EngineError, match=fragment):
+            reader()
+    for args in (
+        ("journal", str(run_root)),
+        ("runs", str(run_root)),
+        ("audit", "--run-root", str(run_root)),
+        ("estate", "prune", "--run-root", str(run_root), "--dry-run"),
+    ):
+        result = _invoke(*args)
+        assert result.exit_code == 2, (name, args, result.output)
+        assert fragment in result.output, (name, args, result.output)
+        # and NOTHING was answered shorter: no verb printed a table, a
+        # trace or a verdict list over an estate it could not prove
+        assert "UNREPLAYABLE GAP" not in result.stdout, (name, args)
+        assert "attestation-verified" not in result.stdout, (name, args)
+
+
+def test_b2_an_unreadable_receipt_never_buys_a_shorter_answer(tmp_path: Path) -> None:
+    """B2: `archived_periods` lists receipt FILES, which is what a lister
+    owes -- and `dsl41 runs` used it to decide there were no rows.
+
+    A root whose every period is archived answers with an empty table. A
+    root whose receipt is unreadable must not: that is the same empty
+    table bought with a file nobody checked, and it is indistinguishable
+    from the honest one."""
+    from dsl41.period import archive_receipt_path, archived_periods
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    durable_write(str(archive_receipt_path(run_root, 1)), b"{not canonical json\n")
+    assert archived_periods(run_root) == [1, 2]  # the LISTER still lists it
+
+    for args in (("runs", str(run_root)), ("journal", str(run_root))):
+        result = _invoke(*args)
+        assert result.exit_code == 2, (args, result.output)
+        assert "000001.archive.json" in result.output, args
+    with pytest.raises(EngineError, match="not ss3.2-canonical JSON"):
+        plan_retention(run_root)
+
+
+def test_b3_a_registry_row_pointing_at_a_stranger_releases_nothing(tmp_path: Path) -> None:
+    """B3, the severe one: the cover came from a checkpoint found through
+    an UNVALIDATED registry root.
+
+    The chain checkpoint that covers a period may live in another root
+    after a roll, so the cover has to be an estate fact. Round one read
+    the row, went to the directory it named and verified whatever
+    attestation was there -- so a row edited to point at ANOTHER ESTATE's
+    root supplied an internally-valid later checkpoint and released THIS
+    estate's WAL. An unproved root authorizing a deletion is the one thing
+    the floor exists to prevent.
+
+    The stranger here is a real second genesis with a real audited period,
+    so its checkpoint verifies on its own terms exactly as the attack
+    needs."""
+    from dsl41.boundary import EstateAnchor, PeriodRow
+    from dsl41.period import read_sentinel
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    assert [item.period_id for item in plan_retention(run_root).prunable() if item.kind == "wal"]
+
+    stranger = tmp_path / "stranger"
+    _periods(stranger, 3, attest_through=2)
+    assert attestation_path(stranger, 2).exists()
+    assert read_sentinel(stranger).estate_id != read_sentinel(run_root).estate_id
+
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    anchor.acquire()
+    try:
+        stored = anchor.require()
+        rows = dict(stored.periods)
+        rows["3"] = PeriodRow(**{**rows["3"].model_dump(), "root": str(stranger)})
+        anchor.write(stored.model_copy(update={"periods": rows}))
+    finally:
+        anchor.release()
+
+    with pytest.raises(EngineError, match="resolves to a stranger's root proves nothing"):
+        plan_retention(run_root)
+    swept = _invoke("estate", "prune", "--run-root", str(run_root), "--archive-inputs")
+    assert swept.exit_code == 2
+    assert "resolves to a stranger's root proves nothing" in swept.output
+    assert wal_path(run_root, 1).exists() and wal_path(run_root, 2).exists()
+
+
+def test_b3_the_live_recheck_asks_the_same_question_as_the_plan(tmp_path: Path) -> None:
+    """B3: the re-check is what stands between a plan and a deletion, so a
+    row redirected AFTER planning must not supply the cover that licenses
+    it.
+
+    The plan is taken while the registry is honest and the row is moved
+    before the sweep runs -- exactly the window a re-check exists for."""
+    from dsl41.boundary import EstateAnchor, PeriodRow
+    from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    plan = plan_retention(run_root)
+    assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1, 2]
+
+    stranger = tmp_path / "stranger"
+    _periods(stranger, 3, attest_through=2)
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    anchor.acquire()
+    try:
+        stored = anchor.require()
+        rows = dict(stored.periods)
+        rows["3"] = PeriodRow(**{**rows["3"].model_dump(), "root": str(stranger)})
+        anchor.write(stored.model_copy(update={"periods": rows}))
+    finally:
+        anchor.release()
+
+    report = prune(plan, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert report.removed == ()
+    assert report.refused
+    assert all("stranger's root" in why for _, why in report.refused), report.refused
+    assert not archive_receipt_path(run_root, 1).exists()
+    assert wal_path(run_root, 1).exists()
+
+
+def test_b4_a_half_deleted_candidate_pair_is_completed_from_the_receipt(
+    tmp_path: Path,
+) -> None:
+    """B4: the receipt is the RECOVERY authority, and enumeration comes
+    from it.
+
+    Crash after `candidate.json` goes and before `staged_manifest.json`
+    does, and the ordinary derivation says there is no candidate in this
+    period at all -- `read_candidate` returns None and returns early. The
+    staged file was then listed by no plan, held by no floor and reachable
+    by no verb: an artifact the estate could neither keep on purpose nor
+    finish removing. Enumerating from the receipt closes it, because that
+    is what a point of no return means."""
+    from dsl41.boundary import read_candidate
+    from dsl41.period import ARCHIVE_CLASS
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    candidate = period_dir(run_root, 2) / "candidate.json"
+    staged = period_dir(run_root, 2) / "staged_manifest.json"
+    assert candidate.exists() and staged.exists()
+
+    import dsl41.retention as retention_mod
+
+    real_remove = retention_mod._remove
+
+    def halfway(plan, item):
+        # the first removal lands, the second is the power cut
+        if item.path == staged:
+            raise OSError("power loss between the pair")
+        real_remove(plan, item)
+
+    retention_mod._remove = halfway  # type: ignore[assignment]
+    try:
+        first = prune(plan_retention(run_root), classes=(ARCHIVE_CLASS,), dry_run=False)
+    finally:
+        retention_mod._remove = real_remove  # type: ignore[assignment]
+    assert not candidate.exists() and staged.exists()
+    assert any(item.path == staged for item, _ in first.failed)
+    assert read_candidate(period_dir(run_root, 2)) is None  # the derivation is blind now
+
+    resumed = plan_retention(run_root)
+    left = _by_path(resumed, staged)
+    assert left.verdict == "prunable" and left.rule == "DL-144"
+    assert left.why == "the receipt is durable; completing the archive"
+    finished = prune(resumed, classes=(ARCHIVE_CLASS,), dry_run=False)
+    assert finished.refused == () and finished.failed == ()
+    assert not staged.exists()
+    assert not wal_path(run_root, 2).exists()
+
+
+def test_b6_audit_period_and_rederive_seal_refuse_a_receipt_themselves(
+    tmp_path: Path,
+) -> None:
+    """B6: the two FUNCTIONS, not the CLI path in front of them.
+
+    `audit_period` read the receipt directly and used it to skip the loss
+    branch and return an attestation. The CLI missed that because
+    `verified_tier` refuses one frame earlier -- but a caller is not a
+    guard, and a library function that is only safe behind one of its
+    callers is not safe. `rederive_seal` had the same read, deciding
+    whether a missing WAL reads as ARCHIVED or as a rolled root.
+
+    Both are driven here with no CLI in the way, over a receipt whose
+    integrity is intact and whose binding is not."""
+    from dsl41.attest import audit_period, rederive_seal
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    _archive(run_root)
+    _corrupt_receipt(run_root, 1, attestation_digest="sha256:" + "ef" * 32)
+
+    with pytest.raises(EngineError, match="is not the one that licensed the deletion"):
+        audit_period(run_root, 1, anchor=_anchor(run_root))
+    with pytest.raises(EngineError, match="is not the one that licensed the deletion"):
+        rederive_seal(run_root, 1)
+
+    # and the honest estate still works through both, so this is a gate
+    # rather than a build in which the two never succeed
+    durable_write(
+        str(archive_receipt_path(run_root, 1)),
+        read_archive_receipt(run_root, 1).model_copy(
+            update={"attestation_digest": verify_attestation(run_root, 1).digest}
+        ).to_bytes(),
+    )
+    assert audit_period(run_root, 1, anchor=_anchor(run_root)).period_id == 1
+    with pytest.raises(EngineError, match="inputs were ARCHIVED"):
+        rederive_seal(run_root, 1)  # archived, and it says so rather than "not in this root"
+
+
+def test_b7_an_unsealed_row_with_an_orphan_sidecar_is_skipped_not_refused(
+    tmp_path: Path,
+) -> None:
+    """B7's other half: the row's digest decides whether a period is a
+    COVER CANDIDATE at all, and an unsealed one is skipped.
+
+    ss11 names the state: a crash after the sidecar is durable and before
+    the record that commits it leaves an ORPHAN sidecar, and an orphan is
+    never selected. Reaching the digest comparison with `row.seal_digest`
+    still null would read that ordinary crash window as "a sidecar this
+    lineage never closed with" and refuse every prune of the estate until
+    an operator went looking for corruption that is not there.
+
+    So the guard is a rule, not a short-circuit: skip the row, plan the
+    rest, and let the cover come from a period that is actually sealed."""
+    from dsl41.boundary import PeriodRow
+
+    run_root = tmp_path / "run"
+    _archivable(run_root)
+    before = plan_retention(run_root)
+    assert [item.period_id for item in before.prunable() if item.kind == "wal"] == [1, 2]
+    store = _anchor(run_root)
+    committed = store.require().row(3)
+    assert committed is not None and committed.seal_digest == read_seal(run_root, 3).digest
+
+    store.acquire()
+    try:
+        stored = store.require()
+        rows = dict(stored.periods)
+        # the crash window: period 3's sidecar is durable, the row that
+        # commits it is not
+        rows["3"] = PeriodRow(**{**committed.model_dump(), "seal_digest": None})
+        store.write(stored.model_copy(update={"periods": rows}))
+    finally:
+        store.release()
+
+    plan = plan_retention(run_root)  # plans, rather than refusing
+    # period 3 is no longer a cover candidate, so the cover falls back to
+    # period 2 -- and period 2 itself is then held, NAMED, never offered
+    # on a seal the lineage has not committed
+    assert _by_path(plan, wal_path(run_root, 1)).verdict == "prunable"
+    held = _by_path(plan, wal_path(run_root, 2))
+    assert held.verdict == "held"
+    assert "no chain checkpoint above period 2 covers it" in held.why
