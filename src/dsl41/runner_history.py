@@ -14,10 +14,9 @@ records plus (optionally) a catalog and a trace -- both themselves plain
 data, never a live `Engine`. `read_run_root` is the thin I/O shell: for
 EVERY WAL segment the root still retains -- one per period (I1) -- it
 rebuilds that period's catalog from its own stored inputs (no estate-file
-argument needed, unlike `dsl41 journal`: DL-130's bundle, or DL-66's
-`manifest/` on a root that predates it), replays it
-through a fresh `Oracle` exactly as `dsl41 journal`
-does, and reads the spool. `read_spool` is its own thin function for the
+argument needed, unlike `dsl41 journal`: DL-130's content-addressed bundle),
+replays it through a fresh `Oracle` exactly as `dsl41 journal` does, and
+reads the spool. `read_spool` is its own thin function for the
 same reason: a duration table has two independent I/O concerns (the WAL,
 the spool), and mixing them into one function would make the fold hard to
 test without both.
@@ -91,15 +90,14 @@ Five decisions, each with its reason here; the decision itself is
    (job, started_at) first, so a break lands exactly where that job changed
    -- never a hidden line, never a refusal to print.
 
-5. **A missing manifest degrades; a wrong one refuses.** The period
-   manifest is DL-130 and `manifest/` before it is DL-66; a run root
-   predating both has neither, as does one whose retention pruned them --
-   and those are exactly the old run roots a history tool exists to read.
-   So an absent manifest folds from records alone rather than refusing the
-   whole root, while a manifest whose `catalog_hash` disagrees with the
-   journal's opening record still refuses, because that one is not
-   a missing fact but a wrong one. What the degraded path costs is real and
-   is carried per row in `fidelity` rather than in a warning line a JSON or
+5. **A missing manifest degrades; a wrong one refuses; a RETIRED layout
+   is named.** A root whose retention pruned its manifest is exactly the
+   root a history tool exists to read, so an absent manifest folds from
+   records alone rather than refusing the whole root, while a manifest
+   whose `catalog_hash` disagrees with the journal's opening record still
+   refuses, because that one is not a missing fact but a wrong one. What
+   the degraded path costs is real and is carried per row in `fidelity`
+   rather than in a warning line a JSON or
    CSV consumer never sees: no box rows at all, no `box_name`, no
    `started_by`, no `job_hash`, bare-default exit-code verdicts, and -- the
    one that misleads rather than omits -- a run closed by KILLJOB or
@@ -113,7 +111,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -175,7 +173,7 @@ class RunRow(BaseModel):
     #: the estate; this moves only for this job's.
     job_hash: str | None = None
     #: how much of the row could be established (decision 5). "records_only"
-    #: means the run root had no `manifest/`, so there was no catalog to
+    #: means the run root had no period manifest, so there was no catalog to
     #: rebuild and no trace to replay: box rows are absent entirely, and on the
     #: leaf rows `box_name`, `started_by` and `job_hash` are null, exit-code
     #: verdicts fall back to the bare SEM-09 default, and a run that KILLJOB or
@@ -369,10 +367,9 @@ def _leaf_status(
 
 
 def _note_executor(effect: Mapping[str, Any], executor_by_key: dict[tuple[str, int], str]) -> None:
-    """Bind one run to the host its SPAWN named. One function for both
-    dialects: a nested effect inside a `decision` and a pre-DL-118 standalone
-    `effect` record carry the same fields, so reading them twice differently
-    is how the two would drift."""
+    """Bind one run to the host its SPAWN named, from the effect nested in
+    the `decision` that planned it (DL-118). It read the standalone `effect`
+    record too until DL-138 retired that dialect."""
     if effect.get("kind") != "SPAWN":
         return
     job, run_number = effect.get("job"), effect.get("run_number")
@@ -431,8 +428,6 @@ def _leaf_rows(
             # the decision that planned it (DL-118)
             for effect in record.get("effects") or []:
                 _note_executor(effect, executor_by_key)
-        elif rec == "effect":
-            _note_executor(record, executor_by_key)  # pre-DL-118 dialect
 
     rows: list[RunRow] = []
     for key in order:
@@ -511,7 +506,7 @@ def fold_run_rows(
     use the bare SEM-09 default rather than a job's declared
     success_codes/fail_codes. Every row then says so in `fidelity`
     (decision 5) rather than reading like a complete one. `read_run_root`
-    below supplies a catalog whenever the run root has a `manifest/`.
+    below supplies a catalog whenever the run root still holds its bundle.
 
     `carried` is job -> the run number this period OPENED with, so a run
     that crosses a boundary keeps one identity (I2). Absent -- period 1, or
@@ -609,11 +604,11 @@ def load_catalog_from_manifest(run_root: Path, period_id: int | None = None) -> 
     self-contained artifact -- no estate-file argument needed, unlike
     `dsl41 journal`.
 
-    Two layouts, one reader. A root opened since DL-130 keeps its inputs in
-    `catalogs/<source_bundle_hash>/`, addressed by their bytes, and names
-    the address in `periods/000001/manifest.json`; one opened before it has
-    `manifest/` with its own `sources` list. Both hold the byte-exact
-    post-placeholder JIL (render_preserve, F1) in command-line order.
+    One layout since DL-138, which retired the other. A root keeps its
+    inputs in `catalogs/<source_bundle_hash>/`, addressed by their bytes,
+    and names the address in `periods/<id>/manifest.json`; the bundle holds
+    the byte-exact post-placeholder JIL (render_preserve, F1) in
+    command-line order.
 
     This is NOT hash-gated the way `dsl41 journal` is: `SourceSpan.file`
     inside the reloaded catalog names the stored path, not the original
@@ -644,8 +639,8 @@ def load_catalog_from_manifest(run_root: Path, period_id: int | None = None) -> 
 def active_period_id(run_root: Path) -> int:
     """Which period this root's ACTIVE segment holds (period-model I1).
 
-    1 on a legacy root and on a root that has never sealed, and the reason
-    this is a function: every artifact under `periods/` is addressed by the
+    1 on a root that has never sealed, and the reason this is a
+    function: every artifact under `periods/` is addressed by the
     period number, and a reader that defaulted to 1 after a boundary would
     read period 1's manifest beside period N's records and refuse the root
     as inconsistent."""
@@ -653,47 +648,77 @@ def active_period_id(run_root: Path) -> int:
         opening = read_journal(run_root)[0]
     except (OSError, EngineError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
-    period_id = opening.get("period_id")
-    return period_id if isinstance(period_id, int) and not isinstance(period_id, bool) else 1
+    # `read_journal` has run ss2.1's schema over the opening, so this is
+    # present and an int: a fallback here would be a second authority for a
+    # field the reader already proved (DL-138)
+    return int(opening["period_id"])
+
+
+#: Retired estate layouts: the marker FILE that identifies one, and the
+#: entry that retired it. APPEND-ONLY (docs/protocol-evolution.md ss6).
+RETIRED_LAYOUTS: Final[tuple[tuple[str, str], ...]] = (("manifest/manifest.json", "DL-138"),)
+
+
+def _refuse_retired_layout(run_root: Path) -> None:
+    """D9, DL-138: a root with no period manifest is told WHICH state it is
+    in, discriminated on the FILE.
+
+    `<run-root>/manifest/manifest.json` is DL-66's layout and refuses by
+    name. A `manifest/` directory WITHOUT that file is unknown residue and
+    refuses generically. The two are different facts -- one root predates
+    the period model, the other has a directory nothing here wrote -- and
+    an operator needs to be told which is on the disk. A root with neither
+    simply has no manifest, and the caller degrades (decision 5)."""
+    for marker, retiring in RETIRED_LAYOUTS:
+        if (run_root / marker).exists():
+            raise RunHistoryError(
+                f"{run_root}: holds `{marker}` and no periods/<id>/manifest.json --"
+                f" the `manifest/` run-root layout is RETIRED and refused by name"
+                f" since {retiring} (docs/protocol-evolution.md ss6, ss8)"
+            )
+    if (run_root / "manifest").is_dir():
+        raise RunHistoryError(
+            f"{run_root}: holds a `manifest/` directory with no manifest.json inside"
+            " and no periods/<id>/manifest.json -- nothing here names this root's"
+            " inputs, and history does not guess (period-model ss1.1)"
+        )
 
 
 def _period_manifest_or_refuse(run_root: Path, period_id: int | None = None) -> "Manifest | None":
-    """`read_period_manifest`, with its refusal converted to this module's.
+    """`read_period_manifest`, with its refusal converted to this module's,
+    and with D9's layout tombstone where it returns None.
 
     Every door into run history answers `RunHistoryError` and the CLI
     prints it as exit 2; a decoder error escaping as itself would take
     down a whole multi-root `dsl41 runs` with a traceback."""
     try:
-        return read_period_manifest(
+        manifest = read_period_manifest(
             run_root, active_period_id(run_root) if period_id is None else period_id
         )
     except EngineError as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
+    if manifest is None:
+        _refuse_retired_layout(run_root)
+    return manifest
 
 
 def stored_input_paths(run_root: Path, period_id: int | None = None) -> list[Path]:
-    """The stored inputs in command-line order -- DL-130's bundle where
-    there is one, DL-66's `manifest/` otherwise -- or `[]` when this root
-    stores none: an engine started with nothing staged, a root older than
-    both layouts, or one whose retention pruned them. Empty is a missing
-    fact and degrades (decision 5); a bundle that is present and unreadable
-    is corruption and raises. `period_id` names which period's inputs;
-    omitted, the active one."""
+    """The stored inputs in command-line order -- DL-130's bundle -- or `[]`
+    when this root stores none: an engine started with nothing staged, or a
+    root whose retention pruned them. Empty is a missing fact and degrades
+    (decision 5); a bundle that is present and unreadable is corruption and
+    raises. `period_id` names which period's inputs; omitted, the active
+    one."""
     manifest = _period_manifest_or_refuse(run_root, period_id)
-    if manifest is not None:
-        directory = bundle_dir(run_root, manifest.source_bundle_hash)
-        if not (directory / "sources.json").exists():
-            return []
-        try:
-            return bundle_source_paths(run_root, manifest.source_bundle_hash)
-        except EngineError as exc:
-            raise RunHistoryError(f"{run_root}: {exc}") from exc
-    manifest_dir = run_root / "manifest"
-    payload = load_json(manifest_dir / "manifest.json")
-    sources = payload.get("sources") if payload is not None else None
-    if not isinstance(sources, list):
+    if manifest is None:
         return []
-    return [manifest_dir / str(entry["file"]) for entry in sources]
+    directory = bundle_dir(run_root, manifest.source_bundle_hash)
+    if not (directory / "sources.json").exists():
+        return []
+    try:
+        return bundle_source_paths(run_root, manifest.source_bundle_hash)
+    except EngineError as exc:
+        raise RunHistoryError(f"{run_root}: {exc}") from exc
 
 
 def replay_trace(
@@ -787,42 +812,26 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
         raise RunHistoryError(
             f"{run_root}: run history requires a journal starting with a segment record"
         )
-    period_id = records[0].get("period_id")
-    if not isinstance(period_id, int) or isinstance(period_id, bool):
-        period_id = 1  # a legacy `header` root: one period, and always was
+    period_id = records[0]["period_id"]
     _prove_opening(run_root, records[0])
     spool = _read_all_spool(records)
     period_manifest = _period_manifest_or_refuse(run_root, period_id)
-    manifest: dict[str, Any] | None = (
-        period_manifest.model_dump(mode="json")
-        if period_manifest is not None
-        else load_json(run_root / "manifest" / "manifest.json")
-    )
-    if manifest is None:
-        # A MISSING manifest degrades; a WRONG one refuses. The two are
-        # different facts and a history tool that refused both would be
-        # unable to read exactly the run roots it exists for: the period
-        # manifest is DL-130, `manifest/` is DL-66, and every root
-        # predating both has neither, as does one whose retention pruned
-        # them. Every row it returns says `records_only`, so what is
-        # missing rides on the data rather than on a warning the caller may
-        # not print (decision 5).
+    if period_manifest is None:
+        # A MISSING manifest degrades; a WRONG one refuses, and a RETIRED
+        # layout is named (`_period_manifest_or_refuse`). A root whose
+        # retention pruned its manifest is exactly the root this tool exists
+        # for. Every row it returns says `records_only`, so what is missing
+        # rides on the data rather than on a warning the caller may not
+        # print (decision 5).
         return fold_run_rows(records, spool=spool)
-    if period_manifest is not None:
-        # PR-22: the manifest and the segment are ONE object written twice,
-        # and a self-consistent REPLACEMENT sharing catalog_hash but not
-        # baseline_id or runtime_hash is foreign -- the full agreement
-        # check, not one field
-        try:
-            check_manifest_against_segment(period_manifest, records[0])
-        except EngineError as exc:
-            raise RunHistoryError(f"{run_root}: {exc}") from exc
-    elif manifest.get("catalog_hash") != records[0].get("catalog_hash"):
-        # the DL-66 dict manifest predates the model the full check reads
-        raise RunHistoryError(
-            f"{run_root}: the manifest's catalog_hash disagrees with the journal's"
-            " opening record -- this manifest is not this journal's"
-        )
+    # PR-22: the manifest and the segment are ONE object written twice,
+    # and a self-consistent REPLACEMENT sharing catalog_hash but not
+    # baseline_id or runtime_hash is foreign -- the full agreement
+    # check, not one field
+    try:
+        check_manifest_against_segment(period_manifest, records[0])
+    except EngineError as exc:
+        raise RunHistoryError(f"{run_root}: {exc}") from exc
     opened = _opening_rows(run_root, records[0], period_manifest)
     carried = (
         {}
@@ -847,7 +856,7 @@ def _prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
     closes for the full-fidelity path (period-model ss11, PR-50)."""
     link = opening.get("opens_from_seal")
     if not isinstance(link, Mapping):
-        return  # period 1, or a legacy header: opened from nothing
+        return  # period 1: opened from nothing
     period_id = link.get("period_id")
     digest = link.get("digest")
     try:
@@ -891,8 +900,8 @@ def _opening_rows(
     """The rows this period opened with -- `attest.carried_from_opening`,
     which is where audit gets the same fact.
 
-    None means "this period opened from nothing": period 1, a legacy
-    header, or a DL-66 root with no period manifest. A period whose
+    None means "this period opened from nothing": period 1, or a root with
+    no period manifest. A period whose
     opening NAMES a seal and whose sidecar is absent, unreadable or not
     the named one REFUSES: swallowing that failure would let a period 2
     that happens to run only C2-added jobs replay cleanly from an empty

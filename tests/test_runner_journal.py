@@ -80,7 +80,6 @@ def test_segment_record_carries_the_period_identity_domain_and_instant(
     assert segment["rec"] == "segment"
     assert segment["catalog_hash"] == catalog_hash_v2(catalog)
     assert segment["catalog_hash_version"] == 2
-    assert segment["catalog_hash_v1"] is None
     assert segment["clock_domain"] == "real"
     assert segment["at"] == T0.isoformat()
     assert segment["period_id"] == 1 and segment["segment_no"] == 1
@@ -694,7 +693,13 @@ def test_an_empty_interior_line_is_corruption_not_a_torn_tail(tmp_path: Path) ->
     """A torn FINAL line is a crash mid-append and is dropped -- write-ahead
     means the feed it preceded never happened. An empty line with records
     AFTER it cannot be that: something wrote past it, so the log is not what
-    it claims to be and reading on would silently skip an input."""
+    it claims to be and reading on would silently skip an input.
+
+    The opening here is a RETIRED `header`, deliberately: structural
+    integrity is the more fundamental fact, so the parse pass runs before
+    D1's record validator and this file is called corrupt rather than called
+    a retired dialect (DL-138). Replacing it with a `segment` would drop
+    that ordering pin."""
     path = tmp_path / "j.jsonl"
     path.write_text(
         '{"rec": "header", "catalog_hash": "x", "clock_domain": "virtual",'
@@ -707,10 +712,10 @@ def test_an_empty_interior_line_is_corruption_not_a_torn_tail(tmp_path: Path) ->
 
 
 def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> None:
-    """The header's `dsl41_version` is advisory forensics and gates nothing
-    (ss7 gates the state-machine version instead), so a src-tree run with no
-    installed distribution records what it knows rather than refusing to
-    start."""
+    """The `leader` record's `dsl41_version` is advisory forensics and gates
+    nothing (ss7 gates the state-machine version instead), so a src-tree run
+    with no installed distribution records what it knows rather than
+    refusing to start."""
     import importlib.metadata
 
     def no_such_distribution(_name: str) -> str:
@@ -725,21 +730,23 @@ def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> Non
 
 def test_an_embedded_opening_record_refuses_the_journal(tmp_path: Path) -> None:
     """I1: one segment record per file, and it is line 1. An embedded
-    `segment` or `header` mid-file is a splice -- a reader that split the
-    validated stream on it would treat forged records as a file boundary
-    and admit an unchained period."""
+    `segment` mid-file is a splice -- a reader that split the validated
+    stream on it would treat forged records as a file boundary and admit an
+    unchained period.
+
+    A byte-true COPY of the real opening is the case that matters: it
+    passes every schema check the first one passed, so position is the only
+    thing that can refuse it. The retired `header` variant this test also
+    carried refuses one gate earlier now, at the record validator (DL-138,
+    pinned in test_decision_record.py)."""
     from dsl41.canon import canonical_bytes
 
     wal = _write_two_input_journal(tmp_path)
     records = read_journal(wal)
-    for forged_opening in (
-        dict(records[0]),  # a byte-true copy of the real segment record
-        {"rec": "header", "baseline_id": records[0].get("baseline_id", "b"), "v": 1},
-    ):
-        spliced = [records[0], forged_opening, *records[1:]]
-        wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
-        with pytest.raises(EngineError, match="a second opening inside one is a splice"):
-            read_journal(wal)
+    spliced = [records[0], dict(records[0]), *records[1:]]
+    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
+    with pytest.raises(EngineError, match="a second opening inside one is a splice"):
+        read_journal(wal)
     wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
     assert read_journal(wal)  # restored: clean
 

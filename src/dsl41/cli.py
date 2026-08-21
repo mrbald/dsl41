@@ -508,9 +508,8 @@ def journal(
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
     opening = records[0]
-    # like for like (period-model ss1.1): a `segment` pins catalog_hash v2,
-    # a legacy `header` pins v1, and comparing across the two would refuse
-    # every journal written before DL-130
+    # like for like (period-model ss1.1): the recipe is the one the
+    # `segment` itself pins, never the one this build happens to write
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         typer.echo(
             "catalog hash mismatch: the estate differs from the one this journal ran"
@@ -1260,7 +1259,7 @@ def _observed_profile(
 def _active_period(run_root: Path) -> int:
     """Which period this root's ACTIVE segment holds (period-model I1).
 
-    1 on a root that has never sealed and on a legacy one. A reader that
+    1 on a root that has never sealed. A reader that
     defaulted to 1 after a boundary would read period 1's manifest beside
     period N's records -- and a ROLLED root has no period 1 at all."""
     from dsl41.runner_history import RunHistoryError, active_period_id
@@ -2634,7 +2633,7 @@ async def _drive_boundary(
     engine: "Engine", request: "SealRequest", run_root: Path, estate_anchor: "Path | None"
 ) -> int:
     """One queued boundary, driven to its outcome by this process's own
-    loop -- the offline sealer's and the adopter's shared tail.
+    loop -- the offline sealer's tail.
 
     Two things can finish first and they mean different things. The LOOP
     ending is a committed boundary (`PeriodSealed`), a fail-stop, or a
@@ -2732,10 +2731,9 @@ class _Wiring:
     """The components a period's PINNED profile says it runs with.
 
     Derived from the manifest rather than from flags, because an offline
-    sealer and an adopter both meet an estate that already decided: the
-    resume gate compares the wiring it finds against the pin, and a
-    process that wired from its own defaults would refuse the estate it
-    was asked to close."""
+    sealer meets an estate that already decided: the resume gate compares
+    the wiring it finds against the pin, and a process that wired from its
+    own defaults would refuse the estate it was asked to close."""
 
     adapters: "dict[str, JobAdapter]"
     scheduler: "Scheduler"
@@ -2931,232 +2929,10 @@ def _closed_periods(run_root: Path) -> list[int]:
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Lineage-level operations: adopt a legacy root, prune what retention"
-    " allows, and the break-glass reclaim.",
+    help="Lineage-level operations: prune what retention allows, and the"
+    " break-glass reclaim.",
 )
 app.add_typer(estate_app, name="estate")
-
-
-@estate_app.command("adopt")
-def estate_adopt(
-    legacy_root: Path = typer.Argument(
-        ..., help="The legacy run root to adopt (a `header` journal)."
-    ),
-    next_files: list[Path] = typer.Option(
-        ...,
-        "--next",
-        help="JIL file(s) forming C2 -- the estate period 2 will run. Adoption IS a"
-        " seal, so it takes --next like one.",
-    ),
-    estate_anchor: Path = _ANCHOR_OPT,
-    force_seal: bool = typer.Option(
-        False, "--force-seal", help="Commit inside the retry horizon (period-model ss9)."
-    ),
-    claimed_actor: str = _ACTOR_OPT,
-    timezone: str = _TIMEZONE_OPT,
-    timezone_map: Path = _TIMEZONE_MAP_OPT,
-    as_machine: list[str] = typer.Option(
-        [],
-        "--as-machine",
-        help="Machine name(s) the LEGACY period ran as. Only read when"
-        " `manifest/manifest.json` does not record them.",
-    ),
-    machine_policy: str = typer.Option(
-        "strict",
-        "--machine-policy",
-        help="The legacy period's machine policy. Only read when the legacy"
-        " manifest does not record it.",
-    ),
-    detached: bool = typer.Option(
-        False,
-        "--detached",
-        help="The legacy period ran CMD jobs under a supervisor. Only read when"
-        " the legacy manifest does not record it.",
-    ),
-    deadman: float = typer.Option(
-        None, "--deadman", help="The legacy period's supervisor deadman, seconds."
-    ),
-    next_timezone: str = typer.Option(None, "--next-timezone", help="C2's base zone."),
-    next_timezone_map: Path = typer.Option(
-        None, "--next-timezone-map", help="C2's vendor timezone table."
-    ),
-    next_as_machine: list[str] = typer.Option(
-        [], "--next-as-machine", help="Machine name(s) C2 runs as. Repeatable."
-    ),
-    next_machine_policy: str = typer.Option(
-        "strict", "--next-machine-policy", help="C2's machine policy: strict|local-eligible."
-    ),
-    next_detached: bool = typer.Option(
-        False, "--next-detached", help="C2 runs CMD jobs under the supervisor."
-    ),
-    next_deadman: float = typer.Option(
-        None, "--next-deadman", help="C2's supervisor deadman, seconds."
-    ),
-    permit_unknown: bool = _PERMIT_UNKNOWN,
-    properties: list[Path] = _PROPERTIES,
-) -> None:
-    """Adopt a legacy run root into a periodized lineage (period-model
-    ss11): fence first, authority second, on a DRAINED estate.
-
-    In order, and the order is the whole argument. C2's readiness runs
-    first, over an in-memory reconstruction of the legacy state, so a
-    candidate that could never open refuses while the sentinel, the legacy
-    WAL and the anchor are untouched. The fence follows -- the legacy
-    journal is hard-linked to `legacy/journal.jsonl` and the `period_root`
-    sentinel is renamed over its name, so there is no instant at which
-    `journal.jsonl` is absent and an old binary could genesis here. Only
-    then does the anchor gain `adopting`, which is what gives adoption ONE
-    recovery owner: while it stands, `run --resume` refuses and names this
-    verb. Then the term, the barrier with the outbox HELD, the
-    translation, and finally period 1's seal through the COMMON seal body.
-
-    A drained estate means: no live wrapper, no live file watch, nothing
-    pending in the legacy outbox, and every admitted input holding a
-    durable decision. Each is a refusal, not a repair -- resume the legacy
-    engine, let it settle, and retry. A drain is what the runbook already
-    does at every release.
-
-    Every step is idempotent: a re-run finds the tombstone, reads
-    `estate_id` back rather than minting a second, and continues from
-    wherever it stopped.
-
-    The LEGACY period's `timezone`, `as_machine`, `machine_policy` and
-    `detached` come from `manifest/manifest.json`'s own `options` block --
-    the estate's record of how it ran beats anyone's memory of it. What
-    that block never held (the deadman, the timezone table, the
-    reconciliation windows) is what the flags below state, and that
-    statement is UNCHECKED by construction: the barrier is wired from the
-    profile it is attesting, so nothing can disagree with it. It is pinned
-    in period 1's manifest and every LATER resume is held to it, which is
-    where a wrong one surfaces.
-
-    Exit codes are `seal`'s: 0 committed, 2 refused with the estate as it
-    was, 4 unknown.
-    """
-    import asyncio
-
-    from dsl41.runner_control import claimed_actor as default_actor
-
-    if deadman is not None and not detached:
-        typer.echo("--deadman needs --detached: a tethered run has no supervisor", err=True)
-        raise typer.Exit(2)
-    if next_deadman is not None and not next_detached:
-        typer.echo("--next-deadman needs --next-detached", err=True)
-        raise typer.Exit(2)
-    profile = _next_profile(timezone, timezone_map, as_machine, machine_policy, detached, deadman)
-    next_profile = _next_profile(
-        next_timezone,
-        next_timezone_map,
-        next_as_machine,
-        next_machine_policy,
-        next_detached,
-        next_deadman,
-    )
-    raise typer.Exit(
-        asyncio.run(
-            _adopt(
-                legacy_root,
-                estate_anchor,
-                next_files,
-                profile,
-                next_profile,
-                permit_unknown,
-                properties,
-                force_seal,
-                claimed_actor or default_actor(),
-            )
-        )
-    )
-
-
-async def _adopt(
-    legacy_root: Path,
-    estate_anchor: "Path | None",
-    next_files: list[Path],
-    profile: "RuntimeProfile",
-    next_profile: "RuntimeProfile",
-    permit_unknown: bool,
-    properties: "list[Path] | None",
-    force_seal: bool,
-    actor: str,
-) -> int:
-    """ss11 steps 1-7: the transaction, then the common seal body over the
-    root it produced."""
-    from dsl41.boundary import default_anchor_dir
-    from dsl41.estate import adopt_legacy_root, legacy_profile
-    from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.runner_ledger import acquire_run_root
-    from dsl41.runner_startup import resume_run
-
-    anchor_dir = estate_anchor or default_anchor_dir(legacy_root)
-    try:
-        lock = acquire_run_root(legacy_root)
-    except EngineError as exc:
-        typer.echo(
-            f"{exc} -- a live legacy engine holds this root, and adoption refuses"
-            " rather than racing it (period-model ss11)",
-            err=True,
-        )
-        return 2
-    wiring = None
-    try:
-        # DL-66's `manifest/` recorded four of the launch options, and the
-        # estate's own record of how it ran beats an operator's memory of
-        # it. The flags supply the rest -- the deadman, the timezone table,
-        # the windows -- and the WIRING below is built from the result, so
-        # the pin and the machine agree by construction rather than by
-        # attestation. Read under the lock, like everything else here
-        profile = legacy_profile(legacy_root, profile)
-        # readiness needs C2 STAGED under the legacy root: phase 1 validates
-        # exactly the staged bytes the digest names, in adoption exactly as
-        # in a live seal (ss8's readiness is identical in all three modes)
-        _, staged_manifest, _ = _stage_next(
-            legacy_root, next_files, next_profile, permit_unknown, properties
-        )
-        adoption = adopt_legacy_root(
-            legacy_root,
-            anchor_dir=anchor_dir,
-            profile=profile,
-            staged_manifest=staged_manifest,
-            claimed_actor=actor,
-            force_seal=force_seal,
-        )
-        if adoption.sealed:
-            # ss11's matrix row: the boundary was already committed and
-            # this run performed the head CAS the crashed one did not.
-            # There is nothing left to seal -- sealing again would close a
-            # period that is already closed
-            typer.echo(
-                f"period 1 of estate {adoption.estate_id} was already sealed; the"
-                " lineage head is now `closed` and the adoption is complete"
-            )
-            _say_next(legacy_root, estate_anchor)
-            lock.release()
-            return 0
-        wiring = await _wire_from_profile(legacy_root, adoption.catalog, profile)
-        engine = await resume_run(
-            adoption.catalog,
-            legacy_root,
-            clock=RealClock(),
-            adapters=wiring.adapters,
-            scheduler=wiring.scheduler,
-            hold_open=True,
-            supervisor=wiring.client,
-            deadman_s=wiring.deadman_s,
-            lock=lock,
-            anchor_dir=anchor_dir,
-            adopting=True,  # ss11 step 5: this resume IS adoption's barrier
-        )
-    except EngineError as exc:
-        typer.echo(str(exc), err=True)
-        if wiring is not None:
-            await wiring.close()
-        lock.release()
-        return 2
-    request = adoption.request.model_copy(update={"epoch": engine.epoch})
-    code = await _drive_boundary(engine, request, legacy_root, estate_anchor)
-    await wiring.close()
-    return code
 
 
 @estate_app.command("reclaim")

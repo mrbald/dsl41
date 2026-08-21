@@ -30,17 +30,17 @@ from dsl41.boundary import (
     Anchor,
     ClaimedHead,
     ClosedHead,
+    CommittedBoundary,
     EstateAnchor,
-    Lineage,
     OpenHead,
     PeriodSealed,
     SealRequest,
-    act_on_head,
     claim_id_for,
     claim_root,
     default_anchor_dir,
     executing_jobs,
     filesystem_type,
+    open_next_period,
     read_candidate,
     read_seal,
     retry_horizon_gate,
@@ -53,6 +53,7 @@ from dsl41.attest import audit_period
 from dsl41.period import (
     RETRY_HORIZON_S,
     RuntimeProfile,
+    SEGMENT_FIELDS,
     SourceFile,
     active_wal,
     period_dir,
@@ -197,7 +198,7 @@ def test_pr01a_genesis_writes_the_sentinel_before_the_wal(tmp_path: Path) -> Non
     sentinel = read_sentinel(run_root)
     assert sentinel is not None
     assert sentinel.rec == "period_root" and sentinel.see == "wal/"
-    assert sentinel.adopted_from is None and sentinel.claim_id is None
+    assert sentinel.claim_id is None
     # one line, and it is NOT the WAL
     assert len((run_root / "journal.jsonl").read_text().splitlines()) == 1
     assert wal_path(run_root, 1).exists()
@@ -240,12 +241,38 @@ def test_pr01c_another_estates_sentinel_refuses_the_root(tmp_path: Path) -> None
         claim_root(run_root, estate_id="estate-one", claim_id="sha256:" + "0" * 64)
 
 
-def test_pr01c_a_legacy_journal_refuses_and_names_adoption(tmp_path: Path) -> None:
-    run_root = tmp_path / "run"
-    run_root.mkdir()
-    (run_root / "journal.jsonl").write_text(json.dumps({"rec": "header"}) + "\n")
-    with pytest.raises(EngineError, match="estate adopt"):
-        claim_root(run_root)
+def test_pr01c_a_retired_journal_refuses_and_names_the_dialect(tmp_path: Path) -> None:
+    """D5's owner-local tombstone (DL-138). `claim_root` does not route
+    through `read_journal`, so it carries its own registry: a `journal.jsonl`
+    opening with a retired `header` refuses BY NAME, and anything else at
+    that path is unknown residue and keeps the generic refusal.
+
+    The tombstone is HEADER-ONLY. `result` and `effect` are retired RECORDS
+    and were never legal openings, so a file that opens with one is not a
+    pre-period root this build recognises -- it is residue like the garbage
+    below, and naming DL-138 over it would tell an operator their root
+    predates a retirement it never took part in (DL-138, the L2 review)."""
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    (retired / "journal.jsonl").write_text(json.dumps({"rec": "header"}) + "\n")
+    with pytest.raises(EngineError, match="RETIRED") as named:
+        claim_root(retired)
+    assert "DL-138" in str(named.value)
+
+    for kind in ("result", "effect"):
+        never = tmp_path / f"never-{kind}"
+        never.mkdir()
+        (never / "journal.jsonl").write_text(json.dumps({"rec": kind}) + "\n")
+        with pytest.raises(EngineError, match="already exists") as residue:
+            claim_root(never)
+        assert "DL-138" not in str(residue.value) and "RETIRED" not in str(residue.value)
+
+    garbage = tmp_path / "garbage"
+    garbage.mkdir()
+    (garbage / "journal.jsonl").write_text("not a record at all\n")
+    with pytest.raises(EngineError, match="already exists") as generic:
+        claim_root(garbage)
+    assert "DL-138" not in str(generic.value)
 
 
 def test_a_used_root_refuses_genesis_and_says_what_to_do(tmp_path: Path) -> None:
@@ -343,35 +370,42 @@ def test_pr05_an_estate_id_mismatch_refuses(tmp_path: Path) -> None:
     anchor.release()
 
 
-def test_the_adopting_head_is_read_and_refused_by_name(tmp_path: Path) -> None:
-    """`adopting` is U7's to WRITE. It is read here so a resume refuses it
-    by name instead of meeting an unknown state and guessing."""
-    anchor_dir = tmp_path / "anchor"
-    anchor_dir.mkdir()
-    (anchor_dir / "anchor.json").write_bytes(
-        json.dumps(
-            {
-                "artifact_format_version": 1,
-                "estate_id": "e1",
-                "head": {"state": "adopting", "period_id": 1, "root": str(tmp_path / "r")},
-                "periods": {},
-            },
-            sort_keys=True,
-        ).encode()
-        + b"\n"
-    )
-    anchor = EstateAnchor(anchor_dir)
-    anchor.acquire()
-    stored = anchor.read()
-    assert stored is not None and stored.head.state == "adopting"
-    with pytest.raises(EngineError, match="dsl41 estate adopt"):
-        act_on_head(
-            anchor,
-            run_root=tmp_path / "r",
-            estate_id="e1",
-            lineage=Lineage(seal=None, opens_next=False),
+def test_the_adopting_head_refuses_before_parse_and_names_the_dialect(tmp_path: Path) -> None:
+    """D3 (DL-138): `adopting` is a RETIRED head state, and an anchor
+    carrying one refuses BEFORE the discriminated union is parsed.
+
+    Pydantic's own answer is "input tag 'adopting' ... does not match any of
+    the expected tags", which tells an operator holding a pre-DL-138 anchor
+    nothing about what they hold. An unknown state keeps that generic
+    error -- "this used to be legal" and "this was never legal" are
+    different facts (docs/protocol-evolution.md ss6)."""
+
+    def _anchor_with(state: str) -> EstateAnchor:
+        anchor_dir = tmp_path / state
+        anchor_dir.mkdir()
+        (anchor_dir / "anchor.json").write_bytes(
+            json.dumps(
+                {
+                    "artifact_format_version": 1,
+                    "estate_id": "e1",
+                    "head": {"state": state, "period_id": 1, "root": str(tmp_path / "r")},
+                    "periods": {},
+                },
+                sort_keys=True,
+            ).encode()
+            + b"\n"
         )
-    anchor.release()
+        return EstateAnchor(anchor_dir)
+
+    retired = _anchor_with("adopting")
+    with pytest.raises(EngineError, match="RETIRED") as named:
+        retired.read()
+    assert "DL-138" in str(named.value) and "`adopting`" in str(named.value)
+
+    unknown = _anchor_with("dreaming")
+    with pytest.raises(EngineError, match="not an anchor this binary can read") as generic:
+        unknown.read()
+    assert "DL-138" not in str(generic.value)
 
 
 def test_pr04_a_network_filesystem_anchor_is_refused(tmp_path: Path, monkeypatch) -> None:
@@ -741,6 +775,111 @@ def test_pr45_a_claim_with_a_durable_segment_moves_the_head_at_resume(tmp_path: 
     stored = EstateAnchor(default_anchor_dir(run_root)).read()
     assert stored is not None and isinstance(stored.head, OpenHead)
     assert stored.head.period_id == 2
+
+
+#: the five fields the DL-137 derived set replaced. Named here because the
+#: test below drives a field that is NOT among them: it is what makes the
+#: case a pin on the DERIVED set rather than on any five fields
+_HAND_WRITTEN_FIVE = ("period_id", "segment_no", "baseline_id", "first_index", "clock_domain")
+
+
+@contextlib.contextmanager
+def _crashed_between_the_segment_and_the_cas(run_root: Path):
+    """The window `_check_existing_segment` exists for, built natively: an
+    opener that took the claim, wrote the opening segment and died before
+    the head CAS.
+
+    The opener's OWN seam makes the state rather than anchor surgery, so
+    what the retry meets is what a real crash leaves. The anchor lock is
+    held around the body, because the retry re-enters the opener where
+    recovery does -- under the lineage lock."""
+    engine = _genesis(run_root)
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+    catalog, _ = _catalog(C2_JIL)
+    manifest = read_period_manifest(run_root, 2)
+    assert manifest is not None
+    # read back off the disk, never re-derived: the retry knows the seal
+    # the way recovery knows it
+    committed = CommittedBoundary(seal=read_seal(run_root, 1), manifest=manifest)
+    assert committed.seal.digest == boundary.seal.digest
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    anchor.acquire()
+    try:
+        with pytest.raises(EngineError, match="crash at after_opening_segment"):
+            open_next_period(
+                run_root=run_root,
+                anchor=anchor,
+                committed=committed,
+                catalog=catalog,
+                crash_point=_crash_at("after_opening_segment"),
+            )
+        stored = anchor.require(committed.seal.estate_id)
+        assert isinstance(stored.head, ClaimedHead)  # the CAS never ran
+        assert wal_path(run_root, 2).exists()  # and the segment is durable
+        yield anchor, committed, catalog
+    finally:
+        anchor.release()
+
+
+def test_an_existing_next_segment_that_agrees_is_verified_and_the_cas_runs(
+    tmp_path: Path,
+) -> None:
+    """The positive half of the same rule: the segment the crashed opener
+    wrote agrees with the committed boundary field for field, so the retry
+    VERIFIES it and goes on to the head CAS.
+
+    Without this case the refusal below could be the fixture's rather than
+    the rule's -- and the file is neither rewritten nor appended to, which
+    is I1 (one segment record, one period)."""
+    run_root = tmp_path / "run"
+    with _crashed_between_the_segment_and_the_cas(run_root) as (anchor, committed, catalog):
+        written = wal_path(run_root, 2).read_bytes()
+        opened = open_next_period(
+            run_root=run_root, anchor=anchor, committed=committed, catalog=catalog
+        )
+        opened.journal.close()
+    stored = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert stored is not None and isinstance(stored.head, OpenHead)
+    assert stored.head.period_id == 2  # the CAS the crash cost us
+    assert wal_path(run_root, 2).read_bytes() == written
+    assert [r["rec"] for r in read_journal(wal_path(run_root, 2))].count("segment") == 1
+
+
+def test_an_existing_next_segment_that_disagrees_refuses_before_the_cas(tmp_path: Path) -> None:
+    """Presence is not agreement: the full seal-to-opening validation runs
+    BEFORE the recovery CAS, so a segment whose pins disagree refuses with
+    the head still `claimed` -- rather than after the head has named it.
+
+    `runtime_hash` is driven on purpose. The check compares the DERIVED
+    `model_fields & SEGMENT_FIELDS` set (DL-137), and the hand-written five
+    it replaced did not include it: the same segment passed the old check
+    and is refused by this one."""
+    run_root = tmp_path / "run"
+    stranger = "sha256:" + "b" * 64
+    with _crashed_between_the_segment_and_the_cas(run_root) as (anchor, committed, catalog):
+        opening = committed.seal.next_period
+        derived = set(type(opening).model_fields) & SEGMENT_FIELDS
+        assert "runtime_hash" in derived and "runtime_hash" not in _HAND_WRITTEN_FIVE
+        assert opening.runtime_hash != stranger
+        path = wal_path(run_root, 2)
+        lines = path.read_text().splitlines()
+        segment = {**json.loads(lines[0]), "runtime_hash": stranger}
+        path.write_text("\n".join([json.dumps(segment, sort_keys=True), *lines[1:]]) + "\n")
+
+        with pytest.raises(EngineError, match="did not open") as refused:
+            open_next_period(
+                run_root=run_root, anchor=anchor, committed=committed, catalog=catalog
+            )
+        message = str(refused.value)
+        stored = anchor.require(committed.seal.estate_id)
+    assert f"runtime_hash: segment {stranger!r}" in message  # the field, and both sides
+    assert repr(opening.runtime_hash) in message
+    assert message.count(" vs the boundary's ") == 1  # that field alone
+    assert "ss3.4" in message
+    assert isinstance(stored.head, ClaimedHead)  # the CAS never ran
+    reread = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert reread is not None and isinstance(reread.head, ClaimedHead)
 
 
 #: a scheduled estate, so a tick can LATCH on a held job (SEM-32)
@@ -2654,7 +2793,7 @@ def test_every_duplicated_seal_record_field_is_compared_at_recovery(tmp_path: Pa
     _close(engine)
     assert _record_disagreements(boundary.seal, boundary.record) == []
     for key, wrong in (
-        ("source", "adopt"),
+        ("source", "someone-elses-source"),
         ("request_id", "someone-elses-request"),
         ("claimed_actor", "mallory@ops"),
         ("force_seal", True),

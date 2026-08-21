@@ -103,7 +103,7 @@ class LeaderLock:
     lineage lock is this pattern on the anchor directory, because that
     pattern already solves what a bare `O_EXCL` does not -- replacement and
     lifetime. Only the file name and the noun in the refusal move; the
-    run-root spelling is the default, so a legacy root's `leader.lock` is
+    run-root spelling is the default, so a run root's `leader.lock` is
     byte-identical to what every earlier build wrote."""
 
     def __init__(
@@ -237,8 +237,8 @@ class Fence:
     not claim to un-run what already happened and does turn a divergence
     into a recorded stop. Composing them here rather than at each call site
     is what stops a writer from proving one and forgetting the other; a
-    legacy root with no anchor holds a fence of one lock and behaves exactly
-    as it did before."""
+    root with no anchor holds a fence of one lock and behaves exactly as it
+    did before."""
 
     def __init__(self, *locks: LeaderLock) -> None:
         self.locks = locks
@@ -280,10 +280,10 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     site -- they answer one question ("may this build lead this log?") and
     splitting them is how the second one goes missing.
 
-    The catalog hash is recomputed under the recipe the log itself names
-    (period-model ss1.1): v2 for a `segment`, v1 for a legacy `header`.
-    Comparing across recipes would refuse every estate that predates
-    DL-130, which is the outage DL-100 already named."""
+    The catalog hash is recomputed under the recipe the log's own `segment`
+    names (period-model ss1.1), never under the one this build happens to
+    write: comparing across recipes is how a gate refuses an estate that
+    did not change, which is the outage DL-100 named."""
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"

@@ -55,7 +55,6 @@ from test_runner_control import (
 )
 
 from dsl41.ir import lower_source
-from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
@@ -68,7 +67,7 @@ from dsl41.runner import Engine
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import Effect
 from dsl41.runner_hosts import HostCommand
-from dsl41.runner_journal import Journal, read_journal, read_outbox, replay_inputs
+from dsl41.runner_journal import Journal, read_journal, read_outbox
 from dsl41.period import active_wal
 from dsl41.runner_startup import (
     _preflight_identities,
@@ -132,7 +131,7 @@ def _sans_run_id(intents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _decided(records: list[dict[str, Any]]) -> set[int]:
-    return {r["index"] for r in records if r.get("rec") in ("decision", "result")}
+    return {r["index"] for r in records if r.get("rec") == "decision"}
 
 
 # ------------------------------------------------- 1. PR-35: one commit (CM-17)
@@ -414,69 +413,15 @@ def test_decision_effects_in_admission_order(tmp_path: Path) -> None:
     assert live_spawn["generation"] == live_kill["generation"] == 0
 
 
-# ------------------------------------------------------- 3. the legacy dialect
+# ---------------------------------------- 3. the D1 record validator (DL-138)
 
 
-_DL118_FIELDS = ("run_id", "generation")
+def _wal(run_root: Path) -> Path:
+    return run_root / "wal" / "000001.jsonl"
 
 
-def _as_legacy(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One decision-dialect log, rewritten as the log a pre-DL-118 engine
-    would have left: a `result` record, then one `effect` record per intent,
-    in the same order and with the same contents -- minus the two identity
-    fields DL-118 added, which an old engine never wrote."""
-    legacy: list[dict[str, Any]] = []
-    for record in records:
-        if record.get("rec") != "decision":
-            legacy.append(record)
-            continue
-        legacy.append(
-            {
-                "rec": "result",
-                **{
-                    key: record[key]
-                    for key in ("index", "request_id", "decision", "reason", "revisions")
-                },
-            }
-        )
-        legacy.extend(
-            # pre-DL-118 effects carried neither run_id nor generation
-            {"rec": "effect", **{k: v for k, v in effect.items() if k not in _DL118_FIELDS}}
-            for effect in record["effects"]
-        )
-    return legacy
-
-
-def _state(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Everything a resuming engine takes from a log: the history it
-    reproduces, the rows it reproduces it into, its position, and the
-    intents it inherits."""
-    oracle = Oracle(lower_source(_SOLO_JIL))
-    replay = replay_inputs(oracle, records)
-    return {
-        "trace": [(e.at, e.job, e.transition, e.cause) for e in oracle.trace()],
-        "rows": {job: (rt.status, rt.run_number) for job, rt in oracle.store.job.items()},
-        "frontiers": replay.frontiers,
-        "recovered": [r.model_dump() for r in replay.recovered],
-        "effects": [
-            (e.effect_id, e.kind, replay.outbox.state_of(e.effect_id))
-            for e in replay.outbox.effects()
-        ],
-        "pending": [e.effect_id for e in replay.outbox.pending()],
-    }
-
-
-def test_legacy_dialect_replays_to_the_same_state(tmp_path: Path) -> None:
-    """A run root written before DL-118 must keep working: `dsl41 journal`,
-    `dsl41 runs` and `--resume` all read the same log. The two dialects say
-    the same thing and differ only in how many fsyncs the writer spent, so
-    they must fold to one state in memory.
-
-    The legacy twin is DERIVED from the real one rather than hand-written,
-    which is what makes the comparison about the dialect: the revisions, the
-    ids and the order are the shipped engine's own, not a guess that could
-    agree with itself.
-    """
+def _one_period(tmp_path: Path) -> Path:
+    """A real run root with a decision and its effects in it, closed."""
     run_root = tmp_path / "run"
     engine = start_run(
         lower_source(_SOLO_JIL),
@@ -495,20 +440,151 @@ def test_legacy_dialect_replays_to_the_same_state(tmp_path: Path) -> None:
     asyncio.run(scenario())
     assert engine.journal is not None
     engine.journal.close()
+    return run_root
 
-    modern = read_journal(run_root / "journal.jsonl")
-    legacy = _as_legacy(modern)
-    assert [r["rec"] for r in legacy].count("effect") == len(_effects_of(modern)) >= 2
-    assert not [r for r in legacy if r["rec"] == "decision"]
 
-    legacy_root = tmp_path / "legacy"
-    legacy_root.mkdir()
-    (legacy_root / "journal.jsonl").write_text(
-        "".join(json.dumps(r, sort_keys=True) + "\n" for r in legacy)
+def _rewrite(run_root: Path, records: list[dict[str, Any]]) -> Path:
+    path = _wal(run_root)
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    return path
+
+
+def test_the_current_record_kinds_are_accepted(tmp_path: Path) -> None:
+    """The positive half of D1, and the one that stops the validator from
+    being a way to break every reader: a real period's log holds `segment`,
+    `leader`, `input`, `decision` and their neighbours, and every one of
+    them passes.
+
+    `host` is CURRENT and is appended here explicitly. A host command is
+    admitted like an input and replays like one, and it is the kind a
+    registry pinned from the writers alone would have missed (the engine
+    that writes one is exercised in test_hosts.py)."""
+    from dsl41.runner_journal import CURRENT_RECS, RETIRED_RECS
+
+    run_root = _one_period(tmp_path)
+    records = read_journal(_wal(run_root))
+    kinds = {r["rec"] for r in records}
+    assert {"segment", "leader", "input", "decision"} <= kinds <= CURRENT_RECS
+    assert not kinds & set(RETIRED_RECS)
+
+    host = {
+        "rec": "host",
+        "seq": 99,
+        "at": T0.isoformat(),
+        "host": {"verb": "drain", "id": "local", "force": False},
+        "source": "control",
+    }
+    assert read_journal(_rewrite(run_root, [*records, host]))[-1] == host
+
+
+def test_the_retired_record_dialects_refuse_by_name(tmp_path: Path) -> None:
+    """D1 (DL-138): a `header` opening, a `result` mid-journal and a
+    standalone `effect` each refuse naming the kind AND the entry that
+    retired it. A `header` opening in particular must not come back as
+    "missing segment record" -- the validator runs first for exactly that
+    reason."""
+    run_root = _one_period(tmp_path)
+    records = read_journal(_wal(run_root))
+    decision = next(r for r in records if r["rec"] == "decision")
+    header = {
+        "rec": "header",
+        "baseline_id": records[0]["baseline_id"],
+        "catalog_hash": "0" * 64,
+        "state_machine_version": 1,
+        "clock_domain": "virtual",
+        "started_at": records[0]["at"],
+    }
+    result = {
+        "rec": "result",
+        **{k: decision[k] for k in ("index", "request_id", "decision", "reason", "revisions")},
+    }
+    effect = {"rec": "effect", **decision["effects"][0]}
+    for kind, forged in (
+        ("header", [header, *records[1:]]),
+        ("result", [*records, result]),
+        ("effect", [*records, effect]),
+    ):
+        path = _rewrite(run_root, forged)
+        with pytest.raises(EngineError, match="RETIRED") as caught:
+            read_journal(path)
+        assert f"`{kind}`" in str(caught.value)
+        assert "DL-138" in str(caught.value)
+
+
+def test_an_unknown_record_kind_refuses_as_its_own_error(tmp_path: Path) -> None:
+    """The third arm, and a DELIBERATE behavior change: `read_journal` used
+    to IGNORE a `rec` it did not recognise. Version gating sits on the
+    opening `segment`, so an unrecognised kind inside a version-matched
+    segment is corruption -- and it is NOT a tombstone, because "this was
+    never legal" is a different fact from "this used to be"
+    (docs/protocol-evolution.md ss6)."""
+    run_root = _one_period(tmp_path)
+    records = read_journal(_wal(run_root))
+    path = _rewrite(run_root, [*records, {"rec": "wisdom", "seq": 99}])
+    with pytest.raises(EngineError, match="unknown record kind 'wisdom'") as caught:
+        read_journal(path)
+    assert "DL-138" not in str(caught.value)
+    assert "RETIRED" not in str(caught.value)
+
+
+def test_legacy_batch_is_pinned_three_ways_at_the_central_validator(tmp_path: Path) -> None:
+    """D1/D2 (DL-138). The field STAYS on the record and the reads are the
+    validator's: exactly `False` proceeds, `True` is the retired fold
+    dialect and refuses by name, and missing or non-boolean is MALFORMED --
+    a distinct error, because a record that cannot say what it is is not an
+    old record.
+
+    All three at the CENTRAL validator, so every consumer inherits them."""
+    run_root = _one_period(tmp_path)
+    records = read_journal(_wal(run_root))
+    assert all(r["legacy_batch"] is False for r in records if r["rec"] == "decision")
+
+    def _with(marker: Any, *, drop: bool = False) -> list[dict[str, Any]]:
+        out = []
+        for record in records:
+            if record.get("rec") != "decision":
+                out.append(record)
+            elif drop:
+                out.append({k: v for k, v in record.items() if k != "legacy_batch"})
+            else:
+                out.append({**record, "legacy_batch": marker})
+        return out
+
+    read_journal(_rewrite(run_root, _with(False)))  # proceeds
+    with pytest.raises(EngineError, match="RETIRED") as retired:
+        read_journal(_rewrite(run_root, _with(True)))
+    assert "DL-138" in str(retired.value)
+    for malformed in (_with("true"), _with(1), _with(None, drop=True)):
+        with pytest.raises(EngineError, match="malformed rather than old") as bad:
+            read_journal(_rewrite(run_root, malformed))
+        assert "DL-138" not in str(bad.value)
+
+
+def test_the_retired_fold_reaches_a_history_and_a_retention_consumer(tmp_path: Path) -> None:
+    """The inheritance, proved rather than assumed (PR-48's replacement).
+
+    `runner_history` and `retention` parse decision effects WITHOUT
+    `read_outbox`, so before D1 each would have needed its own copy of the
+    `legacy_batch` rule. Both route through `read_journal`, so both refuse
+    the retired fold by name and neither carries a second spelling."""
+    from dsl41.retention import plan_retention
+    from dsl41.runner_history import RunHistoryError, read_run_root
+
+    run_root = _one_period(tmp_path)
+    records = read_journal(_wal(run_root))
+    _rewrite(
+        run_root,
+        [
+            {**r, "legacy_batch": True} if r.get("rec") == "decision" else r
+            for r in records
+        ],
     )
-    # it parses through the ordinary reader, not a special one
-    assert read_journal(legacy_root / "journal.jsonl") == legacy
-    assert _state(legacy) == _state(modern)
+    with pytest.raises(RunHistoryError, match="RETIRED") as history:
+        read_run_root(run_root)
+    assert "DL-138" in str(history.value)
+    with pytest.raises(EngineError, match="RETIRED") as retention:
+        plan_retention(run_root)
+    assert "DL-138" in str(retention.value)
 
 
 # ------------------------------------------- 3a. identity at birth and readback
@@ -616,11 +692,13 @@ def test_pr36a_the_preflight_refuses_every_identity_split_before_anything_moves(
 
 def test_read_outbox_refuses_a_native_decision_with_an_identity_less_effect() -> None:
     """The read-side half of the writer's refusal: this code never writes a
-    `legacy_batch: false` decision whose SPAWN has no run_id, so meeting one
-    means corruption or a foreign writer -- and accepting it would let resume
-    mint an identity AFTER the transaction, the exact hole DL-118 closed. A
-    `legacy_batch: true` fold keeps its None defaults: it never had an
-    identity to lose."""
+    decision whose SPAWN has no run_id, so meeting one means corruption or a
+    foreign writer -- and accepting it would let resume mint an identity
+    AFTER the transaction, the exact hole DL-118 closed.
+
+    The fold half of this test went with the `legacy_batch: true` dialect
+    at DL-138; `legacy_batch` is now the central validator's, pinned three
+    ways there."""
     naked = {
         "effect_id": "e1:SPAWN:j.1",
         "kind": "SPAWN",
@@ -642,34 +720,11 @@ def test_read_outbox_refuses_a_native_decision_with_an_identity_less_effect() ->
     }
     with pytest.raises(EngineError, match="e1:SPAWN:j.1"):
         read_outbox([decision])
-    # the record has exactly one shape: a BOOLEAN marker and a LIST of
-    # effects. A foreign truthy spelling or an absent list must not read as
-    # "empty native decision" -- that is intents silently lost.
-    with pytest.raises(EngineError, match="legacy_batch"):
-        read_outbox([{**decision, "legacy_batch": "true"}])
+    # the record has exactly one shape: a LIST of effects. An absent list
+    # must not read as "empty native decision" -- that is intents silently
+    # lost.
     with pytest.raises(EngineError, match="effects"):
         read_outbox([{k: v for k, v in decision.items() if k != "effects"}])
-    # a fold is a defined reconstruction (period-model ss11): one legacy
-    # executor at generation 0, every effect resolved. Wrong generation and
-    # pending intent both refuse -- a pending legacy outbox refuses ADOPTION
-    # (PR-48), so a fold carrying one was not made by it.
-    fold = {**decision, "legacy_batch": True, "effects": [{**naked, "generation": 0}]}
-    retirement = {"rec": "effect_result", "effect_id": "e1:SPAWN:j.1", "state": "retired"}
-    with pytest.raises(EngineError, match="generation 7"):
-        read_outbox([{**fold, "effects": [{**naked, "generation": 7}]}, retirement])
-    with pytest.raises(EngineError, match="pending"):
-        read_outbox([{**fold, "effects": [{**naked, "generation": 0, "run_id": _RID}]}])
-    # a fold's null-run_id SPAWN is legal ONLY resolved retired or
-    # indeterminate: a run that provably never reached an adapter has no id
-    # to carry; an applied one must have one
-    with pytest.raises(EngineError, match="pending"):
-        read_outbox([fold])
-    with pytest.raises(EngineError, match="applied"):
-        read_outbox([fold, {**retirement, "state": "applied"}])
-    folded = read_outbox([fold, retirement])
-    assert [(e.effect_id, e.run_id, e.generation) for e in folded.effects()] == [
-        ("e1:SPAWN:j.1", None, 0)
-    ]
 
 
 def test_pr36a_the_reconcile_barrier_refuses_a_split_and_appends_nothing(tmp_path: Path) -> None:
@@ -864,3 +919,32 @@ def test_v2_request_is_refused_naming_v3() -> None:
         parse_envelope(request, addressed="job:j", baseline_id="the-log")
     parsed = parse_envelope({**request, "v": 3}, addressed="job:j", baseline_id="the-log")
     assert parsed.request_id == "r1"
+
+
+def test_an_unknown_field_on_a_control_request_is_ignored() -> None:
+    """The OTHER half of the control socket's row in the evolution matrix
+    (docs/protocol-evolution.md ss7, cases 3 and 4), and a SEPARATE test on
+    purpose: an unknown FIELD follows the row's tolerance rule while an
+    unsupported VERSION always refuses, and one message that is both proves
+    neither.
+
+    The control socket is a TOLERANT row (control-protocol ss2, "consumers
+    must ignore unknown fields"): a field this build does not know is a
+    newer client speaking, and refusing it would make every additive change
+    a wire break. The version test above is the strict half of the pair."""
+    request = {
+        "v": PROTOCOL_VERSION,
+        "baseline_id": "the-log",
+        "epoch": 0,
+        "request_id": "r1",
+        "verb": "ON_HOLD",
+        "payload": {"job": "j"},
+        "expect": {"job:j": 1},
+    }
+    known = parse_envelope(request, addressed="job:j", baseline_id="the-log")
+    surplus = parse_envelope(
+        {**request, "invented_by_a_later_client": {"deep": [1, 2]}},
+        addressed="job:j",
+        baseline_id="the-log",
+    )
+    assert surplus == known  # ignored, not carried and not refused

@@ -516,21 +516,28 @@ def test_a_log_this_build_derives_differently_from_is_refused(tmp_path: Path) ->
         replay_inputs(Oracle(lower_source(_SOLO_JIL)), records)
 
 
-def test_a_journal_written_before_s2_replays_unchanged(tmp_path: Path) -> None:
-    """No format gate was needed, and this is why: a pre-S2 journal carries
-    no results, so every attempt in it is applied -- exactly what the
-    single-pass reader did. The synthesized ids name each attempt's position
-    in the log, which is the only thing that could ever have identified
-    them."""
+def test_a_journal_with_no_decisions_replays_unchanged(tmp_path: Path) -> None:
+    """No format gate was needed for the pre-S2 shape, and this is why: a
+    log whose attempts carry NO decision applies every one of them --
+    exactly what the single-pass reader did. The synthesized ids name each
+    attempt's position in the log, which is the only thing that could ever
+    have identified them.
+
+    Opened with a real `segment` since DL-138: the `header` this test used
+    to build is a retired dialect and refuses by name. What is exercised is
+    the decision-less log, not the opening record."""
+    catalog = lower_source(_SOLO_JIL)
     path = tmp_path / "journal.jsonl"
-    path.write_text(
-        '{"rec": "header", "catalog_hash": "x", "clock_domain": "virtual",'
-        ' "dsl41_version": "0", "started_at": "2026-07-01T08:00:00"}\n'
-        '{"rec": "input", "seq": 1, "at": "2026-07-01T08:00:00", "kind": "STARTJOB",'
-        ' "payload": {"job": "j"}, "source": "control"}\n'
-        '{"rec": "advance", "seq": 2, "at": "2026-07-01T08:01:00"}\n'
-    )
-    oracle = Oracle(lower_source(_SOLO_JIL))
+    Journal.create(
+        path, catalog=catalog, clock_domain="virtual", started_at=datetime(2026, 7, 1, 8, 0)
+    ).close()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            '{"rec": "input", "seq": 1, "at": "2026-07-01T08:00:00", "kind": "STARTJOB",'
+            ' "payload": {"job": "j"}, "source": "control"}\n'
+            '{"rec": "advance", "seq": 2, "at": "2026-07-01T08:01:00"}\n'
+        )
+    oracle = Oracle(catalog)
     replay = replay_inputs(oracle, read_journal(path))
     assert oracle.store.job["j"].status == "RUNNING"
     assert [r.request_id for r in replay.recovered] == ["log:1", "log:2"]

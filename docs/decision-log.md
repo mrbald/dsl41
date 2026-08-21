@@ -6735,3 +6735,76 @@
   tombstones, the adoption path, the schema surgery and the tests -- because a
   split leaves a red intermediate state. The pinned test counts move with it
   and are appended here.
+  THE CODE HALF LANDED (L2). 2937 -> 2921 collected: 27 legacy tests deleted
+  with the `legacy_twin`, `_legacy_root`, `_unfold_decisions` and `_adopt`
+  fixtures, 11 added -- the D1 roster in `tests/test_decision_record.py`, the
+  D4 trio in `tests/test_period_identity.py` (the journal reader, journal
+  creation, and the ordering pin the review added), the unknown-field half of the
+  control row beside the version half it was folded into, `estate adopt` as
+  an unknown command, and the two direct pins named below -- and about a
+  dozen rewritten to keep their native halves. Four things the
+  implementation decided that the plan did not.
+  FIRST, D4 had a FOURTH owner: `period.check_manifest_self_consistent` asked
+  the same version question in its own words, so it routes through the
+  dispatcher with the other three -- a gate that told an operator holding a
+  retired root something different from the reader that opens it is the
+  defect D4 exists to prevent. SECOND, `runner_startup`'s missing-manifest
+  refusal loses its `rec == "segment"` fork with the `header` that was the
+  other arm: the refusal is unconditional now and the profile block below it
+  is no longer nested, which is what the deletion left behind rather than a
+  change of rule. THIRD, `examples/nightbank/RUNBOOK.md` had to be swept, and
+  it is not documentation for this purpose:
+  `test_every_dsl41_verb_the_runbook_types_exists` resolves every `dsl41
+  <verb>` the runbook types against this build, so exercise 18 becomes a
+  retirement note pointing at the contract. FOURTH, one test was LEAKING and
+  is recorded rather than quietly fixed: the segment-rewritten-to-v1 pin in
+  `tests/test_period_identity.py` edited `journal.jsonl` -- the SENTINEL --
+  instead of the WAL beside it, and its `catalog_hash` match was satisfied by
+  a pydantic "extra inputs are not permitted" error, so it never once drove
+  the gate it named. It drives the
+  WAL now, as `test_the_journal_reader_refuses_the_retired_recipe_by_name`,
+  and after the review below it drives the record v1 REALLY wrote rather
+  than a v2-shaped one relabelled -- the second-order leak the first fix
+  left, and the one that hid the ordering defect recorded at the end.
+  One property was pinned ONLY through the adoption path, and it is
+  RE-PINNED directly rather than left to be discovered: "presence is not
+  agreement -- the full seal-to-opening validation runs before the recovery
+  CAS" is now
+  `test_an_existing_next_segment_that_disagrees_refuses_before_the_cas` in
+  `tests/test_boundary.py`, with
+  `test_an_existing_next_segment_that_agrees_is_verified_and_the_cas_runs`
+  as the positive case it is measured against. Both build the window at the
+  opener's OWN seam -- claim taken, segment durable, head still `claimed` --
+  so the retry meets what a crash leaves rather than what anchor surgery
+  composed. The refusing case drives `runtime_hash`, one of the five fields
+  the hand-written check DL-137 replaced never compared, and asserts the
+  head is still `claimed` after the refusal: the field pins the DERIVED set,
+  the head pins the ORDER.
+  TWO CLAUSES WIDENED IN REVIEW. D6 named three copies of the decided-set
+  join; `runner_history._note_executor` had a fourth reader of the
+  standalone `effect` record, unreachable and -- once its test went with the
+  dialect -- untested, so it goes with the other three. D5 asked
+  `attest.rederive_seal` to REWORD its opening refusal; with `OPENING_RECS`
+  down to `segment` the branch is unreachable, and the only message it could
+  carry calls whatever it found "retired" without naming an entry, which is
+  the merge ss6 forbids. It is deleted and the guarantee it duplicated is
+  stated where the read happens.
+  TWO DEFECTS FOUND IN REVIEW, both in the ORDER the reads run in. FIRST,
+  the tombstones ran too late. The current-dialect schema and the later
+  records were validated before the opening's version was dispatched, so a
+  real version-1 opening -- bare hexdigest `catalog_hash`, `catalog_hash_v1`
+  field -- was called malformed by the grammar or the unknown-key check
+  instead of reaching its tombstone, and an unsupported opening followed by
+  an unknown record kind reported the KIND. The version verdict owns the
+  file's fate and is taken first now: `period.check_segment_version` is
+  split out of `check_segment_record` and runs at the top of it and at the
+  top of `read_journal`, before D1's pass.
+  `test_the_openings_version_is_dispatched_before_any_record_is_read` pins
+  the order, with the current version as its control. SECOND, D5's
+  header-only tombstone was header-only in this entry and not in the code:
+  `opens_with_retired_rec` answered for `result` and `effect` too, so
+  `claim_root` and `plan_retention` named DL-138 over a file that was never
+  a legal journal opening. The helper is `opens_with_rec` now and reports
+  the kind raw; each owner compares it to `header` and keeps its own
+  wording, and the two owners' tests carry the `result` and `effect`
+  residue cases beside the garbage one.

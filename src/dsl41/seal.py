@@ -93,6 +93,13 @@ from dsl41.runner_effects import Effect, is_valid_run_id
 
 
 def _current_recipe(value: int) -> int:
+    """A seal pins the CURRENT recipe, which is a stricter question than
+    `period.check_catalog_hash_version`'s "may this binary read it" and is
+    deliberately NOT routed through it (D4, DL-138). A seal is a closed
+    estate artifact -- exact-schema on its row of the evolution matrix
+    (`docs/protocol-evolution.md` ss1) -- so a version merely READABLE is
+    still the wrong pin here, and would stay wrong in a future where two
+    recipes are readable at once."""
     if value != CATALOG_HASH_VERSION:
         raise ValueError(
             f"catalog_hash_version {value}: a seal pins the current recipe"
@@ -154,9 +161,10 @@ class BoundaryRequest(BaseModel):
     Three of the four fields originate in the request and nowhere else, so
     audit checks them for equality between the sidecar and the `seal`
     record and carries them. `source` is the exception -- audit DERIVES it
-    (ss11) and compares. Two values, not three: a live seal through the
-    control socket and an offline seal from the CLI are one kind of
-    boundary, a request carrying an id its caller minted.
+    and compares. ONE value: a live seal through the control socket and an
+    offline seal from the CLI are one kind of boundary, a request carrying
+    an id its caller minted. `adopt` was the other and went with the
+    estate-adoption path (DL-138).
 
     "Claimed actor", not "principal": there is no authentication at this
     tier (`control-protocol.md` ss7 gap 2), and the seal must not spell an
@@ -164,9 +172,8 @@ class BoundaryRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    source: Literal["request", "adopt"]
-    #: for an adoption this is derived -- `sha256("adopt" || estate_id)` --
-    #: and audit re-derives it (PR-47b); for a request it is the caller's
+    source: Literal["request"]
+    #: the caller's, and audit compares rather than trusts it (PR-47b)
     request_id: str = Field(min_length=1)
     claimed_actor: str
     force_seal: bool

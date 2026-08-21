@@ -104,7 +104,7 @@ from dsl41.runner_admission import DecisionIndex, RequestCollision
 from dsl41.runner_clock import EngineError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
-from dsl41.runner_journal import Journal, read_journal
+from dsl41.runner_journal import Journal, opens_with_rec, read_journal
 from dsl41.runner_ledger import LeaderLock, Proof
 from dsl41.runner_procid import (
     current_boot_id,
@@ -201,11 +201,12 @@ class SealRequest(BaseModel):
     mutation, and it carries `request_id` like every command -- which is
     what makes a lost response retryable at all.
 
-    `source` has two values and not three: a live seal through the control
-    socket and an offline seal from the CLI are ONE kind of boundary, a
-    request carrying an id its caller minted. `adopt` is the other, and
-    only `for_adoption` below constructs it -- the wire parser never reads
-    the field, so nothing on a socket can claim to be an adoption."""
+    `source` has ONE value: a live seal through the control socket and an
+    offline seal from the CLI are one kind of boundary, a request carrying
+    an id its caller minted. `adopt` was the other and went with the
+    estate-adoption path (DL-138); the field stays because audit DERIVES it
+    and compares, and a derivation over a one-value domain is still the
+    check that catches a rewritten record."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -216,35 +217,7 @@ class SealRequest(BaseModel):
     stage_digest: str
     force_seal: bool = False
     claimed_actor: str = ""
-    source: Literal["request", "adopt"] = "request"
-
-    @classmethod
-    def for_adoption(
-        cls,
-        *,
-        estate_id: str,
-        baseline_id: str,
-        epoch: int,
-        next_period: StagedNextPeriod,
-        claimed_actor: str,
-        force_seal: bool = False,
-    ) -> SealRequest:
-        """ss11 step 7's synthetic request: the fingerprint over the same
-        envelope a live request would carry, and a DERIVED `request_id`.
-
-        Adoption has no caller-supplied request, so its id is
-        `sha256("adopt" || estate_id)` -- one estate, one adoption, one id,
-        and audit re-derives rather than reads it (PR-47b)."""
-        return cls(
-            baseline_id=baseline_id,
-            epoch=epoch,
-            request_id=adopt_request_id(estate_id),
-            next_period=next_period,
-            stage_digest=next_period.stage_digest,
-            force_seal=force_seal,
-            claimed_actor=claimed_actor,
-            source="adopt",
-        )
+    source: Literal["request"] = "request"
 
     @property
     def fingerprint(self) -> str:
@@ -348,31 +321,23 @@ class ClaimedHead(BaseModel):
     target_root: str
 
 
-class AdoptingHead(BaseModel):
-    """`estate adopt` owns `root` until period 1 seals (ss11).
+#: Retired lineage head states: the state, and the entry that retired it.
+#: APPEND-ONLY (docs/protocol-evolution.md ss6). `adopting` was the estate
+#: adoption path's fourth head, and an anchor carrying one is refused
+#: BEFORE parse -- a discriminated union meets an unknown tag with a
+#: validator error that names none of this.
+RETIRED_HEAD_STATES: Final[dict[str, str]] = {"adopting": "DL-138"}
 
-    Written by adoption, which is U7's. It is READ here so a resume can
-    refuse it BY NAME -- while the head is `adopting`, adoption owns
-    recovery and `run --resume` must say so rather than meet an unknown
-    state and guess."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    state: Literal["adopting"] = "adopting"
-    period_id: int = Field(ge=1)
-    root: str
-
-
-Head = Annotated[OpenHead | ClosedHead | ClaimedHead | AdoptingHead, Field(discriminator="state")]
+Head = Annotated[OpenHead | ClosedHead | ClaimedHead, Field(discriminator="state")]
 
 
 class PeriodRow(BaseModel):
     """ss1.3's archive registry entry: which root holds this period, and
     what has been proved about it.
 
-    `segment_durable` is what makes a row PROVISIONAL. Genesis and adoption
-    insert their row before any segment exists, so every cross-period
-    reader ignores a row until it reads `true`."""
+    `segment_durable` is what makes a row PROVISIONAL. Genesis inserts its
+    row before any segment exists, so every cross-period reader ignores a
+    row until it reads `true`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -576,6 +541,7 @@ class EstateAnchor:
             payload = decode(raw)
             if not isinstance(payload, dict):
                 raise EngineError(f"{self.path}: not a JSON object")
+            _check_head_state(self.path, payload)
             return Anchor.model_validate(payload)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{self.path}: not an anchor this binary can read ({exc})") from exc
@@ -653,50 +619,6 @@ class EstateAnchor:
             head=OpenHead(period_id=period_id, root=normalized_root(root)),
             # provisional until the segment lands: every cross-period
             # reader ignores a row until it reads `segment_durable` (PR-02c)
-            periods={str(period_id): PeriodRow(root=normalized_root(root))},
-        )
-        self.write(anchor)
-        return anchor
-
-    def create_adopting(self, *, estate_id: str, root: Path, period_id: int = 1) -> Anchor:
-        """`absent -> adopting(period_id, root)`: adoption's step 4 (ss11).
-
-        The same create-only rule genesis takes, with the same single
-        resume exception in adoption's own words: our own `adopting(1,
-        this root, this estate_id)` is an adoption interrupted, and
-        `estate adopt` owns it until period 1 seals. Anything else --
-        another estate's anchor, this estate's `open` head, a dead
-        incumbent's -- refuses (PR-01b).
-
-        `adopting` is a FOURTH head state and it is what gives adoption
-        one recovery owner: `run --resume` refuses while it stands, and
-        draft 14's hand-off to `--resume` "once a segment exists" left the
-        crash between the segment and the seal with two owners and no
-        finisher."""
-        existing = self.read()
-        ours = (
-            existing is not None
-            and existing.estate_id == estate_id
-            and isinstance(existing.head, AdoptingHead)
-            and existing.head.period_id == period_id
-            and normalized_root(existing.head.root) == normalized_root(root)
-        )
-        action = own_or_refuse(
-            exists=existing is not None,
-            ours=ours,
-            what=str(self.path),
-            holder=_holder_of(existing),
-        )
-        if action == "resume":
-            assert existing is not None
-            return existing
-        anchor = Anchor(
-            estate_id=estate_id,
-            head=AdoptingHead(period_id=period_id, root=normalized_root(root)),
-            # provisional, exactly as genesis's row is: adoption's finalize
-            # is folded into `adopting -> closed`, because the period-1
-            # segment and its seal are one transaction here and no reader
-            # can reach the row in between (PR-02c, PR-48)
             periods={str(period_id): PeriodRow(root=normalized_root(root))},
         )
         self.write(anchor)
@@ -874,15 +796,7 @@ class EstateAnchor:
     def close_period(
         self, *, estate_id: str, period_id: int, root: Path, seal_digest: str
     ) -> Anchor:
-        """`open -> closed`, and `adopting -> closed`: the THIRD write of
-        the seal sequence (ss3, ss11 step 7).
-
-        ONE transition with two legal predecessors, not two methods: the
-        bytes it writes and the row it flips are identical, and adoption's
-        finalize is folded in here because a period-1 segment and its seal
-        are one transaction under `estate adopt` -- a separate finalize
-        would be a crash window with no reader that could use the row in
-        between (PR-48).
+        """`open -> closed`: the THIRD write of the seal sequence (ss3).
 
         Idempotent on a head already closed at this digest, because
         recovery performs exactly this CAS when the record landed and the
@@ -896,7 +810,7 @@ class EstateAnchor:
                     f" {head.seal_digest} -- this seal says {seal_digest} (period-model ss1.3)"
                 )
             return anchor
-        if not isinstance(head, (OpenHead, AdoptingHead)) or head.period_id != period_id:
+        if not isinstance(head, OpenHead) or head.period_id != period_id:
             raise EngineError(
                 f"{self.path}: cannot close period {period_id}: the head is"
                 f" {_spell(head)} (period-model ss1.3)"
@@ -1016,14 +930,30 @@ class EstateAnchor:
         return anchor
 
 
-def _spell(head: OpenHead | ClosedHead | ClaimedHead | AdoptingHead) -> str:
+def _spell(head: OpenHead | ClosedHead | ClaimedHead) -> str:
     if isinstance(head, OpenHead):
         return f"open(period {head.period_id}, {head.root})"
     if isinstance(head, ClosedHead):
         return f"closed(period {head.period_id}, {head.seal_digest}, {head.closing_root})"
-    if isinstance(head, ClaimedHead):
-        return f"claimed({head.claim_id}, {head.target_root})"
-    return f"adopting(period {head.period_id}, {head.root}) -- `dsl41 estate adopt` owns it"
+    return f"claimed({head.claim_id}, {head.target_root})"
+
+
+def _check_head_state(path: Path, payload: Mapping[str, Any]) -> None:
+    """A retired head state refuses BEFORE the anchor is parsed (DL-138).
+
+    Pydantic meets an unknown discriminator tag with "input tag 'adopting'
+    found using 'state' does not match any of the expected tags", which
+    tells an operator holding a pre-DL-138 anchor nothing about what they
+    hold or why it stopped being readable."""
+    head = payload.get("head")
+    state = head.get("state") if isinstance(head, Mapping) else None
+    retired = RETIRED_HEAD_STATES.get(state) if isinstance(state, str) else None
+    if retired is not None:
+        raise EngineError(
+            f"{path}: the lineage head state `{state}` is a RETIRED dialect, refused"
+            f" by name since {retired} -- the estate-adoption path that wrote it went"
+            " with it (docs/protocol-evolution.md ss6, ss8)"
+        )
 
 
 def _holder_of(anchor: Anchor | None) -> str:
@@ -1091,7 +1021,6 @@ def claim_root(
     *,
     estate_id: str | None = None,
     claim_id: str | None = None,
-    adopted_from: str | None = None,
 ) -> OpenedRoot:
     """ss1.1's SENTINEL step, under ss1.1's ownership rule.
 
@@ -1109,8 +1038,24 @@ def claim_root(
     it needs to prove, because an in-place opener takes a new claim every
     period."""
     existing = read_sentinel(run_root)
-    legacy = existing is None and sentinel_path(run_root).exists()
-    if existing is None and not legacy:
+    occupied = existing is None and sentinel_path(run_root).exists()
+    if occupied:
+        # D5, DL-138: this reader does NOT route through `read_journal`, so
+        # it carries its own tombstone. A recognised retired OPENING is told
+        # apart from unknown residue, because one says the root predates a
+        # retirement and the other says the bytes are somebody else's. The
+        # tombstone is header-ONLY: `header` was a legal opening once, and a
+        # file opening with any other kind -- a retired `result` or `effect`
+        # included -- was never a journal, so it falls to the generic
+        # refusal below.
+        if opens_with_rec(sentinel_path(run_root)) == "header":
+            raise EngineError(
+                f"{sentinel_path(run_root)}: opens with `header`, a RETIRED record"
+                " dialect refused by name since DL-138 -- there is no path from it"
+                " into a period lineage, and this root cannot be claimed"
+                " (docs/protocol-evolution.md ss6, ss8)"
+            )
+    if existing is None and not occupied:
         check_root_unused(run_root)
     ours = (
         existing is not None
@@ -1118,12 +1063,12 @@ def claim_root(
         and (claim_id is None or existing.claim_id == claim_id)
     )
     action = own_or_refuse(
-        exists=existing is not None or legacy,
+        exists=existing is not None or occupied,
         ours=ours,
         what=str(sentinel_path(run_root)),
         holder=(
-            "a legacy journal -- adopt it with `dsl41 estate adopt`"
-            if legacy
+            "a file this binary does not recognise"
+            if occupied
             else f"estate {existing.estate_id}, claim {existing.claim_id}"
             if existing is not None
             else "nobody"
@@ -1133,7 +1078,7 @@ def claim_root(
         assert existing is not None
         return OpenedRoot(estate_id=existing.estate_id, sentinel=existing, resumed=True)
     minted = estate_id or str(uuid.uuid4())
-    sentinel = Sentinel(estate_id=minted, adopted_from=adopted_from, claim_id=claim_id)
+    sentinel = Sentinel(estate_id=minted, claim_id=claim_id)
     write_sentinel(run_root, sentinel)
     return OpenedRoot(estate_id=minted, sentinel=sentinel, resumed=False)
 
@@ -1170,7 +1115,7 @@ def staged_next_from(staged_manifest: StagedManifest) -> StagedNextPeriod:
     """`StagedManifest` -> the client-proposal half, DERIVED from the
     model's own fields (DL-137): this projection had four spellings --
     one hand-listed here, one derived in attest, two reflection rebuilds
-    in the CLI and adoption -- and which fields cross from launcher-pin
+    in the CLI -- and which fields cross from launcher-pin
     to client-proposal is one fact."""
     return StagedNextPeriod(
         **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
@@ -1268,10 +1213,10 @@ def load_bundle_catalog(
     run_root: Path, source_bundle_hash: str, *, permit_unknown: bool = False
 ) -> CatalogIR:
     """Any period's catalog, loaded from the immutable bundle this root
-    holds -- the ONE loader (DL-137): staging validation, audit and
-    adoption all parse the same way or `catalog_hash` v2 cannot bind
-    them. Parsed under the ORIGINAL paths `sources.json` records, because
-    the hash covers spans and a span names its file."""
+    holds -- the ONE loader (DL-137): staging validation and audit both
+    parse the same way or `catalog_hash` v2 cannot bind them. Parsed under
+    the ORIGINAL paths `sources.json` records, because the hash covers spans
+    and a span names its file."""
     sources: Sequence[SourceFile] = bundle_sources(run_root, source_bundle_hash)
     try:
         return lower_catalog(
@@ -1282,7 +1227,7 @@ def load_bundle_catalog(
         raise EngineError(
             f"{run_root}: bundle {source_bundle_hash} does not load ({exc}):"
             " a catalog that cannot be rebuilt from its own bundle cannot be"
-            " validated, audited or adopted (period-model ss7, ss11)"
+            " validated or audited (period-model ss7)"
         ) from exc
 
 
@@ -1319,7 +1264,7 @@ def externally_requested_attempts(records: Sequence[Mapping[str, Any]]) -> list[
     decided = {
         record["index"]
         for record in records
-        if record.get("rec") in ("decision", "result") and isinstance(record.get("index"), int)
+        if record.get("rec") == "decision" and isinstance(record.get("index"), int)
     }
     # an ATTEMPT carries its number under `seq` and a DECISION under `index`
     # -- one is the subscribe cursor and the other is the attempt's own
@@ -1397,17 +1342,6 @@ def seal_fingerprint(
     )
 
 
-def adopt_request_id(estate_id: str) -> str:
-    """ss11 step 7's synthetic boundary id: `sha256("adopt" || estate_id)`.
-
-    DERIVED rather than minted, and re-derived by audit rather than read
-    (PR-47b): an adoption has no caller-supplied request to carry an id,
-    and a consistent rewrite of `source: adopt -> request` plus a new id
-    would otherwise have told audit to treat the id as authoritative.
-    One estate, one adoption, one id."""
-    return "sha256:" + hashlib.sha256(("adopt" + estate_id).encode("utf-8")).hexdigest()
-
-
 # ---------------------------------------------------------- the phases
 
 
@@ -1437,7 +1371,7 @@ def validate_staged(ctx: StagedContext) -> Classification:
     """ss7 phase 1, at readiness, BEFORE the barrier. No seal, no T.
 
     A failure here refuses while C1 is still open and correct, which is the
-    whole point of running it first: draft 15 let adoption fence a legacy
+    whole point of running it first: draft 15 let an opener fence a foreign
     root and commit period 1 without ever running C2's readiness, so an
     unsupported artifact version or a failing preflight surfaced only when
     period 2 refused to open -- a committed, unopenable boundary with the
@@ -1692,10 +1626,13 @@ _SEAL_SCHEMA: Final[dict[str, Any]] = {
     "digest": is_hash_address,
     "next_period_id": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 2,
     "next_baseline_id": is_hash_address,
+    # the CURRENT recipe, not merely a readable one: the `seal` record is a
+    # closed artifact and holds to its sidecar's rule, which is why this is
+    # not `period.check_catalog_hash_version` (D4, DL-138)
     "catalog_hash_version": lambda v: (
         isinstance(v, int) and not isinstance(v, bool) and v == CATALOG_HASH_VERSION
     ),
-    "source": lambda v: v in ("request", "adopt"),
+    "source": lambda v: v == "request",
     "request_id": lambda v: isinstance(v, str) and bool(v),
     "request_fingerprint": lambda v: isinstance(v, str) and bool(v),
     "claimed_actor": lambda v: isinstance(v, str),
@@ -2421,11 +2358,10 @@ def act_on_head(
     run_root: Path,
     estate_id: str,
     lineage: Lineage,
-    adopting: bool = False,
 ) -> Anchor:
     """ss11 step 4: act on the head before anything is replayed.
 
-    Five rows, each repairing exactly one crash window:
+    Four rows, each repairing exactly one crash window:
     `open(N, this root)` with N's `seal` record present performs the CAS
     the crashed sealer did not; `closed` with no following segment leaves
     the claim to the opener; `claimed` with our claim and a durable segment
@@ -2434,26 +2370,6 @@ def act_on_head(
     segment finalizes."""
     current = anchor.require(estate_id)
     head = current.head
-    if isinstance(head, AdoptingHead):
-        # `adopting` is what gives adoption ONE recovery owner: while the
-        # head stands, `estate adopt` owns the root and every other resume
-        # refuses BY NAME rather than meeting an unknown state and guessing.
-        # The adopter's own barrier is the exception, and it says so
-        # explicitly -- draft 14 handed recovery to `--resume` "once a
-        # segment exists", which is after the translation and before the
-        # seal, so the crash there had two owners and neither could finish
-        if not (
-            adopting
-            and head.root == normalized_root(run_root)
-            and lineage.seal is None
-            and not lineage.opens_next
-        ):
-            raise EngineError(
-                f"{anchor.path}: the head is {_spell(head)}: adoption owns recovery of"
-                " this root until period 1 seals -- re-run `dsl41 estate adopt`"
-                " (period-model ss11)"
-            )
-        return current
     if (
         lineage.seal is not None
         and lineage.opens_next

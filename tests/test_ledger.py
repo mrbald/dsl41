@@ -49,7 +49,7 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_effects import OUTCOME_UNAVAILABLE
-from dsl41.period import catalog_hash_v1, catalog_hash_v2
+from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -385,51 +385,44 @@ def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Pa
         asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
 
 
-def test_a_header_that_pins_no_version_reads_as_the_one_that_defined_it() -> None:
-    """A journal written before S6a. Refusing it would make the gate's first
-    act an outage on every run root in existence."""
-    catalog = lower_source(_SOLO_JIL)
-    check_leader_eligibility(
-        {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)}, catalog=catalog
-    )
-    with pytest.raises(EngineError, match="catalog hash mismatch"):
-        check_leader_eligibility({"rec": "header", "catalog_hash": "other"}, catalog=catalog)
-
-
 def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:
-    """(period-model ss1.1, DL-130): `catalog_hash` is versioned, so the
-    gate recomputes under the recipe the record pins -- v1 for a legacy
-    `header`, v2 for a `segment`. Comparing across recipes would refuse
-    every journal ever written, in one direction or the other."""
+    """(period-model ss1.1, DL-130; D4, DL-138): `catalog_hash` is versioned,
+    so the gate recomputes under the recipe the record PINS and never under
+    the one this build happens to write.
+
+    Rewritten at DL-138, which left one readable recipe: what the gate
+    proves now is that the pinned version reaches the one dispatcher --
+    version 2 compares, the retired 1 refuses BY NAME, an unknown 3 refuses
+    as its own error -- rather than being assumed anywhere along the way."""
     catalog = lower_source(_SOLO_JIL)
-    legacy = {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)}
     current = {
         "rec": "segment",
         "catalog_hash": catalog_hash_v2(catalog),
         "catalog_hash_version": 2,
     }
-    check_leader_eligibility(legacy, catalog=catalog)
     check_leader_eligibility(current, catalog=catalog)
-    # the same estate under the OTHER recipe is a mismatch, both ways
-    for swapped in (
-        {**legacy, "catalog_hash": current["catalog_hash"]},
-        {**current, "catalog_hash": legacy["catalog_hash"]},
-    ):
-        with pytest.raises(EngineError, match="catalog hash mismatch"):
-            check_leader_eligibility(swapped, catalog=catalog)
+    with pytest.raises(EngineError, match="catalog hash mismatch"):
+        check_leader_eligibility({**current, "catalog_hash": "sha256:" + "0" * 64}, catalog=catalog)
+    with pytest.raises(EngineError, match="RETIRED") as retired:
+        check_leader_eligibility({**current, "catalog_hash_version": 1}, catalog=catalog)
+    assert "DL-138" in str(retired.value)
+    with pytest.raises(EngineError, match="catalog_hash_version 3") as unknown:
+        check_leader_eligibility({**current, "catalog_hash_version": 3}, catalog=catalog)
+    assert "DL-138" not in str(unknown.value)
 
 
-def test_a_changed_estate_refuses_under_either_recipe() -> None:
-    """The gate's own reason for existing, on both sides of the version:
-    a changed estate re-baselines explicitly rather than drifting."""
+def test_a_changed_estate_refuses() -> None:
+    """The gate's own reason for existing: a changed estate re-baselines
+    explicitly rather than drifting."""
     catalog = lower_source(_SOLO_JIL)
     changed = lower_source(_SOLO_JIL.replace("command: x", "command: y"))
-    for record in (
-        {"rec": "header", "catalog_hash": catalog_hash_v1(catalog)},
-        {"rec": "segment", "catalog_hash": catalog_hash_v2(catalog), "catalog_hash_version": 2},
-    ):
-        with pytest.raises(EngineError, match="catalog hash mismatch"):
-            check_leader_eligibility(record, catalog=changed)
+    record = {
+        "rec": "segment",
+        "catalog_hash": catalog_hash_v2(catalog),
+        "catalog_hash_version": 2,
+    }
+    with pytest.raises(EngineError, match="catalog hash mismatch"):
+        check_leader_eligibility(record, catalog=changed)
 
 
 # ------------------------------------------------- 5. the takeover barrier
@@ -790,19 +783,16 @@ def test_an_incomplete_watch_with_no_adapter_to_re_arm_it_refuses_loudly(tmp_pat
 def test_a_job_whose_type_this_engine_cannot_dispatch_never_reaches_reconciliation(
     tmp_path: Path,
 ) -> None:
-    """An engine with no adapter for a job's type is refused BEFORE replay,
-    on both routes it can arrive by.
+    """An engine with no adapter for a job's type is refused BEFORE replay.
 
     This used to pin the reconciliation ladder's left-alone parity -- an
     engine that could never have started the run must not invent a verdict
     about it -- and reached that branch through the header-journal twin a
-    pre-DL-130 estate is, because a pinned root already refused the missing
-    adapter first. DL-134 closed that route: ss11's matrix adopts a legacy
-    journal rather than resuming it. So both routes now refuse, and what is
-    pinned here is that neither of them replays a thing (DL-134's own entry
-    records the ladder branch left unreachable)."""
-    from test_period_identity import legacy_twin
-
+    pre-DL-130 estate was, because a pinned root already refused the missing
+    adapter first. DL-134 closed that route and DL-138 deleted the dialect
+    it went through. What is pinned here is that the one route left refuses
+    before anything replays (DL-134's entry records the ladder branch left
+    unreachable; DL-138 deleted it)."""
     run_root = tmp_path / "run"
 
     async def scenario():
@@ -812,11 +802,6 @@ def test_a_job_whose_type_this_engine_cannot_dispatch_never_reaches_reconciliati
         await engine.shutdown()
         _close(engine)
         with pytest.raises(EngineError, match="wired no adapter"):
-            await _resume_with(
-                run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
-            )
-        legacy_twin(run_root, lower_source(_SOLO_JIL))
-        with pytest.raises(EngineError, match="dsl41 estate adopt"):
             await _resume_with(
                 run_root, T0 + timedelta(minutes=2), _SOLO_JIL, {"FW": FakeAdapter(default=None)}
             )

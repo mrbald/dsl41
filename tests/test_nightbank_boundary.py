@@ -55,7 +55,6 @@ from dsl41.period import (
     RuntimeProfile,
     SourceFile,
     attestation_path,
-    read_sentinel,
     seal_path,
     stage_manifest,
     wal_path,
@@ -463,57 +462,52 @@ def test_prune_names_every_floor_and_deletes_nothing_it_was_not_asked_for(
     assert "attested [1]" in after.output
 
 
-# ---------------------------------------------- RUNBOOK 18: adoption
+# ------------------------------------- RUNBOOK 18: the retirement note
 
 
-def test_a_night_from_before_the_boundary_era_is_adopted(night_base: Path) -> None:
-    """RUNBOOK exercise 18: a run root written before the periodized layout
-    -- a `header` journal and `manifest/` -- no longer resumes. It is
-    adopted, once (ss11).
+def test_a_night_from_before_the_boundary_era_is_refused_by_name(night_base: Path) -> None:
+    """RUNBOOK exercise 18, as DL-138 left it: a run root written before the
+    periodized layout does not resume and is not adopted -- the verb is
+    gone, and every read dialect it translated is retired.
 
-    The refusal comes first and it NAMES the verb, because a root that
-    could not resume and could not say what to do instead would be a
-    stranded night. After adoption the root is ordinary: period 1 is
-    sealed, and its own evidence re-derives it -- with `source: adopt`,
-    which audit derives rather than reads."""
-    from test_period_identity import legacy_twin
-
+    What an operator sees is a tombstone rather than a parse error: the
+    refusal names the dialect on the disk and the entry that retired it,
+    and `estate adopt` is not a command."""
     run_root, props = _night(night_base)
-    catalog, _ = _load(props)
-    _genesis(run_root, props, events=_operator_events())
-    legacy_twin(run_root, catalog)
-    shutil.rmtree(run_root / "wal", ignore_errors=True)
-    shutil.rmtree(default_anchor_dir(run_root), ignore_errors=True)
+    old = run_root.parent / "old-engine"
+    old.mkdir()
+    (old / "journal.jsonl").write_text(
+        json.dumps(
+            {
+                "rec": "header",
+                "baseline_id": "b",
+                "catalog_hash": "0" * 64,
+                "state_machine_version": 1,
+                "clock_domain": "real",
+                "started_at": "2026-07-01T08:00:00",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
     stranded = _invoke(
         "run",
         "--resume",
         "--run-root",
-        str(run_root),
+        str(old),
         *[str(f) for f in SMALL_FILES],
         "-p",
         str(props),
     )
     assert stranded.exit_code == 2
-    assert "estate adopt" in stranded.output
+    assert "RETIRED" in stranded.output and "DL-138" in stranded.output
 
-    adopted = _invoke(
-        "estate", "adopt", str(run_root), *_next_args(props), "--claimed-actor", "ops@nightbank"
-    )
-    assert adopted.exit_code == 0, adopted.output
-
-    sentinel = read_sentinel(run_root)
-    assert sentinel is not None and sentinel.adopted_from == "legacy/journal.jsonl"
-    assert wal_path(run_root, 1).exists() and seal_path(run_root, 1).exists()
-    assert isinstance(_head(run_root), ClosedHead)
-    seal = read_seal(run_root, 1)
-    assert seal.boundary_request.source == "adopt"
-    # the night's own state came through the translation
-    assert seal.state.globals["RECON_APAC"].value == "CLEAN"
-    assert seal.state.jobs["OPS_B"].on_hold is True
-
-    assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
-    assert _invoke("verify", "--run-root", str(run_root)).exit_code == 0
+    gone = _invoke("estate", "adopt", str(old), "--next", str(SMALL_FILES[0]))
+    assert gone.exit_code != 0
+    # the words typer prints for a command it does not have -- "adopt" alone
+    # would also appear in the usage line of a verb that merely refused
+    assert "No such command" in gone.output
 
 
 # ------------------------------------------- RUNBOOK 19: the physical roll
@@ -653,7 +647,7 @@ def test_every_dsl41_verb_the_runbook_types_exists() -> None:
     change, and an exercise that opens with a command that does not exist
     is worse than no exercise. So: every `dsl41 <verb>` the runbook types
     must resolve to a command this build has -- and where the verb is a
-    GROUP, its subcommand is resolved too, or `estate adopt` would pass on
+    GROUP, its subcommand is resolved too, or `estate prune` would pass on
     the strength of `estate` alone."""
     text = (NB / "RUNBOOK.md").read_text()
     typed = {
@@ -681,4 +675,4 @@ def test_every_dsl41_verb_the_runbook_types_exists() -> None:
     # boundary-era exercises rather than only the ones that came before
     verbs = {verb for verb, _ in typed}
     assert {"run", "query", "sendevent", "seal", "audit", "verify"} <= verbs
-    assert {("estate", "adopt"), ("estate", "reclaim"), ("estate", "prune")} <= typed
+    assert {("estate", "reclaim"), ("estate", "prune")} <= typed

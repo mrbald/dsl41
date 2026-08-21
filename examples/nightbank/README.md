@@ -36,10 +36,11 @@ without you.
 A night is one period of an estate that outlives it. RUNBOOK exercises 15
 to 21 are the verbs for the rest of that life: seal the night at an instant
 you choose and open the next period in place, keeping every global, hold
-and latch; attest the closed period so it can be archived; adopt a run root
-written before the period model existed; roll to a fresh directory; free a
-lineage a crashed roll left claimed; and prune what retention licenses —
-and only that.
+and latch; attest the closed period so it can be archived; roll to a fresh
+directory; free a lineage a crashed roll left claimed; and prune what
+retention licenses — and only that. (Exercise 18 is a retirement note:
+DL-138 retired the read dialects a pre-boundary root was written in, and
+the verb that adopted one.)
 
 Each exercise shows a refusal before the command that works, because the
 refusals are what an operator has to recognize. Sealing too soon after a

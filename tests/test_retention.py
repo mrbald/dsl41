@@ -874,15 +874,43 @@ def test_a_file_named_like_a_spool_says_why_it_is_not_one(tmp_path: Path) -> Non
 
 
 def test_the_verb_refuses_a_root_that_is_not_in_a_lineage(tmp_path: Path) -> None:
-    """A legacy root has no periods, so it has no floors to compute. It is
-    told which verb puts it in a lineage rather than being swept."""
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "journal.jsonl").write_text(json.dumps({"rec": "header"}) + "\n")
-    with pytest.raises(EngineError, match="dsl41 estate adopt"):
-        plan_retention(legacy)
-    refused = _invoke("estate", "prune", "--run-root", str(legacy), "--dry-run")
-    assert refused.exit_code == 2 and "estate adopt" in refused.output
+    """A root with no sentinel has no periods, so it has no floors to
+    compute -- and D5's owner-local tombstone (DL-138) tells the operator
+    WHICH kind of root they pointed at.
+
+    `plan_retention` does not route through `read_journal`, so it carries
+    its own registry: a retired `header` opening refuses BY NAME, while
+    anything else at that path is unknown residue and refuses generically.
+    Merging the two would lose the difference between an old root and a
+    directory that was never an estate.
+
+    HEADER-ONLY, and the `result`/`effect` cases are why the distinction is
+    on the OPENING rather than on the record kind: both are retired records,
+    and neither was ever a legal journal opening, so a file that starts with
+    one is residue and not an old estate (DL-138, the L2 review)."""
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    (retired / "journal.jsonl").write_text(json.dumps({"rec": "header"}) + "\n")
+    with pytest.raises(EngineError, match="RETIRED") as named:
+        plan_retention(retired)
+    assert "DL-138" in str(named.value)
+    refused = _invoke("estate", "prune", "--run-root", str(retired), "--dry-run")
+    assert refused.exit_code == 2 and "DL-138" in refused.output
+
+    for kind in ("result", "effect"):
+        never = tmp_path / f"never-{kind}"
+        never.mkdir()
+        (never / "journal.jsonl").write_text(json.dumps({"rec": kind}) + "\n")
+        with pytest.raises(EngineError, match="holds no estate") as residue:
+            plan_retention(never)
+        assert "DL-138" not in str(residue.value) and "RETIRED" not in str(residue.value)
+
+    garbage = tmp_path / "garbage"
+    garbage.mkdir()
+    (garbage / "journal.jsonl").write_text("not a record at all\n")
+    with pytest.raises(EngineError, match="holds no estate") as generic:
+        plan_retention(garbage)
+    assert "DL-138" not in str(generic.value)
 
 
 def test_the_verb_refuses_an_anchor_of_another_estate(tmp_path: Path) -> None:
@@ -1278,24 +1306,34 @@ def test_a_seal_record_with_an_unknown_field_refuses_the_plan(tmp_path: Path) ->
 
 
 def test_backfill_refuses_a_header_wal_under_a_sentinel(tmp_path: Path) -> None:
-    """ss1.1/ss11: a sentinel says this root is periodized -- a `header`
-    WAL under its segment name is a foreign or pre-adoption file, and
-    serving it would stream an unaffiliated legacy lineage."""
-    from test_period_identity import legacy_twin
+    """ss1.1/ss11: a sentinel says this root is periodized, and a `header`
+    WAL under its segment name is a file from before the period model.
 
+    Since DL-138 that file refuses BY NAME at the record validator, before
+    any chain proof runs -- the tombstone replaces the short-circuit the
+    backfill used to carry, and the subscriber is told what is on the disk
+    rather than being handed an unaffiliated stream."""
     from dsl41.runner_journal import read_backfill
 
     run_root = tmp_path / "run"
-    engine = _open_period_one(run_root)
-    _close(engine)
-    donor = tmp_path / "donor"
-    catalog = _catalog(C1_JIL)[0]
-    engine = _open_period_one(donor)
-    _close(engine)
-    legacy_twin(donor, catalog)  # downgrade the donor to a header journal
-    shutil.copyfile(donor / "journal.jsonl", wal_path(run_root, 1))
-    with pytest.raises(EngineError, match="legacy stream does not belong"):
+    _close(_open_period_one(run_root))
+    wal_path(run_root, 1).write_text(
+        json.dumps(
+            {
+                "rec": "header",
+                "baseline_id": "b",
+                "catalog_hash": "0" * 64,
+                "state_machine_version": 1,
+                "clock_domain": "virtual",
+                "started_at": "2026-07-01T08:00:00",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    with pytest.raises(EngineError, match="RETIRED") as caught:
         read_backfill(run_root / "journal.jsonl", since=0)
+    assert "DL-138" in str(caught.value) and "`header`" in str(caught.value)
 
 
 # ------------------------------------------ peer-review round-4 pins (DL-135)

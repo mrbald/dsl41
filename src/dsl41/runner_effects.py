@@ -122,14 +122,16 @@ class Effect(BaseModel):
     at: datetime
     #: the run's process identity, minted IN the decision transaction for a
     #: SPAWN (period-model ss2.3, PR-36a) and carried by the KILL of a run
-    #: this log spawned. None only on a record written before DL-118, or on
-    #: a KILL for such a run -- never from this writer's planner for a SPAWN.
+    #: this log spawned. None on a KILL for a run this root holds no binding
+    #: for, and on a hand-built record before the reader's gate sees it --
+    #: never from this writer's planner for a SPAWN.
     run_id: str | None = None
     #: the executor host row's generation, read at birth (PR-16): an effect
     #: born before an eviction cannot pass for one born after it. None only
-    #: on a pre-DL-118 record. STRICT: the fold gate compares it to exactly
-    #: 0, and lax pydantic would wave `false`, `"0"` and `0.0` through that
-    #: comparison as coerced integers.
+    #: on a hand-built record, which validates so `read_outbox`'s
+    #: birth-identity gate can refuse it by name; nothing this engine plans
+    #: leaves it None. STRICT, because lax pydantic would wave `false`,
+    #: `"0"` and `0.0` through every integer comparison below it.
     generation: int | None = Field(default=None, strict=True)
 
 
@@ -307,8 +309,8 @@ def plan_effects(
     mint: it never re-plans, it reads the outbox back from the records
     (`Replay`), so the id a resumed engine acts on is the id the log holds.
     A KILL carries the run's id from `run_ids` -- the (job, run_number) ->
-    run_id bindings this run root already made -- or None for a run a
-    pre-DL-118 journal spawned without one. `generation` is the executor
+    run_id bindings this run root already made -- or None for a run this
+    root holds no binding for. `generation` is the executor
     host row's CURRENT value (PR-16), one value because one call plans for
     one executor. The function still decides INTENT only -- whether an
     intent is still desired when its turn comes is `superseded_reason`'s

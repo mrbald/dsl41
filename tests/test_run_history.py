@@ -46,7 +46,6 @@ from dsl41.runner_history import (
 )
 from dsl41.period import read_period_manifest, runtime_profile_from_cli
 from dsl41.runner_startup import resume_run, start_run
-from test_period_identity import legacy_twin
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -69,7 +68,6 @@ def _header(catalog_hash: str = "h1", started_at: datetime = T0) -> dict[str, An
         "source_bundle_hash": "sha256:bundle",
         "runtime_hash": "sha256:runtime",
         "state_machine_version": 1,
-        "catalog_hash_v1": None,
         "clock_domain": "real",
         "first_index": 1,
         "opens_from_seal": None,
@@ -493,27 +491,6 @@ def test_a_spool_record_naming_a_stranger_reads_as_absent(tmp_path: Path) -> Non
     assert partial is not None and partial.ended_at is None
 
 
-def test_a_pre_dl118_run_root_still_reports_its_executor() -> None:
-    """The fold reads run roots, and old ones outnumber new ones. A journal
-    written before DL-118 carries its SPAWN as a standalone `effect` record
-    rather than nested in the decision that planned it; both spell the same
-    fact, so both answer."""
-    decision = _spawn_decision(1, T0, job="j1", run_number=1, executor_id="remote")
-    # a faithful old record: pre-DL-118 effects had no run_id or generation
-    legacy = {
-        "rec": "effect",
-        **{k: v for k, v in decision["effects"][0].items() if k not in ("run_id", "generation")},
-    }
-    records = [
-        _header(),
-        legacy,
-        _dispatch("j1", 1, run_dir=None, started_at=T0),
-        _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
-    ]
-    [row] = fold_run_rows(records)
-    assert row.executor_id == "remote"
-
-
 def test_a_run_numberless_change_status_overwrites_the_currently_open_run() -> None:
     """An operator CHANGE_STATUS (cli.py sendevent has no --run-number
     option) names no run_number in its payload; it overwrites whichever run
@@ -539,22 +516,6 @@ def test_a_run_numberless_change_status_overwrites_the_currently_open_run() -> N
 def test_fold_run_rows_refuses_a_record_list_with_no_opening_record() -> None:
     with pytest.raises(RunHistoryError, match="segment"):
         fold_run_rows([_dispatch("j1", 1, run_dir=None, started_at=T0)])
-
-
-def test_fold_run_rows_accepts_a_legacy_header_journal() -> None:
-    """(DL-130): `segment` replaced `header`, and every reader accepts
-    both -- a run root written before it is exactly what this tool exists
-    to read."""
-    legacy = {
-        "rec": "header",
-        "catalog_hash": "h1",
-        "dsl41_version": "0+test",
-        "state_machine_version": 1,
-        "clock_domain": "real",
-        "started_at": T0.isoformat(),
-    }
-    [row] = fold_run_rows([legacy, _dispatch("j1", 1, run_dir=None, started_at=T0)])
-    assert row.job == "j1" and row.catalog_hash == "h1"
 
 
 # ------------------------------------------------------------- 2. the spool
@@ -775,21 +736,30 @@ def test_a_manifest_belonging_to_another_journal_still_refuses(tmp_path: Path) -
         read_run_root(run_root)
 
 
-def test_a_legacy_run_root_still_folds_full_fidelity_rows(tmp_path: Path) -> None:
-    """(DL-130): a root written before the period layout keeps `manifest/`
-    and a `header` journal. `dsl41 runs` exists to read old roots, so both
-    halves stay readable -- the catalog rebuilds from `manifest/` and the
-    rows come back `full`, not `records_only`."""
+def test_d9_a_retired_manifest_layout_refuses_by_name(tmp_path: Path) -> None:
+    """D9 (DL-138), discriminated ON THE FILE.
+
+    A root holding `manifest/manifest.json` where `periods/<id>/manifest.json`
+    is absent is DL-66's retired run-root layout and refuses BY NAME. A
+    `manifest/` directory WITHOUT that file is unknown residue and refuses
+    generically. The two are different states and an operator needs to be
+    told which one is on the disk."""
     text = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
     run_root = tmp_path / "run"
     asyncio.run(_run_real_and_manifest(text, run_root, ["j1"]))
-    legacy_twin(run_root, lower_catalog([parse(text, file="estate.jil")], permit_unknown=False))
+    shutil.rmtree(run_root / "periods")
+    (run_root / "manifest").mkdir()
 
-    [row] = read_run_root(run_root)
-    assert row.job == "j1"
-    assert row.fidelity == "full"
-    assert row.job_hash is not None
-    assert row.status == "SUCCESS"
+    with pytest.raises(RunHistoryError, match="no manifest.json inside") as residue:
+        read_run_root(run_root)
+    assert "DL-138" not in str(residue.value)
+
+    (run_root / "manifest" / "manifest.json").write_text(
+        json.dumps({"catalog_hash": "h1", "sources": []})
+    )
+    with pytest.raises(RunHistoryError, match="RETIRED") as retired:
+        read_run_root(run_root)
+    assert "DL-138" in str(retired.value)
 
 
 def test_pr50_run_history_spans_a_boundary(tmp_path: Path) -> None:

@@ -20,10 +20,13 @@ a rule two callers will eventually spell differently.
 and `parsed_at` are diagnostic and leave; spans stay. v1 hashed the whole
 model, so a patch release that changed nothing but the version string
 changed the hash -- and a live estate would then refuse to resume under it,
-which DL-100 already named an outage manufactured by bookkeeping. The
+which DL-100 already named an outage manufactured by bookkeeping. v1 is a
+RETIRED dialect since DL-138 and is refused by name, never recomputed. The
 version rides explicitly (`catalog_hash_version`), because a hash whose
 recipe is inferred from its own value is not a versioned hash: every gate
-that compares hashes compares LIKE FOR LIKE through `catalog_hash_for`.
+that compares hashes compares LIKE FOR LIKE through `catalog_hash_for`,
+and every one of them dispatches the version through
+`check_catalog_hash_version`.
 
 **`source_bundle_hash`** addresses the immutable input bundle by BYTES.
 The framing is normative: inputs in command-line order, per file
@@ -86,9 +89,15 @@ _is_hash = is_hash_address  # the schema tables above read the short name
 
 
 #: The recipe `catalog_hash` names, carried explicitly on every `segment`
-#: and every manifest (ss1.1). A legacy `header` journal pins v1 and keeps
-#: being compared under v1 for as long as it lives.
+#: and every manifest (ss1.1).
 CATALOG_HASH_VERSION: Final[int] = 2
+
+#: Retired `catalog_hash` recipes: the version, and the entry that retired
+#: it. APPEND-ONLY (docs/protocol-evolution.md ss6) -- a row is never
+#: removed and never re-used, because a root written before the retirement
+#: can still arrive on an operator's disk and is owed a refusal that names
+#: what it holds.
+RETIRED_CATALOG_HASH_VERSIONS: Final[dict[int, str]] = {1: "DL-138"}
 
 #: One estate, one journal, one segment, period 1 -- as far as this unit
 #: goes. The seal that makes these numbers move is a later unit; naming
@@ -112,16 +121,6 @@ RETRY_HORIZON_S: Final[float] = 60.0
 
 
 # --------------------------------------------------------------- catalog hash
-
-
-def catalog_hash_v1(catalog: CatalogIR) -> str:
-    """The LEGACY content hash (bare hexdigest, no prefix): sha256 of
-    `model_dump_json()` over the whole model, `meta` included.
-
-    Kept because a journal written before DL-130 pins one, and a gate that
-    compared a v1 journal against a v2 recomputation would refuse every
-    estate that predates this build. Nothing new is written under it."""
-    return hashlib.sha256(catalog.model_dump_json().encode("utf-8")).hexdigest()
 
 
 def catalog_hash_v2(catalog: CatalogIR) -> str:
@@ -184,40 +183,61 @@ def job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
     }
 
 
-def catalog_hash_at(version: int, catalog: CatalogIR) -> str:
-    """`catalog`'s hash under the recipe `version` names.
+def check_catalog_hash_version(version: int, *, where: str) -> None:
+    """The ONE `catalog_hash` version dispatch, three ways (DL-138).
 
-    One function rather than a choice at each gate. The two hashes never
-    compare equal -- one is prefixed and the other is not -- so a gate that
-    picked wrong would refuse every resume, and a gate that guessed from
-    the spelling would be reading the answer out of the question.
+    Current proceeds. A RETIRED recipe refuses by name and cites the entry
+    that retired it. Anything else refuses as an unknown. "This used to be
+    legal" and "this was never legal" are different facts and get different
+    errors (docs/protocol-evolution.md ss6): the first says the root
+    predates a retirement, the second that the bytes are corrupt or
+    foreign, and an operator acts on each differently.
 
-    A version this binary does not implement is refused BY NAME, on the
-    same rule as `artifact_format_version` (PR-08d): recomputing it under
-    v1 would report "the estate changed" over a log this build simply
-    cannot read, and that refusal tells an operator to abandon a live
-    estate."""
+    FOUR owners ask this question -- `check_segment_version` over a segment,
+    `check_manifest_self_consistent` over a manifest at every write and
+    every read, `Journal.create` over a new log's manifest, and
+    `catalog_hash_at` before it recomputes -- and they ask it HERE. The
+    fourth was found by implementing the other three: copies of one question
+    are how a tree comes to answer it four ways."""
     if version == CATALOG_HASH_VERSION:
-        return catalog_hash_v2(catalog)
-    if version == 1:
-        return catalog_hash_v1(catalog)
+        return
+    retired = RETIRED_CATALOG_HASH_VERSIONS.get(version)
+    if retired is not None:
+        raise EngineError(
+            f"{where}: catalog_hash_version {version} is a RETIRED dialect, refused"
+            f" by name since {retired} -- this binary reads {CATALOG_HASH_VERSION}"
+            " only (docs/protocol-evolution.md ss6, ss8)"
+        )
     raise EngineError(
-        f"catalog_hash_version {version}: this binary implements"
-        f" 1 and {CATALOG_HASH_VERSION} (period-model ss1.1)"
+        f"{where}: catalog_hash_version {version}: this binary implements"
+        f" {CATALOG_HASH_VERSION} (period-model ss1.1)"
     )
 
 
+def catalog_hash_at(version: int, catalog: CatalogIR) -> str:
+    """`catalog`'s hash under the recipe `version` names.
+
+    One function rather than a choice at each gate: a gate that guessed the
+    recipe from the spelling would be reading the answer out of the
+    question.
+
+    The version is DISPATCHED before anything is recomputed, on the same
+    rule as `artifact_format_version` (PR-08d): recomputing an unreadable
+    recipe under the only one left would report "the estate changed" over a
+    log this build simply cannot read, and that refusal tells an operator to
+    abandon a live estate."""
+    check_catalog_hash_version(version, where="catalog_hash")
+    return catalog_hash_v2(catalog)
+
+
 def catalog_hash_for(record: Mapping[str, Any], catalog: CatalogIR) -> str:
-    """The hash to compare `record`'s `catalog_hash` against: the version a
-    `segment` PINS, v1 for a legacy `header` -- which pins none, because it
-    was written before there was one to pin.
+    """The hash to compare `record`'s `catalog_hash` against: the version
+    the `segment` PINS.
 
     The pinned version is read strictly: a `segment` missing the field, or
     carrying `"2"`, `true` or `2.7`, is a malformed identity record and
     refuses -- `int()` coercion would let a record that cannot say which
     recipe it means pick one anyway."""
-    if record.get("rec") == "header":
-        return catalog_hash_v1(catalog)
     version = record.get("catalog_hash_version")
     if isinstance(version, bool) or not isinstance(version, int):
         raise EngineError(
@@ -533,11 +553,10 @@ def quarantine_dir(run_root: Path, stage_digest: str, manifest_digest: str) -> P
 # -------------------------------------------------------- the sentinel and wal
 
 #: ss1.1: the permanent one-line sentinel every periodized root carries. The
-#: NAME is the legacy journal's, deliberately -- an old binary refuses `run`
-#: because a `journal.jsonl` exists and refuses `run --resume` because the
-#: first record is not `header`, and there is no instant at which the file is
-#: absent. A native root that sealed and exited would otherwise release
-#: `leader.lock` over a directory the shipped binary reads as UNUSED.
+#: NAME is deliberate: a binary that predates the period model refuses `run`
+#: because a `journal.jsonl` exists, and there is no instant at which the
+#: file is absent. A native root that sealed and exited would otherwise
+#: release `leader.lock` over a directory such a binary reads as UNUSED.
 SENTINEL_NAME: Final[str] = "journal.jsonl"
 
 #: ss1.1: `wal/000001.jsonl` is period 1, `000002` is period 2 (I1: one
@@ -571,16 +590,8 @@ class Sentinel(BaseModel):
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     estate_id: str = Field(min_length=1)
     see: Literal["wal/"] = WAL_POINTER
-    #: `legacy/journal.jsonl` on an adopted root, null otherwise; permanent
-    adopted_from: str | None = None
     #: the claim that FIRST opened this root (a physical roll's), or null
     claim_id: str | None = None
-    #: adoption only (DL-134): the normalized anchor directory the fence
-    #: bound, written in the SAME atomic sentinel rename -- a swappable
-    #: side file would let a forged binding point a fence-crash retry at a
-    #: second empty anchor and mint a second authority. Null on native and
-    #: rolled roots.
-    adopted_anchor: str | None = None
 
 
 def split_run_dir(name: str) -> tuple[str, int] | None:
@@ -603,12 +614,14 @@ def sentinel_path(run_root: Path) -> Path:
 
 
 def read_sentinel(run_root: Path) -> Sentinel | None:
-    """The root's sentinel, or None when it has none -- an unused root, or a
-    legacy one whose `journal.jsonl` IS the WAL.
+    """The root's sentinel, or None when this root has none.
 
     Absence is a fact and corruption is not: a file that exists and holds a
     `period_root` record this binary cannot read is an `EngineError` naming
-    it, never a degrade to "legacy"."""
+    it, never a degrade to "no sentinel". A `journal.jsonl` that is not a
+    `period_root` line is not a sentinel either, and the owner that asked
+    -- `claim_root`, `plan_retention` -- is the one that names what it
+    found (DL-138)."""
     path = sentinel_path(run_root)
     try:
         with path.open("rb") as handle:
@@ -620,9 +633,9 @@ def read_sentinel(run_root: Path) -> Sentinel | None:
     try:
         payload = decode(first)
     except CanonError:
-        return None  # a legacy journal's first record is not canonical JSON
+        return None  # not canonical JSON: whatever it is, it is not a sentinel
     if not isinstance(payload, dict) or payload.get("rec") != "period_root":
-        return None  # `segment` or `header`: this root's journal IS its WAL
+        return None  # a first line that is not `period_root` is not a sentinel
     try:
         return Sentinel.model_validate(payload)
     except ValidationError as exc:
@@ -690,8 +703,8 @@ def resolve_wal(path: Path | str) -> Path:
 
     A caller may hold any of three things and mean the same file: an estate
     root, that root's sentinel, or a WAL segment. A periodized root's
-    sentinel says where the records went; a legacy root's `journal.jsonl`
-    IS the records. Every reader in the tree goes through this, so the
+    sentinel says where the records went; a root without one has no records
+    this binary reads. Every reader in the tree goes through this, so the
     layout is the sentinel's to state and no second module gets an opinion
     about it."""
     path = Path(path)
@@ -704,8 +717,9 @@ def resolve_wal(path: Path | str) -> Path:
 
 def estate_wal(run_root: Path) -> Path:
     """The segment this root's appender opens: `wal/<newest>.jsonl` on a
-    periodized root, `journal.jsonl` on a legacy one -- where the journal
-    IS the WAL and always was."""
+    periodized root, and `journal.jsonl` on a root with no sentinel -- which
+    is a root this binary has yet to open, or one whose owner refuses it by
+    name (DL-138)."""
     return active_wal(run_root) if read_sentinel(run_root) is not None else sentinel_path(run_root)
 
 
@@ -713,9 +727,9 @@ def root_of_wal(wal: Path) -> Path:
     """The estate root a WAL file belongs to -- the inverse of
     `estate_wal`, and the only place the layout is read backwards.
 
-    A periodized segment is `<root>/wal/<n>.jsonl` and a legacy WAL is
-    `<root>/journal.jsonl`, so the parent's NAME is what tells the two
-    apart. `estate_wal` puts the layout behind one function on the way
+    A periodized segment is `<root>/wal/<n>.jsonl` and a sentinel-less
+    root's file is `<root>/journal.jsonl`, so the parent's NAME is what
+    tells the two apart. `estate_wal` puts the layout behind one function on the way
     down; this is the same rule on the way up, so a caller that holds a
     segment and wants its siblings does not spell the shape inline
     (DL-135)."""
@@ -728,9 +742,7 @@ def estate_segments(path: Path | str) -> list[Path]:
 
     `resolve_wal` answers "which file does an appender open"; this answers
     "which files does the estate still hold", and a reader that wants the
-    whole period-crossing record sequence needs the second. A legacy root
-    -- where `journal.jsonl` IS the WAL -- holds exactly one, which is what
-    it always held."""
+    whole period-crossing record sequence needs the second."""
     wal = resolve_wal(path)
     root = root_of_wal(wal)
     if wal.parent.name != WAL_DIR:
@@ -739,8 +751,8 @@ def estate_segments(path: Path | str) -> list[Path]:
 
 
 def root_is_unused(run_root: Path) -> bool:
-    """Whether this directory holds no estate: no sentinel and no legacy
-    journal. The one question `run` asks before it stages a period."""
+    """Whether this directory holds no estate: nothing at the sentinel's
+    name. The one question `run` asks before it stages a period."""
     return not sentinel_path(run_root).exists()
 
 
@@ -956,7 +968,7 @@ def write_period_manifest(run_root: Path, manifest: Manifest) -> Path:
     _write_canonical_file(path, manifest.model_dump(mode="json"))
     # the liturgy fsyncs the file and ITS directory; the entries for
     # periods/<N>/ and periods/ are records too, and a power loss that
-    # dropped either would make this root read as legacy-missing at resume
+    # dropped either would make this root read as manifest-less at resume
     fsync_dir(directory.parent)
     fsync_dir(run_root)
     return path
@@ -970,18 +982,19 @@ def check_manifest_self_consistent(manifest: StagedManifest, where: str) -> None
     `artifact_format_version` must be the one this binary writes (a staged
     2 would open an estate whose own resume refuses it at the ingress),
     and its `catalog_hash_version` must be the current recipe -- a native
-    manifest under the legacy recipe would re-manufacture the patch-release
+    manifest under a retired recipe would re-manufacture the patch-release
     outage v2 exists to end."""
     if manifest.artifact_format_version != ARTIFACT_FORMAT_VERSION:
         raise EngineError(
             f"{where}: artifact_format_version {manifest.artifact_format_version}:"
             f" this binary writes {ARTIFACT_FORMAT_VERSION}"
         )
-    if manifest.catalog_hash_version != CATALOG_HASH_VERSION:
-        raise EngineError(
-            f"{where}: catalog_hash_version {manifest.catalog_hash_version}: a native"
-            f" manifest pins {CATALOG_HASH_VERSION} (period-model ss1.1)"
-        )
+    # the FOURTH owner of the D4 question, through the same dispatcher
+    # (DL-138): a manifest is where a segment's pin comes from, and a gate
+    # here that spelled the refusal its own way would tell an operator
+    # holding a retired root something different from the reader that
+    # opens it
+    check_catalog_hash_version(manifest.catalog_hash_version, where=where)
     for field in ("catalog_hash", "source_bundle_hash", "runtime_hash"):
         if not _is_hash(getattr(manifest, field)):
             raise EngineError(
@@ -996,9 +1009,11 @@ def check_manifest_self_consistent(manifest: StagedManifest, where: str) -> None
 
 
 def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> Manifest | None:
-    """The committed manifest, or None when this root has none -- a root
-    written before DL-130 carries `manifest/` instead, and a MISSING
-    artifact degrades where a WRONG one refuses (DL-113 decision 5).
+    """The committed manifest, or None when this root has none -- pruned,
+    or never written -- because a MISSING artifact degrades where a WRONG
+    one refuses (DL-113 decision 5). What "none" then MEANS is the caller's
+    to name: `runner_history` discriminates the retired `manifest/` layout
+    there, and `runner_startup` refuses a segment root that lost its pin.
 
     Present but unreadable is the WRONG one: refused as an `EngineError`
     naming the file, so a caller that guards a read with the exceptions
@@ -1045,7 +1060,7 @@ def _read_canonical_file(path: Path) -> dict[str, Any] | None:
     there and does not decode raises: absence is a fact, corruption is
     not -- and absent means exactly ENOENT, because an EACCES or EIO is a
     file that exists and cannot be read, and degrading on it would treat a
-    broken root as a legacy one."""
+    broken root as an empty one."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -1066,7 +1081,6 @@ def segment_record(
     *,
     estate_id: str,
     at: datetime,
-    catalog_hash_v1: str | None = None,
     opens_from_seal: Mapping[str, Any] | None = None,
     reclaimed: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1076,9 +1090,6 @@ def segment_record(
     period, the catalog and the semantics without reading an earlier file.
     `dsl41_version` is deliberately NOT here: it is per-process, it already
     rides on `leader`, and a patch release must not move these bytes.
-    `catalog_hash_v1` is null except on an adopted period 1, where it
-    carries the legacy header's hash -- a typed field rather than a
-    contradiction with a schema that forbids extras.
 
     `opens_from_seal` is null on segment 1 and `{period_id, digest}` on
     every later segment -- `seal.open_from_seal` derives it, and `at` on an
@@ -1096,7 +1107,6 @@ def segment_record(
         "source_bundle_hash": manifest.source_bundle_hash,
         "runtime_hash": manifest.runtime_hash,
         "state_machine_version": manifest.state_machine_version,
-        "catalog_hash_v1": catalog_hash_v1,
         "clock_domain": manifest.clock_domain,
         "first_index": manifest.first_index,
         # the boundary's field, and genesis passes none -- it opens no seal
@@ -1135,14 +1145,13 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
     "period_id": _int,
     "baseline_id": _str,
     "catalog_hash": _is_hash,
-    # a `segment` is DL-130-native by definition: the legacy recipe belongs
-    # to `header` alone -- and the check is int-first, because JSON loads
-    # `2.0` as a float that COMPARES equal to 2
-    "catalog_hash_version": lambda v: _int(v) and v == CATALOG_HASH_VERSION,
+    # TYPE only here -- which recipes are readable is the D4 dispatcher's
+    # question and `check_segment_record` asks it below. The check is
+    # int-first, because JSON loads `2.0` as a float that COMPARES equal to 2
+    "catalog_hash_version": _int,
     "source_bundle_hash": _is_hash,
     "runtime_hash": _is_hash,
     "state_machine_version": _int,
-    "catalog_hash_v1": lambda v: v is None or isinstance(v, str),
     "clock_domain": _str,
     # >= 1: index 1 is the first index there ever is, and a forged 0 would
     # make the backfill's positional containment stop at this segment and
@@ -1160,13 +1169,46 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
 SEGMENT_FIELDS = frozenset(_SEGMENT_SCHEMA)
 
 
+def check_segment_version(record: Mapping[str, Any]) -> None:
+    """The opening's `catalog_hash_version`, read exactly and DISPATCHED --
+    before any other check reads the record (DL-138, D4).
+
+    This is a separate function because of WHERE it has to run. The schema
+    below describes the CURRENT dialect, and every one of its verdicts is
+    "this is not a current segment" -- which is true of a retired segment
+    too, and unhelpful. A real version-1 opening carried a BARE HEXDIGEST
+    `catalog_hash` and a `catalog_hash_v1` field, so the grammar check and
+    the unknown-key check both fire on it; whichever fires first tells an
+    operator holding a pre-DL-138 root that their bytes are malformed
+    rather than that their root predates a retirement. The version verdict
+    owns the file's fate, so it is taken first and the schema never gets to
+    describe a record it does not govern.
+
+    The read is exact: a missing field, `true`, `"2"` or `2.0` is a record
+    that cannot say which recipe it means, and it is malformed rather than
+    old. Those two messages are the schema's own, spelled here because this
+    runs before the schema does."""
+    if "catalog_hash_version" not in record:
+        raise EngineError("segment record missing catalog_hash_version (period-model ss2.1)")
+    version = record["catalog_hash_version"]
+    if not _int(version):
+        raise EngineError(
+            f"segment record: catalog_hash_version is {version!r} (period-model ss2.1)"
+        )
+    check_catalog_hash_version(version, where="segment record")
+
+
 def check_segment_record(record: Mapping[str, Any]) -> None:
     """A `segment` must BE a ss2.1 segment: every field present with its
     exact type. Run where the record is first read (`read_journal`), so no
-    later gate meets `state_machine_version: true` and passes it as 1. A
-    legacy `header` is not checked -- it predates the schema."""
-    if record.get("rec") != "segment":
-        return
+    later gate meets `state_machine_version: true` and passes it as 1.
+
+    Unconditional since DL-138: the one opening dialect that was exempt --
+    the `header` -- is retired, and `read_journal` refuses it by name before
+    this runs."""
+    # D4 FIRST, always: which recipe this record is written in decides
+    # whether this schema describes it at all (`check_segment_version`)
+    check_segment_version(record)
     extras = sorted(set(record) - set(_SEGMENT_SCHEMA) - {"rec"})
     if extras:
         # exact means exact: an unknown key is a record this schema does not
@@ -1177,6 +1219,9 @@ def check_segment_record(record: Mapping[str, Any]) -> None:
             raise EngineError(f"segment record missing {key} (period-model ss2.1)")
         if not check(record[key]):
             raise EngineError(f"segment record: {key} is {record[key]!r} (period-model ss2.1)")
+    # the D4 dispatch already ran, at the top: a retired recipe refuses by
+    # name there exactly as it does at `Journal.create` and at
+    # `catalog_hash_at` (DL-138)
     # I1 first: segment_no IS period_id (ss3.4 derives one from the other,
     # genesis is 1/1), both positive -- a segment 1 that declared period 3
     # would leave a null lineage link over a period that needs one
@@ -1210,10 +1255,10 @@ def check_segment_record(record: Mapping[str, Any]) -> None:
             )
 
 
-#: The two record kinds a journal may open with: `segment` is current,
-#: `header` is what every log written before DL-130 has. Every reader
-#: accepts both; only `segment` is written.
-OPENING_RECS: Final[tuple[str, ...]] = ("segment", "header")
+#: The one record kind a journal may open with. `header` opened every log
+#: written before DL-130 and is a retired dialect since DL-138 --
+#: `runner_journal.RETIRED_RECS` refuses it by name.
+OPENING_RECS: Final[tuple[str, ...]] = ("segment",)
 
 
 def is_opening(record: Mapping[str, Any]) -> bool:
@@ -1221,10 +1266,9 @@ def is_opening(record: Mapping[str, Any]) -> bool:
 
 
 def opening_at(record: Mapping[str, Any]) -> datetime:
-    """When the log was opened. `segment` carries `at` -- which on a
-    boundary opening IS the seal's cutoff instant, not restart wall time --
-    and a legacy `header` carries `started_at`."""
-    stamp = record.get("at") if record.get("rec") == "segment" else record.get("started_at")
+    """When the segment was opened -- which on a boundary opening IS the
+    seal's cutoff instant, not restart wall time."""
+    stamp = record.get("at")
     if not isinstance(stamp, str):
         raise EngineError(f"opening record carries no timestamp: {record.get('rec')!r}")
     return datetime.fromisoformat(stamp)

@@ -78,7 +78,6 @@ from dsl41.period import (
     read_period_manifest,
     opening_at,
     read_sentinel,
-    sentinel_path,
     wal_path,
     wal_segments,
     write_period_manifest,
@@ -429,7 +428,6 @@ async def resume_run(
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
     anchor_dir: Path | None = None,
-    adopting: bool = False,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -456,20 +454,10 @@ async def resume_run(
     anchor: EstateAnchor | None = None
     try:
         sentinel = read_sentinel(run_root)
-        if sentinel is None and _is_legacy_header(run_root):
-            # ss11's matrix row, now that the verb that lifts it exists: a
-            # legacy `header` journal is not opened in place, it is
-            # ADOPTED. DL-133 deliberately let one resume, because
-            # refusing before `dsl41 estate adopt` shipped would have
-            # stranded every existing run root with no way back. It ships
-            # here, so the refusal lands with it (DL-134).
-            raise EngineError(
-                f"{sentinel_path(run_root)}: a legacy `header` journal is not resumed"
-                " in place -- it is adopted, which fences it, translates it into"
-                " `wal/000001.jsonl` and seals period 1 in one transaction. Run"
-                f" `dsl41 estate adopt {run_root} --next <estate files>...`"
-                " (period-model ss11)"
-            )
+        # a root whose `journal.jsonl` is not a sentinel gets its refusal
+        # from the reader that owns the question: `read_journal`'s record
+        # tombstone below, or `claim_root`'s (D1/D5, DL-138). This resume
+        # kept a second copy of that judgement and no longer needs one.
         if sentinel is not None:
             anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
             anchor.acquire()
@@ -488,7 +476,6 @@ async def resume_run(
             grace_seconds=grace_seconds,
             supervisor=supervisor,
             deadman_s=deadman_s,
-            adopting=adopting,
         )
     except BaseException:
         # a refused resume holds nothing: the next engine may lead
@@ -514,7 +501,6 @@ async def _resume_under_lock(
     grace_seconds: float | None,
     supervisor: SupervisorClient | None,
     deadman_s: float | None,
-    adopting: bool = False,
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
@@ -539,7 +525,6 @@ async def _resume_under_lock(
             run_root=run_root,
             estate_id=sentinel.estate_id,
             lineage=lineage,
-            adopting=adopting,
         )
     opened_period: OpenedPeriod | None = None
     journal: Journal | None = None
@@ -566,56 +551,45 @@ async def _resume_under_lock(
     check_leader_eligibility(opening, catalog=catalog)
     # PR-22's U4 half: the committed manifest is the engine's own output,
     # and a manifest that is not this segment's refuses rather than being
-    # read past. A root with none is one written before DL-130 (its opening
-    # record is a `header`) or one whose manifest was pruned: genesis
-    # installs it BEFORE the log opens, so no crash leaves a segment that
-    # never had one. A MISSING artifact degrades where a WRONG one
-    # refuses (DL-113 decision 5).
-    period_id = opening.get("period_id")
-    manifest = read_period_manifest(
-        run_root, period_id if isinstance(period_id, int) else GENESIS_PERIOD_ID
-    )
-    if manifest is None and opening.get("rec") == "segment":
-        # genesis installs the manifest BEFORE the log opens, so a segment
-        # root without one is a root that LOST it -- pruned or damaged --
-        # and degrading here would skip every profile gate below. Only a
-        # legacy `header` root may degrade: it never had one to lose.
+    # read past. A MISSING artifact degrades where a WRONG one refuses
+    # (DL-113 decision 5) -- but not here: genesis installs the manifest
+    # BEFORE the log opens, so a root without one is a root that LOST it,
+    # pruned or damaged, and degrading would skip every profile gate below.
+    # The `header` root that once degraded here is a retired dialect and
+    # `read_journal` refused it above (DL-138).
+    # `read_journal` has run ss2.1's schema over the opening, so `period_id`
+    # is present and an int -- a fallback here would be a second authority
+    # for a field the reader already proved (DL-138)
+    manifest = read_period_manifest(run_root, int(opening["period_id"]))
+    if manifest is None:
         raise EngineError(
             f"{run_root}: a segment journal with no periods/000001/manifest.json --"
-            " the period's pin is missing, not legacy (period-model ss2.1)"
+            " the period's pin is missing (period-model ss2.1)"
         )
-    if manifest is not None:
-        check_manifest_against_segment(manifest, opening)
-        # the runtime half of the same gate, in CORE: the wired components
-        # must be what the period pinned, or shifted ticks and different
-        # kill windows run under an unchanged hash. Fields the engine
-        # cannot see inherit the pin, so only real wiring can move this.
-        derived = _derive_runtime_profile(
-            scheduler, adapters, deadman_s, base=manifest.runtime_profile
+    check_manifest_against_segment(manifest, opening)
+    # the runtime half of the same gate, in CORE: the wired components
+    # must be what the period pinned, or shifted ticks and different
+    # kill windows run under an unchanged hash. Fields the engine
+    # cannot see inherit the pin, so only real wiring can move this.
+    derived = _derive_runtime_profile(scheduler, adapters, deadman_s, base=manifest.runtime_profile)
+    drift = _profile_drift(derived, manifest.runtime_profile)
+    if drift:
+        raise EngineError(
+            f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
+            " change is a new period (period-model ss2.1); re-baseline"
+            " explicitly with a fresh run root"
         )
-        drift = _profile_drift(derived, manifest.runtime_profile)
-        if drift:
-            raise EngineError(
-                f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
-                " change is a new period (period-model ss2.1); re-baseline"
-                " explicitly with a fresh run root"
-            )
-        # the reconciliation windows have no wire flag, so the PIN is their
-        # default: a None param resolves from the manifest, and an explicit
-        # one is a caller's deliberate override (a harness affordance, like
-        # wiring a different adapter object)
-        if settle_seconds is None:
-            settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
-        if grace_seconds is None:
-            grace_seconds = manifest.runtime_profile.cmd_grace_us / 1_000_000
+    # the reconciliation windows have no wire flag, so the PIN is their
+    # default: a None param resolves from the manifest, and an explicit
+    # one is a caller's deliberate override (a harness affordance, like
+    # wiring a different adapter object)
     if settle_seconds is None:
-        settle_seconds = 5.0  # a legacy root: the shipped defaults
+        settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
     if grace_seconds is None:
-        grace_seconds = 10.0
+        grace_seconds = manifest.runtime_profile.cmd_grace_us / 1_000_000
     # unconditional (DL-137): the guard's docstring always said "run at
-    # genesis and at resume", and since DL-134 a manifest-less root never
-    # reaches this line anyway (legacy refuses to adopt, pruned refuses
-    # above) -- the condition was a dead fork of the stated rule
+    # genesis and at resume", and a manifest-less root never reaches this
+    # line -- the condition was a dead fork of the stated rule
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
     domain = "virtual" if clock.virtual else "real"
@@ -675,13 +649,6 @@ async def _resume_under_lock(
     # afterwards: an `effect_result` here for an effect born in C1 is an
     # outcome the replay has to attach, and `Outbox.resolve` refuses an
     # outcome for an effect it never saw.
-    # ss11 step 5: adoption's barrier is DISPATCH-FREE, and the flag is
-    # set BEFORE the ladder rather than after it, because the ladder
-    # itself dispatches. A reconciled FAILURE can satisfy a downstream
-    # condition and plan a SPAWN; held, that injection and its planned
-    # effect are durable in the translated WAL and in the seal's
-    # `outbox_pending` before anything acts on them (DL-134)
-    engine.hold_outbox = adopting
     replay = replay_inputs(
         engine.oracle, records, outbox=carried_outbox(opened, at=opening_at(opening))
     )
@@ -749,21 +716,6 @@ async def _resume_under_lock(
     return engine
 
 
-def _is_legacy_header(run_root: Path) -> bool:
-    """Whether `journal.jsonl` is a LEGACY log -- one whose first record is
-    a `header` (ss11's matrix row).
-
-    The narrow question, not "is there a file at that name". A root whose
-    `journal.jsonl` opens with a `segment` is not legacy and never was; it
-    is a root somebody rewrote over its own sentinel, and telling that
-    operator to adopt would send them somewhere the problem is not."""
-    try:
-        records = read_journal(sentinel_path(run_root))
-    except (OSError, EngineError):
-        return False
-    return bool(records) and records[0].get("rec") == "header"
-
-
 def _drop_never_opened_segment(run_root: Path) -> None:
     """ss11's matrix row: a torn or empty FIRST line means the segment
     never opened -- re-open it from the boundary.
@@ -824,11 +776,11 @@ def _reopened(
     """ss7 phase 3 over a segment that is ALREADY open: the carry this
     period was seeded from the first time it opened.
 
-    None for a genesis segment and for a legacy `header` root -- neither
-    opened from a seal, so neither has a carry. `select_seal` has already
-    verified the sidecar against the digest the segment names, and this
-    re-runs the pure load over it, because the load is what turns a
-    sidecar into rows and it is the same load either way."""
+    None for a genesis segment -- it opened from no seal, so it has no
+    carry. `select_seal` has already verified the sidecar against the digest
+    the segment names, and this re-runs the pure load over it, because the
+    load is what turns a sidecar into rows and it is the same load either
+    way."""
     link = opening.get("opens_from_seal")
     if seal is None or not isinstance(link, Mapping):
         return None
@@ -1098,8 +1050,6 @@ def _resume_untraced_starts(
             bound = _spawn_effect_for(engine, job, rt.run_number)
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id if bound else None)
             continue
-        if job_ir.job_type not in engine.adapters:
-            continue  # no dispatch row live either: parity with the running engine
         if engine.outbox.pending_for(job, "SPAWN"):
             # RE-DRIVEN. The log holds an intent to spawn that was never
             # resolved, and nothing anywhere ran: the previous leader died in
@@ -1124,10 +1074,9 @@ def _resume_untraced_starts(
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
             continue
         # FAILED. No pending intent, so the log never said a spawn was meant
-        # to happen -- a journal written before the outbox existed (S5c), or
-        # an effect already resolved whose spool has since gone -- and either
-        # no supervisor path or no bound identity to replay against
-        # (pre-DL-118). That is the case runner-design ss7 was reasoning
+        # to happen -- an effect already resolved whose spool has since gone
+        # -- and either no supervisor path or no bound identity to replay
+        # against. That is the case runner-design ss7 was reasoning
         # about when it chose to fail a start rather than silently re-run
         # it, and for these chains it still does.
         _inject_completion(

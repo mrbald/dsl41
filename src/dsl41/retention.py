@@ -77,12 +77,13 @@ from dsl41.period import (
     read_period_manifest,
     read_sentinel,
     seal_path,
+    sentinel_path,
     wal_path,
     wal_segments,
     split_run_dir,
 )
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import read_journal
+from dsl41.runner_journal import opens_with_rec, read_journal
 from dsl41.seal import Seal
 
 #: the run_id -> (job, run_number) index the supervisor writes FIRST
@@ -231,10 +232,23 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
     observed = _snapshot_idents(run_root, anchor_dir)
     sentinel = read_sentinel(run_root)
     if sentinel is None:
+        # D5, DL-138: this reader does NOT route through `read_journal`, so
+        # it carries its own tombstone. A retired OPENING is named; anything
+        # else at that path is unknown residue and refuses generically --
+        # one says the root predates a retirement, the other says nothing
+        # here is an estate. `header` is the only recognised opening there
+        # ever was besides `segment`, so a file opening with a retired
+        # `result` or `effect` record is residue like any other.
+        if opens_with_rec(sentinel_path(run_root)) == "header":
+            raise EngineError(
+                f"{sentinel_path(run_root)}: opens with `header`, a RETIRED record"
+                " dialect refused by name since DL-138 -- it never joined a period"
+                " lineage, and retention plans over periods"
+                " (docs/protocol-evolution.md ss6, ss8)"
+            )
         raise EngineError(
             f"{run_root}: no `{SENTINEL_NAME}` sentinel -- retention is a period"
-            " model, and a legacy root joins one through `dsl41 estate adopt`"
-            " (period-model ss1.1)"
+            " model, and this directory holds no estate (period-model ss1.1)"
         )
     stored = EstateAnchor(anchor_dir).read()
     if stored is None:
@@ -374,7 +388,7 @@ def _snapshot_idents(*roots: Path) -> dict[Path, tuple[int, int]]:
         try:
             fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         except FileNotFoundError:
-            continue  # an anchor directory may not exist on a legacy layout
+            continue  # an anchor directory need not exist
         except OSError as exc:
             _refuse(root, exc)
             raise AssertionError("unreachable") from exc

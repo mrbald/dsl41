@@ -788,8 +788,8 @@ class FileWatcherAdapter:
                 if run_id is not None and log.run_id != run_id:
                     # exact, None included: a bound launch met a log, so the
                     # log was written under this protocol and must name the
-                    # run -- an idless one is legacy or foreign either way,
-                    # and adopting it consumes a fate the WAL never dispatched
+                    # run -- an idless one is foreign either way, and adopting
+                    # it consumes a fate the WAL never dispatched
                     raise EngineError(
                         f"{job_ir.name}.{run_number}: watch.jsonl names run_id"
                         f" {log.run_id!r} but this run is {run_id!r} -- refusing to"

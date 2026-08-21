@@ -33,8 +33,10 @@ spool and manifests, and a rolled root holds none of its predecessor's
 canonical form proves integrity, not derivation. `rederive_seal` rebuilds
 the sidecar from the four inputs ss11 names -- the opening seal, the
 complete ordered WAL of the period, the immutable spool evidence, and the
-C1/C2 manifests -- plus the sentinel, read for exactly one derivation
-(`boundary_request.source`). The `boundary_request` input scalars are the
+C1/C2 manifests. The sentinel is NOT one of them since DL-138: it was read
+for a single derivation (`boundary_request.source`) over a two-value domain,
+and the second value went with the estate-adoption path. The
+`boundary_request` input scalars are the
 one exception the spec states: they originate in a request no WAL record
 independently holds, so audit checks them record-against-sidecar and
 carries them.
@@ -51,7 +53,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from dsl41.boundary import (
     EstateAnchor,
-    adopt_request_id,
     check_seal_record,
     carried_outbox,
     executing_jobs,
@@ -77,7 +78,6 @@ from dsl41.period import (
     Manifest,
     attestation_path,
     read_period_manifest,
-    read_sentinel,
     seal_path,
     wal_path,
     check_manifest_against_segment,
@@ -452,8 +452,8 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
 
     The inputs are exactly ss11's: the opening seal, the complete ordered
     WAL of the period, the immutable spool evidence, and the C1 and C2
-    manifests -- plus the root's sentinel, read for the single derivation
-    of `boundary_request.source`. Nothing is copied out of the stored
+    manifests. FOUR, not five: the sentinel left with DL-138, which reduced
+    `boundary_request.source` to one derived value. Nothing is copied out of the stored
     sidecar except the three `boundary_request` input scalars the spec
     exempts, and those are read from the `seal` RECORD and checked against
     the sidecar, never taken from one alone."""
@@ -474,16 +474,15 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     records = read_journal(path)
     opening = records[0]
     # `read_journal` runs ss2.1's segment schema over the opening record,
-    # so every field indexed below is present and of its exact type. The
-    # `seal` record gets the same treatment where it is selected, and both
-    # refuse as `EngineError` -- a KeyError traceback out of a CLI verb
-    # that catches refusals is a defect, not a diagnosis
-    if opening.get("rec") != "segment":
-        raise EngineError(
-            f"{wal_path(run_root, period_id)}: opens with a"
-            f" {opening.get('rec')!r} record -- a legacy log has no period to audit"
-            " until `dsl41 estate adopt` has translated it (period-model ss11)"
-        )
+    # so every field indexed below is present and of its exact type -- and
+    # since DL-138 it also guarantees the opening IS a `segment`: a retired
+    # `header` is refused BY NAME one frame earlier, by the reader that owns
+    # the record registry. A second check here could only say "not a
+    # segment", which merges the retired case with the unknown one and is
+    # exactly what the tombstone rule forbids. The `seal` record gets the
+    # same treatment where it is selected, and both refuse as `EngineError`
+    # -- a KeyError traceback out of a CLI verb that catches refusals is a
+    # defect, not a diagnosis
     committed = [record for record in records if record.get("rec") == "seal"]
     if not committed:
         raise EngineError(
@@ -549,7 +548,7 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             " holds no cutoff instant -- every boundary advances through T"
             " (period-model ss6)"
         )
-    boundary_request = _boundary_request(run_root, opening, record)
+    boundary_request = _boundary_request(record)
     # C2's own committed manifest is where the staged half of the opening
     # comes back from: the `seal` RECORD carries only `next_period_id` and
     # `next_baseline_id`, and ss11 names the C2 manifest as an audit input
@@ -687,50 +686,25 @@ def _opened_runtime(run_root: Path, opening: Mapping[str, Any], closing: Manifes
     )
 
 
-def _boundary_request(
-    run_root: Path, opening: Mapping[str, Any], record: Mapping[str, Any]
-) -> BoundaryRequest:
-    """ss11's one derivation and its three carried scalars.
+def _boundary_request(record: Mapping[str, Any]) -> BoundaryRequest:
+    """The boundary's three carried scalars, and its one derived one.
 
-    `source` is DERIVED, never read: a boundary is `adopt` iff the closing
-    segment is period 1 with `catalog_hash_v1` non-null and the root's
-    sentinel `adopted_from` non-null. For period 1 the two must agree; for
-    any later period `adopted_from` stays set for the life of the root
-    while `catalog_hash_v1` is null, so agreement is checked only on period
-    1 and every later boundary derives `request` (PR-47b). An adoption's
-    `request_id` is re-derived too."""
-    sentinel = read_sentinel(run_root)
-    adopted = sentinel is not None and sentinel.adopted_from is not None
-    legacy_hash = opening.get("catalog_hash_v1") is not None
-    period_id = int(opening["period_id"])
-    if period_id == 1 and adopted != legacy_hash:
-        raise EngineError(
-            f"{run_root}: the sentinel says adopted_from"
-            f" {None if sentinel is None else sentinel.adopted_from!r} and the period-1"
-            f" segment says catalog_hash_v1 {opening.get('catalog_hash_v1')!r} -- an"
-            " adoption sets both or neither, and audit derives `source` from the pair"
-            " (period-model ss11, PR-47b)"
-        )
-    source: Literal["request", "adopt"] = "adopt" if (period_id == 1 and adopted) else "request"
+    `source` is DERIVED, never read (PR-47b). Since DL-138 it derives to
+    `request` for every boundary this estate can hold -- `adopt` went with
+    the estate-adoption path -- and the comparison STAYS: deriving over a
+    one-value domain is still what catches a `seal` record whose `source`
+    was rewritten, and the day a second value returns the check is already
+    where it belongs."""
+    source: Literal["request"] = "request"
     if record.get("source") != source:
         raise EngineError(
             f"the `seal` record says source {record.get('source')!r} and this period"
             f" derives {source!r}: `source` is audit's to derive, never to read"
             " (period-model ss11, PR-47b)"
         )
-    request_id = (
-        adopt_request_id(str(opening["estate_id"])) if source == "adopt" else record["request_id"]
-    )
-    if source == "adopt" and record.get("request_id") != request_id:
-        raise EngineError(
-            f"the `seal` record says request_id {record.get('request_id')!r} and an"
-            f" adoption of estate {opening['estate_id']} derives {request_id}: a"
-            " consistent rewrite of the id is exactly what deriving it catches"
-            " (period-model ss11, PR-47b)"
-        )
     return BoundaryRequest(
         source=source,
-        request_id=str(request_id),
+        request_id=str(record["request_id"]),
         claimed_actor=str(record.get("claimed_actor", "")),
         force_seal=bool(record.get("force_seal", False)),
     )

@@ -636,15 +636,11 @@ uv run dsl41 estate prune --run-root $R --dry-run | tail -1
 
 *Why.* `audit` and `verify` answer two different questions and the
 difference matters (`docs/period-model.md` §1.3). `audit` REBUILDS the
-seal from five things — the opening seal, the period's whole WAL, its
-immutable spool, the two period manifests, and the root's SENTINEL —
-and refuses if what it rebuilds differs from what is on disk. The
-sentinel is what lets audit rederive the request's `source`: on an
-adopted root `adopted_from` is set and must agree with the period-1
-segment's `catalog_hash_v1`, so keep the sentinel with the rest when
-you archive a period's evidence — without it the audit cannot say
-whether period 1 was born by adoption or by genesis. It needs all of that, so only the
-root that HOLDS the period can do it. `verify` checks an attestation: its
+seal from four things — the opening seal, the period's whole WAL, its
+immutable spool, and the two period manifests — and refuses if what it
+rebuilds differs from what is on disk. (It read the sentinel as a fifth
+until DL-138, for one derivation that now has a single answer.) It needs
+all four, so only the root that HOLDS the period can do it. `verify` checks an attestation: its
 own digest, its binding to the seal it names, and the chain it claims.
 That is what a rolled root can do with an imported pair, and it is why
 producing a checkpoint requires the one below it while consuming one
@@ -652,56 +648,27 @@ accepts it alone. Attesting is also what unlocks retention: until a period
 is attested, its whole spool is floored, because that spool is what
 `audit` reads.
 
-## 18. Adopt a night from before the boundary era
+## 18. Retired: a night from before the boundary era
 
-Goal: bring a run root written by an older build into a lineage.
+There is no exercise here any more. DL-138 retired every read dialect a
+pre-boundary run root was written in — the `header` journal, `catalog_hash`
+version 1, the `manifest/` layout — and the `estate adopt` verb that
+translated one. The `estate` group keeps `reclaim` and `prune`.
 
-A root from before the periodized layout has a `header` journal and a
-`manifest/` directory. It no longer resumes.
-
-1. Try to resume one and read the refusal:
-
-```sh
-uv run dsl41 run --resume --run-root <legacy>/engine examples/nightbank/estate/small/*.jil -p $P
-```
+Point any of the verbs above at such a root and it refuses BY NAME,
+naming the dialect and DL-138 rather than producing a parse error:
 
 ```
-<legacy>/engine/journal.jsonl: a legacy `header` journal is not resumed in
-place -- it is adopted, which fences it, translates it into
-`wal/000001.jsonl` and seals period 1 in one transaction. Run `dsl41 estate
-adopt <legacy>/engine --next <estate files>...` (period-model ss11)
+<old>/engine/journal.jsonl: opens with `header`, a RETIRED record dialect
+refused by name since DL-138 -- there is no path from it into a period
+lineage, and this root cannot be claimed
 ```
 
-2. Adopt it. Adoption IS a seal, so it takes `--next` like one:
-
-```sh
-uv run dsl41 estate adopt <legacy>/engine "${NEXT[@]}" -p $P --claimed-actor you@host
-```
-
-```
-sealed period 1 at sha256:ddb2…; period 2 is ready to open
-```
-
-3. Look at what it left. `journal.jsonl` is now a one-line sentinel naming
-   `legacy/journal.jsonl`; the old log is still there, under that name,
-   hard-linked and untouched; the records are translated into
-   `wal/000001.jsonl`; `seals/000001.json` closes period 1.
-4. Audit it like any other period — `dsl41 audit --run-root <legacy>/engine`.
-   The seal says `"source": "adopt"`, and audit DERIVES that rather than
-   believing it.
-5. Adoption refuses a night that is not drained: a live wrapper, a live
-   file watch, anything pending in the old outbox, or any admitted command
-   without a durable decision. Each is a refusal and not a repair — start
-   the old engine, let it settle, stop it, and retry.
-
-*Why.* The order is the whole argument (`docs/period-model.md` §11).
-Readiness for the next estate runs FIRST, over a reconstruction of the old
-state, so a candidate that could never open refuses while nothing has
-changed. The fence comes second: the old journal is hard-linked aside and
-the sentinel is renamed over its name, so there is no instant at which
-`journal.jsonl` is absent and an old binary could start a second estate in
-that directory. Authority comes third, and only then. A re-run after any
-crash continues from where it stopped and never mints a second estate id.
+*Why.* `docs/protocol-evolution.md` is the contract: §3 says a dialect may
+be retired only when no instance of it exists anywhere, §5 states the
+pre-production reset clause DL-138 used, and §6 says a retired reader is
+replaced by a tombstone that names what it found — never deleted into
+silence.
 
 ## 19. Roll to a fresh run root
 

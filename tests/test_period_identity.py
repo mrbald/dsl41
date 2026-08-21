@@ -12,10 +12,11 @@ DERIVED from `RuntimeProfile.model_fields`, so a field added later is tested
 by default rather than by somebody remembering to name it (the DL-83
 discipline).
 
-`legacy_twin` below is imported by test_run_history.py. It DERIVES the
-pre-DL-130 shape from a real run root rather than hand-writing one: a
-hand-written legacy journal proves only that the reader accepts what the
-test author imagined.
+DL-138 retired the pre-DL-130 read dialects, so the `legacy_twin` fixture
+that built one and the tests over it are gone. What replaces them is the
+D4 dispatcher's roster below: `catalog_hash_version` 1 refused BY NAME
+through both the journal reader and journal creation, and an unknown
+version refused as its own distinct error.
 """
 
 from __future__ import annotations
@@ -52,9 +53,9 @@ from dsl41.period import (
     catalog_hash_at,
     catalog_hash_for,
     genesis_manifest,
-    catalog_hash_v1,
     catalog_hash_v2,
     check_manifest_against_segment,
+    is_hash_address,
     period_dir,
     read_period_manifest,
     runtime_hash,
@@ -122,41 +123,11 @@ def _close(engine) -> None:
     engine.journal.close()
 
 
-def legacy_twin(run_root: Path, catalog: CatalogIR) -> None:
-    """Rewrite `run_root` as the run root the pre-DL-130 build wrote: a
-    `header` first record pinning `catalog_hash` v1, and `manifest/`
-    instead of `catalogs/` + `periods/`.
-
-    Derived from the root that is there -- baseline, clock domain,
-    state-machine version and the stored inputs all carry over -- so what
-    the readers meet is the log they really would have met."""
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    segment = records[0]
-    assert segment["rec"] == "segment", "legacy_twin downgrades a current root"
-    records[0] = {
-        "rec": "header",
-        "baseline_id": segment["baseline_id"],
-        "catalog_hash": catalog_hash_v1(catalog),
-        "dsl41_version": "0+legacy",
-        "state_machine_version": segment["state_machine_version"],
-        "clock_domain": segment["clock_domain"],
-        "started_at": segment["at"],
-    }
-    path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
-    manifest_dir = run_root / "manifest"
-    manifest_dir.mkdir(exist_ok=True)
-    sources: list[dict[str, str]] = []
-    period_manifest = read_period_manifest(run_root)
-    if period_manifest is not None and (run_root / "catalogs").is_dir():
-        for stored in bundle_source_paths(run_root, period_manifest.source_bundle_hash):
-            shutil.copy(stored, manifest_dir / stored.name)
-            sources.append({"file": stored.name, "original_path": stored.name})
-        shutil.rmtree(run_root / "catalogs")
-    shutil.rmtree(run_root / "periods", ignore_errors=True)
-    (manifest_dir / "manifest.json").write_text(
-        json.dumps({"catalog_hash": catalog_hash_v1(catalog), "sources": sources}, sort_keys=True)
-    )
+def _retired_v1(catalog: CatalogIR) -> str:
+    """The RETIRED `catalog_hash` v1 recipe: a bare hexdigest over the whole
+    model, `meta` included. DL-138 deleted it from the product, so the tests
+    that still need to show what a v1 root held spell it here."""
+    return hashlib.sha256(catalog.model_dump_json().encode("utf-8")).hexdigest()
 
 
 # ------------------------------------------------- 1. catalog_hash v2 (PR-08a)
@@ -206,10 +177,12 @@ def test_pr08a_catalog_hash_v2_golden_vector() -> None:
     assert catalog_hash_v2(catalog) == "sha256:" + hashlib.sha256(GOLDEN_CATALOG_BYTES).hexdigest()
 
 
-def test_pr08a_tool_version_and_parsed_at_do_not_move_v2_but_do_move_v1() -> None:
+def test_pr08a_tool_version_and_parsed_at_do_not_move_v2() -> None:
     """The whole reason for v2 (ss1.1): a patch release moves
-    `tool_version`, and under v1 a seal committed by 1.2.3 could never be
-    opened by 1.2.4 -- an outage manufactured by bookkeeping (DL-100)."""
+    `tool_version`, and under the retired v1 recipe -- which hashed the
+    whole model -- a seal committed by 1.2.3 could never be opened by
+    1.2.4, an outage manufactured by bookkeeping (DL-100). The recipe is
+    spelled HERE, because DL-138 deleted it from the product."""
     catalog = _golden_catalog()
     patched = catalog.model_copy(
         update={
@@ -221,7 +194,7 @@ def test_pr08a_tool_version_and_parsed_at_do_not_move_v2_but_do_move_v1() -> Non
         }
     )
     assert catalog_hash_v2(patched) == catalog_hash_v2(catalog)
-    assert catalog_hash_v1(patched) != catalog_hash_v1(catalog)
+    assert _retired_v1(patched) != _retired_v1(catalog)
 
 
 def test_v2_still_moves_for_a_source_file_list_and_for_a_span() -> None:
@@ -236,20 +209,20 @@ def test_v2_still_moves_for_a_source_file_list_and_for_a_span() -> None:
     assert catalog_hash_v2(relocated) != catalog_hash_v2(_catalog())
 
 
-def test_the_two_hashes_are_spelled_apart() -> None:
-    """v2 carries its algorithm; v1 never did. Two identities that could
-    be mistaken for each other is how a gate compares the wrong pair."""
+def test_the_hash_carries_its_algorithm_and_a_bare_digest_is_not_an_address() -> None:
+    """v2 carries its algorithm; the retired v1 recipe never did. Two
+    identities that could be mistaken for each other is how a gate compares
+    the wrong pair -- and the grammar is what keeps a v1 value from being
+    read as an address at all."""
     catalog = _catalog()
     assert catalog_hash_v2(catalog).startswith("sha256:")
-    assert not catalog_hash_v1(catalog).startswith("sha256:")
+    assert not is_hash_address(_retired_v1(catalog))
 
 
 def test_catalog_hash_for_reads_the_version_the_record_pins() -> None:
-    catalog = _catalog()
-    assert catalog_hash_for({"rec": "header"}, catalog) == catalog_hash_v1(catalog)
     assert catalog_hash_for(
-        {"rec": "segment", "catalog_hash_version": 2}, catalog
-    ) == catalog_hash_v2(catalog)
+        {"rec": "segment", "catalog_hash_version": 2}, _catalog()
+    ) == catalog_hash_v2(_catalog())
     assert CATALOG_HASH_VERSION == 2
 
 
@@ -684,13 +657,33 @@ def test_an_unreadable_manifest_refuses_dsl41_runs_rather_than_escaping(tmp_path
 
 def test_an_unknown_catalog_hash_version_is_refused_by_name(tmp_path: Path) -> None:
     """A version this binary does not implement is not "the estate
-    changed": recomputing it under v1 would tell an operator to abandon a
-    live estate over a log this build cannot read."""
+    changed": recomputing it under the only recipe left would tell an
+    operator to abandon a live estate over a log this build cannot read.
+
+    UNKNOWN, and not retired: the message says what this binary implements
+    and names no decision-log entry (docs/protocol-evolution.md ss6)."""
     catalog = _catalog()
-    with pytest.raises(EngineError, match="catalog_hash_version 3"):
-        catalog_hash_at(3, catalog)
-    with pytest.raises(EngineError, match="catalog_hash_version 3"):
-        catalog_hash_for({"rec": "segment", "catalog_hash_version": 3}, catalog)
+    for call in (
+        lambda: catalog_hash_at(3, catalog),
+        lambda: catalog_hash_for({"rec": "segment", "catalog_hash_version": 3}, catalog),
+    ):
+        with pytest.raises(EngineError, match="catalog_hash_version 3") as caught:
+            call()
+        assert "DL-138" not in str(caught.value)
+        assert "RETIRED" not in str(caught.value)
+
+
+def test_the_retired_catalog_hash_recipe_is_refused_by_name(tmp_path: Path) -> None:
+    """D4/D9 (DL-138): version 1 is RETIRED, and the one dispatcher every
+    owner asks says so by name -- a different error from the unknown case
+    above, because "this used to be legal" and "this was never legal" send
+    an operator to different places."""
+    catalog = _catalog()
+    with pytest.raises(EngineError, match="RETIRED") as caught:
+        catalog_hash_at(1, catalog)
+    assert "DL-138" in str(caught.value)
+    with pytest.raises(EngineError, match="DL-138"):
+        catalog_hash_for({"rec": "segment", "catalog_hash_version": 1}, catalog)
 
 
 def test_an_incomplete_bundle_is_completed_not_reused(tmp_path: Path) -> None:
@@ -849,43 +842,14 @@ def test_a_manifest_for_another_catalog_never_opens_a_log(tmp_path: Path) -> Non
         )
 
 
-# ------------------------------------------- 6. the legacy journal, still read
+# --------------------------------------------- 6. the resume gate's comparison
 
 
-def test_a_legacy_header_journal_still_replays_and_is_adopted_not_resumed(
-    tmp_path: Path,
-) -> None:
-    """DL-130 retired `header` for new logs and for nothing else: a run root
-    written before it still RENDERS and folds exactly as it did.
-
-    What changed at DL-134 is the other half. ss11's matrix says a legacy
-    journal is not opened in place -- it is adopted -- and DL-133 let one
-    resume only because the verb that lifts the refusal did not exist yet.
-    It does now, so `--resume` refuses and names it."""
-    run_root = tmp_path / "run"
-    jil_path = tmp_path / "estate.jil"
-    jil_path.write_text(_SOLO_JIL)
-    catalog = _catalog(file=str(jil_path))
-    staged = _stage_period(
-        run_root, [parse(_SOLO_JIL, file=str(jil_path))], catalog, RuntimeProfile()
-    )
-    _close(_start(run_root, catalog, staged=staged))
-    legacy_twin(run_root, catalog)
-
-    opening = read_journal(run_root / "journal.jsonl")[0]
-    assert opening["rec"] == "header"
-    assert opening["catalog_hash"] == catalog_hash_v1(catalog)
-    with pytest.raises(EngineError, match="dsl41 estate adopt"):
-        asyncio.run(_resume(run_root, catalog, at=T0 + timedelta(minutes=1)))
-    rendered = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
-    assert rendered.exit_code == 0
-
-
-def test_the_resume_gate_compares_like_for_like_on_both_layouts(tmp_path: Path) -> None:
-    """A v1 root resumes under a v1 comparison and a v2 root under a v2
-    one; a CHANGED estate refuses under both. Comparing across recipes
-    would refuse every journal in existence, in one direction or the
-    other."""
+def test_the_resume_gate_compares_like_for_like(tmp_path: Path) -> None:
+    """A root resumes under the recipe its own `segment` pins; a CHANGED
+    estate refuses. The recipe is read from the record and never assumed,
+    which is what stops a gate from refusing an estate that did not
+    change (DL-100)."""
     catalog = _catalog()
     changed = _catalog(_SOLO_JIL.replace("echo hi", "echo bye"))
 
@@ -894,15 +858,6 @@ def test_the_resume_gate_compares_like_for_like_on_both_layouts(tmp_path: Path) 
     _close(asyncio.run(_resume(current, catalog, at=T0 + timedelta(minutes=1))))
     with pytest.raises(EngineError, match="catalog hash mismatch"):
         asyncio.run(_resume(current, changed, at=T0 + timedelta(minutes=2)))
-
-    # the v1 half of the comparison is `check_leader_eligibility`'s, and it
-    # is pinned there (test_ledger) because a legacy root no longer reaches
-    # resume at all: ss11 adopts one, and DL-134 made `--resume` say so
-    legacy = tmp_path / "legacy"
-    _close(_start(legacy, catalog))
-    legacy_twin(legacy, catalog)
-    with pytest.raises(EngineError, match="dsl41 estate adopt"):
-        asyncio.run(_resume(legacy, catalog, at=T0 + timedelta(minutes=1)))
 
 
 def test_the_run_cli_stages_the_bundle_and_the_profile_it_was_launched_with(
@@ -1002,13 +957,11 @@ def test_a_journal_less_engine_is_untouched_by_any_of_this() -> None:
 
 def test_a_malformed_catalog_hash_version_refuses_not_coerces() -> None:
     """A segment that cannot say which recipe it means must not have one
-    picked for it: `"2"`, `true`, `2.7` and an absent field all refuse. A
-    legacy `header` pins none by definition and reads as v1."""
+    picked for it: `"2"`, `true`, `2.7` and an absent field all refuse."""
     catalog = lower_source(_SOLO_JIL)
     for bogus in ("2", True, 2.7, None):
         with pytest.raises(EngineError, match="catalog_hash_version"):
             catalog_hash_for({"rec": "segment", "catalog_hash_version": bogus}, catalog)
-    assert catalog_hash_for({"rec": "header"}, catalog) == catalog_hash_v1(catalog)
 
 
 def test_a_tampered_profile_beside_the_original_hash_refuses(tmp_path: Path) -> None:
@@ -1027,10 +980,10 @@ def test_a_tampered_profile_beside_the_original_hash_refuses(tmp_path: Path) -> 
         read_period_manifest(tmp_path)
 
 
-def test_an_unreadable_manifest_is_never_legacy_missing(tmp_path: Path) -> None:
+def test_an_unreadable_manifest_is_never_read_as_absent(tmp_path: Path) -> None:
     """Absent means exactly ENOENT: an EACCES manifest is a broken root, not
-    a pre-DL-130 one, and degrading on it would resume past a pin that is
-    right there."""
+    a root that has none, and degrading on it would resume past a pin that
+    is right there."""
     catalog = lower_source(_SOLO_JIL)
     manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
     path = write_period_manifest(tmp_path, manifest)
@@ -1308,7 +1261,7 @@ def test_a_segment_root_missing_its_manifest_refuses_resume(tmp_path: Path) -> N
     (period_dir(tmp_path / "root", 1) / "manifest.json").unlink()
 
     async def scenario() -> None:
-        with pytest.raises(EngineError, match="pin is missing, not legacy"):
+        with pytest.raises(EngineError, match="pin is missing"):
             await resume_run(
                 catalog,
                 tmp_path / "root",
@@ -1493,30 +1446,64 @@ def test_an_unimplemented_manifest_artifact_version_refuses(tmp_path: Path) -> N
         read_period_manifest(tmp_path)
 
 
-def test_a_native_log_never_pins_the_legacy_recipe(tmp_path: Path) -> None:
-    """v1 exists only to COMPARE legacy journals: a fresh segment pinned
-    under it would refuse this unchanged estate at the next patch release --
-    the exact outage v2 exists to end."""
+def test_journal_create_refuses_the_retired_recipe_by_name(tmp_path: Path) -> None:
+    """The SECOND owner of the D4 question (DL-138): journal creation. A new
+    log pinned under the retired v1 recipe would refuse this unchanged
+    estate at the next patch release -- the exact outage v2 exists to end --
+    and the refusal names the recipe and the entry that retired it.
+
+    Driven at `Journal.create` itself, and again at the manifest gate that
+    runs before it on the `start_run` path: FOUR owners ask the D4 question
+    and every one of them must answer it the same way."""
     from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_journal import Journal
     from dsl41.runner_startup import start_run
 
     catalog = lower_source(_SOLO_JIL)
-    v1_pin = StagedManifest(
-        catalog_hash=catalog_hash_v1(catalog),
+    v1_pin = Manifest(
+        catalog_hash=_retired_v1(catalog),
+        catalog_hash_version=1,
+        source_bundle_hash=EMPTY_BUNDLE_HASH,
+        runtime_profile=RuntimeProfile(),
+        runtime_hash=runtime_hash(RuntimeProfile()),
+        state_machine_version=1,
+        period_id=1,
+        segment_no=1,
+        baseline_id="sha256:" + "0" * 64,
+        clock_domain="virtual",
+        first_index=1,
+    )
+    with pytest.raises(EngineError, match="RETIRED") as caught:
+        Journal.create(
+            tmp_path / "journal.jsonl",
+            catalog=catalog,
+            clock_domain="virtual",
+            started_at=datetime(2026, 7, 1, 8, 0),
+            manifest=v1_pin,
+        )
+    # the `where` names WHICH owner refused -- without it this assertion is
+    # also satisfied by `catalog_hash_at` one line further on, and deleting
+    # the gate under test would leave the test green
+    assert "DL-138" in str(caught.value) and "a new log's manifest" in str(caught.value)
+    staged = StagedManifest(
+        catalog_hash=_retired_v1(catalog),
         catalog_hash_version=1,
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         runtime_profile=RuntimeProfile(),
         runtime_hash=runtime_hash(RuntimeProfile()),
         state_machine_version=1,
     )
-    with pytest.raises(EngineError, match="pins 2"):  # refused at the earliest gate
+    with pytest.raises(EngineError, match="RETIRED") as caught:
         start_run(
             catalog,
             tmp_path / "root",
             clock=VirtualClock(start=datetime(2026, 7, 1, 8, 0)),
             adapters={"CMD": FakeAdapter(default=None)},
-            staged=v1_pin,
+            staged=staged,
         )
+    # the manifest gate runs first on this path, and it says so
+    assert "DL-138" in str(caught.value)
+    assert "periods/000001/manifest.json" in str(caught.value)
 
 
 def test_the_model_itself_normalizes_as_machine() -> None:
@@ -1567,32 +1554,101 @@ def test_the_normalizer_never_launders_a_wrong_typed_machine() -> None:
         RuntimeProfile(as_machine=(7,))  # type: ignore[arg-type]
 
 
-def test_a_native_segment_rewritten_to_v1_refuses(tmp_path: Path) -> None:
-    """The segment half of the same rule: a segment is DL-130-native by
-    definition, so `catalog_hash_version: 1` on one is a malformed identity
-    record -- even when the manifest was rewritten to match."""
+def _native_opening(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """A genesis WAL and the `segment` record it opens with -- the real
+    writer's, so a D4 pin rewrites ONE field of a valid file rather than
+    hand-building a record the writer would never emit."""
     from dsl41.runner_adapters import FakeAdapter
-    from dsl41.runner_journal import read_journal
     from dsl41.runner_startup import start_run
 
-    catalog = lower_source(_SOLO_JIL)
     engine = start_run(
-        catalog,
+        lower_source(_SOLO_JIL),
         tmp_path / "root",
         clock=VirtualClock(start=datetime(2026, 7, 1, 8, 0)),
         adapters={"CMD": FakeAdapter(default=None)},
     )
     assert engine.journal is not None
     engine.journal.close()
-    path = tmp_path / "root" / "journal.jsonl"
-    lines = path.read_text().splitlines()
-    segment = json.loads(lines[0])
+    path = tmp_path / "root" / "wal" / "000001.jsonl"
+    segment = json.loads(path.read_text().splitlines()[0])
+    assert segment["rec"] == "segment"  # the WAL, not the sentinel beside it
+    return path, segment
+
+
+def _rewrite_journal(path: Path, *records: dict[str, Any]) -> None:
+    path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n")
+
+
+def test_the_journal_reader_refuses_the_retired_recipe_by_name(tmp_path: Path) -> None:
+    """The THIRD owner of the D4 question (DL-138): the journal reader. A
+    segment written under `catalog_hash_version: 1` is a root written under
+    a retired recipe, and it is told so BY NAME rather than left to a later
+    gate reporting "the estate changed".
+
+    The record here is the one v1 REALLY wrote: a bare hexdigest
+    `catalog_hash` -- v1 predates the `sha256:` grammar -- and the
+    `catalog_hash_v1` field D3 deleted from the schema. Both trip a
+    CURRENT-dialect check, and either verdict would tell an operator
+    holding a pre-DL-138 root that their bytes are malformed. The version
+    verdict owns the file's fate, so it is dispatched first (DL-138, the L2
+    review)."""
+    from dsl41.runner_journal import read_journal
+
+    path, segment = _native_opening(tmp_path)
     segment["catalog_hash_version"] = 1
-    segment["catalog_hash"] = catalog_hash_v1(catalog)
-    path.write_text("\n".join([json.dumps(segment, sort_keys=True), *lines[1:]]) + "\n")
-    with pytest.raises(EngineError, match="catalog_hash"):
-        # the bare-hex v1 value trips the address grammar first; either way
-        # the rewritten opening never reads
+    segment["catalog_hash"] = "0" * 64  # v1 spelled the address bare
+    segment["catalog_hash_v1"] = "0" * 64  # and carried the field D3 deleted
+    _rewrite_journal(path, segment)
+    with pytest.raises(EngineError) as caught:
+        read_journal(path)
+    named = str(caught.value)
+    # only the D4 dispatcher can say this; the grammar check and the
+    # unknown-key check each say something else entirely
+    assert "catalog_hash_version 1 is a RETIRED dialect" in named
+    assert "DL-138" in named and "segment record" in named
+    assert "not a sha256" not in named and "carries unknown" not in named
+
+
+def test_the_openings_version_is_dispatched_before_any_record_is_read(
+    tmp_path: Path,
+) -> None:
+    """Ordering, pinned (DL-138, the L2 review): the opening `segment` names
+    the dialect the WHOLE file is written in, so its version verdict is taken before any
+    record -- the opening's own fields included -- is validated.
+
+    A reader that validated records first answered a question about a
+    dialect it cannot read: an unsupported opening followed by a record kind
+    this build never heard of reported the unknown KIND, and the operator
+    went looking for corruption instead of for the retirement their root
+    predates.
+
+    The control is the same file at the CURRENT version, twice: an unknown
+    kind is still refused as an unknown kind, and the ss2.1 schema still
+    runs over the opening. Dispatching first narrows what the schema is
+    asked about; it does not switch it off."""
+    from dsl41.runner_journal import read_journal
+
+    path, native = _native_opening(tmp_path)
+    stranger = {"rec": "wat", "seq": 2, "at": "2026-07-01T08:01:00"}
+
+    _rewrite_journal(path, {**native, "catalog_hash_version": 1}, stranger)
+    with pytest.raises(EngineError) as retired:
+        read_journal(path)
+    assert "catalog_hash_version 1 is a RETIRED dialect" in str(retired.value)
+    assert "unknown record kind" not in str(retired.value)
+
+    _rewrite_journal(path, {**native, "catalog_hash_version": 7}, stranger)
+    with pytest.raises(EngineError) as unsupported:
+        read_journal(path)
+    assert "catalog_hash_version 7: this binary implements" in str(unsupported.value)
+    assert "unknown record kind" not in str(unsupported.value)
+
+    _rewrite_journal(path, native, stranger)
+    with pytest.raises(EngineError, match="unknown record kind 'wat'"):
+        read_journal(path)
+
+    _rewrite_journal(path, {**native, "catalog_hash": "0" * 64})
+    with pytest.raises(EngineError, match="segment record: catalog_hash is"):
         read_journal(path)
 
 

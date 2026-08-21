@@ -32,9 +32,10 @@ them was the atomicity violation ss4 step 7 forbids: the decision durable,
 the process dead before the KILL effect was written, recovery finding every
 attempt decided and an empty outbox. A `decision` record now carries the
 decision, the revisions it moved and the effects it planned, in admission
-order, in one write. `result` and standalone `effect` are RETIRED: nothing
-here writes them, and both readers still accept them, because a run root
-written before DL-118 must keep replaying, resuming and reporting.
+order, in one write. `result` and standalone `effect` are RETIRED, and
+since DL-138 they are REFUSED BY NAME rather than read: no root written
+under them exists, and a reader kept for a producer that cannot exist is
+not compatibility, it is unexercised code.
 
 Stage S6a (concurrency-model ss1/ss7) makes it a LEDGER rather than only a
 log. A `leader` record allocates this incarnation's epoch by being
@@ -46,16 +47,16 @@ state-machine version, beside the catalog hash it already carried.
 DL-130 (period-model ss2.1) replaced `header` with `segment` as that
 opening record. A once-per-log header cannot describe a log made of
 segments, and a segment is self-describing: period, estate, catalog,
-runtime profile and semantics, without reading an earlier file. Only
-`segment` is written; every reader accepts BOTH, because a `header` is
-exactly what a log written before DL-130 opens with, and it pins
-`catalog_hash` v1 where a `segment` pins v2 -- so every gate that compares
-hashes compares like for like (`period.catalog_hash_for`).
+runtime profile and semantics, without reading an earlier file. `header`
+is a retired dialect since DL-138.
 
-A journal written before S2 replays unchanged. Its attempts have no
-results, so all of them apply -- exactly what the single-pass reader did,
-and the reason no format gate was needed. One written before S6a has no
-`leader` record either, so the first term over it is 1.
+**Every record passes ONE validator** (`check_record`, D1). It reads two
+things and no more: the `rec` kind -- current, retired, or unknown, three
+outcomes and three messages -- and, on a `decision`, `legacy_batch`. Per
+record key strictness stays whatever each record's own schema declares;
+this is not that gate. It sits at `read_journal` so `runner_history` and
+`retention`, which parse decision effects without `read_outbox`, inherit
+it rather than each growing a copy.
 """
 
 from __future__ import annotations
@@ -70,7 +71,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
@@ -85,10 +86,11 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.period import (
-    CATALOG_HASH_VERSION,
     Manifest,
     catalog_hash_at,
+    check_catalog_hash_version,
     check_segment_record,
+    check_segment_version,
     estate_segments,
     genesis_manifest,
     is_opening,
@@ -203,15 +205,12 @@ class Journal:
                 state_machine_version=STATE_MACHINE_VERSION,
             )
         else:
-            if manifest.catalog_hash_version != CATALOG_HASH_VERSION:
-                # a NATIVE log pins the current recipe, always: v1 exists
-                # only to compare legacy journals, and a fresh segment
-                # pinned under it would refuse this unchanged estate at the
-                # next patch release -- the exact outage v2 exists to end
-                raise EngineError(
-                    f"manifest pins catalog_hash_version {manifest.catalog_hash_version}:"
-                    f" a new log pins {CATALOG_HASH_VERSION} (period-model ss1.1)"
-                )
+            # a NATIVE log pins the current recipe, always -- through the ONE
+            # dispatcher (D4, DL-138), so this gate and `check_segment_record`
+            # and `catalog_hash_at` cannot answer the same question three ways
+            check_catalog_hash_version(
+                manifest.catalog_hash_version, where=f"{path}: a new log's manifest"
+            )
             # under the recipe the manifest itself names, so this gate can
             # never be the one place that assumes a version
             expected = catalog_hash_at(manifest.catalog_hash_version, catalog)
@@ -339,18 +338,17 @@ class Journal:
         records under one cursor value would leave the second undeliverable
         to a resuming subscriber (DL-89).
 
-        `legacy_batch` is on every decision and `false` from this writer. A
-        `true` one is a batch folded from a legacy estate's separate fsyncs
-        at adoption (period-model ss11), which nothing builds yet -- the
-        field is on the record now so the schema is one rather than two.
+        `legacy_batch` is on every decision and `false` from this writer,
+        and it STAYS on the record (D2, DL-138): the reads are
+        `check_record`'s -- false proceeds, true is a retired dialect,
+        anything else is malformed -- and removing the field would be a
+        wire break for a fact the schema still states.
 
         A NATIVE decision names its identity at birth, and this writer
         refuses one that does not: `generation` on every effect, `run_id`
         on every SPAWN (DL-118, PR-16/PR-36a). The model's None defaults
-        exist so records READ from a pre-DL-118 journal validate -- a fresh
-        effect reaching this method without them is a planner bug, and
-        writing it would smuggle the legacy shape out under
-        `legacy_batch: false`."""
+        exist so a hand-built record validates before this gate reads it --
+        a fresh effect reaching this method without them is a planner bug."""
         for effect in effects:
             if (
                 effect.generation is None
@@ -542,13 +540,138 @@ def repair_tail(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+#: ss2's record kinds this binary reads, pinned from the writers above and
+#: from every read site in the tree (period-model ss2, runner-design ss7).
+#: `host` is current: a host command is admitted like an input and replays
+#: like one.
+CURRENT_RECS: Final[frozenset[str]] = frozenset(
+    {
+        "segment",
+        "leader",
+        "host",
+        "input",
+        "advance",
+        "decision",
+        "effect_result",
+        "dispatch",
+        "drop",
+        "preflight",
+        "seal",
+    }
+)
+
+#: Retired record dialects: the kind, and the entry that retired it.
+#: APPEND-ONLY (docs/protocol-evolution.md ss6). A row is never removed and
+#: never re-used -- the point of a tombstone is that a root written before
+#: the retirement gets told what it holds instead of a generic parse error.
+RETIRED_RECS: Final[dict[str, str]] = {
+    "header": "DL-138",
+    "result": "DL-138",
+    "effect": "DL-138",
+}
+
+
+def check_record(record: Mapping[str, Any], *, where: str) -> None:
+    """D1's ONE record validator (DL-138). Two fields, three outcomes.
+
+    `rec`: a CURRENT kind proceeds; a RETIRED kind refuses naming the kind
+    and the entry that retired it; anything else refuses naming the kind as
+    an UNKNOWN. The three are distinct on purpose -- "this used to be
+    legal" and "this was never legal" send an operator to different places
+    (docs/protocol-evolution.md ss6).
+
+    Refusing the unknown is a deliberate behavior change: `read_journal`
+    used to IGNORE a `rec` it did not recognise. Version gating sits on the
+    opening `segment`, so an unrecognised kind INSIDE a version-matched
+    segment is corruption, not tolerance.
+
+    `legacy_batch` on a `decision`, pinned three ways: exactly `False`
+    proceeds, `True` is the retired fold dialect and refuses by name, and
+    missing or non-boolean is MALFORMED -- a distinct error, because a
+    record that cannot say what it is is not an old record.
+
+    This reads `rec` and `legacy_batch` and NOTHING else. Per-record key
+    strictness is whatever each record's own schema declares."""
+    kind = record.get("rec")
+    retired = RETIRED_RECS.get(kind) if isinstance(kind, str) else None
+    if retired is not None:
+        raise EngineError(
+            f"{where}: `{kind}` is a RETIRED record dialect, refused by name since"
+            f" {retired} -- nothing has written one since DL-118/DL-130 and no root"
+            " holding one exists (docs/protocol-evolution.md ss6, ss8)"
+        )
+    if kind not in CURRENT_RECS:
+        raise EngineError(
+            f"{where}: unknown record kind {kind!r} -- this binary reads"
+            f" {', '.join(sorted(CURRENT_RECS))}; an unrecognised kind inside a"
+            " version-matched segment is corruption, not an older dialect"
+            " (period-model ss2)"
+        )
+    if kind != "decision":
+        return
+    marker = record.get("legacy_batch")
+    if marker is True:
+        raise EngineError(
+            f"{where}: `legacy_batch: true` is a RETIRED record dialect, refused by"
+            " name since DL-138 -- it marked a batch folded from a legacy estate's"
+            " separate fsyncs, and the path that folded one is gone"
+            " (docs/protocol-evolution.md ss6, ss8)"
+        )
+    if marker is not False:
+        raise EngineError(
+            f"{where}: legacy_batch is {marker!r} -- a `decision` carries the boolean"
+            " false, and a record that cannot say what it is is malformed rather"
+            " than old (period-model ss2.3)"
+        )
+
+
+def opens_with_rec(path: Path) -> str | None:
+    """The `rec` kind this file's first line declares, or None when the
+    first line is not a JSON object with a string `rec`.
+
+    The narrow question, and the ONE place the first line is sniffed for
+    it. Two owners ask it -- `boundary.claim_root` and
+    `retention.plan_retention`, neither of which routes through
+    `read_journal` -- and each writes its OWN refusal, because the tombstone
+    an operator reads should name the operation they ran (D5, DL-138).
+
+    It reports the kind RAW and judges nothing. Both owners' tombstones are
+    HEADER-ONLY, and that is a narrower question than "a retired record":
+    `header` was a legal journal opening once, so a file that opens with one
+    is a recognised pre-period root. `result` and `effect` are retired
+    records but were never openings, so a file opening with one was never a
+    legal journal at all -- it is unknown residue, and it gets each owner's
+    generic refusal rather than a tombstone that would tell an operator
+    their root predates a retirement it never took part in (D5, DL-138)."""
+    try:
+        with Path(path).open("rb") as handle:
+            first = handle.readline()
+    except OSError:
+        return None
+    try:
+        payload = json.loads(first)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    kind = payload.get("rec")
+    return kind if isinstance(kind, str) else None
+
+
 def read_journal(path: Path | str) -> list[dict[str, Any]]:
     """Parse a run journal. A torn FINAL line (crash mid-append) is dropped
     -- write-ahead means the corresponding feed never happened; torn or
     invalid INTERIOR lines are corruption and raise loudly.
 
-    The first record must be an opening one: a `segment` (DL-130) or the
-    legacy `header` every log written before it opens with.
+    The opening's `catalog_hash_version` is dispatched FIRST of all, before
+    any record is validated: a segment names the dialect the whole file is
+    written in, and a file this build cannot read is owed that verdict and
+    not a complaint about one of its records (DL-138, D4).
+
+    Every record then passes `check_record` -- still before the opening
+    check -- so a journal that opens with a retired `header` is told what it
+    holds rather than told it is missing a segment (DL-138). The first
+    record must then be a `segment` (DL-130).
 
     `path` may be an estate root, that root's sentinel, or a segment file:
     `resolve_wal` follows the sentinel's `see` once, so a caller that holds
@@ -569,15 +692,40 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
             if index == len(lines) - 1 and trailing is None:
                 break  # torn final append: the feed it preceded never ran
             raise EngineError(f"journal {path}: corrupt line {index + 1}: {exc}") from exc
+    # D4 before D1: the OPENING's version verdict owns the file's fate. A
+    # segment says which dialect the whole file is written in, so a reader
+    # that validated the records first would answer a question about a
+    # dialect it cannot read -- a retired opening followed by a record kind
+    # this build never heard of would be reported as an unknown kind, and
+    # the operator would go looking for corruption instead of for the
+    # retirement their root predates (DL-138, D4). The dispatch is on the
+    # opening only; a version-matched file's later records are D1's.
+    if records and isinstance(records[0], dict) and is_opening(records[0]):
+        check_segment_version(records[0])
+    # D1's pass, and it is its own loop for two reasons. It runs AFTER the
+    # parse loop, so a file whose bytes are corrupt is called corrupt rather
+    # than called a retired dialect -- structural integrity is the more
+    # fundamental fact and an operator needs it first. It runs BEFORE the
+    # opening check below, so a journal that OPENS with a retired `header`
+    # is told what it holds rather than told it is missing a segment
+    # (DL-138).
+    for position, record in enumerate(records):
+        if not isinstance(record, dict):
+            # a line that is not a JSON object has no `rec` to dispatch on
+            raise EngineError(
+                f"journal {path}: line {position + 1} is not a record object"
+                " (period-model ss2)"
+            )
+        check_record(record, where=f"journal {path}: line {position + 1}")
     if not records or not is_opening(records[0]):
         raise EngineError(f"journal {path}: missing segment record")
-    check_segment_record(records[0])  # exact ss2.1 shape; a header is exempt
+    check_segment_record(records[0])  # exact ss2.1 shape, unconditional (DL-138)
     for position, record in enumerate(records):
         if position > 0 and is_opening(record):
             # I1: one segment record per file, and it is line 1. An
-            # embedded `segment` or `header` mid-file is a splice -- a
-            # reader that split on it would treat forged records as a
-            # validated file boundary and admit an unchained period
+            # embedded `segment` mid-file is a splice -- a reader that
+            # split on it would treat forged records as a validated file
+            # boundary and admit an unchained period
             raise EngineError(
                 f"journal {path}: an opening record at line {position + 1} -- a"
                 " segment opens a FILE, and a second opening inside one is a splice"
@@ -664,20 +812,7 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
             named = int(segment.stem)
         except ValueError:
             named = None
-        if root_estate is not None and opening.get("rec") != "segment":
-            # a sentinel says this root is periodized: a `header` WAL under
-            # its segment name is a foreign or pre-adoption file, and
-            # serving it would stream an unaffiliated legacy lineage
-            raise EngineError(
-                f"journal {segment}: opens with {opening.get('rec')!r} under a"
-                " periodized root's sentinel -- a legacy stream does not belong to"
-                " this estate (period-model ss1.1, ss11)"
-            )
-        if (
-            root_estate is not None
-            and opening.get("rec") == "segment"
-            and opening.get("estate_id") != root_estate
-        ):
+        if root_estate is not None and opening.get("estate_id") != root_estate:
             # the early stop can read ONE segment, so the per-adjacency
             # estate check never runs there -- the sentinel is what binds
             # even a single replaced file to this estate
@@ -686,7 +821,7 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
                 f" sentinel naming {root_estate} -- a stranger's segment under this"
                 " estate's name (period-model ss1.2)"
             )
-        if named is not None and opening.get("rec") == "segment" and claimed != named:
+        if named is not None and claimed != named:
             # a foreign segment renamed into place parses and even seals;
             # its own opening is what says which period it is
             raise EngineError(
@@ -728,8 +863,6 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
         # foreign lineage into the stream
         seal_record = older[-1]
         opening = newer[0]
-        if opening.get("rec") != "segment":
-            continue  # legacy header: one segment, never reaches here
         # the FULL ss2.2 schema first: a `closes_at_index` rewritten to a
         # bool or a string would otherwise skip the exact-int continuity
         # comparison below instead of refusing
@@ -786,9 +919,11 @@ def _first_index(opening: Mapping[str, Any]) -> int:
     """A segment's own `first_index` -- the first index it may allocate,
     and NOT the lowest `seq` in it: a period that admitted no input still
     covers its whole index range, and I2 makes the number estate-wide, so
-    the two answers differ exactly where it matters. A legacy `header` log
-    carries none and never lost a record to a boundary, so it starts at
-    1."""
+    the two answers differ exactly where it matters.
+
+    The `else 1` is DEFENSIVE and describes nothing on disk: every segment
+    `read_journal` returns carries `first_index` as an int >= 1, checked by
+    `check_segment_record`. It was the `header`'s answer until DL-138."""
     first = opening.get("first_index")
     return first if isinstance(first, int) and not isinstance(first, bool) else 1
 
@@ -857,14 +992,13 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
     own fate -- its decision is a LATER record, and the gap between them is
     the crash window (concurrency-model ss4).
 
-    `result` is the pre-DL-118 spelling of the same fact, read for the
-    reason every legacy shape here is read: a run root does not become
-    unreadable because the writer moved on."""
+    One kind, not two: `result` was the pre-DL-118 spelling of the same
+    fact and is refused by name at `check_record` (DL-138)."""
     index = DecisionIndex()
     for attempt in read_attempts(records):
         index.note(attempt)
     for record in records:
-        if record.get("rec") not in ("decision", "result"):
+        if record.get("rec") != "decision":
             continue
         index.record(
             ApplyResult(
@@ -894,32 +1028,17 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
     said what was meant. Inside one `decision` the nested list is already in
     admission order, so reading it in order is all per-run ordering takes.
 
-    A standalone `effect` record is the pre-DL-118 dialect and folds into
-    the same outbox: the two spellings differ in how many fsyncs the writer
-    spent, not in what they say."""
+    One decision shape, not two: the standalone `effect` record and the
+    `legacy_batch: true` fold that read it are retired dialects, refused by
+    name at `check_record` before anything reaches here (DL-138)."""
     outbox = outbox if outbox is not None else Outbox()
-    # deferred fold checks (period-model ss11, PR-48), run after the pass
-    # when the outcomes have been read: adoption refuses a pending legacy
-    # outbox, so EVERY folded effect must resolve -- and a fold's
-    # null-run_id SPAWN only ever legally resolves retired or indeterminate
-    # (a run that never reached an adapter has no id and no file; an
-    # applied one must have both)
-    folded: list[str] = []
-    unidentified: list[str] = []
     for record in records:
         if record.get("rec") == "decision":
-            # a `decision` record has exactly one shape (ss2.3): a BOOLEAN
-            # `legacy_batch` and a LIST `effects`. `.get(...) or []` here
-            # would read a corrupt or foreign record as an empty native
-            # decision -- intents silently lost, provenance silently
-            # invented -- so the shape is checked, not defaulted around.
-            marker = record.get("legacy_batch")
-            if not isinstance(marker, bool):
-                raise EngineError(
-                    f"decision at index {record.get('index')}: legacy_batch is"
-                    f" {marker!r}, not a boolean -- the fold allowances are claimed"
-                    " with exactly true (DL-118)"
-                )
+            # a `decision` record has exactly one shape (ss2.3): a LIST
+            # `effects`. `.get(...) or []` here would read a corrupt or
+            # foreign record as an empty native decision -- intents silently
+            # lost, provenance silently invented -- so the shape is checked,
+            # not defaulted around. `legacy_batch` is `check_record`'s.
             effects_field = record.get("effects")
             if not isinstance(effects_field, list):
                 raise EngineError(
@@ -937,28 +1056,12 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
                     ) from exc
                 if parsed.run_id is not None and not is_valid_run_id(parsed.run_id):
                     # any run_id a decision carries is in the ss11a grammar
-                    # -- the legacy estate's adapter minted uuid4 too
                     raise EngineError(
                         f"decision at index {record.get('index')}: effect"
                         f" {parsed.effect_id} carries run_id {parsed.run_id!r} outside"
                         " the ss11a grammar (DL-118)"
                     )
-                if marker:
-                    # a fold is a defined reconstruction, not a guess: one
-                    # legacy executor at generation 0, every effect resolved
-                    if parsed.generation != 0:
-                        raise EngineError(
-                            f"decision at index {record.get('index')}: folded effect"
-                            f" {parsed.effect_id} carries generation"
-                            f" {parsed.generation!r}; a legacy estate had exactly one"
-                            " executor at generation 0 (period-model ss11)"
-                        )
-                    folded.append(parsed.effect_id)
-                    if parsed.kind == "SPAWN" and parsed.run_id is None:
-                        unidentified.append(parsed.effect_id)
-                elif parsed.generation is None or (
-                    parsed.kind == "SPAWN" and parsed.run_id is None
-                ):
+                if parsed.generation is None or (parsed.kind == "SPAWN" and parsed.run_id is None):
                     # the writer refuses these shapes (Journal.decision), so
                     # a native decision carrying one was not written by this
                     # code: corruption or a foreign writer. Accepting it
@@ -969,26 +1072,9 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
                         f" {parsed.effect_id} carries no birth identity (DL-118)"
                     )
                 outbox.record(parsed)
-        elif record.get("rec") == "effect":
-            outbox.record(Effect.model_validate({k: v for k, v in record.items() if k != "rec"}))
         elif record.get("rec") == "effect_result":
             outbox.resolve(
                 EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
-            )
-    for effect_id in folded:
-        if outbox.state_of(effect_id) == "pending":
-            raise EngineError(
-                f"legacy fold: effect {effect_id} is pending -- adoption refuses a"
-                " pending legacy outbox (period-model ss11, PR-48), so a fold that"
-                " carries one was not made by it; re-driving it would execute"
-                " legacy intent adoption already refused"
-            )
-    for effect_id in unidentified:
-        if outbox.state_of(effect_id) not in ("retired", "indeterminate"):
-            raise EngineError(
-                f"legacy fold: SPAWN {effect_id} has no run_id and its outcome is"
-                f" {outbox.state_of(effect_id)!r} -- null is legal only for a run"
-                " that provably never reached an adapter (period-model ss11)"
             )
     return outbox
 
@@ -1034,8 +1120,10 @@ def replay_inputs(
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own
     # opening record carries. Derived from the record rather than passed in:
-    # a caller-supplied base would be a second authority for `first_index`,
-    # and a legacy `header` carries none, which is exactly 0.
+    # a caller-supplied base would be a second authority for `first_index`.
+    # The `else 0` is DEFENSIVE and describes no segment on disk -- every one
+    # carries `first_index` >= 1 -- but this function is public and harnesses
+    # hand it record lists the reader never validated.
     first = records[0].get("first_index")
     base = int(first) - 1 if isinstance(first, int) and not isinstance(first, bool) else 0
     replay = Replay(

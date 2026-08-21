@@ -1,9 +1,14 @@
-"""The estate verbs: `seal`, `audit`, `verify`, `estate adopt`, `estate
-reclaim` and the physical roll (period-model ss1.3, ss7, ss11; DL-134).
+"""The estate verbs: `seal`, `audit`, `verify`, `estate reclaim` and the
+physical roll (period-model ss1.3, ss7; DL-134).
 
 Obligations in ss13 exercised here: PR-01c, PR-02a, PR-02d, PR-02e,
-PR-02f, PR-47a, PR-47b and PR-48's readiness, drain, idempotency and
-`adopting`-head rows.
+PR-02f, PR-47a and PR-47b. PR-48 was retired by DL-138 with the adoption
+path this file used to drive; its replacement refusal tests live with the
+readers that own them -- the record validator and the D4 dispatcher in
+test_decision_record.py and test_period_identity.py, the `claim_root` and
+`plan_retention` tombstones in test_boundary.py and test_retention.py, the
+retired manifest layout in test_run_history.py, and the pre-parse
+`adopting` anchor refusal in test_boundary.py.
 
 House style follows test_boundary.py: every refusal asserts the message
 fragment that only its own rule produces, and every gate has a passing
@@ -22,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +49,6 @@ from dsl41.ir import CatalogIR, lower_catalog
 from dsl41.oracle_state import Event
 from dsl41.period import (
     RuntimeProfile,
-    Sentinel,
     SourceFile,
     attestation_path,
     read_period_manifest,
@@ -125,63 +128,6 @@ def _native_root(run_root: Path, jil: Path, *, admit: bool = False) -> CatalogIR
     assert started.journal is not None
     started.journal.close()
     return catalog
-
-
-def _legacy_root(
-    run_root: Path, jil: Path, *, admit: bool = False, unfold: bool = False
-) -> CatalogIR:
-    """A run root as the pre-DL-130 build wrote one: a `header` journal and
-    `manifest/`, and nothing the periodized layout added.
-
-    `legacy_twin` downgrades the log and the inputs; the rest is what a
-    genuine legacy root does NOT have -- no `wal/`, no anchor. A fixture
-    that left either would be testing adoption against a root no legacy
-    build could produce. `unfold` goes one step further and puts the
-    body back into the pre-DL-118 `result`+`effect` dialect."""
-    from test_period_identity import legacy_twin
-
-    catalog = _native_root(run_root, jil, admit=admit)
-    legacy_twin(run_root, catalog)
-    shutil.rmtree(run_root / "wal", ignore_errors=True)
-    shutil.rmtree(default_anchor_dir(run_root), ignore_errors=True)
-    if unfold:
-        _unfold_decisions(run_root)
-    return catalog
-
-
-def _unfold_decisions(run_root: Path) -> None:
-    """Split every DL-118 `decision` back into the pre-DL-118 dialect it
-    replaced: a `result` record plus one standalone `effect` per intent.
-
-    That dialect is what a LEGACY root really holds -- DL-118 is younger
-    than every root adoption exists for -- and it is the only shape that
-    reaches `translate_legacy_records`'s `result` branch. `legacy_twin` downgrades the
-    header and the inputs and leaves the body native, so a fixture built
-    on it alone would leave the fold untested on the one verb that writes
-    a durable period-1 WAL."""
-    from dsl41.canon import canonical_bytes
-
-    path = run_root / "journal.jsonl"
-    out: list[dict[str, Any]] = []
-    for record in read_journal(path):
-        if record.get("rec") != "decision":
-            out.append(record)
-            continue
-        out.append(
-            {
-                "rec": "result",
-                "index": record["index"],
-                "request_id": record["request_id"],
-                "decision": record["decision"],
-                "reason": record.get("reason"),
-                "revisions": record.get("revisions") or {},
-            }
-        )
-        for effect in record.get("effects") or []:
-            # the legacy writer minted no `generation` and its run ids came
-            # from the adapter, not the decision (DL-118 moved both)
-            out.append({"rec": "effect", **{k: v for k, v in effect.items() if k != "generation"}})
-    path.write_bytes(b"".join(canonical_bytes(record) + b"\n" for record in out))
 
 
 def _invoke(*args: str):
@@ -611,32 +557,31 @@ def _pin_version(run_root: Path, version: int) -> None:
     seal_path(run_root, 1).write_bytes(Seal(**payload).to_bytes())
 
 
-def test_pr47b_audit_derives_source_and_re_derives_an_adoptions_request_id(
-    tmp_path: Path,
-) -> None:
-    """ss11: `source` is audit's to DERIVE, never to read, and an
-    adoption's `request_id` is re-derived too.
+def test_pr47b_audit_derives_source_and_never_reads_it(tmp_path: Path) -> None:
+    """ss11: `source` is audit's to DERIVE, never to read.
 
-    A boundary is `adopt` iff the closing segment is period 1 with
-    `catalog_hash_v1` non-null AND the root's sentinel `adopted_from`
-    non-null. A pair that disagrees refuses -- otherwise a consistent
-    rewrite of `adopt -> request` plus a new id would have told audit to
-    treat the id as authoritative."""
+    DL-138 retired the `adopt` value, so the derivation now has one legal
+    answer -- and the comparison STAYS, which is the whole obligation:
+    a `seal` record whose `source` was rewritten refuses, and the day a
+    second value returns the check is already where it belongs. PR-47b's
+    request-only audit duties are unchanged; only its adoption clauses
+    left."""
+    from dsl41.attest import _boundary_request
+
     c1, c2, _ = _estate(tmp_path / "estate")
     run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    assert _adopt(run_root, c2).exit_code == 0
+    _native_root(run_root, c1)
+    assert _seal_offline(run_root, c2).exit_code == 0
     seal = read_seal(run_root, 1)
-    assert seal.boundary_request.source == "adopt"
+    assert seal.boundary_request.source == "request"
     assert rederive_seal(run_root, 1).digest == seal.digest
 
-    sentinel = read_sentinel(run_root)
-    assert sentinel is not None
-    from dsl41.period import write_sentinel
-
-    write_sentinel(run_root, Sentinel(estate_id=sentinel.estate_id, adopted_from=None))
-    with pytest.raises(EngineError, match="sets both or neither"):
-        rederive_seal(run_root, 1)
+    record = read_journal(wal_path(run_root, 1))[-1]
+    assert record["rec"] == "seal" and record["source"] == "request"
+    derived = _boundary_request(record)
+    assert derived.source == "request" and derived.request_id == record["request_id"]
+    with pytest.raises(EngineError, match="audit's to derive, never to read"):
+        _boundary_request({**record, "source": "somebody-elses"})
 
 
 # ------------------------------------------------- ss7 the physical roll
@@ -1018,385 +963,43 @@ def test_reclaim_never_moves_a_head_that_is_doing_its_job(tmp_path: Path) -> Non
     assert refused.exit_code == 2 and "not a claim" in refused.output
 
 
-# ----------------------------------------------------- ss11 adoption
+# ---------------------------------------------- DL-138: the verb is gone
 
 
-def _adopt(run_root: Path, next_jil: Path, *extra: str):
-    return _invoke("estate", "adopt", str(run_root), "--next", str(next_jil), *extra)
+def test_estate_adopt_is_not_a_command(tmp_path: Path) -> None:
+    """D10 (DL-138): the adoption verb went with the path it drove, and the
+    `estate` group keeps `reclaim` and `prune`.
+
+    A retired VERB is not a retired dialect: there is no artifact on a disk
+    to name, so what an operator gets is typer's own unknown-command exit
+    rather than a tombstone (docs/protocol-evolution.md ss6 governs stored
+    dialects, not the CLI surface)."""
+    gone = _invoke("estate", "adopt", str(tmp_path), "--next", str(tmp_path / "x.jil"))
+    assert gone.exit_code != 0
+    assert "No such command" in gone.output
+    assert _invoke("estate", "--help").exit_code == 0
+    assert "adopt" not in _invoke("estate", "--help").output
+    for kept in ("reclaim", "prune"):
+        assert kept in _invoke("estate", "--help").output
 
 
-def test_pr48_adoption_fences_translates_and_seals_period_one(tmp_path: Path) -> None:
-    """ss11's seven steps, end to end.
-
-    The evidence is every step's own artifact: the tombstone with
-    `adopted_from`, the hard-linked original, the translated segment
-    pinning `catalog_hash_v1`, `catalogs/` and `periods/000001/` split out
-    of `manifest/`, the seal with the DERIVED boundary request, and a head
-    that went `absent -> adopting -> closed` with period 1's registry row
-    flipped in that same write (PR-02c)."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    legacy = read_journal(run_root / "journal.jsonl")
-
-    result = _adopt(run_root, c2, "--claimed-actor", "bob@ops")
-    assert result.exit_code == 0, result.output
-
-    sentinel = read_sentinel(run_root)
-    assert sentinel is not None and sentinel.adopted_from == "legacy/journal.jsonl"
-    assert read_journal(run_root / "legacy" / "journal.jsonl") == legacy
-
-    segment = read_journal(wal_path(run_root, 1))[0]
-    assert segment["rec"] == "segment" and segment["period_id"] == 1
-    assert segment["catalog_hash_v1"] == legacy[0]["catalog_hash"]
-    assert segment["catalog_hash_version"] == 2
-    assert segment["baseline_id"] == legacy[0]["baseline_id"]  # every fingerprint's
-    assert (run_root / "catalogs").is_dir() and read_period_manifest(run_root, 1) is not None
-
-    seal = read_seal(run_root, 1)
-    assert seal.boundary_request.source == "adopt"
-    assert seal.boundary_request.claimed_actor == "bob@ops"
-    head = _head(run_root)
-    assert isinstance(head, ClosedHead) and head.period_id == 1
-    row = _anchor_of(run_root).read().periods["1"]  # type: ignore[union-attr]
-    assert row.segment_durable is True  # adoption's finalize is folded into its close
+# --------------------------------------------- ss1.3 the registry row
 
 
-def test_pr48_the_result_and_effect_records_fold_into_one_decision(tmp_path: Path) -> None:
-    """ss11 step 5: every `result` plus its same-index `effect` records
-    fold into ONE `decision` line, marked `legacy_batch: true`.
+def test_pr02f_the_registry_finds_period_one_after_native_genesis(tmp_path: Path) -> None:
+    """ss1.3: the registry maps every period to the root that holds it, and
+    period 1's row is written when the root first owns it -- provisional at
+    genesis, flipping in the finalize CAS immediately after its segment.
 
-    Marked because those records were separate fsyncs and a fold cannot
-    make a torn batch atomic after the fact -- audit knows the difference,
-    and the ADOPTER's own decisions, written natively after the
-    translation, are not marked.
-
-    The fold is checked against the retained original, record by record
-    and not only at the fold, because the whole translation is what period
-    1 replays from. The `run_id` reconstruction is the next test's: this
-    estate's admitted input plans no effect, which is the ordinary case
-    and the one a fixture can build without a spool."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1, admit=True, unfold=True)
-    original = read_journal(run_root / "journal.jsonl")
-    assert [r["rec"] for r in original].count("result") >= 1
-    assert not [r for r in original if r.get("rec") == "decision"]
-
-    assert _adopt(run_root, c2).exit_code == 0
-    assert read_journal(run_root / "legacy" / "journal.jsonl") == original
-
-    translated = read_journal(wal_path(run_root, 1))
-    results = [r for r in original if r.get("rec") == "result"]
-    indices = {r["index"] for r in results}
-    decisions = [r for r in translated if r.get("rec") == "decision"]
-    folded = [r for r in decisions if r["index"] in indices]
-    # every FOLDED batch is marked, and the adopter's own -- written
-    # natively by the barrier after the translation -- is not
-    assert folded and all(r["legacy_batch"] is True for r in folded)
-    assert all(r["legacy_batch"] is False for r in decisions if r["index"] not in indices)
-    assert all(e["generation"] == 0 for r in folded for e in r["effects"])
-    # lossless: one decision per result, at the same index, carrying the
-    # same effects in the same order
-    assert [r["index"] for r in folded] == [r["index"] for r in results]
-    for record in folded:
-        source = [
-            {k: v for k, v in e.items() if k not in ("rec", "generation")}
-            for e in original
-            if e.get("rec") == "effect" and e["index"] == record["index"]
-        ]
-        assert [
-            {k: v for k, v in e.items() if k not in ("rec", "generation")}
-            for e in record["effects"]
-        ] == source
-    # and everything else crossed verbatim
-    verbatim = [r for r in original if r.get("rec") not in ("header", "result", "effect")]
-    assert all(record in translated for record in verbatim)
-    # the translated period audits, which is the whole point of a fold
-    assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
-
-
-def test_pr48_a_fold_refuses_a_spawn_it_cannot_identify(tmp_path: Path) -> None:
-    """ss11: `run_id: null` is legal ONLY for a run that provably never
-    reached an adapter -- no `spawn.json`, and an outcome of `retired` or
-    `indeterminate`.
-
-    A legacy SPAWN that a drain and a KILL retired before it reached an
-    adapter legitimately has no run and no file, and adoption must not
-    refuse an estate for a run that never existed. One with any other
-    outcome is a run the fold cannot name, and inventing an id for it
-    would be a guess in a durable record."""
-    from dsl41.estate import translate_legacy_records
-
-    records = [
-        {"rec": "result", "index": 4, "request_id": "r", "decision": "applied", "revisions": {}},
-        {
-            "rec": "effect",
-            "effect_id": "e-4",
-            "kind": "SPAWN",
-            "job": "a",
-            "run_number": 1,
-            "executor_id": "local",
-            "index": 4,
-            "at": "2026-08-20T00:00:00",
-            "run_id": None,
-        },
-    ]
-    retired = [*records, {"rec": "effect_result", "effect_id": "e-4", "state": "retired"}]
-    [decision] = [r for r in translate_legacy_records(tmp_path, retired) if r["rec"] == "decision"]
-    assert decision["legacy_batch"] is True
-    assert decision["effects"][0]["run_id"] is None
-
-    applied = [*records, {"rec": "effect_result", "effect_id": "e-4", "state": "applied"}]
-    with pytest.raises(EngineError, match="never reached an adapter"):
-        translate_legacy_records(tmp_path, applied)
-
-
-def test_pr48_a_c2_that_fails_readiness_refuses_before_the_fence(tmp_path: Path) -> None:
-    """ss11 step 1: readiness runs FIRST, over an in-memory reconstruction
-    of the legacy state, and a failure refuses with the sentinel, the
-    legacy WAL and the anchor untouched.
-
-    Draft 15 let adoption fence the legacy root and commit period 1 without
-    ever running C2's readiness, so an unsupported artifact version or a
-    failing preflight surfaced only when period 2 refused to open -- a
-    committed, unopenable boundary with the old engine already fenced."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    broken = tmp_path / "estate" / "broken.jil"
-    broken.write_text("insert_job: a\njob_type: c\ncommand: x\nmachine: nowhere\n")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    before = (run_root / "journal.jsonl").read_bytes()
-
-    refused = _adopt(run_root, broken)
-    assert refused.exit_code == 2 and "does not pass preflight" in refused.output
-    assert (run_root / "journal.jsonl").read_bytes() == before  # not fenced
-    assert read_sentinel(run_root) is None
-    assert not (run_root / "legacy").exists()
-    assert _anchor_of(run_root).read() is None
-    assert not wal_path(run_root, 1).exists()
-
-    assert _adopt(run_root, c2).exit_code == 0  # the gate, not the machinery
-
-
-def test_pr48_adoption_refuses_an_undecided_input(tmp_path: Path) -> None:
-    """ss11 step 2: every admitted input must hold a durable decision, and
-    this is a REFUSAL rather than a repair.
-
-    Replay recovers only the `ApplyResult` of a result-less input and
-    discards the emitted events that would plan its effects, so an adopter
-    that "gave it a decision" either dispatched a recovered SPAWN before
-    its decision was durable or wrote `effects: []` and failed a start the
-    old estate had committed. Neither is acceptable."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1, admit=True)
-    _drop_last_decision(run_root)
-
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2
-    assert "have no durable `result`" in refused.output
-    assert read_sentinel(run_root) is None
-
-
-def _drop_last_decision(run_root: Path) -> None:
-    """Leave the last admitted input without its decision -- the crash
-    window a legacy engine can really die in."""
-    from dsl41.canon import canonical_bytes
-
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    decided = [r for r in records if r.get("rec") in ("decision", "result")]
-    assert decided, "the fixture must admit at least one input"
-    records.remove(decided[-1])
-    path.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-
-
-def test_pr48_run_resume_refuses_while_the_head_is_adopting(tmp_path: Path) -> None:
-    """ss11: `adopting` is what gives adoption ONE recovery owner. While it
-    stands, `run --resume` refuses and names the verb that can finish it.
-
-    Draft 14 handed recovery to `--resume` "once a segment exists", which
-    is after the translation and before the seal, so a crash there had two
-    owners and neither could finish."""
-
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    _stage_for_adopt(run_root, c2)
-
-    with pytest.raises(EngineError, match="re-run `dsl41 estate adopt`"):
-        _open_in_place(run_root, c2)
-    assert _head(run_root).state == "adopting"
-
-    assert _adopt(run_root, c2).exit_code == 0  # the re-run finishes it
-    assert isinstance(_head(run_root), ClosedHead)
-
-
-def _stage_for_adopt(run_root: Path, next_jil: Path) -> None:
-    """Run ss11 steps 1-6 and stop, leaving the head `adopting` -- the
-    state a crash between the translation and the seal really leaves."""
-    from dsl41.boundary import stage_next_period
-    from dsl41.estate import adopt_legacy_root
-
-    parsed = [parse(next_jil.read_text(), file=str(next_jil))]
-    catalog = lower_catalog(parsed)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(
-            run_root, [SourceFile(path=str(next_jil), text=render_preserve(parsed[0]))]
-        ),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    stage_next_period(run_root, staged_manifest=staged_manifest)
-    adopt_legacy_root(
-        run_root,
-        anchor_dir=default_anchor_dir(run_root),
-        profile=RuntimeProfile(),
-        staged_manifest=staged_manifest,
-        claimed_actor="tester@ops",
-    )
-
-
-def test_pr48_adoption_is_idempotent_and_mints_one_estate_id(tmp_path: Path) -> None:
-    """ss11: every step is idempotent -- a re-run finds the tombstone,
-    reads `estate_id` BACK rather than minting a second, and continues from
-    wherever it stopped."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    _stage_for_adopt(run_root, c2)
-    first = read_sentinel(run_root)
-    assert first is not None
-    translated = wal_path(run_root, 1).read_bytes()
-
-    assert _adopt(run_root, c2).exit_code == 0
-    again = read_sentinel(run_root)
-    assert again is not None and again.estate_id == first.estate_id
-    # the translation is not re-written over the adopter's own records
-    assert wal_path(run_root, 1).read_bytes().startswith(translated.splitlines()[0])
-
-
-def test_pr48_a_re_run_after_the_committed_seal_performs_the_head_cas(
-    tmp_path: Path,
-) -> None:
-    """ss11's matrix row: adoption's `seal` record present, head still
-    `adopting`.
-
-    The boundary committed and the process died before the anchor CAS.
-    `adopting` names exactly one recovery owner, so a re-run of `estate
-    adopt` performs the CAS -- and reports a FINISHED adoption rather than
-    sealing a period that is already closed. `run --resume` refuses until
-    it has."""
-    from dsl41.boundary import AdoptingHead
-
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    assert _adopt(run_root, c2).exit_code == 0
-    digest = read_seal(run_root, 1).digest
-
-    anchor = _anchor_of(run_root)
-    anchor.acquire()
-    stored = anchor.require()
-    anchor.write(
-        stored.model_copy(update={"head": AdoptingHead(period_id=1, root=stored.periods["1"].root)})
-    )
-    anchor.release()
-    with pytest.raises(EngineError, match="re-run `dsl41 estate adopt`"):
-        _open_in_place(run_root, c2)
-
-    rerun = _adopt(run_root, c2)
-    assert rerun.exit_code == 0, rerun.output
-    assert "was already sealed" in rerun.output
-    head = _head(run_root)
-    assert isinstance(head, ClosedHead) and head.seal_digest == digest
-    # and nothing was sealed a second time
-    assert [r for r in read_journal(wal_path(run_root, 1)) if r.get("rec") == "seal"] != []
-    assert len([r for r in read_journal(wal_path(run_root, 1)) if r.get("rec") == "seal"]) == 1
-
-
-def test_adoption_reads_the_legacy_launch_options_the_manifest_recorded(
-    tmp_path: Path,
-) -> None:
-    """DL-66's `manifest/manifest.json` recorded four launch options, and
-    adoption reads them rather than asking the operator to remember.
-
-    The estate's own record of how it ran beats anyone's memory of it, and
-    the WIRING is built from the result -- so the pin and the machine agree
-    by construction. What the block never held stays the flags'."""
-    from dsl41.estate import legacy_profile
-
+    Amended at DL-138, which retired the other route into this row: the
+    obligation stays, and its adoption clause went with the path."""
     c1, _, _ = _estate(tmp_path / "estate")
     run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    manifest = run_root / "manifest" / "manifest.json"
-    payload = json.loads(manifest.read_bytes())
-    payload["options"] = {
-        "timezone": "Europe/Zurich",
-        "as_machine": ["beta", "alpha"],
-        "machine_policy": "local-eligible",
-        "detached": True,
-    }
-    manifest.write_text(json.dumps(payload, sort_keys=True))
-
-    attested = RuntimeProfile(cmd_grace_us=7_000_000)
-    read = legacy_profile(run_root, attested)
-    assert read.default_tz == "Europe/Zurich"
-    assert read.as_machine == ("alpha", "beta")  # the model normalizes
-    assert read.machine_policy == "local-eligible"
-    assert read.execution_mode == "detached"
-    assert read.cmd_grace_us == 7_000_000  # never recorded: the flag's
-
-    # a root whose manifest holds no options block yields the attestation
-    payload.pop("options")
-    manifest.write_text(json.dumps(payload, sort_keys=True))
-    assert legacy_profile(run_root, attested) == attested
-
-
-def test_a_native_root_is_not_adopted_twice(tmp_path: Path) -> None:
-    """Adoption translates a LEGACY `header` journal. A root that has been
-    through it, or was born native, is already periodized."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
     _native_root(run_root, c1)
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2 and "already a periodized estate" in refused.output
-
-
-def test_pr01c_a_root_with_a_wal_and_no_sentinel_refuses_adoption(tmp_path: Path) -> None:
-    """A legacy layout has no `wal/`. A root with both is neither legacy
-    nor adopted, and translating into a segment this transaction did not
-    write would adopt a stranger's records under this estate's name."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    catalog = _native_root(run_root, c1)
-    from test_period_identity import legacy_twin
-
-    legacy_twin(run_root, catalog)  # leaves `wal/` where it was
-    shutil.rmtree(default_anchor_dir(run_root), ignore_errors=True)
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2 and "a legacy layout has no `wal/`" in refused.output
-
-
-def test_pr02f_the_registry_finds_period_one_after_adoption(tmp_path: Path) -> None:
-    """ss1.3: the registry maps every period to the root that holds it, and
-    period 1's row is written when the root first owns it -- at `absent ->
-    adopting`, provisional, flipping in `adopting -> closed`."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    _legacy_root(run_root, c1)
-    _stage_for_adopt(run_root, c2)
-    provisional = _anchor_of(run_root).read()
-    assert provisional is not None
-    assert provisional.periods["1"].segment_durable is False  # ignored by every reader
-
-    assert _adopt(run_root, c2).exit_code == 0
-    final = _anchor_of(run_root).read()
-    assert final is not None
-    assert final.periods["1"].segment_durable is True
-    assert final.periods["1"].root == str(Path(run_root).resolve())
+    stored = _anchor_of(run_root).read()
+    assert stored is not None
+    assert stored.periods["1"].segment_durable is True
+    assert stored.periods["1"].root == str(Path(run_root).resolve())
 
 
 def test_a_re_run_audit_returns_the_stored_checkpoint_unchanged(tmp_path: Path) -> None:
@@ -1507,150 +1110,6 @@ def test_a_crashed_audit_retry_still_flips_the_attested_row(tmp_path: Path) -> N
     assert row.attested is True  # ...and the transition still finishes
 
 
-def test_adoption_refuses_an_occupied_anchor_before_the_fence(tmp_path: Path) -> None:
-    """ss1.3/ss11: fencing first and refusing at `create_adopting` would
-    leave the legacy root rewritten under an anchor that was never this
-    estate's."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    other_root = tmp_path / "other"
-    _native_root(other_root, c1)  # its anchor holds another estate
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    before = (run_root / "journal.jsonl").read_bytes()
-    refused = _adopt(run_root, c2, "--estate-anchor", str(default_anchor_dir(other_root)))
-    assert refused.exit_code == 2 and "somebody's" in refused.output
-    assert (run_root / "journal.jsonl").read_bytes() == before  # the fence never ran
-    assert read_sentinel(run_root) is None
-
-
-def test_an_adopted_root_refuses_a_fresh_anchor(tmp_path: Path) -> None:
-    """ss1.3: re-running a COMPLETED adoption against a second empty
-    anchor would mint a second closed authority over one root -- the fork
-    the anchor exists to prevent."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    assert _adopt(run_root, c2).exit_code == 0
-    fresh = tmp_path / "second.anchor"
-    replayed = _adopt(run_root, c2, "--estate-anchor", str(fresh))
-    assert replayed.exit_code == 2 and "ORIGINAL --estate-anchor" in replayed.output
-    assert not (fresh / "anchor.json").exists()
-
-
-def test_the_fence_refuses_a_foreign_file_under_the_archived_name(tmp_path: Path) -> None:
-    """ss11 step 3: the archived name must BE the legacy journal (same
-    inode) -- a foreign file would be trusted as the legacy WAL forever,
-    and the rename would delete the only real copy."""
-    from dsl41.estate import fence_legacy_root, legacy_journal
-
-    c1, _, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    target = legacy_journal(run_root)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("a stranger's bytes\n")
-    with pytest.raises(EngineError, match="not the same file"):
-        fence_legacy_root(run_root, "e-1", anchor_dir=default_anchor_dir(run_root))
-    assert (run_root / "journal.jsonl").exists()  # nothing was replaced
-
-
-def test_adoption_refuses_an_unanswering_supervisor_socket(tmp_path: Path) -> None:
-    """ss11 step 2 / ss8: a supervisor socket that exists and does not
-    answer means the process that owns the live-wrapper evidence is
-    unreachable -- a drained estate cannot be proved."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    (run_root / "supervisor.sock").write_text("")  # exists, is not a socket
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2 and "does not answer" in refused.output
-
-
-def test_adoption_refuses_a_supervisor_that_lists_a_live_wrapper(tmp_path: Path) -> None:
-    """ss11 step 2: a legacy supervisor can hold a live wrapper the local
-    spool never recorded, so the spool alone is not the drain proof."""
-    import socket as socket_mod
-    import tempfile
-    import threading
-
-    c1, c2, _ = _estate(tmp_path / "estate")
-    # AF_UNIX sun_path is ~104 bytes and pytest's tmp_path is deep -- the
-    # socket (and therefore the legacy root) needs a short base
-    short = Path(tempfile.mkdtemp(prefix="dsl41a-", dir="/tmp"))
-    run_root = short / "legacy"
-    _legacy_root(run_root, c1)
-    server = socket_mod.socket(socket_mod.AF_UNIX)
-    server.bind(str(run_root / "supervisor.sock"))
-    server.listen(1)
-
-    def answer() -> None:
-        conn, _ = server.accept()
-        conn.recv(65536)
-        conn.sendall(
-            (
-                json.dumps(
-                    {
-                        "ok": True,
-                        "version": 1,
-                        "runs": [{"job": "ghost", "run_number": 7, "wrapper_alive": True}],
-                    }
-                )
-                + "\n"
-            ).encode()
-        )
-        conn.close()
-
-    thread = threading.Thread(target=answer, daemon=True)
-    thread.start()
-    try:
-        refused = _adopt(run_root, c2)
-    finally:
-        server.close()
-        thread.join(timeout=5)
-        shutil.rmtree(short, ignore_errors=True)
-    assert refused.exit_code == 2 and "still lists live wrapper(s) ghost.7" in refused.output
-
-
-def test_the_fold_never_takes_a_strangers_spawn_record(tmp_path: Path) -> None:
-    """DL-118 at the fold: a spawn.json naming another (job, run_number)
-    is a stranger's record, and copying its run_id would forge a durable
-    binding every later identity check then trusts."""
-    from dsl41.estate import _folded_effect
-
-    root = tmp_path / "legacy"
-    run_dir = root / "runs" / "a.1"
-    run_dir.mkdir(parents=True)
-    (run_dir / "spawn.json").write_text(
-        json.dumps({"job": "b", "run_number": 9, "run_id": str(uuid.uuid4())})
-    )
-    effect = {"kind": "SPAWN", "job": "a", "run_number": 1, "effect_id": "e-1", "run_id": None}
-    with pytest.raises(EngineError, match="null run_id is legal only"):
-        _folded_effect(root, effect, {"e-1": "applied"})
-
-
-def test_recovery_of_a_committed_adoption_validates_the_sidecar(tmp_path: Path) -> None:
-    """ss11's matrix row acts on a COMMITTED boundary, and committed means
-    the sidecar exists, mirrors the record, and is this adoption's -- a
-    shape-valid record alone must not close the head."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    assert _adopt(run_root, c2).exit_code == 0
-    # re-open the recovery row: head back to adopting, record mutated
-    anchor = _anchor_of(run_root)
-    anchor.acquire()
-    stored = anchor.require()
-    from dsl41.boundary import AdoptingHead
-
-    anchor.write(stored.model_copy(update={"head": AdoptingHead(period_id=1, root=str(run_root))}))
-    anchor.release()
-    _rewrite_seal_record_field(run_root, 1, claimed_actor="mallory@ops")
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2 and "disagrees" in refused.output
-    head = _head(run_root)
-    assert isinstance(head, AdoptingHead)  # the CAS did not run over the forgery
-
-
 def test_reclaim_refuses_a_claim_whose_body_its_name_does_not_bind(tmp_path: Path) -> None:
     """ss1.3: the claim id is derived from {prev_seal_digest, next_period,
     target_root}; a swapped canonical body under the head's filename
@@ -1689,98 +1148,6 @@ def test_reclaim_refuses_a_claim_whose_body_its_name_does_not_bind(tmp_path: Pat
 # ------------------------------------------ peer-review round-2 pins (DL-134)
 
 
-def _adopt_stopped_at(run_root: Path, next_jil: Path, stage: str, *, anchor_dir: Path) -> None:
-    """Run adoption up to `stage` and crash there, via its own seam."""
-    from dsl41.boundary import stage_next_period
-    from dsl41.estate import adopt_legacy_root
-
-    parsed = [parse(next_jil.read_text(), file=str(next_jil))]
-    catalog = lower_catalog(parsed)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(
-            run_root, [SourceFile(path=str(next_jil), text=render_preserve(parsed[0]))]
-        ),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    stage_next_period(run_root, staged_manifest=staged_manifest)
-
-    def crash(name: str) -> None:
-        if name == stage:
-            raise _Stopped()
-
-    with pytest.raises(_Stopped):
-        adopt_legacy_root(
-            run_root,
-            anchor_dir=anchor_dir,
-            profile=RuntimeProfile(),
-            staged_manifest=staged_manifest,
-            claimed_actor="tester@ops",
-            crash_point=crash,
-        )
-
-
-def test_a_fence_crash_retry_needs_the_original_anchor_and_gets_it(tmp_path: Path) -> None:
-    """ss1.3/ss11: a crash between the fence and `create_adopting` leaves
-    an adopted sentinel with the correct anchor still EMPTY. The binding
-    the fence wrote is what tells that window from a retry pointed at the
-    wrong anchor -- one proceeds, the other is the fork."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    original = default_anchor_dir(run_root)
-    _adopt_stopped_at(run_root, c2, "after_fence", anchor_dir=original)
-    sentinel = read_sentinel(run_root)
-    assert sentinel is not None and sentinel.adopted_anchor is not None  # bound IN the sentinel
-    assert not (run_root / "legacy" / "anchor.json").exists()  # never a swappable side file
-    assert _anchor_of(run_root).read() is None  # ...and no authority yet
-
-    wrong = _adopt(run_root, c2, "--estate-anchor", str(tmp_path / "wrong.anchor"))
-    assert wrong.exit_code == 2 and "ORIGINAL --estate-anchor" in wrong.output
-    assert str(original) in wrong.output  # the refusal NAMES the bound one
-
-    retried = _adopt(run_root, c2)  # the original anchor: the crash window resumes
-    assert retried.exit_code == 0, retried.output
-    head = _head(run_root)
-    from dsl41.boundary import ClosedHead
-
-    assert isinstance(head, ClosedHead)
-
-
-def test_adoption_refuses_a_list_error_envelope(tmp_path: Path) -> None:
-    """ss11 step 2: an error envelope ("unsupported_version", a refusal)
-    is NOT an empty estate -- reading it as drained would fence over live
-    work."""
-    import socket as socket_mod
-    import tempfile
-    import threading
-
-    c1, c2, _ = _estate(tmp_path / "estate")
-    short = Path(tempfile.mkdtemp(prefix="dsl41e-", dir="/tmp"))
-    run_root = short / "legacy"
-    _legacy_root(run_root, c1)
-    server = socket_mod.socket(socket_mod.AF_UNIX)
-    server.bind(str(run_root / "supervisor.sock"))
-    server.listen(1)
-
-    def answer() -> None:
-        conn, _ = server.accept()
-        conn.recv(65536)
-        conn.sendall((json.dumps({"ok": False, "error": "unsupported_version"}) + "\n").encode())
-        conn.close()
-
-    thread = threading.Thread(target=answer, daemon=True)
-    thread.start()
-    try:
-        refused = _adopt(run_root, c2)
-    finally:
-        server.close()
-        thread.join(timeout=5)
-        shutil.rmtree(short, ignore_errors=True)
-    assert refused.exit_code == 2 and "well-formed LIST" in refused.output
-
-
 def test_the_attested_cas_refuses_a_strangers_anchor(tmp_path: Path) -> None:
     """ss1.3: the row is a claim about one estate's one period in one
     root -- flipping it on a stranger's anchor would mark a period
@@ -1796,36 +1163,6 @@ def test_the_attested_cas_refuses_a_strangers_anchor(tmp_path: Path) -> None:
         audit_period(root_a, 1, anchor=_anchor_of(root_b))
     row = _anchor_of(root_b).read().periods["1"]  # type: ignore[union-attr]
     assert row.attested is False  # the stranger's row never flipped
-
-
-def test_recovery_refuses_a_replacement_successor_manifest(tmp_path: Path) -> None:
-    """ss11: presence is not agreement -- a self-consistent replacement
-    manifest passes every shape check and refuses only at the opening, so
-    the full seal-to-opening validation runs before the recovery CAS."""
-    c1, c2, _ = _estate(tmp_path / "estate")
-    run_root = tmp_path / "legacy"
-    _legacy_root(run_root, c1)
-    assert _adopt(run_root, c2).exit_code == 0
-    other_root = tmp_path / "other"
-    _legacy_root(other_root, c1)
-    assert _adopt(other_root, c2).exit_code == 0
-    anchor = _anchor_of(run_root)
-    anchor.acquire()
-    stored = anchor.require()
-    from dsl41.boundary import AdoptingHead
-
-    anchor.write(stored.model_copy(update={"head": AdoptingHead(period_id=1, root=str(run_root))}))
-    anchor.release()
-    # a SELF-CONSISTENT manifest -- another adoption's -- under this root's name
-    from dsl41.period import period_dir
-
-    shutil.copyfile(
-        period_dir(other_root, 2) / "manifest.json", period_dir(run_root, 2) / "manifest.json"
-    )
-    refused = _adopt(run_root, c2)
-    assert refused.exit_code == 2
-    head = _head(run_root)
-    assert isinstance(head, AdoptingHead)  # the CAS did not run over the replacement
 
 
 def test_reclaim_refuses_a_registry_row_that_never_closed(tmp_path: Path) -> None:
@@ -1871,43 +1208,6 @@ def test_audit_refuses_a_sidecar_the_successor_did_not_open_from(tmp_path: Path)
     refused = _invoke("audit", "--run-root", str(run_root))
     assert refused.exit_code == 2
     assert "opened its successor from" in refused.output
-
-
-def test_adoption_refuses_a_list_row_missing_the_liveness_flag(tmp_path: Path) -> None:
-    """ss11 step 2: a row shape without `wrapper_alive` would read as
-    false -- and fence over an unspooled live wrapper."""
-    import socket as socket_mod
-    import tempfile
-    import threading
-
-    c1, c2, _ = _estate(tmp_path / "estate")
-    short = Path(tempfile.mkdtemp(prefix="dsl41f-", dir="/tmp"))
-    run_root = short / "legacy"
-    _legacy_root(run_root, c1)
-    server = socket_mod.socket(socket_mod.AF_UNIX)
-    server.bind(str(run_root / "supervisor.sock"))
-    server.listen(1)
-
-    def answer() -> None:
-        conn, _ = server.accept()
-        conn.recv(65536)
-        conn.sendall(
-            (
-                json.dumps({"ok": True, "version": 1, "runs": [{"job": "g", "run_number": 1}]})
-                + "\n"
-            ).encode()
-        )
-        conn.close()
-
-    thread = threading.Thread(target=answer, daemon=True)
-    thread.start()
-    try:
-        refused = _adopt(run_root, c2)
-    finally:
-        server.close()
-        thread.join(timeout=5)
-        shutil.rmtree(short, ignore_errors=True)
-    assert refused.exit_code == 2 and "well-formed LIST" in refused.output
 
 
 def test_the_attested_cas_refuses_a_provisional_or_undurable_row(tmp_path: Path) -> None:

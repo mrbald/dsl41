@@ -350,9 +350,11 @@ across them (S7b).
 
 Exercises 15 to 21 are the boundary era: sealing a night live and offline,
 opening the next period in place and seeing what crossed, the morning-after
-`audit`/`verify`, adopting a night written before the period model, rolling
-to a fresh run root, break-glass reclaim, and retention. CI drives the same
-flows end to end in `tests/test_nightbank_boundary.py` (DL-136).
+`audit`/`verify`, rolling to a fresh run root, break-glass reclaim, and
+retention. Exercise 18 is a retirement note: DL-138 retired every read
+dialect a pre-boundary run root was written in, and the verb that adopted
+one. CI drives the same flows end to end in
+`tests/test_nightbank_boundary.py` (DL-136).
 
 ## Implementation memo
 
@@ -516,8 +518,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   executor in the table
 - src/dsl41/period.py — period identity (period-model ss1.1/ss2.1, DL-130):
   `catalog_hash` v2 (the ss3.2 canonical form with `meta` projected to
-  `{source_files}`, so a patch release cannot orphan a live estate) beside the
-  v1 a legacy journal still pins, `source_bundle_hash` (length-framed, in
+  `{source_files}`, so a patch release cannot orphan a live estate) and the
+  ONE dispatcher every owner asks which recipes are readable -- v1 is retired
+  and refused by name (DL-138); `source_bundle_hash` (length-framed, in
   command-line order) and the content-addressed input bundle it addresses,
   the typed frozen `RuntimeProfile` and its `runtime_hash`, the staged and
   committed manifest models, and the `segment` record every new log opens with
@@ -559,14 +562,11 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   earlier roots are gone. "Verified" means re-derived: a sidecar that matches
   its own canonical form proves integrity, not derivation
 - src/dsl41/estate.py — estate-level transactions over roots (period-model
-  ss1.1/ss1.3/ss7/ss11, DL-134): the PHYSICAL ROLL (`run --open-from`) — head
+  ss1.1/ss1.3/ss7, DL-134): the PHYSICAL ROLL (`run --open-from`) — head
   `closed`, closing period quiescent and attested, sentinel before claim, import
-  between claim and segment — and ADOPTION (`estate adopt`) — readiness before
-  the fence, the fence as a hard link plus a rename so `journal.jsonl` is never
-  absent, `adopting` as the head that gives adoption one recovery owner, the
-  drain refusals, the `manifest/` split and the `result`+`effect` fold. Neither
-  is a second semantic path: both hand the ordinary machinery a root it can
-  resume, and adoption seals period 1 through the COMMON seal body
+  between claim and segment. Not a second semantic path: it hands the ordinary
+  machinery a root it can resume. The module's other operation, adoption from a
+  legacy estate, went with the read dialects at DL-138
 - src/dsl41/retention.py — the retention floors and the prune verb (period-model
   ss11a/ss12, DL-135): what may never be deleted, computed from one root rather
   than asserted — the sentinel, the anchor and its live claim, the sidecars this
@@ -580,13 +580,14 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   iterates the prunable set alone, and the remover refuses a path that is not one,
   is outside the run root, or holds a retained artifact beneath it
 - src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
-  advance/host/effect/effect_result/result/seal/dispatch/drop/preflight records, append+fsync before every
+  advance/host/decision/effect_result/seal/dispatch/drop/preflight records, append+fsync before every
   feed), read_journal, the two-pass replay_inputs, and the resume gate written
-  into the opening record (a `segment`, or a `header` on a log written before
-  DL-130 — every reader accepts both). Since DL-133 the records live in
+  into the opening `segment`. ONE record validator sits at the read layer
+  (DL-138): a current kind proceeds, a retired one (`header`, `result`,
+  `effect`) refuses by name, an unknown one refuses as its own error, and a
+  `decision`'s `legacy_batch` is pinned three ways. Since DL-133 the records live in
   `wal/<segment_no>.jsonl` and `journal.jsonl` holds the one-line `period_root`
-  sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`,
-  and a legacy root — where `journal.jsonl` IS the WAL — is unchanged.
+  sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`.
   `read_journal` is one segment, which is what a replay and an audit each want;
   `read_backfill` is what a subscriber resuming across a boundary wants — the
   retained segments walked newest first and stopped at the one holding its
@@ -637,7 +638,8 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   `dsl41 ui` subprocess per browser session — optional `dsl41[ui]` extra, loopback
   by default), and the boundary-era estate verbs — `seal` (live or offline, the
   lock decides which), `audit` and `verify` (produce a checkpoint; consume one),
-  and `estate adopt` / `estate reclaim` / `estate prune` (DL-134, DL-135).
+  and `estate reclaim` / `estate prune` (DL-134, DL-135; `estate adopt` was
+  retired by DL-138).
   Exit 2 = catalog load/usage failure everywhere, preflight refusals included.
   Exit 1 = findings for `lint`/`equiv`, and a mid-run engine failure for
   `run`/`rehearse`. `report` always exits 0 once generated: the report itself
@@ -869,8 +871,9 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   (missing, corrupt, mismatched predecessor), a physical roll opening period 2 in
   a fresh root and resuming there while the closing root refuses the same seal,
   the attestation gate on a roll, break-glass reclaim recorded in the anchor and
-  in the next `segment`, and adoption end to end — fence, translate, seal — with
-  its readiness-before-fence, drain and `adopting`-head refusals
+  in the next `segment`, and the retirement tombstones DL-138 left where the
+  adoption path was — `claim_root` and `plan_retention` naming the dialect they
+  found, and an `adopting` anchor refused before parse
 - tests/test_retention.py — the retention floors and `estate prune` (period-model
   ss11a/ss12, DL-135): each itemized floor refused one case at a time and released
   again once the head has moved past it and a later checkpoint covers it, the
@@ -893,10 +896,10 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
   with period 1's globals, holds and statuses, then `audit`, `verify` and a
   prune that takes the run's timings and leaves its row. The rest run in
   process over the same 81-job estate: the offline seal of a stopped night,
-  the retention survey and its no-class refusal, a legacy night adopted, a
-  roll refused until the closing night is attested, and break-glass reclaim
-  after a crashed roll. A last test holds the RUNBOOK to the CLI: every
-  `dsl41 <verb>` it types must be a command this build has
+  the retention survey and its no-class refusal, a roll refused until the
+  closing night is attested, and break-glass reclaim after a crashed roll.
+  A last test holds the RUNBOOK to the CLI: every `dsl41 <verb>` it types
+  must be a command this build has
 - tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
   its revisions
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
