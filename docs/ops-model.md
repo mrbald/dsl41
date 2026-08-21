@@ -452,7 +452,7 @@ May differ: **the transport, and only the transport.**
    replay onto a table without this engine's own executor decides *"no such
    host"* where the run decided otherwise — one step before the case that breaks
    it. The moment a run can name a different executor, offline replay must read
-   it from the header.
+   it from the opening `segment` record.
 
 ### 4a.5 The local rig is the cheapest proving ground the relay has
 
@@ -671,7 +671,7 @@ did it not run" and "how long did it take" are different queries.
 
 *(Amended by DL-113, at build.* Built without waiting for §1–§4's seal:
 `dsl41 runs` is a plain offline CLI verb over one or more run roots' existing
-`journal.jsonl` + `manifest/` + spool, computed on demand rather than
+`journal.jsonl` + estate files + spool, computed on demand rather than
 materialized at any write time — there is no seal to materialize it at, and
 no writer of a new record kind. The row therefore carries neither `estate`
 nor `period_id`: `run_number` resets at every re-baseline exactly as §0
@@ -685,7 +685,8 @@ knows both ends" of a box's run turned out to mean that literally: a box
 gets no `dispatch` record and its fold is emitted, never journaled, so its
 row is only recoverable by replaying the journal through a fresh Oracle —
 the same replay `dsl41 journal` already does, with the catalog rebuilt from
-`manifest/` rather than supplied on the command line. The same replay also
+the root's own stored inputs rather than supplied on the command line. The
+same replay also
 closes a leaf run that KILLJOB or a `term_run_time` auto-TERMINATE ended:
 both are decided by the oracle synchronously while processing the KILLJOB
 or timer input itself, so neither produces the adapter-completion `STATUS`
@@ -1323,7 +1324,8 @@ seal; the lineage fence and the optional run root; `baseline_id` per period;
 the atomic `decision` record and control-protocol v3; the capacity
 decomposition; the classification tiers; `catalog_hash` v2; the retry horizon
 as a profile field; armed latches crossing a release; the SPAWN idempotency
-protocol; the FW spool; adoption. Two from this document survive on their own:
+protocol; the FW spool. Adoption was on that list and is retired unbuilt
+(DL-138). Two from this document survive on their own:
 **run-root exclusion and estate leadership are two mutexes** (§4a) and **the
 local multi-executor rig is a third proving tier** (§4a.5).
 

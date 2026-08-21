@@ -55,10 +55,10 @@ and DL-134.)* Since the periodized layout the records live in
 root also holds `seals/<period>.json`, `seals/<period>.audit.json` and
 `periods/<period>/manifest.json`, and the LINEAGE anchor lives OUTSIDE it,
 at `<run-root>.anchor` by default — deliberately, so `tar`ing a root never
-carries the fence away with it. Back both up. A run root written
-before DL-130 has `manifest/` instead of `catalogs/` + `periods/`; every
-reader still accepts it, and `dsl41 estate adopt` is how it joins a
-lineage (§6a).
+carries the fence away with it. Back both up. *(Amended by DL-138.)* A run root
+written before DL-130 has `manifest/` instead of `catalogs/` + `periods/`. That
+layout is retired: it is refused by name, not read, and there is no path from
+such a root into a lineage (`docs/protocol-evolution.md`).
 Run roots are `0700`, journals and job output `0600` — the WAL
 carries globals and every control input, so keep the service account's
 home to itself. A run root is the audit artifact of its night: retention
@@ -232,8 +232,8 @@ survive into operation.
   manifest + spool into one row per job run — "how long did it take, run
   after run, and did it change" (DL-113). Unlike `dsl41 journal`
   it needs no estate-file argument: it rebuilds the catalog from the run
-  root's own stored inputs (DL-130's bundle, or DL-66's `manifest/` on a
-  root that predates it). Name
+  root's own stored inputs — DL-130's bundle, and since DL-138 only that:
+  DL-66's `manifest/` layout is retired and refused rather than read. Name
   several run roots on one command line to carry a series across a
   baseline change — the default table marks the break rather than
   blending two catalogs into one misleading line. *(Amended by DL-136.)*
@@ -406,35 +406,22 @@ LINEAGE's, not the root's, so every later `--resume` of the new root needs
 `--estate-anchor /srv/dsl41/runs/<old>.anchor`. Put it in the unit file
 with the run root.
 
-**Adopt** a run root written before the periodized layout — a `header`
-journal and `manifest/`. Such a root no longer resumes; it is adopted, once:
+**Adoption is retired (DL-138).** `dsl41 estate adopt` took a run root
+written before the periodized layout — a `header` journal and `manifest/` —
+and translated it into period 1 of a new lineage. No dsl41 estate ran in
+production, so the verb had nothing to adopt. It is gone, and so are the read
+paths it fed: a `header` journal, a `catalog_hash_version` of 1, a `result` or
+standalone `effect` record and a `manifest/manifest.json` layout are each
+refused by name, citing DL-138.
 
-```sh
-dsl41 estate adopt /srv/dsl41/runs/<legacy> \
-    --next /srv/dsl41/estate/*.jil \
-    [--deadman …] [--timezone-map …]     # what `manifest/` did not record
-```
+**A run root written before the boundary era is not adoptable.** There is no
+supported path from one into a lineage. Start a new estate with `dsl41 run`
+and let the old root stand as the archive of the nights it holds.
+`docs/protocol-evolution.md` is the contract that governs a retirement like
+this one — what each protocol tolerates, how long its instances live, and what
+has to be true before a reader may drop a dialect.
 
-It requires a **drained and settled** estate: no live wrapper, no live file
-watch, nothing pending in the legacy outbox, and every admitted input
-holding a durable decision. Each is a refusal, not a repair — resume the
-legacy engine, let it settle, and retry. A drain is what §6's window
-already does.
-
-The legacy period's `timezone`, `as_machine`, `machine_policy` and
-`detached` come from `manifest/manifest.json`'s own `options` block — the
-estate's record of how it ran beats anyone's memory of it. The deadman,
-the timezone table and the reconciliation windows were never recorded, so
-those are the flags — and that statement is **unchecked**: the adoption
-barrier is wired from the profile it is attesting, so nothing can
-contradict it. It is pinned in period 1's manifest and every later
-`--resume` is held to it, which is where a wrong one surfaces. Get it
-right, and keep it in the unit file.
-
-Every step is idempotent: a re-run continues from where it stopped, never
-mints a second estate id, and refuses rather than re-describing a period
-it already pinned. A re-run after a crash between the seal record and the
-head CAS performs the CAS and reports the adoption complete.
+The `estate` group keeps its other verbs: `reclaim` (below) and `prune` (§2a).
 
 A roll that is refused **after** it wrote the target root's sentinel
 leaves that directory owned by the claim it was attempting: §1.1's
@@ -519,7 +506,7 @@ format moved. What still requires a full drain and a new estate is a
 a seal whose `next_period` names a different one is refused at readiness
 (period-model §2.1).
 
-The journal header and manifest record the tool version, but resume
+The `leader` record names the tool version, but resume
 gates on catalog hash and clock domain — not version. Do not lean on
 that: treat an engine upgrade like an estate change unless the release
 notes say the journal format is resume-compatible across the pair.

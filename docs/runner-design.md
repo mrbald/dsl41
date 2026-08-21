@@ -356,16 +356,15 @@ The journal is an append-only JSONL WAL, one file per run. Record kinds:
 run is now one file per PERIOD, and the file at the old name is a
 sentinel.** A periodized root's records live in `wal/<segment_no>.jsonl`;
 `journal.jsonl` holds one line, the permanent `period_root` record
-`{rec, artifact_format_version, estate_id, see, adopted_from, claim_id}`.
-The NAME is kept deliberately: an old binary refuses `run` because a
-`journal.jsonl` exists and refuses `run --resume` because the first record
-is not `header`, and there is no instant at which the file is absent — so a
-root that sealed and exited never reads as *unused* to a build that would
-genesis into it. Every reader follows the sentinel's `see` through one
+`{rec, artifact_format_version, estate_id, see, claim_id}` (`adopted_from`
+left with DL-138). The NAME is kept deliberately: the file is never absent,
+so a root that sealed and exited never reads as *unused* to a build that
+would genesis into it. Every reader follows the sentinel's `see` through one
 function (`period.resolve_wal`), so a caller holding a run root, the
 sentinel or a segment reads the same records. A **legacy root**, where
-`journal.jsonl` IS the WAL, keeps working unchanged; the first record's
-kind is what tells the two layouts apart. Two record kinds join the list
+`journal.jsonl` IS the WAL, is a retired layout: since DL-138 the first
+record's kind is still what tells the two apart, and a `header` there is
+refused by name rather than read. Two record kinds join the list
 below: **`seal`** (period-model §2.2), the last record of a period's last
 segment and the boundary's commit point — **any record after one in the
 same segment is refused at the read**, not tolerated as a torn tail — and
@@ -374,9 +373,10 @@ the sentinel itself, which is not in the WAL at all.
 - `segment` — the first record of every segment, and the whole identity of
   the period it opens: `{rec, segment_no, estate_id, period_id,
   baseline_id, catalog_hash, catalog_hash_version, source_bundle_hash,
-  runtime_hash, state_machine_version, catalog_hash_v1, clock_domain,
+  runtime_hash, state_machine_version, clock_domain,
   first_index, opens_from_seal, reclaimed, trust_unaudited, at}`
-  (`docs/period-model.md` §2.1, DL-130). Self-describing on purpose: a
+  (`docs/period-model.md` §2.1, DL-130; `catalog_hash_v1` left with DL-138).
+  Self-describing on purpose: a
   reader that opens it knows the period, the catalog and the semantics
   without reading an earlier file. `catalog_hash` + `state_machine_version`
   are what leader eligibility is an exact match on
@@ -384,13 +384,13 @@ the sentinel itself, which is not in the WAL at all.
   recipe the hash was taken under, so the gate compares like for like.
   `dsl41_version` is deliberately NOT here — it is per-process, it rides on
   `leader`, and a patch release must not move these bytes (PR-07).
-- `header` — **retired for new logs** (DL-130): a once-per-log header
-  cannot describe a log made of segments. It was `{catalog_hash,
-  state_machine_version, dsl41_version, clock_domain, started_at}`, and its
-  `catalog_hash` is v1. Nothing writes one; every reader accepts one, because
-  a run root written before DL-130 must keep replaying, resuming and
-  reporting — and a v1 pin is compared under v1 for the rest of that log's
-  life.
+- `header` — **retired** (DL-130 stopped writing it; DL-138 stopped reading
+  it): a once-per-log header cannot describe a log made of segments. It was
+  `{catalog_hash, state_machine_version, dsl41_version, clock_domain,
+  started_at}`, and its `catalog_hash` was v1. Nothing writes one and nothing
+  reads one: a journal opening with a `header` is refused naming the kind and
+  DL-138, and so is a `catalog_hash_version` of 1
+  (`docs/protocol-evolution.md`).
 - `leader` — `{epoch, at, pid, host, dsl41_version}`: one term of leadership
   over this run root (S6a, DL-100). Appended under the run root's lock
   immediately after acquiring it, which is what makes the epoch monotone —
@@ -429,19 +429,23 @@ the sentinel itself, which is not in the WAL at all.
   bound, or null for a run a pre-DL-118 journal spawned. `generation` is
   the executor host row's value at birth (PR-16). The list is in ADMISSION
   order, so a SPAWN precedes its run's later KILL. `legacy_batch` is
-  `false` from this writer.
+  **required false**: this writer pins it, `true` is a retired dialect
+  refused naming DL-138, and missing or non-boolean is malformed and refused
+  as its own error.
 - `effect_result` — `{effect_id, state, run_id, detail}`: what became of one
   attempt — `applied`, `indeterminate`, or `retired` (superseded before it
   ran). Its ABSENCE means `pending`, which is the crash window, and is
   exactly the distinction `indeterminate` exists to keep separate: nothing
   was tried, versus something was tried and cannot be reported on.
-- `result` and standalone `effect` — **retired** (DL-118). They were the
-  decision and its intents as separate records, each its own fsync, and the
-  window between them was the atomicity violation §4 step 7 forbids.
-  Nothing writes them. Everything that READS a journal still accepts them,
-  so a run root written before DL-118 keeps replaying, resuming and
-  reporting: an old `result` folds into the same decision index and an old
-  `effect` into the same outbox.
+- `result` and standalone `effect` — **retired** (DL-118 stopped writing
+  them; DL-138 stopped reading them). They were the decision and its intents
+  as separate records, each its own fsync, and the window between them was
+  the atomicity violation §4 step 7 forbids. Nothing writes them and nothing
+  reads them: either one in a journal is refused naming the kind and DL-138.
+  An **unknown** `rec` is refused too, naming the kind, as its own error —
+  the version gate sits on the opening `segment`, so an unrecognised kind
+  inside a version-matched segment is corruption
+  (`docs/protocol-evolution.md`).
 - `dispatch` — `{job, run_number, wrapper_pid, run_dir, started_at}`
   (audit/ordering only). The wrapper's `spawn.json` is the authoritative
   spawn record, written by the process that did the spawn. This closes
@@ -505,9 +509,11 @@ sha256) — and the engine installs `periods/000001/manifest.json`
 The bundle is addressed by its own bytes, so a relaunch on unchanged
 inputs reuses the directory rather than rewriting it. The run root
 outlives the estate files it was launched from. The legacy `manifest/`
-directory is no longer written; a root that has one keeps being read from
-it. The catalog hash covers `SourceSpan.file`, so byte-exact replay
-against relocated copies still needs the recorded original paths;
+directory is neither written nor read: since DL-138 a root that has one where
+the period manifest is absent is refused naming the retired layout
+(`docs/protocol-evolution.md`). The catalog hash covers `SourceSpan.file`, so
+byte-exact replay against relocated copies still needs the recorded original
+paths;
 relocation-independent hashing is a deliberate defer (it orphans every
 existing journal's resume gate).
 
@@ -540,21 +546,15 @@ rows install verbatim, revisions included, and only genuinely new rows are
 seeded from the catalog. Step 1 then gates on THAT segment's pins, which
 are C2's.
 
-*(Amended by DL-134, at build of period-model §11's adoption.)* **A legacy
-`header` root now refuses `--resume` and names the verb that lifts it.**
-DL-133 let one resume, deliberately: the refusal belongs with `dsl41 estate
-adopt`, and refusing before that verb existed would have stranded every
-existing run root with no way back. The verb exists, so the refusal stands
-where §11's matrix puts it — a legacy journal is not opened in place, it is
-adopted, which fences it, translates it into `wal/000001.jsonl` and seals
-period 1 in one transaction. The question asked is narrow: the first record
-is a `header`. A `journal.jsonl` that opens with a `segment` is not legacy
-and never was, and its own refusals are unchanged.
-
-A root with a sentinel that has `adopted_from` set is an ADOPTED root and
-resumes like any other; while the lineage head is `adopting`, `--resume`
-refuses and names `dsl41 estate adopt`, because adoption owns recovery of
-that root until period 1 seals.
+*(Amended by DL-134, at build of period-model §11's adoption; superseded by
+DL-138.)* DL-133 let a legacy `header` root resume, deliberately, and DL-134
+moved the refusal to `--resume` and named `dsl41 estate adopt` as the verb
+that lifted it. **DL-138 retired the verb and the dialect together.** The
+refusal stands and the name changes: a `journal.jsonl` whose first record is
+a `header` is refused as a **retired dialect**, citing DL-138, and there is no
+verb that lifts it. The question asked is still narrow — the first record is a
+`header`. A `journal.jsonl` that opens with a `segment` is not legacy and never
+was, and its own refusals are unchanged.
 
 1. On catalog-hash mismatch, refuse — no silent semantic drift. A changed
    estate re-baselines explicitly.
@@ -605,8 +605,8 @@ that root until period 1 seals.
    PENDING kills read that state and walked past it. The row being terminal
    is what makes the process an orphan: the sweep skips it as "already
    replayed", and nothing else ever looks again.*
-   All reconciliation injections journal with source=reconcile. Adoption
-   never appears at this tier. When the supervisor (§6a Tier 1, 11f)
+   All reconciliation injections journal with source=reconcile. When the
+   supervisor (§6a Tier 1, 11f)
    exists, jobs survive engine restarts by *reattachment* — their parent
    never died. Then this step reduces to the supervisor's LIST.
 

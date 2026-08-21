@@ -108,10 +108,10 @@ RETURNING next_index;                       -- zero rows returned = fenced
 
 Step 1 before step 2 is the frozen dedup-before-stale-epoch rule
 (concurrency-model §4). Step 3 is the frozen atomic-commit requirement, which
-**the current code does not satisfy** — result and each effect are separate
-`_write` calls, each fsyncing independently (`runner.py:711`,
-`runner_journal.py:314`). The existing test proves ordering, not atomicity
-(`tests/test_effects.py:249`). S8a fixes a live violation, not only a future one.
+the code before DL-118 **did not satisfy** — `result` and each `effect` were
+separate `_write` calls, each fsyncing independently. DL-118's atomic
+`decision` record closed the live violation (CM-17); S8a carries the same
+requirement onto the shared store.
 
 Dispatch re-checks the term, and the relay rejects any dispatch carrying an
 epoch below the highest it has seen (concurrency-model §7, frozen).

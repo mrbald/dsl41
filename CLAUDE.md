@@ -29,7 +29,9 @@ it.
 6. `docs/period-model.md` — normative for periods, seals, the carry, the
    lineage fence and the optional run root (DL-114). The runner's other
    frozen contracts — `concurrency-model.md`, `control-protocol.md`,
-   `supervisor-protocol.md` — are read when touching the runner.
+   `supervisor-protocol.md`, `protocol-evolution.md` (DL-138: dialect
+   lifecycle, tombstones, the retirement gate) — are read when touching
+   the runner.
 7. `docs/citation-index.md` — what every reference token in the sources means
    and which doc defines it (SEM/UCS/M/P-M/DL/L/T/F/ss/Q/Qr/U/E). A new
    namespace needs a row there first; `scripts/arch_check.py` fails on a

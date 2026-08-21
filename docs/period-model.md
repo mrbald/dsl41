@@ -1,6 +1,6 @@
 # Period model — the seal, the segment, and the optional run root
 
-Status: **frozen (2026-08-20, DL-114).** Draft 29, converged. Intended to become normative in the way
+Status: **frozen (2026-08-20, DL-114).** Draft 30, converged. Intended to become normative in the way
 `docs/concurrency-model.md` and `docs/control-protocol.md` are: once frozen,
 each change to a frozen item requires a decision-log entry. It supersedes
 `docs/ops-model.md` §1–§3 and §8a–§8b as the *mechanism*; that document stays
@@ -266,6 +266,17 @@ directory is doing a job that belongs to a record.
   when period 1's row flips; `PR-\d{2}[a-z]?` is the namespace regex and
   suffixed ids are cited; §3.2 says `deadman_us` once; the SPAWN replay
   lead-in appears once.
+- **Draft 30** — the legacy read dialects retire (DL-138). Adoption from a
+  pre-period estate is ruled out: no dsl41 estate runs in production, so the
+  `header` journal, `catalog_hash` version 1, the `result` and standalone
+  `effect` records, the `manifest/` layout and the whole `estate adopt` path
+  have no producer and no estate left to consume. Each retired artifact is
+  refused by name; the `estate adopt` command is removed outright — an unknown
+  command, not a tombstone.
+  Out of the schemas go the `adopting` head state, `catalog_hash_v1`, the
+  sentinel's `adopted_from` and the `adopt` seal source; `legacy_batch` stays
+  on `decision`, required and false. `docs/protocol-evolution.md` is the
+  contract the retirement ran under and records it as the first executed one.
 
 ## 1. Identities
 
@@ -322,9 +333,8 @@ and a revision mean one thing for the life of the estate.
 
 **Every periodized root carries a permanent `journal.jsonl` sentinel** — one
 line, `{"rec": "period_root", "artifact_format_version": 1, "estate_id": …,
-"see": "wal/", "adopted_from": null, "claim_id": null}` — whether it was
-adopted, created by genesis, or opened by a physical roll; adoption's differs
-in `adopted_from: "legacy/journal.jsonl"`, a roll's in `claim_id` naming the
+"see": "wal/", "claim_id": null}` — whether it was created by genesis or
+opened by a physical roll; a roll's differs in `claim_id` naming the
 claim that **first opened this root**, so "this very claim" is a fact the
 sentinel can prove rather than infer from `estate_id` alone. The claim-equality
 rule applies to a physical roll creating a previously unowned root; an in-place
@@ -332,15 +342,13 @@ opener takes a new claim every period and its root's sentinel keeps the claim
 that created the root, so for an in-place claim the sentinel proves only that
 this estate owns this root — which is what it needs to prove. One record kind,
 one schema. Draft
-10 created the sentinel only during adoption, so a native root that sealed and
-exited code 3 released `leader.lock` over a directory with no `journal.jsonl`;
-the shipped binary treats that as an *unused* root — it writes `manifest/`
-before it takes leadership and creates a fresh header journal — so an old
-binary run without `--resume` there starts a new estate beside the lineage,
-ignoring the anchor, and can admit work while detached C1 executions are still
-alive. With the sentinel in place old `run` refuses (a `journal.jsonl` exists)
-and old `run --resume` refuses (its first record is not `header`). The
-adoption tombstone **is** this sentinel with `adopted_from` set.
+10 created the sentinel only on the adoption path DL-138 retired, so a native
+root that sealed and exited code 3 released `leader.lock` over a directory with
+no `journal.jsonl`; a build that finds no journal there reads the root as
+*unused*, starts a new estate beside the lineage, ignores the anchor, and can
+admit work while detached C1 executions are still alive. The sentinel closes
+that window by never being absent: a root that sealed never reads as unused,
+which is also why the file keeps the old name.
 
 **One ownership rule governs every root and every anchor**, and it is the
 current runner's own rule — it refuses any root with an existing
@@ -396,8 +404,9 @@ hash **with one exclusion, and versions it**: `catalog_hash` v2 is sha256 over
 the §3.2 canonical form of `CatalogIR` with `meta` projected to
 `{source_files}` only — `tool_version` **and** `parsed_at` are diagnostic and
 leave; spans stay. The version rides explicitly as `catalog_hash_version: 2` on
-`segment`, seal and period manifest; a legacy period's v1 value is recorded as
-`catalog_hash_v1` beside it; and a hash-v2 golden vector ships with PR-08.
+`segment`, seal and period manifest, and a hash-v2 golden vector ships with
+PR-08. Version 1 is retired: it is refused by name (DL-138,
+`docs/protocol-evolution.md`), and no record carries a v1 value beside a v2 one.
 Today's hash
 serializes the whole model, and `CatalogMeta.tool_version` is the installed
 package version — reversing nothing but the version string from 1.2.3 to 1.2.4
@@ -406,8 +415,8 @@ opened by 1.2.4, and PR-07's byte-identical openings across a patch release
 were impossible. It is also the resume-refusal DL-100 already called *"an
 outage manufactured by bookkeeping"* for the SM version, and the argument is
 the same. Spans stay in; only diagnostic metadata leaves. This is a change to a
-frozen identity (leader eligibility) and takes its own DL entry; legacy
-journals carry v1 and adoption records which. The period manifest binds
+frozen identity (leader eligibility) and takes its own DL entry. The period
+manifest binds
 `catalog_hash` and `source_bundle_hash` together. A period that reverts to
 earlier bytes references the directory already there. Launch options live under
 `periods/`, never `catalogs/`.
@@ -436,21 +445,18 @@ The lineage forks unless exactly one root can succeed a seal:
 7. the same `(job, run_number)` executes twice — `concurrency-model.md` §0's
    safety property, violated.
 
-**The contract**, substrate-independent, with four head states:
+**The contract**, substrate-independent, with three head states:
 
 ```
 open(period_id, root)                          a period is live in `root`
 closed(seal_digest, closing_root, period_id)   it ended; nobody has opened the next
 claimed(claim_id, target_root)                 one root is opening the next
-adopting(root)                                 `estate adopt` owns `root` until period 1 seals (§11)
 
 close_period(estate_id, period_id, root, seal_digest)          open → closed
-                                                                adopting → closed   (§11)
 claim_id = sha256(canonical{prev_seal_digest, next_period, target_root})   # target_root: absolute, normalized
 claim_successor(estate_id, seal_digest, next_period, target_root) → claimed
 first segment record durable                                    claimed → open
 genesis (§1.1)                                                  absent → open(1, root)
-adoption (§11)                                                  absent → adopting(root)
 ```
 
 Draft 4 defined `closed → claimed → open` and never `open → closed`, so a
@@ -543,29 +549,26 @@ replacement and lifetime:
   `{artifact_format_version, claim_id, estate_id, prev_seal_digest,
   next_period, target_root, claimed_at, diag: {pid, start_time, boot_id}}`.
 - `anchor.json` is written by the same liturgy under the held lock and carries
-  `{artifact_format_version, estate_id, head: open|closed|claimed|adopting,
+  `{artifact_format_version, estate_id, head: open|closed|claimed,
   periods: {N: {root, segment_durable, seal_digest, attested}}}`. **A period's registry row is
   inserted when a root first owns it, and is provisional until that period's
   first segment is durable**: genesis writes `periods[1]` in its `absent →
-  open(1, root)` and adoption in its `absent → adopting(root)` — both before
-  any segment exists, so those rows carry `segment_durable: false` and every
-  cross-period reader ignores a row until it reads `true`; a successor's row is
+  open(1, root)` — before any segment exists, so that row carries
+  `segment_durable: false` and every cross-period reader ignores a row until it
+  reads `true`; a successor's row is
   written in `claimed → open`, after its segment is durable, and is never
   provisional. Period 1's row flips to `segment_durable: true` in a **finalize
-  CAS performed immediately after the segment lands** — for **genesis** a
-  sixth step of its own, with a recovery row for the crash between segment and
-  finalize (resume performs it); for **adoption** folded into `adopting →
-  closed` (§11), because adoption writes its segment and its seal in one
-  transaction and nothing can read period 1's row in between — never deferred
-  to "the close or the first resume" of a *running* period, which left an
+  CAS performed immediately after the segment lands** — a sixth step of
+  genesis's own, with a recovery row for the crash between segment and
+  finalize (resume performs it) — never deferred to "the close or the first
+  resume" of a *running* period, which left an
   uninterrupted engine running a durable period that estate-wide readers were
   told to ignore. `seal_digest` is filled at close and `attested` at audit.
   Draft 15 inserted rows only at `claimed → open`, so period 1 had none and
   estate-wide `audit`, `journal` and `runs` could lose it after a physical roll
   (PR-02f); draft 16 then said both "only at `claimed → open`" and "at first
-  ownership". Every head transition — `absent → open`, `absent → adopting`,
-  `open → closed`, `adopting → closed`, `closed → claimed`, `claimed → open` —
-  is one liturgy write; the CAS is read-compare-write under the lock. Rename without `fsync(dir)` is not durable: a power loss could keep
+  ownership". Every head transition — `absent → open`, `open → closed`,
+  `closed → claimed`, `claimed → open` — is one liturgy write; the CAS is read-compare-write under the lock. Rename without `fsync(dir)` is not durable: a power loss could keep
   B's first segment and revert the head, and a second target would then claim
   the same seal. Process-kill tests do not prove directory-entry durability;
   §13 says so where it matters (PR-02c).
@@ -594,8 +597,19 @@ file anchor beside the store would be two leadership truths, and
 Three record kinds join `docs/runner-design.md` §7's list — `segment`, `seal`,
 `decision` — and three are retired: `header` (a once-per-log header cannot
 describe a log made of segments), and `result` plus standalone `effect` (§2.3).
-`leader`, `input`, `advance`, `host`, `effect_result`, `dispatch`, `drop` and
-`preflight` are unchanged.
+
+**Retired means refused by name since DL-138.** Nothing writes one and nothing
+reads one: a journal that opens with a `header`, or that carries a `result` or
+a standalone `effect`, is refused naming the kind and that entry
+(`docs/protocol-evolution.md` §6). The current kinds are `segment`, `seal`,
+`decision`, `leader`, `input`, `advance`, `host`, `effect_result`, `dispatch`,
+`drop` and `preflight` — `host` among them, current and not retired — and each
+keeps the shape `docs/runner-design.md` §7 gives it. An **unknown** `rec`
+refuses too, naming the kind and as its own distinct error: version gating
+happens at the opening `segment`, so an unrecognised kind inside a
+version-matched segment is corruption and not a dialect this reader is too old
+to see. Skipping it would let a reader walk past evidence and report a complete
+replay.
 
 ### 2.1 `segment` — the first record of every segment
 
@@ -603,15 +617,15 @@ describe a log made of segments), and `result` plus standalone `effect` (§2.3).
 {"rec": "segment", "segment_no": 2, "estate_id": "…", "period_id": 2,
  "baseline_id": "…", "catalog_hash": "…", "catalog_hash_version": 2,
  "source_bundle_hash": "…", "runtime_hash": "…", "state_machine_version": 1,
- "catalog_hash_v1": null, "clock_domain": "real", "first_index": 4187,
+ "clock_domain": "real", "first_index": 4187,
  "opens_from_seal": {"period_id": 1, "digest": "sha256:…"},
  "reclaimed": null, "trust_unaudited": null,
  "at": "2026-08-18T02:00:00.000000"}
 ```
 
-`catalog_hash_v1: str | null` is on every `segment` — null except on an
-adopted period 1, where it carries the legacy header's hash — so the legacy
-identity has a typed field rather than a contradiction with `extra="forbid"`.
+There is **no** `catalog_hash_v1` field. It carried an adopted period 1's
+legacy hash beside the v2 one; version 1 is a retired dialect (DL-138) and no
+`segment` records one.
 `dsl41_version` is **not** on `segment`: it is per-process and already rides on
 `leader` (`runner-design.md` §7), and keeping it here would break PR-07's
 byte-identical openings on a patch-version retry. `reclaimed` and
@@ -697,10 +711,9 @@ or capacity are valid under v2 semantics. So: `next_period.state_machine_version
 SM bump remains what it is today — a full drain and a new estate. That is no
 regression: it is the status quo, and SM bumps are deliberately rare (DL-100:
 the package version moves for a typo; the SM version moves only when the
-derivation does). The extension that lifts this — a v2 `estate check-open`
-producing an attestation the v1 sealer requires, plus a versioned
-`migrate_seal(v_from, v_to)` — is named in §12 as future work and specified
-nowhere here.
+derivation does). DL-138's evolution contract makes the rule explicit and
+permanent: a semantics change is a full drain and a new-estate genesis, and no
+extension lifts it (`docs/protocol-evolution.md` §1).
 
 ### 2.2 `seal` — the last record of a period's last segment
 
@@ -811,9 +824,9 @@ a wrong one — `digest`, `period_id`, `closes_at_index`, `at`,
 ```
 
 `concurrency-model.md` §4 step 7 requires the decision, revisions, outbox
-entries and `applied_index` to commit **atomically**, and `ha-deployment.md` §2
-records that the code does not: `result` and each `effect` are separate
-`_write` calls, each fsyncing on its own. This is the file-substrate answer:
+entries and `applied_index` to commit **atomically**, and before DL-118 the
+code did not: `result` and each `effect` were separate `_write` calls, each
+fsyncing on its own (`ha-deployment.md` §2 recorded the violation). This is the file-substrate answer:
 one line, one fsync, on the argument `Journal.admit` already makes for the input
 side. Without it a real window is invisible to every precondition: the result
 is fsynced, the process dies before the KILL effect is written, recovery finds
@@ -826,17 +839,22 @@ effect carries `{executor_id, generation}` from birth: `ha-deployment.md` §4
 resolves affinity **inside** the effect-intent transaction and forbids a remap
 from moving an existing effect, and an effect without a generation cannot prove
 at dispatch that it did not read a newer one (PR-16). **Every SPAWN effect also
-carries `run_id`, minted in the same transaction.** Today the adapter mints it
-when its task starts — after the durable effect — so an engine that dies
-between the supervisor writing R1's index and the engine recording the outcome
-resumes with a pending effect and no memory of R1, and re-dispatch mints R2
-unless recovery invents a spool-lookup rule. `concurrency-model.md` §5 always
+carries `run_id`, minted in the same transaction.** Before DL-118 the adapter
+minted it when its task started — after the durable effect — so an engine that
+died between the supervisor writing R1's index and the engine recording the
+outcome resumed with a pending effect and no memory of R1, and re-dispatch
+minted R2 unless recovery invented a spool-lookup rule. `concurrency-model.md` §5 always
 said `run_id` is bound before the attempt; DL-96 deferred it *"until the relay
 needs it"*; the seal needs it first (PR-36a). One key then runs through the WAL,
 the supervisor index, the receipt and the retry, and `(job, run_number) ↔
 run_id` is one-to-one by construction. `legacy_batch` is on **every** decision
-— `false` for a live one, `true` only for a batch adoption folded from separate
-legacy fsyncs (§11).
+and is **required false**. `true` is a retired dialect — it named a batch
+folded from separate legacy fsyncs — and a record carrying it is refused
+naming DL-138. Missing, or present with a non-boolean value, is **malformed**
+and refused as its own distinct error: an absent flag is not a false one, and a
+reader that defaulted it would accept a record no writer of this estate wrote.
+The three cases are decided at one validator, so every consumer that parses a
+`decision` inherits them.
 `index`, not `seq`, exactly as `result` today: `seq` is the subscribe cursor and
 a decision shares its attempt's number (DL-89). `decision` is an unsequenced,
 at-least-once record on the subscribe stream, as `result` was.
@@ -962,16 +980,17 @@ and decision lookup ambiguous. The engine computes `first_index` after §6 step
 6, writes it into the sidecar's `next_period` and the opening `segment`, and
 `stage_digest` excludes it (PR-05b). **`boundary_request` is
 authoritative input in three of its four fields** — `{source, request_id,
-claimed_actor, force_seal}`, where `request_id` (for a `request`),
+claimed_actor, force_seal}`, where `request_id`,
 `claimed_actor` and `force_seal` originate in the request and nowhere else,
-and `source ∈ {request, adopt}` is **derived by audit** and checked (§11). Two
-values, not three: a live seal through the control socket and an offline seal
-from the CLI are the same kind of boundary — a request carrying an id its
+and `source` is `"request"` — **one value since DL-138** — which audit checks
+for equality between the record and the sidecar (§11). A live seal through the
+control socket and an offline seal from the CLI are the same kind of boundary —
+a request carrying an id its
 caller minted — and draft 24's `control | offline` split asked audit to tell
 them apart by a `leader` record that carries epoch, time, pid, host and
-version and nothing that names the process's mode. For `adopt` the
-`request_id` is derived, `sha256("adopt" ‖ estate_id)`, and audit re-derives
-it (PR-47b); `request_fingerprint`
+version and nothing that names the process's mode. The second value the field
+once had, `adopt`, went with the estate-adoption path, and with it the derived
+adoption `request_id`. `request_fingerprint`
 is **derived** over the envelope and audit recomputes it; `forced_gate` is
 **gate output** — `null`, or `{"gate": "retry_horizon", "horizon_us": …,
 "observed_age_us": …}` — and audit re-derives it from the profile's
@@ -1049,14 +1068,17 @@ payload the oracle constructs is canonicalizable, and that is an obligation
 
 **One shared `artifact_format_version`** governs this section and every
 artifact this spec defines — the seal sidecar, the attestation, the period
-manifest, `sources.json`, `receipt.json`, `reply.json`, every `watch.jsonl`
+manifest, `staged_manifest.json`, `candidate.json`, `sources.json`,
+`receipt.json`, `reply.json`, every `watch.jsonl`
 line, the `run_id` index entry, `anchor.json`, the claim file, and the sentinel
 — each carrying the field, each refused when it names a version this binary
 does not implement (PR-08d), and each digested, where digested, over its
 canonical bytes with only its top-level `digest` removed. Draft 10 promised a
 version per artifact and gave several none; a canonicalization change moves
 the bytes of all of them at once, so one version is the honest count.
-`seal_format_version` is retired into it. An artifact serialized by incidental
+`seal_format_version` is retired into it. `docs/protocol-evolution.md` §1 puts
+every artifact named here on a compatibility row and states its lifetime.
+An artifact serialized by incidental
 `json.dumps` settings passes a same-binary test and fails after a patch changes
 serialization; the golden vectors (PR-08, PR-08a, PR-08b) exist for exactly
 that.
@@ -1497,8 +1519,9 @@ closes_at_index + 1`; every field duplicated between the candidate record and
 sidecar agrees; the **classifier runs again** over the post-barrier live
 closure — the barrier's own admissions and any reconciliation injections may
 have created executions or latent intent that phase 1 never saw, and an
-adoption barrier's reconciled FAILURE can leave a `pending_spawn` for a job
-C2 changes (PR-48) — **and its output is the committed classification**: the
+offline seal's recovery barrier can reconcile a FAILURE that leaves a
+`pending_spawn` for a job C2 changes — **and its output is the committed
+classification**: the
 sidecar's `classification` field equals phase 2's result byte for byte, never
 phase 1's. An implementation that re-ran only enough to reject R and committed
 the stale phase-1 map would carry a seal whose A assumptions omit a latent case
@@ -1579,7 +1602,7 @@ phase-1 check is one in PR-28; every phase-2 check is one in PR-28a.
 A seal **refuses** rather than proceeds when any check fails.
 
 **Readiness — before the current period closes**, and identical in live,
-offline **and adoption** mode: C2 loaded from exactly the staged bytes `stage_digest` names;
+offline mode: C2 loaded from exactly the staged bytes `stage_digest` names;
 `catalog_hash` v2 and `source_bundle_hash` computed and bound in the candidate
 manifest; `RuntimeProfile` constructed and hashed; `next_period.
 state_machine_version == seal.state_machine_version` (§2.1) and
@@ -1801,21 +1824,17 @@ switches catalogs at each `segment` record.
 matches its own canonical form proves integrity, not derivation. A seal is
 *verified* when `audit` has reproduced **every digest-covered field** of it,
 field by field — **except the scalars of `boundary_request`** (`claimed_actor`,
-`force_seal`, and `request_id` when the source is `request`), which are
+`force_seal` and `request_id`), which are
 authoritative boundary *input* originating in a request no WAL record
 independently holds; audit checks those for exact equality between sidecar
 and `seal` record — `source` rides on both and in the request fingerprint —
-and carries them. **`source` itself is derived by audit, never read**: a
-boundary is `adopt` iff the closing segment is **period 1** with
-`catalog_hash_v1` non-null and the root's sentinel `adopted_from` non-null —
-for period 1 the two must agree and a one-null/one-non-null pair refuses; for
-any later period `catalog_hash_v1` is null by schema while `adopted_from`
-stays set for the life of the root, so agreement is checked only on period 1
-and every later boundary derives `request` (PR-47b) — audit compares its derivation against both copies.
-Otherwise a consistent rewrite of `adopt → request` plus a new id would have
-told audit to treat the id as authoritative. An **adoption's** `request_id`
-is re-derived, not carried. The sentinel is therefore a **fifth** audit input
-beside the four below, read for exactly this one derivation. Everything else is re-derived: `request_fingerprint`
+and carries them. **`source` is `request` on every boundary since DL-138**:
+it has one legal value, so there is nothing left to derive, and audit checks
+the record and the sidecar agree on it and refuses a disagreement (PR-47b).
+The second value, `adopt`, and the evidence pair that used to decide between
+them — `catalog_hash_v1` on the period-1 `segment` and `adopted_from` on the
+sentinel — went with the estate-adoption path. The sentinel is therefore not
+an audit input. Everything else is re-derived: `request_fingerprint`
 from the envelope, `forced_gate` from the pinned horizon, the WAL and T, and
 the state, executions, outbox, classification and every lineage field
 (`baseline_id` included) — from exactly four things: the opening seal; the complete
@@ -1858,11 +1877,9 @@ release discipline this implies, and it closes what draft 3 left open as PR-Q4.
 | --- | --- |
 | sidecar present, `seal` record absent | orphan; period still open |
 | `seal` record present, anchor head still `open` | committed; resume performs the `open → closed` CAS, then proceeds as the next row |
-| adoption's `seal` record present, head still `adopting` | committed; a re-run of `estate adopt` performs `adopting → closed`; `run --resume` refuses until it has |
 | `seal` record present, head `closed`, no following `segment` | claim the successor and open `next_period` |
 | physical roll: crash after import, before the first `segment` in the new root | the import is idempotent by content address; re-import, then open |
 | physical roll: closing period has no `audit.json` | refuse: attest first |
-| adoption: an old binary is pointed at the adopted root | `run` refuses (a `journal.jsonl` exists); `run --resume` refuses (first record is `period_root`, not `header`) |
 | head `claimed(claim_id, root)`, crash before the first `segment` record | the same `(seal, next_period, root)` recomputes the same `claim_id`, resumes it, opens; a different one refuses naming the holder |
 | head `claimed`, first `segment` durable, crash before head moved to `open` | resume finds the segment, moves the head to `open`, continues |
 | new-format estate, crash in period 1 before any seal | replay from the genesis segment |
@@ -1879,141 +1896,28 @@ release discipline this implies, and it closes what draft 3 left open as PR-Q4.
 | two candidate active segments | impossible by I1 once `segment_no == period_id`; a second file for one period is refused as foreign |
 | `segment` pins ≠ preceding seal's `next_period` | refuse |
 | any record after a `seal` in the same segment | refuse |
-| legacy `header` journal, no `segment` | not opened in place: **adopted** by `dsl41 estate adopt` (below), and refused by `run --resume` until it is |
+| legacy `header` journal, no `segment` | **refused** — a retired dialect, named with DL-138 (below) |
 
-**Legacy adoption: fence first, authority second, on a drained estate.**
-`dsl41 estate adopt <legacy-root> --estate-anchor <dir> --next <estate
-files>... [--runtime-profile …]` — it is a seal, so it takes `--next` like one.
-In this order, and the order is the whole argument:
+**Legacy adoption is retired (DL-138).** Drafts 4–29 defined `dsl41 estate
+adopt`: a transaction that fenced a run root written before this model,
+translated its `header` journal into `wal/000001.jsonl` and sealed period 1 in
+one step. No dsl41 estate runs in production, so the path had no producer and
+no estate to consume. It is gone, and with it the `adopting` head state, the
+`adopt` seal source, `catalog_hash_v1`, the sentinel's `adopted_from` and the
+`legacy_batch: true` fold.
 
-1. **lock and identify**: take the legacy root's `leader.lock` — a live
-   legacy engine holds it, and adoption refuses rather than racing it — **and**
-   `anchor.lock` on the target anchor directory, which must hold **no
-   `anchor.json`** (§1.1's ownership rule). Both locks are held for the whole
-   transaction. Then **mint `estate_id` in memory**, because readiness (next)
-   must construct the synthetic request `sha256("adopt" ‖ estate_id)` to run
-   its collision check, and step 3 is where that identity becomes *durable*,
-   not where it is created — a failed readiness discards the in-memory value.
-   Then **reconstruct the legacy state in memory** — a read-only replay of
-   the legacy journal and a read-only reconciliation sweep (spool, `LIST`),
-   writing nothing — because phase 1 classifies against the *carried* live
-   closure, and a fresh C1 oracle knows nothing of legacy QUE_WAIT rows, armed
-   latches, timers or pending intent; draft 17 classified first and would have
-   fenced the legacy root before discovering the real state. Then run
-   **phase-1 readiness** for C2 (§7) over that state; a failure refuses here,
-   with the sentinel, the legacy WAL and the anchor untouched — staged files
-   under `catalogs/` and `periods/.staging/` may exist, and are harmless. Step
-   5 repeats the replay and sweep durably; both are deterministic over the
-   same inputs;
-2. **require a drained and settled estate**: the reconciliation sweep —
-   legacy `dispatch` records, spool directories, supervisor `LIST` — finds no
-   live wrapper, no live FW, the legacy outbox has nothing pending, **and every
-   admitted input has a durable `result`**. That last clause is a refusal, not
-   a repair: replay recovers only the `ApplyResult` of a result-less input and
-   discards the emitted events that would plan its effects, so an adopter that
-   "gave it a decision" either dispatched a recovered SPAWN before its decision
-   was durable or wrote `effects: []` and let reconciliation fail a start the
-   old estate had committed. Neither is acceptable; the operator resumes the
-   legacy engine, lets it settle, and retries. A detached wrapper can
-   outlive the engine that released the lock, so "no engine" is not "no work";
-   and a live legacy FW's progress exists only in an adapter's local variable,
-   so it is not reconstructible and is a **hard refusal**. Adoption is a
-   one-time migration; a drain is what the runbook already does at every
-   release;
-3. **fence**: hard-link `journal.jsonl` to
-   `legacy/journal.jsonl` and `fsync(dir)`; then rename the sentinel over
-   `journal.jsonl` and `fsync(dir)` — the §1.1 `period_root` record with
-   `adopted_from: "legacy/journal.jsonl"`. The tombstone is
-   where `estate_id` is first durable; a re-run reads it back rather than
-   minting a second. From here an old `run` refuses (a `journal.jsonl`
-   exists), an old `run --resume` refuses (its first record is not `header`),
-   and there is no instant at which the file is absent — which matters because
-   old `run` on a journal-less root starts a **new genesis** and writes
-   `manifest/` before it takes the lock. Both writes are the liturgy: a bare
-   `link` plus `os.replace` passes every process-kill test and a power loss can
-   restore the header pathname after period 2 has opened. **Before this step an
-   old binary may legitimately lead**, because no new authority exists yet and
-   nothing durable has changed; the re-run simply starts over. After it, none
-   may;
-4. **authority**: only now perform the create-only CAS `absent →
-   adopting(1, legacy-root)` with the sentinel's `estate_id`, under the lock
-   held since step 1. **`adopting` is a fourth head state**, and it is what
-   gives adoption one recovery owner: while the head is `adopting`, `estate
-   adopt` owns the root — a re-run finds our own `adopting(1, legacy-root, our
-   estate_id)` and continues from wherever it stopped, segment written or not
-   — and `run --resume` **refuses**, naming `adopt`. Draft 14 handed recovery
-   to `--resume` "once a segment exists", which is after step 5 and before the
-   seal, so a crash there had two owners and neither could finish. The head
-   moves `adopting → closed` at step 7 and never `→ open`;
-5. **term, barrier, then translate** — and the barrier is **dispatch-free**:
-   first synthesize the adopter's own **`leader` record at `max_epoch + 1`**,
-   because every input the adopter generates belongs to an incarnation and
-   `runner-design.md` §7 says so — a reconciliation input under the dead
-   legacy leader's epoch, or under an epoch with no leader record, is one the
-   frozen record contract cannot place; the seal then carries that same term.
-   Then run the same-root recovery barrier over the legacy inode — replay,
-   reconcile every execution host, re-drive recorded kills — under the legacy
-   `state_machine_version`, which must equal this binary's, **with the outbox
-   held**: every effect the barrier's reconciliation injections plan is left
-   *pending*, never dispatched, and period 2 dispatches it after opening. A
-   reconciled FAILURE can satisfy a downstream condition and plan a SPAWN; a
-   barrier that dispatched it before its decision was durable in the translated
-   WAL would repeat the act after a crash. Held, the injection and its planned
-   effect are durable in `wal/000001.jsonl` and in the seal's `outbox_pending`
-   before anything acts on them. Then
-   write `wal/000001.jsonl` by the liturgy: a synthesized `segment` from the
-   `header` (`estate_id`, `period_id: 1`, `segment_no: 1`,
-   `catalog_hash` recomputed as v2 from the loaded catalog, `catalog_hash_version: 2`, `catalog_hash_v1` from the header, `runtime_hash`
-   from the manifest's launch options plus operator-attested fields,
-   `first_index: 1`, `opens_from_seal: null`); every `input`/`advance`/`host`/
-   `leader`/`dispatch`/`drop`/`preflight`/`effect_result` copied verbatim; every
-   `result` and its same-index `effect` records folded into one `decision`
-   line, `generation: 0` and the `run_id` read from `spawn.json` on each SPAWN
-   effect (the legacy estate had exactly one executor at generation 0, and the
-   spool is where its adapter recorded the run — defined reconstructions, not
-   guesses) — **or `run_id: null` where no `spawn.json` exists and the effect's
-   recorded outcome is `retired` or `indeterminate`**: a legacy SPAWN that a
-   drain and a KILL retired before it reached an adapter legitimately has no
-   run and no file, and adoption must not refuse an estate for a run that
-   never existed. `null` is legal only under `legacy_batch: true`, and the line marked `legacy_batch: true` because those records
-   were **separate fsyncs** and a fold cannot make a torn batch atomic after
-   the fact — audit knows the difference. Reconciliation injections the
-   barrier itself makes are appended as what they are: an `input` with
-   `source: "reconcile"` **and** its `decision`, the pair every live
-   reconciliation writes;
-6. **split** `manifest/` into `catalogs/<bundle>/` and `periods/000001/` — a
-   construction, not a rename;
-7. **seal** period 1 through **the common seal body** — stage C2 under
-   `catalogs/` and `periods/.staging/`, phase 1, the committed manifest,
-   phase 2 (with phase 3's load on the committed form), install, sidecar, `seal` record appended to
-   `wal/000001.jsonl`, anchor CAS **`adopting → closed`**, which is also where period 1's
-   registry row flips `segment_durable: true` — adoption's finalize is folded
-   into its close, because the period-1 segment and its seal are one
-   transaction here and a separate finalize would be a crash window with no
-   reader that could use the row in between (PR-48) — with a synthetic
-   boundary request: `request_id = sha256("adopt" ‖ estate_id)`, the
-   fingerprint over the same envelope a live request would carry, and the
-   invoking claimed actor. Draft 15 let adoption fence the legacy root and
-   commit period 1 without ever running C2's readiness, so an unsupported
-   artifact version or a failing preflight surfaced only when period 2 refused
-   to open — a committed, unopenable boundary with the old engine already
-   fenced. A phase-1 failure refuses **in step 1**, before the fence, with the
-   sentinel, legacy WAL and anchor untouched. A **phase-2** refusal happens
-   after the fence by design — the barrier can create intent phase 1 never saw
-   — and it does **not** strand the estate: an uncommitted adoption is retried
-   under the same `estate_id` with a **corrected C2** whose `stage_digest` may
-   differ, the old candidate quarantined as §7 quarantines any superseded one,
-   and the adoption completed; "the exact same incomplete transaction" in
-   §1.1's ownership rule means the same `estate_id` and legacy root, never the
-   same staged C2 (PR-48).
+What stands in its place is a refusal, not a repair. A `journal.jsonl` opening
+with a `header`, a `catalog_hash_version` of 1, a `result` or standalone
+`effect` record, a `manifest/manifest.json` layout and an on-disk head state of
+`adopting` are each refused **by name**, citing DL-138, by the owner that meets
+them. A run root written before the period model is therefore neither adoptable
+nor readable, and there is no supported path from one into a lineage.
 
-Every step is idempotent — a re-run finds the tombstone and continues; nothing
-mints a second `estate_id`. Every step is a matrix row (PR-48), each tested by
-launching an old binary at that crash point **before** recovery: after steps
-1–2 it may lead and the re-run absorbs whatever it appended; after step 3 it
-must not lead and must not genesis; and each row is also a **power-loss**
-injection, not only a process kill. Residue an old `run` can leave before its
-own refusal: a stray `manifest/` — junk, tolerated, never read.
+`docs/protocol-evolution.md` is the contract this retirement ran under: the
+per-protocol compatibility matrix, the lifecycle a new dialect enters service
+by, the absence gate a retirement normally has to meet, and the pre-production
+reset clause that let this one meet it trivially. It records this strip as the
+first executed retirement.
 
 **Subscribers** (`control-protocol.md` §5, v3): a client asking for an index
 below the earliest retained record receives an explicit gap marker; the seam
@@ -2105,8 +2009,9 @@ presented against a different `(job, run_number)`, and a fingerprint collision.
 ## 12. Non-goals
 
 - a physical roll while jobs are live (the multi-root execution bridge);
-- a `state_machine_version` change across a transition (§2.1) — the
-  two-interpreter handshake and `migrate_seal` are the extension that lifts it;
+- a `state_machine_version` change across a transition (§2.1) — and not an
+  extension point: a semantics change is a full drain and a new-estate genesis
+  (`docs/protocol-evolution.md` §1, DL-138);
 - the shared store — orthogonal; when it lands it replaces the anchor (§1.3);
 - mid-run catalog reload (DL-65);
 - automatic sealing on a timer;
@@ -2139,20 +2044,28 @@ other and the gate must resolve them.
 
 Written against "what would a plausible-but-wrong implementation still pass?"
 
+**Every row has a STATE: `active` or `retired`.** An active row is a property
+a test holds the code to, and every row below is active unless its own cell
+says otherwise. A **retired** row names the decision-log entry that retired it
+and the refusal tests that replaced it. It stays in the table: the citations
+that point at it must still resolve, and a reader of an older commit has to be
+able to find what the obligation was. A retired row is never deleted, never
+renumbered and never re-used for a different property.
+
 ### 13.1 Lineage
 
 | # | obligation |
 | --- | --- |
 | PR-01 | two roots concurrently claiming one seal: exactly one succeeds; the loser refuses, names the holder, appends and dispatches nothing |
-| PR-01b | genesis **and adoption** against an **existing** anchor refuse, even when its incumbent is dead and detached work is alive under it; two roots racing genesis on one anchor: exactly one estate exists afterwards; genesis's own interrupted `open(1, root)` with a matching sentinel and no segment is the sole resume |
-| PR-01c | a target root that already holds a `journal.jsonl` — another estate's, this estate's earlier period, a concurrent opener's, **or this estate's own sentinel from an older abandoned claim** — refuses a physical-roll opener; two estates racing one fresh root: no anchor is ever `claimed(R)` while R's sentinel is not this estate's for this `claim_id`; an in-place opener on its own root proceeds with a sentinel whose `claim_id` is the root's creating claim |
+| PR-01b | genesis against an **existing** anchor refuses, even when its incumbent is dead and detached work is alive under it; two roots racing genesis on one anchor: exactly one estate exists afterwards; genesis's own interrupted `open(1, root)` with a matching sentinel and no segment is the sole resume |
+| PR-01c | a target root that already holds a `journal.jsonl` — another estate's, this estate's earlier period, a concurrent opener's, **or this estate's own sentinel from an older abandoned claim** — refuses a physical-roll opener; a root holding a **retired `header` journal** refuses naming DL-138, while an unrecognised non-estate root keeps the generic refusal; two estates racing one fresh root: no anchor is ever `claimed(R)` while R's sentinel is not this estate's for this `claim_id`; an in-place opener on its own root proceeds with a sentinel whose `claim_id` is the root's creating claim |
 | PR-01a | **native genesis** as a crash matrix: killed after the sentinel, after the anchor, after the manifest, before the first `segment`, **after the segment and before the finalize CAS** — each re-run completes idempotently, `estate_id` is read back not re-minted, and an **old binary launched at every point refuses both `run` and `run --resume`**; the same for a physical roll's new root — with power loss after the sentinel and after the claim, and the assertion that no state has `claimed(target_root)` while the target lacks a valid sentinel |
 | PR-02 | the winner crashes with the head `claimed`: a resume from the **same** `(seal, next_period, root)` — a new PID, and the root given as `./r` the first time and `/abs/r` the second — recomputes the `claim_id`, resumes it and opens; a different root still refuses |
 | PR-02a | a quiet **physical roll** end to end: `audit` period 1 in A, seal, `run --open-from` into root B, **A is made unavailable**, B is crashed and resumes from its own imported artifacts, `verify` of period 1 passes in B (full `audit` is impossible there and is not asked), and A (restored) refuses to open the same seal |
 | PR-02b | the `open → closed` CAS: crash after the `seal` record and before the head moves; resume performs the CAS and the successor claim then proceeds |
-| PR-02c | anchor durability under **power loss**, not process kill: with `fsync(dir)` removed from any one head transition the test fails; a successor's registry row appears in the same write as `claimed → open`; period 1's row is provisional (`segment_durable: false`) and flips **in genesis's finalize CAS immediately after its segment** and **in adoption's `adopting → closed`** — an implementation that flips it at period 1's close after a running engine, or never, fails; cross-period readers ignore it until it flips |
+| PR-02c | anchor durability under **power loss**, not process kill: with `fsync(dir)` removed from any one head transition the test fails; a successor's registry row appears in the same write as `claimed → open`; period 1's row is provisional (`segment_durable: false`) and flips **in genesis's finalize CAS immediately after its segment** — an implementation that flips it at period 1's close after a running engine, or never, fails; cross-period readers ignore it until it flips |
 | PR-02d | `run --open-from` refuses a closing period with no `audit.json`, **and** one whose `audit.json` fails `verify` — a file that merely exists is not enough |
-| PR-02f | estate-wide `audit`, `journal` and `runs` find period 1's root through the registry after native genesis and after adoption, and still after a physical roll of period 2 |
+| PR-02f | estate-wide `audit`, `journal` and `runs` find period 1's root through the registry after native genesis, and still after a physical roll of period 2 |
 | PR-02e | **producer-negative**: `audit` of period 2 refuses to emit an attestation over a missing, invalid or mismatched attestation 1. **consumer-positive**: two consecutive physical rolls with both earlier roots unavailable — C `verify`s attestation 2 alone and accepts the chain below it |
 | PR-03 | the anchor directory is deleted under a live incumbent: it stops on its next append, its next dispatch, its next revision-bearing read — a `status` immediately after replacement is refused, not answered — **and its next FW `watch.jsonl` append**, with the replacement injected between the observation and the line |
 | PR-04 | an NFS anchor path is refused at startup |
@@ -2280,9 +2193,9 @@ Written against "what would a plausible-but-wrong implementation still pass?"
 | PR-24c | an evicted host row carries across a seal as evicted; nothing in this spec un-evicts it; a re-registration of a non-evicted host that changes only `deadman_us` or `last_contact` writes no record and moves no revision |
 | PR-27a | a host evicted, its work re-driven or retired, its spool reconciled, its supervisor gone for good: the seal **commits** |
 | PR-47c | a CMD live at T whose `status.json` lands in C2 audits as live in C1 — including `ended_at == T`, because ownership comes from the WAL's admitted completion, not the timestamp |
-| PR-47b | `audit` reproduces **every** digest-covered field except the `boundary_request` input scalars, which it checks record-vs-sidecar and carries; a consistent rewrite of `request_fingerprint`, `forced_gate.horizon_us`, `forced_gate.observed_age_us`, a top-level/nested actor disagreement, **or an adoption's `request_id`, a consistent `source: adopt → request` rewrite with a new id, or a period-1 `catalog_hash_v1`/`adopted_from` pair that disagrees** **fails**; an in-place period 2 after an adopted period 1 derives `request` and passes;
+| PR-47b | `audit` reproduces **every** digest-covered field except the `boundary_request` input scalars, which it checks record-vs-sidecar and carries; a consistent rewrite of `request_fingerprint`, `forced_gate.horizon_us`, `forced_gate.observed_age_us`, a top-level/nested actor disagreement, **or a record and sidecar that disagree on `source`** **fails** |
 | PR-47e | seal under `retry_horizon_us` = H1, audit under an ambient setting H2 ≠ H1: audit derives `forced_gate` from H1 read out of the **closing** period manifest; and C1 = 60 s / staged C2 = 1 s with a 10-second-old attempt refuses unforced, while the reverse commits; an effect with no `effect_result` is in `outbox_pending`; one with `applied`, `indeterminate` or `retired` is not, and each of those still shapes the reconstruction; and one dropped scheduler tick reaches the frontier |
-| PR-48 | `estate adopt` as a crash matrix over §11's seven steps, each row a process kill **and** a power loss — after steps 1–2 an old binary launched before recovery **may** lead and the re-run absorbs it; after step 3 it must neither lead nor genesis; the re-run completes idempotently and no run mints a second `estate_id`; a live legacy engine blocks adoption; a live detached wrapper with no engine, a live FW, and a pending legacy outbox each **refuse**; `run --resume` refuses while the head is `adopting`; every adopter-generated input is bracketed by the adopter's `leader` at `max_epoch + 1` and the seal names that term; adoption's `boundary_request` is `{source: adopt, request_id: sha256("adopt" ‖ estate_id), claimed_actor: the invoking actor, force_seal: the CLI flag}`, and a live or offline seal's `source` is `request`; a C2 failing readiness refuses adoption **before** the fence, legacy estate untouched; a crash after C2's install and before the seal record re-runs to completion; a crash after the seal record and before `adopting → closed` leaves `run --resume` refusing until the re-run performs the CAS; an admitted input with no `result` **refuses** adoption; a torn `result`/`effect` batch folds with `legacy_batch: true` and the complete translated record sequence — not only the fold — matches the retained original; a retired legacy SPAWN with no `spawn.json` translates with `run_id: null`; a reconciled FAILURE that plans a downstream SPAWN leaves it **pending** in the translated WAL and the seal, and period 2 dispatches it once — with crash points around the injection, its decision, the translation and the first dispatch; **and when C2 changes that downstream job**, phase-2 reclassification refuses the seal after the barrier and before the record, so C2's command never runs under C1's run number — **and then** a corrected C2 is staged, the adoption is re-run under the same `estate_id`, it commits, and period 2 dispatches the pending SPAWN once; the translated segment replays, audits, opens period 2 and resumes under the new binary; the fold is lossless against the retained `legacy/journal.jsonl` |
+| PR-48 | **RETIRED by DL-138.** It was the `estate adopt` crash matrix over the seven steps of §11's legacy-adoption transaction, and neither the verb nor the transaction exists. Its replacements are the refusal tests DL-138 owes (`docs/protocol-evolution.md` §7), one set per owner: a journal opening with a `header`, a `result` mid-journal and a standalone `effect` each refuse naming the kind and DL-138, while a `host` record is accepted and an **unknown** kind refuses naming itself as its own error; `legacy_batch` false proceeds, true refuses naming DL-138, missing or non-boolean refuses as malformed — the true case driven through a history and a retention consumer as well as through the central validator; `catalog_hash_version` 1 refuses naming DL-138 through **both** the journal reader and journal creation, and an unknown version refuses generically; a root holding `manifest/manifest.json` where the period manifest is absent refuses naming the retired layout, while a `manifest/` directory without that file refuses generically; `claim_root` and `plan_retention` on a `header` root refuse naming DL-138 and on garbage refuse generically; an on-disk anchor whose head state is `adopting` refuses **before parse**, naming DL-138; and `estate adopt` is not a command |
 | PR-49 | subscribe: pruned cursor → gap marker; `decision` across the backfill/live seam; exact-retry cursor |
 | PR-50 | run history spans a boundary keeping `start_period` |
 
@@ -2320,8 +2233,8 @@ into one scenario and called it end-to-end evidence; it was a refusal scenario
 mislabelled.
 
 **C — the lineage** (the fence). A quiet physical roll after attestation
-(PR-02a, PR-02d); a fork attempt from a second root (PR-01); an old binary
-pointed at an adopted root (PR-48); the winner crashed with the head `claimed`
+(PR-02a, PR-02d); a fork attempt from a second root (PR-01);
+the winner crashed with the head `claimed`
 (PR-02); the anchor deleted under the incumbent (PR-03); a crash in period 1
 before any seal (PR-45); a lost `seal` response on both sides of the record
 (PR-30a).
@@ -2348,7 +2261,8 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `runner_supervisor.py` | completed-run tombstones (PR-36) |
 | `runner_history.py`, `cli.py journal` | period-aware |
 | `runner_history.py` | `_job_fingerprints` becomes `period.job_fingerprints` (DL-131): §10.2's leaf test is named here under its original home, and a pure analysis pass may not import a private name out of a runner module |
-| `citation-index.md` | `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135) |
+| `protocol-evolution.md` | **new** (DL-138): the per-protocol compatibility matrix, the lifecycle a dialect enters service by, the retirement gate, the pre-production reset clause, and the tombstone-registry rule |
+| `citation-index.md` | `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135); the PR row states what a retired row cites (DL-138) |
 | `CLAUDE.md` | read-first list |
 
 ## 16. Open questions

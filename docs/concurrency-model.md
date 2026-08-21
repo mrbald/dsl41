@@ -723,10 +723,19 @@ diagnostic and leave, and **spans stay** — a relocated or reordered estate
 is still a different estate (`docs/period-model.md` §1.1). The version is
 carried explicitly as `catalog_hash_version` on the opening record and on
 the period manifest, never inferred, and **the gate recomputes under the
-recipe the log itself names**: a legacy `header` pins v1 and is compared
-under v1 for the rest of its life; a `segment` pins v2. Comparing across
-recipes would refuse every journal in existence, in one direction or the
-other. What eligibility means is unchanged: two pins, both exact.*)*
+recipe the log itself names**: a `segment` pins v2. What eligibility means is
+unchanged: two pins, both exact.*)*
+
+*(Amended by DL-138.* **Version 1 is retired.** The sentence above used to add
+"a legacy `header` pins v1 and is compared under v1 for the rest of its life",
+because comparing across recipes would have refused every journal then in
+existence. No such journal exists: the `header` record and `catalog_hash`
+version 1 are retired dialects, refused by name at one dispatcher
+(`docs/protocol-evolution.md`). The gate reads one recipe, and a record naming
+version 1 is refused rather than compared. The same entry closes the DL-100
+courtesy above: a `header` "that pins none" cannot arrive, so nothing reads
+as state-machine version 1 by default. The record at position zero is a
+`segment`, and it pins both.*)*
 
 ## 8. Host lifecycle: active, passive, evicted
 

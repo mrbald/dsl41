@@ -6566,3 +6566,172 @@
   2934 -> 2937 collected (the parser pin, the machine-policy pin and
   the tier-boundary equality pin); ruff, mypy and arch_check clean; the
   review stamped arch-review/2026-08-21.
+- DL-138 the legacy read dialects retire, and the contract that governs the
+  next retirement (2026-08-21; a pre-production reset over the whole read
+  side -- period-model draft 30, the new `docs/protocol-evolution.md`, and the
+  code strip that follows them).
+  THE RULING. Adoption from a legacy estate is ruled out. No dsl41 estate runs
+  in production, so the five read dialects the tree still carried have no
+  producer and no estate left to consume: the `header` journal opening;
+  `catalog_hash` version 1; the `result` and standalone `effect` records with
+  the `legacy_batch: true` fold that read them; the `manifest/manifest.json`
+  run-root layout; and the whole `dsl41 estate adopt` path. Every one of them
+  was kept for a single reason -- a run root written before the period model
+  must keep replaying, resuming and reporting -- and no such root exists.
+  THE CLASSIFICATION. This is a PRE-PRODUCTION RESET under the reset clause of
+  the evolution contract below. The ordinary retirement gate is the ACTUAL
+  ABSENCE of every instance, and here it is met trivially, because nothing
+  was ever written anywhere. The consequence is stated rather than hidden: a
+  pre-DL-138 on-disk root is unreadable. The clause is usable only while
+  nothing runs in production, and this entry states that condition so a later
+  reader can check the claim instead of inferring it. First use, and once
+  production exists, the last.
+  WHAT REPLACES THE READERS AS PROOF. Those readers were also the tree's only
+  live demonstration that its versioning mechanism worked at all. Four things
+  carry that now: the contract in `docs/protocol-evolution.md`; owner-local
+  refusal-by-name tombstones; per-surface dispatcher tests; and this strip,
+  recorded in that document as the contract's first executed retirement.
+  D1 RETIREMENT IS REFUSAL BY NAME, through OWNER-LOCAL tombstone registries
+  -- never a deleted reader, which produces a generic parse error or silence.
+  For record kinds, ONE validator at the `read_journal` layer dispatches three
+  ways: a current kind proceeds, from a registry pinned at implementation from
+  the read sites plus period-model ss2 and runner-design ss7, `host` INCLUDED;
+  a retired kind (`header`, `result`, `effect` -- append-only) refuses naming
+  the kind and this entry; an unknown kind refuses naming the kind. Today
+  `read_journal` IGNORES an unknown `rec`, and the change is deliberate:
+  version gating sits on the opening `segment`, so an unrecognised kind inside
+  a version-matched segment is corruption, not tolerance. `legacy_batch` is
+  pinned three ways at the same validator -- exactly `False` proceeds, `True`
+  is retired and refused naming this entry, missing or non-boolean is
+  malformed and refused as a DISTINCT error -- so `runner_history` and
+  `retention`, which parse decision effects without `read_outbox`, inherit all
+  three. The validator reads `rec` and `legacy_batch` only; per-record key
+  strictness stays whatever each schema already declares.
+  D2 `legacy_batch` STAYS on the `decision` record, required and false. The
+  writer pins it; the reads are D1's. No wire break.
+  D3 SCHEMA SURGERY IS FULL REMOVAL, no tombstone fields: `Sentinel`'s
+  `adopted_from` AND `adopted_anchor`; the `adopting` `Head` variant with its
+  whole operative surface (`create_adopting`, the `close_period` adopting
+  branch, `_spell`, `act_on_head`, the startup adoption flags);
+  `SealRequest.for_adoption` and the boundary-request schema narrowed in the
+  same change; the seal `source` literal narrowed to `"request"` with
+  `attest._boundary_request`'s derivation simplified; `adopt_request_id`;
+  `claim_root(adopted_from=...)`; and the `segment` field `catalog_hash_v1`
+  with its schema entry. An on-disk anchor whose head state is `adopting` gets
+  a PRE-PARSE refusal naming this entry -- a retired-STATE tombstone in
+  `boundary`, not a generic validation error a reader cannot act on.
+  D4 ONE three-way catalog-hash-version dispatcher -- current proceeds, 1 is
+  retired and named, anything else is unknown and refuses generically --
+  shared by EVERY owner path: `check_segment_record`, `Journal.create`'s
+  independent gate and `catalog_hash_at`. `catalog_hash_v1()` and the v1
+  recipe go, and `catalog_hash_for`'s header arm with them. Three owners asked
+  one question in three places, and a strip that fixed only the one with a
+  test would have left the other two answering it differently.
+  D5 THE ADOPT-FUNNEL REFUSALS STOP NAMING A DELETED VERB. `resume_run`'s
+  legacy-header refusal and its `_is_legacy_header` helper are subsumed by
+  D1's tombstone. `boundary.claim_root` and `retention.plan_retention` do not
+  route through `read_journal`, so each gets an owner-local header-only
+  tombstone check: a recognised header root refuses naming this entry, while
+  an unknown non-estate root keeps its generic refusal.
+  `attest.rederive_seal` refuses "retired dialect" without naming a verb that
+  no longer exists.
+  D6 THE TRIPLICATED DECIDED-SET JOIN drops its `"result"` arm in all three
+  places in one unit: `runner_journal.read_decisions`,
+  `boundary.externally_requested_attempts` and `estate.check_drained` -- the
+  last of which goes with its module.
+  D7 DEAD CODE DELETED AND NAMED, corrected from the first reading.
+  `runner_startup`'s legacy default reconciliation windows -- the two
+  `settle_seconds`/`grace_seconds` fallbacks commented "a legacy root: the
+  shipped defaults" -- have been unreachable since DL-134 made a legacy root
+  refuse before it could reach them, and DL-134 did not name them. They go,
+  with the obsolete legacy comments beside them. The refusal a few lines ABOVE
+  them STAYS and is load-bearing: a `segment` journal with no
+  `periods/000001/manifest.json` is a root that LOST its pin, and degrading
+  there would skip every profile gate below. Two branches in one function, one
+  dead and one carrying the section's whole argument -- naming which is which
+  is the point of this paragraph. DL-134's own named dead branch,
+  `_resume_untraced_starts`' no-adapter `continue`, goes too.
+  D8 THE EVOLUTION CONTRACT, `docs/protocol-evolution.md`, written per
+  CONCRETE protocol with SEPARATE compatibility and lifetime columns, because
+  a tolerant reader is not a long-lived one and a long-lived artifact is not
+  automatically a tolerant one. Rows are split BY TOLERANCE RULE, not by file:
+  WAL journal records; the closed estate artifacts of period-model ss3.2 --
+  every member it declares closed, `candidate.json` and `staged_manifest.json`
+  included, assigned by reference to the rule ss3.2 already states rather than
+  restated here; the tolerant estate files -- `sources.json` and the
+  FW-written watch records, whose readers take the fields they need while
+  their versions still refuse; the tolerant supervisor artifacts
+  (receipts, replies and the run-id index); the wrapper-owned spool, which is
+  `spawn.json` and `status.json` and NOTHING else -- `watch.jsonl` is
+  FW-adapter-written and lives in its own row; the supervisor socket AND the
+  control socket, one row each; and `state_machine_version` as a SEMANTICS
+  row, frozen across a transition, evolving only by a full drain and a
+  new-estate genesis. UNKNOWN FIELDS AND UNSUPPORTED VERSIONS ARE DISTINCT
+  CASES ON EVERY ROW: a tolerant row ignores an unknown field and still
+  REFUSES an unsupported version, and the two are tested separately. A new
+  dialect enters service in four steps -- introduce with dual-read, overlap
+  with POSITIVE compatibility tests that pin both versions, switch the writer
+  for new instances only, then retire. The retirement gate is the actual
+  absence of every instance, floored, held or prunable-but-present alike:
+  DL-135 made pruning optional and policy-driven, so a prunable artifact can
+  stay readable indefinitely, and "prunable" is a verdict rather than a
+  deletion. MIGRATION IS NOT THIS CONTRACT'S MECHANISM: if one is ever needed
+  it is its own decision-log entry with lineage and verification proofs -- the
+  path this entry retires is the shape such a thing takes -- and an in-place
+  rewrite of an immutable digest-bound artifact is never permitted. The reset
+  clause is the only bypass, under its own stated condition. Every evolution
+  event owes one decision-log entry plus dispatcher tests per affected row.
+  D9 RETIRED FORMATS GET OWNER-LOCAL NAMED TOMBSTONES, not generic refusals:
+  `catalog_hash` version 1 through D4's dispatcher, and the legacy `manifest/`
+  layout in `runner_history` discriminated ON THE FILE --
+  `<run-root>/manifest/manifest.json` present where `periods/<id>/manifest.json`
+  is absent is the retired layout and refuses naming this entry, while a
+  `manifest/` directory WITHOUT that file is unknown residue and refuses
+  generically. The two are different states and an operator needs to be told
+  which one is on the disk.
+  D10 THE ADOPTION-ONLY RUNTIME SURFACE GOES WITH THE PATH. `Engine.hold_outbox`
+  is retired: the field on the engine in `runner.py` and the dispatch branch
+  that read it -- the one that made the whole dispatch surface a no-op, with
+  exactly one caller and a docstring citing the period-model ss11 steps this
+  entry deletes. The `estate` CLI group's help text and `estate.py`'s module
+  docstring stop promising adoption; the group keeps `reclaim` and `prune`.
+  WHAT THE SPECS SAY NOW. `docs/period-model.md` goes to DRAFT 30. ss2's
+  retired-record list reads "refused by name since DL-138" and confirms `host`
+  as current; ss2.1 loses `catalog_hash_v1`; ss2.3 states the three
+  `legacy_batch` cases; ss1.3 loses the `adopting` head state and its two
+  transitions; the sentinel loses `adopted_from`; ss3.1's seal source narrows
+  to `request`; ss8's adoption mode goes; ss11's seven-step adoption
+  transaction is replaced by a short retirement note pointing at the contract,
+  and the recovery matrix's legacy-header row now reads "refused (retired
+  dialect)". ss13's preamble gains a ROW STATE: active, or retired with the
+  entry that retired it and the replacement tests named. PR-48 is RETIRED here
+  and KEPT in the table so its citations still resolve; its replacements are
+  named in its own cell -- the header/`result`/`effect` and unknown-kind
+  dispatch, the `host`-accepted positive, the `legacy_batch` trio driven
+  through a history and a retention consumer, catalog-hash version 1 through
+  both the journal reader and journal creation, the manifest-layout pair, the
+  `claim_root`/`plan_retention` header-root tombstones, the pre-parse
+  `adopting` anchor refusal, and `estate adopt` as an unknown command.
+  PR-01b, PR-02c, PR-02f and PR-47b stay ACTIVE and keep their numbers,
+  losing only their adoption clauses -- PR-47b keeps every request-only audit
+  obligation it had. PR-01c is reworded: its refusal names a retired dialect
+  instead of a verb. `docs/citation-index.md`'s PR row now says a property is
+  tested while the row is active and that a retired row cites its retiring
+  entry and its replacement tests. concurrency-model ss7 retires "a legacy
+  `header` pins v1"; runner-design ss7 keeps the retired record entries as
+  history with their read promises withdrawn; the runbook's Adopt section
+  becomes a pointer to the contract and states that a pre-boundary-era root is
+  not adoptable.
+  WHAT IS KEPT, AND STRENGTHENED. `read_journal`'s opening requirement -- the
+  first record is a valid `segment` -- with `check_segment_record`'s header
+  exemption deleted so the ss2.1 check is unconditional; the splice refusal;
+  `read_backfill`'s chain proofs with their header short-circuits gone; the
+  D4 dispatcher replacing AND keeping `Journal.create`'s version gate at the
+  same strictness; `legacy_batch` required-false; and the protocol v3
+  handshake, the `sha256:` grammar, the canonical forms and the wire
+  tolerant-reader rules, untouched and now cited as rows of the matrix.
+  THE TAIL. Unit L1 landed the documents above. Unit L2 lands the code half in
+  ONE unit -- the readers, the D1 validator, the D4 dispatcher, the D5 and D9
+  tombstones, the adoption path, the schema surgery and the tests -- because a
+  split leaves a red intermediate state. The pinned test counts move with it
+  and are appended here.
