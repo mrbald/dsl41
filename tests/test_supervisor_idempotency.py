@@ -1138,6 +1138,67 @@ def test_pr36a_a_supervisor_known_dead_run_with_no_local_trace_still_replays(
     assert engine.oracle.store.job["j"].status == "SUCCESS"
 
 
+def test_dl137_a_string_run_number_in_the_list_reply_refuses_resume(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-137's tightening, on `runner_startup`'s reconcile/kill ladder:
+    `_reconcile` used to build its `supervised_live` dict with
+    `int(r["run_number"])`, so a supervisor that sent the number as a JSON
+    STRING coerced through silently and reconciled exactly as if it had
+    been an int. The unified `SupervisorRunRow` types `run_number: int`
+    with `strict=True`, which blocks that coercion -- the same row now
+    refuses at `list_runs()`, before `_reconcile` (or the kill ladder that
+    reads the same dict) ever sees it, so `resume_run` itself refuses
+    instead of quietly reconciling on a row lax pydantic would have waved
+    through."""
+    import asyncio as _asyncio
+    from datetime import timedelta
+
+    from dsl41.runner_adapters import SupervisorClient
+    from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_startup import resume_run
+
+    catalog, t0, bound = _crashed_run_root(tmp_path)
+
+    async def fake_request(self, obj: dict, *, _connect: bool = True) -> dict:
+        assert obj["cmd"] == "LIST"
+        return {
+            "ok": True,
+            "version": 1,
+            "incarnation": "inc-1",
+            "runs": [
+                {
+                    "run_id": bound,
+                    "job": "j",
+                    "run_number": "1",  # malformed: a string where the wire always sends an int
+                    "run_dir": str(tmp_path / "run" / "runs" / "j.1"),
+                    "wrapper_pid": 4242,
+                    "wrapper_alive": False,
+                    "spawned_at": "2026-07-01T08:00:00+00:00",
+                    "wrapper_rc": 0,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(SupervisorClient, "_request", fake_request)
+    client = SupervisorClient(tmp_path / "run")
+    probe = _probe_adapter()
+
+    async def scenario():
+        return await resume_run(
+            catalog,
+            tmp_path / "run",
+            clock=VirtualClock(start=t0 + timedelta(minutes=1)),
+            adapters={"CMD": probe},
+            supervisor=client,
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+
+    with pytest.raises(EngineError, match="malformed run row"):
+        _asyncio.run(scenario())
+
+
 def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: Path) -> None:
     """reply.json survived a crash its wrapper did not: a fresh supervisor
     answers duplicate, no exit push will ever come, and no record will ever
@@ -1198,6 +1259,71 @@ def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: P
         return await _asyncio.wait_for(adapter.run(catalog.jobs["j"], 1, ctx), timeout=10.0)
 
     assert _asyncio.run(scenario()) == 7
+
+
+def test_dl137_a_null_run_id_in_the_list_reply_refuses_the_duplicate_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-137's tightening: `_listed_alive`'s dict access (`r.get("run_id")
+    == run_id`) used to read a `run_id: null` row as simply "not this run"
+    and fall straight through to the spool ladder -- the row above pins
+    that path when the row is dropped ENTIRELY (`{"runs": []}`), and a null
+    `run_id` was silently equivalent to that. The unified `SupervisorRunRow`
+    requires `run_id: str`, so the SAME malformed row now refuses at the
+    `list_runs()` boundary, before `_listed_alive` ever gets to compare it."""
+    import asyncio as _asyncio
+
+    from dsl41.ir import lower_source
+    from dsl41.runner_adapters import AdapterContext, SupervisedCommandAdapter, SupervisorClient
+    from dsl41.runner_clock import EngineError, VirtualClock
+    from datetime import datetime
+
+    rid = RUN_ID
+    run_dir = tmp_path / "runs" / "j.1"
+    run_dir.mkdir(parents=True)
+    (tmp_path / "logs").mkdir()
+
+    async def fake_request(self, obj: dict, *, _connect: bool = True) -> dict:
+        if obj["cmd"] == "SPAWN":
+            return {
+                "ok": True,
+                "run_id": obj["spec"]["run_id"],
+                "wrapper_pid": 4242,
+                "spawned_at": "x",
+                "duplicate": True,
+            }
+        assert obj["cmd"] == "LIST"
+        return {
+            "ok": True,
+            "version": 1,
+            "incarnation": "inc-1",
+            "runs": [
+                {
+                    "run_id": None,  # malformed: the wire's own identity field, corrupted
+                    "job": "j",
+                    "run_number": 1,
+                    "run_dir": str(run_dir),
+                    "wrapper_pid": 4242,
+                    "wrapper_alive": False,
+                    "spawned_at": "x",
+                    "wrapper_rc": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(SupervisorClient, "_request", fake_request)
+    client = SupervisorClient(tmp_path)
+    adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.0)
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
+    ctx = AdapterContext(
+        clock=VirtualClock(start=datetime(2026, 7, 1, 8, 0)), run_root=tmp_path, run_id=rid
+    )
+
+    async def scenario():
+        return await _asyncio.wait_for(adapter.run(catalog.jobs["j"], 1, ctx), timeout=10.0)
+
+    with pytest.raises(EngineError, match="malformed run row"):
+        _asyncio.run(scenario())
 
 
 def test_pr36_an_index_entry_disowning_its_name_is_indeterminate(sup_root: Path, sups) -> None:

@@ -48,6 +48,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from pydantic import BaseModel, ConfigDict, ValidationError
+
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
@@ -899,6 +901,74 @@ class SupervisorConn:
         self.conn.close()
 
 
+class SupervisorRunRow(BaseModel):
+    """One row of a LIST reply's `runs` array (supervisor-protocol ss5:
+    `run_id, job, run_number, run_dir, wrapper_pid, wrapper_alive,
+    spawned_at, wrapper_rc`). DL-137 deferred slice: this row used to be
+    decoded four times over -- `SupervisedCommandAdapter._listed_alive`
+    here, `Engine._supervisor_proof` (runner.py, the ss8 seal-time proof,
+    PR-27) and `runner_startup`'s reconcile/kill ladder -- three of them
+    lenient (`.get(...)`, defaulting past a missing field) and one strict
+    (`_supervisor_proof`'s identity checks, which already refuse a row that
+    does not name the run it claims to). This model is parsed ONCE, inside
+    `SupervisorClient.list_runs`, at the bar the strict reader set: every
+    field the wire always sends is required, and `strict=True` blocks the
+    numeric-string/float coercions lax pydantic would otherwise wave
+    through (a `run_number` of `"1"` or a `wrapper_alive` of `1` now refuse
+    here instead of reaching a reader that trusted them).
+
+    Tolerant of unknown fields, per the wire's own rule (docs/supervisor-
+    protocol.md ss5's "ignores unknown fields", pinned as the "Supervisor
+    socket" row of docs/protocol-evolution.md's table).
+
+    `.get`/`__getitem__` read like the raw dict every call site already
+    read: the migration this slice makes is in the PARSE, once, not in
+    rewriting four readers' access syntax (and in test doubles that stand
+    in for the client, whose hand-built rows never pass through here at
+    all -- this shim keeps them reading a validated row exactly as they
+    read a raw one)."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    run_id: str
+    job: str
+    run_number: int
+    run_dir: str
+    wrapper_pid: int
+    wrapper_alive: bool
+    spawned_at: str
+    wrapper_rc: int | None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
+
+
+def _parse_run_rows(raw_rows: list[Any]) -> list[SupervisorRunRow]:
+    """The one decoder DL-137 asked for, in place of the four ad hoc ones:
+    every row a LIST reply carries validated the same way, refusing the
+    same way, wherever it is read. `EngineError`, not a bare
+    `ValidationError`, because a malformed row from the supervisor we hold
+    the lease against is exactly the kind of evidence this codebase refuses
+    rather than degrades past (DL-139's `decision_effects` is the same
+    idiom, for the same reason)."""
+    rows: list[SupervisorRunRow] = []
+    for raw in raw_rows:
+        try:
+            rows.append(SupervisorRunRow.model_validate(raw))
+        except ValidationError as exc:
+            raise EngineError(
+                f"the supervisor's LIST reply carries a malformed run row: {exc}"
+                " (supervisor-protocol ss5)"
+            ) from exc
+    return rows
+
+
 class SupervisorClient:
     """Engine-side client of the ss6a Tier-1 supervisor (this side may import
     dsl41 freely). Ensures a supervisor is running (spawning one DETACHED if
@@ -1294,7 +1364,10 @@ class SupervisorClient:
         )
 
     async def list_runs(self) -> dict[str, Any]:
-        return await self._request({"cmd": "LIST"})
+        resp = await self._request({"cmd": "LIST"})
+        if "runs" in resp:
+            resp = {**resp, "runs": _parse_run_rows(resp["runs"])}
+        return resp
 
     async def shutdown(self) -> dict[str, Any]:
         return await self._request({"cmd": "SHUTDOWN", "token": self.token})

@@ -58,6 +58,7 @@ from dsl41.runner_adapters import (
     fsync_dir,
     SupervisedCommandAdapter,
     SupervisorClient,
+    SupervisorRunRow,
     SupervisorUnavailable,
     Terminated,
     load_json,
@@ -908,13 +909,15 @@ async def _reconcile(
     spool ladder unchanged (the supervisor died, or the run predates it)."""
     assert engine.run_root is not None
     boot_now = _procid.current_boot_id()
-    supervised_live: dict[tuple[str, int], dict[str, Any]] = {}
+    #: DL-137 -- values are `SupervisorRunRow`, validated once at the
+    #: `SupervisorClient.list_runs` boundary; every reader below still reads
+    #: it like the raw dict it replaced (`.get`/`[]`), so this dict-of-rows
+    #: is the one decode the whole resume ladder shares.
+    supervised_live: dict[tuple[str, int], SupervisorRunRow] = {}
     if supervisor is not None:
         with contextlib.suppress(SupervisorUnavailable):
             listing = await supervisor.list_runs()
-            supervised_live = {
-                (str(r["job"]), int(r["run_number"])): r for r in listing.get("runs", [])
-            }
+            supervised_live = {(r["job"], r["run_number"]): r for r in listing.get("runs", [])}
     # sweep = union(journal dispatch records, runs/ directory) (ss7)
     candidates: dict[tuple[str, int], Path | None] = {}
     for record in records:
@@ -959,7 +962,7 @@ async def _reconcile(
                 # never stopped -- the adapter task just awaits its exit push,
                 # NO reconciliation injection (spec ss3). The LIST row's
                 # identity was checked against the WAL by the preflight.
-                cmd_adapter.reattach[(job, run_number)] = str(reattach["run_id"])
+                cmd_adapter.reattach[(job, run_number)] = reattach["run_id"]
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
         if job_ir.job_type == "FW":
@@ -1229,7 +1232,7 @@ def _refuse_identity_split(effect: Effect, observed: object, source: str) -> Non
 def _preflight_identities(
     engine: Engine,
     candidates: dict[tuple[str, int], Path | None],
-    supervised_live: dict[tuple[str, int], dict[str, Any]],
+    supervised_live: dict[tuple[str, int], SupervisorRunRow],
 ) -> None:
     """Check EVERY candidate's observed identities against the WAL before
     the barrier mutates anything (DL-118). One sweep, up front, because the
@@ -1309,7 +1312,7 @@ def _reconcile_applied_spawns(
 
 
 async def _redrive_recorded_kills(
-    engine: Engine, supervised_live: dict[tuple[str, int], dict[str, Any]]
+    engine: Engine, supervised_live: dict[tuple[str, int], SupervisorRunRow]
 ) -> None:
     """Deliver the kills the previous engine decided and did not get to
     (concurrency-model ss5; S5c).
@@ -1364,7 +1367,7 @@ async def _redrive_recorded_kills(
             # says this run is alive, which is why `_apply_effect`'s
             # supersession check (which reads `_live`) is not the right gate
             # at resume.
-            run_id = str(listing["run_id"])
+            run_id = listing["run_id"]
             redriven.add(run_id)
             await adapter.kill(run_id)
             engine._resolve_effect(
@@ -1381,7 +1384,9 @@ async def _redrive_recorded_kills(
 
 
 async def _redrive_orphans(
-    engine: Engine, supervised_live: dict[tuple[str, int], dict[str, Any]], redriven: set[str]
+    engine: Engine,
+    supervised_live: dict[tuple[str, int], SupervisorRunRow],
+    redriven: set[str],
 ) -> None:
     """PR-33: every live wrapper whose row is TERMINAL, killed at resume --
     whatever the KILL effect says, and whether or not one exists.
@@ -1392,7 +1397,7 @@ async def _redrive_orphans(
     an `applied`, `retired` or absent KILL effect cannot answer. A run this
     resume already killed is skipped rather than signalled twice."""
     for (job, run_number), listing in sorted(supervised_live.items()):
-        run_id = str(listing.get("run_id") or "")
+        run_id = listing.get("run_id") or ""
         if not listing.get("wrapper_alive") or not run_id or run_id in redriven:
             continue
         row = engine.oracle.store.job.get(job)

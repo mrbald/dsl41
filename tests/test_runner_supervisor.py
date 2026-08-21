@@ -820,6 +820,43 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
         teardown_supervisor(short_root, proc)
 
 
+def test_dl137_a_list_row_with_an_unknown_field_still_parses(tmp_path: Path, monkeypatch) -> None:
+    """The tolerant-fields half of the wire's own forward-compatibility rule
+    (supervisor-protocol ss5's "ignores unknown fields", the `Supervisor
+    socket` row of docs/protocol-evolution.md's table): a row a newer
+    supervisor sends with one extra key is not corruption, so the unified
+    `SupervisorRunRow` (DL-137) ignores the key rather than refusing the
+    row -- and every other field still reads, typed."""
+    row = {
+        "run_id": "8a4f1e2c-3b5d-4e6f-9a1b-2c3d4e5f6a7b",
+        "job": "j",
+        "run_number": 1,
+        "run_dir": str(tmp_path / "runs" / "j.1"),
+        "wrapper_pid": 4242,
+        "wrapper_alive": True,
+        "spawned_at": "2026-07-01T08:00:00+00:00",
+        "wrapper_rc": None,
+        "from_a_future_supervisor": "not yet named by this client",
+    }
+
+    async def fake_request(self, obj: dict, *, _connect: bool = True) -> dict:
+        assert obj["cmd"] == "LIST"
+        return {"ok": True, "version": 1, "incarnation": "inc-1", "runs": [row]}
+
+    monkeypatch.setattr(SupervisorClient, "_request", fake_request)
+
+    async def scenario() -> dict:
+        client = SupervisorClient(tmp_path)
+        return await client.list_runs()
+
+    resp = asyncio.run(scenario())
+    [parsed] = resp["runs"]
+    assert parsed.job == "j"
+    assert parsed.run_number == 1
+    assert parsed.wrapper_alive is True
+    assert "from_a_future_supervisor" not in parsed.model_dump()
+
+
 # ------------------------------------------------------------- deadman (ss8)
 
 
