@@ -624,7 +624,12 @@ count) plus the 27-file synthetic/doc-derived JIL corpus under
 - src/dsl41/runner_procid.py — the durability liturgy (fsync/rename/fsync) and process
   identity (boot id, (pid, start-time) PID-reuse guard, quiet group kill) the wrapper
   and the supervisor share: one stdlib-only module both import by top-level name (DL-72)
-- src/dsl41/cli.py — typer entry points: `lint`, `equiv`, `report`, `uc` (the U3a
+- src/dsl41/cli.py — the typer app assembly: it builds the app and registers every
+  verb, in help order, and owns nothing else. The verbs live one module per domain
+  beside it (DL-137): cli_common.py (the shared options, the catalog door, and the
+  readings that turn an exception or a control answer into an exit code),
+  cli_compile.py, cli_run.py, cli_control.py and cli_estate.py. The verbs are:
+  `lint`, `equiv`, `report`, `uc` (the U3a
   record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
   `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
   preprocessor), `journal` (render-by-replay of a run WAL), `run` (headless executor: wall clock,

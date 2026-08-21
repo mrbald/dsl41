@@ -629,7 +629,7 @@ def test_spec_texts_helper_renders_post_placeholder_blocks() -> None:
     its preserve-rendered statement block -- placeholder-resolved, comments
     kept, separating blank lines dropped."""
     from dsl41.ast_jil import parse
-    from dsl41.cli import _spec_texts
+    from dsl41.cli_run import _spec_texts
     from dsl41.ir import lower_catalog
     from dsl41.placeholders import substitute
 
@@ -1667,7 +1667,7 @@ def test_cli_brief_flags_include_the_armed_latch_in_ihna_order() -> None:
     """DL-68 review: `query status --brief` and the TUI jobs table render
     the same flags column from the same status payload -- the armed latch
     (SEM-32) must show as A on the headless skim too, after I/H/N."""
-    from dsl41.cli import _brief_flags
+    from dsl41.cli_control import _brief_flags
 
     all_on = {"on_ice": True, "on_hold": True, "on_noexec": True, "armed": True}
     assert _brief_flags(all_on) == "IHNA"
@@ -1871,7 +1871,7 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
     Table-driven so that adding a fifth outcome without a code fails here,
     rather than defaulting to 0 in front of an operator."""
     import dsl41.runner_control as control_mod
-    from dsl41.cli import _mutate
+    from dsl41.cli_control import _mutate
     from dsl41.runner_control import ControlClientError
 
     request = {"cmd": "sendevent", "request_id": "req-7"}
@@ -1898,6 +1898,69 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
         # the id is the only thing that makes a retry safe, so every outcome
         # that may still apply has to carry it and no other outcome may
         assert ("--request-id req-7" in err) is names_the_id, answer
+
+
+def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    """The same ladder at its OTHER caller (DL-137).
+
+    A boundary asked for over the socket is a mutation, so it is answered
+    the way every mutation is. What the SURFACE does with that reading is
+    still the surface's: period-model ss7 publishes 0/2/4 for `seal` and 3
+    means something else in that feature area, so a `rejected` answer --
+    which this engine's seal handler cannot give, and which is why the row
+    below is about the reading, not about a shape the server emits -- stays
+    `unknown` here, request_id and all.
+
+    The applied row pins the one thing the seal adds to the ladder: the
+    sentence that names the two openers is printed when the boundary
+    COMMITTED and at no other outcome."""
+    import dsl41.runner_control as control_mod
+    from dsl41.cli_estate import _live_seal
+    from dsl41.period import runtime_profile_from_cli
+    from dsl41.runner_control import ControlClientError
+
+    run_root = tmp_path / "root"
+    run_root.mkdir()
+    (run_root / "control.sock").touch()  # the live door _live_seal requires
+    estate = tmp_path / "c2.jil"
+    estate.write_text("insert_job: seal_ladder_job\njob_type: c\ncommand: x\nmachine: m1\n")
+    profile = runtime_profile_from_cli(timezone="UTC")
+    header = {"ok": True, "baseline_id": "b-1", "epoch": 1}
+
+    cases: list[tuple[object, int, bool, bool]] = [
+        ({"ok": True, "kind": "seal", "digest": "sha256:x"}, 0, False, True),
+        ({"ok": False, "refused": True, "error": "not quiescent"}, 2, False, False),
+        ({"ok": False, "decision": "rejected", "index": 4}, 4, True, False),
+        ({"ok": False, "error": "no boundary outcome within 30.0s"}, 4, True, False),
+        (ControlClientError("no such file"), 2, False, False),
+        (ControlClientError("engine hung up", delivered=True), 4, True, False),
+    ]
+    for answer, code, names_the_id, opens in cases:
+
+        def fake_roundtrip(_path, request, *, answer=answer, **_kw):
+            if request.get("cmd") == "status":
+                return header  # the ss6 read header the seal is composed against
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
+        got = _live_seal(
+            run_root,
+            [estate],
+            profile,
+            permit_unknown=False,
+            properties=None,
+            force_seal=False,
+            actor="ops@t",
+            request_id="req-9",
+        )
+        assert got == code, answer
+        printed = capsys.readouterr()
+        assert ("--request-id req-9" in printed.err) is names_the_id, answer
+        assert ("dsl41 run --resume" in printed.out) is opens, answer
 
 
 def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(

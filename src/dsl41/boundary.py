@@ -76,6 +76,7 @@ from dsl41.classify import Baseline, CarriedState, Classification, classify
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.period import (
     CATALOG_HASH_VERSION,
+    WAL_DIR,
     Manifest,
     RuntimeProfile,
     Sentinel,
@@ -1003,7 +1004,11 @@ def check_root_unused(run_root: Path) -> None:
     is claimable BEFORE it stages a bundle into it or starts a supervisor
     against it -- both are acts on an estate this process may turn out not
     to lead."""
-    leftovers = [name for name in ("wal", "seals") if (run_root / name).exists()]
+    leftovers = [
+        directory.name
+        for directory in (run_root / WAL_DIR, seal_dir(run_root))
+        if directory.exists()
+    ]
     periods = run_root / "periods"
     if periods.is_dir() and any(e.name != ".staging" for e in periods.iterdir()):
         leftovers.append("periods (committed)")
@@ -1088,7 +1093,7 @@ def claim_root(
 def open_wal(run_root: Path, segment_no: int) -> Path:
     """Make `wal/` and hand back the segment's path, with the directory
     entry durable before anything is appended to a file inside it."""
-    directory = run_root / "wal"
+    directory = run_root / WAL_DIR
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     fsync_dir(directory)

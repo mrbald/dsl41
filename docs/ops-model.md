@@ -448,7 +448,7 @@ May differ: **the transport, and only the transport.**
    table row an effect binds to. Two executors on one box need both, and
    `dsl41 run` has no flag for the second.
 3. `dsl41 journal` seeds genesis with `LOCAL_EXECUTOR_ID` hardcoded
-   (`src/dsl41/cli.py:528`). The comment there is guarding the right thing — a
+   (`src/dsl41/cli_run.py:855`). The comment there is guarding the right thing — a
    replay onto a table without this engine's own executor decides *"no such
    host"* where the run decided otherwise — one step before the case that breaks
    it. The moment a run can name a different executor, offline replay must read

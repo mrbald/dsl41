@@ -30,7 +30,7 @@ cli_runner = CliRunner()
 def test_serve_missing_socket_exits_2(tmp_path, monkeypatch) -> None:
     # bypass the real textual-serve import so this test's outcome does not
     # depend on whether the [ui] extra happens to be installed (ss14)
-    monkeypatch.setattr("dsl41.cli._import_textual_serve_or_exit_2", lambda: object)
+    monkeypatch.setattr("dsl41.cli_control._import_textual_serve_or_exit_2", lambda: object)
     result = cli_runner.invoke(app, ["serve", "--socket", str(tmp_path / "nope.sock")])
     assert result.exit_code == 2
     assert "no such file" in result.output
@@ -64,7 +64,7 @@ def test_serve_constructs_the_ui_subprocess_command_quoting_a_space(tmp_path, mo
         def serve(self, debug=False):
             captured["served"] = True
 
-    monkeypatch.setattr("dsl41.cli._import_textual_serve_or_exit_2", lambda: FakeServer)
+    monkeypatch.setattr("dsl41.cli_control._import_textual_serve_or_exit_2", lambda: FakeServer)
     result = cli_runner.invoke(
         app, ["serve", "--socket", str(sock), "--host", "0.0.0.0", "--port", "9001"]
     )
@@ -91,7 +91,7 @@ def test_serve_default_host_is_loopback(tmp_path, monkeypatch) -> None:
         def serve(self, debug=False):
             pass
 
-    monkeypatch.setattr("dsl41.cli._import_textual_serve_or_exit_2", lambda: FakeServer)
+    monkeypatch.setattr("dsl41.cli_control._import_textual_serve_or_exit_2", lambda: FakeServer)
     result = cli_runner.invoke(app, ["serve", "--socket", str(sock)])
     assert result.exit_code == 0, result.output
     assert captured["host"] == "127.0.0.1"
@@ -111,7 +111,7 @@ def test_serve_bind_failure_exits_2(tmp_path, monkeypatch) -> None:
         def serve(self, debug=False):
             raise OSError("address already in use")
 
-    monkeypatch.setattr("dsl41.cli._import_textual_serve_or_exit_2", lambda: FakeServer)
+    monkeypatch.setattr("dsl41.cli_control._import_textual_serve_or_exit_2", lambda: FakeServer)
     result = cli_runner.invoke(app, ["serve", "--socket", str(sock)])
     assert result.exit_code == 2
     assert "address already in use" in result.output

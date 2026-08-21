@@ -76,6 +76,7 @@ from dsl41.period import (
     period_dir,
     read_period_manifest,
     read_sentinel,
+    seal_dir,
     seal_path,
     sentinel_path,
     wal_path,
@@ -526,7 +527,7 @@ def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
     either, and an artifact with no verdict is one the guard cannot
     protect."""
     held = set(segments)
-    for directory in (run_root / "periods", run_root / "seals"):
+    for directory in (run_root / "periods", seal_dir(run_root)):
         if not directory.is_dir():
             continue
         for entry in directory.iterdir():

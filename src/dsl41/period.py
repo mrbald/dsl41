@@ -711,6 +711,26 @@ def closed_periods(run_root: Path) -> list[int]:
     )
 
 
+def attestation_periods(run_root: Path) -> list[int]:
+    """Every period this root holds an ATTESTATION for, in order.
+
+    The FILE, not its verdict: `dsl41 verify` is what decides whether the
+    newest one proves anything, and a reader that had to verify before it
+    could name the candidates could not report one that does not (ss1.3,
+    ss11). Beside `closed_periods` because both answer "which periods does
+    this root hold an artifact for", and because the artifact's name is
+    `attestation_path`'s to spell: after DL-137 no caller outside this
+    module builds it."""
+    directory = seal_dir(run_root)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        int(entry.name.split(".")[0])
+        for entry in directory.glob("*.audit.json")
+        if entry.name.split(".")[0].isdigit()
+    )
+
+
 def active_wal(run_root: Path) -> Path:
     """The segment an appender opens: the newest this root holds, or
     segment 1 on a root whose genesis has not written one yet."""

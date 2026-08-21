@@ -37,7 +37,8 @@ from typer.testing import CliRunner
 
 from dsl41.canon import canonical_bytes
 from dsl41.boundary import stage_period
-from dsl41.cli import _observed_profile, _serve_run, app
+from dsl41.cli import app
+from dsl41.cli_run import _observed_profile, _serve_run
 from dsl41.ir import CatalogIR, CatalogMeta, lower_catalog, lower_source
 from dsl41.period import (
     CATALOG_HASH_VERSION,
@@ -1075,7 +1076,7 @@ def test_a_resume_with_different_launch_options_refuses(tmp_path: Path) -> None:
     with every identity gate green. A legacy root (no manifest) has no pin
     to hold; a deadman difference compares at its OBSERVED value; the
     matching profile passes."""
-    from dsl41.cli import _resume_profile_error
+    from dsl41.cli_run import _resume_profile_error
 
     catalog = lower_source(_SOLO_JIL)
     pinned = runtime_profile_from_cli(timezone="UTC")

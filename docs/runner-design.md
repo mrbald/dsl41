@@ -883,8 +883,9 @@ shim: stdlib-only, no third-party imports — its dumbness is a correctness
 property), `runner_supervisor.py` (the §6a Tier-1 daemon, held to the same
 boundary), `runner_procid.py` (the process-identity helpers those two share,
 stdlib-only for the same reason — DL-72), and `runner_tui.py` (guarded
-textual import). CLI verbs in cli.py: `run`, `rehearse`, `sendevent`,
-`serve`, `journal`.
+textual import). CLI verbs in cli_run.py (`run`, `rehearse`, `journal`) and
+cli_control.py (`sendevent`, `serve`) -- the five-module CLI split of
+DL-137, assembled by cli.py.
 
 - **11a** — oracle additions (`next_timer_due`, `advance`) + engine loop +
   FakeAdapter + VirtualClock + bisimulation suite. Proves the design.
