@@ -513,6 +513,13 @@ multihost track (`docs/decision-log.md` DL-78) has to address each one.
    actor field is named `claimed_actor`: the log records an assertion, and
    `docs/concurrency-model.md` §6's "the leader stamps the authenticated
    principal" waits on a leader that can authenticate one.
+   **Closing (DL-146):** authorization and *local* authentication close
+   with `docs/access-model.md` — kernel peer credentials, one
+   principal→tier map, a closed verb table gated in `_handle`, denials
+   answered in the existing `refused` vocabulary with receipts in a
+   perimeter journal. No envelope change. The web session's per-user
+   identity stays open under the named seam `web-session-principal-v2`
+   (access-model §9).
 3. **Unix-domain only.** No network transport, so the single-engine
    guarantee rests on a local `bind()`. A non-local controller would need
    both a transport and a replacement for that guarantee.

@@ -112,6 +112,10 @@ source = ["src/dsl41"]
 include = [
     "src/dsl41/oracle_state.py",
     "src/dsl41/runner.py",
+    # the access perimeter (DL-146) is decision-shaped the same way: an
+    # authorization guard whose false arm nothing takes is an untested
+    # refusal, which on this module means an untested DENIAL path
+    "src/dsl41/runner_access.py",
     "src/dsl41/runner_admission.py",
     "src/dsl41/runner_effects.py",
     "src/dsl41/runner_hosts.py",

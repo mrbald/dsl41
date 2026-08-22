@@ -18,7 +18,8 @@ with AutoSys semantics (E1). One engine does two duties:
   path*. Thus rehearsal results are evidence about production behavior.
 
 These items are explicitly not in scope (§12): an HA/clustered scheduler, a
-multi-node agent fabric, and an RBAC system. (A single-node resource/load
+multi-node agent fabric, and an RBAC system (the RBAC non-goal retired
+2026-08-22: DL-146, `docs/access-model.md`). (A single-node resource/load
 manager DID land, DL-50, because the prod estate carries locks that the
 estate relies on for correctness. The oracle honors these locks as capacity
 buckets, and preflight refuses the unmodelable.) Here, prod grade means
@@ -818,7 +819,9 @@ supervisor's.
 
 ## 12. Non-goals
 
-The non-goals: HA/clustering, remote machines or agent fabric, and RBAC.
+The non-goals: HA/clustering, remote machines or agent fabric, and RBAC —
+the RBAC non-goal retired by DL-146 (`docs/access-model.md`: three tiers
+at the perimeter, the core stays authz-free).
 Also the refused extended-calendar residue (standard calendars honored
 since DL-56, the SEM-36..39 extended-calendar freeze interpreted since
 DL-57, open composition corners on pinned defaults since DL-59 — only

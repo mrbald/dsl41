@@ -7355,3 +7355,133 @@
   external blockers above it. 3060 -> 3076 collected; ruff, mypy and
   arch_check clean; the baseline re-armed and the review stamped
   arch-review/2026-08-22.
+- DL-146 three tiers at the perimeter: the access model is designed and
+  the core stays authz-free (2026-08-22; a three-way design round --
+  the user's constraints, one Claude sketch, one codex-sol sketch, two
+  adversarial rounds to convergence; docs/access-model.md is the
+  product and will freeze when its ss12 obligations are green).
+  THE MODEL. Three tiers, strictly nested, read < ops < adm, an enum
+  and nothing else. User pins: exactly three tiers; seal=ops;
+  prune/reclaim=adm; FORCE_STARTJOB and evict stay ops. A principal is
+  (realm, name, groups); realms (`os/`, later assertion realms) keep a
+  web `root` from ever matching the OS `root`. One mapping seam:
+  principal -> tier, strict TOML, user: rows beat group: rows, highest
+  group wins, unmapped=deny (unmapped=read is the one legal relaxation
+  and is documented as disclosure-grade: spec exposes commands, globals
+  values, subscribe raw WAL). CONFIGURED VS ABSENT IS EXPLICIT: no map
+  configured means today's 0600 owner-only model, unchanged; a
+  configured path that is missing or invalid REFUSES at startup and
+  keeps old policy on reload -- it never falls back to owner-wide
+  authority.
+  THE BOUNDARY. Guarded: control.sock and the served web TUI. Ruled
+  out: local CLI with filesystem access is adm by definition
+  (documented, not fought -- CLI tables are semantic, not enforced);
+  supervisor.sock is governed but not tiered (v1): owner-0600 even
+  under the 0710 traversal, adm-equivalent by kernel.
+  Local authn is kernel peer credentials (SO_PEERCRED /
+  LOCAL_PEERCRED, extending runner_supervisor.peer_uid); no credential
+  refuses -- the supervisor's permissive None is not copied.
+  claimed_actor loses all weight: the server overwrites the actor with
+  the canonical authenticated spelling. The seal fingerprint carries
+  IDENTITY, never TIER: a role-map edit changes no fingerprint and
+  breaks no retry; a different principal retrying someone else's
+  boundary mismatches by design; and arming access between an attempt
+  and its retry changes the spelling -- named as an operational corner
+  of the arming runbook, answered by re-read-and-re-decide.
+  THE GATE sits in ControlServer._handle before the cmd split -- the
+  one place _respond and _subscribe share (the DL-90 lesson, applied
+  the second time). Closed verb table, default deny, a completeness
+  gate diffs the dispatcher against it. A denial consumes no engine
+  index and advances no engine time; it answers the existing
+  ok:false/refused:true vocabulary. NO envelope change, no v4, no
+  dialect event: enforcement is outside the wire contract. An
+  in-envelope principal was considered and rejected -- caller-written
+  identity is another claimed_actor, and an optional field a v3 server
+  ignores cannot carry authorization.
+  RECEIPTS go to <run_root>/perimeter.jsonl, never the engine WAL --
+  a denial is not an engine input and replay must not see policy. Own
+  access_seq; access_denied, privileged_admitted (the break-glass
+  ledger), policy_loaded, policy_reload_failed, stream_revoked; no
+  request bodies, no global values.
+  RELOAD keeps connections: immutable principal per connection,
+  immutable policy snapshot per request with a generation number;
+  SIGHUP after an atomic rename swaps the snapshot; subscribe -- the
+  verb with no next request -- is re-evaluated live and exactly the
+  streams that lost read close with a stream_revoked receipt. Failed
+  reload keeps the old policy. OS group changes propagate on
+  reconnect; forcing reconnects is administration, not reload.
+  MODES: the run root is forced 0700 today, so a 0660 socket alone is
+  unreachable (codex catch) -- access configured flips the root to
+  0710 (execute-only traversal for socket_group, no listing) and the
+  socket to 0660. The 0700 root was the FENCE for its children (logs/
+  and runs/ are born 0755 -- the obligation test caught this), so
+  arming first tightens every direct child to owner-only; a test
+  asserts nothing but the socket is group-accessible. Arming changes exactly
+  those two things; every further grant (web-tier log visibility) is
+  the operator's explicit act. The map loader verifies file AND parent
+  directory (owner, not group/other-writable, no symlink follow); the
+  reload install is RECEIPT-GATED -- a policy_loaded that cannot be
+  synced keeps the old snapshot active.
+  THE WEB TIER ships as per-tier serve instances under per-tier OS
+  service accounts; the corporate proxy authenticates the browser and
+  routes -- PAM, LDAP, Entra, client certs, all outside the core, zero
+  integration code. The TUI child tails run-dir logs directly, so the
+  account is the containment (a per-session broker was designed and
+  DEFERRED: it routes but does not contain under the current process
+  model; not PR-sized). Receipt identity is the service account, loss
+  accepted and named; the deferred seam is web-session-principal-v2
+  with codex's round-1 broker sketch as the reference design.
+  BREAK-GLASS is a receipt category, not an authorization dimension:
+  no fourth tier, no per-verb deny overlay (a second policy axis and a
+  sparse flag matrix -- the arch-review lens says no). Ops is
+  documented as destructive.
+  runner_access.py joins the DL-105 coverage gate at 100% branch --
+  an authorization guard's untaken false arm is an untested denial.
+  BUILT the same day, three-review convergence (codex adversarial
+  round + the house self-review agent + the author's pass), every
+  finding folded: a symlinked map PARENT refuses (O_NOFOLLOW guards
+  only the last component); format_version rejects bool/float (TOML
+  true == 1 in Python) and tier rejects non-strings; access_seq
+  RESUMES from the last complete record and heals a torn tail (a
+  reissued 1 is a duplicate audit key); the receipt writer loops a
+  short os.write (a partial line must not pass the receipt gate);
+  socket_group is FIXED at arming -- a reload naming another group is
+  refused whole; the map is validated read-only BEFORE the root is
+  claimed (the refusal writes nothing) and arming re-validates; a
+  revoked subscribe stream's handler task is CANCELLED, not just its
+  writer closed (parked on queue.get(), a quiet estate never wakes
+  it); receipts carry bounded labels only, and stream_revoked names
+  the deciding digest; peer-credential resolution errors refuse
+  instead of leaking an EOF; the doc's macOS xucred claim corrected
+  to getgrouplist (16-group truncation). The self-review round added:
+  runner_access under the DL-105 gate demanded its missing refusal
+  arms -- all covered, 100% branch; a REAL SIGHUP subprocess test
+  (the DL-105 shape: the wiring, not the function); read timeouts on
+  every test socket read; umask-proofed map fixtures; the live
+  revoke test renamed to what a same-uid suite can honestly claim
+  (the exactly-half pinned at unit level); the seal-fingerprint half
+  of obligation 10 pinned across a live reload.
+  The closing verification round HELD the slice on two grounds and
+  both are closed: an unusable socket_group now preflights BEFORE the
+  root is claimed (no estate residue -- the same no-writes rule as the
+  roll preflight), and the receipt journal's remaining gaps are shut
+  (an existing journal this process cannot read REFUSES arming rather
+  than restarting the key series; a mid-line tear seals with a
+  newline before the next record; a zero-byte write refuses instead
+  of looping; stream_revoked carries the full decision context; a map
+  must be a regular file, and a FIFO refuses without blocking).
+  RULED BY SPECIFICATION, not patched: perimeter classification is by
+  cmd alone -- the verb inside sendevent/host is the dispatcher's to
+  validate (ONE gate, DL-145 defect-2's lesson), so
+  privileged_admitted is a PERIMETER receipt and the engine's own
+  decision lives in the WAL. RESIDUALS, named: the lstat-then-open
+  ancestor race (the doc tells operators to place the map under a
+  root-owned path); the two heavyweight e2e cases (a live seal retry
+  through _committed_seal across arming, a different-principal
+  collision) -- the mechanism is pinned at the fingerprint layer and
+  the boundary suite owns the stand-in. 3076 -> 3121 collected.
+  RETIRES: the runner-design ss0/ss12 RBAC non-goal (annotated in
+  place); the authorization half of control-protocol ss7 gap 2 (the
+  local authentication half closes with it; web session identity stays
+  open under the named seam). Gap 4 (prose errors) deliberately
+  stands.

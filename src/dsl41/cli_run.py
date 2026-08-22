@@ -186,6 +186,14 @@ def run(
     timezone_map: Path = TIMEZONE_MAP_OPT,
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
+    access_map: Path = typer.Option(
+        None,
+        "--access-map",
+        help="Role map arming the three-tier perimeter on the control socket"
+        " (docs/access-model.md): strict TOML, principal -> tier. A configured"
+        " path that is missing or invalid REFUSES startup; omit the option and"
+        " the 0600 owner-only model stands unchanged. SIGHUP reloads the map.",
+    ),
 ) -> None:
     """Execute the estate headlessly on this machine: wall clock, real
     processes, WAL journal, calendar scheduler, and the control socket
@@ -268,6 +276,7 @@ def run(
                     parsed=parsed,
                     anchor_dir=estate_anchor,
                     open_from=open_from,
+                    access_map=access_map,
                 )
             )
         )
@@ -402,6 +411,7 @@ async def _serve_run(
     parsed: "list[JilFile] | None" = None,
     anchor_dir: "Path | None" = None,
     open_from: "Path | None" = None,
+    access_map: "Path | None" = None,
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -440,6 +450,28 @@ async def _serve_run(
             check_roll_ready(run_root, Path(open_from))
         except EngineError as exc:
             return refuse(exc)
+    if access_map is not None:
+        # the access-model ss4 refusal must write NOTHING (the check_roll_ready
+        # precedent above): the same load_policy that arming runs later is
+        # called here read-only, before the root is claimed or the WAL opened
+        import grp as grp_mod
+
+        from dsl41.runner_access import AccessError, load_policy
+
+        try:
+            preflight_policy = load_policy(access_map, generation=1)
+            if preflight_policy.socket_group is not None:
+                # an unresolvable group would otherwise fail only at arming,
+                # AFTER the root is claimed and the WAL opened
+                grp_mod.getgrnam(preflight_policy.socket_group)
+        except AccessError as exc:
+            return refuse(exc)
+        except KeyError:
+            return refuse(
+                EngineError(
+                    f"access map {access_map}: socket_group is not a group this host knows"
+                )
+            )
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -601,11 +633,22 @@ async def _serve_run(
             typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
         if warns and engine.journal is not None:
             engine.journal.preflight(warns)
+        access = None
+        if access_map is not None:
+            # access-model ss4: a configured path that does not load REFUSES;
+            # it never falls back to owner-wide authority
+            from dsl41.runner_access import AccessControl, AccessError
+
+            try:
+                access = AccessControl.arm(access_map, run_root)
+            except AccessError as exc:
+                return refuse(exc)
         server = ControlServer(
             engine,
             run_root / "control.sock",
             spec_texts=spec_texts,
             estate_fingerprint=estate_fingerprint,
+            access=access,
         )
         try:
             await server.start()
@@ -621,6 +664,13 @@ async def _serve_run(
             except (NotImplementedError, ValueError):
                 # non-main-thread embedding (test harnesses): stoppable only by
                 # engine failure; the real CLI always has the main thread
+                pass
+        if access is not None:
+            # access-model ss7: explicit reload; a failed one keeps the old
+            # policy and writes the receipt, never kills the engine
+            try:
+                loop.add_signal_handler(signal_mod.SIGHUP, access.reload)
+            except (NotImplementedError, ValueError):
                 pass
         stop_task = asyncio.ensure_future(stop.wait())
         ui_task: asyncio.Task | None = None

@@ -103,6 +103,7 @@ from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.oracle_state import Event, EventKind, HostRuntime, JobRuntime, JobStatus
 from dsl41.runner import Engine
+from dsl41.runner_access import AccessControl, peer_principal
 from dsl41.runner_adapters import LINE_LIMIT, job_log_paths
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
@@ -210,6 +211,7 @@ class ControlServer:
         *,
         spec_texts: Mapping[str, str] | None = None,
         estate_fingerprint: Mapping[str, str] | None = None,
+        access: AccessControl | None = None,
     ) -> None:
         self.engine = engine
         self.path = path
@@ -227,6 +229,10 @@ class ControlServer:
         self._drift_checked_at: float | None = None
         self._server: asyncio.Server | None = None
         self._conn_tasks: set[asyncio.Task[Any]] = set()
+        #: the armed perimeter, or None = the 0600 owner-only model,
+        #: byte-compatible (docs/access-model.md ss4: configured vs absent
+        #: is explicit)
+        self.access = access
 
     async def start(self) -> None:
         """Bind (0600 from birth via umask) after the stale-socket probe: a
@@ -256,6 +262,20 @@ class ControlServer:
         finally:
             os.umask(old_umask)
         os.chmod(self.path, 0o600)  # belt: some platforms ignore umask on bind
+        if self.access is not None and self.access.policy.socket_group is not None:
+            # access-model ss8: group reachability is deliberate -- resolve
+            # the named group and widen the socket, or refuse to serve
+            import grp
+
+            group = self.access.policy.socket_group
+            try:
+                gid = grp.getgrnam(group).gr_gid
+                os.chown(self.path, -1, gid)
+                os.chmod(self.path, 0o660)
+            except (KeyError, OSError) as exc:
+                raise EngineError(
+                    f"cannot arm control socket for group {group!r}: {exc}"
+                ) from exc
 
     async def close(self) -> None:
         # cancel handlers BEFORE wait_closed(): since 3.12 wait_closed blocks
@@ -286,6 +306,24 @@ class ControlServer:
         if task is not None:
             self._conn_tasks.add(task)
         try:
+            principal = None
+            if self.access is not None:
+                # access-model ss3: the principal is fixed at accept and
+                # immutable for the connection; no resolvable credential
+                # refuses (the supervisor's permissive None is not copied)
+                sock = writer.get_extra_info("socket")
+                principal = peer_principal(sock) if sock is not None else None
+                if principal is None:
+                    await self._send(
+                        writer,
+                        {
+                            "ok": False,
+                            "refused": True,
+                            "error": "access control is armed and this peer has no"
+                            " resolvable kernel credential (access-model ss3)",
+                        },
+                    )
+                    return
             while True:
                 line = await reader.readline()
                 if not line:
@@ -319,8 +357,32 @@ class ControlServer:
                         },
                     )
                     continue
+                if self.access is not None and principal is not None:
+                    # access-model ss5: one decision per request, before the
+                    # cmd split -- the one place subscribe and _respond share
+                    # (the DL-90 lesson, applied the second time). A denial
+                    # consumes no engine index and advances no engine time.
+                    allowed, why = self.access.decide(
+                        principal, request.get("cmd"), request.get("verb")
+                    )
+                    if not allowed:
+                        await self._send(writer, {"ok": False, "refused": True, "error": why})
+                        continue
+                    # ss3: the authenticated spelling replaces the claim
+                    request["claimed_actor"] = principal.spelling
                 if request.get("cmd") == "subscribe":
-                    await self._subscribe(writer, request)
+                    if self.access is not None and principal is not None:
+                        # ss7: reload revokes exactly the live streams that
+                        # lost read, so the perimeter tracks the writer AND
+                        # the handler task (parked on queue.get() -- a close
+                        # alone would never wake it on a quiet estate)
+                        self.access.streams[writer] = (principal, task)
+                        try:
+                            await self._subscribe(writer, request)
+                        finally:
+                            self.access.streams.pop(writer, None)
+                    else:
+                        await self._subscribe(writer, request)
                     break  # a subscription owns its connection until hangup
                 try:
                     response = await self._respond(request)
