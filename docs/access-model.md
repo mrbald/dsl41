@@ -3,7 +3,8 @@
 Status: **draft (2026-08-22, DL-146).** Designed in a three-way round: the
 user's constraints, one Claude sketch, one codex-sol sketch, two adversarial
 rounds to convergence; a post-build conformance round (codex-sol,
-2026-08-22) folded by DL-147. Once frozen, each change to a frozen item requires a
+2026-08-22) folded by DL-147; a second conformance round (codex-sol, same
+day) folded by DL-148. Once frozen, each change to a frozen item requires a
 decision-log entry, the same rule as `docs/control-protocol.md`. This document
 retires the RBAC non-goal of `docs/runner-design.md` §0/§12 and closes the
 authorization half of control-protocol §7 gap 2. The authentication half
@@ -56,8 +57,13 @@ Not guarded, by ruling:
   definition.** Anyone who can read the WAL and write the spool needs no
   socket. This is documented, not fought. The CLI verb tables below are
   therefore *semantic* tiers — what the verb means — not enforcement.
+  The exemption is the filesystem path alone: a CLI request that
+  arrives through `control.sock` passes the same gate as every other
+  client (§5) — there is no client identity, only the peer credential.
 - **`supervisor.sock` is governed but not tiered** (v1 ruling): it
-  stays owner-`0600` — kernel-enforced, owner-only, and the local owner
+  keeps both supervisor-protocol §5 controls — owner-`0600` and the
+  same-uid peer-cred check on every accept — kernel-enforced,
+  owner-only, and the local owner
   is adm by definition (previous bullet), which contains every lower
   tier — including when the run root opens to `0710` traversal (§8).
   `supervise shutdown` can kill every managed command; it remains an
@@ -72,8 +78,11 @@ is `runner_supervisor.peer_uid`. The access gate extends it:
 
 - uid → passwd name → groups via `getgrouplist`, on both platforms —
   macOS's `xucred.cr_groups` truncates at 16 and NSS is already the
-  source the map's `group:` names come from. Any resolution error is a
-  refusal, never an unexplained EOF.
+  source the map's `group:` names come from. A failed credential read,
+  a uid with no passwd entry, or a `getgrouplist` error is a refusal,
+  never an unexplained EOF. One deliberate narrowing: a gid with no
+  group name is dropped from the group set, not refused — a nameless
+  gid can match no named `group:` row.
 - The principal is fixed at accept time and is immutable for the life of
   the connection. Changing OS groups requires reconnect; that is an
   administrative fact, not a reload defect (§7).
@@ -136,9 +145,10 @@ following symlinks (and non-blocking: a FIFO refuses instead of parking
 startup) and checks four predicates — the parent before the open, the
 file on the opened descriptor:
 
-- the file is a regular file owned by the engine's own uid — root
-  included is refused: the map speaks for this engine, so this engine
-  must own it;
+- the file is a regular file owned by the engine's own effective uid —
+  any other owner is refused, root included: the map speaks for this
+  engine, so this engine must own it (a root engine owns its map as
+  uid 0);
 - the file is not group- or other-writable (the owner-write bit itself
   is not required);
 - the parent is no symlink (path resolution at open enforces that it
@@ -155,8 +165,31 @@ the sealed estate artifacts; it is policy, not evidence.
 model stands — socket `0600`, owner-only, nothing changes for zero-config
 estates. `access_map` configured but the file is missing, unreadable, or
 invalid: **startup refuses**; on reload, the old policy stays and a
-receipt records the failure (§7). A configured path never silently falls
-back to owner-wide authority.
+refused candidate gets a best-effort failure receipt — the §7 escape
+path (an unwrapped descriptor error) attempts none. A configured path
+never silently falls back to owner-wide authority. The preflight
+refusal writes nothing: the same loader that arming runs is called
+read-only first, and `socket_group` is resolved against the host, both
+before the run root is claimed or the WAL opened. Arming re-validates
+after the root is claimed; a failure there — re-validation, journal
+recovery, the arming receipt's sync, the group grant — still refuses,
+but the claimed root and its WAL already exist by then. The receipt
+trail differs by failure: a re-validation failure writes no receipt;
+an existing `perimeter.jsonl` this engine cannot read refuses at
+recovery, before any new record, rather than restarting the key
+series (§6); a failed receipt sync can leave no, partial, or complete
+`policy_loaded` bytes, and no policy stands; a group-grant failure
+comes after the synced `policy_loaded` line and leaves it with no
+failure record following — a `policy_loaded` line alone does not
+prove the engine went on to serve under that policy. The group grant
+itself is not transactional: a failure can leave a prefix of the
+children already re-moded, or the root re-grouped while still `0700`,
+and startup refuses without rolling anything back. The child pass
+applies exact modes (`0700` dirs, `0600` files) — group and other
+bits never widen, while owner bits can change (a `0400` file gains
+owner write) — and it follows a symlink child to its target, wherever
+that points; both are the owner's own artifacts inside a root that
+was `0700` until this moment.
 
 ## 5. The enforcement point
 
@@ -165,6 +198,12 @@ one place both `_respond` and `_subscribe` pass through (`subscribe`
 owns its connection and skips `_respond`; DL-90 already taught this
 lesson for the version check). Nothing reaches `Engine.submit`
 unauthorized. The engine, oracle and journal stay authz-free.
+
+Two doors precede the gate, in the shipped order: the line must decode
+to a JSON object, and the request must name `v: 3` (control-protocol
+§2). A malformed or wrong-version request is answered before
+classification; it reaches neither the policy nor the perimeter
+journal.
 
 Per request:
 
@@ -178,7 +217,12 @@ Per request:
 4. Compare granted tier with required tier.
 5. Denied → perimeter receipt (§6), answer `ok: false, refused: true`
    with prose naming the tier gap. A denial consumes no engine index and
-   advances no engine time.
+   advances no engine time. Like every answer sent before routing — the
+   malformed line, the version refusal, the credential refusal — the
+   denial carries no read header: the header is stamped only on the
+   answer of a request that passed routing and the lineage proof
+   (control-protocol §2 as amended by DL-148), and a perimeter denial
+   is sent before either.
 6. Admitted → stamp the authenticated principal, continue to the
    existing dispatcher unchanged.
 
@@ -196,7 +240,9 @@ input, and replay must not see policy. A separate append-only journal:
 ```
 
 Every record carries `rec` (the kind), its own `access_seq` (never the
-engine index) and `at`. The rest of the schema is per kind:
+engine index) and `at` — UTC wall time, ISO-8601 at seconds precision;
+`at` orders nothing, `access_seq` is the order. The rest of the schema
+is per kind:
 
 - **Decision records** — `access_denied`, `privileged_admitted` (every
   admitted request that required ops or higher — passed the PERIMETER — the break-glass ledger;
@@ -204,15 +250,27 @@ engine index) and `at`. The rest of the schema is per kind:
   a verb the dispatcher then refuses still shows a perimeter admission
   here), `stream_revoked`. Fields: `realm`, `principal`, `action`,
   `required_tier`, `granted_tier`, `policy_generation`,
-  `policy_digest`. `action` is one bounded label — `cmd` or
+  `policy_digest`. `principal` is the unqualified name; the realm
+  rides in `realm`. `required_tier` is null for a `cmd` outside the
+  table; `granted_tier` is null when resolution denies. `action` is
+  one bounded label — `cmd` or
   `cmd:verb`, each part truncated at 64 characters; a non-string `cmd` is
   recorded as `<non-string-cmd>`, never stringified. Request bodies,
   global values and JIL are never recorded.
-- **Policy records** — `policy_loaded` (`generation`, `digest`, the
-  binding count) and `policy_reload_failed` (`generation`, `error`,
-  plus `orphaned_generation` when a landed `policy_loaded` line must
-  not stand, §7). They carry no principal and no action: policy has
-  neither.
+- **Policy records** — `policy_loaded` (`generation`, `digest`,
+  `bindings` — the binding count) and `policy_reload_failed`
+  (`generation` — the installed generation that stays active, `error`,
+  plus `orphaned_generation` whenever the `policy_loaded` write
+  reported failure: the line may or may not have landed — an fsync can
+  fail after the bytes are out — and the void is decided by seq
+  adjacency, because the generation is process-local and an older
+  incarnation may have used the same number: a failed write attempt
+  still consumes its `access_seq`, so if a complete `policy_loaded`
+  record exists at the failure's `access_seq - 1` carrying the named
+  generation, that record is void; if none exists there, no complete
+  line is void. A later successful reload may reuse the same number —
+  a failed reload does not consume it — and its line stands, §7).
+  They carry no principal and no action: policy has neither.
 - The §9 web records join this table when that seam lands.
 
 Durability is per kind, and each rule is deliberate:
@@ -236,11 +294,29 @@ Durability is per kind, and each rule is deliberate:
   lands.
 
 `access_seq` is journal-wide: it continues across engine restarts (the
-writer recovers it from the last complete record and heals a torn
-tail), so the key stays unique for the journal's life. The policy
+writer recovers it from the last complete record and makes a
+best-effort attempt to heal a torn tail), so complete records carry
+strictly increasing seqs across restarts in normal operation. Every
+write attempt, whatever the kind, allocates its seq before the I/O.
+A reported failure splits two ways: when no complete line landed, the
+number is a gap once a later write succeeds, and it can be reissued
+after a restart only if no later complete record carries a higher
+seq; when the line landed complete and only the I/O after it failed —
+the fsync, or the close — the record exists and carries its seq: the
+§7 void rule exists exactly for that case, and is built on this
+allocation order. Recovery reads
+the last complete record; an unreadable file refuses arming (§4),
+while a readable file with no complete record starts the series at
+zero — the next append issues 1, the same as a fresh journal. One
+corner is accepted: if the heal itself fails and the next append then
+succeeds, that record joins the torn fragment — unreadable to
+recovery, so a later incarnation can reissue its seq. Where a reader
+meets a reissued seq, physical file order is the tie-breaker. The policy
 `generation` is process-local: arming starts every incarnation at 1.
 Across restarts the `policy_digest` — not the generation — identifies
-the policy a record was decided under; decision records carry both.
+the policy a record was decided under; decision records carry both. The
+digest is `sha256:` plus the SHA-256 hex of the exact map bytes the
+loader read.
 
 **Evolution and lifetime** (collected in the `docs/protocol-evolution.md`
 §1 matrix): the discriminator is the record's `rec` kind. Evolution is
@@ -252,7 +328,13 @@ everything else reads it as an audit trail), so there is no per-record
 version field to refuse on. There is no physical roll in v1: the
 journal is one append-only file for the life of its run root, pruned
 only with that root — truncating it in place would restart `access_seq`
-and forge duplicate keys. It sits outside the period-model §12 lineage
+and forge duplicate keys. The writer trusts the path it owns:
+`perimeter.jsonl` is opened without the map loader's symlink and FIFO
+checks, and each recovery, heal and append resolves the name afresh —
+the run root has been owner-only since before arming (§8), so
+anything planted at that name is the owner's own act, and the
+one-file lifetime holds only while the owner keeps the name bound to
+the same regular file. It sits outside the period-model §12 lineage
 floor (no replay reads it, nothing in the lineage reaches it). Which
 roots may be pruned and when is the same business decision as every
 other retention choice (`deployment-runbook.md` §2a); the act is adm.
@@ -264,17 +346,29 @@ explicit: write a temp file, fsync, rename, `SIGHUP`. Install is
 receipt-gated, in this order: validate the complete candidate, sync the
 `policy_loaded` receipt, then install the snapshot — a policy change
 that cannot be receipted does not happen, and the old snapshot stays
-active. Any other failure keeps the old snapshot and writes
-`policy_reload_failed` (best effort). Startup with a configured but
+active. "Complete" is the candidate policy, not a proven byte count:
+v1 validates what one descriptor read returned, so a short read that
+ends at valid TOML would install that prefix — the temp-fsync-rename
+procedure above is what keeps the file stable under the read;
+full-read enforcement is a named code follow-up (DL-148). A refused candidate, a changed `socket_group` (below) and a
+failed `policy_loaded` write each keep the old snapshot and attempt
+`policy_reload_failed` (best effort). An error outside those paths —
+the loader's own descriptor I/O failing mid-read — escapes the reload
+call into the event loop's handler-exception log instead: the old
+snapshot stays active and no failure receipt is attempted. Startup
+with a configured but
 invalid map, or one whose arming receipt cannot be synced, refuses
 (§4).
 
 `socket_group` is fixed at arming: a reload that names a different
 group is refused whole (`policy_reload_failed`) — the kernel side of the
 grant cannot follow a map edit, and a half-applied change is worse than
-a restart. When the `policy_loaded` line lands but its fsync fails, the
-failure receipt names the `orphaned_generation` the landed line must
-not stand for.
+a restart. When the `policy_loaded` write reports failure, the failure
+receipt — itself best effort — names the `orphaned_generation`: the
+line may have landed complete before its fsync or close failed, and
+whether a line is void is decided by seq adjacency (§6), never by
+scanning for the generation. A later successful reload may reuse the number; its line
+stands (§6).
 
 Connections are **kept** across reload:
 
@@ -284,7 +378,7 @@ Connections are **kept** across reload:
   work either.
 - `subscribe` has no next request, so reload re-evaluates every live
   stream under the new policy and closes exactly those that lost read,
-  each with a `stream_revoked` receipt.
+  attempting a best-effort `stream_revoked` receipt for each (§6).
 - OS group changes propagate on reconnect (§3). Forcing reconnects is a
   separate administrative act, not part of reload semantics.
 
@@ -306,13 +400,23 @@ deliberately. Arming has two modes, chosen by the map:
   `socket_group`. The `0700` root was the
   fence for its children (`logs/` and `runs/` are born `0755`), so
   opening it first **tightens every direct child to owner-only** (dirs
-  `0700`, files `0600`); later artifacts land inside those directories.
+  `0700`, files `0600` — exact modes: group and other bits never
+  widen, owner bits can change, and a symlink child's target is what
+  changes, §4); later artifacts land inside those directories.
   A test asserts nothing but the socket is group-accessible after
   arming. `supervisor.sock` stays `0600` (§2).
 - Access not configured: everything stays exactly as today (`0700`,
-  `0600`), and no gate, receipts or overwrite exist at all (§4).
+  `0600`). No gate or actor overwrite is active, and no new perimeter
+  receipt is attempted (§4); a `perimeter.jsonl` left by an earlier
+  armed incarnation stays where it is, for the life of the root (§6).
 - Sockets are created with no access, ownership and group set, and the
   final mode applied last. The socket directory is never group-writable.
+- The receipt journal (`perimeter.jsonl`, §6) is created owner-only —
+  mode `0600` before umask, which can only narrow it. Group-open
+  arming's child-tightening pass also forces an existing journal to
+  `0600`; owner-only arming leaves an existing file's mode alone. The
+  perimeter never adds group or other permissions to it; the child
+  pass can restore owner bits (`0400` → `0600`, §4).
 - Opening to a group changes exactly three things: the direct children
   tighten to owner-only, the root takes the group and `0710`, the
   socket takes the group and `0660`. Every further grant — log
@@ -406,16 +510,19 @@ document freezes:
 1. Zero-config estates: no behavior change anywhere (the whole existing
    suite is the fixture).
 2. Configured-but-invalid map: startup refusal; reload keeps old policy
-   and writes the receipt.
+   and attempts the failure receipt (best effort, §6).
 3. Resolution order: user row beats group rows; highest group wins;
    `unmapped` applies last; realms never cross-match.
 4. Gate coverage: every dispatcher `cmd` has a row (completeness gate);
    `subscribe` is gated; a denial consumes no engine index.
-5. Denied mutation → `refused: true`, receipt written and synced, WAL
-   untouched.
-6. `privileged_admitted` written for every ops admission.
+5. Denied mutation → `refused: true`, receipt synced before the
+   answer, WAL untouched; a receipt write that fails still denies
+   (§6).
+6. `privileged_admitted` attempted for every ops admission; a failed
+   write does not block the admission (§6).
 7. Reload: connections survive; next request sees new policy; a live
-   subscribe stream that lost read closes with `stream_revoked`.
+   subscribe stream that lost read closes, its `stream_revoked`
+   receipt attempted (revocation mandatory, receipt best effort, §6).
 8. Modes: armed group-open → `0710`/`0660` and owner-only WAL
    asserted; armed owner-only (no `socket_group`) → `0700`/`0600`
    unchanged with the gate live; unconfigured → `0700`/`0600`

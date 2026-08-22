@@ -61,10 +61,19 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   connection: the next line on it may be well-formed.
 - Responses are `{"ok": true, …}` or `{"ok": false, "error": "<message>"}`.
   Errors are human-readable strings, **not** stable codes.
-- Every response also carries the **read header**: `baseline_id`, `epoch`
-  and `applied_index` (`docs/concurrency-model.md` §6). A revision means
-  nothing without the log it was read from, and a client that cannot name
-  the log cannot be told it is holding a stale one.
+- Responses carry the **read header**: `baseline_id`, `epoch` and
+  `applied_index` (`docs/concurrency-model.md` §6). A revision means
+  nothing without the log it was read from, and a client that cannot
+  name the log cannot be told it is holding a stale one. *(Amended by
+  DL-148 — the headerless answers enumerated.)* The header is stamped
+  in one place: on the answer of a request that passed routing and the
+  §4 lineage proof. Everything else is headerless — an answer sent
+  before routing (the malformed line, the version refusal, the DL-146
+  perimeter's credential refusal and denial), the lineage refusal
+  itself (§4, PR-03), the internal-error answer of a handler that
+  raised, and every line `subscribe` writes on its own connection
+  (§5). None of them names a revision. This enumerates what the
+  shipped v3 server has always done.
 - A malformed line answers `{"ok": false, "error": "bad request: …"}` and
   the stream stays in sync. A handler that raises answers
   `{"ok": false, "error": "internal error: …"}` rather than dying
@@ -98,8 +107,11 @@ semantics.
 ```
 
 The `verb` set maps 1:1 onto oracle `EventKind`. Every admitted command is
-journaled with `source=control`; the WAL is the audit trail, and there is
-no second log.
+journaled with `source=control`; the WAL is the audit trail of engine
+decisions, and no second log carries them. *(Narrowed by DL-148:)* access
+decisions at the DL-146 perimeter — admissions and denials at the
+boundary — go to the perimeter journal (`docs/access-model.md` §6) and
+never enter the WAL.
 
 | verb | `payload` | notes |
 |---|---|---|
@@ -294,7 +306,8 @@ unresolved KILL ladder out; a timeout is `unknown`, never a refusal.
 
 *(Amended by DL-133, at build of period-model §1.3.)* **A read is refused
 when this engine can no longer prove it leads the estate's LINEAGE.** Every
-answer below carries the §2 read header — a baseline, an epoch and a log
+answer below carries the §2 read header (headerless exceptions enumerated
+there, DL-148) — a baseline, an epoch and a log
 position — and those are exactly the coordinates a displaced leader may no
 longer speak for, so a `status` immediately after the anchor directory is
 deleted or replaced is refused rather than answered, and the refusal
@@ -304,14 +317,18 @@ admission's first append rather than at this door — refusing there would
 leave a displaced leader answering nothing and stopping never, and would
 also refuse the read a client composes its `expect` from, so the very
 mutation that stops the engine could never be sent (CM-14). A `subscribe`
-response is a read and is refused on the same rule.
+response is a read and is refused on the same rule — *(DL-148:)* the same
+lineage proof, not the same header: no `subscribe` line — the ack, a
+refusal, a marker or a record — carries the read header (§2), and a
+subscription is not a `concurrency-model.md` §6 revision-bearing read.
 
 Every query is a **pure projection**. None mutates, none inserts a store
 row. They are safe to serve from the engine's task because `feed()` never
 yields, so a handler can never observe a half-applied event.
 
-Every response carries the read header (§2) in addition to the fields
-listed below. These are the reads an `expect` is composed from:
+Every §4 query answer that is answered — not the lineage refusal, not
+an internal-error answer (both headerless, §2 DL-148) — carries the
+read header in addition to the fields listed below. These are the reads an `expect` is composed from:
 per-job `state_rev` in `status`, `global`/`globals` for a named
 global, and `hosts` for a routing row. Revision-bearing reads are
 leader-only in v2 — one engine per run root *is* the leader until S6

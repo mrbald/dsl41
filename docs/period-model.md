@@ -1003,7 +1003,11 @@ and decision lookup ambiguous. The engine computes `first_index` after §6 step
 `stage_digest` excludes it (PR-05b). **`boundary_request` is
 authoritative input in three of its four fields** — `{source, request_id,
 claimed_actor, force_seal}`, where `request_id`,
-`claimed_actor` and `force_seal` originate in the request and nowhere else,
+`claimed_actor` and `force_seal` originate in the request and nowhere else
+*(DL-148: on an access-armed estate the perimeter has already overwritten
+`claimed_actor` with the authenticated spelling before the request reaches
+this tier — `docs/access-model.md` §3; this tier still reads the request
+and nothing else)*,
 and `source` is `"request"` — **one value since DL-138** — which audit checks
 for equality between the record and the sidecar (§11). A live seal through the
 control socket and an offline seal from the CLI are the same kind of boundary —
@@ -1028,9 +1032,13 @@ horizon and `force_seal: false` → refuse; age < horizon and `force_seal: true`
 → commit with `forced_gate` populated. An unnecessary `--force-seal` is
 recorded in `boundary_request.force_seal` and engages no gate. Draft 21 put all three in one
 excluded block, so a consistent rewrite of the fingerprint or the observed age
-passed audit (PR-47b). "Claimed actor", not "principal": there is no
-authentication at this tier (`control-protocol.md` §7 gap 2), and the seal must
-not spell an unauthenticated claim as if it were one. `classification` records the
+passed audit (PR-47b). "Claimed actor", not "principal": this tier does no
+authentication of its own — the name records what the request carried, and
+the seal must not spell that claim as if this tier had proved it. *(Amended
+by DL-148: the local-authentication half of `control-protocol.md` §7 gap 2
+closed with DL-146 — on an armed estate the carried value is the
+perimeter's authenticated spelling; on an unconfigured estate it stays the
+caller's bare claim.)* `classification` records the
 §10 verdict and every A assumption; draft 2 promised "assumption recorded" and
 gave it nowhere to live.
 

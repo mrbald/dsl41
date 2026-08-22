@@ -778,7 +778,10 @@ The control plane is a Unix domain socket in the run directory, mode 0600
 - **subscribe** — stream journal records from a seq (the UI feed).
 
 Every control input is journaled like any other injected event
-(source=control). The WAL is the audit trail — there is no second log.
+(source=control). The WAL is the audit trail of engine decisions — no
+second log carries them. *(Narrowed by DL-148:)* access decisions at
+the DL-146 perimeter go to the perimeter journal
+(`docs/access-model.md` §6) and never enter the WAL.
 
 ## 11. UI — one Textual app, terminal and web (E3)
 
