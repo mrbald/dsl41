@@ -748,8 +748,9 @@ this jump possible.
 
 ## 10. Control plane
 
-The control plane is a Unix domain socket in the run directory, mode 0600,
-with a JSON-lines protocol.
+The control plane is a Unix domain socket in the run directory, mode 0600
+(0660 to a named `socket_group` when the DL-146 access perimeter is armed —
+`docs/access-model.md` §8), with a JSON-lines protocol.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,

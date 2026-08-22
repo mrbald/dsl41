@@ -2,7 +2,8 @@
 
 Status: **draft (2026-08-22, DL-146).** Designed in a three-way round: the
 user's constraints, one Claude sketch, one codex-sol sketch, two adversarial
-rounds to convergence. Once frozen, each change to a frozen item requires a
+rounds to convergence; a post-build conformance round (codex-sol,
+2026-08-22) folded by DL-147. Once frozen, each change to a frozen item requires a
 decision-log entry, the same rule as `docs/control-protocol.md`. This document
 retires the RBAC non-goal of `docs/runner-design.md` §0/§12 and closes the
 authorization half of control-protocol §7 gap 2. The authentication half
@@ -56,8 +57,9 @@ Not guarded, by ruling:
   socket. This is documented, not fought. The CLI verb tables below are
   therefore *semantic* tiers — what the verb means — not enforcement.
 - **`supervisor.sock` is governed but not tiered** (v1 ruling): it
-  stays owner-`0600` — kernel-enforced, owner-only, adm-equivalent —
-  including when the run root opens to `0710` traversal (§8).
+  stays owner-`0600` — kernel-enforced, owner-only, and the local owner
+  is adm by definition (previous bullet), which contains every lower
+  tier — including when the run root opens to `0710` traversal (§8).
   `supervise shutdown` can kill every managed command; it remains an
   owner-only act. A later version may put it behind the same gate;
   nothing in this model blocks that.
@@ -85,7 +87,11 @@ canonical authenticated spelling (`os/<name>`) before anything is
 fingerprinted or logged. The seal fingerprint contains the actor
 (`boundary.SealRequest`), so the invariant is stated precisely: the
 fingerprint carries *identity*, never *tier*. A role-map edit changes no
-fingerprint and breaks no retry; a different authenticated principal
+fingerprint — an admitted retry still matches its original attempt.
+Admission itself is a separate question: every request, a retry
+included, decides under the current policy (§5, §7), so a principal
+whose tier dropped below ops is denied at the perimeter before the
+retry route is reached. A different authenticated principal
 retrying someone else's boundary mismatches by design and is answered by
 the existing re-read-and-re-decide path. When access is not configured,
 the claim passes through untouched (byte-compatible). One transition
@@ -102,7 +108,9 @@ mapping seam: every identity source ends here.
 ```toml
 format_version = 1
 unmapped = "deny"              # "read" is the only other legal value
-socket_group = "dsl41-control" # the OS group that may reach the socket
+socket_group = "dsl41-control" # optional: the OS group that may reach
+                               # the socket; absent = owner-only armed
+                               # mode (ss8)
 
 [[binding]]
 subject = "group:os/dsl41-observers"
@@ -123,16 +131,25 @@ Resolution, in order:
    section.
 
 Validation refuses: duplicate subjects, unknown fields, unknown tiers,
-wildcards, a subject without a realm, a path that is not a regular file
-(a FIFO cannot park startup: the open is non-blocking). The loader opens
-the file without following symlinks and verifies owner and mode
-(owner-writable only) after opening — and the same for the file's parent
-directory (owned by root or the engine's own uid, not group- or
-other-writable, not itself a symlink), so an ops-tier user cannot swap
-the map by renaming over it. One residual is named: ancestors ABOVE the
-parent are not walked, so place the map under a root-owned path (`/etc`,
-or the estate owner's home) rather than under a world-writable tree. The map lives outside the sealed estate artifacts; it is
-policy, not evidence.
+wildcards, a subject without a realm. The loader opens the file without
+following symlinks (and non-blocking: a FIFO refuses instead of parking
+startup) and checks four predicates — the parent before the open, the
+file on the opened descriptor:
+
+- the file is a regular file owned by the engine's own uid — root
+  included is refused: the map speaks for this engine, so this engine
+  must own it;
+- the file is not group- or other-writable (the owner-write bit itself
+  is not required);
+- the parent is no symlink (path resolution at open enforces that it
+  is a directory) and is owned by root or the engine's own uid;
+- the parent is not group- or other-writable — otherwise an ops-tier
+  user could swap the map by renaming over it.
+
+One residual is named: ancestors ABOVE the parent are not walked, so
+place the map under a root-owned path (`/etc`, or the estate owner's
+home) rather than under a world-writable tree. The map lives outside
+the sealed estate artifacts; it is policy, not evidence.
 
 **Configured vs absent is explicit.** No `access_map` configured: today's
 model stands — socket `0600`, owner-only, nothing changes for zero-config
@@ -178,23 +195,67 @@ input, and replay must not see policy. A separate append-only journal:
 <run_root>/perimeter.jsonl
 ```
 
-Records: `access_denied`, `privileged_admitted` (every ops/adm request
-that passed the PERIMETER — the break-glass ledger; the engine's own
-decision on that request is the WAL's to record, so a verb the
-dispatcher then refuses still shows a perimeter admission here),
-`policy_loaded`,
-`policy_reload_failed`, `stream_revoked`, plus the §9 web records when
-that seam lands. Each record carries its own `access_seq` (never the
-engine index), the principal with realm, the `(cmd, verb)`, the required
-and granted tiers, and the policy generation and digest it was decided
-under. Request bodies, global values and JIL are never recorded — the
-`action` is a bounded label (a non-string `cmd` is recorded as
-`<non-string-cmd>`, never stringified). `access_seq` continues across
-engine restarts (the writer recovers it from the last complete record
-and heals a torn tail), so the key stays unique for the journal's life.
+Every record carries `rec` (the kind), its own `access_seq` (never the
+engine index) and `at`. The rest of the schema is per kind:
 
-A denial is synced before it is answered when storage works; a storage
-failure still denies. Retention of this journal is adm.
+- **Decision records** — `access_denied`, `privileged_admitted` (every
+  admitted request that required ops or higher — passed the PERIMETER — the break-glass ledger;
+  the engine's own decision on that request is the WAL's to record, so
+  a verb the dispatcher then refuses still shows a perimeter admission
+  here), `stream_revoked`. Fields: `realm`, `principal`, `action`,
+  `required_tier`, `granted_tier`, `policy_generation`,
+  `policy_digest`. `action` is one bounded label — `cmd` or
+  `cmd:verb`, each part truncated at 64 characters; a non-string `cmd` is
+  recorded as `<non-string-cmd>`, never stringified. Request bodies,
+  global values and JIL are never recorded.
+- **Policy records** — `policy_loaded` (`generation`, `digest`, the
+  binding count) and `policy_reload_failed` (`generation`, `error`,
+  plus `orphaned_generation` when a landed `policy_loaded` line must
+  not stand, §7). They carry no principal and no action: policy has
+  neither.
+- The §9 web records join this table when that seam lands.
+
+Durability is per kind, and each rule is deliberate:
+
+- `access_denied` — synced before the refusal is answered; a storage
+  failure still denies. The decision fails closed; the receipt does
+  not gate it.
+- `policy_loaded` — sync-gated: a policy that cannot be receipted does
+  not arm and does not install (§7).
+- `policy_reload_failed` — best effort (written synced, the result
+  ignored): it reports a failure already answered by keeping the old
+  policy.
+- `privileged_admitted` — best effort, unsynced. The admission stands
+  when the receipt write fails: the WAL is the authoritative record of
+  what the engine then did, and gating every ops verb on receipt
+  storage would turn a full disk into a total operations outage while
+  reads stayed open. The corroborating ledger is best-effort by
+  ruling.
+- `stream_revoked` — the revocation is mandatory, its receipt best
+  effort: a stream that lost read closes whether or not the record
+  lands.
+
+`access_seq` is journal-wide: it continues across engine restarts (the
+writer recovers it from the last complete record and heals a torn
+tail), so the key stays unique for the journal's life. The policy
+`generation` is process-local: arming starts every incarnation at 1.
+Across restarts the `policy_digest` — not the generation — identifies
+the policy a record was decided under; decision records carry both.
+
+**Evolution and lifetime** (collected in the `docs/protocol-evolution.md`
+§1 matrix): the discriminator is the record's `rec` kind. Evolution is
+additive — a writer may add fields, a reader must ignore fields it does
+not know; an incompatible change takes a NEW kind name, the same move
+the WAL makes for record kinds. Unknown kinds are skipped, not refused:
+no engine dispatches this journal (seq recovery reads only `access_seq`;
+everything else reads it as an audit trail), so there is no per-record
+version field to refuse on. There is no physical roll in v1: the
+journal is one append-only file for the life of its run root, pruned
+only with that root — truncating it in place would restart `access_seq`
+and forge duplicate keys. It sits outside the period-model §12 lineage
+floor (no replay reads it, nothing in the lineage reaches it). Which
+roots may be pruned and when is the same business decision as every
+other retention choice (`deployment-runbook.md` §2a); the act is adm.
 
 ## 7. Reload and revocation
 
@@ -231,24 +292,32 @@ Connections are **kept** across reload:
 
 The run root is forced `0700` today (`runner_startup`), so a `0660`
 socket alone is unreachable — parent traversal must be granted
-deliberately:
+deliberately. Arming has two modes, chosen by the map:
 
-- Access configured: run root `0710`, group = `socket_group` —
-  execute-only traversal, no listing. `control.sock` becomes `0660`
-  root-owner:`socket_group`. The `0700` root was the fence for its
-  children (`logs/` and `runs/` are born `0755`), so arming first
-  **tightens every direct child to owner-only** (dirs `0700`, files
-  `0600`); later artifacts land inside those directories. A test asserts
-  nothing but the socket is group-accessible after arming.
-  `supervisor.sock` stays `0600` (§2).
+- **Armed, owner-only** (`socket_group` absent): the gate, the
+  receipts and the actor overwrite are all live, and every mode stays
+  exactly as today (`0700` root, `0600` socket, children untouched).
+  Nobody but the owner reaches the socket; the perimeter is an audit
+  and policy layer for the owner's own connections, and a staging step
+  before a group grant.
+- **Armed, group-open** (`socket_group` named): run root `0710`, group
+  = `socket_group` — execute-only traversal, no listing. `control.sock`
+  becomes `0660`, owner unchanged (the run-root owner), group
+  `socket_group`. The `0700` root was the
+  fence for its children (`logs/` and `runs/` are born `0755`), so
+  opening it first **tightens every direct child to owner-only** (dirs
+  `0700`, files `0600`); later artifacts land inside those directories.
+  A test asserts nothing but the socket is group-accessible after
+  arming. `supervisor.sock` stays `0600` (§2).
 - Access not configured: everything stays exactly as today (`0700`,
-  `0600`).
+  `0600`), and no gate, receipts or overwrite exist at all (§4).
 - Sockets are created with no access, ownership and group set, and the
   final mode applied last. The socket directory is never group-writable.
-- Arming changes exactly two things: traversal on the root and the
-  socket's group and mode. Every further grant — log visibility for a
-  web tier above all (§9) — is the operator's explicit act, never the
-  perimeter's.
+- Opening to a group changes exactly three things: the direct children
+  tighten to owner-only, the root takes the group and `0710`, the
+  socket takes the group and `0660`. Every further grant — log
+  visibility for a web tier above all (§9) — is the operator's explicit
+  act, never the perimeter's.
 
 ## 9. The web tier
 
@@ -284,12 +353,19 @@ Consequences, stated plainly:
 
 Closed table, default deny. A dispatcher `cmd` without a row here is a
 test failure (the completeness gate diffs the dispatcher against this
-table), and an unlisted `(cmd, verb)` is denied at runtime.
+table), and a `cmd` outside the table is denied at runtime.
+Classification is by `cmd` alone (§5): the perimeter admits any verb
+string inside a listed `cmd`, and the DISPATCHER then refuses an
+unknown one — two refusals from two owners, and a dispatcher refusal
+after a perimeter admission still leaves its `privileged_admitted`
+receipt (§6). The verb column below is therefore the dispatcher's
+accepted set, listed here for the tier it rides under, not a second
+classification axis.
 
 | cmd | verb | tier |
 | --- | --- | --- |
 | `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `hosts`, `subscribe` | — | read |
-| `sendevent` | every EventKind verb, including `FORCE_STARTJOB`, `KILLJOB`, `CHANGE_STATUS`, `SET_GLOBAL` | ops |
+| `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `host` | `activate`, `drain`, `evict` (forced included) | ops |
 | `seal` | normal and `force_seal` | ops |
 
@@ -303,6 +379,10 @@ verb are read-shaped; `sendevent`, `host`, `supervise shutdown` are ops;
 `run`, `serve`, `audit` (writes attestations and registry state),
 `seal` (stages C2 files before the ops verb — a later slice may split
 staging from committing), `estate prune`, `estate reclaim` are adm.
+`supervise shutdown` is ops-shaped — it operates, it configures
+nothing — while its only door is the owner-`0600` supervisor socket
+(§2), so the enforcement (owner = adm by definition) exceeds the tier
+the verb semantically needs. Adm contains ops; no contradiction.
 
 The TUI: a read session may render the mutating console disabled as a
 courtesy; the server refusal is the authority either way.
@@ -336,12 +416,16 @@ document freezes:
 6. `privileged_admitted` written for every ops admission.
 7. Reload: connections survive; next request sees new policy; a live
    subscribe stream that lost read closes with `stream_revoked`.
-8. Modes: configured → `0710`/`0660` and owner-only WAL asserted;
-   unconfigured → `0700`/`0600` unchanged.
+8. Modes: armed group-open → `0710`/`0660` and owner-only WAL
+   asserted; armed owner-only (no `socket_group`) → `0700`/`0600`
+   unchanged with the gate live; unconfigured → `0700`/`0600`
+   unchanged.
 9. Peer credential absent with access configured → connection refused.
 10. With access configured, the authenticated spelling replaces the
     claim in every journaled record and in the seal fingerprint; a
-    role-map edit changes no fingerprint (retry survives reload); without
-    access, actor bytes pass through unchanged.
+    role-map edit changes no fingerprint — an ADMITTED retry survives
+    reload, while admission itself decides under the current policy
+    (§3: a tier lost is a retry denied); without access, actor bytes
+    pass through unchanged.
 11. `runner_access.py` sits under CI's 100% branch-coverage gate
     (`[tool.coverage.report]`): every refusal arm is held, not asserted.

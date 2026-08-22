@@ -7485,3 +7485,73 @@
   local authentication half closes with it; web session identity stays
   open under the named seam). Gap 4 (prose errors) deliberately
   stands.
+- DL-147 the conformance round before the freeze: eight sol findings,
+  five frozen docs amended, two armed modes named (2026-08-22; a
+  codex-sol conformance review of docs/access-model.md against the
+  frozen sources and the shipped code; all eight findings held on
+  verification and are folded -- the doc stays DRAFT; the ss12 freeze
+  mechanism stands, obligations 8 and 10 reworded, none removed).
+  FROZEN SOURCES AMENDED (the amendments this entry authorizes):
+  control-protocol ss2 (the 0600 clause now names the DL-146 armed
+  0660/0710 mode) and ss3 (claimed_actor: overwritten with the
+  authenticated spelling when access is configured); runner-design
+  ss10 (the same mode note); concurrency-model's DL-111 amendment
+  (forced_by now holds an authenticated identity on an armed estate,
+  the bare claim on an unconfigured one -- "claimed" stays because
+  arming is optional); protocol-evolution ss1 (a perimeter-journal
+  row) and its source list; period-model ss1.1 (perimeter.jsonl in
+  the layout) and ss12 (outside the lineage floor).
+  RULED, not just reworded:
+  (1) TWO ARMED MODES exist and are now named -- socket_group stays
+  OPTIONAL: absent = armed owner-only (gate, receipts and actor
+  overwrite live, every mode as today -- an audit layer and a staging
+  step), named = armed group-open (0710/0660 plus the child
+  tightening). "Arming changes exactly two things" corrected to the
+  three things opening to a group changes. Obligation 8 covers both
+  armed modes; one new test pins the owner-only mode's unchanged
+  modes.
+  (2) PERIMETER JOURNAL EVOLUTION: discriminator is the rec kind, no
+  per-record version field BY CONSTRUCTION -- no engine dispatches
+  the journal (seq recovery reads only access_seq, the rest is
+  audit), so evolution is additive, an incompatible change takes a
+  new kind name (the WAL's move), unknown kinds are skipped.
+  Lifetime: one append-only file for the life of its run root, pruned
+  only whole-root (in-place truncation would restart access_seq and
+  forge duplicate keys); outside the period-model ss12 lineage floor;
+  which roots to prune stays the deployment-runbook ss2 business
+  decision, the act is adm.
+  (3) RECEIPT DURABILITY is per kind and deliberate: access_denied
+  synced before the answer (fails closed); policy_loaded sync-gated
+  (no receipt, no install); policy_reload_failed best effort (the
+  failure is already answered by keeping the old policy);
+  privileged_admitted best effort UNSYNCED -- the admission stands
+  when the receipt write fails, because the WAL is the authoritative
+  record of what the engine then did and gating every ops verb on
+  receipt storage turns a full disk into a total operations outage
+  while reads stay open; stream_revoked: the revocation is mandatory,
+  its receipt best effort. Schemas are per kind: decision records
+  carry principal/action/tiers/generation/digest (action is ONE
+  bounded label, cmd or cmd:verb); policy records carry neither
+  principal nor action. Policy GENERATION is process-local (arming
+  restarts at 1); the digest, not the generation, identifies a policy
+  across restarts; access_seq alone is journal-wide.
+  (4) RETRY WORDING NARROWED: a role-map edit changes no fingerprint
+  -- an ADMITTED retry matches its original attempt -- but admission
+  itself decides under the current policy, so a tier lost is a retry
+  denied at the perimeter before the retry route. Obligation 10 says
+  both halves.
+  (5) VERB TABLE: classification is cmd-alone (restated at the
+  table); the sendevent row names the externally injectable set from
+  control-protocol ss3 instead of "every EventKind" -- the internal
+  kinds (STATUS, TIMER, the alarms) have no wire door and the
+  dispatcher refuses them like any unknown verb; a dispatcher refusal
+  after a perimeter admission still leaves privileged_admitted.
+  (6) MAP PREDICATES stated separately, matching the loader: the FILE
+  must be regular and owned by the engine's own uid (root refused --
+  the map speaks for this engine), not group/other-writable (the
+  owner-write bit is NOT required); the PARENT must be a real
+  directory owned by root or the engine uid, not group/other-writable.
+  (7) supervise shutdown: semantic tier stays OPS (it operates,
+  it configures nothing); its only door is the owner-0600 supervisor
+  socket, so enforcement (owner = adm by definition) exceeds the
+  semantic tier -- explained in ss10, not reclassified.

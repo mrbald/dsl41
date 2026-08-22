@@ -8,9 +8,10 @@ holder (ss7). `runner_control.ControlServer` calls it; nothing below the
 control plane imports it.
 
 Everything here fails closed: a configured map that is missing or
-invalid refuses at load, an unmapped principal is denied, an unlisted
-`(cmd, verb)` is denied, a peer without a resolvable credential is
-refused at accept (ss3).
+invalid refuses at load, an unmapped principal is denied, a `cmd`
+outside the closed table is denied (the verb inside a listed cmd is
+the dispatcher's to validate, ss10), a peer without a resolvable
+credential is refused at accept (ss3).
 """
 
 from __future__ import annotations

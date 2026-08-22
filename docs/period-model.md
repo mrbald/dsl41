@@ -321,6 +321,8 @@ and a revision mean one thing for the life of the estate.
 ```
 <estate-root>/
   control.sock  supervisor.sock  leader.lock
+  perimeter.jsonl     access receipts (DL-146) — never an engine input,
+                      never replayed; contract in docs/access-model.md §6
   wal/
     000001.jsonl        period 1, closed
     000002.jsonl        period 2, closed
@@ -2103,6 +2105,11 @@ presented against a different `(job, run_number)`, and a fingerprint collision.
   (§11a). Recovery refuses without a sidecar or a catalog directory; a
   retention rule that could delete them while obeying the tombstone floor was a
   rule that could delete the only artifacts able to open the head (PR-36c).
+  The DL-146 perimeter journal (`perimeter.jsonl`, `docs/access-model.md`
+  §6; added here by DL-147) sits outside this floor: no replay reads it,
+  nothing in the lineage reaches it. Its one physical rule: pruned only
+  with its whole root, never truncated in place — `access_seq` is
+  recovered from its tail, and a truncation would forge duplicate keys.
 
 ### 12a. The archive — PR-Q3's answer (DL-144)
 

@@ -866,6 +866,15 @@ today, because `reinstate_host` refuses to act on a row that is not
 quarantined. It is a loaded gun for whoever writes the next transition, so
 eviction now clears it.*)*
 
+*(Amended by DL-147.* DL-146 built the missing principal for local peers:
+with an access map configured, the control server authenticates the peer
+by kernel credential and overwrites `claimed_actor` with the canonical
+spelling before the row is written, so `forced_by` holds an authenticated
+identity on an armed estate — and remains the bare claim on an
+unconfigured one. The word "claimed" stays, because arming is optional;
+the web session's per-user identity is still open under
+`web-session-principal-v2` (`docs/access-model.md` §3, §9).*)*
+
 *(Amended by DL-94, at build — stage S5a.* Four things this section left
 implicit, settled by the code that implements it.
 

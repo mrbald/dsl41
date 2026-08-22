@@ -46,7 +46,10 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
 
 - A **unix domain socket** at `<run_root>/control.sock`, mode `0600`
   (set via umask at bind, re-chmod'd after, because some platforms ignore
-  umask on bind).
+  umask on bind). *(Amended by DL-147: when an access map names a
+  `socket_group`, the socket keeps its owner, takes that group, and is
+  re-set to `0660`; the run root opens to `0710` traversal — `docs/access-model.md`
+  §8, DL-146. Estates without a configured map keep `0600` exactly.)*
 - **JSON lines**, both directions. One request object per line; one
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
@@ -128,7 +131,12 @@ while an unseen old-epoch request is refused.
 
 `claimed_actor` is optional and is exactly what it says: there is no
 authentication at this tier (§7), so it is recorded as the caller's claim
-about itself and is never treated as a principal.
+about itself and is never treated as a principal. *(Amended by DL-147:
+with an access map configured, the server authenticates the peer by
+kernel credential and OVERWRITES this field with the canonical spelling
+`os/<name>` before anything is fingerprinted or logged —
+`docs/access-model.md` §3, DL-146. On unconfigured estates the sentence
+above stands unchanged.)*
 
 **The response is the decision, not the receipt:**
 

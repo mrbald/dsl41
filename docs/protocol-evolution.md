@@ -8,7 +8,8 @@ before an old one is retired.
 
 It invents no rule for any protocol. Each tolerance rule lives in the document
 that froze it — `docs/control-protocol.md` §2, `docs/supervisor-protocol.md`
-§3 and §5, `docs/period-model.md` §2 and §3.2. This document collects them per
+§3 and §5, `docs/period-model.md` §2 and §3.2, `docs/access-model.md` §6
+(DL-147). This document collects them per
 protocol, so that a change to one can be argued against the whole set instead
 of against the one reader the author had open.
 
@@ -51,6 +52,7 @@ written against.
 | **Tolerant estate files** — `sources.json`, and every `watch.jsonl` line written by the FW adapter (`docs/period-model.md` §3.5) | `artifact_format_version` | ignored — the reader takes the fields it needs; §3.2's canonical form binds the writer, not the reader | refused, naming the version (PR-08d) | `sources.json` as durable as its catalog bundle; a watch line as durable as the run spool that holds it | no retained instance |
 | **Tolerant supervisor artifacts** — `receipt.json`, `reply.json`, the `run_id` index entry (`docs/supervisor-protocol.md` §3) | `artifact_format_version` | ignored — the section's own forward-compatibility rule | refused | as durable as the spool; the `run_id` index is additionally held by the retention floor while its SPAWN can still be replayed | no instance on disk |
 | **Wrapper-owned spool files** — `spawn.json` and `status.json`, and those two only (`docs/supervisor-protocol.md` §3) | their own `version` field | ignored | refused | as durable as the run directory | no retained spool holds one |
+| **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146/DL-147) | the record's `rec` kind; no per-record version field | ignored — evolution is additive; an incompatible change takes a NEW kind name, the WAL's move | not applicable by construction: no engine dispatches this journal (seq recovery reads only `access_seq`, the rest is audit), so an unknown kind is skipped, not refused | as durable as its run root; pruned only whole-root — an in-place truncation would restart `access_seq` and forge duplicate keys | no retained root holds one |
 | **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused, and the refusal does not close the connection | the live connection | none beyond the door: the version is refused at the handshake, and a closed connection leaves nothing behind |
 | **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb | ignored | refused as `unsupported_version` | the live connection | as the control socket |
 | **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment` and on the seal | not a format question: one executable implements exactly one version and refuses every other | refused | the estate | not retired — **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |

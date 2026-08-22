@@ -77,9 +77,7 @@ def _write_map(path: Path, body: str) -> Path:
 
 
 def _map_granting(path: Path, tier: str | None, *, unmapped: str = "deny") -> Path:
-    rows = (
-        f'[[binding]]\nsubject = "user:os/{ME}"\ntier = "{tier}"\n' if tier is not None else ""
-    )
+    rows = f'[[binding]]\nsubject = "user:os/{ME}"\ntier = "{tier}"\n' if tier is not None else ""
     return _write_map(path, f'format_version = 1\nunmapped = "{unmapped}"\n{rows}')
 
 
@@ -138,20 +136,20 @@ def test_access_map_unmapped_read_is_the_one_relaxation(tmp_path: Path) -> None:
     "body",
     [
         pytest.param('format_version = 2\nunmapped = "deny"\n', id="format-version"),
-        pytest.param('format_version = true\n', id="format-version-bool"),
-        pytest.param('format_version = 1.0\n', id="format-version-float"),
+        pytest.param("format_version = true\n", id="format-version-bool"),
+        pytest.param("format_version = 1.0\n", id="format-version-float"),
         pytest.param(
             'format_version = 1\n[[binding]]\nsubject = "user:os/a"\ntier = []\n',
             id="tier-not-a-string",
         ),
         pytest.param('format_version = 1\nunmapped = "adm"\n', id="unmapped-tier"),
-        pytest.param('format_version = 1\nsurprise = true\n', id="unknown-key"),
+        pytest.param("format_version = 1\nsurprise = true\n", id="unknown-key"),
         pytest.param(
             'format_version = 1\n[[binding]]\nsubject = "user:os/a"\ntier = "root"\n',
             id="unknown-tier",
         ),
         pytest.param(
-            'format_version = 1\n'
+            "format_version = 1\n"
             '[[binding]]\nsubject = "user:os/a"\ntier = "read"\n'
             '[[binding]]\nsubject = "user:os/a"\ntier = "ops"\n',
             id="duplicate-subject",
@@ -347,9 +345,7 @@ def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path) ->
         finally:
             await _teardown(engine, server, loop_task)
         actors = {
-            rec.get("claimed_actor")
-            for rec in read_journal(run_root)
-            if "claimed_actor" in rec
+            rec.get("claimed_actor") for rec in read_journal(run_root) if "claimed_actor" in rec
         }
         assert actors == {f"os/{ME}"}  # the impostor claim never lands (ss12.10)
         ledger = [r for r in _receipts(run_root) if r["rec"] == "privileged_admitted"]
@@ -456,9 +452,7 @@ def test_access_reload_revokes_the_live_stream_that_lost_read(short_root: Path) 
         engine, server, loop_task, access = await _serve_armed(run_root, TEXT, map_path)
         try:
             reader, writer = await asyncio.open_unix_connection(str(server.path))
-            writer.write(
-                json.dumps({"v": PROTOCOL_VERSION, "cmd": "subscribe"}).encode() + b"\n"
-            )
+            writer.write(json.dumps({"v": PROTOCOL_VERSION, "cmd": "subscribe"}).encode() + b"\n")
             await writer.drain()
             # the ack is deterministic (DL-45) and registration precedes it
             ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
@@ -555,6 +549,41 @@ def test_access_socket_and_root_modes(short_root: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_access_armed_owner_only_keeps_todays_modes(short_root: Path) -> None:
+    """ss8/ss12.8: armed WITHOUT socket_group -- the owner-only armed
+    mode. The gate and receipts are live; every mode stays as today
+    (0700 root, 0600 socket, children untouched)."""
+    # unit half, umask-proof: arm() without a group touches no mode at all
+    unit_root = short_root / "unit"
+    unit_root.mkdir(mode=0o700)
+    child = unit_root / "logs"
+    child.mkdir()
+    os.chmod(child, 0o755)
+    AccessControl.arm(_map_granting(short_root / "unit-roles.toml", "read"), unit_root)
+    assert stat_mod.S_IMODE(os.stat(unit_root).st_mode) == 0o700
+    assert stat_mod.S_IMODE(os.stat(child).st_mode) == 0o755
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        map_path = _map_granting(short_root / "roles.toml", "read")
+        engine, server, loop_task, _access = await _serve_armed(run_root, TEXT, map_path)
+        try:
+            assert stat_mod.S_IMODE(os.stat(run_root).st_mode) == 0o700
+            assert stat_mod.S_IMODE(os.stat(server.path).st_mode) == 0o600
+            # the gate is live: an ops verb the read tier lacks refuses
+            read = await _call(server.path, {"cmd": "status"})
+            assert read["ok"] is True
+            denied = await _call(server.path, _envelope("ON_HOLD", "acc_job", read))
+            assert denied["ok"] is False and denied["refused"] is True
+            # and the perimeter journal exists, owner-only
+            receipts = run_root / "perimeter.jsonl"
+            assert stat_mod.S_IMODE(os.stat(receipts).st_mode) == 0o600
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_access_zero_config_socket_stays_0600(short_root: Path) -> None:
     """ss4/ss12.1: no access -> 0600 socket, no perimeter journal, the
     wire claim passes through (the rest of obligation 1 is the whole
@@ -581,9 +610,7 @@ def test_access_zero_config_socket_stays_0600(short_root: Path) -> None:
         finally:
             await _teardown(engine, server, loop_task)
         actors = {
-            rec.get("claimed_actor")
-            for rec in read_journal(run_root)
-            if "claimed_actor" in rec
+            rec.get("claimed_actor") for rec in read_journal(run_root) if "claimed_actor" in rec
         }
         assert actors == {"impostor@nowhere"}  # byte-compatible passthrough
 
@@ -939,9 +966,7 @@ def test_access_sighup_reloads_the_live_engine(short_root: Path) -> None:
                 break
             if proc.poll() is not None:
                 assert proc.stderr is not None
-                raise AssertionError(
-                    f"engine died: {proc.returncode}\n{proc.stderr.read()}"
-                )
+                raise AssertionError(f"engine died: {proc.returncode}\n{proc.stderr.read()}")
             time.sleep(0.05)
         else:
             raise AssertionError("engine never served its socket")
