@@ -62,6 +62,7 @@ from dsl41.boundary import (
     seal_fingerprint,
     check_record_names_sidecar,
     load_bundle_catalog,
+    staged_next_from,
 )
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
@@ -103,7 +104,6 @@ from dsl41.seal import (
     Seal,
     SealedHost,
     SealedState,
-    StagedNextPeriod,
     close_runtime,
     implicit_routes,
     open_from_seal,
@@ -775,9 +775,10 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     # for exactly this. The five engine-derived fields are re-derived below
     # by `staged.commit`, never read.
     opening_manifest = _opening_manifest(run_root, period_id + 1)
-    staged = StagedNextPeriod(
-        **{name: getattr(opening_manifest, name) for name in _STAGED_FROM_RECORD}
-    )
+    # ONE projection (DL-137, DL-145): `Manifest` IS a `StagedManifest`, so
+    # the owner's derivation reads the staged half back off it and a field
+    # added to `StagedNextPeriod` crosses by default
+    staged = staged_next_from(opening_manifest)
     fingerprint = seal_fingerprint(
         source=boundary_request.source,
         baseline_id=closing.baseline_id,
@@ -848,12 +849,6 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             force_seal=boundary_request.force_seal,
         ),
     )
-
-
-#: the staged half of the opening, read back off C2's committed manifest.
-#: DERIVED from the model, so a field added to `StagedNextPeriod` is read
-#: by default rather than by somebody remembering to list it.
-_STAGED_FROM_RECORD: Final[tuple[str, ...]] = tuple(StagedNextPeriod.model_fields)
 
 
 def _opens_from(opening: Mapping[str, Any]) -> str | None:

@@ -7259,3 +7259,99 @@
   more -- the `held` verdicts that used to cite it now cite DL-144 and
   say which dependency is in the way. ops-model ss11's E20 closes with
   it.
+- DL-145 the review after the reset: what seven units of building left
+  behind (2026-08-22; the DL-75 architecture review over the
+  DL-138..DL-144 drift -- 22,296 lines since arch-review/2026-08-21 --
+  run by three parallel read-only readers with the arch-review lens;
+  the script's 22 size advisories stay the script's).
+  SEVEN DEFECTS found and fixed with pins. (1) `_catalog_from_root`
+  was a weaker second bundle loader: it dropped the owner's
+  JilParseError/LoweringError wrap, so an offline seal over a bundle
+  that no longer parses escaped as a traceback at exit 1 -- deleted
+  for `load_bundle_catalog`, and the offline sealer reads C1 with
+  `permit_unknown=True` for `_period_catalog`'s own reason. (2) The
+  `--next-*` flags were gated by a hand-copied, incomplete second
+  guard: `--next-deadman 0` was an uncaught ValidationError at exit 1
+  -- `_next_profile` is now the ONE gate (model bounds through
+  try/except -> refuse; the cross-field pairing rule moved there
+  because `RuntimeProfile` does not own it, pinned AT the gate).
+  (3) `_live_seal` printed a resume command without `--estate-anchor`
+  on a rolled lineage. (4) `_drive_boundary`'s generic failure left
+  ss7's published 0/2/4 table at exit 1. (5) `_serve_run`'s early
+  returns leaked a started supervisor's lease and released the lock
+  inconsistently -- one fully NESTED teardown now (lease -> journal
+  -> lock, each step in its own finally; `_return_lease` is the one
+  lease-teardown spelling, used by `Wiring.close` and the wiring
+  rollback too). (6) retention read the ss1.3 registry more leniently
+  than the walk -- a non-canonical key was silently dropped and never
+  reached the no-silent-loss check, so an edited anchor planned over
+  a smaller estate; `boundary.registry_rows` is the one reader for
+  both, and retention's six `Any` annotations are typed. (7) RULED:
+  one evidence standard for one CAS -- `act_on_head`'s claimed branch
+  runs `_check_existing_segment` BEFORE the head moves, because the
+  crash window between a durable next segment and the open CAS
+  resumes through `act_on_head`, where DL-142's check-then-CAS order
+  silently did not hold.
+  ACTED, the cheap-deletion slice: `_record_disagreements` derived
+  from `seal_record` + `_SEAL_SCHEMA` (DL-137 defect-3 class -- four
+  hand tables were one projection); `staged_next_from` is the one
+  staged projection (the attest rebuild died); one `normalized_root`
+  spelling; `_remaining_spool` shared by the plan blocker and the
+  TOCTOU re-check; the candidate-pair filenames as constants with
+  `archivable_names` derived from `wal_path`/`period_dir`; two
+  deferred imports un-deferred and a duplicated receipt paragraph
+  deleted; `status_payload` is the ONE AdapterResult->STATUS map (the
+  resume copy's silent-FAILURE fallthrough for an unknown member died
+  into a loud refusal); `Journal._write` refuses an unregistered
+  record kind (CURRENT_RECS is guarded structurally, not by a subset
+  pin); `wire_from_profile` takes `start=` instead of reading a clock
+  it was not given; one timer-order key where DL-143 found the
+  re-sort; `STATUS_FLAG_MARKS` is one flag alphabet for the CLI and
+  the TUI; `_open_period` inlined; `rejected_as_unknown`'s
+  unreachable-branch paragraph replaced by its pin; five one-line
+  staleness fixes (the hard-coded class flag, two inline wal-shape
+  spellings, the prune help's missing report rows, the query help's
+  verb list).
+  DEFERRED, each its own future slice: `read_seal_bound` -- the
+  sidecar-identity question is patched at three call sites in three
+  wordings and `verify_attestation` still reads a seal unbound; the
+  shared ss3.2 ingress (`Attestation` and `ArchiveReceipt` carry a
+  verbatim-duplicated from_bytes ladder; Seal stays out); the
+  SupervisorRunRow dict-compat shim (attribute access + a shared
+  run_row test factory retire the two idioms); a typed `dispatch_row`
+  decoder (three raw readers, DL-139's class); `_periods_in` for the
+  four seals/-scan tokenizers; ONE archived-period renderer (six
+  operator sentences, four owners, three hand-typed tier words -- and
+  the estate-wide journal prints an unverified enumeration line
+  beside the verified gap notice); `period.accountable_periods` (three
+  unions over five predicates, each with its own why-this-union
+  paragraph); shared anchor-vs-root addressing for audit/prune; the
+  `_serve_run` two-function split (now that the teardown is total);
+  the TIMEZONE option pair moving to its only consumer; the
+  watch-completion second answer (named in place, unified later).
+  DECLINED, so the next review does not re-find them: the
+  `--resume`/`--open-from` pair (two arities, teaching refusal);
+  prune's class booleans (a set, not a mode enum); `EstatePeriod`
+  holding its `PeriodRow` (resolution, not duplication); the attest
+  proof ladder (one door per question, eleven sites through it);
+  three vocabularies for three questions (verdicts, tiers, walk
+  refusals); the four owner-local tombstone registries (DL-138 chose
+  owner-local); `_next_work`'s branch count (the domain's, with the
+  truth table as its licence); `Journal.seal` bypassing `_write` (its
+  fsync policy is argued); the `_archive_blocker`/`_recheck_archive`
+  pair (a TOCTOU re-read is not drift); `rederive_seal` rebuilding
+  `close_runtime`'s arguments (ss11's verified-means-re-derived);
+  `SealedVerdict` vs `JobVerdict`; the two inode walkers; the
+  `load_catalog_or_exit_2` pass-through (eight callers).
+  LOAD-BEARING, confirmed fresh: cli.py as pure assembly (nothing
+  forwards through it); `read_watch_log` as the single fold owner;
+  the DL-139/DL-142 record-reading split (one decoder, one validator,
+  one prove_opening); the five TOCTOU re-checks in the resume ladder;
+  `outcome_from_status`; the walk's provisional note said once.
+  The slice's own two review rounds added five internal fixes (a
+  lease released when Scheduler construction refuses; the nested
+  finally; a can't-fail duplicate test removed; a cross-surface test
+  rewritten to fail on either half; one refusal reworded) and the two
+  external blockers above it. 3060 -> 3076 collected; ruff, mypy and
+  arch_check clean; the baseline re-armed and the review stamped
+  arch-review/2026-08-22.

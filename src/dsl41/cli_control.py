@@ -294,16 +294,40 @@ def serve(
 
 def _brief_flags(row: dict[str, object]) -> str:
     """The --brief flags column, I/H/N/A in the TUI's fixed order -- both
-    surfaces render the same alphabet from the same status payload (DL-68)."""
-    marks = (("I", "on_ice"), ("H", "on_hold"), ("N", "on_noexec"), ("A", "armed"))
-    return "".join(mark for mark, key in marks if row.get(key))
+    surfaces render the same alphabet from the same status payload (DL-68),
+    and since DL-145 from the same tuple."""
+    from dsl41.runner_control import STATUS_FLAG_MARKS
+
+    return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
+
+
+#: the read verbs this surface forwards, and the two scriptable predicates
+#: it answers itself. Module-level so the argument's HELP is derived from
+#: them (DL-145): the hand-typed help string it replaced was a second
+#: spelling of this set, and a verb added to the gate below reached the
+#: gate and not the help.
+_QUERY_VERBS: tuple[str, ...] = (
+    "status",
+    "trace",
+    "explain",
+    "spec",
+    "deps",
+    "timers",
+    "plan",
+    "global",
+    "globals",
+    "subscribe",
+)
+_QUERY_PREDICATES: dict[str, tuple[str, ...]] = {
+    "is-success": ("SUCCESS",),
+    "is-failed": ("FAILURE", "TERMINATED"),
+}
 
 
 def query(
     what: str = typer.Argument(
         ...,
-        help="status|trace|explain|spec|deps|timers|plan|global|globals"
-        "|subscribe|is-success|is-failed",
+        help="|".join([*_QUERY_VERBS, *_QUERY_PREDICATES]),
     ),
     socket_path: Path = _SOCKET_OPT,
     job: str = typer.Option(
@@ -336,19 +360,7 @@ def query(
     import socket as socket_mod
 
     verb = what.lower()
-    known = (
-        "status",
-        "trace",
-        "explain",
-        "spec",
-        "deps",
-        "timers",
-        "plan",
-        "global",
-        "globals",
-        "subscribe",
-    )
-    predicates = {"is-success": ("SUCCESS",), "is-failed": ("FAILURE", "TERMINATED")}
+    known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
     if verb not in known and verb not in predicates:
         typer.echo(f"unknown query {what!r} ({'|'.join([*known, *predicates])})", err=True)
         raise typer.Exit(2)

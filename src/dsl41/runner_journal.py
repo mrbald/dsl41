@@ -469,6 +469,19 @@ class Journal:
             self._subscribers.remove(queue)
 
     def _write(self, record: dict[str, Any]) -> None:
+        if record.get("rec") not in CURRENT_RECS:
+            # the WRITE side of DL-138's registry, so the hand-listed set
+            # closes structurally: a new record kind that never reached
+            # `CURRENT_RECS` is refused here rather than written and then
+            # refused by every reader of the segment it landed in. The
+            # `seal` record is the one kind that does not come through
+            # here -- it is appended by the boundary under its own schema
+            # check -- and it is in the set for the readers' sake.
+            raise EngineError(
+                f"{self.path}: refusing to append record kind"
+                f" {record.get('rec')!r} -- this binary writes"
+                f" {', '.join(sorted(CURRENT_RECS))} (period-model ss2)"
+            )
         if self._lock is not None:
             # ss1's epoch-conditional append, and ss7's "losing proof stops
             # dispatch, not merely renewal" (S6b). BEFORE the write, so a

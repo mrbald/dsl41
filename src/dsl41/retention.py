@@ -80,13 +80,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from dsl41.attest import verify_attestation
+from dsl41.attest import verify_archive_receipt, verify_attestation
 from dsl41.boundary import (
     ANCHOR_LOCK_NAME,
     ANCHOR_NAME,
+    Anchor,
     ClaimedHead,
     EstateAnchor,
+    Head,
+    PeriodRow,
     default_anchor_dir,
+    normalized_root,
+    registry_rows,
     read_candidate,
     read_seal,
     read_staged_manifest,
@@ -97,7 +102,9 @@ from dsl41.runner_procid import fsync_dir
 from dsl41.runner_effects import RUN_ID_RE
 from dsl41.period import (
     ARCHIVE_CLASS,
+    CANDIDATE_NAME,
     SENTINEL_NAME,
+    STAGED_MANIFEST_NAME,
     WAL_DIR,
     ArchiveReceipt,
     archive_receipt_path,
@@ -311,7 +318,7 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
         )
     segments = wal_segments(run_root)
     periods = _periods_held(run_root, segments)
-    registry = _registry_periods(stored)
+    registry = _registry_periods(stored, anchor_dir)
     archived = _archive_receipts(run_root, periods, stored)
     _check_no_silent_loss(run_root, registry, segments, archived)
     if not segments and not archived:
@@ -625,7 +632,7 @@ def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
 
 
 def _archive_receipts(
-    run_root: Path, periods: Sequence[int], stored: Any
+    run_root: Path, periods: Sequence[int], stored: Anchor
 ) -> dict[int, ArchiveReceipt]:
     """Every archive receipt this root holds, PROVED before it is believed
     (ss12, DL-144).
@@ -636,8 +643,6 @@ def _archive_receipts(
     round one of DL-144 shipped exactly that. What this adds is the ANCHOR:
     the verifier binds the receipt to the root's SENTINEL, and a plan is
     computed under an anchor that must be the same estate."""
-    from dsl41.attest import verify_archive_receipt
-
     out: dict[int, ArchiveReceipt] = {}
     for period_id in periods:
         receipt = verify_archive_receipt(run_root, period_id)
@@ -653,7 +658,7 @@ def _archive_receipts(
     return out
 
 
-def _registry_periods(stored: Any) -> list[tuple[int, Any]]:
+def _registry_periods(stored: Anchor, anchor_dir: Path) -> list[tuple[int, PeriodRow]]:
     """ss1.3's archive registry as `(period, ROW)`, ascending, provisional
     rows dropped.
 
@@ -663,17 +668,19 @@ def _registry_periods(stored: Any) -> list[tuple[int, Any]]:
     checkpoint (DL-144). A projection that throws the digest away is
     how that field stopped being load-bearing.
 
-    Canonical decimal keys only, the rule `walk_estate` reads the registry
-    by: `01` aliases `1`, and two keys naming one period would put two
-    roots in one place."""
-    out: list[tuple[int, Any]] = []
-    for key, row in getattr(stored, "periods", {}).items():
-        if key.isdigit() and str(int(key)) == key and row.segment_durable:
-            out.append((int(key), row))
-    return sorted(out, key=lambda pair: pair[0])
+    `boundary.registry_rows` is the OWNER of the read and refuses the two
+    ways a registry can be wrong (DL-145). This module used to apply the
+    canonical-key rule by dropping the row instead: a dropped row never
+    reached `_check_no_silent_loss`, so an edited anchor refused the walk
+    and quietly planned deletions over a smaller estate."""
+    return [
+        (period_id, row)
+        for period_id, row in registry_rows(stored, anchor_dir=anchor_dir)
+        if row.segment_durable
+    ]
 
 
-def _covered_through(estate_id: str, registry: Sequence[tuple[int, Any]]) -> int | None:
+def _covered_through(estate_id: str, registry: Sequence[tuple[int, PeriodRow]]) -> int | None:
     """The highest period whose attestation VERIFIES **on a root this
     estate proves**, or None (ss1.3's induction, DL-144).
 
@@ -760,7 +767,7 @@ def _covered_through(estate_id: str, registry: Sequence[tuple[int, Any]]) -> int
 
 def _check_no_silent_loss(
     run_root: Path,
-    registry: Sequence[tuple[int, Any]],
+    registry: Sequence[tuple[int, PeriodRow]],
     segments: Sequence[int],
     archived: Mapping[int, ArchiveReceipt],
 ) -> None:
@@ -865,7 +872,7 @@ def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
             f"no chain checkpoint above period {period_id} covers it"
             " -- attest a later period first"
         )
-    remaining = _spool_remaining(scan, period_id)
+    remaining = _remaining_spool(scan.run_root, scan.born, period_id)
     if remaining:
         shown = ", ".join(str(path) for path in remaining[:4])
         more = f" (+{len(remaining) - 4} more)" if len(remaining) > 4 else ""
@@ -876,18 +883,26 @@ def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
     return None
 
 
-def _spool_remaining(scan: _Scan, period_id: int) -> list[Path]:
+def _remaining_spool(
+    run_root: Path, born: Mapping[tuple[str, int], tuple[int, Any]], period_id: int
+) -> list[Path]:
     """Every tombstone artifact of a run BORN in this period that is still
     on disk, sorted.
 
     Read from the WAL's own SPAWN effects, which is the join the tombstone
     floor uses -- so what this lists is exactly what stops being explicable
-    the moment the WAL goes."""
+    the moment the WAL goes.
+
+    ONE walk (DL-145), for the plan's archive blocker and for the TOCTOU
+    re-check that runs again at the receipt. The re-check still re-reads
+    the estate -- it passes a FRESH `born`, because a spool that came back
+    between the plan and the sweep is the thing it exists to catch -- but
+    the two may not differ in what they call a remaining spool."""
     return sorted(
         path
-        for (job, run_number), (birth, run_id) in scan.born.items()
+        for (job, run_number), (birth, run_id) in born.items()
         if birth == period_id
-        for path in _spool_paths(scan.run_root, job, run_number, run_id)
+        for path in _spool_paths(run_root, job, run_number, run_id)
         if path.exists()
     )
 
@@ -986,7 +1001,7 @@ def _opening_period(run_root: Path, current: int) -> int | None:
 # ------------------------------------------------- ss12 the head's reach
 
 
-def _lineage_artifacts(scan: _Scan, head: Any) -> list[Artifact]:
+def _lineage_artifacts(scan: _Scan, head: Head) -> list[Artifact]:
     """The sentinel, the anchor and the active claim (ss12).
 
     The anchor is outside every archivable root by design, so these three
@@ -1272,7 +1287,7 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
                 why="recovery after an install-before-seal crash is decided by these two files",
                 period_id=period_id,
             )
-            for name in ("staged_manifest.json", "candidate.json")
+            for name in (STAGED_MANIFEST_NAME, CANDIDATE_NAME)
         ]
     # committed, so recovery no longer reads them: DL-144 puts them in the
     # archive class UNDER THE SAME COVER as this period's WAL, because the
@@ -1292,7 +1307,7 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
                 why="the seal that installed it committed, and this period's inputs are archivable",
                 period_id=period_id,
             )
-            for name in ("staged_manifest.json", "candidate.json")
+            for name in (STAGED_MANIFEST_NAME, CANDIDATE_NAME)
         ]
     return [
         Artifact(
@@ -1303,7 +1318,7 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
             why=f"the seal that installed it committed, and the archive is blocked: {blocked}",
             period_id=period_id,
         )
-        for name in ("staged_manifest.json", "candidate.json")
+        for name in (STAGED_MANIFEST_NAME, CANDIDATE_NAME)
     ]
 
 
@@ -1881,8 +1896,6 @@ def _archive_receipts_first(
     A period that ALREADY has a receipt writes nothing: the point of no
     return is behind it, and what is left is the deletion a retry
     completes."""
-    from dsl41.attest import verify_archive_receipt
-
     kept: list[Artifact] = []
     refused: list[tuple[Artifact, str]] = []
     by_period: dict[int, list[Artifact]] = {}
@@ -1976,7 +1989,9 @@ def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str
             " (period-model ss1.3)"
         )
     try:
-        covered = _covered_through(plan.estate_id, _registry_periods(stored))
+        covered = _covered_through(
+            plan.estate_id, _registry_periods(stored, plan.anchor_dir)
+        )
     except EngineError as exc:
         return str(exc)
     if covered is None or covered <= period_id:
@@ -1984,14 +1999,8 @@ def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str
             f"no chain checkpoint above period {period_id} covers it any more"
             " -- attest a later period first"
         )
-    remaining = sorted(
-        path
-        for (job, run_number), (birth, run_id) in _spawn_periods(
-            plan.run_root, [period_id]
-        ).items()
-        if birth == period_id
-        for path in _spool_paths(plan.run_root, job, run_number, run_id)
-        if path.exists()
+    remaining = _remaining_spool(
+        plan.run_root, _spawn_periods(plan.run_root, [period_id]), period_id
     )
     if remaining:
         shown = ", ".join(str(path) for path in remaining[:4])
@@ -2270,7 +2279,11 @@ def _remove_at(
 
 
 def _resolved(path: Path) -> Path:
-    return Path(os.path.realpath(str(path)))
+    """`normalized_root` as a `Path` -- ONE spelling of "the same root"
+    (DL-145). The `os.path.realpath` this called by hand was the owner's
+    rule copied, and a copy is what lets two readers disagree about which
+    directory a registry row names."""
+    return Path(normalized_root(path))
 
 
 def _size_of(path: Path) -> int:

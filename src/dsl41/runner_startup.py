@@ -65,6 +65,7 @@ from dsl41.runner_adapters import (
     outcome_from_status,
     read_watch_log,
     resolve_spool,
+    status_payload,
 )
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_effects import Effect, EffectOutcome
@@ -165,6 +166,29 @@ def _derive_runtime_profile(
     return RuntimeProfile.model_validate(values)
 
 
+async def _return_lease(client: "SupervisorClient | None") -> None:
+    """Give the supervisor lease back and close the transport -- EACH step
+    guaranteed, whatever the one before it did (DL-145).
+
+    The two are separate obligations to two different things. `release`
+    speaks to the SUPERVISOR and ends the single-controller lease; `close`
+    ends this process's socket and cancels the renew and reader tasks. A
+    `release` that raises -- the transport died mid-request, the renew task
+    lost the socket -- used to take the transport close with it, leaving a
+    live reader task and an open writer on a client nobody holds. The first
+    exception still propagates: this makes the teardown total, not silent.
+
+    One spelling, so the sequence cannot be half-written in a second
+    place: `Wiring.close` and the wiring builder's own rollback both call
+    it."""
+    if client is None:
+        return
+    try:
+        await client.release()
+    finally:
+        await client.close()
+
+
 @dataclass
 class Wiring:
     """The components a `RuntimeProfile` says an incarnation runs with.
@@ -180,16 +204,21 @@ class Wiring:
     deadman_s: float | None
 
     async def close(self) -> None:
-        if self.client is not None:
-            await self.client.release()
-            await self.client.close()
+        await _return_lease(self.client)
 
 
 async def wire_from_profile(
-    run_root: Path, catalog: CatalogIR, profile: RuntimeProfile
+    run_root: Path, catalog: CatalogIR, profile: RuntimeProfile, *, start: datetime
 ) -> Wiring:
     """Build adapters, scheduler and (when the profile says detached) the
-    supervisor client from `profile`.
+    supervisor client from `profile`, with the scheduler started at
+    `start`.
+
+    `start` is the CALLER's (DL-145). This function reads no clock of its
+    own: the instant a scheduler's plans are computed from is a launch
+    fact, the callers already hold one, and a builder that took `now()`
+    behind their backs could put a scheduler on a different instant from
+    the engine it is wired into.
 
     The inverse of `_derive_runtime_profile`, and since DL-137 the ONE
     place a real run's components are constructed: `dsl41 run`, its resume
@@ -199,47 +228,56 @@ async def wire_from_profile(
     `_profile_drift` in `resume_run` is still what holds it to the pin;
     what this removes is a second construction of the same components whose
     values merely happened to agree."""
-    from datetime import UTC, datetime
-
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
     deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
     client = None
-    # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
-    # supervisor that owns the wrapper lifelines, so an engine restart does
-    # not kill the jobs. FW stays in-engine (no process to survive).
-    if profile.execution_mode == "detached":
-        client = SupervisorClient(run_root, deadman_s=deadman_s)
-        try:
-            await client.ensure_running()
-            await client.acquire()
-        except SupervisorUnavailable as exc:
-            raise EngineError(f"supervisor unavailable: {exc}") from exc
-        cmd: object = SupervisedCommandAdapter(
-            client,
-            grace_seconds=profile.cmd_grace_us / 1_000_000,
-            settle_seconds=profile.reconcile_settle_us / 1_000_000,
+    try:
+        # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
+        # supervisor that owns the wrapper lifelines, so an engine restart does
+        # not kill the jobs. FW stays in-engine (no process to survive).
+        if profile.execution_mode == "detached":
+            client = SupervisorClient(run_root, deadman_s=deadman_s)
+            try:
+                await client.ensure_running()
+                await client.acquire()
+            except SupervisorUnavailable as exc:
+                raise EngineError(f"supervisor unavailable: {exc}") from exc
+            cmd: object = SupervisedCommandAdapter(
+                client,
+                grace_seconds=profile.cmd_grace_us / 1_000_000,
+                settle_seconds=profile.reconcile_settle_us / 1_000_000,
+            )
+        else:
+            cmd = LocalCommandAdapter(grace_seconds=profile.cmd_grace_us / 1_000_000)
+        adapters = {
+            "CMD": cmd,
+            "FW": FileWatcherAdapter(
+                default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
+            ),
+        }
+        scheduler = Scheduler(
+            catalog,
+            start=start,
+            default_tz=profile.default_tz,
+            # SEM-35's unique-city default applies only with NO map, and the
+            # profile cannot spell "no map": an absent `--timezone-map` is an
+            # EMPTY table on it. An empty dict passed on would retire that
+            # ladder for every per-job zone -- so empty reads as absent, which
+            # is what `dsl41 run` has always done and what the offline sealer,
+            # closing an estate opened that way, was silently NOT doing.
+            tz_aliases=dict(profile.tz_aliases) or None,
         )
-    else:
-        cmd = LocalCommandAdapter(grace_seconds=profile.cmd_grace_us / 1_000_000)
-    adapters = {
-        "CMD": cmd,
-        "FW": FileWatcherAdapter(
-            default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
-        ),
-    }
-    scheduler = Scheduler(
-        catalog,
-        start=datetime.now(UTC).replace(tzinfo=None),
-        default_tz=profile.default_tz,
-        # SEM-35's unique-city default applies only with NO map, and the
-        # profile cannot spell "no map": an absent `--timezone-map` is an
-        # EMPTY table on it. An empty dict passed on would retire that
-        # ladder for every per-job zone -- so empty reads as absent, which
-        # is what `dsl41 run` has always done and what the offline sealer,
-        # closing an estate opened that way, was silently NOT doing.
-        tz_aliases=dict(profile.tz_aliases) or None,
-    )
+    except BaseException:
+        # the LEASE is this function's until it hands back a `Wiring`, and
+        # only then does it become the caller's to close (DL-145). The
+        # supervisor is up and leased BEFORE the scheduler is built, and a
+        # `Scheduler` refuses an unknown calendar or an unresolvable
+        # per-job zone -- so a catalog the caller never preflighted (the
+        # offline sealer reads the ROOT's) used to leave a live lease
+        # nobody held a handle to, for a whole deadman interval.
+        await _return_lease(client)
+        raise
     return Wiring(
         adapters=cast("dict[str, JobAdapter]", adapters),
         scheduler=scheduler,
@@ -1015,13 +1053,11 @@ async def _reconcile(
             grace_seconds=grace_seconds,
             expected_run_id=bound.run_id if bound is not None else None,
         )
-        extras: dict[str, object]
-        if isinstance(result, int):
-            extras = {"exit_code": result}
-        elif isinstance(result, Terminated):
-            extras = {"status": "TERMINATED", "cause": result.cause}
-        else:
-            extras = {"status": "FAILURE", "cause": result.cause}
+        # the OWNER's reading (DL-145): this used to fall through to
+        # FAILURE for anything that was not an int or a `Terminated`,
+        # while the live path refused the same value -- so a result the
+        # engine would not report on became a fabricated fate at resume
+        extras = status_payload(result, where=f"the spool ladder for {job}.{run_number}")
         if ended_at is not None:
             extras["ended_at"] = ended_at.isoformat()  # true end time (ss7)
         _inject_completion(engine, job, run_number, extras, at=ended_at or last_at, last_at=last_at)

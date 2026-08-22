@@ -171,12 +171,11 @@ from dsl41.classify import Baseline, CarriedState, carried_from_oracle
 from dsl41.runner_adapters import (
     AdapterContext,
     DetachSignal,
-    Failed,
     JobAdapter,
     SealBarrier,
     SupervisorClient,
     SupervisorUnavailable,
-    Terminated,
+    status_payload,
 )
 from dsl41.runner_admission import (
     INERT_EPOCH,
@@ -1641,16 +1640,7 @@ class Engine:
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate
         payload: dict[str, object] = {"job": job_ir.name, "run_number": run_number}
-        if isinstance(result, int):
-            # raw exit code only: the SEM-09/DL-33 verdict stays oracle-side
-            payload["exit_code"] = result
-        elif isinstance(result, Terminated):
-            # a kill that was observed to happen (DL-41a item 7)
-            payload |= {"status": "TERMINATED", "cause": result.cause}
-        elif isinstance(result, Failed):
-            payload |= {"status": "FAILURE", "cause": result.cause}
-        else:
-            raise EngineError(f"adapter for {job_ir.name!r} returned {result!r}")
+        payload |= status_payload(result, where=f"adapter for {job_ir.name!r}")
         # source="adapter" is what makes this a COMPLETION, and therefore
         # what subjects it to the ss4 stale gate (runner_admission)
         self._enqueue(Event(at=self.clock.now(), kind="STATUS", payload=payload))

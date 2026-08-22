@@ -818,7 +818,9 @@ async def _start_detached_night(base: Path) -> _LiveNight:
     # removes the run root that holds the pid, so nothing could find it
     # again either
     try:
-        wiring = await wire_from_profile(run_root, catalog, DETACHED)
+        wiring = await wire_from_profile(
+            run_root, catalog, DETACHED, start=datetime.now(UTC).replace(tzinfo=None)
+        )
         sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
         staged = stage_manifest(
             catalog,
@@ -1119,7 +1121,9 @@ async def _reopen_detached(night: _LiveNight, catalog):
     way `dsl41 run` stops it, then resume on the same root over C2's
     catalog. The night's engine and wiring become C2's."""
     await _stop_engine(night)
-    wiring = await wire_from_profile(night.run_root, catalog, DETACHED)
+    wiring = await wire_from_profile(
+        night.run_root, catalog, DETACHED, start=datetime.now(UTC).replace(tzinfo=None)
+    )
     engine = await resume_run(
         catalog,
         night.run_root,

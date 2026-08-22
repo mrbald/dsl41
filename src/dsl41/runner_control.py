@@ -134,6 +134,19 @@ JOB_EVENT_VERBS: frozenset[EventKind] = frozenset(
 )
 STATUSES: frozenset[str] = frozenset(get_args(JobStatus))
 
+#: The operator-flag alphabet of the `status` payload and the ORDER both
+#: surfaces render it in: the three set states first, the armed latch last,
+#: so a flags cell is diffable by eye (DL-68). It lives beside the payload
+#: that carries the keys, and `dsl41 query --brief` and the TUI both import
+#: it -- two hand-kept copies of one alphabet were two alphabets waiting to
+#: drift (DL-145).
+STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
+    ("I", "on_ice"),
+    ("H", "on_hold"),
+    ("N", "on_noexec"),
+    ("A", "armed"),
+)
+
 
 class ControlServer:
     """ss10 control plane: a unix domain socket in the run directory, mode

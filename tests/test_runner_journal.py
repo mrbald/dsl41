@@ -93,6 +93,37 @@ def test_segment_record_carries_the_period_identity_domain_and_instant(
     assert "dsl41_version" not in segment
 
 
+def test_the_writer_refuses_a_record_kind_this_binary_does_not_write(tmp_path: Path) -> None:
+    """DL-145. DL-138 made retirement REFUSAL BY NAME and put `CURRENT_RECS`
+    at the read side. The write side had no gate at all, so the registry was
+    closed by hand: a kind appended without being registered produced a
+    segment every reader of it -- replay, history, retention, audit --
+    refuses, and the file that holds it is append-only.
+
+    One guard at `_write` closes it structurally. `seal` is the one record
+    that does not come through here (the boundary appends it under its own
+    schema check) and it is in the set for the readers' sake."""
+    from dsl41.runner_journal import CURRENT_RECS
+
+    catalog = lower_source(_SOLO_JIL)
+    path = tmp_path / "journal.jsonl"
+    journal = Journal.create(path, catalog=catalog, clock_domain="real", started_at=T0)
+    try:
+        with pytest.raises(EngineError, match="refusing to append record kind 'tally'"):
+            journal._write({"rec": "tally", "n": 1})
+        with pytest.raises(EngineError, match="refusing to append record kind None"):
+            journal._write({"n": 1})
+        # a RETIRED kind is refused here too: the tombstone registry says a
+        # reader must name it, and a writer must not make one to name
+        with pytest.raises(EngineError, match="refusing to append record kind 'result'"):
+            journal._write({"rec": "result", "n": 1})
+    finally:
+        journal.close()
+    # nothing was appended: the segment record still stands alone
+    assert [r["rec"] for r in read_journal(path)] == ["segment"]
+    assert "seal" in CURRENT_RECS  # the readers' entry, written elsewhere
+
+
 def _attempt(index: int, event: Event | None, *, source: str | None = "control") -> Attempt:
     at = event.at if event is not None else T0 + timedelta(minutes=index)
     return Attempt(

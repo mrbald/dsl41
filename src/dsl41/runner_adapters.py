@@ -278,6 +278,31 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     return Failed(f"unrecognized status record outcome {outcome!r}")
 
 
+def status_payload(result: AdapterResult, *, where: str) -> dict[str, object]:
+    """One adapter result as the STATUS input's payload fields (ss4).
+
+    The live path and the resume ladder both turn a result into these
+    three shapes, and they used to do it in two bodies. They agreed on
+    the two named statuses and NOT on the fourth case: the engine refused
+    an unrecognised result and the startup copy fell through to FAILURE,
+    which fabricates a fate for a run nobody read. One body, so an
+    addition to `AdapterResult` reaches both surfaces or neither
+    (DL-145).
+
+    `where` is what the caller puts before "returned": a refusal has to
+    name the run it could not report on, and the two callers name it
+    differently because they hold different halves of it."""
+    if isinstance(result, Terminated):
+        # a kill that was observed to happen (DL-41a item 7)
+        return {"status": "TERMINATED", "cause": result.cause}
+    if isinstance(result, Failed):
+        return {"status": "FAILURE", "cause": result.cause}
+    if isinstance(result, int):
+        # raw exit code only: the SEM-09/DL-33 verdict stays oracle-side
+        return {"exit_code": result}
+    raise EngineError(f"{where} returned {result!r}")
+
+
 def _build_run_spec(
     job_ir: JobIR,
     run_number: int,
@@ -802,7 +827,17 @@ class FileWatcherAdapter:
                 stable = log.stable_polls
                 next_at = log.next_poll_at(interval)
                 if log.complete:
-                    return 0  # the last durable poll completed it (PR-34a)
+                    # PR-34a, and the FALLBACK reading of it. The PRIMARY
+                    # reader is the resume ladder
+                    # (`runner_startup._resume_watch`), which meets the
+                    # same complete log one step earlier and INJECTS the
+                    # completion from it without launching anything. This
+                    # branch answers when a launch happened anyway -- an
+                    # embedder's re-dispatch, or a watch the ladder handed
+                    # to the adapter -- and it must read `complete` the
+                    # same way, because re-polling would decide the watch
+                    # again against a world that has moved on.
+                    return 0
         while True:
             await ctx.clock.sleep_until(next_at)
             if ctx.barrier is not None:

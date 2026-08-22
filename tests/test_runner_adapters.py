@@ -33,6 +33,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -55,6 +56,108 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("the adapters/wrapper tier is POSIX-only", allow_module_level=True)
 
 T0 = datetime(2026, 7, 1, 8, 0)
+
+
+# ---------------------------------- 1a. one result, one reported status (C7)
+
+
+class _ReturnsAdapter:
+    """An adapter that hands back exactly what the test names."""
+
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> Any:
+        return self.result
+
+
+def _live_status(text: str, result: object) -> dict:
+    """What the LIVE path puts on the STATUS input for `result`."""
+    engine = Engine(
+        lower_source(text), clock=VirtualClock(start=T0), adapters={"CMD": _ReturnsAdapter(result)}
+    )
+    seen: list[Event] = []
+    engine._enqueue = seen.append  # type: ignore[method-assign]
+    asyncio.run(
+        engine._run_adapter(engine.oracle.catalog.jobs["j"], 1, _ReturnsAdapter(result))
+    )
+    [event] = seen
+    assert {event.payload["job"], event.payload["run_number"]} == {"j", 1}
+    return {k: v for k, v in event.payload.items() if k not in ("job", "run_number")}
+
+
+def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> dict:
+    """What the RESUME ladder puts on the same input for the same result."""
+    from dsl41 import runner_startup
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_startup import _reconcile
+
+    engine = start_run(
+        lower_source(text),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},  # parks the run: RUNNING at resume
+    )
+    seen: list[dict] = []
+
+    async def _resolve(*_a: Any, **_kw: Any) -> Any:
+        return result, None
+
+    def _capture(_engine, _job, _run_number, extras, *, at, last_at) -> None:
+        seen.append(extras)
+
+    monkeypatch.setattr(runner_startup, "resolve_spool", _resolve)
+    monkeypatch.setattr(runner_startup, "_inject_completion", _capture)
+
+    async def scenario() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        # the ladder's candidate set is (dispatch records + runs/), and
+        # `FakeAdapter` writes neither -- so the run is handed the one
+        # record a dispatched CMD run really leaves
+        records = [{"rec": "dispatch", "job": "j", "run_number": 1, "run_dir": None}]
+        try:
+            await _reconcile(engine, records, T0, settle_seconds=0.0, grace_seconds=0.0)
+        finally:
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+    [extras] = seen
+    return dict(extras)
+
+
+def test_one_adapter_result_is_reported_the_same_live_and_at_resume(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-145. Turning an `AdapterResult` into the STATUS input's payload
+    had two bodies, and they did not agree.
+
+    Both spelled the exit code, TERMINATED and FAILURE the same way. The
+    FOURTH case is where they parted: the engine REFUSED a result it could
+    not classify, and the resume ladder's copy fell through to FAILURE --
+    fabricating a fate for a run nobody read, on the one path where a run's
+    fate is being recovered rather than observed.
+
+    One body now (`runner_adapters.status_payload`), driven here through
+    both call sites over the same three results."""
+    from dsl41.runner_adapters import status_payload
+
+    text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+    for index, result in enumerate((0, 7, Terminated("wrapper lost"), Failed("unobservable"))):
+        expected = status_payload(result, where="pin")  # type: ignore[arg-type]
+        live = _live_status(text, result)
+        resumed = _resumed_status(tmp_path / f"root{index}", text, result, monkeypatch)
+        assert live == expected == resumed, result
+
+    # and the fourth case refuses on BOTH, naming the run it could not
+    # report on: the resume copy used to answer FAILURE here
+    with pytest.raises(EngineError, match="adapter for 'j' returned"):
+        _live_status(text, "not an adapter result")
+    with pytest.raises(EngineError, match="the spool ladder for j.1 returned"):
+        _resumed_status(tmp_path / "root-bad", text, "not an adapter result", monkeypatch)
+
 
 
 # --------------------------------------------------------------- 1. RealClock

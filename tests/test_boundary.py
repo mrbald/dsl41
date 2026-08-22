@@ -2835,6 +2835,61 @@ def test_every_duplicated_seal_record_field_is_compared_at_recovery(tmp_path: Pa
         assert any(key in d for d in disagreements), key
 
 
+def test_a_resume_through_that_window_refuses_before_the_head_moves(tmp_path: Path) -> None:
+    """DL-145. The operator's route to that crash window is `dsl41 run
+    --resume`, and it reached a WEAKER rule than the opener's.
+
+    `open_next_period` demands AGREEMENT before it moves the head --
+    `_check_existing_segment` first, then the CAS, which is DL-142's pinned
+    order. `act_on_head`'s `claimed` row performed the same CAS on the
+    segment's mere PRESENCE, so a disagreeing segment moved the head and
+    was caught afterwards, by a later gate, with the lineage already
+    naming it.
+
+    One evidence standard now. Same window, same disagreement as the test
+    above; the difference is only which door the estate is opened
+    through."""
+    run_root = tmp_path / "run"
+    stranger = "sha256:" + "b" * 64
+    with _crashed_between_the_segment_and_the_cas(run_root):
+        path = wal_path(run_root, 2)
+        lines = path.read_text().splitlines()
+        segment = {**json.loads(lines[0]), "runtime_hash": stranger}
+        path.write_text("\n".join([json.dumps(segment, sort_keys=True), *lines[1:]]) + "\n")
+    # the fixture's lock is released here: recovery takes the lineage lock
+    # itself, which is what makes this the operator's route and not the
+    # opener's
+    with pytest.raises(EngineError, match="did not open") as refused:
+        _resume(run_root, C2_JIL)
+    assert f"runtime_hash: segment {stranger!r}" in str(refused.value)
+    stored = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert stored is not None
+    assert isinstance(stored.head, ClaimedHead)  # the CAS never ran
+
+
+def test_a_claimed_head_whose_root_holds_no_naming_seal_refuses(tmp_path: Path) -> None:
+    """The other arm of the same check (DL-145): the head move is licensed
+    by the seal the segment opened from, and the agreement check needs it.
+
+    A `claimed` head pointing at a period whose segment this root holds,
+    with no seal in the lineage that names it, is a state nothing this
+    binary writes -- so it refuses by name rather than performing a CAS it
+    cannot justify."""
+    run_root = tmp_path / "run"
+    with _crashed_between_the_segment_and_the_cas(run_root) as (anchor, committed, _catalog_c2):
+        from dsl41.boundary import Lineage, act_on_head
+
+        with pytest.raises(EngineError, match="no seal that opens the claimed period"):
+            act_on_head(
+                anchor,
+                run_root=run_root,
+                estate_id=committed.seal.estate_id,
+                lineage=Lineage(seal=None, opens_next=False),
+            )
+        stored = anchor.require(committed.seal.estate_id)
+    assert isinstance(stored.head, ClaimedHead)
+
+
 # ------------------------------------------- sol round-2 pins (U6BR2, DL-133)
 
 

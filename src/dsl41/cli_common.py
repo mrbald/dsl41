@@ -257,11 +257,13 @@ def command_outcome(
     `dsl41 seal` is the one: period-model ss7 states 0/2/4 for it, and 3 is
     taken in that same feature area -- a live ENGINE exits 3 when its
     period sealed, and init units read that number
-    (deployment-runbook ss6a). Nothing reaches the fold today, because the
-    engine's `seal` handler answers `ok`, `refused` or a bare timeout and
-    never a decision; it keeps that verb's answer to an outcome it cannot
-    classify exactly what it was before this ladder was shared. Widening
-    ss7's table is ss7's call, not this slice's.
+    (deployment-runbook ss6a). It is a DEFENCE, and the live seal's ladder
+    test in `tests/test_runner_control.py` already drives a synthetic
+    `rejected` reply through it and exits 4. What stood here instead was an
+    ARGUMENT that nothing reaches the fold today, read off what the
+    engine's `seal` handler happens to answer -- an argument that goes
+    stale the day that handler grows a decision, while the test does not
+    (DL-145). Widening ss7's table is ss7's call, not this slice's.
     """
     import json as json_mod
 

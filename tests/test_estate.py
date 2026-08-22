@@ -196,6 +196,119 @@ def test_the_offline_seal_refuses_and_leaves_the_period_open(tmp_path: Path) -> 
     assert _seal_offline(run_root, c2).exit_code == 0  # the gate, not the machinery
 
 
+def _bundled_root(run_root: Path, jil: Path, *, stored: str, permit_unknown: bool = False):
+    """`_native_root`, with the BUNDLE's stored text under the caller's
+    control.
+
+    The bundle is what an offline seal re-parses C1 from (ss7), and the two
+    ways it can fail to are what this exposes: bytes that are not JIL at
+    all, and bytes that need `--permit-unknown` to lower. Both are stored
+    self-consistently -- `write_bundle` addresses whatever it is given --
+    so the estate is well-formed and the READ is the thing under test."""
+    parsed = [parse(jil.read_text(), file=str(jil))]
+    catalog = lower_catalog(parsed, permit_unknown=permit_unknown)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, [SourceFile(path=str(jil), text=stored)]),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    started = start_run(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters={"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()},
+        staged=staged,
+    )
+    asyncio.run(started.run_until_quiescent(started.clock.now()))
+    asyncio.run(started.shutdown())
+    assert started.journal is not None
+    started.journal.close()
+    return catalog
+
+
+def test_a_boundary_that_fails_outside_the_house_error_still_exits_two(
+    tmp_path: Path, capsys
+) -> None:
+    """DL-145. ss7 publishes 0/2/4 for `seal` and nothing else. The offline
+    driver's tail read the exception's TYPE instead -- exit 2 for an
+    `EngineError`, exit 1 for anything else -- so an `OSError` out of the
+    boundary reported "the estate failed while running" for a period that
+    did not close and is still serving C1.
+
+    The refusal goes through the one reading of it (`cli_common.refuse`),
+    which is where the 0/2/4 promise lives."""
+    import asyncio as asyncio_mod
+
+    from dsl41.cli_estate import _drive_boundary
+
+    class _StubEngine:
+        """Just the surface `_drive_boundary` reads."""
+
+        journal = None
+
+        async def submit_seal(self, request: Any) -> Any:
+            raise OSError("the volume holding the anchor went away")
+
+        async def run_until_quiescent(self, until: Any) -> None:
+            await asyncio_mod.sleep(3600)  # still serving C1, as ss7 says
+
+        async def shutdown(self) -> None:
+            return None
+
+    code = asyncio.run(
+        _drive_boundary(_StubEngine(), object(), tmp_path, None)  # type: ignore[arg-type]
+    )
+    assert code == 2
+    assert "the volume holding the anchor went away" in capsys.readouterr().err
+
+
+def test_an_offline_seal_over_a_bundle_that_does_not_reparse_refuses_by_name(
+    tmp_path: Path,
+) -> None:
+    """DL-145. The offline sealer had its OWN loader beside
+    `boundary.load_bundle_catalog`, and the copy was weaker in one way that
+    mattered: it did not wrap `JilParseError`/`LoweringError` in
+    `EngineError`, so the `except EngineError` around it never saw them.
+    A root whose stored bundle no longer parses answered with an uncaught
+    traceback and exit 1 -- "the estate failed while running", for a period
+    that is still open and unharmed.
+
+    One loader now, and the sentence an operator reads is the owner's."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _bundled_root(run_root, c1, stored="this is not JIL at all\n")
+
+    refused = _seal_offline(run_root, c2)
+    assert refused.exit_code == 2
+    assert "does not load" in refused.output
+    assert "cannot be rebuilt from its own bundle" in refused.output
+    assert not seal_path(run_root, 1).exists()
+    assert isinstance(_head(run_root), OpenHead)  # C1 is still open
+
+
+def test_an_offline_seal_reads_c1_with_permit_unknown(tmp_path: Path) -> None:
+    """DL-145, the other half of the same ruling. The bundle holds the EXACT
+    bytes this period ran; the gate that decided whether an unknown
+    attribute was acceptable ran once, at launch. Re-asking it at the
+    boundary made `dsl41 seal` refuse a root `dsl41 run` was serving --
+    with a traceback, because the refusal was not an `EngineError` either.
+
+    Same call `cli_run._period_catalog` makes, for the same stated
+    reason."""
+    base = tmp_path / "estate"
+    base.mkdir(parents=True, exist_ok=True)
+    c1 = base / "c1.jil"
+    c1.write_text(C1_JIL + "no_such_attribute: 7\n")
+    c2 = base / "c2.jil"
+    c2.write_text(C2_JIL)
+    run_root = tmp_path / "run"
+    _bundled_root(run_root, c1, stored=c1.read_text(), permit_unknown=True)
+
+    assert _seal_offline(run_root, c2).exit_code == 0
+    assert read_seal(run_root, 1).period_id == 1
+
+
 def test_the_offline_seal_reads_c1_from_the_root_not_the_command_line(tmp_path: Path) -> None:
     """ss7: in both modes the sealer holds C1 to run the barrier -- and it
     loads it from the ROOT's own bundle.

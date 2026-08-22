@@ -560,6 +560,15 @@ def check_stamp(value: str, field: str) -> None:
 ARCHIVE_CLASS: Final[str] = "archive-inputs"
 
 
+#: ss7's two staging artifacts, spelled once (DL-145). They are written
+#: under `periods/.staging/<stage_digest>/`, renamed into `periods/<N>/`
+#: on commit, read back by recovery, and licensed by name in an archive
+#: receipt -- eleven sites for two file names, which is eleven chances
+#: for one of them to be spelled a twelfth way.
+STAGED_MANIFEST_NAME: Final[str] = "staged_manifest.json"
+CANDIDATE_NAME: Final[str] = "candidate.json"
+
+
 def archivable_names(period_id: int) -> tuple[str, str, str]:
     """The three paths ss12a's `archive-inputs` class may ever delete for
     one period, spelled relative to the run root: the segment, and the
@@ -567,11 +576,15 @@ def archivable_names(period_id: int) -> tuple[str, str, str]:
 
     ONE spelling, shared by the receipt's own shape rule and by the
     recovery that enumerates from a receipt -- a second copy is how the
-    artifact and the sweep come to disagree about what was licensed."""
+    artifact and the sweep come to disagree about what was licensed. The
+    paths are DERIVED from the same `wal_path`/`period_dir` the writers
+    use, against an empty root, so a layout that moves moves here too."""
+    root = Path()
+    directory = period_dir(root, period_id)
     return (
-        f"{WAL_DIR}/{period_id:06d}.jsonl",
-        f"periods/{period_id:06d}/candidate.json",
-        f"periods/{period_id:06d}/staged_manifest.json",
+        wal_path(root, period_id).as_posix(),
+        (directory / CANDIDATE_NAME).as_posix(),
+        (directory / STAGED_MANIFEST_NAME).as_posix(),
     )
 
 

@@ -80,6 +80,10 @@ from test_runner_leadership import engine
 T0 = datetime(2026, 7, 1, 8, 0)
 _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: echo hi\nmachine: m1\n"
 
+#: the launch instant a caller of `wire_from_profile` supplies (DL-145):
+#: the builder reads no clock of its own, so a test names one
+_NOW = datetime(2026, 8, 22, 3, 0, 0)
+
 
 # ------------------------------------------------------------------ helpers
 
@@ -1821,28 +1825,82 @@ def test_the_resume_sweep_rejects_a_noncanonical_run_directory(tmp_path: Path) -
     assert split_run_dir("b.") is None and split_run_dir(".1") is None
 
 
-def test_a_bad_machine_policy_is_a_refusal_on_every_verb(tmp_path: Path) -> None:
-    """DL-137: `--machine-policy bogus` was a clean exit-2 on `run` and an
-    uncaught ValidationError (exit 1, documented as an estate failure) on
-    `seal` and `estate adopt`. One guard now, in `_next_profile`."""
+def test_the_next_profile_gate_owns_the_deadman_pairing_rule(capsys) -> None:
+    """DL-145, pinned AT THE GATE. The CLI-level test below drives `seal`,
+    so it passes whether the pairing rule lives in `_next_profile` or back
+    in the verb body -- and the whole claim of that slice is that every
+    `--next-*` flag is checked in ONE place, which a verb-level drive
+    cannot see.
+
+    This calls the gate directly. A deadman with no supervisor to hold the
+    lifelines is the one rule `RuntimeProfile` cannot state -- it is about
+    two flags, not one field -- so it is the one rule this function still
+    words itself, and the refusal has to come from here."""
+    import typer
+
+    from dsl41.cli_estate import _next_profile
+
+    with pytest.raises(typer.Exit) as refused:
+        _next_profile(None, None, [], "strict", False, 30.0)
+    assert refused.value.exit_code == 2
+    assert "--next-deadman needs --next-detached" in capsys.readouterr().err
+
+    # the paired form is what the gate is FOR, so it passes through and
+    # carries the value: a guard that refused both would pass the test above
+    paired = _next_profile(None, None, [], "strict", True, 30.0)
+    assert paired.execution_mode == "detached" and paired.deadman_us == 30_000_000
+    # and the model's own bound is caught HERE too, not by a second copy
+    with pytest.raises(typer.Exit) as zero:
+        _next_profile(None, None, [], "strict", True, 0.0)
+    assert zero.value.exit_code == 2
+    assert "deadman_us" in capsys.readouterr().err
+
+
+def test_every_next_profile_bound_is_the_models_and_refuses_with_exit_2(tmp_path: Path) -> None:
+    """DL-137 found `--machine-policy bogus` exiting 1 on `seal`; DL-145
+    found the guard that fixed it was a HAND COPY of `run`'s and had
+    checked one bound of two.
+
+    `--next-deadman 0` was still an uncaught ValidationError and exit 1
+    while `run --deadman 0` was a clean exit 2. Both bounds are
+    `RuntimeProfile`'s -- a machine-policy literal and a positive deadman
+    -- so `_next_profile` catches the MODEL's refusal instead of restating
+    it, and neither bound can be checked on one route and not the other.
+
+    The machine-policy sentence is now the model's own; it names the field
+    and the values it accepts, which is what the copy said in fewer
+    words."""
     from typer.testing import CliRunner
 
     from dsl41.cli import app
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "seal",
-            "--run-root",
-            str(tmp_path / "nowhere"),
-            "--next",
-            str(tmp_path / "nowhere.jil"),
-            "--next-machine-policy",
-            "bogus",
-        ],
-    )
-    assert result.exit_code == 2
-    assert "expected strict|local-eligible" in result.output
+    def _seal(*flags: str) -> Any:
+        return CliRunner().invoke(
+            app,
+            [
+                "seal",
+                "--run-root",
+                str(tmp_path / "nowhere"),
+                "--next",
+                str(tmp_path / "nowhere.jil"),
+                *flags,
+            ],
+        )
+
+    bad_policy = _seal("--next-machine-policy", "bogus")
+    assert bad_policy.exit_code == 2
+    assert "machine_policy" in bad_policy.output
+    assert "'strict'" in bad_policy.output and "'local-eligible'" in bad_policy.output
+
+    zero_deadman = _seal("--next-detached", "--next-deadman", "0")
+    assert zero_deadman.exit_code == 2  # was 1, on an uncaught ValidationError
+    assert "deadman_us" in zero_deadman.output
+
+    # the one rule the model cannot hold -- it is about two flags, not one
+    # field -- keeps its own sentence, and `run` says the same of its own
+    tethered = _seal("--next-deadman", "30")
+    assert tethered.exit_code == 2
+    assert "--next-deadman needs --next-detached" in tethered.output
 
 
 def test_serve_wires_every_adapter_window_from_the_pinned_profile(
@@ -1891,6 +1949,12 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
         async def acquire(self) -> None:
             return None
 
+        async def release(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
     captured: dict[str, Any] = {}
 
     def _capture(catalog_arg: Any, root: Path, **kwargs: Any) -> Any:
@@ -1917,6 +1981,78 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
     # SEM-35's city ladder still resolves the per-job zone: an empty alias
     # table read as a PRESENT map would refuse this catalog outright
     assert str(captured["scheduler"]._plans["j1"].tz) == "Europe/Zurich"
+
+
+def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-145. `_serve_run` takes two things it must give back: the run
+    root's leader lock, and -- detached -- the supervisor's LEASE, whose
+    deadman is measured in tens of seconds.
+
+    Every refusal below the wiring used to `return` past both. The lock
+    then excluded the operator's own corrected retry, and the lease made a
+    second engine wait out an eviction for a supervisor nobody was using.
+    One `finally` now, in the order the normal path always had: lease,
+    journal, lock.
+
+    The `--timezone` drift is driven because it refuses at the LAST of the
+    three early returns -- after the supervisor is up and the lease is
+    taken -- so the leak it proves is the whole one."""
+    from dsl41 import runner_adapters, runner_startup
+    from dsl41.runner_ledger import acquire_run_root
+
+    catalog = lower_source(_SOLO_JIL)
+    run_root = tmp_path / "root"
+    run_root.mkdir()
+    pinned = runtime_profile_from_cli(timezone="UTC", detached=True)
+    write_period_manifest(
+        run_root,
+        genesis_manifest(
+            catalog,
+            clock_domain="real",
+            state_machine_version=1,
+            staged=stage_manifest(
+                catalog,
+                source_bundle_hash=EMPTY_BUNDLE_HASH,
+                profile=pinned,
+                state_machine_version=1,
+            ),
+        ),
+    )
+    lease: list[str] = []
+
+    class _FakeSupervisorClient:
+        supervisor_deadman_s = None
+
+        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+            self.deadman_s = deadman_s
+
+        async def ensure_running(self) -> None:
+            lease.append("ensure_running")
+
+        async def acquire(self) -> None:
+            lease.append("acquire")
+
+        async def release(self) -> None:
+            lease.append("release")
+
+        async def close(self) -> None:
+            lease.append("close")
+
+    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
+
+    drifted = runtime_profile_from_cli(timezone="Europe/Zurich", detached=True)
+    code = asyncio.run(_serve_run(catalog, run_root, True, [], profile=drifted))
+
+    assert code == 2  # the run never started: the pin says another zone
+    assert lease == ["ensure_running", "acquire", "release", "close"]
+    # the raw-fd lock conflicts with a retry in THIS process, so a held one
+    # would refuse here -- which is exactly what an operator's corrected
+    # re-run would have met
+    retry = acquire_run_root(run_root)
+    retry.release()
 
 
 def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_it(
@@ -1954,7 +2090,7 @@ def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_i
     monkeypatch.setattr(runner_adapters.SupervisorClient, "close", _close)
 
     async def _drive() -> None:
-        wiring = await wire_from_profile(tmp_path, catalog, profile)
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=_NOW)
         assert calls == ["ensure_running", "acquire"]
         assert wiring.client is not None
         assert wiring.deadman_s == 41.0
@@ -1962,6 +2098,188 @@ def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_i
         assert calls == ["ensure_running", "acquire", "release", "close"]
 
     asyncio.run(_drive())
+
+
+def test_a_lease_release_that_raises_still_closes_the_transport(tmp_path: Path) -> None:
+    """DL-145, at the LOWER level. `Wiring.close` owes the supervisor a
+    RELEASE and owes this process a transport CLOSE, and they are two
+    obligations to two different things.
+
+    `release` speaks over the socket, so it is exactly the step that fails
+    when the socket has died -- and a chain of two statements let it take
+    the close with it, leaving a live reader task and an open writer on a
+    client nobody holds a handle to. The first exception still comes out:
+    this makes the teardown total, not silent."""
+    from dsl41.runner_scheduler import Scheduler
+    from dsl41.runner_startup import Wiring
+
+    steps: list[str] = []
+
+    class _BadRelease:
+        async def release(self) -> None:
+            steps.append("release")
+            raise OSError("pin: the supervisor socket died mid-RELEASE")
+
+        async def close(self) -> None:
+            steps.append("close")
+
+    wiring = Wiring(
+        adapters={},
+        scheduler=Scheduler(lower_source(_SOLO_JIL), start=_NOW),
+        client=_BadRelease(),  # type: ignore[arg-type]
+        deadman_s=None,
+    )
+    with pytest.raises(OSError, match="died mid-RELEASE"):
+        asyncio.run(wiring.close())
+    assert steps == ["release", "close"]
+
+
+def test_a_lease_release_that_raises_still_closes_the_journal_and_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The same failure at the UPPER level (DL-145). `_serve_run` owes three
+    things back -- the lease, the log's fsync, the leader lock -- to three
+    different owners, and none of them is the others' to skip.
+
+    A `release` that raises used to end the teardown where it stood: the
+    journal was left unflushed and the lock was left held, so the estate
+    refused the operator's own retry with "held by another engine" by a
+    process that had already exited."""
+    from dsl41 import runner_adapters, runner_control, runner_journal, runner_startup
+    from dsl41.runner_ledger import acquire_run_root
+
+    catalog = lower_source(_SOLO_JIL)
+    run_root = tmp_path / "root"
+    steps: list[str] = []
+
+    class _FakeSupervisorClient:
+        supervisor_deadman_s = None
+
+        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+            self.deadman_s = deadman_s
+
+        async def ensure_running(self) -> None:
+            return None
+
+        async def acquire(self) -> None:
+            return None
+
+        async def release(self) -> None:
+            steps.append("release")
+            raise OSError("pin: the supervisor socket died mid-RELEASE")
+
+        async def close(self) -> None:
+            steps.append("close")
+
+    async def _no_socket(self: Any) -> None:
+        raise EngineError("pin: the control socket could not be bound")
+
+    real_close = runner_journal.Journal.close
+
+    def _noted_close(self: Any) -> None:
+        steps.append("journal")
+        real_close(self)
+
+    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)
+    monkeypatch.setattr(runner_journal.Journal, "close", _noted_close)
+
+    profile = runtime_profile_from_cli(detached=True)
+    with pytest.raises(OSError, match="died mid-RELEASE"):
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+    # the transport and the journal both closed, in the order they are owed
+    assert steps == ["release", "close", "journal"]
+    retry = acquire_run_root(run_root)  # and the lock came back
+    retry.release()
+
+
+def test_a_failing_journal_close_still_gives_the_leader_lock_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-145, the other half of the one teardown. `Journal.close` fsyncs
+    before it releases, and a failing fsync must PROPAGATE -- durability is
+    not suppressible here any more than it is anywhere else in the liturgy.
+
+    What it must not ALSO do is strand the estate's leader lock: the
+    operator's retry would then be refused with "held by another engine" by
+    a process that is gone. The lock comes back whatever the steps above it
+    do."""
+    from dsl41 import runner_control, runner_journal
+    from dsl41.runner_ledger import acquire_run_root
+
+    catalog = lower_source(_SOLO_JIL)
+    run_root = tmp_path / "root"
+
+    async def _no_socket(self: Any) -> None:
+        raise EngineError("pin: the control socket could not be bound")
+
+    def _bad_close(self: Any) -> None:
+        raise OSError("pin: fsync failed on the way out")
+
+    monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)
+    monkeypatch.setattr(runner_journal.Journal, "close", _bad_close)
+
+    with pytest.raises(OSError, match="fsync failed on the way out"):
+        asyncio.run(
+            _serve_run(catalog, run_root, False, [], profile=runtime_profile_from_cli())
+        )
+    retry = acquire_run_root(run_root)
+    retry.release()
+
+
+def test_wire_from_profile_gives_back_a_lease_it_cannot_finish_wiring(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-145. The supervisor is started and LEASED before the scheduler is
+    built, and `Scheduler` refuses a catalog it cannot plan -- an unknown
+    `run_calendar`, an unresolvable per-job zone.
+
+    Everything between the two used to leave the lease held with nobody
+    holding a handle to it: the caller has no `Wiring` to close, so the
+    only thing that ends it is the deadman, tens of seconds later, and the
+    corrected retry meets a supervisor that is already leased. The lease is
+    this function's until it hands back a `Wiring`."""
+    from dsl41 import runner_adapters, runner_startup
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source(
+        _SOLO_JIL + 'date_conditions: 1\nrun_calendar: nosuchcal\nstart_times: "03:00"\n'
+    )
+    lease: list[str] = []
+
+    class _FakeSupervisorClient:
+        supervisor_deadman_s = None
+
+        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+            self.deadman_s = deadman_s
+
+        async def ensure_running(self) -> None:
+            lease.append("ensure_running")
+
+        async def acquire(self) -> None:
+            lease.append("acquire")
+
+        async def release(self) -> None:
+            lease.append("release")
+
+        async def close(self) -> None:
+            lease.append("close")
+
+    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
+    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
+
+    profile = RuntimeProfile(execution_mode="detached")
+    with pytest.raises(EngineError, match="no calendar definition"):
+        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW))
+    assert lease == ["ensure_running", "acquire", "release", "close"]
+
+    # the TETHERED half of the same refusal: there is no lease to give
+    # back, and the teardown must not invent a client to close
+    lease.clear()
+    with pytest.raises(EngineError, match="no calendar definition"):
+        asyncio.run(wire_from_profile(tmp_path, catalog, RuntimeProfile(), start=_NOW))
+    assert lease == []
 
 
 def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
@@ -1980,4 +2298,4 @@ def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
 
     monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _boom)
     with pytest.raises(EngineError, match="supervisor unavailable: no socket answered"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, profile))
+        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW))

@@ -687,6 +687,49 @@ def test_the_walk_refuses_a_registry_with_a_hole_in_it(tmp_path: Path) -> None:
     assert walk_estate(line.anchor).roots() == (line.root_a, line.root_b)
 
 
+def test_the_retention_plan_reads_the_registry_exactly_as_the_walk_does(tmp_path: Path) -> None:
+    """DL-145. ss1.3's registry had TWO readers and the deletion side was
+    the lenient one.
+
+    `walk_estate` refuses a non-canonical key and a hole; retention's own
+    reader silently DROPPED a row whose key was not canonical and had no
+    hole rule at all. A dropped row never reaches `_check_no_silent_loss`,
+    so an edited anchor made every estate-wide read refuse while the
+    PLAN -- the one that authorizes deletions -- was computed over a
+    smaller estate that looked whole.
+
+    One reader now (`boundary.registry_rows`), and this drives the same two
+    edits through both doors."""
+    from dsl41.retention import plan_retention
+
+    line = _lineage(tmp_path)
+    stored = EstateAnchor(line.anchor).require()
+    assert set(stored.periods) == {"1", "2"}
+
+    # period 2 reachable ONLY under a non-canonical key: the lenient read
+    # answered with a one-period estate, and root B holds period 2
+    _rewrite_anchor(line.anchor, {"1": stored.periods["1"], "02": stored.periods["2"]})
+    for door in (
+        lambda: walk_estate(line.anchor),
+        lambda: plan_retention(line.root_b, anchor_dir=line.anchor),
+    ):
+        with pytest.raises(EngineError, match="registry key '02' is not a period number"):
+            door()
+
+    _rewrite_anchor(line.anchor, {"1": stored.periods["1"], "3": stored.periods["2"]})
+    for door in (
+        lambda: walk_estate(line.anchor),
+        lambda: plan_retention(line.root_b, anchor_dir=line.anchor),
+    ):
+        with pytest.raises(EngineError, match=r"names periods \[1, 3\] and a lineage has no holes"):
+            door()
+
+    # and the repaired registry plans, so the refusals above are the rule's
+    # and not a fixture that never worked
+    _rewrite_anchor(line.anchor, dict(stored.periods))
+    assert plan_retention(line.root_b, anchor_dir=line.anchor).estate_id == stored.estate_id
+
+
 def test_audit_of_a_provisional_period_says_which_state_it_is_in(tmp_path: Path) -> None:
     """ "In no registry row" and "in a row that is not durable yet" are two
     different states, and only one of them is a typo.

@@ -1500,6 +1500,39 @@ def test_row_cells_flags_compose_partial_combinations_in_deterministic_order() -
     assert app._row_cells("j", h_n_and_a)[5] == "HNA"
 
 
+def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) -> None:
+    """DL-145. `dsl41 query --brief` and this table each carried their own
+    (mark, key) table for the same status payload, in the same order, kept
+    equal by hand. Two equal copies test nothing, so this drives the
+    SOURCE.
+
+    The alphabet belongs to the module that owns the payload
+    (`runner_control.STATUS_FLAG_MARKS`). Move it there and BOTH surfaces
+    move: a hand-kept copy would go on spelling the old one, which is
+    exactly the drift the copies were one edit away from."""
+    import itertools
+
+    from dsl41 import runner_control, runner_tui
+    from dsl41.cli_control import _brief_flags
+    from dsl41.runner_control import STATUS_FLAG_MARKS
+
+    app = RunnerApp(Path("/tmp/unused.sock"))
+    keys = [key for _, key in STATUS_FLAG_MARKS]
+    assert keys == ["on_ice", "on_hold", "on_noexec", "armed"]
+    for combination in itertools.product((False, True), repeat=len(keys)):
+        row = {"status": "INACTIVE", **dict(zip(keys, combination, strict=True))}
+        assert app._row_cells("j", row)[5] == _brief_flags(row)
+
+    # a FIFTH flag, added where the payload is built: both surfaces publish
+    # it, and neither has a table of its own that could miss it
+    moved = (*STATUS_FLAG_MARKS, ("Z", "quarantined"))
+    monkeypatch.setattr(runner_control, "STATUS_FLAG_MARKS", moved)
+    monkeypatch.setattr(runner_tui, "STATUS_FLAG_MARKS", moved)
+    fifth = {"status": "INACTIVE", "on_ice": True, "quarantined": True}
+    assert app._row_cells("j", fifth)[5] == "IZ"
+    assert _brief_flags(fifth) == "IZ"
+
+
 def test_t_binding_is_registered_with_a_footer_label() -> None:
     bindings = {b.key: b for b in RunnerApp.BINDINGS if isinstance(b, Binding)}
     assert bindings["t"].action == "triggers"

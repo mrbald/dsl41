@@ -293,6 +293,18 @@ _PROJECTED_HOST_FIELDS: tuple[str, ...] = tuple(
 _DEFAULT_JOB = JobRuntime()
 
 
+def _timer_order(entry: tuple[datetime, int, Event] | tuple[datetime, int]) -> tuple[datetime, int]:
+    """ss3.2's timer order, spelled ONCE (DL-145): `(due, token)` and
+    nothing after it.
+
+    The heap, the carry's install and both timer readers used to spell it
+    three ways -- an explicit key, a bare `sorted` over the whole triple,
+    and a projection sorted as a pair. The bare one reached the EVENT on a
+    tie, which the token makes impossible today and which no reader should
+    have to prove again to change a field on `Event` (DL-143's area)."""
+    return (entry[0], entry[1])
+
+
 class CarriedRows(BaseModel):
     """What a seal carries into the next period, as this module's own types
     (period-model ss3.3, ss7 phase 3 step 3).
@@ -830,7 +842,7 @@ class RuntimeState:
         self._jobs = dict(carried.jobs)
         self._globals = dict(carried.globals_)
         self._hosts = dict(carried.hosts)
-        self._timers = sorted(carried.timers, key=lambda entry: (entry[0], entry[1]))
+        self._timers = sorted(carried.timers, key=_timer_order)
         heapq.heapify(self._timers)
         self._timer_seq = carried.timer_seq
         self._consumed = dict(carried.consumed)
@@ -966,13 +978,15 @@ class RuntimeState:
 
     def timers(self) -> list[tuple[datetime, int, Event]]:
         """Every armed timer as (due, token, event), in FIRING order."""
-        return sorted(self._timers)
+        return sorted(self._timers, key=_timer_order)
 
     def timers_for(self, job: str) -> list[tuple[datetime, int]]:
         """One job's armed timers as (due, token), in firing order: the
         entity-local half of the global ordering (concurrency-model ss3).
         Sorting the union of these across jobs reproduces the heap's firing
         order exactly, which a per-job set digest cannot do."""
-        return sorted(
-            (due, token) for due, token, ev in self._timers if ev.payload.get("job") == job
-        )
+        return [
+            (due, token)
+            for due, token, ev in sorted(self._timers, key=_timer_order)
+            if ev.payload.get("job") == job
+        ]

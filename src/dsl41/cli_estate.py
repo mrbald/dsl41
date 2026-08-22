@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from dsl41.ast_jil import parse
 from dsl41.cli_common import (
     PERMIT_UNKNOWN,
     PROPERTIES,
@@ -29,7 +28,7 @@ from dsl41.cli_common import (
     say_next,
     walk_estate_or_exit_2,
 )
-from dsl41.ir import lower_catalog
+from dsl41.period import ARCHIVE_CLASS
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateAnchor, EstateWalk, SealRequest
@@ -87,25 +86,41 @@ def _next_profile(
 
     Prefixed because a boundary names TWO periods and the CLI would
     otherwise read as if it were describing the one that is running. What
-    it describes is the one about to open."""
+    it describes is the one about to open.
+
+    ONE gate for every `--next-*` flag (DL-145). The bounds are
+    `RuntimeProfile`'s -- the machine-policy literal and the positive
+    deadman -- and this catches the model's refusal instead of hand-copying
+    it: the copy that stood here checked the policy and not the deadman, so
+    `--next-deadman 0` was an uncaught ValidationError and exit 1 while
+    `run --deadman 0` was a clean exit 2. The one rule the model cannot
+    hold is the PAIRING below, which is about two flags and not about a
+    field."""
+    from pydantic import ValidationError
+
     from dsl41.period import runtime_profile_from_cli
 
-    if machine_policy not in ("strict", "local-eligible"):
-        # the same guard `run`/`rehearse` apply: without it a bad flag
-        # surfaces as an uncaught ValidationError and exit 1 -- documented
-        # as "the estate failed while running", which it never did (DL-137)
-        typer.echo(f"--machine-policy {machine_policy!r}: expected strict|local-eligible", err=True)
+    if deadman is not None and not detached:
+        # loud, not silent: without a supervisor there is nothing to hold
+        # the lifelines, so nothing a deadman could bound
+        # (concurrency-model ss8). `run` says the same of its own flags.
+        typer.echo(
+            "--next-deadman needs --next-detached: a tethered run has no supervisor", err=True
+        )
         raise typer.Exit(2)
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
-    return runtime_profile_from_cli(
-        timezone=timezone,
-        tz_aliases=tz_aliases,
-        as_machine=as_machine,
-        machine_policy=machine_policy,
-        detached=detached,
-        deadman_s=deadman,
-    )
+    try:
+        return runtime_profile_from_cli(
+            timezone=timezone,
+            tz_aliases=tz_aliases,
+            as_machine=as_machine,
+            machine_policy=machine_policy,
+            detached=detached,
+            deadman_s=deadman,
+        )
+    except ValidationError as exc:
+        raise typer.Exit(refuse(exc, prefix="the next period's runtime profile")) from None
 
 
 def _stage_next(
@@ -202,11 +217,6 @@ def seal(
     from dsl41.runner_control import claimed_actor as default_actor
     from dsl41.runner_ledger import acquire_run_root
 
-    if next_deadman is not None and not next_detached:
-        typer.echo(
-            "--next-deadman needs --next-detached: a tethered run has no supervisor", err=True
-        )
-        raise typer.Exit(2)
     profile = _next_profile(
         next_timezone,
         next_timezone_map,
@@ -225,6 +235,7 @@ def seal(
         raise typer.Exit(
             _live_seal(
                 run_root,
+                estate_anchor,
                 next_files,
                 profile,
                 permit_unknown,
@@ -257,6 +268,7 @@ def seal(
 
 def _live_seal(
     run_root: Path,
+    estate_anchor: "Path | None",
     next_files: list[Path],
     profile: "RuntimeProfile",
     permit_unknown: bool,
@@ -321,7 +333,12 @@ def _live_seal(
     return command_outcome(
         socket_path,
         request,
-        on_applied=lambda: say_next(run_root, None),
+        # the anchor the caller named rides into the printed resume command
+        # (DL-145): a ROLLED root's anchor is the LINEAGE's and must be
+        # spelled explicitly, so a hard-coded None handed the operator a
+        # command that opens the wrong lineage -- and the offline sealer,
+        # which does pass it, printed the right one for the same estate
+        on_applied=lambda: say_next(run_root, estate_anchor),
         # ss7 publishes 0/2/4 for this verb and 3 means something else here
         # (a sealed ENGINE exits 3); see `command_outcome`
         rejected_as_unknown=True,
@@ -356,7 +373,9 @@ async def _offline_seal(
     closing period's identity is the manifest's."""
     import uuid
 
-    from dsl41.boundary import SealRequest
+    from datetime import UTC, datetime
+
+    from dsl41.boundary import SealRequest, load_bundle_catalog
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.runner_history import active_period_id
     from dsl41.period import read_period_manifest
@@ -379,8 +398,25 @@ async def _offline_seal(
     )
     wiring = None
     try:
-        catalog = _catalog_from_root(run_root, pinned.source_bundle_hash)
-        wiring = await wire_from_profile(run_root, catalog, pinned.runtime_profile)
+        # the OWNER's loader (DL-145): the copy this replaced dropped the
+        # JilParseError/LoweringError -> EngineError wrap, so a bundle
+        # that no longer parses left this `except EngineError` untouched
+        # and the verb exited 1 on a traceback.
+        #
+        # `permit_unknown` for `_period_catalog`'s reason: these are the
+        # exact bytes the CLOSING period ran, the gate that decided
+        # whether an unknown attribute was acceptable ran once at launch,
+        # and re-asking it here would make `dsl41 seal` refuse a root
+        # `dsl41 run` is serving.
+        catalog = load_bundle_catalog(
+            run_root, pinned.source_bundle_hash, permit_unknown=True
+        )
+        wiring = await wire_from_profile(
+            run_root,
+            catalog,
+            pinned.runtime_profile,
+            start=datetime.now(UTC).replace(tzinfo=None),
+        )
         engine = await resume_run(
             catalog,
             run_root,
@@ -435,7 +471,6 @@ async def _drive_boundary(
     from datetime import datetime
 
     from dsl41.boundary import BoundaryFailStop, PeriodSealed
-    from dsl41.runner_clock import EngineError
 
     # `ensure_future` over the engine's own future: it hands the same
     # object back and gives this function the `done`/`exception`/`result`
@@ -476,8 +511,13 @@ async def _drive_boundary(
         typer.echo(str(outcome), err=True)
         code = 4
     elif outcome is not None:
-        typer.echo(str(outcome), err=True)
-        code = 2 if isinstance(outcome, EngineError) else 1
+        # ss7 publishes 0/2/4 for this verb and nothing else (DL-145): the
+        # boundary did NOT commit and C1 is still open, whatever kind of
+        # exception said so. The exit-1 fork this replaced left the
+        # published table for anything that was not an `EngineError` and
+        # reported "the estate failed while running" for a period that is
+        # still serving.
+        code = refuse(outcome)
     else:
         typer.echo("the engine loop returned without a boundary", err=True)
     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -487,17 +527,6 @@ async def _drive_boundary(
     if engine.journal is not None:
         engine.journal.close()
     return code
-
-
-def _catalog_from_root(run_root: Path, source_bundle_hash: str) -> "CatalogIR":
-    """C1, from the root's own immutable bundle (period-model ss7).
-
-    Parsed under the ORIGINAL paths `sources.json` records, because
-    `catalog_hash` v2 covers spans and a span names its file."""
-    from dsl41.period import bundle_sources
-
-    sources = bundle_sources(run_root, source_bundle_hash)
-    return lower_catalog([parse(source.text, file=source.path) for source in sources])
 
 
 def audit(
@@ -842,7 +871,7 @@ def estate_prune(
     ),
     archive_inputs: bool = typer.Option(
         False,
-        "--archive-inputs",
+        f"--{ARCHIVE_CLASS}",
         help="ARCHIVE a covered period: write its receipt, then delete its WAL and"
         " its committed candidate files. IRREVERSIBLE -- the period drops to the"
         " attestation-verified tier and can never be re-derived. Prune its"
@@ -873,12 +902,18 @@ def estate_prune(
     candidate's two files, their bundles, the latest attestation, and the
     WAL and spool of any unattested period. This verb cannot reach them.
 
-    Three verdicts are reported. `floored` is refused by the model.
-    `held` has been released by the head moving on and is kept anyway,
-    because no retention class licenses it -- and the row says which
-    dependency is in the way. `prunable` is licensed by name: a tombstone
-    whose period is attested and whose run has ended, a quarantined
-    candidate, and the INPUTS of a period the archive covers.
+    The report has six rows and each is a different fact. **removed** (or
+    **would remove**, under `--dry-run`) is what went. **prunable, outside
+    the flags given** is licensed by name -- a tombstone whose period is
+    attested and whose run has ended, a quarantined candidate, the INPUTS
+    of a period the archive covers -- and was not asked for. **held** has
+    been released by the head moving on and is kept anyway, because no
+    retention class licenses it; the row says which dependency is in the
+    way. **floored** is refused by the model and this verb cannot reach
+    it. **the archive refused** is selected and NOT licensed: nothing was
+    attempted and nothing is broken, and the reason names the order to
+    follow. **the filesystem refused** is selected, licensed, and refused
+    by the operating system -- a partial sweep, reported as one.
 
     **`--archive-inputs` is the one irreversible verdict (DL-144).** It
     answers PR-Q3 -- may a seal-only archive stand in for pruned inputs? --
@@ -909,7 +944,6 @@ def estate_prune(
     `--dry-run`), 2 on a refusal and 2 when the filesystem refused a
     removal -- and then the report says which ones went and which did not.
     """
-    from dsl41.period import ARCHIVE_CLASS
     from dsl41.retention import CLASSES, plan_retention, prune
     from dsl41.runner_clock import EngineError
 

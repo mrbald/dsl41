@@ -145,6 +145,7 @@ from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     REFUSED,
     REJECTED,
+    STATUS_FLAG_MARKS,
     STATUSES,
     ControlClient,
     ControlClientError,
@@ -1336,17 +1337,10 @@ class RunnerApp(App[None]):
         status = str(row.get("status", ""))
         at = str(row.get("status_at") or "")
         # A last: the operator flags are set states, the armed latch is a
-        # promise -- IHNA order keeps the cell diffable by eye
-        flags = "".join(
-            mark
-            for mark, flag in (
-                ("I", "on_ice"),
-                ("H", "on_hold"),
-                ("N", "on_noexec"),
-                ("A", "armed"),
-            )
-            if row.get(flag)
-        )
+        # promise -- IHNA order keeps the cell diffable by eye. The alphabet
+        # belongs to the payload's owner (DL-145), so `--brief` and this
+        # cell cannot come to spell one estate two ways
+        flags = "".join(mark for mark, flag in STATUS_FLAG_MARKS if row.get(flag))
         timers = row.get("pending_timers") or []
         timer_text = ""
         if timers:

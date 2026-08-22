@@ -1949,6 +1949,7 @@ def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
         monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
         got = _live_seal(
             run_root,
+            None,
             [estate],
             profile,
             permit_unknown=False,
@@ -1961,6 +1962,49 @@ def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
         printed = capsys.readouterr()
         assert ("--request-id req-9" in printed.err) is names_the_id, answer
         assert ("dsl41 run --resume" in printed.out) is opens, answer
+
+
+def test_a_live_seal_on_a_rolled_root_prints_the_lineage_anchor(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """DL-145. `--estate-anchor` reaches the verb and the live sealer threw
+    it away: `say_next` was called with a hard-coded `None`, so a lineage
+    that has ROLLED -- whose anchor is not `<run-root>.anchor` and must be
+    named explicitly -- was handed a resume command that opens the wrong
+    lineage. The offline sealer passed it and printed the right one for the
+    same estate, which is how one verb came to answer two ways."""
+    import dsl41.runner_control as control_mod
+    from dsl41.cli_estate import _live_seal
+    from dsl41.period import runtime_profile_from_cli
+
+    run_root = tmp_path / "root"
+    run_root.mkdir()
+    (run_root / "control.sock").touch()
+    anchor = tmp_path / "lineage.anchor"
+    estate = tmp_path / "c2.jil"
+    estate.write_text("insert_job: rolled_job\njob_type: c\ncommand: x\nmachine: m1\n")
+
+    def fake_roundtrip(_path, request, **_kw):
+        if request.get("cmd") == "status":
+            return {"ok": True, "baseline_id": "b-1", "epoch": 1}
+        return {"ok": True, "kind": "seal", "digest": "sha256:x"}
+
+    monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
+    got = _live_seal(
+        run_root,
+        anchor,
+        [estate],
+        runtime_profile_from_cli(timezone="UTC"),
+        permit_unknown=False,
+        properties=None,
+        force_seal=False,
+        actor="ops@t",
+        request_id="req-10",
+    )
+    assert got == 0
+    printed = capsys.readouterr().out
+    assert f"--estate-anchor {anchor}" in printed
+    assert f"dsl41 run --resume --run-root {run_root} --estate-anchor {anchor}" in printed
 
 
 def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(

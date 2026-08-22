@@ -75,8 +75,10 @@ from dsl41.canon import (
 from dsl41.classify import Baseline, CarriedState, Classification, classify
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.period import (
+    CANDIDATE_NAME,
     CATALOG_HASH_VERSION,
     SENTINEL_NAME,
+    STAGED_MANIFEST_NAME,
     WAL_DIR,
     ArchiveReceipt,
     Manifest,
@@ -1030,6 +1032,53 @@ def is_anchor_dir(path: Path) -> bool:
     return (Path(path) / ANCHOR_NAME).is_file()
 
 
+def registry_rows(anchor: Anchor, *, anchor_dir: Path) -> list[tuple[int, PeriodRow]]:
+    """ss1.3's archive registry as `(period, ROW)`, ascending -- the ONE
+    read of it (DL-145).
+
+    Two rules, and both REFUSE rather than drop, because every reader of
+    this registry answers a question about the WHOLE estate and a dropped
+    row makes a smaller estate look complete.
+
+    **Canonical decimal keys only**, the same rule `split_run_dir` reads
+    run directories by: `01` aliases `1`, and two keys naming one period
+    would put two roots in one place.
+
+    **No holes.** A row is INSERTED when a root first owns a period and
+    never removed, so the keys of a registry this binary wrote are 1..max
+    with no gap. A gap is an edited anchor.
+
+    Provisional rows are RETURNED, not filtered: whether a row whose
+    segment is not yet durable counts is the caller's question (the walk
+    names them, the retention plan skips them), and a shared reader that
+    answered it would be deciding for both.
+
+    `anchor_dir` names the file in every refusal. It is the caller's
+    because the anchor MODEL does not carry its own path, and a refusal
+    that could not say which anchor is wrong sends nobody anywhere. The
+    lenient second reader this replaced silently dropped a non-canonical
+    key and had no hole rule at all, so an edited anchor made the walk
+    refuse and the retention plan run over a smaller estate -- one
+    registry, two answers, and the deletion side was the lenient one."""
+    rows: list[tuple[int, PeriodRow]] = []
+    for key, row in anchor.periods.items():
+        if not key.isdigit() or str(int(key)) != key:
+            raise EngineError(
+                f"{anchor_dir}: registry key {key!r} is not a period number --"
+                " ss1.3 keys the archive registry by the period spelled as a"
+                " decimal, and this row belongs to no period"
+            )
+        rows.append((int(key), row))
+    numbers = {number for number, _ in rows}
+    if numbers and numbers != set(range(1, max(numbers) + 1)):
+        raise EngineError(
+            f"{anchor_dir}: the registry names periods {sorted(numbers)} and a"
+            " lineage has no holes -- rows are inserted when a root first owns a"
+            " period and never removed (period-model ss1.3)"
+        )
+    return sorted(rows, key=lambda pair: pair[0])
+
+
 def walk_estate(anchor_dir: Path) -> EstateWalk:
     """ss1.3's archive registry, read as a lineage: every period this
     estate holds, in period order, with the root that holds it (PR-02f).
@@ -1086,32 +1135,9 @@ def walk_estate(anchor_dir: Path) -> EstateWalk:
             " which period, and an estate-wide read has no roots without it"
             " (period-model ss1.3)"
         )
-    rows: list[tuple[int, PeriodRow]] = []
-    for key, row in stored.periods.items():
-        if not key.isdigit() or str(int(key)) != key:
-            # canonical spelling only, the same rule `split_run_dir` reads
-            # run directories by: `01` aliases `1`, and two keys naming one
-            # period would put two roots in one place in the walk
-            raise EngineError(
-                f"{anchor_dir}: registry key {key!r} is not a period number --"
-                " ss1.3 keys the archive registry by the period spelled as a"
-                " decimal, and this row belongs to no period"
-            )
-        rows.append((int(key), row))
-    numbers = {number for number, _ in rows}
-    if numbers and numbers != set(range(1, max(numbers) + 1)):
-        # a row is INSERTED when a root first owns a period and never
-        # removed, so the keys of a registry this binary wrote are
-        # 1..max with no hole. A hole is an edited anchor, and walking
-        # it would report an estate whose middle is missing as whole
-        raise EngineError(
-            f"{anchor_dir}: the registry names periods {sorted(numbers)} and a"
-            " lineage has no holes -- rows are inserted when a root first owns a"
-            " period and never removed (period-model ss1.3)"
-        )
     periods: list[EstatePeriod] = []
     provisional: list[int] = []
-    for period_id, row in sorted(rows, key=lambda pair: pair[0]):
+    for period_id, row in registry_rows(stored, anchor_dir=anchor_dir):
         if not row.segment_durable:
             provisional.append(period_id)
             continue
@@ -1149,7 +1175,11 @@ def _prove_root(
     receipt that licensed the deletion. Without a receipt the same disk is
     LOSS and refuses, because accidental loss must never read as
     archiving."""
-    root = Path(row.root)
+    # ONE spelling of "the same root" (DL-145): ss1.3 persists `root`
+    # absolute and normalized, and every reader that compares or
+    # de-duplicates one goes through `normalized_root` -- so `roots()`
+    # cannot answer with two names for one directory
+    root = Path(normalized_root(row.root))
     where = f"period {period_id}: registry root {root}"
     if not root.is_dir():
         raise EngineError(
@@ -1171,9 +1201,6 @@ def _prove_root(
             f"{where} belongs to estate {sentinel.estate_id}, and this lineage is"
             f" {stored.estate_id}: two geneses are two estates (period-model ss1.2)"
         )
-    # the receipt is read whether or not the segment survives: DL-144 makes
-    # the archive IRREVERSIBLE, so a restored input beside a receipt does
-    # not move the period back to the derivation-verified tier
     # the receipt is proved whether or not the segment survives: DL-144
     # makes the archive IRREVERSIBLE, so a restored input beside a receipt
     # does not move the period back to the derivation-verified tier -- and
@@ -1419,19 +1446,19 @@ def stage_next_period(
     `clock_domain` and `first_index` are derived at the boundary and are
     excluded from `stage_digest` by construction (`StagedNextPeriod`), so a
     retry that closes at a different index stages the same identity."""
-    check_manifest_self_consistent(staged_manifest, "staged_manifest.json")
+    check_manifest_self_consistent(staged_manifest, STAGED_MANIFEST_NAME)
     staged = staged_next_from(staged_manifest)
     directory = staging_dir(run_root, staged.stage_digest)
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory.parent, 0o700)
     os.chmod(directory, 0o700)
     durable_write(
-        str(directory / "staged_manifest.json"),
+        str(directory / STAGED_MANIFEST_NAME),
         canonical_bytes(staged_manifest.model_dump(mode="json")) + b"\n",
     )
     crash_point("after_staged_manifest")
     durable_write(
-        str(directory / "candidate.json"),
+        str(directory / CANDIDATE_NAME),
         canonical_bytes(
             Candidate(stage_digest=staged.stage_digest, next_period=staged).model_dump(mode="json")
         )
@@ -1465,13 +1492,13 @@ def staged_bytes_for(
 
 
 def read_candidate(directory: Path) -> Candidate | None:
-    return _read_artifact(directory / "candidate.json", Candidate)
+    return _read_artifact(directory / CANDIDATE_NAME, Candidate)
 
 
 def read_staged_manifest(directory: Path) -> StagedManifest | None:
-    manifest = _read_artifact(directory / "staged_manifest.json", StagedManifest)
+    manifest = _read_artifact(directory / STAGED_MANIFEST_NAME, StagedManifest)
     if manifest is not None:
-        check_manifest_self_consistent(manifest, str(directory / "staged_manifest.json"))
+        check_manifest_self_consistent(manifest, str(directory / STAGED_MANIFEST_NAME))
     return manifest
 
 
@@ -1920,17 +1947,6 @@ _SEAL_SCHEMA: Final[dict[str, Any]] = {
     "force_seal": lambda v: isinstance(v, bool),
 }
 
-#: The sidecar fields the record duplicates, and the record key each lands
-#: under. ss2.2 requires every one to agree; ss11 checks them at resume.
-_RECORD_MIRRORS: Final[tuple[tuple[str, str], ...]] = (
-    ("estate_id", "estate_id"),
-    ("period_id", "period_id"),
-    ("closes_at_index", "closes_at_index"),
-    ("digest", "digest"),
-    ("catalog_hash_version", "catalog_hash_version"),
-    ("request_fingerprint", "request_fingerprint"),
-)
-
 
 def seal_record(seal: Seal) -> dict[str, Any]:
     """ss2.2's record, verbatim -- the boundary's DECISION.
@@ -1970,33 +1986,22 @@ def check_seal_record(record: Mapping[str, Any]) -> None:
 
 
 def _record_disagreements(seal: Seal, record: Mapping[str, Any]) -> list[str]:
-    out = [
-        f"{key}: sidecar {getattr(seal, field)!r} vs record {record.get(key)!r}"
-        for field, key in _RECORD_MIRRORS
-        if getattr(seal, field) != record.get(key)
+    """Every field the ss2.2 record duplicates, compared against the
+    sidecar it names -- DERIVED (DL-145): the record the seal ITSELF would
+    write, against the record on disk, over `_SEAL_SCHEMA`'s own keys.
+
+    So a key added to the schema is compared here for free. What this
+    replaced named its fields four ways -- a mirror table, three
+    hand-rolled ifs and a four-row tuple -- and every addition to ss2.2 had
+    to be remembered twice or be duplicated without ever being checked
+    (DL-137's third defect, same class).
+
+    `sidecar X vs record Y` reads off the argument order: the seal's own
+    derivation is the left side."""
+    return [
+        f"{key}: sidecar {mine!r} vs record {theirs!r}"
+        for key, mine, theirs in disagreements(seal_record(seal), record, _SEAL_SCHEMA)
     ]
-    if seal.closed_at.isoformat() != record.get("at"):
-        out.append(f"at: sidecar {seal.closed_at.isoformat()} vs record {record.get('at')!r}")
-    if seal.next_period.period_id != record.get("next_period_id"):
-        out.append(
-            f"next_period_id: sidecar {seal.next_period.period_id}"
-            f" vs record {record.get('next_period_id')!r}"
-        )
-    if seal.next_period.baseline_id != record.get("next_baseline_id"):
-        out.append(
-            f"next_baseline_id: sidecar {seal.next_period.baseline_id}"
-            f" vs record {record.get('next_baseline_id')!r}"
-        )
-    req = seal.boundary_request
-    for field, key in (
-        ("source", "source"),
-        ("request_id", "request_id"),
-        ("claimed_actor", "claimed_actor"),
-        ("force_seal", "force_seal"),
-    ):
-        if getattr(req, field) != record.get(key):
-            out.append(f"{key}: sidecar {getattr(req, field)!r} vs record {record.get(key)!r}")
-    return out
 
 
 # --------------------------------------------------------- the executions
@@ -2638,9 +2643,13 @@ def act_on_head(
     `open(N, this root)` with N's `seal` record present performs the CAS
     the crashed sealer did not; `closed` with no following segment leaves
     the claim to the opener; `claimed` with our claim and a durable segment
-    moves the head to `open`; `claimed` with another refuses, naming the
-    holder; and `open(1, this root)` with a provisional row and a durable
-    segment finalizes."""
+    that AGREES with the seal it opened from moves the head to `open`;
+    `claimed` with another refuses, naming the holder; and `open(1, this
+    root)` with a provisional row and a durable segment finalizes.
+
+    Agreement, not presence, and the check runs BEFORE the CAS -- the same
+    standard `open_next_period` holds an already-written segment to
+    (DL-145)."""
     current = anchor.require(estate_id)
     head = current.head
     if (
@@ -2682,11 +2691,37 @@ def act_on_head(
                 " written before the head moves, so this state is unreachable without"
                 " something deleting it (period-model ss1.3)"
             )
-        if wal_path(run_root, claim.next_period).exists():
+        segment = wal_path(run_root, claim.next_period)
+        if segment.exists():
+            # ONE evidence standard for the head move (DL-145). The CAS
+            # used to run on the segment's PRESENCE while `open_next_period`
+            # demands AGREEMENT -- `_check_existing_segment` first, then the
+            # CAS -- and the OPERATOR's route reaches this one: a crash
+            # between `after_opening_segment` and `after_open_cas` is
+            # repaired here, at resume, so a segment whose pins disagree
+            # with the seal moved the head and was caught afterwards.
+            # DL-142's pinned check-before-CAS order now holds on both
+            # routes.
+            seal = lineage.seal
+            if seal is None or seal.next_period.period_id != claim.next_period:
+                raise EngineError(
+                    f"{anchor.path}: the head claims period {claim.next_period} for"
+                    f" {run_root}, and the seal this root's records name opens"
+                    f" {'nothing' if seal is None else f'period {seal.next_period.period_id}'}"
+                    " -- the head move is licensed by the seal the claimed segment"
+                    " opened from, and this root holds no seal that opens the"
+                    " claimed period (period-model ss11)"
+                )
+            _check_existing_segment(
+                segment,
+                seal.next_period,
+                {"period_id": seal.period_id, "digest": seal.digest},
+                pending_reclaim(current, claim.next_period),
+            )
             # same readable-vs-durable rule as the close CAS above: the
             # segment's existence justifies the head move, so the segment
             # is made durable before the head names it
-            fsync_file(wal_path(run_root, claim.next_period))
+            fsync_file(segment)
             return anchor.open_claimed(
                 claim_id=claim.claim_id, period_id=claim.next_period, root=run_root
             )
