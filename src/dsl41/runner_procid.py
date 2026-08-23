@@ -91,6 +91,20 @@ def fsync_file(path: "str | os.PathLike[str]") -> None:
         os.close(fd)
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Every byte, or an error. `os.write` may write FEWER bytes than it was
+    given and return the count without raising, and the liturgy below then
+    fsyncs and renames a TRUNCATED record into place (DL-151) -- a
+    half-written `spawn.json` published as the durable one, which is the
+    exact loss the liturgy exists to prevent."""
+    written = 0
+    while written < len(data):
+        count = os.write(fd, data[written:])
+        if count <= 0:  # pragma: no cover -- POSIX: 0 only for an empty write
+            raise OSError(f"short write: {written} of {len(data)} bytes")
+        written += count
+
+
 def durable_write(path: str, data: bytes) -> None:
     """The DL-41a durability liturgy: same-dir temp file, fsync(file),
     rename, fsync(directory). Requires a local filesystem."""
@@ -103,7 +117,7 @@ def durable_write(path: str, data: bytes) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # owner-only, not umask's call
     try:
         try:
-            os.write(fd, data)
+            _write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -136,7 +150,7 @@ def durable_create(path: str, data: bytes) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         try:
-            os.write(fd, data)
+            _write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)

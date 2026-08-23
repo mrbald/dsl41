@@ -157,9 +157,20 @@ def decode(data: bytes | str) -> object:
 
     Duplicate object keys at any depth (PR-12), float literals and the
     non-standard `NaN`/`Infinity` constants (PR-11), non-scalar strings
-    (PR-10a), and an unimplemented `artifact_format_version` (PR-08d).
+    (PR-10a), an unimplemented `artifact_format_version` (PR-08d) -- and
+    bytes that are not UTF-8 at all.
+
+    That last one is a refusal, not an escape (DL-151). ss3.2 has one
+    encoding, so bytes outside it are exactly as unreadable as a duplicate
+    key; but `bytes.decode` raises `UnicodeDecodeError`, which no caller's
+    `except CanonError` catches. Every reader in this repo turns a
+    `CanonError` into its own named refusal and had no branch for this one,
+    so an invalid byte reached the top as an internal error.
     """
-    text = data.decode("utf-8") if isinstance(data, bytes) else data
+    try:
+        text = data.decode("utf-8") if isinstance(data, bytes) else data
+    except UnicodeDecodeError as exc:
+        raise CanonError(f"not UTF-8: {exc}") from exc
     try:
         obj = json.loads(
             text,

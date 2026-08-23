@@ -73,6 +73,7 @@ import contextlib
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -146,6 +147,12 @@ if _PROCID_DIR_ADDED:
 
 PROTOCOL_VERSION = 1
 
+#: the `version` the wrapper stamps on `spawn.json` and `status.json` (ss3).
+#: The same integer as `runner_wrapper.SPEC_VERSION`, held separately because
+#: this tier runs the wrapper by file path and imports nothing from it: two
+#: copies of one number, and a change to either is a protocol change.
+SPOOL_VERSION = 1
+
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
 #: relative to THIS file so the supervisor never imports dsl41 to find it.
 _WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_wrapper.py")
@@ -167,6 +174,16 @@ _INDEX_DIR = ".by_run_id"
 #: estate whose root never rolls would otherwise grow this without limit
 #: (ss11a). Older completions are read from the spool, which is the truth.
 _LIST_COMPLETED_WINDOW = 256
+
+
+def _is_wire_int(value: object, expected: int) -> bool:
+    """Integer identity on the wire, which Python's `==` is not (DL-151).
+
+    `True == 1` and `1.0 == 1`, so a bare comparison let a JSON `true` or
+    `1.0` stand in for protocol version 1 or fencing token 1. A version and
+    a fencing token are integers, and nothing else may pass as one: the
+    token is the fence that keeps a superseded controller out."""
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
 
 
 # ------------------------------------------------------- ss11a tombstone files
@@ -550,7 +567,7 @@ class Supervisor:
         except (json.JSONDecodeError, ValueError):
             self._send(conn, {"ok": False, "error": "malformed_json"})
             return
-        if req.get("v") != PROTOCOL_VERSION:
+        if not _is_wire_int(req.get("v"), PROTOCOL_VERSION):
             self._send(conn, {"ok": False, "error": "unsupported_version"})
             return
         cmd = req.get("cmd")
@@ -631,7 +648,11 @@ class Supervisor:
         is the opposite of what stale_token asks for."""
         if req.get("incarnation") != self.incarnation:
             return {"ok": False, "error": "wrong_incarnation", "incarnation": self.incarnation}
-        if not self._lease_active() or self.lease is None or self.lease.token != req.get("token"):
+        if (
+            not self._lease_active()
+            or self.lease is None
+            or not _is_wire_int(req.get("token"), self.lease.token)
+        ):
             return {"ok": False, "error": "stale_token"}
         return None
 
@@ -665,8 +686,8 @@ class Supervisor:
         # accept (ss1); a same-uid process is already inside the trust
         # boundary and can signal the engine directly.
         if self._lease_active() and self.lease is not None and self.lease.conn is not None:
-            incumbent = (
-                req.get("incarnation") == self.incarnation and req.get("token") == self.lease.token
+            incumbent = req.get("incarnation") == self.incarnation and _is_wire_int(
+                req.get("token"), self.lease.token
             )
             if not incumbent:
                 return {
@@ -750,13 +771,22 @@ class Supervisor:
             not isinstance(job, str)
             or not job
             or os.sep in job
+            or "\x00" in job
             or job in (".", "..")
             or isinstance(run_number, bool)
             or not isinstance(run_number, int)
         ):
             return {"ok": False, "error": "bad_spec", "detail": "spec.job / spec.run_number"}
+        # NUL is checked HERE, ahead of the two realpath calls below, because
+        # os.path takes a NUL as a ValueError and not an OSError: an embedded
+        # null in `job` or `run_dir` used to reach realpath and answer
+        # `internal:` from the dispatcher's belt instead of `bad_spec`
+        # (DL-151). `_spec_schema_error` scans every other string field.
+        incoming = spec.get("run_dir")
+        if not isinstance(incoming, str) or "\x00" in incoming:
+            return {"ok": False, "error": "bad_spec", "detail": "spec.run_dir is not a path"}
         run_dir = self.run_dir_for(job, run_number)
-        if os.path.realpath(str(spec.get("run_dir"))) != os.path.realpath(run_dir):
+        if os.path.realpath(incoming) != os.path.realpath(run_dir):
             # the supervisor OWNS this directory now, so it insists on the one
             # it owns: index -> (job, run_number) -> directory is the only way
             # a replay finds the tombstone again. REALPATH, not normpath: the
@@ -1281,6 +1311,10 @@ def _fsync_dir(path: str) -> None:
 #: it, because a fingerprint over a spec with an unpinned key type is not
 #: collision-free, and an unvalidated field that only explodes after the
 #: fork kills the one process whose death EOFs every wrapper on the host.
+#: `grace_seconds` must be FINITE (DL-151): an `Infinity` passed the old
+#: `>= 0.0` test, and SHUTDOWN escalates TERM->KILL after that many seconds,
+#: so one such spec made the whole shutdown unbounded -- a supervisor that
+#: never exits and a run root that can never be rerouted.
 _SPEC_SCHEMA: dict[str, Any] = {
     "version": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "run_id": lambda v: isinstance(v, str),
@@ -1292,7 +1326,10 @@ _SPEC_SCHEMA: dict[str, Any] = {
     "stderr_path": lambda v: isinstance(v, str),
     "stdin_path": lambda v: v is None or isinstance(v, str),
     "grace_seconds": lambda v: (
-        isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) >= 0.0
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and float(v) >= 0.0
     ),
     "lifeline_fd": lambda v: isinstance(v, int) and not isinstance(v, bool),
 }
@@ -1306,7 +1343,15 @@ def _spec_schema_error(spec: dict[str, Any]) -> str | None:
     """The frozen ss2 shape, or the first reason it is not. Unknown keys
     REFUSE: the protocol is frozen, so a key this schema does not pin is a
     key whose type is not pinned either -- and the fingerprint's typed float
-    encoding is only injective over pinned types."""
+    encoding is only injective over pinned types.
+
+    A NUL in any string field refuses too (DL-151). It is not a type error,
+    so the predicates above cannot see it, and nothing downstream can either:
+    `os.open`, `subprocess.Popen` and `os.path` all raise ValueError for an
+    embedded null, which is not the OSError the wrapper guards with. A NUL in
+    `command` or a path therefore killed the wrapper AFTER the fork, with no
+    `status.json` written -- the E7 case the wrapper is built never to
+    produce."""
     for key in spec:
         if key not in _SPEC_SCHEMA:
             return f"unknown spec key {key!r}"
@@ -1315,8 +1360,11 @@ def _spec_schema_error(spec: dict[str, Any]) -> str | None:
             if key in _SPEC_OPTIONAL:
                 continue
             return f"spec.{key} is missing"
-        if not check(spec[key]):
+        value = spec[key]
+        if not check(value):
             return f"spec.{key} has the wrong type"
+        if isinstance(value, str) and "\x00" in value:
+            return f"spec.{key} holds a NUL"
     return None
 
 
@@ -1354,10 +1402,33 @@ _INVALID: dict[str, Any] = {"__invalid__": True}
 _UNREADABLE = "__unreadable__"
 
 
+def _spool_version_supported(doc: dict[str, Any]) -> bool:
+    """The `Wrapper-owned spool files` row of docs/protocol-evolution.md,
+    asked once (DL-151).
+
+    `spawn.json` and `status.json` carry their own `version`, and the row is
+    tolerant on fields and STRICT on versions: a version this binary does not
+    implement must stop the reader, because the field exists to say the
+    meaning changed. `true` and `1.0` are not the integer 1 (the same
+    bool-as-int hole `_is_wire_int` closes on the socket).
+
+    An ABSENT `version` passes. The matrix has no column for a missing
+    version and no document rules one, so refusing here would pick a side by
+    guess; the split is recorded in the round's ledger instead."""
+    if "version" not in doc:
+        return True
+    return _is_wire_int(doc["version"], SPOOL_VERSION)
+
+
 def _load_json(path: str) -> dict[str, Any] | None:
     """A wrapper-written spool record: plain JSON. ABSENT means exactly
     ENOENT -- an EACCES or EIO is a file that EXISTS and cannot be read,
-    and reading that as absence would erase evidence (ss11a)."""
+    and reading that as absence would erase evidence (ss11a).
+
+    Bytes that are not UTF-8 are the same kind of unreadable and take the
+    same answer: `json.load` raises `UnicodeDecodeError` for them, which is
+    not a `JSONDecodeError`, so before DL-151 it escaped to the dispatcher's
+    belt and answered `internal:`."""
     try:
         with open(path, "rb") as f:
             loaded = json.load(f)
@@ -1365,9 +1436,11 @@ def _load_json(path: str) -> dict[str, Any] | None:
         return None
     except OSError:
         return _INVALID
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return _INVALID
-    return loaded if isinstance(loaded, dict) else _INVALID
+    if not isinstance(loaded, dict) or not _spool_version_supported(loaded):
+        return _INVALID
+    return loaded
 
 
 #: the ss11a tombstone schemas: required keys and their type checks, per
@@ -1406,9 +1479,10 @@ _TOMBSTONE_SCHEMAS: dict[str, dict[str, Any]] = {
 def _load_tombstone(path: str, kind: str) -> dict[str, Any] | None:
     """A supervisor-written ss11a record, read through the ss3.2 ingress:
     duplicate keys, floats, non-scalar strings and an artifact_format_version
-    this binary does not implement all refuse (PR-08d/PR-12), and so does a
-    record missing a required field -- `json.load` would accept all of them
-    and let a replay answer from unsupported evidence."""
+    this binary does not implement all refuse (PR-08d/PR-12), and so do bytes
+    that are not UTF-8 and a record missing a required field -- `json.load`
+    would accept all of them and let a replay answer from unsupported
+    evidence."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -1440,8 +1514,15 @@ def main(argv: list[str] | None = None) -> int:
         " and this run root is never reroutable except by force.",
     )
     args = parser.parse_args(argv)
-    if args.deadman_seconds is not None and args.deadman_seconds <= 0:
-        print("supervisor: --deadman-seconds must be positive", file=sys.stderr)
+    if args.deadman_seconds is not None and not (
+        math.isfinite(args.deadman_seconds) and args.deadman_seconds > 0
+    ):
+        # FINITE and positive, in that order (DL-151). `nan` fails every
+        # comparison, so `<= 0` let it through and the interval then fired on
+        # the first tick -- a supervisor that exits at once and takes every
+        # wrapper with it. `inf` passed the same gate and never fired, which
+        # is `--deadman-seconds` spelled as no deadman at all.
+        print("supervisor: --deadman-seconds must be a finite positive number", file=sys.stderr)
         return 2
     # ENOENT on the run_root is a caller bug (the engine makes it first)
     if not os.path.isdir(args.run_root):

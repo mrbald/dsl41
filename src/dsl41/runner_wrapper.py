@@ -136,6 +136,16 @@ if _PROCID_DIR_ADDED:
 
 SPEC_VERSION = 1
 
+#: how a spawn or a durable record write is allowed to fail (DL-151). OSError
+#: is the expected half. ValueError is the half that got away: an embedded
+#: NUL in a path or in the command makes `os.open`, `subprocess.Popen` and
+#: every `os.path` call raise ValueError, not OSError, so such a spec killed
+#: this process with no `status.json` at all -- the E7 absence this module
+#: exists never to produce. The supervisor now refuses a NUL at the ss2 gate;
+#: this is the recorder's own belt, because the absence of a record is the
+#: one thing it may not answer with.
+_IO_FAILURE = (OSError, ValueError)
+
 #: pause-point env var; see module docstring (test scaffolding, inert in prod)
 PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
@@ -293,7 +303,7 @@ def main() -> int:
                 close_fds=True,
                 preexec_fn=_restore_default_signals,  # single-threaded: safe
             )
-    except OSError as exc:
+    except _IO_FAILURE as exc:
         try:
             durable_write_json(
                 os.path.join(run_dir, "status.json"),
@@ -305,7 +315,7 @@ def main() -> int:
                     "ended_at": utc_now_iso(),
                 },
             )
-        except OSError as write_exc:
+        except _IO_FAILURE as write_exc:
             print(f"runner_wrapper: spawn AND record failed: {write_exc}", file=sys.stderr)
             return 3
         return 0
@@ -324,7 +334,7 @@ def main() -> int:
     }
     try:
         durable_write_json(os.path.join(run_dir, "spawn.json"), spawn_record)
-    except OSError as exc:
+    except _IO_FAILURE as exc:
         # cannot promise observability without the spawn record: kill what we
         # started, still try to record the outcome, and exit loudly
         print(f"runner_wrapper: spawn.json write failed: {exc}", file=sys.stderr)
@@ -344,7 +354,7 @@ def main() -> int:
                     "ended_at": utc_now_iso(),
                 },
             )
-        except OSError:
+        except _IO_FAILURE:
             pass  # already loud on stderr; absence of status.json IS the E7 signal
         return 3
     _test_pause("post_record")
@@ -380,7 +390,7 @@ def main() -> int:
             os.path.join(run_dir, "status.json"),
             {"version": SPEC_VERSION, **identity, **status, "ended_at": utc_now_iso()},
         )
-    except OSError as exc:
+    except _IO_FAILURE as exc:
         print(f"runner_wrapper: status.json write failed: {exc}", file=sys.stderr)
         _reap(child)
         return 3

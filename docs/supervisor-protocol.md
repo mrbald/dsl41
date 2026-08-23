@@ -93,11 +93,19 @@ writes anything durable (§5). Every key above is required except
 `lifeline_fd`, which the supervisor fills. `version`, `run_number` and
 `lifeline_fd` are integers and never booleans. `run_id`, `job`,
 `command`, `run_dir`, `stdout_path` and `stderr_path` are strings.
-`stdin_path` is a string or null. `grace_seconds` is a number, zero or
-more. `job` names one directory component: it must not be empty, must not
-hold a path separator, and must not be `.` or `..`. An **unknown key is
-refused** (`bad_spec`). The object is frozen, so a key this list does not
-name is a key whose type is not pinned either, and the receipt
+`stdin_path` is a string or null. *(Amended by DL-151.)* `grace_seconds`
+is a **finite** number, zero or more: §5's SHUTDOWN escalates TERM→KILL
+after that many seconds, so an `Infinity` makes the whole orderly
+shutdown unbounded. `job` names one directory component: it must not be
+empty, must not hold a path separator, and must not be `.` or `..`.
+*(Amended by DL-151.)* **No string value may hold a NUL**, in `job`, in
+`command` or in any path. An embedded null makes `os.path`, `os.open`
+and the spawn raise `ValueError` rather than `OSError`, so one that
+passed this gate was not a refusal but a wrapper killed after the fork
+with no `status.json` — the §3 absence that means the machine died.
+An **unknown key is refused** (`bad_spec`). The object is frozen, so a
+key this list does not name is a key whose type is not pinned either, and
+the receipt
 fingerprint (§3) stays injective only over pinned types. This is the one
 place in the protocol where an unknown field refuses rather than being
 ignored: §5's forward-compatibility rule covers the fields of a REQUEST,
@@ -115,6 +123,20 @@ ambiguous crash semantics). Each file is a single JSON object, with
 sort_keys and one trailing newline. Consumers must ignore unknown fields
 (forward compatibility). `version` increases only on an incompatible
 change.
+
+*(Amended by DL-151.)* A consumer of `spawn.json` or `status.json` must
+**refuse** a `version` it does not implement, and `true` and `1.0` are
+not the integer 1. Tolerant on fields, strict on versions — the
+`Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The two
+consumers answer in their own vocabularies: engine-side the record reads
+as unread, which costs a `status.json` its outcome and makes the run
+`exit_status_unobservable` rather than letting a record whose meaning
+changed decide a verdict; supervisor-side it reads as PRESENT AND
+UNREADABLE, never as absence, because absence authorizes a spawn (§5).
+An **absent** `version` is not ruled here and passes both: the evolution
+matrix has a column for an unknown field and one for an unsupported
+version and none for a missing one, and inventing an answer in this
+document would settle by guess a question no document has ruled.
 
 *(Amended by DL-129, at build of period-model §11a.)* Three files join the
 spool, and the **supervisor** writes them, not the wrapper: `receipt.json`
@@ -333,6 +355,15 @@ unknown verb → `unknown_verb`. A missing/wrong `v` →
 `unsupported_version`. A malformed line → `malformed_json` (the stream
 is not desynced).
 
+*(Amended by DL-151.)* `v` and `token` are **integers**, and neither JSON
+`true` nor `1.0` is one. Both were compared with `==`, which in Python
+equates all three, so a request carrying `"v": true` was served as
+version 1 and a `"token": true` passed the fence at token 1. The
+`incarnation` needs no such check: it is a hex string, which no boolean
+and no number can equal. This is a type check on the wire, not a
+tolerance — the token is the whole fence that keeps a superseded
+controller from mutating a live one's runs.
+
 *(Amended by DL-150.)* A blank or whitespace-only line is ignored and gets
 no answer at all; every other line gets exactly one. A handler that raises
 is answered `{"ok": false, "error": "internal: <type>: <message>"}` and the
@@ -500,7 +531,9 @@ checked first, and then a stale/expired token →
   *(Amended by DL-150.)* **Absent means ENOENT and nothing else.** A record
   that exists and cannot be read — wrong permissions, a truncated write,
   bytes the §3.2 ingress refuses, a missing required field, an
-  `artifact_format_version` this binary does not implement — is never
+  `artifact_format_version` this binary does not implement, *(DL-151:)*
+  bytes that are not UTF-8 at all, and a `spawn.json` or `status.json`
+  whose own §3 `version` this binary does not implement — is never
   absence, because absence authorizes a spawn. An unreadable index entry or
   `receipt.json` is `indeterminate`. An unreadable `reply.json` falls to the
   next row of the table, and every next row is safer than the one above it,
@@ -566,8 +599,14 @@ spawns without semantics.
 
 **The deadman** (S5b, DL-95). Started with `--deadman-seconds N`, a
 supervisor that has had **no live leaseholder** for N seconds stops its loop
-and returns. Both halves of "live" from the lease definition above apply:
-unexpired *and* the holder's connection still open — an expired lease whose
+and returns. *(Amended by DL-151.)* N must be **finite and positive**, and
+the supervisor exits 2 otherwise. `nan` fails every comparison, so a
+positivity test alone admitted it and the interval then fired on the first
+tick — a supervisor that exits at once and takes every wrapper with it.
+`inf` is the same flag spelled as no deadman at all, which §5 already has a
+way to say: omit it. Both halves of "live" from the lease definition
+above apply: unexpired *and* the holder's connection still open — an
+expired lease whose
 connection is open is a controller that stopped renewing, and an unexpired
 one whose connection died is a controller that is gone. The clock restarts
 whenever a live leaseholder appears, so a reconnecting engine reprieves it.

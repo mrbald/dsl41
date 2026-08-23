@@ -38,7 +38,13 @@ from test_runner_lifecycle import module_imports, procid_import_branches
 from dsl41 import canon, runner_procid, runner_supervisor, runner_wrapper
 from dsl41.ir import lower_source
 from dsl41.runner_startup import resume_run
-from dsl41.runner_adapters import FileWatcherAdapter, SupervisedCommandAdapter, SupervisorClient
+from dsl41.runner_adapters import (
+    FileWatcherAdapter,
+    SupervisedCommandAdapter,
+    SupervisorClient,
+    SupervisorRunRow,
+    load_json,
+)
 from dsl41.runner_clock import RealClock
 from dsl41.runner_journal import read_journal
 from dsl41.period import active_wal
@@ -905,41 +911,288 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
         teardown_supervisor(short_root, proc)
 
 
-def test_dl137_a_list_row_with_an_unknown_field_still_parses(tmp_path: Path, monkeypatch) -> None:
+def test_dl137_unknown_fields_are_ignored_in_both_directions(short_root: Path) -> None:
     """The tolerant-fields half of the wire's own forward-compatibility rule
     (supervisor-protocol ss5's "ignores unknown fields", the `Supervisor
-    socket` row of docs/protocol-evolution.md's table): a row a newer
-    supervisor sends with one extra key is not corruption, so the unified
-    `SupervisorRunRow` (DL-137) ignores the key rather than refusing the
-    row -- and every other field still reads, typed."""
-    row = {
-        "run_id": "8a4f1e2c-3b5d-4e6f-9a1b-2c3d4e5f6a7b",
-        "job": "j",
-        "run_number": 1,
-        "run_dir": str(tmp_path / "runs" / "j.1"),
-        "wrapper_pid": 4242,
-        "wrapper_alive": True,
-        "spawned_at": "2026-07-01T08:00:00+00:00",
-        "wrapper_rc": None,
-        "from_a_future_supervisor": "not yet named by this client",
-    }
+    socket` row of docs/protocol-evolution.md's table), asked of BOTH ends.
 
-    async def fake_request(self, obj: dict, *, _connect: bool = True) -> dict:
-        assert obj["cmd"] == "LIST"
-        return {"ok": True, "version": 1, "incarnation": "inc-1", "runs": [row]}
+    The request direction is the one a dispatcher test owes, and it is
+    driven against the real server here (DL-151): the earlier version of
+    this test monkeypatched the client and injected an unknown key into a
+    hand-built RESPONSE row, so a server that started refusing unknown
+    request fields would have left it green. Every verb is asked, because
+    tolerance is the dispatcher's rule and not one handler's.
 
-    monkeypatch.setattr(SupervisorClient, "_request", fake_request)
+    The response direction keeps its own assertion, on a row the running
+    supervisor actually sent plus the key a newer one might add."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    future = {"from_a_future_controller": "not yet named by this supervisor"}
+    try:
+        assert cli.send({"v": 1, "cmd": "PING", **future})["ok"] is True
+        acquired = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60, **future})
+        assert acquired["ok"] is True
+        tok = acquired["token"]
+        assert cli.send({"v": 1, "cmd": "RENEW", "token": tok, "ttl_s": 60, **future})["ok"] is True
 
-    async def scenario() -> dict:
-        client = SupervisorClient(tmp_path)
-        return await client.list_runs()
+        run_dir = short_root / "runs" / "j.1"
+        spawn = cli.send(
+            {"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(run_dir, "sleep 30"), **future}
+        )
+        assert spawn["ok"] is True
+        listed = cli.send({"v": 1, "cmd": "LIST", **future})
+        assert listed["ok"] is True
+        [row] = listed["runs"]
+        wait_for(lambda: (run_dir / "spawn.json").exists())  # else SIGNAL is not_ready
+        assert (
+            cli.send(
+                {
+                    "v": 1,
+                    "cmd": "SIGNAL",
+                    "token": tok,
+                    "run_id": row["run_id"],
+                    "sig": "KILL",
+                    **future,
+                }
+            )["ok"]
+            is True
+        )
 
-    resp = asyncio.run(scenario())
-    [parsed] = resp["runs"]
-    assert parsed.job == "j"
-    assert parsed.run_number == 1
-    assert parsed.wrapper_alive is True
-    assert "from_a_future_supervisor" not in parsed.model_dump()
+        # the response direction: the row as the supervisor sent it, plus the
+        # one key a newer supervisor might add
+        parsed = SupervisorRunRow.model_validate({**row, "from_a_future_supervisor": "later"})
+        assert parsed.job == "j"
+        assert parsed.run_number == 1
+        assert parsed.wrapper_alive is True
+        assert "from_a_future_supervisor" not in parsed.model_dump()
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+# ------------------------------------------------ DL-151: the refusals owed
+
+
+def test_dl151_bytes_that_are_not_utf8_refuse_rather_than_escape(tmp_path: Path) -> None:
+    """ss3.2 has one encoding, so bytes outside it are as unreadable as a
+    duplicate key -- but `bytes.decode` raises `UnicodeDecodeError`, which no
+    caller's `except CanonError` caught. `canon.decode` is the layer that
+    owes the refusal: every reader in the repo turns its `CanonError` into a
+    named answer, and none of them had a branch for this one."""
+    raw = b'{"artifact_format_version": 1, "run_id": "\xff\xfe"}'
+    path = tmp_path / "receipt.json"
+    path.write_bytes(raw)
+
+    with pytest.raises(canon.CanonError, match="not UTF-8"):
+        canon.decode(raw)
+    # both supervisor loaders answer PRESENT-BUT-UNREADABLE, never absence:
+    # absence authorizes a spawn (ss11a)
+    assert runner_supervisor._load_tombstone(str(path), "receipt") is runner_supervisor._INVALID
+    assert runner_supervisor._load_json(str(path)) is runner_supervisor._INVALID
+
+
+def test_dl151_an_unreadable_index_entry_answers_indeterminate_not_internal(
+    short_root: Path,
+) -> None:
+    """The ss11a table's `indeterminate` row, reached through the invalid-UTF-8
+    door. Before the refusal above, the escape hit the dispatcher's belt and
+    the operator was told `internal: UnicodeDecodeError` -- a wire answer no
+    section of the protocol names."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        spec = _spec(short_root / "runs" / "j.1", "true")
+        index = short_root / "runs" / ".by_run_id" / spec["run_id"]
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_bytes(b'{"artifact_format_version": 1, "run_id": "\xff"}')
+        answer = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": spec})
+        assert answer["ok"] is False
+        assert answer["error"] == "indeterminate"
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl151_an_unsupported_spool_version_is_refused_by_both_readers(tmp_path: Path) -> None:
+    """docs/protocol-evolution.md's `Wrapper-owned spool files` row: tolerant
+    on fields, STRICT on versions. Nothing read the field before.
+
+    An ABSENT version passes both readers: the matrix has no column for a
+    missing version and no document rules one, so refusing it would pick a
+    side by guess."""
+    path = tmp_path / "status.json"
+
+    def written(record: dict) -> None:
+        path.write_text(json.dumps(record))
+
+    written({"version": 1, "outcome": "exited", "exit_code": 0})
+    assert runner_supervisor._load_json(str(path)) is not runner_supervisor._INVALID
+    assert load_json(path) is not None
+
+    written({"outcome": "exited", "exit_code": 0})  # no version at all
+    assert runner_supervisor._load_json(str(path)) is not runner_supervisor._INVALID
+    assert load_json(path) is not None
+
+    for foreign in (2, 99, True, 1.0, "1", None):
+        written({"version": foreign, "outcome": "exited", "exit_code": 0})
+        assert runner_supervisor._load_json(str(path)) is runner_supervisor._INVALID, foreign
+        assert load_json(path) is None, foreign
+
+
+def test_dl151_a_future_status_record_never_becomes_a_success(short_root: Path) -> None:
+    """What the version gate buys, said as an outcome: a `status.json` this
+    binary cannot read reports `exit_status_unobservable` rather than driving
+    the run's verdict from a record whose meaning changed."""
+    run_dir = short_root / "runs" / "j.1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.json").write_text(
+        json.dumps({"version": 2, "run_id": "r", "outcome": "exited", "exit_code": 0})
+    )
+    from dsl41.runner_adapters import resolve_spool
+
+    outcome, ended = asyncio.run(
+        resolve_spool(
+            "j", 1, run_dir, runner_procid.current_boot_id(), settle_seconds=0.0, grace_seconds=0.0
+        )
+    )
+    assert "exit_status_unobservable" in str(outcome)
+    assert ended is None
+
+
+def test_dl151_a_nul_in_the_spec_is_bad_spec_not_internal(short_root: Path) -> None:
+    """`os.path`, `os.open` and `subprocess.Popen` all raise ValueError -- not
+    OSError -- for an embedded null, so a NUL used to reach `realpath` and
+    answer `internal:`, or slip past the gate entirely and kill the wrapper
+    after the fork with no `status.json` (the E7 absence). Every string field
+    of the ss2 spec refuses one."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        for field in ("job", "run_dir", "command", "stdout_path", "stderr_path", "stdin_path"):
+            spec = _spec(short_root / "runs" / "j.1", "true")
+            spec[field] = f"{spec.get(field) or ''}\x00x"
+            answer = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": spec})
+            assert answer["ok"] is False, field
+            assert answer["error"] == "bad_spec", (field, answer)
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl151_the_wrapper_records_a_spawn_it_could_not_open(short_root: Path) -> None:
+    """The recorder's own belt, under the supervisor's gate. A spec that
+    slipped a NUL through -- an older supervisor, a hand-driven wrapper --
+    must still leave a record: the absence of `status.json` means the machine
+    died, and the wrapper may never be the one to fake that."""
+    run_dir = short_root / "runs" / "j.1"
+    run_dir.mkdir(parents=True)
+    read_fd, write_fd = os.pipe()
+    spec = _spec(run_dir, "true")
+    spec["stdout_path"] = str(run_dir / "ou\x00t.log")
+    spec["lifeline_fd"] = read_fd
+    out = subprocess.run(
+        [sys.executable, str(Path(runner_wrapper.__file__))],
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        pass_fds=(read_fd,),
+        check=False,
+    )
+    os.close(read_fd)
+    os.close(write_fd)
+    assert out.returncode == 0, out.stderr
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["outcome"] == "spawn_failed"
+    assert "null" in status["error"]
+
+
+def test_dl151_grace_seconds_must_be_finite(short_root: Path) -> None:
+    """SHUTDOWN escalates TERM->KILL after `grace_seconds`, so an `Infinity`
+    made the whole orderly shutdown unbounded -- a supervisor that never
+    exits and a run root nothing can reroute. The ss2 gate is where it stops:
+    `float("inf") >= 0.0` is True, so the old bound test let it in."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        # json.dumps writes these as the non-standard `Infinity`/`NaN`
+        # constants, which is exactly the wire form a client would send
+        for grace in (float("inf"), float("-inf"), float("nan")):
+            spec = _spec(short_root / "runs" / "j.1", "true")
+            spec["grace_seconds"] = grace
+            answer = cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": spec})
+            assert answer["ok"] is False, grace
+            assert answer["error"] == "bad_spec", (grace, answer)
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl151_a_bool_is_not_the_version_and_not_a_fencing_token(short_root: Path) -> None:
+    """`True == 1` and `1.0 == 1`, so a bare comparison let a JSON `true`
+    stand in for protocol version 1 and for fencing token 1. The token is the
+    fence that keeps a superseded controller out; nothing may pass as one but
+    the integer itself."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        for version in (True, 1.0):
+            answer = cli.send({"v": version, "cmd": "PING"})
+            assert answer["error"] == "unsupported_version", version
+        acquired = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})
+        assert acquired["token"] == 1
+        for token in (True, 1.0):
+            answer = cli.send({"v": 1, "cmd": "RENEW", "token": token, "ttl_s": 60})
+            assert answer["error"] == "stale_token", token
+        # and the incumbency proof on ACQUIRE reads the same way: a `true`
+        # token is not the incumbent's, so a second controller is refused
+        other = RawClient(short_root)
+        try:
+            held = other.send(
+                {
+                    "v": 1,
+                    "cmd": "ACQUIRE",
+                    "controller_id": "B",
+                    "ttl_s": 60,
+                    "token": True,
+                    "incarnation": cli.incarnation,
+                }
+            )
+            assert held["error"] == "lease_held"
+        finally:
+            other.close()
+        assert cli.send({"v": 1, "cmd": "RENEW", "token": 1, "ttl_s": 60})["ok"] is True
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl151_a_short_write_never_publishes_a_truncated_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The liturgy's first step. `os.write` may write fewer bytes than it was
+    given and return the count without raising, so the old body fsynced and
+    renamed a TRUNCATED record into place -- a half-written `spawn.json`
+    published as the durable one."""
+    real_write = os.write
+    seen: list[int] = []
+
+    def one_byte_at_a_time(fd: int, data: bytes) -> int:
+        seen.append(len(data))
+        return real_write(fd, data[:1])
+
+    monkeypatch.setattr(runner_procid.os, "write", one_byte_at_a_time)
+    target = tmp_path / "spawn.json"
+    payload = b'{"version": 1}\n'
+    runner_procid.durable_write(str(target), payload)
+    assert target.read_bytes() == payload
+    assert len(seen) == len(payload)  # every byte took its own call
+
+    created = tmp_path / "receipt.json"
+    runner_procid.durable_create(str(created), payload)
+    assert created.read_bytes() == payload
 
 
 # ------------------------------------------------------------- deadman (ss8)
@@ -1020,15 +1273,29 @@ def test_a_supervisor_with_no_deadman_outlives_its_controller(short_root: Path) 
         teardown_supervisor(short_root, proc)
 
 
-def test_a_deadman_interval_must_be_positive(short_root: Path) -> None:
-    out = subprocess.run(
-        [sys.executable, str(SUPERVISOR), "--run-root", str(short_root), "--deadman-seconds", "0"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert out.returncode == 2
-    assert "must be positive" in out.stderr
+def test_a_deadman_interval_must_be_finite_and_positive(short_root: Path) -> None:
+    """`nan` and `inf` are the two the bound test could not see (DL-151):
+    every comparison against `nan` is False, so `<= 0` passed it and the
+    interval then fired on the first tick -- a supervisor that exits at once
+    and takes every wrapper with it. `inf` passed the same gate and never
+    fired, which is `--deadman-seconds` spelled as no deadman at all."""
+    for value in ("0", "-1", "nan", "inf", "-inf"):
+        out = subprocess.run(
+            # `=` rather than a separate word: argparse reads a leading `-`
+            # as the next option name and never reaches this gate
+            [
+                sys.executable,
+                str(SUPERVISOR),
+                "--run-root",
+                str(short_root),
+                f"--deadman-seconds={value}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.returncode == 2, value
+        assert "must be a finite positive number" in out.stderr, value
 
 
 def _spec(run_dir: Path, command: str, grace: float = 2.0) -> dict:

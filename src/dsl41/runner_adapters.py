@@ -226,15 +226,50 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
     A record carrying an unpaired surrogate is unreadable in the same sense
     (PR-10a): it decodes, but nothing downstream can canonicalize it, so it
-    takes the same path rather than a new one."""
+    takes the same path rather than a new one. Bytes that are not UTF-8 at
+    all join them (DL-151): `json.load` raises `UnicodeDecodeError` for
+    those, which is not a `JSONDecodeError`, so they used to escape.
+
+    A `version` this binary does not implement is unreadable too -- the
+    `Wrapper-owned spool files` row of docs/protocol-evolution.md is
+    tolerant on fields and STRICT on versions. None is this reader's whole
+    refusal vocabulary, and every caller's next step for a missing record is
+    safe by construction: an unread `status.json` becomes
+    `exit_status_unobservable`, never a success, and an unread `spawn.json`
+    is a group this engine will not signal."""
     try:
         with path.open("rb") as f:
             loaded = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(loaded, dict) or not is_scalar_json(loaded):
         return None
+    if not spool_version_supported(loaded):
+        return None
     return loaded
+
+
+def spool_version_supported(doc: Mapping[str, Any]) -> bool:
+    """The spool row's version gate, engine-side (DL-151).
+
+    `spawn.json` and `status.json` carry their own `version`. One that this
+    binary does not implement must stop the reader: the field exists to say
+    the meaning changed. `true` and `1.0` are not the integer 1.
+
+    An ABSENT `version` passes. docs/protocol-evolution.md's matrix has a
+    column for an unknown FIELD and one for an unsupported VERSION and none
+    for a MISSING one, and no document rules it, so refusing here would pick
+    a side by guess. The supervisor keeps its own copy of this rule
+    (`runner_supervisor._spool_version_supported`); that tier imports nothing
+    from the engine (DL-42)."""
+    if "version" not in doc:
+        return True
+    version = doc["version"]
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and (version == _wrapper.SPEC_VERSION)
+    )
 
 
 def _naive_utc(iso: str) -> datetime:

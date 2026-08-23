@@ -5,7 +5,8 @@ every versioned protocol and every durable artifact in the runner is held to.
 It answers four questions: what each protocol tolerates, how long an instance
 of it can still arrive, how a new dialect enters service, and what must be true
 before an old one is retired. *(Amended by DL-150, a conformance round against
-the shipped readers; every amendment below carries its own marker.)*
+the shipped readers, and by DL-151, which paid the code debts that round
+recorded; every amendment below carries its own marker.)*
 
 It invents no rule for any protocol. Each tolerance rule lives in the document
 that defines it — `docs/control-protocol.md` §2, `docs/supervisor-protocol.md`
@@ -101,6 +102,20 @@ are written by the supervisor and the wrapper, which may be a different build
 from the engine that reads them. A field added by a newer writer must not stop
 an older reader. A `version` the reader does not implement must stop it: the
 version exists to say the meaning changed.
+
+*(Amended by DL-151, at the build of the refusal this row had always asked
+for.)* Until then no reader looked at the `spawn.json` / `status.json`
+`version` at all. Both now do, each in its own vocabulary: the engine reads
+an unsupported version as an UNREAD record, which costs a `status.json` its
+outcome and lands the run on `exit_status_unobservable` rather than letting
+a record whose meaning changed decide a verdict; the supervisor reads it as
+PRESENT AND UNREADABLE, never as absence, because in its §11a table absence
+authorizes a spawn. `true` and `1.0` are not the integer 1 on either side.
+An **absent** `version` is refused by neither, and that is this contract
+declining to rule rather than ruling: the columns above cover an unknown
+FIELD and an unsupported VERSION and not a MISSING one, so a rule invented
+here would settle by guess the open question DL-150 recorded and left
+open.
 
 **The wrapper input spec is strict on fields, beside a spool it writes
 tolerantly, and the fingerprint is why.** A spool file is read for the fields a
