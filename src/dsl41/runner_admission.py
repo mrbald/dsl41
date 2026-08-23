@@ -72,11 +72,13 @@ routing-table command (`docs/concurrency-model.md` ss8). It is admitted by
 this same order and gated in this same place, and it is applied to the ss3
 owner rather than fed, because the oracle must never read a host row.
 
-Not here yet: the outbox and the `effect_id`-to-`executor_id` binding
-(S5c), and epoch allocation (S6). `epoch` is carried at 0 because ss6 ships
-it inert rather than break the wire twice; the check for it is in its ss4 place,
-AFTER dedup, so an exact old-epoch retry recovers its original result while
-an unseen old-epoch request is refused.
+The outbox with its `effect_id`-to-`executor_id` binding (S5c, DL-96) and
+epoch allocation (S6, DL-99) have both landed since. `epoch` names a real
+leader term, and the check for it is in its ss4 place, AFTER dedup, so an
+exact old-epoch retry recovers its original result while an unseen
+old-epoch request is refused. `INERT_EPOCH` survives as the default for an
+Engine that held no election at all -- no run root, no log -- and not as a
+placeholder.
 """
 
 from __future__ import annotations
@@ -93,6 +95,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string
+from dsl41.period import CMD_GRACE_S
 from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
@@ -193,10 +196,11 @@ class Envelope(BaseModel):
     #: empty and never optional: ss0 is mandatory.
     expect: dict[str, int]
     epoch: int = INERT_EPOCH
-    #: a CLIENT HINT, exactly as named. There is no authentication at this
-    #: tier (control-protocol ss7 gap 2), so this is what the caller said
-    #: about itself and nothing more; ss6 gives the leader the job of
-    #: stamping an authenticated principal, and no leader can do that yet.
+    #: a CLIENT HINT, exactly as named: this is what the caller said about
+    #: itself. On an estate with NO access map the socket's mode is the whole
+    #: boundary and the claim stands as it arrived; on an ARMED one the
+    #: server overwrites it with the kernel-authenticated principal before
+    #: anything is fingerprinted or journaled (access-model ss3, DL-146/147).
     claimed_actor: str | None = None
 
 
@@ -290,7 +294,8 @@ def _parse_expect(expect: Any, *, addressed: str | None) -> dict[str, int]:
     if expect is None:
         raise EnvelopeError(
             f'expect is required: name the revision you read, as {{"{addressed}": N}}'
-            f" (read it from `status`/`global`; 0 means the entity is still absent)"
+            f" (read it from `status`/`global`/`hosts`; 0 means the entity is still"
+            " absent)"
         )
     if not isinstance(expect, dict):
         raise EnvelopeError(f'expect must be an object like {{"{addressed}": N}}, got {expect!r}')
@@ -530,7 +535,11 @@ class Applied:
 
 
 def apply_attempt(
-    oracle: Oracle, attempt: Attempt, *, decided: ApplyResult | None = None
+    oracle: Oracle,
+    attempt: Attempt,
+    *,
+    decided: ApplyResult | None = None,
+    grace_s: float = CMD_GRACE_S,
 ) -> Applied:
     """Steps 5-7 for one admitted attempt, live or replayed.
 
@@ -539,13 +548,25 @@ def apply_attempt(
     record of anything. `decided` is a DURABLE decision from the log, and
     it wins -- a gate that has changed since must reproduce what the log
     says happened, not what it would decide now.
+
+    `grace_s` is the command grace this period runs, and it reaches only
+    ss8's eviction bound (`runner_hosts.kill_allowance`). It is a WIRING
+    fact and the WAL carries none, so a replay cannot read it -- and that
+    changes no verdict, which is worth stating rather than assuming. A
+    `decided` attempt never reaches the gate at all. An UNDECIDED one is
+    gated against a host row the replay seeded ITSELF, whose `last_contact`
+    is the seeding instant (`register_host`) and whose deadman is absent
+    outside the engine's own resume: every replayed attempt is older than
+    that instant, so the elapsed wait is never positive and a gated
+    eviction is rejected whatever the bound is. The value therefore decides
+    only for a LIVE gate, which always has the engine's own.
     """
     ev = attempt.event()
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
         if decided is not None:
             decision, reason = decided.decision, decided.reason
         else:
-            reason = _gate(oracle, attempt, ev)  # step 6
+            reason = _gate(oracle, attempt, ev, grace_s=grace_s)  # step 6
             decision = "rejected" if reason is not None else "applied"
         if decision == "applied":
             if ev is not None:
@@ -579,7 +600,7 @@ def apply_attempt(
     )
 
 
-def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None) -> str | None:
+def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None, *, grace_s: float) -> str | None:
     if attempt.expect is not None:
         reason = precondition_reason(oracle, attempt.expect)
         if reason is not None:
@@ -590,7 +611,13 @@ def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None) -> str | None:
         # against a table that had moved by the time it applied -- and replay,
         # which has no live host to probe, must reach the same verdict from
         # the same row.
-        return host_rejection_reason(oracle.store, attempt.host, attempt.at)
+        return host_rejection_reason(
+            oracle.store,
+            attempt.host,
+            attempt.at,
+            grace_s=grace_s,
+            actor=attempt.claimed_actor,
+        )
     if ev is None or attempt.source not in COMPLETION_SOURCES:
         return None  # CHANGE_STATUS parity: an external event is never gated
     return stale_reason(oracle, ev)

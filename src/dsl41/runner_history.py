@@ -122,6 +122,7 @@ from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
 from dsl41.period import (
     Manifest,
+    RuntimeProfile,
     bundle_dir,
     bundle_source_paths,
     disagreements,
@@ -129,6 +130,7 @@ from dsl41.period import (
     job_fingerprints,
     opening_at,
     read_period_manifest,
+    tz_aliases_of,
     check_manifest_against_segment,
     SEGMENT_FIELDS,
 )
@@ -813,6 +815,14 @@ def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None
     )
 
 
+def _period_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfile | None":
+    """The runtime profile an opening segment's period was pinned with, or
+    None where this root no longer holds the manifest (ss2.1, decision 5's
+    degrade)."""
+    manifest = read_period_manifest(run_root, int(opening["period_id"]))
+    return None if manifest is None else manifest.runtime_profile
+
+
 def replay_trace(
     run_root: Path,
     records: list[dict[str, Any]],
@@ -835,7 +845,15 @@ def replay_trace(
     `replay_inputs` refuses at the first admitted input that touches a
     carried entity (DL-136)."""
     check_replay_version(records[0], where=str(run_root))
-    oracle = Oracle(catalog, carried=carried)
+    # SEM-35: this period's own alias table, read from its pin -- a narration
+    # that resolved `timezone:` without it refuses a log the engine wrote
+    # (DL-151). A root that no longer holds the manifest degrades to none,
+    # which is what every reader here did before the table was wired at all.
+    oracle = Oracle(
+        catalog,
+        carried=carried,
+        tz_aliases=tz_aliases_of(_period_profile(run_root, records[0])),
+    )
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:
         replay_inputs(oracle, records)

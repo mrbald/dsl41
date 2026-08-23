@@ -1319,6 +1319,16 @@ RUNNING **box** has no adapter, no effect and no entry — boxes are deliberatel
 outside `dispatchable` — and the loader must not reject an estate for having
 one live.
 
+*(Amended by DL-151: where the CMD-or-FW half is asked.)* Which rows are
+dispatchable is a question about C2, and the seal artifact does not carry a
+catalog: the sidecar's own validation therefore refuses only what the
+artifact can refute — a missing row, a row that is not live, a run number
+that disagrees — and the **resume path** asks the rest, over the seal it is
+about to open from, before the successor's segment is written. An entry
+naming a box, or a job the opening catalog does not define, refuses there.
+Deferring it without an asker is what let a forged sidecar naming a live
+BOX row pass every gate on the way in.
+
 ## 4. `baseline_id` rotates per period
 
 Load-bearing: keep one because the log is continuous and this happens — a
@@ -1576,6 +1586,20 @@ fields that moved: a runtime-profile change is a new period (§2.1). A setting
 the wiring cannot express — the reconciliation and grace windows have no wire
 flag — takes the pin as its default. An opener that assembled with ambient CLI
 defaults instead would pass every functional case (PR-22b).
+
+*(Amended by DL-151: a third rule, for the two fields that are neither.)*
+`as_machine` and `machine_policy` change what the runner ANSWERS TO, and no
+wired component reports them — they act in preflight, over the catalog. An
+opener that DECLARES them is held to the pin like any expressible setting;
+one that declares nothing inherits the pin, having said nothing to be held
+to. Inheriting unconditionally is what let a boundary that staged a new
+machine identity open silently under the old one, the process still
+answering to the names it was started with while the manifest pinned
+others. **And the runtime gate runs before the successor's segment is
+written**: a refusal at the end of the ladder refuses the process but
+leaves period N+1 open on the disk, so the next attempt with the same
+wrong wiring meets an ordinary open period and succeeds. A boundary
+refuses while it is still a boundary.
 
 **Phase 1 — `validate_staged(StagedContext)`**, at
 readiness, before the barrier. Inputs: the context above; no seal, no T. Checks: the candidate parses under a supported
@@ -2442,7 +2466,7 @@ whole.
 | PR-19a | C2 removes the resource, C3 reintroduces it: the units are still spent |
 | PR-20 | an in-flight job releases the vector it acquired |
 | PR-21 | waiter order survives |
-| PR-22a | a `CHANGE_STATUS STARTING` row with no execution entry seals and opens; an execution entry with no non-terminal row refuses |
+| PR-22a | a `CHANGE_STATUS STARTING` row with no execution entry seals and opens; an execution entry with no non-terminal row refuses. *(Amended by DL-151: the CMD-or-FW half.)* At the resume loader, which holds C2: an entry behind a live **box** row refuses and writes no segment; the same entry behind the box's dispatchable MEMBER opens |
 | PR-22 | `open_from_seal` refuses each of §7 step 6's invariants when violated — one injected failure per invariant, duplicate timer tokens and **every shared-field disagreement** (`run_id` between effect and `effect_result`, `run_number` between row and execution, `artifact_format_version` between manifest and the seal that names it) included — and accepts an estate with a live **box** and no execution entry for it |
 | PR-23 | genesis seeding never clears a carried operator hold |
 | PR-24 | deadman bound is measured from the new period's takeover, not a carried `last_contact` |
@@ -2469,7 +2493,7 @@ whole.
 | PR-28d | fault injection **on the seal append itself** — write error mid-line, `fsync` error after a complete line, power loss after flush before fsync: the engine fail-stops with an unknown outcome, never reopens admission; recovery then finds a complete line → `fsync`s the WAL and only then promotes it, **with power loss injected before and after that confirming `fsync`, and with the confirming `fsync` itself raising** — before it the seal may vanish and no successor exists; after it the seal is durable; when it raises, no anchor transition, no successor segment, admission stays closed, and a repeated recovery stays fail-stopped — a torn or absent line → truncated and C1 reopened, a line with records after it → refused |
 | PR-28c | one operator hold, one **pre-armed** job and one held, **initially unarmed** job, a tick at T for the latter, then both a refused and a committed boundary: the pre-armed row is exactly as the operator left it; the initially unarmed row is `armed: true` with exactly the one legitimate C1 revision increment the tick caused — in **both** outcomes, so an abort that restored a pre-freeze snapshot fails; after the commit the operator's `OFF_HOLD` in C2 produces exactly one start |
 | PR-30f | crash before and after the engine's committed-manifest write, before the rename: the retry re-validates, overwrites with its own, and the installed `periods/N+1/` holds both files |
-| PR-22b | resume never runs a profile the period did not pin: a launch option that disagrees with the committed manifest's `RuntimeProfile` **refuses the resume**, naming the fields that moved, and the settings the wiring cannot express resolve from the pin rather than from an ambient default. Both halves, one case each — including the deadman, which compares at its OBSERVED value and not the asked one |
+| PR-22b | resume never runs a profile the period did not pin: a launch option that disagrees with the committed manifest's `RuntimeProfile` **refuses the resume**, naming the fields that moved, and the settings the wiring cannot express resolve from the pin rather than from an ambient default. Both halves, one case each — including the deadman, which compares at its OBSERVED value and not the asked one. *(Amended by DL-151: two more cases.)* A DECLARED `as_machine`/`machine_policy` that disagrees with the pin refuses and an undeclared one inherits it; and a refused open over a COMMITTED boundary leaves no segment and an unmoved head, so the corrected retry opens the same boundary |
 | PR-30d | the engine dies after installing `periods/N+1/` and before the `seal` record, under power loss: a retry with the same `stage_digest` — **after an intervening indexed C1 admission** — reuses the staged identity and regenerates `manifest.json` with the new `first_index`; a retry differing in **each staged field** (`catalog_hash`, `catalog_hash_version`, `source_bundle_hash`, `runtime_hash`, `state_machine_version`, `artifact_format_version`) quarantines it and installs its own; alternating S1 → S2 → S1 → S2 quarantines without collision; and the engine-derived committed fields never alter `stage_digest`; the committed boundary opens either way |
 | PR-30a | the live `seal` request: a lost response **before** the seal record → the retry is a fresh request that seals (the period was still open, nothing named the first attempt); **after** it → the exact retry is answered from the committed seal in the new period; a collision refuses |
 | PR-30b | live-mode seal exits code 3 and no detached command is signalled |

@@ -53,11 +53,13 @@ from dsl41.runner_adapters import FakeAdapter, SupervisorClient
 from dsl41.runner_admission import PROTOCOL_VERSION, Envelope
 from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_control import ControlServer, outcome_of, read_for, revision_in
+from dsl41.period import CMD_GRACE_S
 from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
     T_KILL_S,
     HostCommand,
     apply_host_command,
+    kill_allowance,
     host_rejection_reason,
     routes_new_effects,
     seed_local_executor,
@@ -242,6 +244,58 @@ def test_cm11_eviction_is_refused_before_the_bound_and_permitted_after() -> None
     assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 0.5)) is None
 
 
+def test_cm11_an_unattributed_force_is_refused() -> None:
+    """ss8: force is "loud, durable and attributable", and attribution is the
+    WHOLE of its safety story -- so a force that names nobody has none.
+
+    `HostRuntime.forced_by` documents itself as non-null iff the state was
+    reached by force, and an unattributed one writes `None` there: the row
+    then reads exactly like a proof-gated eviction, which is the one thing
+    the field exists to tell apart. The counter-case to
+    `test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it`,
+    which always supplied an actor (DL-151)."""
+    store = _table(h=HostRuntime(deadman_s=60.0, last_contact=T0))
+    forced = _cmd("evict", "h", force=True)
+    at = T0 + timedelta(seconds=1)  # every gated precondition unmet
+
+    for actor in (None, "", "   "):
+        reason = host_rejection_reason(store, forced, at, actor=actor)
+        assert reason is not None and "claimed_actor" in reason
+    # the gated verbs are unaffected: they assert nothing about who asked
+    assert host_rejection_reason(store, _cmd("drain", "h"), at, actor=None) is None
+
+
+def test_cm11_the_kill_half_of_the_bound_follows_the_periods_grace() -> None:
+    """ss8's `T_kill` is what the wrappers take to die, and a wrapper waits
+    the RUN's `grace_seconds` between TERM and KILL.
+
+    `RuntimeProfile.cmd_grace_us` is per period and unbounded above, so a
+    fixed 30 s bound stopped covering the kill it exists to cover as soon as
+    a period ran a grace over ~15 s -- and eviction was then permitted while
+    the old command was still inside its TERM grace, which is the double run
+    the bound prevents. At the 10 s default the bound is unchanged, which is
+    what keeps ss8's worked example true (DL-151)."""
+    deadman = 60.0
+    store = _table(h=_quarantined(deadman_s=deadman, last_contact=T0))
+    cmd = _cmd("evict", "h")
+
+    assert kill_allowance(CMD_GRACE_S) == T_KILL_S  # the default estate is unmoved
+    long_grace = 60.0
+    bound = deadman + kill_allowance(long_grace)
+    bound += skew_allowance(bound)
+    # the moment the OLD fixed bound would have permitted the eviction
+    old_bound = deadman + T_KILL_S
+    old_bound += skew_allowance(old_bound)
+    late = T0 + timedelta(seconds=old_bound + 1)
+    reason = host_rejection_reason(store, cmd, late, grace_s=long_grace)
+    assert reason is not None and f"kill {kill_allowance(long_grace):.1f}s" in reason
+    assert host_rejection_reason(store, cmd, late) is None  # ...at the default grace
+    assert (
+        host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 0.5), grace_s=long_grace)
+        is None
+    )
+
+
 def test_cm11_eviction_needs_the_leaders_own_record_of_unreachability() -> None:
     """ss8 precondition 1. `quarantined` IS that record: it is what the
     leader writes when a host stops answering, and reading a live probe here
@@ -268,7 +322,7 @@ def test_cm11_force_skips_the_preconditions_and_is_recorded_with_its_principal()
     would suggest the eviction rested on who asked."""
     store = _table(h=HostRuntime(state="active"))
     forced = _cmd("evict", "h", force=True)
-    assert host_rejection_reason(store, forced, T0) is None
+    assert host_rejection_reason(store, forced, T0, actor="alice@ops") is None
 
     store.begin_input()
     store.evict_host("h", forced_by="alice@ops")
@@ -1137,7 +1191,10 @@ def test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it
     forced = _cmd("evict", "h", force=True)
     # every gated precondition unmet -- active, and in contact one second ago
     assert host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(seconds=1)) is not None
-    assert host_rejection_reason(store, forced, T0 + timedelta(seconds=1)) is None
+    assert (
+        host_rejection_reason(store, forced, T0 + timedelta(seconds=1), actor="alice@ops-laptop")
+        is None
+    )
 
     store.begin_input()
     apply_host_command(store, forced, actor="alice@ops-laptop")

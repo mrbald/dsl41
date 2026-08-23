@@ -560,7 +560,7 @@ def _evict_bound(engine) -> float:
     # CM-11's other half, against the same produced preconditions: the wait is
     # skippable, and only by saying so
     forced = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID, force=True)
-    assert host_rejection_reason(store, forced, at) is None
+    assert host_rejection_reason(store, forced, at, actor="alice@ops") is None
     return bound - waited
 
 

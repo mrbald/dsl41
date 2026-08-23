@@ -54,6 +54,7 @@ from dsl41.period import (
     read_period_manifest,
     read_sentinel,
     seal_path,
+    sealed_periods,
     stage_manifest,
     wal_path,
     write_bundle,
@@ -1501,3 +1502,129 @@ def test_the_race_loser_makes_the_winner_durable_before_the_cas(
     monkeypatch.undo()
     assert loser.digest == winner.digest
     assert target_ino in synced and dir_ino in synced
+
+
+# ------------------------ ss2.1/ss2.2 what the CLI composes against (DL-151)
+
+
+def _seal_next(run_root: Path, next_jil: Path, *extra: str):
+    return _invoke("seal", "--run-root", str(run_root), "--next", str(next_jil), *extra)
+
+
+def test_pr22b_the_launch_gate_reads_the_committed_boundarys_manifest(tmp_path: Path) -> None:
+    """ss2.1: the options a resume is held to are the PERIOD IT OPENS
+    INTO's, and on a root with a committed boundary that is N+1, not N.
+
+    The gate read the newest SEGMENT's manifest, which a committed-but-
+    unopened boundary is one period behind: C2's own options were refused
+    against C1's pin, while C1's options passed the gate and opened C2.
+    Both halves of one in-place profile change were unreachable in one
+    command (DL-151)."""
+    from dsl41.cli_run import _resume_profile_error
+    from dsl41.period import runtime_profile_from_cli
+
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+    assert _seal_next(run_root, c2, "--next-timezone", "Europe/Zurich").exit_code == 0
+
+    c2_options = runtime_profile_from_cli(timezone="Europe/Zurich")
+    assert _resume_profile_error(run_root, c2_options, None) is None
+    refused = _resume_profile_error(run_root, runtime_profile_from_cli(), None)
+    assert refused is not None and "default_tz" in refused
+
+
+def test_pr22b_the_gate_still_reads_the_open_period_when_no_boundary_is_staged(
+    tmp_path: Path,
+) -> None:
+    """The control: with no committed boundary ahead of it, the period a
+    resume opens into is the one already open, and the gate is unchanged."""
+    from dsl41.cli_run import _resume_profile_error
+    from dsl41.period import runtime_profile_from_cli
+
+    c1, _, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+
+    assert _resume_profile_error(run_root, runtime_profile_from_cli(), None) is None
+    refused = _resume_profile_error(
+        run_root, runtime_profile_from_cli(timezone="Europe/Zurich"), None
+    )
+    assert refused is not None and "default_tz" in refused
+
+
+def test_pr30e_the_cli_retry_of_a_committed_boundary_closes_no_second_period(
+    tmp_path: Path,
+) -> None:
+    """ss2.2: an exact retry of a committed boundary is answered from the
+    next period, and the answer is keyed on the request FINGERPRINT -- which
+    covers the `baseline_id` and the `epoch` the original attempt carried.
+
+    The CLI composed from the CURRENT header instead, so the promised route
+    was unreachable from `dsl41 seal --request-id`. Offline that was not
+    merely a missed deduplication: nothing between the CLI and the cutoff
+    would have recognised the retry, so it would have closed a SECOND
+    period (DL-151)."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+
+    first = _seal_next(run_root, c2, "--request-id", "r-1")
+    assert first.exit_code == 0, first.output
+    digest = read_seal(run_root, 1).digest
+
+    again = _seal_next(run_root, c2, "--request-id", "r-1")
+    assert again.exit_code == 0, again.output
+    assert digest in again.output and "already closed" in again.output
+    assert sealed_periods(run_root) == [1]  # no second boundary
+    assert read_seal(run_root, 1).digest == digest
+
+
+def test_pr30e_a_live_retry_is_answered_by_the_engine_of_the_new_period(
+    short_root: Path,  # noqa: F811
+) -> None:
+    """The same route on the LIVE path, between real processes: the engine
+    of period N+1 keeps the `seal` record it opened from and answers an
+    exact retry from it -- which the CLI could not reach, because it
+    composed the retry under the header the NEW period publishes.
+
+    The evidence is that the second engine keeps serving: an unrecognised
+    retry would have been a fresh boundary, and a fresh boundary exits the
+    engine with code 3 (DL-151)."""
+    _, c2, _ = _estate(short_root)
+    with engine(short_root) as first:
+        answer = cli(
+            "seal", "--run-root", str(first.run_root), "--next", str(c2), "--request-id", "r-live"
+        )
+        assert answer.returncode == 0, answer.stderr
+        first.proc.wait(timeout=30)
+    run_root = first.run_root
+    digest = read_seal(run_root, 1).digest
+
+    with engine(short_root, resume=True, run_root=run_root, files=[c2]) as second:
+        again = cli(
+            "seal", "--run-root", str(run_root), "--next", str(c2), "--request-id", "r-live"
+        )
+        assert again.returncode == 0, again.stderr
+        payload = json.loads(again.stdout.splitlines()[0])
+        assert payload["decision"] == "applied"
+        assert payload["digest"] == digest and payload["next_period_id"] == 2
+        assert second.proc.poll() is None  # no second boundary, so no exit 3
+    assert sealed_periods(run_root) == [1]
+
+
+def test_pr30c_the_same_request_id_under_another_envelope_is_a_collision(
+    tmp_path: Path,
+) -> None:
+    """ss2.2's other half, in the same place: force is an authorization and
+    the actor is attribution, so neither may be swapped under a retry. The
+    id that closed the boundary answers only the command that closed it."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+    assert _seal_next(run_root, c2, "--request-id", "r-1").exit_code == 0
+
+    collision = _seal_next(run_root, c2, "--request-id", "r-1", "--force-seal")
+    assert collision.exit_code == 2
+    assert "different envelope" in collision.output
+    assert sealed_periods(run_root) == [1]

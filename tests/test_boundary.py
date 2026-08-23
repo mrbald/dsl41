@@ -71,6 +71,7 @@ from dsl41.runner_adapters import FakeAdapter, SupervisorUnavailable
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.seal import StagedNextPeriod
 
@@ -273,6 +274,46 @@ def test_pr01c_a_retired_journal_refuses_and_names_the_dialect(tmp_path: Path) -
     with pytest.raises(EngineError, match="already exists") as generic:
         claim_root(garbage)
     assert "DL-138" not in str(generic.value)
+
+
+def test_pr08d_a_sentinel_this_binary_cannot_read_refuses_by_name(tmp_path: Path) -> None:
+    """PR-08d, and `read_sentinel`'s own rule: absence is a fact and
+    corruption is not.
+
+    A file that EXISTS and holds a `period_root` record this binary cannot
+    read -- an `artifact_format_version` it does not implement -- was
+    swallowed with every other ss3.2 ingress refusal and returned as "no
+    sentinel". The root still refused, at whatever gate met it next, but
+    namelessly: nothing printed the version (DL-151).
+
+    A first line this cannot READ AS a `period_root` record at all keeps the
+    old answer -- not JSON, a different `rec`, or a line torn mid-write --
+    because it is not a sentinel and its own reader names what it found
+    (DL-138). The torn one is the residue this fix deliberately leaves: a
+    half-written first line still reads as absence, and closing that needs a
+    rule about what a torn sentinel MEANS, which no document states."""
+    from dsl41.period import read_sentinel, sentinel_path
+
+    future = tmp_path / "future"
+    future.mkdir()
+    sentinel_path(future).write_bytes(
+        json.dumps(
+            {"rec": "period_root", "artifact_format_version": 2, "estate_id": "e", "see": "wal/"},
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="not a sentinel this binary can read") as refused:
+        read_sentinel(future)
+    assert "artifact_format_version 2" in str(refused.value)
+
+    for index, line in enumerate(
+        (b"not json at all\n", b'{"rec":"header"}\n', b'{"rec":"period_root"\n')
+    ):
+        other = tmp_path / f"other{index}"
+        other.mkdir()
+        sentinel_path(other).write_bytes(line)
+        assert read_sentinel(other) is None
 
 
 def test_a_used_root_refuses_genesis_and_says_what_to_do(tmp_path: Path) -> None:
@@ -3609,3 +3650,260 @@ def test_a_closed_segment_with_a_torn_tail_refuses_rather_than_skipping_records(
         assert any(r.get("rec") == "seal" for r in _subscribed(opened, run_root, since=0))
     finally:
         _close(opened)
+
+
+# ------------------------- ss2.1 the profile the opener is held to (DL-151)
+
+
+#: a box and its one member: the only shape that can put a live BOX row
+#: behind an `executions` entry, which is what ss3.5's CMD-or-FW half is
+#: about
+BOX_JIL = (
+    "insert_job: bx\njob_type: b\n\n"
+    "insert_job: a\njob_type: c\ncommand: x\nbox_name: bx\n"
+)
+
+
+def _resume_wired(
+    run_root: Path,
+    text: str,
+    *,
+    default_tz: str | None = None,
+    declared: RuntimeProfile | None = None,
+):
+    """`_resume` with the two things the profile gate reads: a real
+    scheduler (so `default_tz` is WIRED rather than inherited) and the
+    launcher's declared profile."""
+    catalog, _ = _catalog(text)
+    return asyncio.run(
+        resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=Scheduler(catalog, start=T0, default_tz=default_tz),
+            declared=declared,
+        )
+    )
+
+
+def _committed_boundary_over(run_root: Path, profile: RuntimeProfile):
+    """A root whose newest boundary is COMMITTED and not yet opened, with
+    period 2 pinned to `profile`."""
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL, profile=profile)
+    boundary = asyncio.run(_seal(engine, _request(engine, staged)))
+    _close(engine)
+    return boundary
+
+
+def test_pr22b_a_committed_profile_change_refuses_before_it_writes_the_segment(
+    tmp_path: Path,
+) -> None:
+    """ss2.1: the period a resume OPENS INTO is the committed boundary's,
+    so the wiring is held to N+1's pin -- and the refusal has to come
+    BEFORE the successor's segment is written.
+
+    It did not. `_open_from_seal` wrote `wal/000002.jsonl` and moved the
+    head, and only the gate at the end of the ladder refused; the SECOND
+    try with the same wrong wiring then met an ordinary open period and
+    succeeded. A boundary that changes the profile must refuse while it is
+    still a boundary (DL-151)."""
+    run_root = tmp_path / "run"
+    _committed_boundary_over(run_root, RuntimeProfile(default_tz="Europe/Zurich"))
+
+    with pytest.raises(EngineError, match="runtime-profile mismatch on default_tz"):
+        _resume_wired(run_root, C2_JIL)  # C1's wiring: UTC
+    assert wal_segments(run_root) == [1]  # nothing written
+    stored = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)  # the head never moved
+
+    with pytest.raises(EngineError, match="runtime-profile mismatch on default_tz"):
+        _resume_wired(run_root, C2_JIL)  # ...and the second try refuses too
+    assert wal_segments(run_root) == [1]
+
+    opened = _resume_wired(run_root, C2_JIL, default_tz="Europe/Zurich")
+    assert wal_segments(run_root) == [1, 2]
+    _close(opened)
+
+
+def test_pr22b_the_opener_is_held_to_the_staged_machine_identity(tmp_path: Path) -> None:
+    """ss2.1: `as_machine` and `machine_policy` change what this runner
+    answers to, so they are part of a period's identity -- but no wired
+    object can report them (they act in preflight, over the catalog).
+
+    They therefore INHERITED the pin, which made them unable to disagree
+    with it: a boundary that staged a new machine identity opened silently
+    under the OLD one, the process still answering to the names it was
+    started with while the manifest pinned others. The launcher now
+    declares them and is held to them (DL-151)."""
+    run_root = tmp_path / "run"
+    _committed_boundary_over(run_root, RuntimeProfile(as_machine=("boxa",)))
+
+    with pytest.raises(EngineError, match="runtime-profile mismatch on as_machine"):
+        _resume_wired(run_root, C2_JIL, declared=RuntimeProfile())
+    assert wal_segments(run_root) == [1]
+
+    opened = _resume_wired(run_root, C2_JIL, declared=RuntimeProfile(as_machine=("boxa",)))
+    assert read_period_manifest(run_root, 2).runtime_profile.as_machine == ("boxa",)  # type: ignore[union-attr]
+    _close(opened)
+
+
+def test_pr22b_a_caller_that_declares_nothing_still_inherits_the_pin(tmp_path: Path) -> None:
+    """The control, and the reason `declared` is a parameter rather than a
+    new rule: an embedder that says nothing about a machine identity has
+    said nothing to hold to the pin, and inherits it exactly as before."""
+    run_root = tmp_path / "run"
+    _committed_boundary_over(run_root, RuntimeProfile(as_machine=("boxa",)))
+    opened = _resume_wired(run_root, C2_JIL)  # no `declared`
+    assert wal_segments(run_root) == [1, 2]
+    _close(opened)
+
+
+def _forge_execution(run_root: Path, period_id: int, job: str) -> None:
+    """Put a live row and an `executions` entry for `job` into the stored
+    sidecar, through the model, and re-point BOTH things that name it: the
+    `seal` record in the WAL and the anchor head.
+
+    So the artifact stays self-consistent, the lineage still names it, and
+    only the catalog-aware half of the ss3.5 join has anything to object
+    to -- which is the whole point of the test below."""
+    from dsl41.boundary import seal_record
+    from dsl41.seal import Seal
+
+    seal = read_seal(run_root, period_id)
+    payload = seal.to_payload()
+    payload["state"]["jobs"][job] = {
+        **payload["state"]["jobs"][job],
+        "status": "RUNNING",
+        "run_number": 1,
+    }
+    payload["executions"] = [
+        {
+            "kind": "bound",
+            "job": job,
+            "run_number": 1,
+            "effect_id": "e-1",
+            "index": 1,
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "executor_id": "local",
+            "generation": 0,
+            "run_dir": f"runs/{job}.1",
+        }
+    ]
+    forged = Seal(**payload)
+    seal_path(run_root, period_id).write_bytes(forged.to_bytes())
+
+    path = active_wal(run_root)
+    lines = path.read_text().splitlines()
+    record = json.loads(lines[-1])
+    assert record["rec"] == "seal"
+    named = seal_record(forged)
+    path.write_text(
+        "\n".join([*lines[:-1], json.dumps({**record, **named}, sort_keys=True)]) + "\n"
+    )
+
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    anchor.acquire()
+    try:
+        stored = anchor.require()
+        assert isinstance(stored.head, ClosedHead)
+        anchor.write(
+            stored.model_copy(
+                update={"head": stored.head.model_copy(update={"seal_digest": forged.digest})}
+            )
+        )
+    finally:
+        anchor.release()
+
+
+def test_pr22a_an_execution_entry_behind_a_box_row_is_refused_at_the_loader(
+    tmp_path: Path,
+) -> None:
+    """ss3.5: every `executions` entry has a RUNNING or STARTING **CMD or
+    FW** row. A RUNNING box has no adapter, no effect and no entry -- boxes
+    are deliberately outside `dispatchable`.
+
+    The seal's own join could not ask it: knowing a job's TYPE needs the
+    catalog the period opens with, so `_check_join` deferred this half to
+    "the loader that holds C2" -- and no loader did it. A forged or
+    corrupted sidecar naming a live BOX row passed every gate on the way in
+    (DL-151). The counter-case below is the same forgery over the box's
+    MEMBER, which is a legal live execution and must still open."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=BOX_JIL)
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, BOX_JIL))))
+    _close(engine)
+    _forge_execution(run_root, 1, "bx")
+
+    with pytest.raises(EngineError, match="names box 'bx'"):
+        _resume_wired(run_root, BOX_JIL)
+    assert wal_segments(run_root) == [1]  # refused before the successor is written
+    stored = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)  # ...and unclaimed
+
+
+def test_pr22a_the_same_entry_behind_a_dispatchable_row_still_opens(tmp_path: Path) -> None:
+    """The counter-case: an entry behind the MEMBER is a legal live
+    execution across a boundary, and the check must not refuse it."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=BOX_JIL, profile=DETACHED)
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, BOX_JIL, profile=DETACHED))))
+    _close(engine)
+    _forge_execution(run_root, 1, "a")
+
+    opened = _resume_wired(run_root, BOX_JIL)
+    assert wal_segments(run_root) == [1, 2]
+    _close(opened)
+
+
+def test_sem35_every_replay_of_a_map_only_zone_reads_the_periods_own_table(
+    tmp_path: Path,
+) -> None:
+    """SEM-35/DL-62: a `ujo_timezones` name is site-local, and the only
+    record of the table that resolves it is the period's own
+    `RuntimeProfile`. Neither the catalog nor the WAL carries one.
+
+    So every reader that replays the log has to read the pin, or it refuses
+    the very log the engine wrote: the engine resolves `timezone: ujo_ny`
+    through the scheduler's table, and audit, the history fold and the
+    journal narration each build their own Oracle. Wiring one and not the
+    others is a divergence with a green engine (DL-151)."""
+    from dsl41.runner_history import replay_trace
+
+    aliases = {"ujo_ny": "America/New_York"}
+    text = (
+        "insert_job: rw\njob_type: c\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "00:00-23:59"\ntimezone: ujo_ny\n'
+    )
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(text)
+    profile = RuntimeProfile(tz_aliases=aliases)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=profile,
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        # a COMPLETING adapter: the boundary below refuses over live work,
+        # and what this test needs from the run is the zone lookup a start
+        # performs, not a job left running across it
+        adapters={"CMD": FakeAdapter(default=(0.0, 0))},
+        scheduler=Scheduler(catalog, start=T0, tz_aliases=aliases),
+        staged=staged,
+    )
+    # the start is what asks for the zone: the window is read in the job's
+    # own, so `_job_tz` runs and an oracle without the table raises here
+    engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "rw"}))
+    asyncio.run(engine.run_until_quiescent(T0))
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, text, profile=profile))))
+    _close(engine)
+
+    records = read_journal(wal_path(run_root, 1))
+    replay_trace(run_root, records, catalog)  # the history fold
+    audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))  # audit

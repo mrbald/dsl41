@@ -853,6 +853,20 @@ million over the interval it is added to, which is
 the standard lease argument and depends only on bounded drift. A refusal
 reports the remaining wait, so the operator waits rather than guesses.
 
+*(Amended by DL-151.)* **`T_kill` is DERIVED from the grace the period
+runs**, not a constant: `2 × cmd_grace + 10s`, over the grace the leader's
+own CMD adapter is wired with — which resume holds to
+`RuntimeProfile.cmd_grace_us`, so the wiring and the pin are the same number
+on any estate this engine may lead. Two graces because two waits stack — the
+wrapper's own TERM-to-KILL wait, then the supervisor's wait for its
+wrappers — plus a margin for the supervisor's exit. The grace is per
+period and unbounded above while `T_kill` was fixed at 30 s, so a period
+running a grace over roughly 15 s had a bound that no longer covered the
+kill it exists to cover, and `evict` could be permitted while the old
+command was still inside its TERM grace: the double run this gate is for.
+At the 10 s default the derivation is 30 s, so the worked example below
+and every default estate are unmoved.
+
 **Force is attributed, not forbidden.** `evict --force` skips the
 precondition, is recorded with the claimed principal (§6: the leader stamps
 an authenticated one when there is authentication to stamp), and is the
@@ -860,7 +874,15 @@ one path in this document that can produce a double run. It exists
 because an operator with out-of-band knowledge — the machine is
 physically powered off, the disk is out — is sometimes right, and waiting
 out a deadman is then pure loss. It is loud, durable and attributable;
-that is the whole of its safety story.
+that is the whole of its safety story. *(Amended by DL-151.)* Which is why
+a force that names NOBODY is refused: an unattributed force writes
+`forced_by: null`, and the row then reads exactly like a proof-gated
+eviction — the one thing that field exists to tell apart. `claimed_actor` is
+required on `--force` and on nothing else. There is no flag for it and no
+new operator step: `dsl41 host` always sends the claim, and on an armed
+estate the perimeter replaces it with the authenticated principal (§6). The
+refusal answers a client that sends none, and it is a rejection like any
+other precondition.
 
 **Eviction is fenced on return.** Eviction bumps the host's `generation`.
 A returning relay presenting a stale generation is refused registration

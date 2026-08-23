@@ -163,6 +163,7 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from datetime import UTC, datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
@@ -279,7 +280,13 @@ TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", 
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
 
-    def __init__(self, catalog: CatalogIR, *, carried: CarriedRows | None = None) -> None:
+    def __init__(
+        self,
+        catalog: CatalogIR,
+        *,
+        carried: CarriedRows | None = None,
+        tz_aliases: Mapping[str, str] | None = None,
+    ) -> None:
         self.catalog = catalog
         self.store = RuntimeState()
         if carried is not None:
@@ -341,6 +348,15 @@ class Oracle:
         #: SEM-35 name -> zone, resolved once per name (the ladder walks
         #: the whole zoneinfo database for a city default)
         self._tz_cache: dict[str, tzinfo] = {}
+        #: SEM-35's `ujo_timezones` table, as `--timezone-map` supplies it to
+        #: the scheduler (DL-62). None means no map, which is a DIFFERENT
+        #: resolution than an empty one: the ladder's unique-city default
+        #: applies only when the estate supplied no table, so a run with a
+        #: map gets the map's answer and nothing else (runner_scheduler's
+        #: `resolve_timezone`). Wired from the scheduler at engine build:
+        #: an oracle that resolved without it refused a map-only name at the
+        #: first start although preflight had passed (DL-151).
+        self._tz_aliases: dict[str, str] | None = None if tz_aliases is None else dict(tz_aliases)
 
     # ------------------------------------------------------------------ plumbing
 
@@ -833,7 +849,7 @@ class Oracle:
         if name not in self._tz_cache:
             from dsl41.runner_scheduler import resolve_timezone
 
-            resolved = resolve_timezone(name)
+            resolved = resolve_timezone(name, self._tz_aliases)
             if resolved is None:
                 raise OracleError(
                     f"{job_ir.name}: timezone {name!r} is not resolvable (SEM-35: a zoneinfo"

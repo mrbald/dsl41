@@ -502,8 +502,7 @@ The `--next-*` options describe the period about to OPEN
 (`--next-timezone`, `--next-as-machine`, `--next-machine-policy`,
 `--next-detached`, `--next-deadman`, `--next-timezone-map`). A change to
 any of them is a new period exactly as a catalog change is — the model's
-rule. What the CLI can OPEN is narrower; see the limit two paragraphs
-below.
+rule, and the opener holds you to it: see "Open, in place" below.
 
 **They do not inherit C1. State the whole profile every time.** An omitted
 `--next-*` takes its own default, not the running period's: no
@@ -513,28 +512,21 @@ with a bare `--next` therefore commits a tethered successor. And
 `--next-deadman` needs `--next-detached`; alone it exits 2 before C2 is
 staged, exactly as `--deadman` needs `--detached` on `dsl41 run`.
 
-**Today, change the CATALOG across an in-place boundary and nothing
-else.** A boundary that also moves a `--next-*` field does not open in one
-command, and the two halves fail differently:
+**Open, in place.** *(Amended by DL-151.)* One command, whatever the
+boundary moved. The FILES are C2's and so are the OPTIONS: state every
+`--next-*` the seal staged again on the opener, without the `--next-`
+prefix (`--next-timezone Europe/Zurich` → `--timezone Europe/Zurich`).
+A catalog-only boundary therefore repeats the closing period's options,
+because that is what it staged.
 
-- a field the engine wires — `--next-timezone`, `--next-timezone-map`,
-  `--next-detached`, `--next-deadman` — refuses either way. Give the
-  opener C2's options and it refuses before it starts, because the
-  gate reads the CLOSING period's pin: the new segment does not exist
-  yet. Give it C1's options and it writes the new segment, moves the
-  head, and THEN refuses, `runtime-profile mismatch on <field>`. A
-  second `--resume`, now with C2's options, opens the period the first
-  attempt left behind.
-- a field the engine cannot see — `--next-as-machine`,
-  `--next-machine-policy` — refuses with C2's options and OPENS with
-  C1's. The period then runs the old machine identity while its manifest
-  pins the new one.
-
-Until that is fixed, change the runtime profile through §6's
-fresh-run-root cycle, where the options are stated once at genesis.
-
-**Open, in place** — the ordinary case, a catalog-only boundary. The FILES
-are C2's; the options are the ones the closing period ran with:
+Wrong options refuse and write NOTHING: the successor's segment is not
+created, the lineage head does not move, and the refusal names the fields
+that disagree (`runtime-profile mismatch on <field>`), so the corrected
+command opens the same committed boundary. That holds for the fields the
+engine wires and for the two it cannot see — `--next-as-machine`,
+`--next-machine-policy` — alike; before DL-151 the first pair took two
+commands to open and the second pair opened silently under the OLD
+machine identity.
 
 ```sh
 dsl41 run --resume --run-root /srv/dsl41/runs/<id> \
@@ -675,7 +667,11 @@ boundary is done and the next move is to OPEN it, never to seal again.
 If they are not, re-send the SAME request with the `--request-id` the
 command printed — a retry the still-open period recognises is answered
 from its own decision and applies nothing twice. Never compose a fresh
-`request_id` for a retry: a new id is a new command.
+`request_id` for a retry: a new id is a new command. *(Amended by
+DL-151.)* A retry that finds the boundary ALREADY committed is answered
+from the seal it committed — the same digest, the same next period, and no
+second boundary — whether the root is live or offline; before DL-151 that
+route existed in the engine and the CLI could not reach it.
 
 *The engine exited 3 and the init system restarted it.* It will loop.
 Exit 3 is "sealed; period N+1 is ready to open", and the opening is an

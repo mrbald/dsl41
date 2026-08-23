@@ -28,11 +28,14 @@ module adds, is the layer above:
   reconciliation (its job is already TERMINAL) and ran on orphaned. A
   recorded kill is re-driven instead -- which is exactly the one side
   effect runner-design ss7 already permits at resume.
-- **Three states, not two.** "Deduplicate and replay the original result"
+- **Four states, not two.** "Deduplicate and replay the original result"
   is unimplementable as stated: persist tombstone, act, crash before
   persisting the result, and nothing can know whether the signal landed.
-  `pending` -> `applied` | `indeterminate`, and an effect whose outcome is
-  unknown answers `OUTCOME_UNAVAILABLE` rather than a plausible guess.
+  `pending` -> `applied` | `indeterminate` | `retired`, and an effect whose
+  outcome is unknown answers `OUTCOME_UNAVAILABLE` rather than a plausible
+  guess. `retired` is the recorded outcome of the supersession rule below,
+  not an omission: "safe to forget" and "must not be forgotten" are
+  different facts (ss5's DL-111 amendment).
 
 What is deliberately NOT here, and why:
 
@@ -74,9 +77,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from dsl41.oracle_state import TERMINAL, Event, JobRuntime
 from dsl41.runner_clock import EngineError
 
-#: ss5's effect alphabet at this stage. SHUTDOWN is not here: it binds to a
-#: supervisor incarnation and a scheduler epoch, and neither is allocated
-#: until S6.
+#: ss5's effect alphabet. SHUTDOWN is not here, and what defers it is no
+#: longer a missing identity: the incarnation is allocated by the supervisor
+#: at start (DL-80) and the epoch by S6a. It is that nothing needs it -- the
+#: shutdown path speaks to the supervisor directly and leaves no intent for
+#: an outbox to carry (ss5).
 EffectKind = Literal["SPAWN", "KILL"]
 
 #: What an effect whose outcome is unknown answers when asked for its result

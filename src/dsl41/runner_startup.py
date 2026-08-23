@@ -111,7 +111,12 @@ from dsl41.boundary import (
     select_seal,
 )
 from dsl41.oracle_state import CarriedRows
-from dsl41.seal import OpenedRuntime, Seal, open_from_seal
+from dsl41.seal import (
+    OpenedRuntime,
+    Seal,
+    check_executions_dispatchable,
+    open_from_seal,
+)
 from dsl41.runner_ledger import (
     STATE_MACHINE_VERSION,
     Fence,
@@ -124,11 +129,18 @@ from dsl41.runner_ledger import (
 from dsl41.runner_scheduler import Scheduler
 
 
+#: Profile fields NO wired object can report: they act in preflight, over
+#: the catalog, and never on an adapter or a scheduler. They inherit the pin
+#: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
+_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
+
+
 def _derive_runtime_profile(
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
     deadman_s: float | None,
     base: RuntimeProfile | None,
+    declared: RuntimeProfile | None = None,
 ) -> RuntimeProfile:
     """The runtime profile the engine is ACTUALLY wired with (period-model
     ss2.1, DL-130).
@@ -138,12 +150,22 @@ def _derive_runtime_profile(
     nothing would otherwise open a period whose hash says UTC while every
     tick is shifted. So the wired components are read back -- the
     scheduler's timezone, the adapters' modes and windows, the deadman --
-    over `base` for the fields the engine cannot see (machine policy and
-    as-machine live in preflight, not on any wired object)."""
+    over `base` for the fields the engine cannot see.
+
+    `declared` is what the LAUNCHER was invoked with, and it supplies
+    exactly `_UNWIRED_FIELDS`. Without it those two inherit the pin and can
+    therefore never disagree with it -- so a boundary that staged a new
+    machine identity opened SILENTLY under the old one, this process still
+    answering to the machine names it was started with while the manifest
+    pinned others (DL-151). A caller that declares nothing keeps the old
+    inheritance, because it has said nothing to hold to the pin."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
     values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
+    if declared is not None:
+        for name in _UNWIRED_FIELDS:
+            values[name] = getattr(declared, name)
     if scheduler is not None:
         values["default_tz"] = scheduler.default_tz or "UTC"
         values["tz_aliases"] = dict(scheduler.tz_aliases)
@@ -553,6 +575,7 @@ async def resume_run(
     deadman_s: float | None = None,
     lock: LeaderLock | None = None,
     anchor_dir: Path | None = None,
+    declared: RuntimeProfile | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -601,6 +624,7 @@ async def resume_run(
             grace_seconds=grace_seconds,
             supervisor=supervisor,
             deadman_s=deadman_s,
+            declared=declared,
         )
     except BaseException:
         # a refused resume holds nothing: the next engine may lead
@@ -626,6 +650,7 @@ async def _resume_under_lock(
     grace_seconds: float | None,
     supervisor: SupervisorClient | None,
     deadman_s: float | None,
+    declared: RuntimeProfile | None = None,
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
@@ -633,9 +658,10 @@ async def _resume_under_lock(
 
     ss11 steps 1-4 run first, and in their order: the sentinel (ss1.1's
     ownership rule applies to resume as to creation), the anchor and its
-    `estate_id`, the SEAL selected by lineage from what this root holds,
-    and then the head action that repairs whatever window the last process
-    died in. Only then does the ladder this function had before begin --
+    `estate_id`, the SEAL selected by lineage from what this root holds --
+    and the half of ss3.5's join that needs C2, which sits between 3 and 4
+    so a sidecar this catalog refuses moves nothing -- and then the head
+    action that repairs whatever window the last process died in. Only then does the ladder this function had before begin --
     over the segment the lineage selected, which on a committed boundary is
     the one this resume just opened. Steps 1 and 2 -- the sentinel and the
     anchor -- are the CALLER's, because they are the other half of the
@@ -644,6 +670,14 @@ async def _resume_under_lock(
     _drop_never_opened_segment(run_root)
     records = read_journal(estate_wal(run_root))
     lineage = select_seal(run_root, records)  # step 3
+    if lineage.seal is not None:
+        # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
+        # sidecar half ran inside `select_seal`; this is the half that needs
+        # the OPENING catalog. Ahead of step 4, so a sidecar this catalog
+        # refuses moves no head and writes no segment -- and it runs at
+        # every resume of a period that opened from a seal, not only at the
+        # one that opened it.
+        check_executions_dispatchable(lineage.seal, catalog)
     if anchor is not None and sentinel is not None:
         act_on_head(  # step 4
             anchor,
@@ -655,7 +689,17 @@ async def _resume_under_lock(
     journal: Journal | None = None
     if lineage.opens_next:
         assert anchor is not None and lineage.seal is not None
-        opened_period = _open_from_seal(run_root, anchor, lineage.seal, catalog, fence)
+        opened_period = _open_from_seal(
+            run_root,
+            anchor,
+            lineage.seal,
+            catalog,
+            fence,
+            scheduler=scheduler,
+            adapters=adapters,
+            deadman_s=deadman_s,
+            declared=declared,
+        )
         journal = opened_period.journal
         records = read_journal(journal.path)
     opening = records[0]
@@ -694,9 +738,13 @@ async def _resume_under_lock(
     check_manifest_against_segment(manifest, opening)
     # the runtime half of the same gate, in CORE: the wired components
     # must be what the period pinned, or shifted ticks and different
-    # kill windows run under an unchanged hash. Fields the engine
-    # cannot see inherit the pin, so only real wiring can move this.
-    derived = _derive_runtime_profile(scheduler, adapters, deadman_s, base=manifest.runtime_profile)
+    # kill windows run under an unchanged hash. Fields no wiring can report
+    # inherit the pin unless the launcher DECLARED them (`declared`), so a
+    # process that says nothing about its machine identity is held to the
+    # rest and one that does is held to all of it.
+    derived = _derive_runtime_profile(
+        scheduler, adapters, deadman_s, base=manifest.runtime_profile, declared=declared
+    )
     drift = _profile_drift(derived, manifest.runtime_profile)
     if drift:
         raise EngineError(
@@ -880,6 +928,11 @@ def _open_from_seal(
     seal: Seal,
     catalog: CatalogIR,
     fence: Proof,
+    *,
+    scheduler: Scheduler | None = None,
+    adapters: Mapping[str, JobAdapter] | None = None,
+    deadman_s: float | None = None,
+    declared: RuntimeProfile | None = None,
 ) -> OpenedPeriod:
     """ss11 step 5's opening half, in place: claim the successor and write
     the opening segment from the seal this root closed with.
@@ -887,7 +940,15 @@ def _open_from_seal(
     The committed manifest must already be installed -- the boundary
     renamed it into `periods/N+1/` BEFORE the record that names it -- so a
     missing one is a boundary whose artifacts were pruned under the head,
-    which the retention floor forbids and which recovery cannot invent."""
+    which the retention floor forbids and which recovery cannot invent.
+
+    The runtime gate runs HERE, against that manifest, BEFORE the segment
+    is written. The gate at the end of the resume ladder is too late: it
+    refuses the process, but the segment for period N+1 is already on the
+    disk and the head has already moved, so the SECOND try -- with the same
+    wrong wiring -- meets an ordinary open period and succeeds. A boundary
+    that changes the profile must refuse while it is still a boundary
+    (DL-151)."""
     opening = seal.next_period
     manifest = read_period_manifest(run_root, opening.period_id)
     if manifest is None:
@@ -896,6 +957,19 @@ def _open_from_seal(
             f" periods/{opening.period_id:06d}/manifest.json is not there -- the"
             " boundary's own artifacts are reachable from the lineage head and may"
             " never be pruned (period-model ss12)"
+        )
+    drift = _profile_drift(
+        _derive_runtime_profile(
+            scheduler, adapters or {}, deadman_s, base=manifest.runtime_profile, declared=declared
+        ),
+        manifest.runtime_profile,
+    )
+    if drift:
+        raise EngineError(
+            f"runtime-profile mismatch on {', '.join(drift)}: period"
+            f" {opening.period_id} was COMMITTED with a runtime profile this wiring"
+            " does not describe -- open it with the options the boundary staged"
+            " (period-model ss2.1)"
         )
     return open_next_period(
         run_root=run_root,
@@ -1486,6 +1560,7 @@ def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
         detail=(
             "the spool records the run as killed"
             if killed
-            else "the run ended on its own before the kill was delivered"
+            else "the spool records no kill: the run exited on its own, failed to"
+            " spawn, or left a record this build does not recognise"
         ),
     )

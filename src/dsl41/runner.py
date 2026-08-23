@@ -204,7 +204,7 @@ from dsl41.runner_hosts import (
     routes_new_effects,
     seed_local_executor,
 )
-from dsl41.period import StagedManifest, staging_dir
+from dsl41.period import CMD_GRACE_S, StagedManifest, staging_dir
 from dsl41.runner_journal import (
     Journal,
     read_journal,
@@ -318,6 +318,25 @@ def _raise_if_failed(task: asyncio.Task[None]) -> None:
             raise exc  # adapter bug: fail loudly, never guess
 
 
+def _oracle_aliases(scheduler: "Scheduler | None") -> dict[str, str] | None:
+    """The SEM-35 alias table the ORACLE resolves `timezone:` through: the
+    scheduler's own, so the two halves of one engine read a job's zone the
+    same way (DL-62).
+
+    The oracle used to resolve without it. Two consequences, both silent
+    until a job started: a name only the `--timezone-map` table can resolve
+    raised `OracleError` at the first start although preflight and the
+    scheduler had accepted the estate, and a city name the table
+    deliberately re-points still resolved through the ladder's unique-city
+    default (DL-151).
+
+    Empty is `None` -- "no map" -- because that is what the ladder's city
+    default is conditioned on, and because the period's own pin carries
+    `{}` for both."""
+    aliases = scheduler.tz_aliases if scheduler is not None else {}
+    return aliases or None
+
+
 class Engine:
     """ss4 single-writer engine loop over one Oracle. 11a surface: inject()
     external events + run_until_quiescent(horizon). The WAL journal slots in
@@ -350,7 +369,7 @@ class Engine:
         fence: Fence | None = None,
         carried: CarriedRows | None = None,
     ) -> None:
-        self.oracle = Oracle(catalog, carried=carried)
+        self.oracle = Oracle(catalog, carried=carried, tz_aliases=_oracle_aliases(scheduler))
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no
@@ -458,6 +477,23 @@ class Engine:
         is why that is a separate call and not folded in here."""
         self.oracle.store.touch_host(self.executor_id, self.clock.now())
         self.note_executor_reachable()
+
+    @property
+    def cmd_grace_s(self) -> float:
+        """The TERM grace the CMD adapter this engine RUNS waits before it
+        kills (concurrency-model ss8's `T_kill` is two of these).
+
+        Read off the wired adapter rather than off the period's manifest for
+        `_derive_runtime_profile`'s reason: the bound has to describe the
+        machine that runs. Resume holds the two to each other, so on a real
+        estate they are the same number; an engine wired with neither -- the
+        bisimulation harness -- gets the ss2.1 default.
+        """
+        cmd = self.adapters.get("CMD")
+        grace = getattr(cmd, "grace_seconds", None)
+        if isinstance(grace, bool) or not isinstance(grace, (int, float)):
+            return CMD_GRACE_S  # an adapter with no grace of its own (a test double)
+        return float(grace)
 
     def held_jobs(self) -> frozenset[str]:
         """Jobs with a start this shell intended and has not dispatched,
@@ -1368,7 +1404,7 @@ class Engine:
             self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
         self.decisions.note(attempt)
         await self.clock.wait_until(pending.at)
-        applied = apply_attempt(self.oracle, attempt)
+        applied = apply_attempt(self.oracle, attempt, grace_s=self.cmd_grace_s)
         self.decisions.record(applied.result)
         self.frontiers = self.frontiers.record(attempt.index)
         # step 7 commits the decision and the outbox entries it implies as ONE

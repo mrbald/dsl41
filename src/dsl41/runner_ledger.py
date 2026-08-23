@@ -289,8 +289,14 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
             "catalog hash mismatch: the estate changed since this journal was written;"
             " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
         )
+    # read EXACTLY: `True == 1` and `1.0 == 1` in Python, so a bare
+    # comparison let a JSON `true` stand in for version 1 and a tampered
+    # segment lead a build that does not implement its semantics (DL-151).
+    # An ABSENT field still reads as v1 -- the pre-S6a courtesy this gate
+    # has always extended, and `runner_history.check_replay_version` states
+    # why the replay half is deliberately stricter.
     pinned = opening.get("state_machine_version", _ASSUMED_VERSION)
-    if pinned != STATE_MACHINE_VERSION:
+    if not isinstance(pinned, int) or isinstance(pinned, bool) or pinned != STATE_MACHINE_VERSION:
         raise EngineError(
             f"state-machine version mismatch: this journal is v{pinned}, this build"
             f" derives v{STATE_MACHINE_VERSION}; a leader must derive identical"

@@ -82,6 +82,7 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.classify import Classification, Verdict
+from dsl41.ir import CatalogIR
 from dsl41.oracle_state import CarriedRows, Event, GlobalRuntime, HostRuntime, HostState, JobRuntime
 from dsl41.period import (
     CATALOG_HASH_VERSION,
@@ -1013,7 +1014,9 @@ def _check_join(seal: Seal) -> None:
 
     The CMD-or-FW half of ss3.5's sentence needs C2's catalog to know a
     job's type, so it belongs to the loader that holds one -- this
-    function refuses what the artifact alone can refute."""
+    function refuses what the artifact alone can refute.
+    `check_executions_dispatchable` is that half, and the resume path is
+    where it runs (DL-151)."""
     entries: dict[str, Execution] = {}
     for entry in seal.executions:
         if entry.effect_id in entries:
@@ -1351,6 +1354,51 @@ class OpenedRuntime(BaseModel):
             period_id=self.next_period.period_id,
             now=state.now,
         )
+
+
+def check_executions_dispatchable(seal: Seal, catalog: CatalogIR) -> None:
+    """ss3.5's CMD-or-FW half of the join, asked where C2 is held.
+
+    `_check_join` refuses what the sidecar alone can refute: an entry whose
+    row is missing, not live, or at another run. WHICH JOBS may stand behind
+    one needs the catalog the period opens with, and until DL-151 no loader
+    asked -- the seal's own docstring deferred it to "the loader that holds
+    C2" and neither `open_from_seal` (which takes no catalog) nor the resume
+    ladder did it. A forged or corrupted sidecar naming a live BOX row
+    therefore passed every gate on the way in.
+
+    A BOX has no adapter, no effect and no entry: it folds from its members
+    and is deliberately outside `dispatchable`. A job C2 does not define is
+    outside it too, and cannot occur on a legal boundary: `classify` refuses
+    one over an executing job the opening catalog dropped (ss10.1's R row).
+    Meeting one means either the sidecar is not this estate's OR this resume
+    was launched with the wrong estate files -- the second is
+    `check_leader_eligibility`'s to name and it runs after this, so the
+    refusal says both rather than accusing the artifact alone.
+
+    Not an allow-list of type names: `job_type` is extensible, an engine
+    dispatches whatever type it wired an adapter for, and `_require_adapters`
+    is the gate that asks about adapters.
+
+    Over the SEAL rather than over what it opens into, so it can be asked
+    before the successor's segment is written -- the seal's `executions` are
+    what an opening carries, unchanged -- and so one call covers both the
+    resume that opens the period and every resume after it."""
+    for entry in seal.executions:
+        job_ir = catalog.jobs.get(entry.job)
+        if job_ir is None:
+            raise EngineError(
+                f"execution {entry.effect_id!r} names job {entry.job!r}, which this"
+                " catalog does not define: check the estate files this resume was"
+                " launched with -- a legal boundary never carries an execution for a"
+                " job the opening catalog dropped (period-model ss3.5, ss10.1)"
+            )
+        if job_ir.job_type == "BOX":
+            raise EngineError(
+                f"execution {entry.effect_id!r} names box {entry.job!r}: a box folds"
+                " from its members and has no adapter, no effect and no execution"
+                " entry (period-model ss3.5)"
+            )
 
 
 def open_from_seal(

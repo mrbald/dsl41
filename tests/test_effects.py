@@ -628,7 +628,16 @@ def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path)
     )
     finished = _kill_outcome_from_spool(short_root, effect)
     assert finished.state == "retired"
-    assert "ended on its own" in (finished.detail or "")
+    assert "the spool records no kill" in (finished.detail or "")
+
+    # ...and the detail does not claim a run that never started "ended on
+    # its own": `spawn_failed` and an unrecognised record are retired too,
+    # and the sentence covers all three (DL-151)
+    for record in ({"outcome": "spawn_failed", "error": "no such file"}, {"outcome": "moon"}):
+        (run_dir / "status.json").write_text(json.dumps({"run_id": "r9", **record}))
+        never = _kill_outcome_from_spool(short_root, effect)
+        assert never.state == "retired"
+        assert never.detail == finished.detail
 
 
 # ------------------------------- the three arms of _apply_effect (DL-105)

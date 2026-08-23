@@ -25,6 +25,7 @@ from dsl41.cli_common import (
     load_tz_aliases,
     read_header_of,
     refuse,
+    resume_target_period,
     say_next,
     walk_estate_or_exit_2,
 )
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_ledger import LeaderLock
-    from dsl41.seal import StagedNextPeriod
+    from dsl41.seal import Seal, StagedNextPeriod
 
 
 # ------------------------------------------------------- the boundary (U7)
@@ -266,6 +267,36 @@ def seal(
         lock.release()
 
 
+def _committed_boundary(run_root: Path, request_id: "str | None") -> "Seal | None":
+    """The committed boundary `--request-id` names, if this root holds one.
+
+    ss2.2 promises that an exact retry of a committed boundary is answered
+    from the next period, and the engine keys that answer on the request
+    FINGERPRINT -- which covers the `baseline_id` and the `epoch` the
+    original attempt carried. A retry composed from TODAY's header carries
+    the NEW period's baseline and term, so it names a different command and
+    is refused as a collision: the promised route was unreachable from this
+    CLI until DL-151. The seal is where the boundary-time envelope survives.
+
+    Exactly one seal back, like the engine's own route (PR-30e). A root this
+    cannot read offers no retry and the ordinary path answers -- the CLI is
+    composing a request here, not auditing a lineage."""
+    if request_id is None:
+        return None
+    from dsl41.boundary import read_seal
+    from dsl41.period import sealed_periods
+    from dsl41.runner_clock import EngineError
+
+    try:
+        periods = sealed_periods(run_root)
+        if not periods:
+            return None
+        seal = read_seal(run_root, periods[-1])
+    except (OSError, ValueError, KeyError, EngineError):
+        return None
+    return seal if seal.boundary_request.request_id == request_id else None
+
+
 def _live_seal(
     run_root: Path,
     estate_anchor: "Path | None",
@@ -313,6 +344,11 @@ def _live_seal(
     if parsed_header is None:
         return 2
     baseline, epoch = parsed_header
+    retry = _committed_boundary(run_root, request_id)
+    if retry is not None:
+        # ss2.2's retry route: the envelope the ORIGINAL attempt carried,
+        # which is the only one the engine's stored decision answers to
+        baseline, epoch = retry.baseline_id, retry.epoch
     # `staged` is the OWNER's projection (stage_next_period's return,
     # DL-137) -- the reflection rebuild it replaces was the third spelling
     # of which fields cross from launcher-pin to client-proposal
@@ -377,12 +413,16 @@ async def _offline_seal(
 
     from dsl41.boundary import SealRequest, load_bundle_catalog
     from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.runner_history import active_period_id
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
     try:
-        pinned = read_period_manifest(run_root, active_period_id(run_root))
+        # the period this sealer will CLOSE, which on a root with a
+        # committed boundary is the one the resume below opens (DL-151):
+        # reading the newest segment's here loaded C1's bundle over a root
+        # whose next segment runs C2, and the resume refused on a catalog
+        # hash the operator never named
+        pinned = read_period_manifest(run_root, resume_target_period(run_root))
     except Exception as exc:  # RunHistoryError or EngineError: both are refusals
         return refuse(exc, prefix=str(run_root))
     if pinned is None:
@@ -434,18 +474,81 @@ async def _offline_seal(
         if wiring is not None:
             await wiring.close()
         return code
+    retry = _committed_boundary(run_root, request_id)
     request = SealRequest(
-        baseline_id=engine.baseline_id,
-        epoch=engine.epoch,
+        # ss2.2's retry route: a retry carries the envelope its ORIGINAL
+        # attempt carried, because the stored decision is fingerprinted over
+        # it. Composing from the engine's CURRENT header -- which the resume
+        # above has just moved on to the next period -- names a different
+        # command, and offline that does not merely fail to deduplicate:
+        # nothing between here and the cutoff would recognise the retry, so
+        # it would close a SECOND period (DL-151).
+        baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
+        epoch=retry.epoch if retry is not None else engine.epoch,
         request_id=request_id or str(uuid.uuid4()),
         next_period=staged,
         stage_digest=staged.stage_digest,
         force_seal=force_seal,
         claimed_actor=actor,
     )
+    answered = _answer_from_committed(retry, request, run_root, estate_anchor)
+    if answered is not None:
+        await _close_engine(engine)
+        await wiring.close()
+        return answered
     code = await _drive_boundary(engine, request, run_root, estate_anchor)
     await wiring.close()
     return code
+
+
+def _answer_from_committed(
+    seal: "Seal | None",
+    request: "SealRequest",
+    run_root: Path,
+    estate_anchor: "Path | None",
+) -> int | None:
+    """ss2.2's retry route offline: answer from the boundary that already
+    committed, or None when there is nothing to answer from.
+
+    The live path gets this from the engine of period N+1, which keeps the
+    `seal` record it opened from (`ControlServer._committed_seal`). An
+    offline sealer submits to its own engine and passes no such door, so the
+    same rule is applied here to the same evidence -- the sidecar -- with
+    the same two outcomes: an EXACT retry is the original answer, and the
+    same id under a different envelope is a collision, because force is an
+    authorization and the actor is attribution and neither may be swapped
+    under a retry (PR-30c, PR-30e)."""
+    if seal is None:
+        return None
+    if seal.request_fingerprint != request.fingerprint:
+        typer.echo(
+            f"request_id {request.request_id} already named the boundary that closed"
+            f" period {seal.period_id} under a different envelope: force is an"
+            " authorization and the actor is attribution, and neither may be swapped"
+            " under a retry (period-model ss2.2, PR-30c)",
+            err=True,
+        )
+        return 2
+    typer.echo(
+        f"period {seal.period_id} was already closed by request_id"
+        f" {request.request_id}: seal {seal.digest}. No second boundary."
+        f" This root is at period {seal.next_period.period_id}, which the"
+        " recovery this command ran has opened"
+    )
+    say_next(run_root, estate_anchor)
+    return 0
+
+
+async def _close_engine(engine: "Engine") -> None:
+    """Give back what an offline sealer took, whatever became of the
+    boundary: the engine's loop and its journal. One spelling, so an answer
+    that returns early cannot leave a live engine behind."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        await engine.shutdown()
+    if engine.journal is not None:
+        engine.journal.close()
 
 
 async def _drive_boundary(
@@ -522,10 +625,7 @@ async def _drive_boundary(
         typer.echo("the engine loop returned without a boundary", err=True)
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await loop_task
-    with contextlib.suppress(Exception):
-        await engine.shutdown()
-    if engine.journal is not None:
-        engine.journal.close()
+    await _close_engine(engine)
     return code
 
 

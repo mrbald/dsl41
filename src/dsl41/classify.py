@@ -66,7 +66,7 @@ from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, JobRuntime
-from dsl41.period import RuntimeProfile, job_fingerprints
+from dsl41.period import RuntimeProfile, job_fingerprints, tz_aliases_of
 
 # ------------------------------------------------------------------- nodes
 #
@@ -819,7 +819,9 @@ def _eval_clock(carried: CarriedState) -> datetime:
     return max(stamps) if stamps else datetime(1970, 1, 1)
 
 
-def _seeded(catalog: CatalogIR, carried: CarriedState) -> _TruthOracle:
+def _seeded(
+    catalog: CatalogIR, carried: CarriedState, profile: RuntimeProfile | None = None
+) -> _TruthOracle:
     """An interpreter over `catalog` holding the carried rows.
 
     Seeded through `RuntimeState`'s verbs, which are the only write path
@@ -833,7 +835,9 @@ def _seeded(catalog: CatalogIR, carried: CarriedState) -> _TruthOracle:
     across the boundary (ss10.1), so an atom naming it must read what the
     row says. L001 refuses a condition naming a job the catalog does not
     have, so a valid estate never asks."""
-    oracle = _TruthOracle(catalog)
+    # the period's own SEM-35 alias table (DL-151): a condition read under a
+    # `timezone:` only that table resolves must not raise here
+    oracle = _TruthOracle(catalog, tz_aliases=tz_aliases_of(profile))
     store = oracle.store
     store.begin_input()
     for name in sorted(carried.jobs):
@@ -875,8 +879,8 @@ def readiness_flips(
     )
     if not names:
         return ()
-    before = _seeded(closing.catalog, carried)
-    after = _seeded(opening.catalog, carried)
+    before = _seeded(closing.catalog, carried, closing.profile)
+    after = _seeded(opening.catalog, carried, opening.profile)
     return tuple(
         ReadinessFlip(job=name, before=was, after=now)
         for name, was, now in (

@@ -52,6 +52,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.oracle_state import HostRuntime, HostState, RuntimeState
+from dsl41.period import CMD_GRACE_S
 
 #: The id of the executor an engine runs on its own machine. One engine per
 #: run root owns exactly one local executor (control-protocol ss2's socket
@@ -83,15 +84,35 @@ LEADER_VERBS: frozenset[str] = frozenset(get_args(HostVerb)) - HOST_VERBS
 #: carries bookkeeping (a fence, an attribution, or the state it interrupted).
 _TARGET_STATE: dict[str, HostState] = {"activate": "active", "drain": "passive"}
 
-#: ss8's `T_kill`: how long after a deadman fires until the host's wrappers
-#: are certainly gone. The supervisor's exit EOFs every lifeline; each
-#: wrapper then sends TERM to its command pgid, waits the run's
-#: `grace_seconds`, sends KILL, records and exits (supervisor-protocol ss4
-#: step 5). Two graces at the 10 s default covers that plus the supervisor's
-#: own wait for the wrappers, and the number is deliberately generous: it is
-#: added to a wait an operator can always skip with `--force`, so erring
-#: long costs patience and erring short costs a double run.
-T_KILL_S = 30.0
+#: What `kill_allowance` adds on top of the two graces: the supervisor's own
+#: exit, after its last wrapper is gone. Deliberately generous -- it is added
+#: to a wait an operator can always skip with `--force`, so erring long costs
+#: patience and erring short costs a double run.
+KILL_MARGIN_S = 10.0
+
+
+def kill_allowance(grace_s: float) -> float:
+    """ss8's `T_kill` over the command grace the PERIOD runs: how long after
+    a deadman fires until the host's wrappers are certainly gone.
+
+    The supervisor's exit EOFs every lifeline; each wrapper then sends TERM
+    to its command pgid, waits the run's `grace_seconds`, sends KILL,
+    records and exits (supervisor-protocol ss4 step 5). Two graces -- the
+    wrapper's own TERM wait and the supervisor's wait for its wrappers --
+    plus the margin above.
+
+    DERIVED, not fixed (DL-151). `RuntimeProfile.cmd_grace_us` is per period
+    and unbounded above, and the wrapper waits the real value: a constant
+    30 s left eviction permitted while a 60 s-grace command was still inside
+    its TERM window, which is the double run this bound exists to prevent.
+    At the 10 s default this is 30 s, so a default estate's bound is
+    unchanged."""
+    return 2.0 * grace_s + KILL_MARGIN_S
+
+
+#: The bound over the ss2.1 default grace, for a caller with no period in
+#: hand (an in-memory harness). A real engine passes the grace it runs.
+T_KILL_S = kill_allowance(CMD_GRACE_S)
 
 #: ss8's `T_skew`, which covers monotonic-clock DRIFT between hosts, not
 #: clock synchronization -- the standard lease argument, which depends only
@@ -179,14 +200,27 @@ def seed_local_executor(
         store.commit_input()
 
 
-def host_rejection_reason(store: RuntimeState, cmd: HostCommand, at: datetime) -> str | None:
+def host_rejection_reason(
+    store: RuntimeState,
+    cmd: HostCommand,
+    at: datetime,
+    *,
+    grace_s: float = CMD_GRACE_S,
+    actor: str | None = None,
+) -> str | None:
     """ss8's preconditions: why this command must not apply, or None.
 
     A REJECTION, not a refusal (control-protocol ss3). Every check below
     reads mutable state, so it can only be made where `expect` is made --
     inside the input's own batch, in log order. Deciding at the door would
     answer against a table that had moved by the time the command applied,
-    and would leave the log holding a verdict replay could not reproduce."""
+    and would leave the log holding a verdict replay could not reproduce.
+
+    `grace_s` is the command grace the PERIOD runs, which is what the kill
+    half of the bound is made of; `actor` is the attempt's `claimed_actor`,
+    which force needs and the other verbs do not. Both are the input's own
+    facts -- journaled with it -- so replay reaches this verdict from the
+    same values."""
     row = store.host(cmd.host_id)
     if row is None:
         return (
@@ -194,7 +228,7 @@ def host_rejection_reason(store: RuntimeState, cmd: HostCommand, at: datetime) -
             " registering, never by being addressed"
         )
     if cmd.verb == "evict":
-        return _evict_reason(row, cmd, at)
+        return _evict_reason(row, cmd, at, grace_s=grace_s, actor=actor)
     if cmd.verb in LEADER_VERBS:
         # the leader's own observation. Refused against an EVICTED host and
         # nothing else: eviction is a decision about the host's work, and a
@@ -224,14 +258,28 @@ def host_rejection_reason(store: RuntimeState, cmd: HostCommand, at: datetime) -
     return None
 
 
-def _evict_reason(row: HostRuntime, cmd: HostCommand, at: datetime) -> str | None:
+def _evict_reason(
+    row: HostRuntime, cmd: HostCommand, at: datetime, *, grace_s: float, actor: str | None
+) -> str | None:
     """ss8's three eviction preconditions, in the order that costs least to
     explain. A refusal reports the remaining wait, so the operator waits
     rather than guesses."""
     if row.state == "evicted":
         return f"host {cmd.host_id!r} is already evicted, at generation {row.generation}"
     if cmd.force:
-        return None  # ss8: attributed, not forbidden. The record is the safety story.
+        # ss8: attributed, not forbidden -- and "attributed" is the WHOLE of
+        # force's safety story, so a force that names nobody has none. The
+        # row's `forced_by` is non-null iff the state was reached by force,
+        # and an unattributed one reads exactly like a proof-gated eviction.
+        # Checked here rather than at the door so the perimeter has already
+        # had its chance to stamp an authenticated principal (DL-146).
+        if actor is None or not actor.strip():
+            return (
+                f"host {cmd.host_id!r}: --force skips the ss8 preconditions, so the"
+                " record is the only safety story it has -- name who is asking in"
+                " `claimed_actor`. An unattributed force is refused"
+            )
+        return None
     if row.state != "quarantined":
         return (
             f"host {cmd.host_id!r} is {row.state}: eviction needs the leader's own durable"
@@ -250,13 +298,14 @@ def _evict_reason(row: HostRuntime, cmd: HostCommand, at: datetime) -> str | Non
             f"host {cmd.host_id!r} has never been in contact, so the ss8 bound has no"
             " start: nothing here can say how long its wrappers have had to die"
         )
-    bound = row.deadman_s + T_KILL_S
+    kill_s = kill_allowance(grace_s)
+    bound = row.deadman_s + kill_s
     bound += skew_allowance(bound)
     waited = (at - row.last_contact).total_seconds()
     if waited <= bound:
         return (
             f"host {cmd.host_id!r} was in contact {waited:.1f}s ago and the ss8 bound is"
-            f" {bound:.1f}s (deadman {row.deadman_s:.1f}s + kill {T_KILL_S:.1f}s + skew):"
+            f" {bound:.1f}s (deadman {row.deadman_s:.1f}s + kill {kill_s:.1f}s + skew):"
             f" wait {bound - waited:.1f}s more, or --force with proof it is dead"
         )
     return None

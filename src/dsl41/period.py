@@ -355,6 +355,24 @@ def to_us(seconds: float) -> int:
     return round(seconds * 1_000_000)
 
 
+def tz_aliases_of(profile: "RuntimeProfile | None") -> dict[str, str] | None:
+    """The SEM-35 alias table a period runs under, as `resolve_timezone` takes
+    it -- from the period's own pin (DL-62, DL-151).
+
+    Every reader that replays a period's log resolves a job's `timezone:`
+    the way the engine did, or it refuses the very log the engine wrote: the
+    catalog carries no table and neither does the WAL, so the profile is the
+    only record of one. `ujo_timezones` names are site-local, and a name only
+    the table resolves is `OracleError` without it.
+
+    Empty is None -- the "no map" reading `wire_from_profile` already uses --
+    because the ladder's unique-city default is conditioned on the ABSENCE of
+    a table and the pin cannot tell an empty table from no table."""
+    if profile is None:
+        return None
+    return dict(profile.tz_aliases) or None
+
+
 def runtime_profile_from_cli(
     *,
     timezone: str | None = None,
@@ -923,6 +941,19 @@ def sentinel_path(run_root: Path) -> Path:
     return run_root / SENTINEL_NAME
 
 
+def _is_period_root_line(line: bytes) -> bool:
+    """Whether `line` is a `period_root` record AT ALL -- asked with ss3.2's
+    ingress gates off, so `read_sentinel` can tell a sentinel it cannot read
+    from a first line that was never a sentinel. It decides which refusal an
+    operator gets, never what is trusted: every field is still validated by
+    the model above."""
+    try:
+        payload = json.loads(line)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(payload, dict) and payload.get("rec") == "period_root"
+
+
 def read_sentinel(run_root: Path) -> Sentinel | None:
     """The root's sentinel, or None when this root has none.
 
@@ -942,7 +973,14 @@ def read_sentinel(run_root: Path) -> Sentinel | None:
         raise EngineError(f"{path}: unreadable: {exc}") from exc
     try:
         payload = decode(first)
-    except CanonError:
+    except CanonError as exc:
+        if _is_period_root_line(first):
+            # the docstring's rule, kept: a file that HOLDS a `period_root`
+            # record this binary cannot read -- an artifact_format_version it
+            # does not implement, a duplicate key, a float -- refuses BY NAME.
+            # Degrading it to "no sentinel" left the root refusing somewhere
+            # else, namelessly, for a reason nothing printed (DL-151).
+            raise EngineError(f"{path}: not a sentinel this binary can read ({exc})") from exc
         return None  # not canonical JSON: whatever it is, it is not a sentinel
     if not isinstance(payload, dict) or payload.get("rec") != "period_root":
         return None  # a first line that is not `period_root` is not a sentinel

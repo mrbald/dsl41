@@ -385,6 +385,31 @@ def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Pa
         asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
 
 
+def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
+    """ss7: one executable implements one state machine, and the pin is an
+    INTEGER.
+
+    Python's `==` is not integer identity -- `True == 1` and `1.0 == 1` --
+    so a bare comparison let a JSON `true` or a float stand in for version
+    1 and lead a log this build may not lead. The same class the supervisor
+    closed at its own version gate (DL-151). An ABSENT field keeps the
+    pre-S6a courtesy and still reads as v1; `runner_history`'s replay half
+    is deliberately stricter and states why."""
+    catalog = lower_source(_SOLO_JIL)
+    record = {
+        "rec": "segment",
+        "catalog_hash": catalog_hash_v2(catalog),
+        "catalog_hash_version": 2,
+    }
+    check_leader_eligibility(
+        {**record, "state_machine_version": STATE_MACHINE_VERSION}, catalog=catalog
+    )
+    check_leader_eligibility(record, catalog=catalog)  # absent: the courtesy
+    for wrong in (True, 1.0, "1", None):
+        with pytest.raises(EngineError, match="state-machine version mismatch"):
+            check_leader_eligibility({**record, "state_machine_version": wrong}, catalog=catalog)
+
+
 def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:
     """(period-model ss1.1, DL-130; D4, DL-138): `catalog_hash` is versioned,
     so the gate recomputes under the recipe the record PINS and never under

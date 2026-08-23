@@ -296,6 +296,56 @@ def command_outcome(
     return {REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0)
 
 
+def active_period(run_root: Path) -> int:
+    """Which period this root's ACTIVE segment holds, or 1 where the root
+    cannot say -- `runner_history.active_period_id` states the rule and why
+    it is a function; this is the CLI's degrade over it."""
+    from dsl41.runner_history import RunHistoryError, active_period_id
+
+    try:
+        return active_period_id(run_root)
+    except RunHistoryError:
+        from dsl41.period import GENESIS_PERIOD_ID
+
+        return GENESIS_PERIOD_ID
+
+
+def resume_target_period(run_root: Path) -> int:
+    """The period a resume of this root OPENS INTO (period-model ss11 step 5).
+
+    The newest segment's period, unless this root holds a COMMITTED boundary
+    no engine has opened yet: the seal commits period N+1, its manifest is
+    installed before the record that names it, and the resume that follows
+    opens N+1 and runs under N+1's pin.
+
+    Which is the period every CLI act on such a root is ABOUT: the profile
+    gate holds the launch options to it, a missing supervisor is started
+    with the deadman it pins, and an offline sealer closes it. Reading the
+    newest SEGMENT's number instead is what let one in-place profile change
+    refuse the options it was committed with and accept the ones it
+    replaced (DL-151).
+
+    A root this cannot read falls back to the active period -- these are
+    composition questions, and a damaged lineage is the resume's own refusal
+    to make, in its own words. The net is the loader's whole failure
+    surface, not `EngineError` alone: `select_seal` reads its period numbers
+    with a bare `int()`, so a hand-built record can raise `ValueError` or
+    `KeyError` here, and the callers turn anything but a refusal into an
+    exit-1 traceback (the DL-149 rule)."""
+    from dsl41.boundary import select_seal
+    from dsl41.period import estate_wal
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_journal import read_journal
+
+    try:
+        lineage = select_seal(run_root, read_journal(estate_wal(run_root)))
+    except (OSError, ValueError, KeyError, EngineError):
+        return active_period(run_root)
+    if lineage.opens_next and lineage.seal is not None:
+        return lineage.seal.next_period.period_id
+    return active_period(run_root)
+
+
 def say_next(run_root: Path, estate_anchor: "Path | None") -> None:
     anchor = f" --estate-anchor {estate_anchor}" if estate_anchor is not None else ""
     typer.echo(

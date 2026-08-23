@@ -1289,3 +1289,61 @@ def test_dl137_row_none_hold_open_waits_past_the_horizon_with_no_instant_known()
         await engine.shutdown()
 
     asyncio.run(scenario())
+
+
+# ------------------------------------- 7. the timezone map the engine is wired with
+
+
+_TZ_WINDOW_JIL = (
+    "insert_job: {job}\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+    'run_window: "08:00-10:00"\ntimezone: {zone}\n'
+)
+#: 09:00 in New York, 15:00 in Zurich -- one instant that is inside the
+#: window under one zone and outside it under the other.
+_TZ_AT = datetime(2026, 7, 1, 13, 0)
+
+
+def _tz_engine(text: str, aliases: dict[str, str] | None) -> Engine:
+    catalog = lower_source(text)
+    return Engine(
+        catalog,
+        clock=VirtualClock(start=_TZ_AT),
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=Scheduler(catalog, start=_TZ_AT, tz_aliases=aliases),
+    )
+
+
+def test_sem35_the_engine_resolves_a_map_only_zone_through_its_scheduler_map() -> None:
+    """SEM-35/DL-62: `--timezone-map` is the estate's `ujo_timezones` table,
+    and the oracle reads a job's `timezone:` through the same ladder the
+    scheduler does -- so it must be given the same table.
+
+    Without it the oracle resolved on its own, and a name only the map can
+    resolve raised `OracleError` at the job's FIRST start although preflight
+    and the scheduler had both accepted the estate: a run that started and
+    then failed on its own catalog (DL-151)."""
+    engine = _tz_engine(
+        _TZ_WINDOW_JIL.format(job="rw_map", zone="ujo_ny"), {"ujo_ny": "America/New_York"}
+    )
+    engine.oracle.feed(Event(at=_TZ_AT, kind="STARTJOB", payload={"job": "rw_map"}))
+    assert engine.oracle.store.job["rw_map"].status == "RUNNING"  # 09:00 in New York
+
+
+def test_sem35_a_supplied_map_outranks_the_unique_city_default() -> None:
+    """The other half: the ladder's unique-city default applies only when
+    the estate supplied NO map (`resolve_timezone`), so a city name a
+    supplied table deliberately re-points must resolve the table's way.
+
+    `Zurich` is a unique zoneinfo city, so an oracle resolving on its own
+    read this window in Europe/Zurich -- 15:00, outside -- while the
+    scheduler that ticks the same job read it in New York."""
+    aliases = {"zurich": "America/New_York"}
+    engine = _tz_engine(_TZ_WINDOW_JIL.format(job="rw_city", zone="Zurich"), aliases)
+    engine.oracle.feed(Event(at=_TZ_AT, kind="STARTJOB", payload={"job": "rw_city"}))
+    assert engine.oracle.store.job["rw_city"].status == "RUNNING"  # the map's zone
+
+    # the control: no map, so the city default stands and the window is shut
+    plain = _tz_engine(_TZ_WINDOW_JIL.format(job="rw_city", zone="Zurich"), None)
+    plain.oracle.feed(Event(at=_TZ_AT, kind="STARTJOB", payload={"job": "rw_city"}))
+    assert plain.oracle.store.job["rw_city"].status == "INACTIVE"  # 15:00 in Zurich

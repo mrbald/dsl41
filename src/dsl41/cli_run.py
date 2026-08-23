@@ -29,6 +29,7 @@ from dsl41.cli_common import (
     load_catalog_or_exit_2,
     load_tz_aliases,
     refuse,
+    resume_target_period,
     say_next,
     walk_estate_or_exit_2,
 )
@@ -312,22 +313,6 @@ def _observed_profile(
     )
 
 
-def _active_period(run_root: Path) -> int:
-    """Which period this root's ACTIVE segment holds (period-model I1).
-
-    1 on a root that has never sealed. A reader that
-    defaulted to 1 after a boundary would read period 1's manifest beside
-    period N's records -- and a ROLLED root has no period 1 at all."""
-    from dsl41.runner_history import RunHistoryError, active_period_id
-
-    try:
-        return active_period_id(run_root)
-    except RunHistoryError:
-        from dsl41.period import GENESIS_PERIOD_ID
-
-        return GENESIS_PERIOD_ID
-
-
 def _resume_profile_error(
     run_root: Path, profile: "RuntimeProfile", running_deadman: "float | None"
 ) -> "str | None":
@@ -349,10 +334,12 @@ def _resume_profile_error(
     from dsl41.runner_clock import EngineError
 
     try:
-        # the ACTIVE period's manifest, never period 1's: every artifact
-        # under `periods/` is addressed by the period number, and a rolled
-        # root holds only the period it was opened into (DL-134)
-        manifest = read_period_manifest(run_root, _active_period(run_root))
+        # the manifest of the period this resume will OPEN INTO, never
+        # period 1's: every artifact under `periods/` is addressed by the
+        # period number, a rolled root holds only the period it was opened
+        # into (DL-134), and a root with a committed boundary is about to
+        # move to the next one (DL-151)
+        manifest = read_period_manifest(run_root, resume_target_period(run_root))
     except EngineError as exc:
         return str(exc)
     if manifest is None:
@@ -555,7 +542,7 @@ async def _serve_run(
             from dsl41.period import read_period_manifest
 
             try:
-                pinned = read_period_manifest(run_root, _active_period(run_root))
+                pinned = read_period_manifest(run_root, resume_target_period(run_root))
             except EngineError as exc:
                 return refuse(exc)
             if pinned is not None:
@@ -597,6 +584,12 @@ async def _serve_run(
                 deadman_s=running_deadman,
                 lock=lock,
                 anchor_dir=anchor_dir,
+                # the launch options no wired object can report -- the
+                # machine identity and its policy. Without them the core
+                # gate inherits them from the pin and can never disagree
+                # with it, which is how a boundary that staged a new
+                # identity opened under the old one (DL-151)
+                declared=profile,
             )
         else:
             engine = start_run(
@@ -1187,7 +1180,9 @@ def _replay_lineage(
                 f" {previous[-1]['closes_at_index']}; period"
                 f" {records[0]['period_id']} opens in {root}"
             )
-        _run_period(records, opened, where=where)
+        _run_period(
+            records, opened, where=where, tz_aliases=_period_aliases(root, records[0], where=where)
+        )
         previous, previous_segment = records, segment
 
 
@@ -1331,8 +1326,28 @@ def _prove_crossing(
         raise typer.Exit(refuse(exc, prefix=where)) from exc
 
 
+def _period_aliases(
+    root: Path, opening: "dict", *, where: str
+) -> "dict[str, str] | None":
+    """This period's SEM-35 alias table, from its own pin (period-model
+    ss2.1). None where the root no longer holds the manifest, which is the
+    same degrade `_period_catalog` makes for the same reason."""
+    from dsl41.period import read_period_manifest, tz_aliases_of
+    from dsl41.runner_clock import EngineError
+
+    try:
+        manifest = read_period_manifest(root, int(opening["period_id"]))
+    except EngineError as exc:
+        raise typer.Exit(refuse(exc, prefix=where)) from exc
+    return tz_aliases_of(None if manifest is None else manifest.runtime_profile)
+
+
 def _run_period(
-    records: list[dict], opened: "tuple[CatalogIR, CarriedRows | None]", *, where: str
+    records: list[dict],
+    opened: "tuple[CatalogIR, CarriedRows | None]",
+    *,
+    where: str,
+    tz_aliases: "dict[str, str] | None" = None,
 ) -> None:
     """ONE period, replayed and printed. ONE implementation: a
     single-segment read and a lineage that crosses four boundaries differ
@@ -1347,7 +1362,10 @@ def _run_period(
 
     catalog, carried = opened
     named = f"{where}: " if where else ""
-    oracle = Oracle(catalog, carried=carried)
+    # SEM-35: the period's own alias table (DL-151). A narration that
+    # resolved `timezone:` without it refuses the log the engine wrote,
+    # because a `ujo_timezones` name is site-local and lives in the pin.
+    oracle = Oracle(catalog, carried=carried, tz_aliases=tz_aliases)
     # reproducing a log means reproducing the genesis the engine replayed it
     # onto, not only the catalog: a routing-table input lands on a table that
     # already holds this engine's own executor (concurrency-model ss8), and a
