@@ -65,12 +65,17 @@ other will send you to the wrong document.
 in the stonebranch dossier. Sources used to also carry `review M-1`-shaped
 tokens pointing at review conversations; those had no in-repo index, so a
 reader could not follow them. DL-75 deleted every one in `src/dsl41/`,
-where the gate runs, and inlined the reason it stood for. The sweep did not
-reach `tests/`, which still carries eighteen of them in docstrings
-— hyphenated (`Review M-1`, `Review E-1`), unhyphenated (`Review M3`,
-`Review B1`) and compound (`review U6A-05`, `review U6AR3-04`). They are
-residue, not a live namespace. An `M`-shaped citation in `src/` is always a
-mapping row.
+where the gate runs, and inlined the reason it stood for. That sweep did
+not reach `tests/`; DL-151 finished it there — the eighteen it left
+(five in `test_uc_oracle.py`, six in `test_runner_lifecycle.py`, seven in
+`test_seal_artifact.py`), hyphenated (`Review M-1`, `Review E-1`),
+unhyphenated (`Review M3`, `Review B1`) and compound (`review U6A-05`,
+`review U6AR3-04`), now state their reason instead of pointing at it. Two
+kinds of residue are left and neither is a citation: some test FUNCTION
+NAMES still carry the finding they were written for (`test_review_m1_*`,
+`test_m3_*`, `test_b1_*`), and severity-labelled pointers (`Review MAJOR
+2`, `Review BLOCKER`) remain in four other test files. An `M`-shaped
+citation in `src/` is always a mapping row.
 
 **The two `R`s are different things.** `R3` is risk-register row 3 in the
 AutoSys dossier (a construct with no clean UC analog); `R-classified` is

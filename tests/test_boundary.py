@@ -2,9 +2,10 @@
 and the seal operation (period-model ss1.1, ss1.3, ss6-ss9, ss11; DL-133).
 
 Obligations in ss13 exercised here: PR-01a/b/c, PR-02, PR-02b, PR-03,
-PR-04, PR-05b, PR-07's operational half, PR-25, PR-25a, PR-26, PR-27,
-PR-28, PR-28a, PR-28b, PR-28e, PR-29, PR-30, PR-30c, PR-30d, PR-30f,
-PR-32, PR-33, PR-34's barrier half and PR-45's in-place rows.
+PR-04, PR-05b, PR-07's operational half, PR-17, PR-25, PR-25a, PR-26,
+PR-27, PR-28, PR-28a, PR-28b, PR-28e, PR-29, PR-30, PR-30c, PR-30d,
+PR-30f, PR-30g, PR-32, PR-33, PR-34's barrier half and PR-45's in-place
+rows.
 
 House style follows test_seal_artifact.py and test_fw_spool.py: the crash
 matrix drives the operation's OWN seam (`Engine.crash_point`) rather than
@@ -18,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2369,7 +2371,66 @@ def test_pr28_phase_one_refuses_each_of_its_own_checks(tmp_path: Path) -> None:
     broken = "insert_job: a\njob_type: c\ncommand: x\nmachine: nowhere\n"
     with pytest.raises(EngineError, match="does not pass preflight"):
         validate_staged(_staged_context(run_root, engine, text=broken))
+    # the SM-version check (PR-17): the candidate names the version its own
+    # binary implements, and this period runs another one. Injected on the
+    # PERIOD's side, because the candidate's `stage_digest` is derived from
+    # its fields -- a bumped copy is refused by the identity check first,
+    # and the message would then be a neighbouring rule's
+    with pytest.raises(EngineError, match="one executable implements one version"):
+        validate_staged(
+            _staged_context(
+                run_root, engine, state_machine_version=STATE_MACHINE_VERSION + 1
+            )
+        )
     _close(engine)
+
+
+def test_pr17_a_profile_change_and_a_no_change_seal_are_both_transitions(
+    tmp_path: Path,
+) -> None:
+    """PR-17: a transition is not the same thing as a catalog change.
+
+    A runtime-profile change with no catalog change is a transition -- the
+    profile is half of C, so moving it moves the period even though every
+    job is identical. A seal with NOTHING changed is a transition too: the
+    boundary is what closes, and an estate is free to have moved nothing.
+    Both are the same rule, which is why refusing either as a no-op would
+    leave an operator with no way to cut a period at a chosen instant.
+
+    PR-17's third clause -- a `next_period` whose `state_machine_version`
+    differs from the seal's is refused at readiness -- is the SM gate, and
+    it is pinned by `test_pr28_readiness_refuses_while_c1_is_open_and_untouched`
+    and by the phase-1 table in `test_pr28_phase_one_refuses_each_of_its_own_checks`.
+    """
+    moved = tmp_path / "profile"
+    engine = _genesis(moved)
+    closing = read_period_manifest(moved, 1)
+    assert closing is not None
+    # the same JIL, staged again, under a profile the estate did not have
+    staged = _stage(moved, C1_JIL, profile=RuntimeProfile(default_tz="Europe/Zurich"))
+    boundary = asyncio.run(_seal(engine, _request(engine, staged)))
+    _close(engine)
+    assert boundary.seal.period_id == 1
+    opened = read_period_manifest(moved, 2)
+    assert opened is not None and opened.period_id == 2
+    assert opened.catalog_hash == closing.catalog_hash  # the catalog did not move
+    assert opened.runtime_hash != closing.runtime_hash  # the profile did
+
+    still = tmp_path / "unchanged"
+    engine = _genesis(still)
+    closing = read_period_manifest(still, 1)
+    assert closing is not None
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(still, C1_JIL))))
+    _close(engine)
+    opened = read_period_manifest(still, 2)
+    assert opened is not None and opened.period_id == 2
+    # nothing about C moved, and the period still did
+    assert (opened.catalog_hash, opened.runtime_hash) == (
+        closing.catalog_hash,
+        closing.runtime_hash,
+    )
+    assert opened.first_index == boundary.seal.closes_at_index + 1
+    assert read_seal(still, 1).digest == boundary.seal.digest
 
 
 def test_pr30c_an_ordinary_command_and_a_seal_cannot_share_a_request_id(
@@ -2629,6 +2690,111 @@ def test_the_run_root_is_fsynced_when_the_first_boundary_creates_seals(
     monkeypatch.undo()
     _close(engine)
     assert run_root in fsynced
+
+
+def _ident(path: Path) -> tuple[int, int]:
+    """What a directory entry IS, independent of its name: a rename moves the
+    inode, so the staged directory and `periods/N+1/` are the same thing."""
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino)
+
+
+def _boundary_fsyncs(
+    run_root: Path, *, reuse: bool, drop: str | None = None
+) -> tuple[set[tuple[int, int]], dict[str, tuple[int, int]]]:
+    """Drive one whole boundary; report what it fsynced and the identity of
+    each artifact PR-30g requires durable.
+
+    `drop` names one of those fsyncs and REMOVES it -- what deleting that
+    line from the liturgy would do. The witness records identities rather
+    than call sites, so the assertion is about the entry that was made
+    durable and not about which function did it: a second call site fsyncing
+    the same directory keeps the test green, and rightly.
+
+    `reuse=True` takes the SAME-STAGE path: the first attempt installs
+    `periods/000002/` and dies before the seal, and the retry rewrites the
+    manifest in place (ss7, PR-30f). The manifest's own two fsyncs are
+    dropped by position inside its write, which is the one place both paths
+    spell them the same way."""
+    import dsl41.boundary as boundary_mod
+    import dsl41.period as period_mod
+
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    if reuse:
+        engine.crash_point = _crash_at("after_install")  # type: ignore[method-assign]
+        asyncio.run(_refused(engine, _request(engine, staged)))
+        engine.crash_point = _no_crash  # type: ignore[method-assign]
+    seen: set[tuple[int, int]] = set()
+    writing_manifest = [False, 0]
+    real_fsync, real_dir, real_write = os.fsync, boundary_mod.fsync_dir, boundary_mod.durable_write
+    dropped_dir = {
+        "staging": run_root / "periods" / ".staging",
+        "periods": run_root / "periods",
+    }.get(drop or "")
+
+    def fsync(fd: int) -> None:
+        if writing_manifest[0]:
+            position = writing_manifest[1]
+            writing_manifest[1] = position + 1
+            if drop == ("manifest" if position == 0 else "period_dir"):
+                return
+        stat = os.fstat(fd)
+        seen.add((stat.st_dev, stat.st_ino))
+        real_fsync(fd)
+
+    def fsync_dir(path: Path | str) -> None:
+        if dropped_dir is not None and Path(path) == dropped_dir:
+            return
+        real_dir(path)
+
+    def durable_write(path: str, data: bytes) -> None:
+        if os.path.basename(path) != "manifest.json":
+            real_write(path, data)
+            return
+        writing_manifest[0], writing_manifest[1] = True, 0
+        try:
+            real_write(path, data)
+        finally:
+            writing_manifest[0] = False
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("os.fsync", fsync)
+        for module in (boundary_mod, period_mod):
+            patch.setattr(module, "fsync_dir", fsync_dir)
+            patch.setattr(module, "durable_write", durable_write)
+        asyncio.run(_seal(engine, _request(engine, staged)))
+    _close(engine)
+    installed = period_dir(run_root, 2)
+    required = {
+        "manifest": _ident(installed / "manifest.json"),
+        "period_dir": _ident(installed),
+        "periods": _ident(installed.parent),
+    }
+    if not reuse:  # the reuse path renames nothing out of `.staging`
+        required["staging"] = _ident(run_root / "periods" / ".staging")
+    return seen, required
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["fresh-install", "same-stage-reuse"])
+def test_pr30g_the_committed_period_survives_a_power_loss_after_the_seal(
+    tmp_path: Path, reuse: bool
+) -> None:
+    """PR-30g: after the committed seal, `periods/N+1/` and its
+    `manifest.json` are on the disk -- a seal that names a manifest the
+    machine can still lose is a lineage that cannot open.
+
+    Both install paths owe it: the fresh one renames a staged directory into
+    place and fsyncs four entries, the same-stage reuse path rewrites the
+    manifest by its own in-place liturgy. Each fsync is removed in turn and
+    the check must fail on exactly the missing one -- a test that counted
+    fsyncs would stay green with the wrong one gone."""
+    whole, required = _boundary_fsyncs(tmp_path / "whole", reuse=reuse)
+    assert set(required.values()) <= whole
+    for name in required:
+        mutated, expected = _boundary_fsyncs(tmp_path / name, reuse=reuse, drop=name)
+        assert expected[name] not in mutated, name  # the one that was removed
+        assert {i for k, i in expected.items() if k != name} <= mutated  # and only it
 
 
 def test_a_pre_ponr_oserror_aborts_the_boundary_and_the_retry_commits(tmp_path: Path) -> None:

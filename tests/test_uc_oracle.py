@@ -1193,9 +1193,9 @@ def test_divergence_model_fields() -> None:
 
 
 def test_review_m1_f_edge_stays_exact_on_killed_producer_end_to_end() -> None:
-    """Review M-1: f(a) is an EXACT M04 row -- killing the producer must
-    leave the consumer unstarted in BOTH engines (the failure edge no
-    longer fires on Cancelled)."""
+    """f(a) is an EXACT M04 row, so killing the producer leaves the
+    consumer unstarted in BOTH engines: a kill is not a failure, and the
+    failure edge must not fire on a Cancelled predecessor."""
     text = (
         "insert_job: k_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: k_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(k_prod)\n"
@@ -1212,8 +1212,8 @@ def test_review_m1_f_edge_stays_exact_on_killed_producer_end_to_end() -> None:
 
 
 def test_review_m2_startjob_on_the_box_name_launches_the_workflow() -> None:
-    """Review M-2: the canonical AutoSys box trigger STARTJOB(box) must
-    launch the box-named workflow (UCS-0: workflows are themselves tasks)."""
+    """The canonical AutoSys box trigger STARTJOB(box) launches the
+    box-named workflow (UCS-0: workflows are themselves tasks)."""
     text = (
         "insert_job: mbox\njob_type: b\n\n"
         "insert_job: mm1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: mbox\n"
@@ -1241,9 +1241,9 @@ def test_review_m2_nested_box_name_aliases_to_the_top_workflow() -> None:
 
 
 def test_review_m3_gate_on_exitcode_only_consumer_lands_in_the_ledger() -> None:
-    """Review M-3: a v(G) gate whose consumer's only edges already carry M08
-    exitcode var_conditions cannot attach -- it must be RECORDED, never
-    silently dropped (no-silent-loss constitution)."""
+    """A v(G) gate whose consumer's only edges already carry M08 exitcode
+    var_conditions cannot attach -- one edge holds one var_condition. It is
+    RECORDED, never silently dropped (no silent loss, DL-07)."""
     text = (
         "insert_job: g_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: g_cons\njob_type: c\ncommand: y\nmachine: m1\n"
@@ -1258,9 +1258,9 @@ def test_review_m3_gate_on_exitcode_only_consumer_lands_in_the_ledger() -> None:
 
 
 def test_review_m3_gate_not_on_every_path_is_recorded() -> None:
-    """Review M-3 (related finding): when the gate attaches to some edges
-    but others already carry M08 var_conditions, the >=1-satisfied join can
-    bypass the gate -- recorded in the ledger."""
+    """The partial-attachment half of the same rule: when the gate reaches
+    some edges but others already carry M08 var_conditions, the
+    >=1-satisfied join can bypass the gate -- recorded in the ledger."""
     text = (
         "insert_job: p_s\njob_type: c\ncommand: a\nmachine: m1\n\n"
         "insert_job: p_e\njob_type: c\ncommand: b\nmachine: m1\n\n"
@@ -1275,8 +1275,8 @@ def test_review_m3_gate_not_on_every_path_is_recorded() -> None:
 
 
 def test_review_e1_force_first_event_converges_with_autosys() -> None:
-    """Review E-1: FORCE_STARTJOB as the first event force-starts in both
-    engines (the twin launches the containing workflow, then forces)."""
+    """FORCE_STARTJOB as the FIRST event force-starts in both engines: the
+    twin launches the containing workflow, then forces."""
     text = "insert_job: solo_f\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(ghost_f)\n"
     catalog = lower_source(text)
     script = [

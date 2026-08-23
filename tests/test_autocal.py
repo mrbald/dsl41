@@ -8,13 +8,14 @@ entry's documented behavior, test_q8x_* a pinned default or refusal.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dsl41.autocal import CalendarRuleError, compile_calendar, standard_days, standard_rows
-from dsl41.ir import CalendarIR, CatalogIR, CycleIR
+from dsl41.ir import CalendarIR, CatalogIR, CycleIR, lower_source
 
 # ------------------------------------------------------------ builders
 
@@ -543,3 +544,71 @@ def test_q9_holiday_s_without_holcal_compiles() -> None:
     assert days == {date(2026, 2, 1), date(2026, 7, 1)}
     with pytest.raises(CalendarRuleError, match="requires holcal"):
         compile_calendar(_ext(holiday="O"), _catalog(ext=_ext(holiday="O")))
+
+
+# ------------------------------------------- the live-probe file (runbook ss2)
+
+
+#: the file an operator imports on a live box. It is a repo artifact, so the
+#: suite is what keeps it importable: before this test a two-letter day token
+#: or a moved date could sit in it unnoticed until the box refused the import.
+PROBE = Path(__file__).resolve().parent.parent / "docs" / "probes" / "dsl41_q8_cals.txt"
+
+AUG26 = (date(2026, 8, 1), date(2026, 8, 31))
+DEC26 = (date(2026, 12, 1), date(2026, 12, 31))
+#: every day of August 2026, derived from the Gregorian calendar itself
+_AUG_DAYS = {date(2026, 8, day) for day in range(1, 32)}
+
+
+def _aug(*days: int) -> set[date]:
+    return {date(2026, 8, day) for day in days}
+
+
+#: docs/live-instance-runbook.md ss2, "What each August/December 2026
+#: observation means": the date set dsl41 is pinned to produce for each probe
+#: calendar. The runbook reads the vendor's output against exactly these, so a
+#: generator change that moved one would silently move the question too.
+PINNED: dict[str, tuple[tuple[date, date], set[date]]] = {
+    # Q8b: replace-then-shift is the DL-59 pipeline order -- (15, 18)
+    "dsl41_q8b_1": (AUG26, _aug(15)),
+    "dsl41_q8b_2": (AUG26, _aug(18)),
+    # Q8c_1: Saturdays map to Mondays 3, 10, ?, 24, 31; the `?` is the
+    # holiday-free walk, so Mon Aug 17 (a holcal date) is stepped over
+    "dsl41_q8c_1": (AUG26, _aug(3, 10, 18, 24, 31)),
+    # Q8c_2: holiday N is a verbatim one-shot -- Dec 24 lands on Dec 25 and
+    # is not re-processed by the second holiday
+    "dsl41_q8c_2": (DEC26, {date(2026, 12, 25)}),
+    # Q8d_1: `mon | wed & fri` is flat left-to-right, so no day qualifies
+    "dsl41_q8d_1": (AUG26, set()),
+    # Q8d_2: order-free union-minus-exclusions -- the later `mon` does not
+    # resurrect what `NOT mon` took out
+    "dsl41_q8d_2": (AUG26, set()),
+    # Q8d_3: an all-exclusive compound is evaluated literally as an include
+    "dsl41_q8d_3": (AUG26, _AUG_DAYS),
+    # Q8d_4: the OR word unions exactly like `|`
+    "dsl41_q8d_4": (AUG26, {day for day in _AUG_DAYS if day.weekday() in (0, 2)}),
+    # Q8d_5: an exclusion-only rule list subtracts from the DAILY default
+    "dsl41_q8d_5": (AUG26, {day for day in _AUG_DAYS if day.weekday() != 0}),
+}
+
+
+def test_q8_probe_calendars_compile_to_the_runbook_pins() -> None:
+    """`docs/probes/dsl41_q8_cals.txt` compiles, and every calendar in it
+    produces the date set the runbook pins.
+
+    The probe file only answers Q8b-Q8d if both sides of the diff are real:
+    the vendor's export, and OUR date set for the same definition. Nothing
+    compiled the file here before, so a refused token in it would have been
+    found on the box, and a generator change that moved one of these dates
+    would have moved the pinned answer with it."""
+    catalog = lower_source(PROBE.read_text(encoding="utf-8"), file=PROBE.name)
+    assert set(catalog.calendars) == {"dsl41_hols_aug", "dsl41_hols_dec"} | set(PINNED)
+    # the two holiday calendars the extended ones name (SEM-36 holcal)
+    assert standard_days(catalog.calendars["dsl41_hols_aug"]) == {date(2026, 8, 17)}  # a Monday
+    assert standard_days(catalog.calendars["dsl41_hols_dec"]) == {
+        date(2026, 12, 24),
+        date(2026, 12, 25),
+    }
+    for name, (window, expected) in PINNED.items():
+        compiled = compile_calendar(catalog.calendars[name], catalog)
+        assert set(compiled.days_between(*window)) == expected, name

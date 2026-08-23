@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -848,7 +849,7 @@ def _fabricate_exit_record(run_root: Path, job: str, run_number: int, ended_at: 
 
 
 def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) -> None:
-    """Review B1, the un-fired-timer half (DL-44 item 11b): the engine
+    """The kill-wins gate, un-fired-timer half (DL-44 item 11b): the engine
     crashed BEFORE the term_run_time deadline ever fired, and the wrapper
     recorded a natural exit 0 (a SIGTERM-trapping command). At resume the
     replayed timer is still armed and due before the record's timestamp:
@@ -918,7 +919,7 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
 
 
 def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
-    """Review B1, the fired-timer half (DL-44 item 11a): the engine fired
+    """The kill-wins gate, fired-timer half (DL-44 item 11a): the engine fired
     the deadline live (advance journaled WAL-first), then crashed. Replay
     alone must reproduce TERMINATED, and the stale spool record is skipped
     without any reconcile injection."""
@@ -973,7 +974,7 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
 
 
 def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
-    """Review B1, the live white-box half: a completion stamped after a due
+    """The kill-wins gate, live and white-box: a completion stamped after a due
     term_run_time deadline must lose to it -- the gate advances the oracle
     to the completion's instant first and then drops it as terminal."""
     from datetime import timedelta
@@ -1008,8 +1009,9 @@ def test_b1_gate_sees_due_kill_before_forged_completion() -> None:
 
 
 def test_m3_malformed_status_records_map_truthfully() -> None:
-    """Review M3: a lying or truncated record can only make things worse,
-    never better -- and the cause must say what was actually wrong."""
+    """status.json is the sole outcome channel (ss6a), so a lying or
+    truncated record can only make things worse, never better -- and the
+    cause must say what was actually wrong."""
     from dsl41.runner_adapters import outcome_from_status
 
     malformed_exit = outcome_from_status({"outcome": "exited"})
@@ -1023,8 +1025,9 @@ def test_m3_malformed_status_records_map_truthfully() -> None:
 
 
 def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None:
-    """Review M4: an incomplete FW run whose re-dispatch adapter is missing
-    at resume must refuse loudly, never hang RUNNING forever."""
+    """An incomplete FW run whose re-dispatch adapter is missing at resume
+    refuses loudly: a watch nothing can re-drive would otherwise hang
+    RUNNING for the life of the estate."""
     from dsl41.oracle_state import Event
     from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter
@@ -1068,9 +1071,9 @@ def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None
 def test_m6_wrapper_spawn_failure_fails_job_not_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review M6: an EMFILE-class glitch spawning the WRAPPER fails that
-    one job with a truthful FAILURE cause; the engine loop survives and
-    other jobs complete normally."""
+    """An EMFILE-class glitch spawning the WRAPPER fails that one job with
+    a truthful FAILURE cause -- nothing started, so the engine can say so.
+    The loop survives and other jobs complete normally."""
     from dsl41.oracle_state import Event
     from dsl41.runner_startup import start_run
 
@@ -1117,3 +1120,174 @@ def test_m6_wrapper_spawn_failure_fails_job_not_engine(
         if r.get("rec") == "input" and r["payload"].get("job") == "doomed"
     ]
     assert any(c and "wrapper spawn failed" in str(c) for c in causes)
+
+
+def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss13 item 3's ENOSPC case: the runs dir is full when the adapter
+    creates `runs/<job>.<run_number>/`.
+
+    An unspawnable WRAPPER fails one job and the loop lives on
+    (test_m6_wrapper_spawn_failure_fails_job_not_engine): nothing started,
+    so the engine can say so truthfully. A runs dir that cannot be written
+    is the other case -- the SPAWN effect is already applied and durable,
+    and the directory that would have carried the answer does not exist --
+    so the engine raises instead of deciding. Nothing invents a completion:
+    the WAL holds the applied effect and no STATUS, and the ladder resolves
+    the run at resume from the absent spool (ss7)."""
+    import errno
+
+    from dsl41.oracle_state import Event
+    from dsl41.runner_startup import start_run
+
+    jil = (
+        "insert_job: doomed\njob_type: c\ncommand: true\n\n"
+        "insert_job: fine\njob_type: c\ncommand: true\n"
+    )
+    catalog = lower_source(jil)
+    run_root = tmp_path / "run"
+    real_mkdir = Path.mkdir
+    full = {"disk": True}
+
+    def no_space(self: Path, *args: object, **kwargs: object) -> None:
+        if full["disk"] and self.name.startswith("doomed."):
+            full["disk"] = False  # the retry at resume finds room again
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", no_space)
+
+    async def crash() -> None:
+        clock = RealClock()
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=clock,
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+        )
+        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "doomed"}))
+        with pytest.raises(OSError) as full_disk:
+            await engine.run_until_quiescent(datetime.max)
+        assert full_disk.value.errno == errno.ENOSPC
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(crash())
+    records = read_journal(active_wal(run_root))
+    assert [r["rec"] for r in records].count("decision") == 1  # the SPAWN was applied
+    # ...and nothing spoke for the run: no completion, no run directory
+    assert [r for r in records if r.get("rec") == "input" and r.get("source") == "adapter"] == []
+    assert list((run_root / "runs").iterdir()) == []
+
+    async def resume() -> dict[str, str]:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+            settle_seconds=0.2,
+            grace_seconds=2.0,
+        )
+        await engine.run_until_quiescent(datetime.max)
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        return {job: rt.status for job, rt in engine.oracle.store.job.items()}
+
+    assert asyncio.run(resume())["doomed"] == "FAILURE"
+    reconciled = [
+        r["payload"]
+        for r in read_journal(active_wal(run_root))
+        if r.get("rec") == "input" and r.get("source") == "reconcile"
+    ]
+    assert [p["job"] for p in reconciled] == ["doomed"]
+    assert "never spawned" in reconciled[0]["cause"]  # what happened, not a guess
+
+
+@contextlib.contextmanager
+def full_disk(run_dir: Path):
+    """A run dir nothing can be written into -- an ENOSPC stand-in that a
+    test can turn on at a chosen instant. Restored on the way out, or the
+    temp tree cannot be removed."""
+    os.chmod(run_dir, 0o500)
+    try:
+        yield
+    finally:
+        os.chmod(run_dir, 0o700)
+
+
+def _at_pause(proc: subprocess.Popen) -> None:
+    """Wait until the wrapper has SIGSTOPped itself at its pause point --
+    the instant a test may change the world under it."""
+    wait_for(lambda: proc_state(proc.pid) == "T")
+
+
+def _continue_and_wait(proc: subprocess.Popen) -> int:
+    """Release a wrapper stopped at a pause point and collect its exit."""
+    os.kill(proc.pid, signal.SIGCONT)
+    return proc.wait(timeout=30)
+
+
+def test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started(tmp_path: Path) -> None:
+    """ss6a rc 3, the spawn.json half (DL-43 item 4): the command is running
+    and its identity cannot be made durable. Running unrecorded is refused
+    -- the wrapper kills what it started, tries the status record anyway,
+    and exits 3. Here the status write fails too, so the run leaves no
+    record at all and the ladder must read that as E7 rather than an
+    outcome."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(
+        run_dir, "sleep 120", pause="post_spawn_pre_record", grace_seconds=0.5
+    )
+    try:
+        _at_pause(proc)  # the command is up; the disk fills before the record
+        with full_disk(run_dir):
+            assert _continue_and_wait(proc) == 3
+        assert (run_dir / "out.log").exists()  # the command DID spawn
+        assert not (run_dir / "spawn.json").exists()
+        assert not (run_dir / "status.json").exists()
+    finally:
+        os.close(lifeline_w)
+    result, ended_at = _resolve(run_dir)
+    assert result == Failed("exit_status_unobservable")
+    assert ended_at is None
+
+
+def test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome(tmp_path: Path) -> None:
+    """ss6a rc 3, the status.json half: the exit was OBSERVED and the record
+    failed. status.json is the sole data channel, so the exit code dies with
+    the wrapper -- rc 3 is a notification, not an answer, and the ladder
+    reports unobservable instead of the code the wrapper saw."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_record", grace_seconds=0.5)
+    try:
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        _at_pause(proc)
+        with full_disk(run_dir):
+            assert _continue_and_wait(proc) == 3
+        assert not (run_dir / "status.json").exists()
+    finally:
+        os.close(lifeline_w)
+    result, _ = _resolve(run_dir)
+    assert result == Failed("exit_status_unobservable")
+
+
+def test_rc3_a_full_disk_at_spawn_leaves_no_record_and_exits_three(tmp_path: Path) -> None:
+    """ss6a rc 3, the both-failed half: /bin/sh is unspawnable (the log
+    files cannot be created) AND the `spawn_failed` record cannot be
+    written. The wrapper exits 3 loudly on stderr rather than exiting 0
+    over a run nobody can hear about."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    with full_disk(run_dir):
+        proc, lifeline_w = spawn_wrapper(run_dir, "true", grace_seconds=0.5)
+        try:
+            assert proc.wait(timeout=30) == 3
+        finally:
+            os.close(lifeline_w)
+        assert not (run_dir / "out.log").exists()  # nothing ever started
+        assert not (run_dir / "status.json").exists()

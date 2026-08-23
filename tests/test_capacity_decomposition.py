@@ -357,32 +357,46 @@ def test_pr52_ownership_gate_covers_the_new_state(tmp_path: Path) -> None:
     `waiter_seq` are `JobRuntime` fields, so the derived watch set picks them
     up for free; `CapacityReservation` joins the model list; and `consumed`
     and `enqueue_counter` join the containers a caller could reach through --
-    the counter by rebind, since a scalar has nothing to subscript."""
+    the counter by rebind, since a scalar has nothing to subscript.
+
+    Every name the row lists is driven, not just the ones DL-120 added:
+    `HostRuntime` (the ss8 routing row DL-94 put in the model set), the
+    `_hosts`/`hosts` pair, and `timer_seq` beside `enqueue_counter` (DL-132).
+    An assertion that only reads the gate's name list would stay green with
+    any of them removed from it -- the mutation is what proves the gate acts
+    on them."""
     arch_check = _arch_check()
 
     rows = tmp_path / "oracle_state.py"
     rows.write_text(
         "class CapacityReservation(BaseModel):\n    units: int\n\n\n"
+        "class HostRuntime(BaseModel):\n    state_rev: int = 0\n\n\n"
         "class JobRuntime(BaseModel):\n"
         "    reservations: tuple = ()\n"
         "    waiter_seq: int | None = None\n\n\n"
-        "def poke(row, res):\n"
+        "def poke(row, res, host):\n"
         "    row.reservations = ()\n"
         "    row.waiter_seq = 4\n"
-        "    res.units = 99\n",
+        "    res.units = 99\n"
+        "    host.state_rev = 7\n",
         encoding="utf-8",
     )
     messages = [f.message for f in arch_check.state_owner_bypasses([rows])]
     assert any("JobRuntime.reservations" in m for m in messages), messages
     assert any("JobRuntime.waiter_seq" in m for m in messages), messages
     assert any("CapacityReservation.units" in m for m in messages), messages
+    assert any("HostRuntime.state_rev" in m for m in messages), messages
 
     outside = tmp_path / "runner.py"
     outside.write_text(
-        "def poke(engine):\n"
+        "def poke(engine, row):\n"
         "    engine.oracle.store._consumed['r:FUEL'] = 0\n"
         "    engine.oracle.store.consumed['r:FUEL'] = 0\n"
         "    engine.oracle.store._enqueue_counter = 0\n"
+        "    engine.oracle.store._timer_seq = 0\n"
+        "    engine.oracle.store.timer_seq = 0\n"
+        "    engine.oracle.store._hosts['h'] = row\n"
+        "    engine.oracle.store.hosts['h'] = row\n"
         "    engine.oracle.store._consumed.clear()\n",
         encoding="utf-8",
     )
@@ -390,8 +404,12 @@ def test_pr52_ownership_gate_covers_the_new_state(tmp_path: Path) -> None:
     assert kinds == [
         "mutates store._consumed through .clear()",
         "rebinds store._enqueue_counter directly",
+        "rebinds store._timer_seq directly",
+        "rebinds store.timer_seq directly",
         "writes store._consumed directly",
+        "writes store._hosts directly",
         "writes store.consumed directly",
+        "writes store.hosts directly",
     ]
 
     # the alias idiom every runner module uses, and a private name reached

@@ -695,7 +695,7 @@ def test_pr11_a_float_is_refused_at_both_ends() -> None:
         }
     )
     # refused at CONSTRUCTION, not at the first serialization three calls
-    # later: canonicalizability is a model invariant (review U6A-06)
+    # later: canonicalizability is a model invariant
     with pytest.raises(EngineError, match="float"):
         _seal(state=armed)
 
@@ -1721,7 +1721,7 @@ def test_a_seal_mutated_after_validation_refuses_to_serialize() -> None:
     """frozen stops attribute assignment, not mutation inside a dict field:
     a writer that stamped a digest over a post-validation mutation would
     emit a self-consistent artifact only the NEXT reader refuses.
-    `to_bytes` revalidates on the way out (review U6A-05)."""
+    `to_bytes` revalidates on the way out."""
     seal = _seal()
     # in-place, past the frozen model: an R verdict may never be committed,
     # and only the exit revalidation can catch one smuggled in like this
@@ -1734,7 +1734,7 @@ def test_a_padded_copy_with_the_same_digest_is_not_the_artifact() -> None:
     """The digest is over the CANONICAL form, so a whitespace-padded or
     key-reordered copy carries the same digest as the real sidecar --
     accepting it would let two byte-forms of one seal circulate under one
-    name. The file's bytes must BE the canonical bytes (review U6A-04)."""
+    name. The file's bytes must BE the canonical bytes."""
     padded = GOLDEN_BYTES.decode("utf-8").replace('"epoch":7,', '"epoch": 7,', 1)
     assert json.loads(padded) == json.loads(GOLDEN_BYTES)  # same document
     with pytest.raises(EngineError, match="one byte string"):
@@ -1742,7 +1742,7 @@ def test_a_padded_copy_with_the_same_digest_is_not_the_artifact() -> None:
 
 
 def test_the_lineage_link_names_the_predecessor(tmp_path: Path) -> None:
-    """(review U6A-09, period.py's half): segment N opens exactly the seal
+    """The lineage link, period.py's half: segment N opens exactly the seal
     that closed N-1 -- a link naming any other period is a graft."""
     from dsl41.period import check_segment_record
 
@@ -1829,7 +1829,7 @@ def test_two_verdicts_for_one_job_refuse_before_projection() -> None:
 
 
 def test_pr50_a_start_in_period_two_stamps_the_row(tmp_path: Path) -> None:
-    """(review U6AR3-04): `open_period` is the ONE write to the period
+    """`open_period` is the ONE write to the period
     counter -- owner-verb-gated, monotone by one, never inside an input --
     and a start after it stamps the row with the new period, which is what
     crosses the next seal."""
@@ -1858,7 +1858,7 @@ def test_pr50_a_start_in_period_two_stamps_the_row(tmp_path: Path) -> None:
 
 
 def test_a_fresh_state_seeds_any_period_and_a_used_one_advances_by_one() -> None:
-    """(review U6AR4-01): a resume assembles period N into a PRISTINE state
+    """A resume assembles period N into a PRISTINE state
     -- a rule that only counted from 1 could never assemble one. The seed
     is legal exactly once: with a row installed, only +1 remains."""
     from dsl41.ir import lower_source
@@ -1884,7 +1884,7 @@ def test_a_fresh_state_seeds_any_period_and_a_used_one_advances_by_one() -> None
 
 
 def test_finish_genesis_is_one_shot() -> None:
-    """(review U6AR6-01): a second `finish_genesis` after real inputs would
+    """A second `finish_genesis` after real inputs would
     launder a used state back to fresh and let `seed_period` skip a live
     lineage -- the exact bypass the latch closes."""
     from dsl41.ir import lower_source
