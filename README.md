@@ -38,7 +38,12 @@ resume — spool contract frozen in
 11f (the detached supervisor tier). Phase 12 — mandatory optimistic
 concurrency and multihost execution — is specified and under construction;
 its contract is frozen in
-[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md). The scheduler obeys AutoSys calendars (DL-56/57). It
+[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md).
+The evolution contract for every versioned protocol and durable artifact is
+[docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md);
+the access perimeter is
+[docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md).
+The scheduler obeys AutoSys calendars (DL-56/57). It
 applies standard calendar day sets directly. It applies extended
 (autocal-rule) calendars through a built-in interpreter of the doc-frozen
 SEM-36..39 semantics. The memo below has the source map.
@@ -159,9 +164,11 @@ exactly the shape frozen in
 Success/Failure), with `retainSysIds: false` and no system ids. If a workflow
 contains an edge that the base schema cannot express (a t()-derived
 condition, a variable condition), the command quarantines the whole workflow.
-The bundle's own ledger lists the quarantined workflow. There is no partial
-workflow and no silent edge drop. Rich condition forms and write-path
-verification stay blocked on U3b (live controller).
+Two workflows that would emit one record name quarantine as well.
+The bundle's own ledger lists every quarantined workflow with its reason.
+There is no partial workflow and no silent edge drop.
+Rich condition forms and write-path verification stay blocked on U3b
+(live controller).
 
 ### Prove two catalogs equivalent
 

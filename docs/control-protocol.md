@@ -31,13 +31,13 @@ the wire vocabulary, and both clients.
 
 - **server** (`ControlServer`): one per run root, owned by the engine
   process. Mutating verbs inject into the engine's single-writer loop;
-  query verbs are pure projections of oracle state.
+  query verbs are pure projections — see §4 for what that claims.
 - **async client** (`ControlClient`): one persistent request/response
   connection plus separate connections for `subscribe`. Drives the §11
-  TUI (`dsl41 run --ui`, `dsl41 serve`).
+  TUI (`dsl41 run --ui`, `dsl41 ui`, `dsl41 serve`).
 - **sync client** (`roundtrip`): one-shot blocking request/response for
-  callers outside an event loop. Drives `dsl41 sendevent` and
-  `dsl41 query`.
+  callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 host`
+  and `dsl41 query`.
 
 Both clients raise `ControlClientError` on any transport or decode
 failure. Neither maps errors to exit codes — that is the CLI's job.
@@ -59,8 +59,10 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   which owns its connection and never reaches the response path — is not
   the one unversioned door left open. A refusal does not close the
   connection: the next line on it may be well-formed.
-- Responses are `{"ok": true, …}` or `{"ok": false, "error": "<message>"}`.
-  Errors are human-readable strings, **not** stable codes.
+- The answer to a request is `{"ok": true, …}` or
+  `{"ok": false, "error": "<message>"}`. Errors are human-readable
+  strings, **not** stable codes. The other lines a server writes are the
+  §5 shapes — journal records and the gap marker — and carry no `ok`.
 - Responses carry the **read header**: `baseline_id`, `epoch` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
   nothing without the log it was read from, and a client that cannot
@@ -75,7 +77,10 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   (§5). None of them names a revision. This enumerates what the
   shipped v3 server has always done.
 - A malformed line answers `{"ok": false, "error": "bad request: …"}` and
-  the stream stays in sync. A handler that raises answers
+  the stream stays in sync. That holds for invalid JSON **within**
+  `LINE_LIMIT`. A line over the limit is a framing failure the reader
+  cannot answer past: the connection closes with no answer, and the caller
+  reads it as a transport error. A handler that raises answers
   `{"ok": false, "error": "internal error: …"}` rather than dying
   unreplied — a client must never see a bare timeout for a query bug.
 - Consumers must ignore unknown fields (forward compatibility).
@@ -84,8 +89,11 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
 by connecting: a successful connect means a LIVE engine already serves
 this run root and the second engine refuses; a refused connect means a
 crashed run's leftover, which is unlinked and claimed. Two engines racing
-past the probe are separated by the bind itself. This probe is the *only*
-mechanism enforcing one engine per run root — see §7.
+past the probe are separated by the bind itself. The probe is not the
+election. One engine per run root is enforced by the `leader.lock` flock the
+engine takes before it opens anything (`docs/concurrency-model.md` §1,
+DL-99); this probe is cleanup of a stale socket file, and a second refusal
+door in front of it — see §7.
 
 **The version handshake** is `"v": 3` on every request (DL-90, DL-118).
 This was listed here as a known gap through v1; it closed in the same break
@@ -106,17 +114,27 @@ semantics.
  "expect": {"job:nightly": 12}, "claimed_actor": "alice@host"}
 ```
 
-The `verb` set maps 1:1 onto oracle `EventKind`. Every admitted command is
-journaled with `source=control`; the WAL is the audit trail of engine
-decisions, and no second log carries them. *(Narrowed by DL-148:)* access
-decisions at the DL-146 perimeter — admissions and denials at the
+Each `verb` names exactly one oracle `EventKind`, but the set is not the
+whole alphabet: `CHANGE_STATUS` is the wire name of `STATUS`, and `TIMER`,
+`MUST_START_ALARM` and `MUST_COMPLETE_ALARM` are the engine's own and have
+no wire door. Every admitted command is journaled with `source=control`; the
+WAL is the audit trail of engine decisions, and no second log carries them.
+A run started without a journal has no WAL and therefore no audit trail —
+the same run `subscribe` refuses in §5, and not a configuration an operator
+meets.
+*(Narrowed by DL-148:)* access decisions at the DL-146 perimeter —
+admissions and denials at the
 boundary — go to the perimeter journal (`docs/access-model.md` §6) and
 never enter the WAL.
 
 | verb | `payload` | notes |
 |---|---|---|
 | job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC` |
-| `SET_GLOBAL` | `name`, `value` (both non-empty strings) | |
+| `SET_GLOBAL` | `name` (a non-empty string), `value` (a string) | the empty string is a legal value: `v(G) = ""` is a legal condition, so an operator must be able to satisfy it |
+
+Every string a payload carries must be a **Unicode scalar string**: an
+unpaired surrogate is refused at the door, because one admitted would leave
+the estate unsealable (PR-10a, period-model §3.2).
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
 **`expect` is mandatory** (`docs/concurrency-model.md` §0). It names the
@@ -130,7 +148,11 @@ consumed, and the log says nothing about it.
 `request_id` is required. Without one a timed-out command cannot be
 retried safely, because nothing could recognise the retry as one. An
 exact retry — same id, same fingerprint — is answered from its original
-decision and takes no second index. A reused id under a *different*
+decision and takes no second index. *(Amended by DL-147:)* with an access
+map configured, that is what happens **after** the perimeter admits the
+request: admission decides under the current policy, so a caller who has
+since lost the tier is denied at the boundary before the retry route is
+reached (`docs/access-model.md` §5, §7). A reused id under a *different*
 command is refused as a collision. `expect` participates in the
 fingerprint, so the same verb at two revisions is two commands.
 
@@ -164,14 +186,17 @@ them apart from the answer alone:
 | outcome | on the wire | what happened | the caller's next move |
 |---|---|---|---|
 | applied | `ok: true` | the oracle applied it | — |
-| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the log** | fix and re-send; unchanged is safe, since it never happened once |
+| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the WAL** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, §7) | fix and re-send; unchanged is safe, since it never happened once |
 | **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Journaled, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
-| **unknown** | `ok: false`, and neither marker | no decision arrived within the window below | re-read. Retry **only** under the same `request_id` |
+| **unknown** | `ok: false`, and neither marker | admission is uncertain: no decision arrived within the window below, or a handler raised | re-read. Retry **only** under the same `request_id` |
 
 `refused: true` is therefore load-bearing in its absence: it appears on
-every `ok: false` a mutation can meet — including the shared doors, a
-malformed frame and a wrong `v` — so that the one answer without it means
-uncertainty rather than a fourth kind of no. `dsl41 sendevent` spends a
+every `ok: false` that says nothing was admitted — including the shared
+doors, a malformed frame and a wrong `v` — so that an `ok: false` carrying
+neither marker means uncertainty rather than a fourth kind of no. Two
+answers land there: the no-decision timeout below, and the internal-error
+answer of a handler that raised (§2). A client reads both as `unknown`.
+`dsl41 sendevent` spends a
 distinct exit code on each (0/2/3/4) and prints its `request_id` on
 stderr when the answer is `unknown`, which is the only thing that makes
 that retry safe.
@@ -192,6 +217,12 @@ catalog. Overwriting the store's pseudo-entity is exactly how an operator
 satisfies a cross-instance atom the sandbox cannot see. Other job verbs
 stay catalog-only — starting or killing a ghost is meaningless.
 
+Composing that command's `expect` has one corner: before the row exists,
+`status JOB^INST` **refuses**, because the name is in neither the catalog
+nor the store. A refused read is revision `0`, which is exactly what the
+conditional create names, so the bundled composer reads it that way. Once
+`CHANGE_STATUS` has invented the row, `status` answers it like any job.
+
 `status` must be one of the oracle's `JobStatus` values; the refusal
 lists them.
 
@@ -207,8 +238,43 @@ One change to `docs/concurrency-model.md` §8's routing table: which
 execution hosts take new work. `verb` is `activate` | `drain` | `evict`,
 and `payload` is `{id, force?}`.
 
-A **separate `cmd`** because the verb sets are separate things. `sendevent`'s
-map 1:1 onto oracle `EventKind`; a host verb deliberately maps onto none,
+*(Amended by DL-118, at build of period-model §2.2.)* **v3 carries a fourth
+host verb, `route`, and its query — both specified and neither built.**
+DL-118 put them in v3 beside the `seal` verb and the gap marker, and the
+shape is frozen so that two implementations cannot choose incompatible JSON
+for one fact:
+
+```json
+{"cmd": "host", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
+ "verb": "route", "payload": {"id": "<role>", "executor_id": "…"},
+ "expect": {"route:<role>": 3}, "claimed_actor": "…"}
+
+{"cmd": "routes", "v": 3, "roles": ["<role>", …]}
+→ {"ok": true, "routes": {"<role>": {"present": true, "executor_id": "…",
+    "state_rev": 3}}, …header…}
+```
+
+A remap moves one role→executor row. It is applied to the owner, carries no
+oracle event, and is **rejected** — not refused — when `executor_id` names no
+host row, because that check reads mutable state like every other one in the
+table above (period-model §3.3). `route:<role>` is the fourth `expect`
+namespace, beside `job:`, `global:` and `host:`. The `routes` query keeps the
+`hosts` query's corners: an absent role answers
+`{"present": false, "state_rev": 0}`, and omitting `roles` answers the whole
+table. The WAL record is `host: {verb: "route", id, executor_id}`, and the
+answer is the same decision shape and the same four outcomes as every host
+verb.
+
+**None of it exists today.** There is no `route` verb, no `routes` query, no
+`RuntimeState` route storage and no `route:` namespace; the shipped table is
+the one implicit row period-model §3.3 describes, projected from the single
+local executor at revision 0. The unit that adds the storage builds this
+(`docs/ha-deployment.md` §4, S8b); the wire is written here first so that
+unit implements a shape rather than inventing one.
+
+A **separate `cmd`** because the verb sets are separate things. Each
+`sendevent` verb names one oracle `EventKind`; a host verb deliberately
+names none,
 because a job's condition truth cannot depend on where its machine routes
 (DL-93). The **envelope is the same envelope**, parsed by the same
 function: §0's mandate is on externally requested mutations, not on a
@@ -228,16 +294,17 @@ whether the host is answering.
 What is refused and what is rejected divides on one line — whether the
 check reads mutable state:
 
-| refused (nothing in the log) | rejected (a decision, at an index) |
+| refused (nothing in the WAL) | rejected (a decision, at an index) |
 |---|---|
-| an unknown verb, a missing or non-string `id`, a non-boolean `force`, a bad envelope | the host is not in the table; the state forbids this verb; an `evict` whose §8 preconditions do not hold |
+| an unknown verb, a `payload` that is not an object, a missing, empty or non-string `id`, an `id` carrying an unpaired surrogate (PR-10a), a non-boolean `force`, a bad envelope | the host is not in the table; the state forbids this verb; an `evict` whose §8 preconditions do not hold |
 
-The eviction preconditions are §8's three, and the refusal reports the
-remaining wait so the operator waits rather than guesses. `force: true`
-skips them, is recorded with the caller's claimed actor on the row as well
-as in the log, and is the one path in the concurrency model that can
-produce a double run. Every one of these checks is a pure function of the
-row: replay has no live host to probe, so a gate that probed one would
+The eviction preconditions are §8's three. They read mutable state, so
+their failure is a **rejection** at an index and not a refusal, and it
+reports the remaining wait so the operator waits rather than guesses.
+`force: true` skips them, is recorded with the caller's claimed actor on the
+row as well as in the log, and is the one path in the concurrency model that
+can produce a double run. Every one of these checks is a pure function of
+the row: replay has no live host to probe, so a gate that probed one would
 decide differently the second time.
 
 ### `seal` (DL-133, period-model §2.2)
@@ -278,7 +345,11 @@ The generic v3 parser rejects a foreign `baseline_id` before it reads
 carries B1 while C2 answers under B2 — so without a dedicated route the
 exact-retry promise would be unreachable at exactly the moment it matters.
 The engine of period N+1 keeps the `seal` record it opened from and checks
-an incoming `(request_id, fingerprint)` against it first; a match is
+an incoming `(request_id, fingerprint)` against it first. That check sits
+ahead of the whole generic parser, not the baseline gate alone: a matched
+retry is answered from the record without the `expect` refusal above ever
+running, because a retry of a boundary that already committed is the same
+command whatever else rides beside it. a match is
 answered `applied` from that record, and a match on the id under a
 different envelope is a **collision**, refused. Force is an authorization
 and the actor is attribution, and neither may be swapped under a retry.
@@ -322,17 +393,22 @@ lineage proof, not the same header: no `subscribe` line — the ack, a
 refusal, a marker or a record — carries the read header (§2), and a
 subscription is not a `concurrency-model.md` §6 revision-bearing read.
 
-Every query is a **pure projection**. None mutates, none inserts a store
-row. They are safe to serve from the engine's task because `feed()` never
-yields, so a handler can never observe a half-applied event.
+Every query is a **pure projection** of (oracle, catalog, scheduler,
+outbox, spool paths). None changes protocol-visible engine state and none
+inserts a store row; `status` does refresh one private cache, the
+`spec_drift` re-hash below. They are safe to serve from the engine's task
+because `feed()` never yields, so a handler can never observe a
+half-applied event.
 
 Every §4 query answer that is answered — not the lineage refusal, not
 an internal-error answer (both headerless, §2 DL-148) — carries the
-read header in addition to the fields listed below. These are the reads an `expect` is composed from:
-per-job `state_rev` in `status`, `global`/`globals` for a named
-global, and `hosts` for a routing row. Revision-bearing reads are
-leader-only in v2 — one engine per run root *is* the leader until S6
-introduces election, and the socket probe in §2 is what enforces it.
+read header in addition to the fields listed below. These are the reads an
+`expect` is composed from: per-job `state_rev` in `status`,
+`global`/`globals` for a named global, and `hosts` for a routing row.
+Revision-bearing reads have been
+leader-only since v2 — one engine per run root *is* the leader until S6
+introduces election, and `leader.lock` is what enforces it
+(`docs/concurrency-model.md` §1).
 
 ### `status [job]`
 
@@ -352,11 +428,12 @@ without a second query; null for ghosts).
 
 `held` (DL-94) is true when the oracle started the job and this engine
 dispatched no process, because its executor routes no new effects
-(`docs/concurrency-model.md` §8). Derived, never stored. It is published
-because a held job reads RUNNING — the oracle walks a start through
-STARTING to RUNNING in one feed — so status alone cannot tell a drained
-estate from a working one, and a drain is an operation an operator has to
-be able to watch.
+(`docs/concurrency-model.md` §8). Derived from the outbox's pending SPAWN
+intents (S5c) rather than stored as a job field, so it survives a restart.
+It is published because a held job reads RUNNING — the oracle walks a start
+through STARTING to RUNNING in one feed — so status alone cannot tell a
+drained estate from a working one, and a drain is an operation an operator
+has to be able to watch.
 
 `watching` — `{file, interval, min_size}` — is present **only** for a
 live FW run. Absence of the key is itself the "not watching" signal
@@ -398,8 +475,10 @@ source texts (embedders).
 `upstream`/`globals` are split by **atom type**, never by sniffing key
 strings — a job legally named `g:x` (DL-39 escapes) would otherwise
 collide with global `x`. `downstream` comes from the oracle's
-edge-trigger index. Condition edges are not the whole blast radius of a
-box, so containment is served alongside: `box_name` upward, `members`
+edge-trigger index, which is keyed by those strings and therefore does
+inherit the collision for such a name — a limit, not a guard. Condition
+edges are not the whole blast radius of a box, so containment is served
+alongside: `box_name` upward, `members`
 downward.
 
 ### `timers`
@@ -450,7 +529,7 @@ work was declared rerouteable without proof its executor was dead (§8's
 
 ## 5. Streaming verb: subscribe
 
-`{"cmd": "subscribe", "since": <int>?}`. A subscription **owns its
+`{"cmd": "subscribe", "v": 3, "since": <int>?}`. A subscription **owns its
 connection** until hangup, so a client opens a separate connection for it.
 
 The server answers `{"ok": true, "subscribed": true}`, then streams
@@ -464,11 +543,13 @@ Delivery guarantees, exactly as implemented:
   backfill/live seam. The seam is sampled *before* the ack is written,
   because a record appended during the send would otherwise be skipped as
   "covered" despite never being backfilled.
-- unsequenced records (`dispatch`, `drop`, `decision`, `effect_result`) are
-  **at-least-once** inside the backfill race window. `decision` carries its
-  attempt's number under `index` rather than `seq` for exactly this
-  reason: two records sharing one cursor value would leave the second
-  undeliverable to a resuming subscriber (DL-89).
+- every other record kind carries no `seq` and is **at-least-once** inside
+  the backfill race window: `dispatch`, `drop`, `decision`, `effect_result`
+  and `seal` on the live stream, plus `segment`, `leader` and `preflight`,
+  which a backfill can carry but which no live subscription meets.
+  `decision` carries its attempt's number under `index` rather than `seq`
+  for exactly this reason: two records sharing one cursor value would leave
+  the second undeliverable to a resuming subscriber (DL-89).
 - `since` cuts positionally: everything after the last record whose seq is
   at or below it.
 
@@ -498,10 +579,15 @@ is the first index the oldest retained segment may allocate. A physical
 roll is the reachable case: the new root holds the seal it opened from and
 none of the closing period's WAL, by design (period-model §1.3), so a
 subscriber resuming there cannot be given what it asked for and is told
-so. Index 1 is the first index there is, so a cursor at or below 0 is
-never a gap. A client that does not read the marker sees an ordinary
-record it does not recognise and skips it, which is what it already does
-with any record kind it has no case for. The marker is a response like any
+so. The rule is exact: a marker goes out when no retained segment holds the
+cursor **and** `max(since, 0) < earliest_retained - 1`. A cursor at
+`earliest_retained - 1` is contiguous with what the root holds and gets
+none; one below it is missing a record and gets one. A negative cursor
+reads as 0, so on a root that still retains from index 1 no cursor is ever a
+gap — but on a rolled root `since: 0` is one. A client that does not read
+the marker sees an ordinary record it does not recognise and skips it, which
+is what it already does with any record kind it has no case for. The marker
+is a response like any
 other, so the leader re-proves the lineage in front of it (PR-03).
 
 **The backfill can now refuse on the stream.** It reads files this
@@ -531,22 +617,24 @@ multihost track (`docs/decision-log.md` DL-78) has to address each one.
 
 1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2); v3 since
    DL-118.
-2. **No authentication or authorization.** The socket's `0600` mode plus
-   filesystem ownership is the entire access-control model. Any process
-   running as the invoking user has full `sendevent` authority. This is
-   the §12 RBAC non-goal made concrete, and it is why the envelope's
-   actor field is named `claimed_actor`: the log records an assertion, and
+2. **No authentication or authorization — on an estate with no access
+   map.** There the socket's `0600` mode plus filesystem ownership is the
+   entire access-control model, and any process running as the invoking
+   user has full `sendevent` authority. That was the §12 RBAC non-goal
+   made concrete, and it is why the envelope's actor field is named
+   `claimed_actor`: the log records an assertion, and
    `docs/concurrency-model.md` §6's "the leader stamps the authenticated
-   principal" waits on a leader that can authenticate one.
-   **Closing (DL-146):** authorization and *local* authentication close
-   with `docs/access-model.md` — kernel peer credentials, one
-   principal→tier map, a closed verb table gated in `_handle`, denials
-   answered in the existing `refused` vocabulary with receipts in a
-   perimeter journal. No envelope change. The web session's per-user
-   identity stays open under the named seam `web-session-principal-v2`
-   (access-model §9).
+   principal" waited on a leader that could authenticate one.
+   **Closed for a configured estate (DL-146):** authorization and
+   *local* authentication close with `docs/access-model.md` — kernel
+   peer credentials, one principal→tier map, a closed verb table gated
+   in `_handle`, denials answered in the existing `refused` vocabulary
+   with attempted receipts in a perimeter journal. No envelope change.
+   The web session's per-user identity stays open under the named seam
+   `web-session-principal-v2` (access-model §9).
 3. **Unix-domain only.** No network transport, so the single-engine
-   guarantee rests on a local `bind()`. A non-local controller would need
-   both a transport and a replacement for that guarantee.
+   guarantee rests on a local `flock` and a local `bind()`. A non-local
+   controller would need both a transport and a replacement for that
+   guarantee.
 4. **Errors are prose, not codes.** Fine for a human at a terminal and for
    the TUI; a programmatic client cannot branch on them reliably.

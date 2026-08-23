@@ -1,29 +1,30 @@
 # HA deployment — the second host and the second site
 
-`docs/concurrency-model.md` §1 ends with a sentence this document begins at:
+`docs/concurrency-model.md` §1 closes on a paragraph this document begins at:
 *"Where it stops is one host."* Everything frozen there — the invariant, the
 identity model, admission, effects, the takeover barrier, host lifecycle — holds
 unchanged. What was missing was a store that two machines can share and a reason
-to build the relay. A real deployment supplies both.
+to build the relay. A paired-site deployment supplies both.
 
 Status: **plan, not frozen.** Sections marked *frozen* below are frozen by the
 documents they cite, not by this one. This document becomes normative when its
 DL entries land.
 
-**Reconciled 2026-08-20 with `docs/period-model.md`** (converged after 33
-adversarial rounds; the mechanism for periods, seals, the lineage fence and the
-optional run root). Where this document and period-model disagree, period-model
-wins. The specific amendments it required here are marked *(period-model)*.
+**Reconciled 2026-08-20 with `docs/period-model.md`** (the mechanism for
+periods, seals, the lineage fence and the optional run root). Where this
+document and period-model disagree, period-model wins. The specific amendments
+it required here are marked *(period-model)*.
 
 ## 0. Scope
 
-The target estate runs **N booking centers**. Each center schedules an isolated
-graph — no job in one center depends on a job in another. Centers sit at
-different UTC offsets. The client already operates BCM/BCP site switching, and
-the authoritative database is replicated and highly available.
+The target deployment runs **N booking centers**. Each center schedules an
+isolated graph — no job in one center depends on a job in another. Centers sit
+at different UTC offsets. Two properties are assumed of the environment: site
+switching is already operated, and the authoritative database is replicated and
+highly available.
 
 The bare requirement: all graph input data is present at primary and standby,
-the primary executes the graph, the database is replicated, and a BCM switch
+the primary executes the graph, the database is replicated, and a site switch
 moves execution to the standby.
 
 What this document adds to the frozen model is exactly one concept — **role** —
@@ -45,7 +46,8 @@ Consequences worth stating because they are load-bearing:
 - Time domains stay per-estate. The SEM-35 timezone ladder and the resume
   gate's clock-domain check already carry this; a globally-spread estate does
   not need a global clock.
-- A center's outage is a center's outage. Nothing about it is estate-wide.
+- A center's outage is a center's outage. It reaches no other center, because
+  "estate" in this document is one center's, never the deployment's.
 
 ## 2. Leadership — infrastructure election, application term
 
@@ -58,7 +60,7 @@ The correct split:
 
 | concern | owner |
 | --- | --- |
-| which database copy is writable | the client's HA layer (BCM promotion) |
+| which database copy is writable | the deployment's HA layer (database promotion) |
 | which engine leads this estate | dsl41's per-estate term |
 
 Database promotion may *trigger* a takeover. It does not *decide* one.
@@ -79,18 +81,23 @@ The epoch is allocated *by being appended*, exactly as the flock implementation
 allocates it today (concurrency-model §7's worked example) — the mechanism
 changes, the rule does not.
 
-*(period-model)* **Two things this statement lacks.** It has no incumbent
+*(period-model)* **Three things this statement lacks.** It has no incumbent
 guard — a standby rebooting after OS patching runs it, bumps the epoch and
 fences a healthy primary; `ops-model.md` §4 takes this up (boot as a follower;
-leadership is an explicit act). And it has no **lineage-head predicate**:
-period-model §1.3 makes the store, when it arrives, the sole authority for both
-the estate term *and* the lineage head — one transaction consumes
-`expected_head_digest`, advances the head to the opening period and allocates
-the term. The file-substrate anchor it replaces must not survive beside it; two
-leadership truths is the failure mode. ACQUIRE therefore also carries
+leadership is an explicit act). It compares only `catalog_hash` and
+`state_machine_version`, and period identity is
+`(catalog_hash, runtime_hash, state_machine_version)` (period-model §2.1) — the
+shipped resume path already refuses on runtime drift before it appends the
+leader record (`runner_startup.py:701`), so ACQUIRE carries
+`AND runtime_hash = :runtime_hash` too. And it has no **lineage-head
+predicate**: period-model §1.3 makes the store, when it arrives, the sole
+authority for both the estate term *and* the lineage head — one transaction
+consumes `expected_head_digest`, advances the head to the opening period and
+allocates the term. The file-substrate anchor it replaces must not survive
+beside it; two leadership truths is the failure mode. ACQUIRE therefore also carries
 `AND lineage_head = :expected_head` when S8a lands.
 
-**Every admission** — one transaction, in this order:
+**Every admission** — the order, sketched as one transaction:
 
 ```sql
 -- 1. dedup FIRST: recover an exact retry even after its epoch was superseded
@@ -113,6 +120,17 @@ separate `_write` calls, each fsyncing independently. DL-118's atomic
 `decision` record closed the live violation (CM-17); S8a carries the same
 requirement onto the shared store.
 
+**One open point in that sketch.** Frozen §4 admits over **two** atomic
+appends, not one. The input attempt commits first (§4 step 4, publishing
+`command_committed` — the envelope is durable, a decision is not), and the
+apply result with its revisions and outbox rows commits after (§4 step 7). The
+shipped engine does exactly that: `journal.admit(attempt)` fsyncs before apply
+(`runner.py:1368`), and `test_pr35_decision_and_effects_commit_together` pins
+the boundary. The block above shows one transaction, which would drop that
+intermediate durable state and the event that publishes it. S8a must either
+keep the two commits or state why the store may collapse them. This document
+does not decide it.
+
 Dispatch re-checks the term, and the relay rejects any dispatch carrying an
 epoch below the highest it has seen (concurrency-model §7, frozen).
 
@@ -127,8 +145,9 @@ epoch below the highest it has seen (concurrency-model §7, frozen).
 - A stale *status* read is survivable — the server-side CAS rejects the write it
   would have justified. A stale *leader* read is not, and must never be served
   from a replica.
-- A lost commit response is retried with an identical `request_id` and identical
-  bytes, never as a new request.
+- A lost commit response is retried with the same `request_id` and the same
+  semantic envelope — the fingerprint's own scope, transport framing excluded
+  (concurrency-model §6) — never as a new request.
 
 **The limit, stated rather than discovered.** A partitioned old master can keep
 accepting writes, and its `estate_control` row advances independently of the
@@ -164,7 +183,7 @@ Promotion is unsafe if the promoted copy did not acknowledge the safety
 transaction, or completes before replaying the acknowledged WAL position, or if
 an outbox row, route change, host generation or checkpoint is missing from it.
 
-Whether the client's estate can provide this is E14, and it gates §8's S8e.
+Whether a deployment can provide this is E14, and it gates §8's S8e.
 
 ## 4. Affinity — the role is the only new concept
 
@@ -173,18 +192,26 @@ anything that resolves elsewhere (`runner_preflight.py:363`). Under site
 failover the physical host changes, so the binding must move up one level.
 
 - The catalog names a **logical role**. It is IR-F content, so the catalog hash
-  covers it (`runner_journal.py:76`) and operational remapping does not change
-  the hash — a remap is not a re-baseline.
+  covers it (`catalog_hash_v2`, `period.py:136`) and operational remapping does
+  not change the hash — a remap is not a re-baseline.
 - A **route table** maps role → `executor_id`, revised under epoch/CAS like
   any other authoritative row. *(period-model §3.3)*: the row is
   `RouteRuntime {executor_id, state_rev}`, owned by `RuntimeState`, addressed
   by the `route:<role>` `expect` namespace, remapped by the `host` cmd's
   `route` verb, and **carries no generation** — the generation is the host
-  row's, read at effect birth. An earlier draft put a generation on the route
-  and then needed four review rounds to define what a *stale* route meant; the
-  answer was always "the evicted-host case", which §8 of the concurrency model
-  already owns. It is carried across a seal as authoritative state and is not
-  part of period identity (`runtime_hash`): a remap is not a re-baseline.
+  row's, read at effect birth. A generation on the route would make a *stale*
+  route something this spec has to define, and the only answer is "the
+  evicted-host case", which §8 of the concurrency model already owns. It is
+  carried across a seal as authoritative state and is not part of period
+  identity (`runtime_hash`): a remap is not a re-baseline. Half
+  of this row exists today — `seal.RouteRuntime` and `implicit_routes`, one
+  route projected from the single executor (`seal.py:202`, `seal.py:217`). The
+  rest is ruled but neither written down nor built: DL-118 and period-model §15
+  put the `route` verb and the `routes` query in control-protocol v3, and
+  `control-protocol.md` still lists only `activate | drain | evict` and no
+  `routes` query. S8b amends that document, then builds the `RuntimeState` row
+  and the fourth `expect` namespace — three namespaces exist today
+  (`oracle_state.py:431`).
 - **Resolution happens inside the effect-intent transaction** (§2 step 3), not
   at dispatch: `executor_id` from the route, `generation` from the host row's
   current value, and — since period-model lifts DL-96's deferral — `run_id`
@@ -205,17 +232,16 @@ host rows), the **supervisor protocol** (it accepts a fully resolved
 `{job, run_number, command, run_id}` and knows nothing of roles), and the
 **wrapper** (stdlib-only, DL-72). No block is opened to add this.
 
-What must change, and was understated in earlier drafts: `runner_hosts.py:30`
-holds one local executor and routes everything to it, and
-`plan_effects()` takes one engine-wide `executor_id` rather than resolving per
-job (`runner_effects.py:184`).
+What must change: `runner_hosts.py:30` holds one local executor and routes
+everything to it, and `plan_effects()` takes one engine-wide `executor_id`
+rather than resolving per job (`runner_effects.py:290`).
 
 ## 5. Uncertainty — derived, never a status
 
 A job whose executor is unreachable has three indistinguishable fates: it
-finished and we did not hear; it is stuck; it finished without recording. From
-outside they are one class — **the outcome is unknown** — so they get one
-mechanism, not three.
+finished and the engine did not hear; it is stuck; it finished without
+recording. From outside they are one class — **the outcome is unknown** — so
+they get one mechanism, not three.
 
 **No new `JobStatus` member.** An `UNKNOWN` status would reopen condition truth,
 `n()`, box folds, resource accounting, timers and subsequent schedule ticks —
@@ -238,9 +264,9 @@ Instead:
   input.
 
 Note that `outcome_unavailable` is *not* this. It is an effect-result answer for
-an indeterminate KILL (`runner_effects.py:159`), and for that case the oracle has
-already moved the job terminal before the shell attempts the kill
-(`runner.py:869`). The two must not be conflated.
+an effect whose outcome is indeterminate (`runner_effects.py:265`), and in the
+KILL case the oracle has already moved the job terminal before the shell attempts
+the kill (`runner.py:1557`). The two must not be conflated.
 
 **Hold-forever is a safe default, not an operating procedure.** A booking center
 runs against a cutoff. So S8c ships a **cutoff report** — the bounded set of
@@ -265,22 +291,24 @@ suppression and exception routing. Everything short of it — role lookup,
 fencing, quarantine, evidence reconciliation, an explicit operator statement —
 is an infrastructure boundary rather than scheduling policy.
 
-Also not built: cross-site coordination of any kind; snapshots (§8 ships cold
-full replay, and snapshots arrive only if a *measured* takeover time demands
-them); whole-graph re-baselining as a failover mechanism; and *(period-model
-§12)* the **multi-root execution bridge** — a physical roll of the run root
-while jobs are live, which would need each live run's old supervisor endpoint
-and spool root carried until it drains. That is a different thing from the
-snapshots declined above: period-model's seal already bounds replay, so the
-"cold full replay" of S8e becomes replay from the latest seal, and the bridge
-is what would lift the quiescence a physical roll still requires.
+Also not built: cross-site coordination of any kind; snapshots (§8 ships replay
+from the latest seal, and snapshots arrive only if a *measured* takeover time
+demands them); whole-graph re-baselining as a failover mechanism; and
+*(period-model §12)* the **multi-root execution bridge** — a physical roll of
+the run root while jobs are live, which would need each live run's old
+supervisor endpoint and spool root carried until it drains. That is a different
+thing from the snapshots declined above: period-model's seal already bounds
+replay, so S8e replays from the latest committed seal — or from genesis in
+period 1, before any seal exists (period-model §11) — and the bridge is what
+would lift the quiescence a physical roll still requires.
 
 That last one deserves its reason. Re-baselining at the standby is
 implementation-cheap and looks attractive because all input data exists at both
 sites — but inputs being present does not make outputs idempotent, and the
-frozen §6 procedure it would reuse assumes quiesced triggers, drained work and
-no surviving detached process (`deployment-runbook.md:159`). A network partition
-denies all three facts. **Cold replay-and-hold preserves everything known and
+§6 rollout window it would reuse assumes quiesced triggers, drained work and no
+surviving detached process (`deployment-runbook.md` §6, "The window, in order",
+steps 1-4). A network partition
+denies all three facts. **Replay-and-hold preserves everything known and
 leaves only the concurrently-active set for a human**, which is the smaller
 problem and the one an operator can actually work under a cutoff.
 
@@ -298,28 +326,30 @@ House convention: tests named `test_cmNN_*`, continuing the frozen §9 series.
 | --- | --- |
 | CM-15 | the term fences: an engine whose epoch was superseded allocates no index (zero rows) and stops before the work, not after it |
 | CM-16 | dedup precedes the term check: a retry carrying the original `request_id` returns the original decision even after its epoch was superseded |
-| CM-17 | result and outbox commit atomically — no crash exposes one without the other (closes the live violation in §2) |
+| CM-17 | result and outbox commit atomically — no crash exposes one without the other. Closed on the file substrate by DL-118; S8a must keep it on the store |
 | CM-18 | a role remap does not move an existing effect: a re-driven effect keeps its birth `{executor_id, generation}` |
 | CM-19 | preflight refuses a role resolving to zero or to more than one eligible executor, and refuses two sites claiming one role |
 | CM-20 | a job whose bound executor is quarantined without evidence projects `outcome_unknown`, holds its resources, and satisfies nothing downstream |
 | CM-21 | evidence from a returned host resolves the unknown to the *recorded* terminal status, never to a default |
 | CM-22 | operator resolution is recorded with principal, verdict and reason, and replays identically |
-| CM-23 | no `(job, run_number)` runs twice across a site takeover — the remaining half of CM-14 |
+| CM-23 | no `(job, run_number)` runs twice across a site takeover, except after an attributed break-glass eviction — the remaining half of CM-14, carrying the `evict --force` opt-out concurrency-model §8 already documents |
 
 ## 8. Stage order
 
 ```
 S8a  store: schema, per-estate term/CAS, atomic safety transaction.
-     Replaces flock. SINGLE HOST — no behaviour change, proves the store.
+     Takes the TERM off the flock; the run root keeps its own lock
+     (ops-model §4a.1). SINGLE HOST — the graph runs unchanged.
 S8b  role indirection: route table, resolution inside effect intent,
      preflight rewrite. Still single host.
 S8c  uncertainty: derived projection, operator resolution verb, cutoff report.
      Still single host.
-S8d  relay: principals, epoch/generation fencing, run_id bound into the
-     committed effect before the attempt. The second host appears.
-S8e  site takeover: replay from the latest seal against the store
-     (period-model §11; "cold full replay" is superseded); CM-23 over the
-     proving ground.
+S8d  relay: principals, epoch/generation fencing. The second host appears.
+     `run_id` is already bound into the committed effect (DL-118/DL-121);
+     the relay carries that identity rather than minting one.
+S8e  site takeover: replay against the store from the latest committed seal,
+     or from genesis in period 1 before any seal exists (period-model §11);
+     CM-23 over the proving ground.
 S8f  process tier: two-site partition experiments against real processes.
 ```
 
@@ -329,9 +359,11 @@ prerequisite of S8e — not of S8a–S8d — because a takeover that replays fro
 genesis would be rebuilt the day the seal lands.
 
 The order is deliberate and is DL-97/DL-103's own reasoning applied again:
-**everything provable on one host is proved before a second host exists.** S8a
-through S8c change no observable behaviour and are individually testable; only
-S8d needs a machine that does not exist yet.
+**everything provable on one host is proved before a second host exists.** None
+of S8a, S8b and S8c changes how the graph runs. Each changes an operator
+surface: where the term lives, what preflight checks, what the cutoff report
+says. All three are individually testable on one machine; only S8d needs a
+machine that does not exist yet.
 
 §9's guardrail governs S8f: an unspecified chaos test is a flake generator, so
 each experiment names its obligation, its fault and its pass criterion, or it is
@@ -343,26 +375,28 @@ not written.
 | --- | --- |
 | concurrency-model §0 | qualify the safety sentence — `evict --force` is a documented opt-out that can double-run |
 | concurrency-model §1 | "where it stops is one host" superseded by S8a; the five capabilities gain the concrete SQL of §2 |
-| concurrency-model §2 | `run_id` bound into the committed effect before the attempt; the local exception ends with the relay |
+| concurrency-model §5 | done: DL-118 bound `run_id` into the committed effect before the attempt and closed DL-96's local exception ahead of any relay. S8d carries that committed identity over the relay unchanged |
 | concurrency-model §7 | the relay's stated trigger — a second execution host — has fired |
 | concurrency-model §9 | CM-14's remaining half; the series extends past CM-14 |
 | concurrency-model §10 | S8 added |
-| deployment-runbook §0 | scope gains the paired-site deployment beside the single host |
-| citation-index | `CM-\d{2}` range → CM-01–CM-23; the stage row needs both a range bump (S0–S8) and a regex widening — `S\d[a-d]?` does not match `S8e`/`S8f` |
-| supervisor dedup | SPAWN is deduplicated by `run_id` today (`runner_supervisor.py:602`); the frozen model keys on `effect_id`. Fixed in S8d — and *(period-model §11a)* made durable: directory-backed, `run_id`-indexed, outliving `LIST` and supervisor restart |
+| deployment-runbook, scope preamble | scope gains the paired-site deployment beside the single host |
+| citation-index | done: `CM-\d{2}` covers CM-01–CM-23, and the stage row is `S\d[a-f]?` over S0–S8f |
+| supervisor dedup | done: *(period-model §11a)* froze `run_id` as the supervisor's idempotency key and made the store durable — directory-backed, `run_id`-indexed, outliving `LIST` and supervisor restart (`runner_supervisor.py:714`). `effect_id` stays the outbox's dedup identity (concurrency-model §5). The two keys name different things, so there is nothing left to reconcile |
 | `docs/period-model.md` | its §15 lists every amendment the period model makes to the frozen contracts; this document inherits the `ha-deployment.md` rows of that table |
 
 ## 10. Decision-log entries this implies
 
-Proposed, not yet appended. *(DL-113 was taken by run history; period-model §10
-and this list both renumber when appended — read the numbers as an order.)*
+Proposed, not yet appended. The numbers this list first carried — DL-113 to
+DL-118 — were taken by run history and by the period model, and DL-118 is cited
+in §2 with its landed meaning. Read the list as an order. Each entry takes the
+next free number on the day it lands.
 
-- **DL-113** — HA topology is N independent per-estate pairs; no cross-site consensus.
-- **DL-114** — leadership is infrastructure election *plus* an application term; write access is not leadership.
-- **DL-115** — RPO=0 per safety transaction is the portable durability requirement; table-scoped synchrony is not available.
-- **DL-116** — affinity binds to a role resolved inside the effect-intent transaction; role is the only new concept.
-- **DL-117** — outcome uncertainty is a derived projection, never a `JobStatus` member.
-- **DL-118** — no automatic timeout-driven reroute; the boundary between infrastructure and scheduling policy stated.
+1. HA topology is N independent per-estate pairs; no cross-site consensus.
+2. Leadership is infrastructure election *plus* an application term; write access is not leadership.
+3. RPO=0 per safety transaction is the portable durability requirement; table-scoped synchrony is not available.
+4. Affinity binds to a role resolved inside the effect-intent transaction; role is the only new concept.
+5. Outcome uncertainty is a derived projection, never a `JobStatus` member.
+6. No automatic timeout-driven reroute; the boundary between infrastructure and scheduling policy stated.
 
 ## 11. Open questions
 
@@ -373,11 +407,14 @@ Continuing the runner E-series (`docs/runner-design.md` §15).
   Deployment requirement, not code.
 - **E13** — cutoff-report semantics. What does the operator see, and is bulk
   resolution scoped per graph or per job?
-- **E14** — does the client's database actually offer RPO=0 to every
-  promotion-eligible standby? Gates S8e. Client question.
-- **E15** — relay principal naming, issuance and rotation. Unchanged from
-  concurrency-model §7; it wanted one real deployment to answer it, and now has
-  one.
+- **E14** — does the target database offer RPO=0 to every promotion-eligible
+  standby? Gates S8e. Deployment question, not code.
+- **E15** — relay principal naming, issuance and rotation. Open from
+  concurrency-model §7, which wants one real deployment to answer it.
+  *(DL-146)* `docs/access-model.md` has since fixed the principal's shape
+  — `(realm, name, groups)`, authenticated at accept — and named the **asserted
+  principal** as the seam a non-local transport would use (§11 there). E15 owns
+  the remote half of that seam: realm and name policy, issuance, rotation.
 - *(period-model §16)* **PR-Q5** is this document's to answer: the local
   anchor is a single-site fence, and the paired-site deployment gets its
   lineage authority only from the S8a store.

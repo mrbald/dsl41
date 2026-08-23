@@ -3,17 +3,19 @@
 Status: draft v0.1 · verified against docs.stonebranch.com /
 Stonebranch Confluence (UC 7.2–7.9) where noted
 Companion to `autosys-semantics.md`. Same confidence markers: **[V]** verified · **[C]**
-corroborated · **[F]** one unverified field observation (defined in the companion; unused
-here) · **[?]** pin against a live UC instance (most [?] items resolve with
-`/resources/openapi.json` and a test workflow).
+corroborated · **[F]** one unverified field observation (both defined in the companion; both
+unused here) · **[?]** pin against a live UC instance (most [?] items resolve with
+`/resources/openapi.json` and a test workflow). A composite marker such as **[V/?]** means the
+entry is verified as far as it goes and the named residue is open.
 
 ---
 
 ## Part I — UC semantics (UCS entries)
 
-## 0. Execution model
+## 0. Execution model (UCS-0)
 
-UC's model is the near-inverse of AutoSys:
+UC's model is the near-inverse of AutoSys. Code and decision-log citations of `UCS-0` point
+here:
 
 - **Task** = unit of work (typed: Windows/Linux, Universal, SQL, File Monitor, Timer, Manual,
   Email, z/OS, and more). Tasks are standalone definitions. The same task can appear in
@@ -33,15 +35,20 @@ UC's model is the near-inverse of AutoSys:
 Each edge (predecessor → successor) carries a condition: **Success**, **Failure**,
 Success/Failure (that is, done), and optionally a **variable condition expression** (first
 value / operator / second value, resolved at evaluation time). Separate conditional paths per
-outcome are the idiom for branch logic. Only straight edges exist — no boolean algebra on
-edges. Multiple incoming edges express conjunction (AND). For disjunction, see UCS-03.
+outcome are the idiom for branch logic. An edge is a plain binary link — no boolean algebra on
+edges. Multiple incoming edges express conjunction (AND). For disjunction, see UCS-03. Do not
+read that as geometry: UC supports bend points, and the record field `straightEdge` is the
+separate, cosmetic statement that an edge is drawn straight.
 
 ### UCS-02 · Skip propagation **[V]**
 When a predecessor finishes, edges whose condition does not match put their successor paths
 into **Skipped**. Rules (verified verbatim semantics):
-- If ALL immediate predecessors of a task are Skipped, the task is Skipped (skip cascades).
-- If at least one immediate predecessor ran to completion and its edge condition matches,
-  the successor runs — **skipped predecessors do not block it**.
+- If ALL of a task's incoming edges resolve as skipped, the task is Skipped (skip cascades).
+  An edge resolves skipped when its condition did not match, so a predecessor that FAILED
+  skips its Success edge without itself being Skipped.
+- Otherwise the successor runs once every incoming edge has resolved and at least one of them
+  matched — **skipped predecessors do not block it**. A still-pending edge holds the join; a
+  matching edge does not start the successor early.
 So UC's default join is: "AND over non-skipped incoming edges, skip if everything skipped."
 
 ### UCS-03 · Join semantics — the OR problem **[V/?]**
@@ -135,6 +142,12 @@ workflow exists through the API. Operational mapping for runbooks: sendevent ↔
   vertex and edge lists. API operations address vertices by task name (ambiguous-name and
   missing-name operations fail loudly with defined errors **[V]**).
 - Bulk import/export exists for whole-controller definition sets.
+- UC name constraints (charset, length, case sensitivity) are NOT documented — searched, not
+  found (DL-55 item 4). Task names and box-derived workflow names pass through verbatim, and
+  an invalid one fails at create time; only a loose-component workflow gets a synthesized
+  name, `wf_<first task>`. The linter takes the conservative reading of the undocumented
+  part: two JIL names that differ only in case may address one UC task, so L014 refuses them.
+  Extend that rule only if the U3b live pull reveals a real constraint.
 **IR consequence:** the UC backend compiles Layer-G graphs to these record sets. *(Decided,
 DL-55: names are the primary keys — vertices reference tasks by name verbatim, task names are
 catalog-unique so each appears once per workflow. Records pin `retainSysIds: false` and omit
@@ -149,31 +162,42 @@ re-expressed — never silently to plain edges.
 
 ## Part II — AutoSys → UC mapping table
 
-Legend: **E** exact · **A** equivalent under stated assumption · **R** redesign required
-(no faithful translation — the compiler must emit a `needs-human` item) · each A/R row is a
-linter rule and a migration-report entry.
+Legend: **E** exact · **A** equivalent under stated assumption · **R** redesign required (no
+faithful translation — the compiler refuses the construct and emits a redesign item in the
+migration report instead; `cls="redesign"` in the code, "Refused constructs" in the report).
+
+A slashed class (**A/R**, **E/A**) means the row splits by case. Where the Notes column names
+a discriminator the classifier applies it, and every derived edge then carries exactly ONE
+class. Rows without an implemented discriminator keep the slash as a statement of what the
+migration can cost — M12, for one, produces an OR-shape record with a suggested lowering
+instead of an edge class (U1-gated), and M17 has no derived item at all.
+
+Every A/R row that becomes a derived edge becomes a migration-report entry. The non-edge
+entries the report carries are M07, M12, M24, M27 and M33; a row outside both sets has no
+report path. Only six rows also have a dedicated linter rule — L008 (M16), L009 (M01/M02), L012 (M07), L016
+(M34), L018 (M24), L019 (M02). The rule inventory is `ir-design.md` §9.
 
 | # | AutoSys construct (SEM) | UC target | Class | Notes / assumption |
 |---|---|---|---|---|
-| M01 | `s(A)` within one stream, producer+consumer same schedule cycle (SEM-01) | edge A→X (Success) | **A** | Assumption: no reliance on cross-run staleness. Detector: producer and consumer share one derived subgraph + one trigger cadence |
-| M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | Time Scope has no documented maximum (U5 resolved, DL-53), but it is launch-relative and retention-bound — the anchoring still differs from an indefinite latch. Flag each |
-| M03 | `s(A, hhhh.mm)` lookback (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Window anchoring differs per case. Zero-lookback (Q2a, DL-54) anchors to the consumer's own last end — relational, NO fixed Time Scope expresses it. Flag every use |
+| M01 | `s(A)` within one stream, producer+consumer same schedule cycle (SEM-01) | edge A→X (Success) | **A** | Assumption: no reliance on cross-run staleness. Detector (DL-12): the same top-level box, or — when BOTH jobs are unboxed — one derived trigger cadence. Two identically scheduled boxes are two UC workflows, so a cadence collision alone is not one stream |
+| M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | A when the producer exists: Time Scope has no documented maximum (U5 resolved, DL-53), but it is launch-relative and retention-bound — the anchoring still differs from an indefinite latch. Flag each. R when the producer is not defined in the compilation set (DL-12): the atom is permanently false (SEM-06), latching cannot be assessed, and L001 carries the loud error |
+| M03 | any lookback-qualified local atom in `condition` — `s(A, hhhh.mm)` and the same shape on `f`/`d`/`t`/`n`/`e` (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Within `condition`, and for a producer the set defines, the lookback decides the row before the atom kind does. An undefined producer is M02 first; a lookback under a box override is M15 or M16 first. Window anchoring differs per case. Zero-lookback (Q2a, DL-54) anchors to the consumer's own last end — relational, NO fixed Time Scope expresses it. Flag every use |
 | M04 | `f(A)` | edge A→X (Failure) | **E** | within-run |
 | M05 | `d(A)` | edge A→X (Success/Failure) | **E** | within-run |
-| M06 | `t(A)` | Failure-ish: UC Cancelled/Failed distinction | **A** | UC separates Cancelled from Failed. Choose the mapping and document it |
-| M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource | **A** | NOT an edge. Detector: `n()` atoms → mutex candidates. DL-54 softened: under SEM-32 arm-and-wait a *scheduled* n() job queues until the peer completes — this converges with UC's ExclusiveWait (P-M07 now pins alignment at milestone level, divergence only under the superseded abandon reading). Residual ordering divergence: in AutoSys, several armed jobs that wait on one peer wake in catalog order, but UC releases ExclusiveWait FIFO by arrival — flag when >1 waiter shares a peer |
+| M06 | `t(A)` | Failure-ish: UC Cancelled/Failed distinction | **A** | UC separates Cancelled from Failed. Decided (DL-16/DL-55): `t()` gets its own `cancelled` edge condition in the twin, and a `failure` edge does NOT fire on Cancelled. The base record schema has no Cancelled wire token, so such an edge quarantines its whole workflow at emission (`docs/uc-edge-schema.md`) |
+| M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource; `n(self)` → Instance Wait | **A** | NOT an edge. Detector (DL-12): a LOCAL UNQUALIFIED `n()` in `condition` becomes a mutex candidate PAIR. A lookback-qualified `n()` stays an edge (M03), and so does an `n()` under a box override or naming a cross-instance job — it is a completion predicate there, not a start gate. `n(self)` is a one-element group. DL-54 softened: under SEM-32 arm-and-wait a *scheduled* n() job queues until the peer completes — this converges with UC's ExclusiveWait (P-M07 now pins alignment at milestone level; the abandon reading it used to diverge under is retired, DL-58). Residual ordering divergence: in AutoSys, several armed jobs that wait on one peer wake in catalog order, but UC releases ExclusiveWait FIFO by arrival — flag when >1 waiter shares a peer |
 | M08 | `exitcode(A) op k` (SEM-02) | edge variable condition on exit-code variable, or task-level exit-code→status mapping | **A** | mechanism pinned (U4 resolved, DL-53): per-task "Exit Code Processing" field, default method Success Exitcode Range. The exit-code range value itself is required, with no documented default — record the configured range per task in the report |
-| M09 | `value(G) op k` (SEM-08) | edge variable condition / Variable Monitor trigger | **A** | Re-eval-on-set: AutoSys re-evaluates on the SET_GLOBAL event, UC edge conditions evaluate at predecessor completion — the timing differs. If the JIL used globals as async gates, classify as R |
+| M09 | `value(G) op k` (SEM-08) | edge variable condition / Variable Monitor trigger | **A** | Re-eval-on-set: AutoSys re-evaluates on the SET_GLOBAL event, UC edge conditions evaluate at predecessor completion — the timing differs. A global in `condition` is always A at the edge; a global in `box_success`/`box_failure` is M16/R instead. A global has no producer vertex, so the twin attaches ONE usable variable gate to the consumer's incoming edges and records the rest — a consumer with no compiled predecessor edge, a gate that reaches only some paths, a second global on the same consumer — as an exclusion that names the redesign. A JIL that used globals as async gates lands there |
 | M10 | `$$VAR` substitution (SEM-08) | `${var}` resolution | **A** | Resolution timing + UCS-08 ordering property |
 | M11 | AND `&` | multiple incoming edges | **E** | with UCS-02 skip caveat |
 | M12 | OR `\|` | conditional-path restructure / Task Monitor / duplication (UCS-03) | **A/R** | per-case lowering decision — the hard compiler problem |
 | M13 | box, members with no conditions (SEM-10) | workflow, parallel start vertices | **E** | |
-| M14 | box with member conditions (SEM-10) | workflow with edges | **A** | assumes member conditions reference siblings. Conditions that reference jobs *outside* the box → M02 |
-| M15 | box_success/box_failure internal ref (SEM-12) | restructure: terminal vertex placement / workflow status by path design | **A/R** | early-exit semantics needs explicit Skip paths |
+| M14 | box with member conditions (SEM-10) | workflow with edges | **A** | assumes member conditions reference siblings. A member's unqualified `s()` naming a job outside its top-level box → M02. Other atom kinds keep their own row (M03–M08); the twin's cross-workflow gate is what catches them, and it excludes them by record |
+| M15 | box_success/box_failure internal ref (SEM-12) | restructure: terminal vertex placement / workflow status by path design | **A** | early-exit semantics needs explicit Skip paths. Membership is transitive (SEM-12 "inside"), so any descendant lands here; a non-member, global or cross-instance reference is M16 instead |
 | M16 | box_success external ref, hung-RUNNING gate (SEM-12) | — | **R** | no analog — redesign (this is a bug-as-feature pattern) |
 | M17 | box_terminator/job_terminator (SEM-14) | task-level failure handling + workflow Cancel actions | **A/R** | UC has no auto "kill siblings on my failure" edge. Emulate with actions/monitors — per-case |
-| M18 | nested boxes (SEM-17) | sub-workflows | **E** | |
-| M19 | ON_ICE (SEM-20) | Skip task (definition-level Skip flag / instance Skip) | **A** | Verified: a skipped predecessor does not block successors (UCS-02) — downstream-satisfied matches. BUT the all-skipped cascade differs from AutoSys (consumers of an iced job still run if *other* conditions hold, in UC all-preds-skipped → skip cascades). Linter: flag consumers whose only predecessor is iced-translated |
+| M18 | nested boxes (SEM-17) | sub-workflows | **E** | UC sub-workflows are the exact analog. The v1 backend does not use them yet: nested boxes flatten into the top-level workflow record and the nested box names get no record of their own, travelling as an apply note instead (DL-16) |
+| M19 | ON_ICE (SEM-20) | Skip task (definition-level Skip flag / instance Skip) | **A** | Verified: a skipped predecessor does not block successors (UCS-02) — downstream-satisfied matches. BUT the all-skipped cascade differs from AutoSys: an iced predecessor satisfies every atom there (SEM-05), so the consumer runs even when ice is its only predecessor, while in UC all-predecessors-skipped cascades the skip onto the consumer. Linter: flag a consumer when ALL of its immediate predecessors translate to Skip |
 | M20 | ON_HOLD (SEM-21) | Hold task/instance | **E** | downstream blocked in both |
 | M21 | ON_NOEXEC (SEM-22) | Skip (path-level) | **A** | close, but the M19 skip-cascade caveat applies |
 | M22 | FORCE_STARTJOB (SEM-23) | Launch task / Clear Dependencies | **A** | forced runs do not satisfy latches in UC (no latches) — ops retraining, R8 |
@@ -188,7 +212,7 @@ linter rule and a migration-report entry.
 | M31 | max_exit_success + success_codes/fail_codes (SEM-09/DL-33) | task exit-code / output success criteria | **A** | mechanism pinned per M08 (U4 resolved, DL-53). The twin shares ir.exit_is_success on both sides — Q7 composition cited-resolved (DL-58, KB 408778: a present fail_codes decides alone) |
 | M32 | FW jobs (watch_file) (§5) | Agent File Monitor task/trigger (UCS-07) | **A** | steady-state versus existence modes, trigger-disable traps **[V]** |
 | M33 | cross-instance `job^INST` (SEM-07) | Task Monitor across... or UC agent/remote — depends on target topology | **R** | consolidation of instances is a migration design decision, not a translation |
-| M34 | job_load/priority/QUE_WAIT | Virtual Resources + Agent task limits | **A** | model mapping per machine definition |
+| M34 | job_load/priority/QUE_WAIT, and `resources:` requirements (DL-21) | Virtual Resources + Agent task limits | **A** | model mapping per machine definition. A job's declared resource units and their FREE disposition are not expressible in a workflow record: they ride the `dsl41 uc` bundle's exclusion ledger and are configured per task at cutover. L016 warns when a `resources:` name has no `insert_resource` in the set; `dsl41 lint --strict` turns that warning into a failure |
 | M35 | machine (real/virtual) | Agent / Agent Cluster | **A** | broadcast versus any-of semantics — make sure that you know the cluster distribution rules |
 | M36 | alarms (alarm_if_fail, max_run_alarm…) | Email/SNMP notifications, System Operations actions | **A** | observability rework, mechanical |
 
@@ -197,12 +221,24 @@ linter rule and a migration-report entry.
 1. **Every Layer-G edge carries its M-row.** The UC backend refuses to compile R rows (it
    emits migration report items instead). A rows compile and emit assumption records. Only E
    rows compile silently. This is dsl42's "failed translation is a compile error" made
-   granular.
-2. **The migration report is a first-class output artifact** (per-catalog markdown): all A
-   assumptions, all R redesigns, all [?]-dependent mappings.
+   granular. Two narrower gates sit after it, and each records what it drops — never a silent
+   loss. (i) The twin also excludes edge shapes it cannot hold: a `notrunning` edge (no UC
+   condition reads "not running"), a global gate it cannot attach, and every edge that spans
+   two workflows — including E-class M04/M05 ones, which is Task Monitor territory. (ii)
+   Record emission quarantines a WHOLE workflow when the base record schema cannot spell one
+   of its edges — a `cancelled` condition, any variable condition (U3a;
+   `docs/uc-edge-schema.md`).
+2. **The migration report is a first-class output artifact** (per-catalog markdown): every
+   A-classified edge with its assumption, every R-classified edge, the non-edge constructs
+   this table routes to a human (M07 mutex groups, M12 OR shapes, M27 run_window flags, M33
+   external refs, M24 calendars), the quarantine ledger, and the open questions the catalog's
+   rows depend on. The record bundle carries its OWN ledgers next to the records — what the
+   twin excluded, and what a workflow record cannot hold (M20 definition-time status, M34
+   resources, M31 exit-code boundaries) — so records can never be applied without them.
 3. **Detectors needed in analysis passes:** same-cycle detector (M01 versus M02), `n()`-mutex
-   detector (M07), OR-shape classifier (M12), external-ref-in-box detector (M14/M16),
-   iced-consumer detector (M19).
+   detector (M07), OR-shape classifier (M12), box-reference detector (a member's unqualified
+   `s()` naming a job outside its top-level box → M02; a box override naming a transitive
+   member → M15, naming anything else → M16), iced-consumer detector (M19).
 
 ## Part III — Open questions (live UC instance / OpenAPI dive)
 
@@ -250,16 +286,47 @@ linter rule and a migration-report entry.
 
 ## Part IV — Trace tests (oracle-pair set)
 
-The equivalence validator tier (c) runs *both* oracles (the AutoSys semantics oracle and a
-minimal UC workflow interpreter) on generated event streams and compares the traces. The seed
-pairs, one per A-row where the assumption can be violated: P-M01 (a staleness event stream
-that violates the same-cycle assumption → traces MUST diverge, the test asserts that the
-divergence is detected and classified), P-M07 (n() overlap — since DL-54 an ALIGNMENT pin
-under the arm-and-wait default, with the historical divergence preserved under the abandon
-switch), P-M09 (SET_GLOBAL mid-run), P-M12 (each OR lowering versus the AutoSys `|` truth
-table), P-M19 (ice with multi-predecessor consumers), P-M27 (run_window closer-edge
-divergence). These expected-divergence/alignment tests document
-precisely what the migration changes — they are the honest core of the whole project.
+A minimal UC workflow interpreter runs the in-memory twin — what the backend compiled, before
+the U3a emission gate, so a script may exercise a workflow that emission would later
+quarantine. It implements UCS-01, UCS-02, UCS-03 and UCS-13, UCS-09's mutual exclusion, and
+UCS-0 workflow addressing (a launch on any task name opens the containing workflow). Script
+analogs of the UCS-11 run-time overrides — hold/release, skip, kill, forced start — exist so a
+pair can be driven; nothing else in Part I is modeled.
+
+Its own comparator normalizes UC statuses into the AutoSys vocabulary and compares per-job
+outcome sequences against the AutoSys oracle on one shared script. `SKIPPED` is dropped from
+BOTH sides before the equality test — an explicit UC Skip and an AutoSys job that was never
+evaluated are one observable outcome, "did not run" — while a SKIPPED-versus-ran mismatch
+still diverges. The reported divergence keeps the normalized sequences with `SKIPPED` still in
+them, so a reader sees which side skipped. This is a SEPARATE comparison from the equivalence
+validator's tier (c), which compares two AutoSys catalogs; the two share the event and trace
+models, not the entry point.
+
+The seed set is hand-written and non-exhaustive. It covers six rows — M01, M07, M09, M12, M19,
+M27 — with one or more scripts each: P-M01 (a same-cycle pair that nonetheless relies on
+cross-run staleness → traces MUST diverge; the test pins the divergent job and both outcome
+sequences), P-M07 (n() overlap — since DL-54 an ALIGNMENT pin under the arm-and-wait default;
+the pre-DL-54 abandon reading it used to diverge under is retired with the switch, DL-58),
+P-M09 (SET_GLOBAL mid-run), P-M12 (the naive lowering only — one independent-branch script
+that diverges into an AND join, one common-ancestor diamond that converges; the restructure,
+Task-Monitor and duplicate-successor lowerings stay U1-gated), P-M19 (ice: one all-iced script
+that diverges, one mixed-predecessor contrast that converges), P-M27 (run_window closer-edge
+divergence — M27 is an R row, present here because absence is what the pair shows).
+
+Where a pair "converges" it is the compared consumer path that converges. The untaken OR
+branch and the iced job itself are held out of the equality list and asserted separately, so
+the claim stays about the path under test: their AutoSys side was never touched and their UC
+side is Skipped. Including them would not change the verdict — the comparator drops `SKIPPED`
+— but the asserted contrast is what makes the label difference visible. These
+expected-divergence/alignment tests document precisely what the migration changes — they are
+the honest core of the whole project.
+
+Two interpreter approximations are deliberate and known-divergent from Part I. Read every pair
+result against them:
+- Workflow rollup: the interpreter marks an instance Failed when a member ended Failed or
+  Cancelled. Real UC goes Running/Problems and is never Failed (UCS-04, U2 resolved DL-53).
+- Instance Wait: the interpreter allows one open instance per workflow and records-and-ignores
+  a later launch, instead of queuing it as a waiting instance (UCS-09).
 
 ## Sources
 Primary: docs.stonebranch.com and Stonebranch Confluence, Universal Controller 7.2–7.9 —

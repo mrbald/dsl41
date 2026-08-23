@@ -32,12 +32,12 @@ condition: MNTHD#24
 
 extended_calendar: dsl41_q8d_1
 workday: mo,tu,we,th,fr
-condition: mo | we & fri
+condition: mon | wed & fri
 
 extended_calendar: dsl41_q8d_2
 workday: mo,tu,we,th,fr
-condition: NOT mo
-condition: mo
+condition: NOT mon
+condition: mon
 
 extended_calendar: dsl41_q8d_3
 workday: mo,tu,we,th,fr
@@ -45,4 +45,8 @@ condition: xtue | xwed
 
 extended_calendar: dsl41_q8d_4
 workday: mo,tu,we,th,fr
-condition: mo OR we
+condition: mon OR wed
+
+extended_calendar: dsl41_q8d_5
+workday: mo,tu,we,th,fr
+condition: NOT mon

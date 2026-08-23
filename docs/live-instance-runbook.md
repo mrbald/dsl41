@@ -8,29 +8,42 @@ not start cold. This runbook is a companion to the §9 ledger of the
 dossier (docs/autosys-semantics.md) and to the live-instance section of
 CLAUDE.md.
 
+Scope: the questions here are the AutoSys ones. Two groups sit outside
+it. U1, U3b and U6b need a Universal Controller instance, not an AE box;
+docs/stonebranch-semantics.md Part III states all three, and the
+live-instance section of CLAUDE.md gives the work order for U3b only.
+The runner's own parity defaults E5, E6, E7, E9 and E10 have no probe
+here (docs/runner-design.md ss15 states each default).
+
 Ground rules (constitutional, see CLAUDE.md):
 - Give each object that you create on the instance the prefix `dsl41_`.
   If a schedule is involved, use a future date. Delete each object the
   same day.
-- A calendar that no job references is inert. A job with no start_times
-  and no satisfied condition cannot self-start. ON_HOLD blocks starts,
-  but a scheduled tick can latch (SEM-21/32). Thus keep probe start_times
-  in the future, or delete probes before their first tick.
+- A calendar that no job references is inert. A job with no date
+  conditions and no satisfied condition cannot self-start. A job WITH
+  date conditions can start without `start_times`: a run_calendar job
+  fires at each row's own time, and at 00:00 when the row carries none
+  (E11, DL-58). An extended calendar carries no row times, so assume
+  00:00 for it. ON_HOLD blocks starts, but a scheduled tick can latch
+  (SEM-21/32). Thus give each probe an explicit future `start_times`, or
+  delete the probe before its first tick.
 - You can INSPECT captured outputs (autorep, autocal_asc exports,
   job_depends reports) to answer the questions and to shape synthetic
   fixtures. Never commit these outputs to the repo (corpus hygiene,
   LICENSING.md).
 - Record each answer as: a dossier SEM amendment that quotes the
   observation, a DL entry, and trace/fixture tests. Then retire the
-  `# PENDING:` marker (DL-06 protocol — a resolution deletes its
-  switch/marker).
+  `# PENDING:` marker if the item has one (DL-06 protocol — a resolution
+  deletes its switch/marker). Q6 is dossier-only and carries no code
+  marker.
 
-## 1. Source catalog (verified in DL-58; re-fetch before relying on one)
+## 1. Source catalog (verified in DL-58/DL-62; re-fetch before relying on one)
 
 Fetch technique: get TechDocs and KB pages with a raw `curl` that has a
-browser User-Agent (`-A "Mozilla/5.0 ..."`). Then strip the HTML. The
-WebFetch summarizer path sees nav-only shells on TechDocs *reference*
-pages. Fetch Broadcom community threads the same way.
+browser User-Agent (`-A "Mozilla/5.0 ..."`). Then strip the HTML. A
+fetcher that summarizes instead of returning the bytes sees nav-only
+shells on TechDocs *reference* pages. Fetch Broadcom community threads
+the same way.
 
 URL patterns:
 - KB: `https://knowledge.broadcom.com/external/article/<ID>`
@@ -42,7 +55,7 @@ URL patterns:
 | KB 408778 | Q7: exit-code precedence — fail_codes decides alone, unlisted codes SUCCESS |
 | KB 438836 | SEM-05: local ON_ICE predecessor → atom true, lookback ignored; cross-instance ON_ICE not transmitted |
 | KB 92872 | box_success over globals re-evaluated at member completions, not on SET_GLOBAL |
-| KB 280764 | Q8b: vendor-worked nonzero adjust + S vector (WORKD#1, adjust 1, "schedule anyway") |
+| KB 280764 | Q8b: vendor-worked nonzero adjust + S vector — WORKD#1 + adjust 1 + non_workday S = "the day after the first workday", kept even on a Saturday |
 | KB 442457 | Q8d: literal `AND` in an estate calendar; CAUAJM_W_10119/10120 exhausted-calendar behavior; the >366-day materialization drop |
 | KB 29387 | Q9: `autocal_asc -s\|-e\|-c ALL -E file` export, `-I file` import |
 | KB 14195 | Extended calendars materialize into ujo_calendar on save, ~365 days, regenerate when exhausted |
@@ -116,9 +129,11 @@ generated dates of each calendar in two ways:
 to keep the values. Answer `1` at the preview prompt. Capture the listed
 dates.
 
-(b) Scheduler cross-check: use one inert probe job for each calendar.
-This optional step makes sure that the dates materialize into
-ujo_calendar:
+(b) Scheduler cross-check: use one inert probe job, repointed at each
+calendar in turn. It is created already held (`status: ON_HOLD`, SEM-24),
+because an insert followed by a `JOB_ON_HOLD` event leaves a window in
+which a due tick can fire. This optional step makes sure that the dates
+materialize into ujo_calendar:
 
 ```
 jil <<'EOF'
@@ -129,19 +144,32 @@ command: /bin/true
 date_conditions: 1
 run_calendar: dsl41_q8b_1
 start_times: "23:00"
+status: ON_HOLD
 EOF
-sendevent -E JOB_ON_HOLD -J dsl41_q8_probe
 job_depends -t -e -J dsl41_q8_probe -F "08/01/2026 00:00" -T "12/31/2026 00:00"
 ```
 
 (Repoint `run_calendar` to each calendar with `update_job`. Delete the
 probe before a tick becomes due.)
 
-The import file with the probes is **`docs/probes/dsl41_q8_cals.txt`** in
-this repo. The weekday facts in it are correct for 2026. Copy the file to
-the box (`scp docs/probes/dsl41_q8_cals.txt <box>:`). Then run
+The probe calendars are defined in **`docs/probes/dsl41_q8_cals.txt`** in
+this repo. The weekday facts in it are correct for 2026. Day tokens in a
+`condition:` line are the SEM-37 three-letter forms (`mon`, `wed`), not
+the two-letter codes that `workday:` takes — a two-letter token is
+refused, and that refusal answers nothing. Copy the file to the box
+(`scp docs/probes/dsl41_q8_cals.txt <box>:`). Then run
 `autocal_asc -I dsl41_q8_cals.txt`. A refusal at import is itself an
-answer — record the message verbatim.
+answer — record the message verbatim. A BATCH refusal names no
+hypothesis: on any refusal, import the two holiday calendars first, then
+each extended calendar on its own, and attribute the message only to the
+calendar that was alone in the file.
+
+Dates: the fixture is written for August and December 2026. Roll it
+forward if that window is past. Pick a month whose 1st is a Saturday
+(May 2027 is the next one) — every day-of-month number in this section
+then stays the same — and move the holiday rows and the `job_depends`
+`-F`/`-T` bounds with it. Q8c_2 needs a different shape: two consecutive
+holidays whose day after the second one is a Saturday.
 
 What each August/December 2026 observation means:
 
@@ -160,19 +188,25 @@ What each August/December 2026 observation means:
   Aug 18 = holiday-free walk (our pin) · Aug 17 = plain next-workday,
   holidays not skipped.
 - **Q8c_2** (holiday-N chaining — Dec 24+25 are both holidays): output
-  Dec 25 = verbatim one-shot (our pin, current doc text) · Dec 26/28 =
-  the target is re-processed (the 825395 hint) — this result flips the
-  single-shot corner.
-- **Q8d_1** (`mo | we & fri`): Mondays in the output = `&` binds tighter ·
-  empty/no-valid-dates = flat left-to-right (our pin).
-- **Q8d_2** (`NOT mo` line then `mo` line): empty = order-free
+  Dec 25 = verbatim one-shot (our pin, current doc text) · Dec 26 = the
+  target is re-processed by N (the 825395 hint) — this result flips the
+  single-shot corner. Any other date (Dec 28, for example) means N walks
+  like W; record it verbatim, it is a third behavior.
+- **Q8d_1** (`mon | wed & fri`): Mondays in the output = `&` binds
+  tighter · empty/no-valid-dates = flat left-to-right (our pin).
+- **Q8d_2** (`NOT mon` line then `mon` line): empty = order-free
   union-minus-exclusions (our pin) · Mondays = sequential accumulation
   (later include resurrects).
 - **Q8d_3** (`xtue | xwed`): record verbatim the vendor refusal or the
   generated dates (every day vs nothing). Since DL-59, dsl41 evaluates
   it literally as an include (every day) as its pinned default.
-- **Q8d_4**: the same dates as for `mo | we` show that the OR word is
-  correct (AND is already cited, KB 442457).
+- **Q8d_4** (`mon OR wed`): every Monday and every Wednesday in the
+  output shows that the OR word unions like `|` (AND is already cited,
+  KB 442457).
+- **Q8d_5** (`NOT mon` alone — the only rule): every non-Monday = an
+  exclusion-only rule list subtracts from the DAILY default (our pin) ·
+  empty = it subtracts from nothing. This is a separate pinned default
+  from Q8d_2, which mixes an exclusion with an include.
 
 Also diff the full date list of EVERY calendar against the `dsl41`
 generator (`autocal.compile_calendar(...).days_between(...)`). The
@@ -274,7 +308,9 @@ job_type: c
 machine: <M>
 command: /bin/true
 EOF
-# wait past HH:MM: the tick lands, condition false (gate never ran) -- armed
+# wait past HH:MM: the tick lands, condition false (gate never ran) -- armed.
+# The scheduler log shows CAUAJM_I_40162. Without that line nothing armed,
+# and the rest of the probe reads nothing.
 sendevent -E JOB_ON_ICE  -J dsl41_q3ice
 sendevent -E JOB_OFF_ICE -J dsl41_q3ice
 sendevent -E FORCE_STARTJOB -J dsl41_q3ice_gate    # the condition edge
@@ -301,7 +337,7 @@ command: sleep 600
 EOF
 sendevent -E FORCE_STARTJOB -J dsl41_e8
 # on the AGENT machine:  ps -ef | grep 'sleep 600'  →  kill -9 <PID>
-autorep -J dsl41_e8        # ST column: FA vs TE — THE answer
+autorep -J dsl41_e8        # ST column: FA vs TE — the E8 verdict
 autorep -J dsl41_e8 -d     # run detail + exit code (128+9?)
 ```
 
@@ -320,14 +356,22 @@ sleep 10; sendevent -E KILLJOB -J dsl41_e8b
 sleep 30; autorep -J dsl41_e8b
 ```
 
-Reading: if e8=FA and e8b=TE, the scheduler marks TERMINATED from its
-own kill bookkeeping, and external deaths route to FAILURE (flip our
-TERMINATED default, `# PENDING: E8`, runner.py). If e8=TE, the agent
-reports signal deaths, and TERMINATED is mechanism-agnostic (our mapping
-stands). If e8b=SU, the trapped exit won the race, or the wait status
-decides — in each case, record the result for the DL-41a notes. Capture
-the agent/scheduler log lines around the kill (`autosyslog -J dsl41_e8`
-if available).
+Reading: e8 decides E8 on its own. If e8=FA, an external signal death is
+FAILURE. Flip our TERMINATED default for the EXTERNAL death ONLY: a
+`signaled` record produced by a kill the engine itself asked for must
+stay TERMINATED, because `_kill_outcome_from_spool` (runner_startup.py)
+reads `outcome_from_status`'s `Terminated` as the proof that a recorded
+kill landed — a blanket flip in `outcome_from_status`
+(runner_adapters.py) would retire live kills. Retire the
+`# PENDING: E8` marker with the flip. If e8=TE, the agent reports signal
+deaths, TERMINATED is mechanism-agnostic, and our mapping stands.
+
+e8b answers a second question — the KILLJOB mechanism — and never gates
+the E8 verdict. TE means the scheduler marks TERMINATED from its own
+kill bookkeeping. SU means the trapped exit won the race, or the wait
+status decides. Record e8b either way for the DL-41a notes. Capture the
+agent/scheduler log lines around the kill (`autosyslog -J dsl41_e8` if
+available).
 
 ### Optional read-only archaeology (no writes at all)
 

@@ -24,8 +24,9 @@ Operational requirements:
    Re-audit whenever a runtime dependency is added.
 5. Copyright notices currently read "dsl41 authors"; replace with the founder's
    entity name once it exists.
-6. Lifecycle-tier earmark (2026-07-11, DL-42): `runner_wrapper.py`, the
-   future `runner_supervisor.py`, and `docs/supervisor-protocol.md` are
+6. Lifecycle-tier earmark (2026-07-11, DL-42; widened by DL-72 and DL-129,
+   recorded by DL-150): `runner_wrapper.py`, `runner_supervisor.py`,
+   `runner_procid.py`, `canon.py` and `docs/supervisor-protocol.md` are
    earmarked for extraction into a standalone Apache-2.0 package when the
    DL-42 trigger fires. Until extraction they are AGPL like the rest of the
    repo (no per-file headers, per item 3); the earmark's operational force:

@@ -1,14 +1,15 @@
 # Access model — three tiers at the perimeter
 
 Status: **draft (2026-08-22, DL-146).** Designed in a three-way round: the
-user's constraints, one Claude sketch, one codex-sol sketch, two adversarial
-rounds to convergence; a post-build conformance round (codex-sol,
-2026-08-22) folded by DL-147; a second conformance round (codex-sol, same
-day) folded by DL-148. Once frozen, each change to a frozen item requires a
-decision-log entry, the same rule as `docs/control-protocol.md`. This document
-retires the RBAC non-goal of `docs/runner-design.md` §0/§12 and closes the
-authorization half of control-protocol §7 gap 2. The authentication half
-closes only for local peers; the web session keeps a named seam (§9).
+user's constraints and two independent sketches, then two adversarial
+rounds to convergence. A post-build conformance round (2026-08-22) was
+folded by DL-147; a second round (2026-08-22..23) by DL-148; the code
+follow-ups and three amended passages by DL-149. Once frozen, each change
+to a frozen item requires a decision-log entry, the same rule as
+`docs/control-protocol.md`. This document retires the RBAC non-goal of
+`docs/runner-design.md` §1 and §12 and closes the authorization half of
+control-protocol §7 gap 2. The authentication half closes only for local
+peers; the web session keeps a named seam (§9).
 
 ## 0. The problem
 
@@ -62,8 +63,12 @@ Not guarded, by ruling:
   client (§5) — there is no client identity, only the peer credential.
 - **`supervisor.sock` is governed but not tiered** (v1 ruling): it
   keeps both supervisor-protocol §5 controls — owner-`0600` and the
-  same-uid peer-cred check on every accept — kernel-enforced,
-  owner-only, and the local owner
+  same-uid peer-cred check on every accept. That check refuses a peer
+  uid that differs from the owner's and admits a peer the platform
+  supplies no uid for; there the `0600` mode is the whole boundary,
+  and §3 deliberately does not copy the fallback. The kernel supplies
+  the credential and enforces the mode; the supervisor enforces the
+  comparison. Either way the socket is owner-only, and the local owner
   is adm by definition (previous bullet), which contains every lower
   tier — including when the run root opens to `0710` traversal (§8).
   `supervise shutdown` can kill every managed command; it remains an
@@ -293,8 +298,8 @@ Durability is per kind, and each rule is deliberate:
   reads stayed open. The corroborating ledger is best-effort by
   ruling.
 - `stream_revoked` — the revocation is mandatory, its receipt best
-  effort: a stream that lost read closes whether or not the record
-  lands.
+  effort (written synced before the close, the result ignored): a
+  stream that lost read closes whether or not the record lands.
 
 `access_seq` is journal-wide: it continues across engine restarts (the
 writer recovers it from the last complete record and makes a
@@ -398,8 +403,9 @@ deliberately. Arming has two modes, chosen by the map:
 - **Armed, group-open** (`socket_group` named): run root `0710`, group
   = `socket_group` — execute-only traversal, no listing. `control.sock`
   becomes `0660`, owner unchanged (the run-root owner), group
-  `socket_group`. The `0700` root was the
-  fence for its children (`logs/` and `runs/` are born `0755`), so
+  `socket_group`. The `0700` root was the fence for its children
+  (`logs/` and `runs/` are born under the process umask, `0755` by
+  default), so
   opening it first **tightens every direct child to owner-only** (dirs
   `0700`, files `0600` — exact modes: group and other bits never
   widen, owner bits can change, and a symlink child's target is what
@@ -410,8 +416,10 @@ deliberately. Arming has two modes, chosen by the map:
   `0600`). No gate or actor overwrite is active, and no new perimeter
   receipt is attempted (§4); a `perimeter.jsonl` left by an earlier
   armed incarnation stays where it is, for the life of the root (§6).
-- Sockets are created with no access, ownership and group set, and the
-  final mode applied last. The socket directory is never group-writable.
+- Sockets are created owner-only (`0600`, from the umask at bind), the
+  group is set next, and the final mode is applied last. No socket is
+  ever group-readable before it carries its group. The socket directory
+  is never group-writable.
 - The receipt journal (`perimeter.jsonl`, §6) is created owner-only —
   mode `0600` before umask, which can only narrow it. Group-open
   arming's child-tightening pass also forces an existing journal to
@@ -451,7 +459,7 @@ Consequences, stated plainly:
   browser. That loss is accepted for v1; the proxy's own log carries the
   human. The deferred seam is named **`web-session-principal-v2`**: a
   per-session principal asserted by a broker over an explicitly trusted
-  channel (the codex round-1 sketch is the reference design). No v1 code
+  channel (the round-1 broker sketch is the reference design). No v1 code
   anticipates it.
 
 ## 10. The verb table
@@ -479,8 +487,9 @@ classification axis.
 door.
 
 CLI semantic tiers (enforcement is the filesystem, §2): `query *`,
-`journal`, `runs`, `verify`, offline `rehearse`, and every pure-compiler
-verb are read-shaped; `sendevent`, `host`, `supervise shutdown` are ops;
+`host list`, `supervise list`, `journal`, `runs`, `verify`, offline
+`rehearse`, and every pure-compiler verb are read-shaped; `sendevent`,
+`host activate`/`drain`/`evict`, `supervise shutdown` are ops;
 `run`, `serve`, `audit` (writes attestations and registry state),
 `seal` (stages C2 files before the ops verb — a later slice may split
 staging from committing), `estate prune`, `estate reclaim` are adm.
@@ -488,6 +497,9 @@ staging from committing), `estate prune`, `estate reclaim` are adm.
 nothing — while its only door is the owner-`0600` supervisor socket
 (§2), so the enforcement (owner = adm by definition) exceeds the tier
 the verb semantically needs. Adm contains ops; no contradiction.
+
+`ui` has no single tier: its panes are reads and its console sends ops
+verbs, so each request meets the table above on its own.
 
 The TUI: a read session may render the mutating console disabled as a
 courtesy; the server refusal is the authority either way.

@@ -4,7 +4,8 @@ Status: draft v0.1 · verified against Broadcom TechDocs (AE 12.x) where noted
 Purpose: normative reference for the IR design, the linter rule set, the semantics oracle
 (discrete-event interpreter), and the AutoSys→Stonebranch mapping table (stonebranch-semantics.md).
 
-Every numbered SEM entry implies at least one trace test against the semantics oracle.
+Every numbered SEM entry has a behavior pin unless §8 records it as a non-goal. Most pins are
+trace tests against the semantics oracle; §8's layer note names the entries pinned elsewhere.
 Confidence levels: **[V]** verified against Broadcom TechDocs 12.x · **[C]** corroborated by
 multiple secondary sources · **[F]** one field observation, not verified against TechDocs and
 not re-verified — treat as the weakest tier · **[?]** open question — before you rely on it,
@@ -54,7 +55,13 @@ FORCE-triggered evaluation at T0+72h → JobB starts.
   exclusion, not sequencing.
 - `exitcode(j) OP value` / `e(j) OP value` — comparison operators against the last exit code.
 - `value(GLOBAL) OP value` / `v(...)` — global-variable comparison.
-Identifiers are case-insensitive. One-letter abbreviations are canonical short forms.
+Atom keywords are case-insensitive, and the one-letter abbreviations are the canonical short
+forms. Job and global names are matched exactly: the parser preserves their case and the status
+store keys on the name as written.
+*Model note:* the oracle produces only `INACTIVE`, `QUE_WAIT`, `STARTING`, `RUNNING` and the
+three terminal states. `WAIT_REPLY`, `RESTART` and `SUSPENDED` never occur in it, so its `n()`
+is false for `STARTING` and `RUNNING` alone. `QUE_WAIT` stays outside that false set (DL-50): a
+resource-queued job is not running, so `n()` is true for it.
 
 ### SEM-03 · Operators and grouping **[V]**
 `AND`/`&`, `OR`/`|`, parentheses for precedence. Evaluation is strictly left-associative flat
@@ -97,6 +104,10 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
 ### SEM-05 · ON_ICE predecessors inside lookback conditions **[V]**
 If the predecessor job referenced in a lookback condition is currently ON_ICE, the atom
 evaluates **true** and the scheduler ignores the lookback entirely. (Interacts with SEM-20.)
+The rule is blanket over atom kinds (DL-13): `f()`, `t()`, `d()` and `e()` on an iced
+predecessor are all true, not only `s()`. Ice on a job that is STARTING or RUNNING takes effect
+when that run ends — atoms read the real in-flight status until then **[?]** (unverified corner,
+modeled deliberately).
 *(Citation upgraded 2026-07-30, DL-58 — KB 438836, 12.1.01: with a local ON_ICE
 predecessor "the system ignores the look-back condition" and "continuously evaluate[s]
 the dependency as true". Same KB, cross-instance caveat: ON_ICE is NOT transmitted to a
@@ -111,12 +122,16 @@ permanently and silently** — the dependent job never auto-starts. AutoSys ship
 
 ### SEM-07 · Cross-instance atoms **[V]**
 `s(jobB^PRD)` — same predicate algebra against a job on external instance `PRD` (declared via
-`insert_machine`/external-instance JIL with `xtype`). Lookback applies. For the migration these
-become boundary markers in the IR: dependencies whose producer is outside the modeled universe.
+`insert_xinst: PRD` with `xtype:`, not `insert_machine`). Lookback applies. For the migration
+these become boundary markers in the IR: dependencies whose producer is outside the modeled universe.
 
 ### SEM-08 · Global variables **[V]**
 - Set via `sendevent -E SET_GLOBAL -G NAME=value` or `insert_global` JIL.
-- In conditions: `value(NAME) = X` (also `>`, `<`, `!=` comparisons).
+- In conditions: `value(NAME) = X` (also `>`, `<`, `!=` comparisons). *Model note:* the
+  comparand is a string in JIL. The oracle compares numerically when both sides parse as
+  base-10 integers, and lexicographically when either does not. The rule covers all six
+  operators, so `value(N) = 5` is true against a stored `05`. The UC twin and the equivalence
+  checker call the same comparison function, so the three layers cannot disagree.
 - In attribute strings (command, std_out_file, …): `$$NAME` or `$${NAME}` substitution at
   runtime. Single-`$` is shell/environment, double-`$$` is AutoSys global — the parser must
   keep these distinct. A global-variable set is an event that triggers condition re-evaluation.
@@ -158,7 +173,8 @@ conditions hold. Members with no conditions start immediately when the box start
 ### SEM-11 · Box RUNNING/completion **[V]**
 The box stays RUNNING while any member is running. The box cannot complete before all members
 run (or are bypassed). Default: box SUCCESS if and only if all members ended SUCCESS. Box
-FAILURE if at least one member failed (evaluated after all members complete).
+FAILURE if at least one member failed (evaluated after all members complete). A member that
+ended TERMINATED counts as failed for this fold — SEM-14 kills land here.
 
 ### SEM-12 · box_success / box_failure override — with evaluation gating **[V]**
 `box_success: <condition expr>` (same predicate language). Subtle, verified semantics:
@@ -193,11 +209,15 @@ When a job is inserted/moved into a running box: an ALERT event occurs, and the 
 number is set to the box's. If the job is not STARTING/RUNNING/ON_ICE and its run number does
 not exceed the box's, a STARTJOB is issued. Not migration-critical (definition-time mutation),
 but the AST layer must not assume static membership. Noted as out of scope for the oracle v1.
+`SEM-16` is also the house class name for mid-run catalog-object mutations ruled out of scope
+v1 — mid-run `update_resource` replenishment of a depletable included (DL-50).
 
 ### SEM-17 · Deep nesting **[C]**
 Boxes nest arbitrarily (practical guidance: ≤ 1000 members, avoid organizational grouping —
 Broadcom's own guidance is boxes for *shared starting conditions*). ACTIVATED state = "top-level
 box is RUNNING, member not yet started."
+*Model note:* lowering accepts at most 64 containment links as a compiler sanity limit; a deeper
+chain is a loud finding, not a silent truncation.
 
 ---
 
@@ -205,7 +225,8 @@ box is RUNNING, member not yet started."
 
 ### SEM-20 · ON_ICE **[V]**
 - The job will not run. It is removed from all conditions/logic.
-- **Downstream conditions treat the iced job as satisfied** (runs "as though it succeeded").
+- **Downstream conditions treat the iced job as satisfied** (runs "as though it succeeded") —
+  every atom kind, per SEM-05.
   Inside a box, a member that depends on an iced sibling starts immediately when the box
   runs. **[V]**
 - OFF_ICE: the job does **not** run even if its starting conditions currently hold. It waits
@@ -239,6 +260,11 @@ target concept for our own simulator semantics.
 STARTJOB honors nothing extra (it *is* the normal start event). FORCE_STARTJOB starts the job
 regardless of conditions. Force-started runs still emit normal status events → forced runs
 satisfy downstream latching conditions. The oracle needs both as injectable events.
+Which gates a force bypasses, made explicit (DL-13): the `condition` expression, `ON_HOLD`, the
+schedule gate (SEM-30/32), the box-RUNNING gate and the once-per-box-run gate (SEM-10). Which
+gates still hold: `ON_ICE` (SEM-20 removes the job from all logic), a job that is already
+STARTING/RUNNING/QUE_WAIT, and `run_window` — the SEM-33 closer-edge rule applies to a forced
+start like any other.
 
 ### SEM-24 · `status:` at definition time **[V]** (existence) / **[?]** (full value set)
 Estate-shaped JIL carries `status: ON_HOLD` on `insert_job` (including on box jobs): the job is created already in an out-of-band
@@ -264,9 +290,10 @@ a loud lowering error — extend deliberately when the page or an estate shape s
 
 ### SEM-30 · date_conditions is the master switch **[V]**
 The scheduler honors the time attributes (`days_of_week`, `run_calendar`, `exclude_calendar`,
-`start_times`, `start_mins`, `must_start_times`, `must_complete_times`, `timezone`) only when
-`date_conditions: 1`. Without it, the job runs purely on conditions/manual events, and the
-scheduler ignores the time attributes (linter: warn on time attributes present with
+`start_times`, `start_mins`, `run_window`, `must_start_times`, `must_complete_times`,
+`timezone`) only when `date_conditions: 1`. Without it, the job runs purely on
+conditions/manual events, and the scheduler ignores the time attributes (linter: warn on
+time attributes present with
 date_conditions absent/0 — dead configuration).
 
 ### SEM-31 · Mutual exclusivity **[V]**
@@ -325,18 +352,36 @@ latch-until-consumed: an armed run can land in a LATER run_window cycle than its
 a start can actually occur. If conditions become true outside the window, AutoSys picks the
 closer edge. Closer to the next window opening → schedule STARTJOB at window open. Closer to
 the previous window's end → do not run, set INACTIVE. **[V]** Max span 24h. The window can
-cross midnight. The "closer edge" rule is a prime migration hazard (no direct Stonebranch
-analog) — always flag it in mapping.
+cross midnight. Both endpoints are inclusive: an attempt at exactly the opening or the closing
+minute is inside the window. Equal endpoints (`"02:00-02:00"`) are a zero-width window, not a
+24-hour one: only that one instant is inside. An attempt exactly midway between the previous
+close and the next opening resolves to the next opening. Both readings are **[?]** — undocumented
+ties, pinned this way, revisit with live access. The "closer edge" rule is a prime migration
+hazard (no direct Stonebranch analog) — always flag it in mapping.
 Box interaction (verified example): member with run_window + start time inside a box started
 after the window → member INACTIVE so the box can complete, or STARTJOB queued for the next
 window. The queued STARTJOB keeps the box RUNNING overnight. The closer edge decides which
 outcome occurs.
+**[?]** Open tension: that "so the box can complete" half is in conflict with SEM-11 as DL-13
+pinned it (a member that never ran keeps the box RUNNING). The oracle follows the DL-13 pin on
+both edges — a skipped member is left INACTIVE and never enters the box's ran set, so the box
+stays RUNNING rather than folding. Which rule wins needs one live box test; do not read either
+sentence as settled.
 
 ### SEM-34 · must_start_times / must_complete_times are alarms only **[V]**
 They emit MUST_START_ALARM / MUST_COMPLETE_ALARM. They do not affect control flow. Absolute or
 relative (`+n` minutes from each start time) — not mixed. The count must match the number of
-start_times (JIL insert error otherwise). Relative can cross ≤ 2 calendar days. Each
-must_complete must precede the next start. IR: model as SLA annotations, not semantics.
+start_times (JIL insert error otherwise). **[?]** One exception is implemented: a single
+relative offset is accepted against any number of start_times and broadcasts to all of them.
+The doc-derived corpus fixture uses one `+3` against three start_times, from TechDocs' own
+example, so the strict count rule and the vendor's example disagree. Pin the exact rule on a
+live instance. Relative can cross ≤ 2 calendar days. Each must_complete must precede the next
+start. Both of those last two are recorded vendor constraints, not loader validation: lowering
+checks the form and the count, never the span or the ordering. IR: model as SLA annotations,
+not semantics.
+*Model note:* only the relative forms arm an alarm. Absolute `must_start_times` /
+`must_complete_times` lower to IR and are carried, but the oracle owns no calendar, so no
+absolute deadline is armed v1.
 (Contrast `term_run_time`: that one *is* control flow — auto-TERMINATE after n minutes.)
 
 ### SEM-35 · timezone **[V]**
@@ -364,11 +409,16 @@ Zone, Alias, City -- mapping names to POSIX TZ variables; `autotimezone -l` list
 city entries such as `Vancouver City Canada/Pacific` (the docs' own excerpt) name the
 matching region zone. POSIX TZ offsets are **west-positive** (`GMT+5` = 5h west of GMT).
 The runner's port of this ladder, including the no-map unique-city default and its WARN,
-is DL-62 / runner-design ss5.
+is DL-62 / runner-design ss5. Two narrowings of the vendor's text are deliberate there: the
+50-character `a-zA-Z0-9/_-` set is the vendor's statement about *names*, while a POSIX value may
+also carry `+` and `:` (the page's own `"IST-5:30"`), and the resolver accepts those; and only
+fixed-offset POSIX forms resolve — a POSIX string with DST rules is refused, because
+approximating vendor DST rules would silently shift ticks.
 
 ### SEM-36 · Calendar definitions: the autocal_asc record model **[V]**
 The scanner/IR *carry* of calendar exports is DL-36's. This entry pins what the records mean.
-A standard `calendar:` is a literal day list (bare `MM/DD/YYYY [HH:MM]` rows). An extended
+A standard `calendar:` is a literal day list (bare `MM/DD/YYYY [HH:MM[:SS]]` rows — the export
+sample writes the seconds tail, and both widths are accepted; seconds are truncated). An extended
 calendar generates its day set from rules. The 12.x file-format syntax block (Manage
 Calendars, 12.0.01/12.1) is, condensed:
 
@@ -418,6 +468,9 @@ non_workday: {O|S|N|W|P}
   calendar before starting the job. If the current date is on the calendar, the job does not
   start and its status changes to INACTIVE... if the job is a box job and its status changes
   to INACTIVE, all the jobs in the box change to INACTIVE."
+  *Model note:* the runner narrows exclusion to tick suppression — an excluded day is simply not
+  eligible, so no event is emitted. It does not synthesize the vendor's INACTIVE transition or
+  the box-member cascade.
 
 ### SEM-37 · Extended-calendar date-condition keyword grammar **[V]** (defective tokens **[?]**)
 Source: "Date Condition Keywords" — byte-identical between the 12.0.01 and 12.1 renders
@@ -426,7 +479,12 @@ nn with a 2-digit number between 01 and 31. Replace nnn with a 3-digit number be
 365. Replace ddd with one of the following 3-letter abbreviations: mon, tue, wed, thu, fri,
 sat, sun. Replace mmm with [jan … dec]." The worked example `Ctue#02` shows that two-digit
 forms are zero-padded. "The below list of keywords uses all capital letters; however, the date
-condition keywords are not case-sensitive."
+condition keywords are not case-sensitive." Zero padding is the documented canonical width, not
+a parse requirement: the observed export sample writes `MNTHD#1` and `workd#1`, so unpadded
+ordinals are accepted as input and mean the same day. `n`/`nn`/`nnn` are spelling widths; the
+accepted range is per family, not global: `ddd` 1–5, `WEEKD`/`WEKRddd` 1–7, `WORKD` / day-of-month
+/ `mmm` 1–31, `WEEK`/`CWEEK`/`Cddd` 1–53, `CYCP` 1–30, `CYCL`/`CWRK` 1–365. An ordinal outside its
+family's range is a loud refusal.
 
 Token inventory (naming conventions: `#nn` forward ordinal, `Mnn` backward ordinal, `X`
 prefix/infix exclusion, `#L` last). *(Amended 2026-07-30, DL-60: the doc page spells `#L`
@@ -453,8 +511,9 @@ only in the cycle families, but an observed export sample uses `WORKD#L` **[F]**
 - `WEEKDAYS` auto-subtracts holidays **[V]**: "The utility automatically excludes all dates
   that are listed in the calendar that you specify in the holiday calendar field."
 - Operators: "Use AND when you want to specify only dates that meet both conditions. Use OR
-  to specify dates that meet at least one of the conditions." The only full worked condition
-  string in the docs (the federal-holiday example, Define Extended Calendars 12.0) uses `&`,
+  to specify dates that meet at least one of the conditions." *Model note:* the rule parser
+  caps grouping at 100 nested levels (DL-57) and refuses a deeper rule loudly. The only full
+  worked condition string in the docs (the federal-holiday example, Define Extended Calendars 12.0) uses `&`,
   `|`, and parentheses exclusively — for example `(jan&workd#1)|((jan|feb)&mon#3)|(may&monm1)|…` —
   the literal words `AND`/`OR` are described but never demonstrated **[?]**. (That example
   string also contains an unbalanced parenthesis in the site's own render — quote with care.)
@@ -497,10 +556,16 @@ Action codes (identical value set for `non_workday:` and `holiday:`), holiday wo
   workday." (Worked example walks Dec 25 → 26 (holiday) → 27 (non-workday) → lands Dec 28.)
 - `P` — mirror of W, backward (worked example Dec 25 → 24, 23 (non-workdays) → lands Dec 22).
 
-The pipeline is **filter-then-replace, single-shot**: O filters restrict the candidate set
-(filters commute, so no order question), and N/W/P replace excluded candidates with a target
-day. A replacement result is **final** — never re-processed by the other category
-(holiday-N's "applies even if the next day is a holiday or non-workday" is the direct
+*Model note:* a W/P walk is capped at 366 days (DL-57). A calendar whose walk finds no valid
+target inside that bound is a generation error, which is the degenerate-walk case DL-59 reserves
+`CalendarRuleError` for.
+
+The pipeline is **filter-then-replace, single-shot**: O filters restrict the candidate set, and
+N/W/P replace excluded candidates with a target day. The two categories are ordered, not
+commutative: a specified holiday action runs first and settles every holcal date, so the
+non_workday code — O included — never sees one. A weekday holcal date under `holiday: O` plus
+`non_workday: O` is therefore kept, where two commuting filters would drop it. A replacement
+result is **final** — never re-processed by the other category (holiday-N's "applies even if the next day is a holiday or non-workday" is the direct
 evidence). The worked examples exist only under `holiday:`, and the wordings under
 `non_workday:` are NOT parallel: W/P say "run on the next work day" / "previous work day"
 (a walk to a workday — holiday-ness of the target unstated), while N says "**Specifies to include
@@ -548,7 +613,10 @@ A `cycle:` record is a name, an optional description, and repeated `start_date:`
 is a list of date ranges or periods. A period is between two and 365 days. A cycle contains a
 minimum of two periods and a maximum of 30." (The 12.1.01 WebUI page instead says "You must
 add at least one period" — a Broadcom-internal contradiction. Accept ≥1 on input, and never
-emit a diagnostic that calls one-period cycles illegal.)
+emit a diagnostic that calls one-period cycles illegal.) Both bounds are recorded as vendor
+facts, not as loader validation. A cycle record is refused only when a period is unparseable,
+ends before it starts, or the record carries no period at all. Period length and period count
+are never refused.
 
 Two indexing modes **[V]**: `CYCLE` is union membership — "includes dates that fall within
 any of the periods defined in the cycle" — while the `#`-forms index **each period
@@ -581,13 +649,13 @@ materialization horizon does not exist for us. Only cycle-bound calendars genuin
 | `condition` | predicate algebra (§1) |
 | `box_name`, `box_success`, `box_failure`, `box_terminator`, `job_terminator` | container semantics (§2) |
 | `date_conditions` + time cluster | scheduling (§4) |
-| `max_exit_success` | success-boundary shift (SEM-09) |
+| `max_exit_success`, `success_codes`, `fail_codes` | success-boundary shift (SEM-09); `fail_codes` decides alone, else `success_codes` replaces the rule, else the threshold |
 | `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]** |
 | `n_retrys` | auto-restart on FAILURE only: application failures (vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart"; system/network failures restart via the scheduler's `MaxRestartTrys` config parameter instead **[V]** (Q4 resolved, DL-53) |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
-| `auto_delete` | definition lifecycle, not runtime — AST passthrough |
+| `auto_delete` | definition lifecycle, not runtime — carried in IR-F `JobIR.passthrough` |
 | `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]** existence / **[?]** full value set |
-| `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | LEGACY (pre-11.3) load-balancing model — IR carries opaquely; the runner's oracle NOW honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering (DL-50); `machine_method`/`machine` lists stay opaque placement |
+| `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | LEGACY (pre-11.3) load-balancing model — IR carries opaquely; the runner's oracle NOW honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering (DL-50); pool `machine:` lines are typed `MachineMember` rows since DL-49 and preflight resolves their locality, but `machine_method`, member selection/routing and per-member `factor`/`max_load` stay opaque placement |
 | `std_in_file`, `envvars` | CMD exec cluster (12.x sweep, DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08) |
 | `ulimit`, `elevated`, `interactive`, `job_class` | OS/agent-side exec tuning **[V]** (TechDocs 12.x) — inert carry (DL-32) |
 | `chk_files` | pre-start disk-space gate **[V]**: agent checks required space; unmet → alarm and the job does NOT start — Resource-Wait class; opaque carry v1, NO oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle now honors as capacity semaphores, DL-50) |
@@ -604,20 +672,31 @@ materialization horizon does not exist for us. Only cycle-bound calendars genuin
 
 1. **Two-layer IR.** Layer F (faithful): jobs as attribute records + parsed condition ASTs +
    box tree, semantics exactly per SEM entries. Layer G (derived): dependency graph extracted
-   from Layer F, each edge annotated `exact | equivalent-under-assumptions | needs-human`,
-   with the assumption named (for example, "assumes producer and consumer share one schedule cycle,
+   from Layer F, each edge annotated `exact | assumed | redesign` (E/A/R: exact,
+   equivalent-under-assumptions, needs-human), with the assumption named (for example, "assumes producer and consumer share one schedule cycle,
    so latching ≙ run-scoped").
 2. **Condition AST node set:** `StatusAtom(job, status, lookback?)`,
    `ExitCodeAtom(job, op, value, lookback?)`, `GlobalAtom(name, op, value)`,
    `And`, `Or`, `Paren` (kept for round-trip fidelity, erased in canonical form).
-   Cross-instance = `StatusAtom` with `instance` field.
-3. **Status store in the oracle:** map job → (status, timestamp, exit_code, run_number),
-   plus global map. Lookback = timestamp comparison. Box status = derived fold with
-   SEM-11/12 gating rules.
+   Both `StatusAtom` and `ExitCodeAtom` hold a `JobRef`, and cross-instance is that ref's
+   `instance` field — so either atom kind can be cross-instance.
+3. **Status store in the oracle:** one `JobRuntime` row per job, plus a global map. The row
+   carries **two clocks**, not one: `status_at` (the last transition of any kind) and
+   `last_end_at` (the last transition into a terminal status). A window lookback reads
+   `status_at`; zero lookback (SEM-04, Q2a) compares both jobs' `last_end_at`. One timestamp
+   would get SEM-04 wrong after a non-terminal status change. The row also carries
+   `exit_code`, `run_number`, the SEM-20/21/22 flags and the SEM-32 arm. Box status = derived
+   fold with SEM-11/12 gating rules.
 4. **on_ice/on_hold/on_noexec are events in the oracle**, and *rewrites* in static analysis.
-5. **Success is per-job** (max_exit_success) — never hardcode exit 0.
-6. Everything in §5 marked "annotation/opaque" goes into the AST passthrough bag and survives
-   round-trips untouched.
+5. **Success is per-job** (`max_exit_success`, `success_codes`, `fail_codes` — SEM-09's cited
+   precedence) — never hardcode exit 0.
+6. §5's non-control-flow attributes take four IR-F lanes, not one. Observability attributes
+   land in `JobIR.annotations` and known-inert attributes in `JobIR.passthrough`, both as
+   whitespace-trimmed semantic text. `must_start_times`/`must_complete_times` lower to a typed
+   `SlaSpec`, and `resources:` to typed `ResourceRef` rows — normalized values, not source
+   text. Time attributes without truthy `date_conditions` join `passthrough` as dead
+   configuration (SEM-30). Nothing is dropped on any lane; byte-exact text is the AST's job,
+   not IR-F's.
 
 ## 7. Migration risk register (seed — completed in the stonebranch mapping table)
 
@@ -628,7 +707,7 @@ materialization horizon does not exist for us. Only cycle-bound calendars genuin
 | R3 | on_ice downstream-satisfied (SEM-20) | For each edge type, make sure that "skipped counts as satisfied" holds in Stonebranch skip semantics |
 | R4 | Box success gating on external refs (SEM-12) | The hung-RUNNING pattern has no analog — redesign it, do not translate it |
 | R5 | run_window closer-edge rule (SEM-33) | Behavioral cliff at the window midpoint. No analog |
-| R6 | `n()` mutual-exclusion conditions | These are *not* dependencies. Translation as edges creates false ordering — map them to resource/mutex constructs |
+| R6 | local unqualified `n()` atoms in `condition` | These are *not* dependencies. Translation as edges creates false ordering — map them to resource/mutex constructs. Only the bare local form reads as mutual exclusion: a lookback-qualified, cross-instance, or `box_success`/`box_failure` `n()` stays an ordinary edge (DL-12) |
 | R7 | Global-variable conditions (SEM-08) | Needs a UC variable + event-trigger equivalent. The re-evaluation-on-set semantics must match |
 | R8 | FORCE start satisfying downstream latches (SEM-23) | Operational muscle memory changes |
 
@@ -652,7 +731,19 @@ T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfie
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
 tick arms, edge starts, start consumes — cited, abandon switch deleted (SEM-32,
 DL-54/DL-58: `test_sem32_*`) · T33a/b run_window closer-edge both sides + box variant
-(SEM-33) · T34 must_* emit alarms only (SEM-34).
+(SEM-33) · T34a/b must_* emit alarms only (SEM-34).
+
+Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
+pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15 has its
+own oracle test (`test_sem15_idle_box_recompute_derives_status_from_member_changes`). SEM-30 and
+SEM-31 are lowering rules, pinned in the IR suite (`test_sem30_*`, `test_sem31_*`). SEM-35 is
+pinned by the scheduler suite's `test_resolve_timezone_*` and `test_preflight_timezone_*`
+families, which carry no `sem35` in their names. SEM-36..39 are calendar rules, pinned in the autocal suite
+(`test_sem36_*`..`test_sem39_*`). T34a/b's own `test_sem34a/b_*` cover must_complete only; the
+must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
+`test_must_start_alarm_quiet_when_the_run_began_in_time`. SEM-16 (definition-time mutation of a
+running box) and SEM-17's ACTIVATED state are recorded oracle non-goals v1 and have no trace
+test.
 
 ## 9. Open questions — resolve against a live instance or deeper doc dive before oracle v1
 

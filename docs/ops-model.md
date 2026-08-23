@@ -6,18 +6,39 @@ the same estate, read from the other side.
 
 Status: **plan, not frozen — and the ops view only.** The *mechanism* this
 document proposed — the period, the seal, the carry, the lineage fence, the
-optional run root — is now normative-in-waiting in **`docs/period-model.md`**,
-converged with `gpt-5.6-sol` after 33 adversarial rounds. Where this document
-and period-model disagree, **period-model wins**. §1–§3 and §8a–§8b below are
-kept as the *argument* that got there and are marked *superseded*; the
+optional run root — is **frozen in `docs/period-model.md`** (DL-114, with its
+rulings DL-115…DL-129) and **built** (DL-130…DL-136, DL-141…DL-144). Where
+this document and period-model disagree, **period-model wins**. §1–§3 and
+§8a–§8b below are kept as the *argument* that got there and are marked
+*superseded*; the
 scenario catalogue (§5), the closed book (§6), run history (§6a), retention
 (§7), authority (§8) and the deployment shapes (§4a) remain this document's.
 
-**Peer-reviewed 2026-08-18** (`gpt-5.6-sol`, xhigh, read-only over the repo;
-four rounds, converged). Round 4 acted on the repo owner's objection that
-rolling the run root is clumsy and counter-intuitive: §8a.0 is the result and it
-supersedes this document's original framing of the run root as the period
-boundary. Four claims were withdrawn and are marked at the point
+**What shipped since this document was written.** Read every "today", "does
+not exist" and "gap" below against this list, and read the superseded
+sections as history rather than as a description of the code:
+
+- the period identity, the content-addressed catalog bundle, the
+  `RuntimeProfile` and the manifests (DL-130);
+- the boundary classifier — R / A / carry over a transitive closure (DL-131);
+- the seal artifact and the boundary operation, with the cutoff barrier and
+  the retry-horizon gate (DL-132, DL-133);
+- the operator verbs `dsl41 seal`, `dsl41 audit`, `dsl41 verify` and
+  `estate reclaim`, and the physical roll `dsl41 run --open-from` (DL-134);
+- retention floors and `estate prune`, and the archive class that closed
+  E20 (DL-135, DL-144);
+- run history, `dsl41 runs` (DL-113), made boundary-aware (DL-136, DL-141);
+- the capacity decomposition this document's §8b.4 argued for (DL-120);
+- the access perimeter — three tiers and local peer authentication —
+  which closes most of §8 (DL-146…DL-148, `docs/access-model.md`).
+
+What is still a plan: follower mode and `standby check` (§4), the store-backed
+term, the multi-executor rig (§4a.5), and the store-era seal (§8a.2 stage 5).
+
+**Peer-reviewed 2026-08-18** (four rounds, converged). Round 4 acted on the
+repo owner's objection that rolling the run root is clumsy and
+counter-intuitive: §8a.0 is the result and it supersedes this document's
+original framing of the run root as the period boundary. Four claims were withdrawn and are marked at the point
 they were made rather than deleted: §1.3's "a seal does not require a quiesced
 estate", §2.2's per-job release window, §8a.1's "only the last stage waits on
 the store", and §1.1's IR-G analogy. The sweep gained four findings (G7–G10) and
@@ -26,7 +47,11 @@ review"*, the older reading was wrong, not merely weaker.
 
 ## 0. The finding this document starts from
 
-One run root today carries four different lifetimes, and they are forced to end
+*(The problem as it stood. It is solved: `period-model.md` §0 restates it and
+the boundary that fixes it is built. The tense below is the tense of the
+argument.)*
+
+One run root carried four different lifetimes, and they were forced to end
 at the same instant:
 
 | lifetime | what it holds | should end when |
@@ -36,16 +61,17 @@ at the same instant:
 | **baseline** | the catalog: JIL bytes, `catalog_hash`, manifest, roles | the estate changes |
 | **estate** | job rows, globals, host rows, generations | the estate is retired |
 
-`deployment-runbook.md` §6 collapses all four into one act: an estate change is
+`deployment-runbook.md` §6 collapsed all four into one act: an estate change was
 **stop → swap → new run root**, and a new run root is a new log, a new baseline
-*and* a fresh oracle. Genesis seeds definition-time state only —
+*and* a fresh oracle. Genesis seeded definition-time state only —
 `initial_status` flags per SEM-24 and the catalog's declared globals
-(`src/dsl41/oracle.py:261`). So every estate change silently resets:
+(`Oracle.__init__` in `src/dsl41/oracle.py`). So every estate change silently
+reset:
 
 - every runtime global back to its declared value, or to absent;
 - every operator `ON_HOLD` / `ON_ICE` / `ON_NOEXEC` placed since the last change;
 - every `last_end_at` and `status_at`, which is what lookback conditions read
-  (`src/dsl41/oracle.py:608`);
+  (`Oracle._lookback_ok` in `src/dsl41/oracle.py`);
 - every `armed` latch (SEM-32, DL-54) and every box's `ran_members` (SEM-10);
 - every `run_number` back to 0, so `runs/<job>.1` means a different run in each
   baseline and an investigator cannot tell them apart from the path.
@@ -57,8 +83,16 @@ days — a global set by yesterday's reconciliation, a `s(job, "24.00")` lookbac
 a hold placed on Friday for Monday's release — it is silent loss, which is the
 one thing this project refuses everywhere else (DL-07).
 
-Today nothing in the model says which of the two you are doing. This document
+Nothing in the model said which of the two you were doing. This document
 adds the concept that says it.
+
+*(Closed.* A boundary now carries all five: `Oracle.__init__` takes the
+carried rows and installs them before the genesis seed, and the seed skips
+every row and every global the carry supplies, so only genuinely new rows are
+seeded (period-model §7). `run_number` is monotone across the estate
+(period-model I2), so `runs/<job>.<n>` names one run within a lineage.
+A fresh run root still resets everything on this list — that is what a NEW
+estate is.*)
 
 ## 1. The period, the seal, and the carry
 
@@ -146,9 +180,10 @@ rest on Pydantic's or Python's current serialization behaviour.
 ### 1.2 What the seal must carry, and one thing that is not obvious
 
 The rows are easy: `JobRuntime`, `GlobalRuntime` and `HostRuntime` are frozen
-Pydantic models (`src/dsl41/oracle_state.py:111`) and serialize as themselves.
+Pydantic models (`src/dsl41/oracle_state.py`) and serialize as themselves.
 The timer heap carries its ordering token and `_timer_seq`
-(`src/dsl41/oracle_state.py:284`), which §3 already requires to be authoritative.
+(`RuntimeState` in `src/dsl41/oracle_state.py`), which §3 already requires to be
+authoritative.
 
 **The capacity pool's waiter order does not survive a seal, and today's argument
 that it needs no token depends on replaying from genesis.** DL-86 left
@@ -163,6 +198,11 @@ one pool would resume in an arbitrary order — which decides which one starts.
 So the seal carries `waiters` explicitly, as an ordered list. The alternative —
 a rank field on the row — is worse: it adds a projected field that moves on every
 queue change, for a fact only the seal needs.
+
+*(The conclusion was right and the shape was backwards. DL-120 took the
+alternative this paragraph called worse: the rank is `JobRuntime.waiter_seq`
+and the allocator is `RuntimeState.enqueue_counter`, both carried, and the
+seal holds no `waiters` list. §8b.4 is where that argument is made.)*
 
 This is the general shape of the risk and worth stating once: **any invariant
 whose proof is "replay reconstructs it" must be re-checked against a boundary
@@ -185,7 +225,12 @@ persisting.)*
   problem — there is no channel to the process. Quiescence is the stage-1
   contract (§8a.2), and the multi-root bridge that lifts it is stage 4. This
   costs less than it reads: `deployment-runbook.md` §6 already drains before a
-  re-baseline, so stage 1 imposes no new release-window tax.
+  re-baseline, so stage 1 imposes no new release-window tax. *(Narrowed at
+  build. This is the rule for a **physical roll**, and it is enforced: a roll
+  whose seal carries any live execution refuses (`src/dsl41/estate.py`). An
+  **in-place** transition never crosses a supervisor, so in detached mode it
+  drains nothing beyond the §10 R-closure; tethered still drains fully, because
+  stopping the engine cancels live commands — period-model §8's mode table.)*
 - **It cannot carry the decision index, so it must not seal inside the retry
   horizon.** The earlier draft said the index cannot be pruned and then listed
   it as not carried — a straight contradiction. Carrying it does not work
@@ -198,7 +243,10 @@ persisting.)*
   decided and nothing awaiting admission or a response. N must be named
   normatively and clients told that retry guarantees expire after it — which
   weakens an unbounded promise `control-protocol.md` §3 makes today, so it takes
-  its own decision-log entry.
+  its own decision-log entry. *(Softened at build. The horizon landed as a
+  **soft** gate, not a precondition: a boundary inside it warns and commits
+  with `--force-seal`, and the sidecar and the `seal` record carry the override
+  and the gate's numbers — period-model §9.)*
 - **It cannot resolve an unknown, and it does not carry one either.** A run
   whose executor went dark stays unknown until evidence or an operator resolves
   it. But `unresolved` is a **projection** and persisting it as opening truth
@@ -219,15 +267,15 @@ its own procedure:
 
 | operation | what it is |
 | --- | --- |
-| initial JIL release | open period 1 with an empty seal, under catalog C1 |
+| initial JIL release | native genesis opens period 1 under catalog C1. There is no opening seal — period-model §1.3's genesis is its own ordered transaction |
 | incremental JIL change | seal under C1; open the next period under C2, from the carry |
 | rollback | the same, with C1 again — *forward* from the current carry, never back to an old run root |
-| engine version upgrade | seal; open under the same catalog at a new `state_machine_version` |
+| engine version upgrade | seal; open under the same catalog. *Corrected: **not** at a new `state_machine_version` — period-model §12 makes an SM change across a transition a non-goal, so a bump is a full drain and a new-estate genesis* |
 | routine restart / crash | not a seal at all: resume inside the open period |
 
-Rollback deserves its sentence. Today rollback means "the previous tag and
-another fresh run root" (`deployment-runbook.md` §6), which throws away
-everything that happened under the bad release. Under the period model, rollback
+Rollback deserves its sentence. Before the boundary, rollback meant "the
+previous tag and another fresh run root" (`deployment-runbook.md` §6), which
+threw away everything that happened under the bad release. Under the period model, rollback
 carries forward from the state the bad release actually produced, which is the
 only correct reading — the jobs that ran, ran.
 
@@ -242,11 +290,11 @@ it rather than invent a second one.
 | --- | --- | --- |
 | **carry** | definition semantically unchanged | the row carries as-is |
 | **new** | no carried row | genesis seeding applies (SEM-24 flags, declared globals) |
-| **removed** | carried row, no catalog entry | retained as a ghost, listed, never silently dropped. L001 already refuses a *condition* that references it (`src/dsl41/lint.py:15`), so retention is for audit, not for truth |
+| **removed** | carried row, no catalog entry | retained as a ghost, listed, never silently dropped. L001 already refuses a *condition* that references it (`src/dsl41/lint.py`), so retention is for audit, not for truth |
 | **A** | changed, carryable under a stated assumption | carried, assumption recorded: condition changed (boundary truth may move), schedule changed (timers are recomputed, not carried), `initial_status` changed while the carried row disagrees |
 | **R** | cannot be carried | refuses the re-baseline while it is live: the job is RUNNING and its definition changed; its box membership changed while the box is running; its machine or affinity role changed while an effect is bound to the old one |
 
-**Genesis seeding must not overwrite the carry.** `oracle.py:261` seeds
+**Genesis seeding must not overwrite the carry.** `Oracle.__init__` seeds
 `initial_status` and declared globals at construction. Under carry-forward it
 applies to **new** rows only, or every re-baseline silently clears every operator
 hold — the §0 failure with extra steps. A job whose `initial_status` changed
@@ -273,9 +321,11 @@ started because its condition is false, C2 changes M's command but not its
 membership — M is INACTIVE so "changed job is live" does not fire, membership is
 unchanged so the box rule does not fire, and M later starts under C2 inside B's
 C1 execution. **E19 is open about exactly this**, so §2 cannot claim the gate is
-safe while it is. And "live" cannot mean RUNNING: QUE_WAIT, armed latches,
-deferred timers and pending effects are all latent execution intent and each
-needs its own classification.
+safe while it is. *(E19 is now closed: period-model §10.3 classifies a changed
+member of an executing box **R** even while the member is INACTIVE, PR-42.)*
+And "live" cannot mean RUNNING: QUE_WAIT, armed latches, deferred timers and
+pending effects are all latent execution intent and each needs its own
+classification.
 
 *(Partially restored in round 4.)* The per-job gate returns once the run root
 stops rolling, because the drain it was killed by was the supervisor handoff.
@@ -304,30 +354,35 @@ rehearsing a fresh one.
 E9 still applies to a window that spans a tick. The seal's own cutoff is a
 different mechanism and is specified in §8a.2.
 
-## 3. The seal is the only place a version may move
+## 3. The version boundary this document proposed did not ship
 
-*Narrowed by `period-model.md` §2.1: a transition may change the catalog and
-the runtime profile but **not** `state_machine_version` — an SM bump stays a
-new estate, as today. "An upgrade keeps estate state" holds for the common
-upgrade that does not move the SM version.*
+*Rejected, not narrowed. `period-model.md` §2.1 and §12: a transition may
+change the catalog and the runtime profile but **never**
+`state_machine_version`, and the readiness gate refuses a `next_period` whose
+SM version differs (PR-17). An SM bump is a full drain and a new-estate
+genesis, exactly as `deployment-runbook.md` §7 still says. So the seal is not
+a cross-SM migration surface. What survives is the smaller half: an upgrade
+that does not move the SM version keeps the estate's state. The argument below
+is historical.*
 
 `deployment-runbook.md` §7 says to treat an engine upgrade like an estate change,
 because leader eligibility is an exact match on `state_machine_version` and
 replay would otherwise cross a semantic change. That rule is right, and the
 period model turns it from a caution into a boundary:
 
-> Replay never crosses a seal, so a seal is the only point at which
-> `state_machine_version` may change.
+> ~~Replay never crosses a seal, so a seal is the only point at which
+> `state_machine_version` may change.~~
 
 Two consequences an operator can act on:
 
 - An upgrade is **drain → seal → upgrade → open**, and the estate keeps its
-  state. Today it keeps nothing.
-- The seal's `state` becomes the **only cross-version compatibility surface** —
-  one schema, versioned, with a one-way migration per bump. That is a far smaller
-  contract than "every historical input must stay re-interpretable under the new
-  semantics", which is what resume-compatibility means today and why the runbook
-  declines to promise it.
+  state. Before the boundary it kept nothing. *(This one holds, for an upgrade
+  that does not move the SM version.)*
+- ~~The seal's `state` becomes the **only cross-version compatibility
+  surface**~~ — one schema, versioned, with a one-way migration per bump.
+  *(Withdrawn with the rule above. The seal schema still has to stay readable
+  for the estate's retention lifetime, which is a real obligation and a
+  different one.)*
 
 Wrapper and supervisor skew stays a separate question: a detached supervisor
 outlives the engine by design (DL-79), so an upgrade window must still confirm
@@ -390,7 +445,7 @@ that true.
 
 ### 4a.1 Two mutexes, not one
 
-One `flock` does two different jobs today:
+One `flock` did two different jobs:
 
 - it excludes a second process from the **run root's filesystem artifacts** —
   spool directories, `control.sock`, `supervisor.sock`, the journal file;
@@ -400,6 +455,14 @@ One `flock` does two different jobs today:
 Under a shared ledger those separate cleanly. The run root stays local and keeps
 its lock. The term moves to the store. On one box both apply; over the wire only
 the term is shared, because each host has its own run root.
+
+*(Half of this landed locally.* The period model added a second file mutex:
+`leader.lock` still excludes a second writer from one run root
+(`src/dsl41/runner_ledger.py`), and `anchor.lock` serializes the estate's
+**lineage** — which root may claim the next period (`src/dsl41/boundary.py`).
+So the run-root lock and the estate-level lock are already two locks on one
+box. What has not moved is the term itself: the epoch is still written under
+the run-root lock, and the store is still what a second host would need.*)
 
 **That separation is what protects the simple setup.** The flock is kernel-
 released when the holder dies, `kill -9` included, with no expiry to renew — §1
@@ -438,21 +501,29 @@ May differ: **the transport, and only the transport.**
 
 ### 4a.4 Three things block it today
 
-1. `LOCAL_EXECUTOR_ID` is a constant and `seed_local_executor` is the table's only
-   writer (`src/dsl41/runner_hosts.py:56`), so the routing table holds exactly one
-   row. `concurrency-model.md` §8 says so about itself in its DL-111 amendment:
-   *"what is missing is a second row to point them at."*
+1. `LOCAL_EXECUTOR_ID` is a constant and `seed_local_executor` is the only
+   writer that creates a host row (`src/dsl41/runner_hosts.py`), so §8's host
+   table holds exactly one row. `concurrency-model.md` §8 says so about itself
+   in its DL-111 amendment: *"what is missing is a second row to point them
+   at."* The **role → executor** map beside it is a separate thing and is
+   thinner still: `implicit_routes` in `src/dsl41/seal.py` projects exactly one
+   route from that one executor, at `state_rev` 0, because no verb that could
+   move it exists yet.
 2. **`--as-machine` and `executor_id` are different identities and only the first
    is settable.** `--as-machine` is preflight identity — which `machine:` values
    this runner answers to (DL-52). `executor_id` is routing identity — which
    table row an effect binds to. Two executors on one box need both, and
    `dsl41 run` has no flag for the second.
-3. `dsl41 journal` seeds genesis with `LOCAL_EXECUTOR_ID` hardcoded
-   (`src/dsl41/cli_run.py`, `_replay_one`). The comment there is guarding the right thing — a
-   replay onto a table without this engine's own executor decides *"no such
-   host"* where the run decided otherwise — one step before the case that breaks
-   it. The moment a run can name a different executor, offline replay must read
-   it from the opening `segment` record.
+3. `dsl41 journal` seeds every replayed period with `LOCAL_EXECUTOR_ID`
+   hardcoded (`src/dsl41/cli_run.py`, `_run_period`). The comment there is
+   guarding the right thing — a replay onto a table without this engine's own
+   executor decides *"no such host"* where the run decided otherwise — one step
+   before the case that breaks it. The moment a run can name a different
+   executor, offline replay must take the identity from the period's **opening
+   seal**, which carries the host and route rows; the `segment` record names
+   that seal in `opens_from_seal` and carries no executor field of its own.
+   Period 1 has no opening seal, so genesis still needs an authority this
+   section does not name.
 
 ### 4a.5 The local rig is the cheapest proving ground the relay has
 
@@ -491,7 +562,7 @@ the more dangerous error:
 
 Ops details that follow from co-tenancy and are worth one line each: run roots,
 control sockets and supervisor sockets are per run root, so nothing collides by
-construction; `dsl41 serve` needs one port per estate; and `_CapacityPool` is
+construction; `dsl41 serve` needs one port per estate; and `CapacityPool` is
 per engine, so nothing arbitrates a box-wide resource across estates. That last
 one is identical over the wire — a standing scope boundary (the `Qr` series), not
 a break in the isomorphism.
@@ -503,6 +574,14 @@ preconditions are machine-checked rather than remembered, every step is recorded
 in the ledger, and an operator can tell success from partial success without
 reading a WAL.
 
+Two readings to keep straight. The **today** column is the pre-boundary
+engine and is kept as the before-picture; the **gap** column is current, and
+a gap the build has closed says so with its DL entry. And the row labels
+`A1`…`F6` are this table's own: `E1`–`E11` in section E are intervention
+rows, not the runner open questions spelled the same way — §11's E16–E23 and
+C4's E9 are the open-question namespace (`docs/citation-index.md`), and B1/B2,
+C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
+
 ### A. Installation and lifecycle
 
 | # | scenario | today | under the period model | gap |
@@ -510,17 +589,17 @@ reading a WAL.
 | A1 | initial install, one host | `deployment-runbook.md` §1–§3 | unchanged | — |
 | A2 | provision the standby | not covered | same install, boots as follower (§4) | follower mode |
 | A3 | standby readiness verification | not covered | `standby check`, run continuously | the verb, and what BCP wants in it (E17) |
-| A4 | engine version upgrade | fresh run root, state lost (§7) | drain → seal → upgrade → open (§3) | seal-state schema + migration |
-| A5 | OS patching / host maintenance | stop the engine | `host drain` the executor, work finishes, engine keeps leading | — (frozen, §8 of concurrency-model) |
-| A6 | estate decommission | delete run roots | final seal, archive the chain, retire the estate row | retention policy (§7) |
+| A4 | engine version upgrade | fresh run root, state lost | seal → upgrade → resume, and the estate keeps its state, for every upgrade that does NOT move `state_machine_version` (§3) | — for that case (DL-133; `deployment-runbook.md` §7). An SM bump is still a full drain and a new estate: period-model §2.1 refuses a `next_period` whose SM version differs |
+| A5 | OS patching / host maintenance | stop the engine | `host drain` the executor, work finishes, engine keeps leading | the drain is frozen and built (§8 of concurrency-model), but with one executor row it is the engine's own host: keeping the engine up while its host is patched needs the second executor of §4a.4 |
+| A6 | estate decommission | delete run roots | final seal, archive the chain, retire the estate row | not covered end to end. The floors, `estate prune` and the archive class ship (DL-135, DL-144); there is no decommission procedure and no retire verb |
 
 ### B. Estate content
 
 | # | scenario | today | under the period model | gap |
 | --- | --- | --- | --- | --- |
-| B1 | initial JIL release | fresh run root | period 1, empty seal | — |
-| B2 | incremental change (add / remove / modify) | full quiesce, all state lost | seal → classified diff → open under C2 | the diff classifier, the carry |
-| B3 | emergency hotfix, mid-cycle | not supportable without losing the night | per-job R-gate; refuse only if the touched jobs are live | the R-gate |
+| B1 | initial JIL release | fresh run root | native genesis opens period 1; no opening seal | — |
+| B2 | incremental change (add / remove / modify) | full quiesce, all state lost | seal → classified diff → open under C2 | — (DL-131, DL-133) |
+| B3 | emergency hotfix, mid-cycle | not supportable without losing the night | the R-gate over the transitive closure; refuse only while something in it is live | — (DL-131). Tethered mode still drains: a transition is a restart |
 | B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (§2) | — |
 | B5 | calendar / holiday change | a catalog change, but easy to think of as config | it *is* a catalog change: firing dates move | say so in the runbook |
 | B6 | properties / placeholder change | changes post-placeholder JIL, so changes the hash | same as B2 — this surprises people | say so in the runbook |
@@ -531,8 +610,8 @@ reading a WAL.
 | # | scenario | today | under the period model | gap |
 | --- | --- | --- | --- | --- |
 | C1 | ordinary night | frozen | unchanged | — |
-| C2 | closing the books | does not exist | the seal, at the estate's own cutoff, in the estate's own zone (SEM-35) | the verb and the schedule |
-| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance; carried in the seal | E13 |
+| C2 | closing the books | does not exist | the seal, at the estate's own cutoff, in the estate's own zone (SEM-35) | `dsl41 seal` ships (DL-134). The operator chooses each boundary: automatic sealing on a timer is a period-model §12 non-goal. The cadence question is E16 |
+| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance. It is a **projection**: `unresolved` derives from the carried host and execution rows and is regenerated in the new period, never copied into the seal (§1.3, period-model §3.3) | E13 |
 | C4 | missed ticks over downtime | E9 skip-and-report, journaled | unchanged | — |
 | C5 | deliberate catch-up after downtime | explicit `FORCE_STARTJOB`s | unchanged; the seal makes "what did we skip" answerable from the `drop` records in one period | — |
 
@@ -542,11 +621,11 @@ reading a WAL.
 | --- | --- | --- | --- | --- |
 | D1 | "why has X not started?" | `explain`, `deps`, `timers`, `plan` — frozen | unchanged | — |
 | D2 | post-hoc, current period | `dsl41 journal` replay | unchanged | — |
-| D3 | post-hoc, closed period | run root may be gone or archived | the closed book: seal + inputs + catalog (§6) | manifest bytes in the store |
-| D4 | across a failover | the record splits across run roots | one ledger per estate: the trace is continuous across hosts | — |
-| D5 | regulator: what ran, when, under which definition, on whose authority | partially answerable; authority is a *claim* | the chained seal answers three of four | authentication (§8) |
-| D6 | "is this job degrading?" | facts exist per run root; no key, no index, no query | the run table, segmented by `catalog_hash` (§6a) | the projection and the `runs` verb |
-| D7 | "what did last night cost us?" — elapsed per box, per wave | walk the spools | one query over the period's run rows | as D6 |
+| D3 | post-hoc, closed period | run root may be gone or archived | the closed book: seal + inputs + catalog (§6) | — the period's own post-placeholder bytes are stored in its root, content-addressed (DL-130). An archived period is named, not silently short (DL-144) |
+| D4 | across a failover or a physical roll | the record splits across run roots | one ledger per estate: the trace is continuous | on one host it is built — the lineage registry names every root and the readers cross them (DL-141). Across hosts it still needs the store |
+| D5 | regulator: what ran, when, under which definition, on whose authority | partially answerable; authority is a *claim* | the closed book and the run rows answer what ran, when and under which definition — the seal chain alone holds no run history; an armed access perimeter answers local authority | arm the access map, or the actor stays a claim. Authentication for a non-local principal is open (§8) |
+| D6 | "is this job degrading?" | facts exist per run root; no key, no index, no query | the run table, segmented per job (§6a) | — `dsl41 runs` ships (DL-113), and reads a whole lineage from its anchor (DL-141) |
+| D7 | "what did last night cost us?" — elapsed per box, per wave | walk the spools | export the run rows and aggregate them outside dsl41 | no period key and no wave key: `RunRow` carries neither, and `dsl41 runs` filters by job and time only |
 
 ### E. Manual intervention
 
@@ -562,16 +641,25 @@ identically, and never an edit to what is already written.
 | E5 | set a global | `SET_GLOBAL` | by another set | now survives a re-baseline (§0) |
 | E6 | drain / activate an executor | `host drain` / `activate` | yes | asserts nothing about reachability |
 | E7 | evict an executor | `host evict` | no | gated on §8's three preconditions |
-| E8 | **break glass**: `evict --force` | `host evict --force` | no | the one path that can double-run; attributed, not authenticated |
-| E9 | **break glass**: supervisor shutdown | `supervise shutdown` | no | needs the engine stopped and the lease lapsed |
+| E8 | **break glass**: `evict --force` | `host evict --force` | no | the one path that can double-run; authenticated when the access map is armed, attributed otherwise (§8) |
+| E9 | **break glass**: supervisor shutdown | `supervise shutdown` | no | needs no live leaseholder: an expired lease, or an unexpired one whose holder's connection is gone, is grantable (DL-79) |
 | E10 | resolve an unknown outcome | operator STATUS with evidence | no | `ha-deployment.md` §5, CM-22 |
 | E11 | bulk-resolve at cutoff | over the cutoff report | no | E13 |
 
 **Break-glass must survive the seal.** An incident that can be conflated away is
-an incident that will be. A seal carries a non-zero count of forced actions and
-unresolved runs into the next period's opening state until each is explicitly
-acknowledged — the accountant's rule that you do not close over an unreconciled
-item, applied literally.
+an incident that will be. What the build does, and it is not what this
+paragraph first proposed: the seal carries the **facts** — a forced eviction's
+`forced_by` rides on the carried host row, a forced boundary is `force_seal`
+on the `seal` record with the gate's own numbers in `forced_gate`, and every
+undelivered effect is in `outbox_pending`. The perimeter's own ledger is
+separate and is not carried: the perimeter makes a **best-effort, unsynced**
+`privileged_admitted` write in `<run_root>/perimeter.jsonl` for each admitted
+ops-or-higher control request, and that file never enters the WAL, because a
+policy decision is not an engine input (`access-model.md` §6). The admission
+stands when the receipt write fails. `supervise shutdown` goes to the
+owner-only supervisor socket and emits no perimeter receipt at all.
+There is no acknowledgement latch, and the accountant's rule is not enforced
+mechanically. `unresolved` is not carried at all — it is derived (§1.3).
 
 ### F. Failover
 
@@ -593,28 +681,46 @@ routine rather than exotic.
 
 What an investigator or an auditor is handed for a closed period:
 
-1. the **seal** that opened it and the seal that closed it, chained by digest;
-2. every **input** between them;
+1. the **seal** that closed it, and — for every period but the first — the
+   seal that opened it, the two chained by digest. Period 1 has no opening
+   seal: native genesis opens it from nothing;
+2. every **input** between them — unless the period's inputs were archived
+   under the `archive-inputs` class, which deletes the WAL after a durable
+   receipt and drops the period to the attestation-verified tier
+   (period-model §12, DL-144);
 3. the **catalog** it ran under — the post-placeholder JIL bytes, not a tag;
-4. the **principals** who asked for each externally requested input.
+4. the **principals** who asked for each externally requested input — the
+   authenticated ones when the access map was armed, a claim otherwise.
 
-Item 3 is the one that does not work today. Offline replay is hash-gated against
-the estate *at its recorded paths* (`deployment-runbook.md` §4), so the byte-exact
-copies in the run root's own input bundle do not pass from anywhere else — a deliberate defer,
-because relocation-independent hashing would orphan every existing journal.
+Item 3 was the one that did not work, and it works now. It needed no store.
+DL-130 put the period's post-placeholder JIL in the run root itself, under
+`catalogs/<source_bundle_hash>/`, addressed by content. `dsl41 journal` loads
+that bundle when the caller supplies no estate files, and gates it against the
+`catalog_hash` the period's own `segment` record pins — so a closed period
+replays from its own stored bytes and needs no checkout
+(`_period_catalog` in `src/dsl41/cli_run.py`). The recorded paths are kept and
+used: `sources.json` holds each file's original path and command-line order,
+and the bundle is parsed **under those paths**, because `catalog_hash` covers
+spans and a span names its file (`load_bundle_catalog` in
+`src/dsl41/boundary.py`). Nothing is materialized in a scratch directory. The
+shape this section proposed survives; the address is `source_bundle_hash`
+rather than `catalog_hash`, and the artifact lives in the estate's root rather
+than in a store.
 
-The store fixes this without touching the hashing rule: **store the manifest
-bytes, content-addressed by `catalog_hash`**, and materialize them at the
-recorded paths in a scratch directory at replay time. The gate is satisfied
-because the bytes and the paths are both what it expects. Nothing about
-`SourceSpan.file` changes.
+Two consequences an operator should know. A bundle that no longer reproduces
+the pinned hash refuses, and it refuses with a different sentence than a
+supplied catalog that disagrees: one is corruption, the other is a checkout at
+the wrong revision. And a period whose inputs were archived under §12 of
+period-model contributes nothing to a replay — `dsl41 runs` names it rather
+than answering shorter (DL-144).
 
-Item 4 does not work today either, and that is §8.
+Item 4 is now answered for a local peer **when the access map is armed**, and
+that is §8.
 
 ## 6a. Run history — the fact table the ledger already contains
 
-**Today the facts survive and the history does not.** Every timing an operator
-would want is written, in three places, and none of them is queryable across a
+**The facts survived and the history did not.** Every timing an operator
+would want is written, in three places, and none of them was queryable across a
 baseline:
 
 - the `dispatch` record — `{job, run_number, wrapper_pid, run_dir, started_at}`;
@@ -624,17 +730,19 @@ baseline:
 
 What is missing is not the data. It is a **key, an index and a query**:
 
-- `run_number` resets to 0 at every re-baseline (§0), so `runs/job.1` names a
-  different run in every run root and nothing identifies a run across them;
-- run roots are not indexed, so "this job's last twenty runs" means walking N
+- `run_number` reset to 0 at every re-baseline (§0), so `runs/job.1` named a
+  different run in every run root and nothing identified a run across them;
+- run roots were not indexed, so "this job's last twenty runs" meant walking N
   directories, each hash-gated to its own catalog;
 - `JobRuntime` holds the latest status only — one row, no history
-  (`src/dsl41/oracle_state.py:111`);
+  (`JobRuntime` in `src/dsl41/oracle_state.py`);
 - `trace` is the current run's, in memory.
 
-So "is this job degrading?" is answerable in principle and unanswerable in
-practice, and it gets worse with every JIL release — which is exactly the
-frequency at which an operator asks it.
+So "is this job degrading?" was answerable in principle and unanswerable in
+practice, and it got worse with every JIL release — which is exactly the
+frequency at which an operator asks it. `dsl41 runs` is the answer and it
+ships (DL-113); the rest of this section is what it was designed against, and
+the amendment at the end of §6a.1 says where the build differs.
 
 **The carry is the precondition.** Once `run_number` survives a re-baseline (§2),
 `(estate, job, run_number)` is a stable primary key for the life of the estate,
@@ -644,14 +752,21 @@ from the period model; it is the second thing the period model makes possible.
 ### 6a.1 Derived, never authoritative
 
 The ledger already holds every fact. So the run table is a **projection**, on the
-same rule as IR-G and as the seal itself: regenerate it, never edit it, and never
-treat it as the source of a truth the inputs disagree with.
+same rule as IR-G: regenerate it, never edit it, and never treat it as the
+source of a truth the inputs disagree with. *(Not "and as the seal itself" —
+§1.1 rule 1 settles that the other way: a seal IS used as authority, and what
+keeps it honest is reproduction rather than derivation.)*
 
 **It materializes at the seal**, before the period's inputs become archivable
 (§7). A seal therefore produces two derived things — the **carry**, which is
 state, and the period's **run rows**, which are history. Both are verifiable by
 replay while the inputs still exist, which is the only window in which either can
 be checked.
+
+*(Withdrawn at build. The seal materializes the carry and nothing else; the
+run rows are folded on demand from the WAL, so they cannot outlive it. See the
+amendment below, and §7's second clock, which this paragraph was the reason
+for.)*
 
 One row per completed run:
 
@@ -669,18 +784,29 @@ held job, a refused command — these are `drop` records and trace entries, and
 folding them into the run table would make it answer two questions badly. "Why
 did it not run" and "how long did it take" are different queries.
 
-*(Amended by DL-113, at build.* Built without waiting for §1–§4's seal:
-`dsl41 runs` is a plain offline CLI verb over one or more run roots' existing
-`journal.jsonl` + estate files + spool, computed on demand rather than
-materialized at any write time — there is no seal to materialize it at, and
-no writer of a new record kind. The row therefore carries neither `estate`
-nor `period_id`: `run_number` resets at every re-baseline exactly as §0
-already says, so the caller names which run roots to combine and
-`catalog_hash` — not `run_number` — is what actually tells two runs of the
-same job apart across a baseline change. `RunRow` adds one field this sketch
-did not have, `clock_source`, naming whether a row's timing came from the
-wrapper's own spool or fell back to the journal (decision 1 of
-`src/dsl41/runner_history.py`'s module docstring). "The oracle already
+*(Amended by DL-113, at build; extended by DL-136 and DL-141.* Built without
+waiting for §1–§4's seal: `dsl41 runs` is a plain offline CLI verb over the
+WAL segments a run root still retains — one per period — plus that period's
+own catalog bundle and its spool, computed on demand rather than materialized
+at any write time. There is no writer of a new record kind, and **it does not
+materialize at the seal**: the run rows exist only while the WAL they are
+folded from does. The row therefore carries neither `estate` nor `period_id`;
+the caller names the run roots, or names the lineage **anchor** alone and the
+registry supplies every root in period order (DL-141). `RunRow` adds three
+fields this sketch did not have: `clock_source`, naming whether a row's timing
+came from the wrapper's own spool or fell back to the journal; `job_hash`,
+this job's own definition fingerprint; and `fidelity`, saying how much of the
+row could be established when the period's manifest is gone (decisions 1, 4
+and 5 of `src/dsl41/runner_history.py`'s module docstring). An open run gets a
+row too, with a null `ended_at` and a null duration — never a fabricated one.
+The stable key across a lineage is `(estate, job, run_number)` as this section
+argued, but `estate` is supplied by the lineage the caller named and is not a
+field on the row. Two limits are stated where a reader meets them: a run that
+SPANS a boundary keeps its row in the period that dispatched it and its status
+stays RUNNING, because the terminal input is in the next segment and the fold
+reads one segment at a time; and a full-fidelity period costs one replay each,
+while a period whose manifest is gone folds from its records with no replay at
+all. "The oracle already
 knows both ends" of a box's run turned out to mean that literally: a box
 gets no `dispatch` record and its fold is emitted, never journaled, so its
 row is only recoverable by replaying the journal through a fresh Oracle —
@@ -720,11 +846,19 @@ than worthless if someone acts on it. "This job got 40% slower on Tuesday" and
 is actionable.
 
 Grafana will happily draw one line through that change. dsl41 will not, because
-every run row carries the `catalog_hash` it ran under, and the history query
-**segments the series at every baseline boundary**. This is the same error class
+every run row carries the definition it ran under, and the history query
+**segments the series where that definition moved**. This is the same error class
 `equiv` exists for on the semantic side — a comparison that crosses a catalog
-change is not a comparison — applied to the operational side, where nothing
-guards it today.
+change is not a comparison — applied to the operational side, where nothing else
+guards it.
+
+*(Sharpened at build.* The break is drawn on the row's own `job_hash`, not on
+`catalog_hash`, and falls back to `catalog_hash` only when either row lacks a
+job hash. `catalog_hash` is deliberately conservative — an estate that changed
+in any way re-baselines — so a release touching twelve jobs of eight hundred
+moves it for all eight hundred, and a break on it would mark every job in the
+estate as changed. Both hashes ride on every row in every format, so a JSON or
+CSV consumer can segment either way (decision 4 of `runner_history.py`).*)
 
 That segmentation is small, and it is the whole differentiator. Everything else in
 this section is a table and a SELECT.
@@ -742,47 +876,107 @@ vendor's average-run-time notion behind its runtime alarms) sets a parity
 expectation for a migrated estate is a dossier question, not a runner decision —
 **[?]**, and it needs a citation sweep before anything is built to match it.
 
-## 7. Retention — four clocks, not one
+## 7. Retention — more than one clock
 
 | what | retained for | why |
 | --- | --- | --- |
-| sealed periods (inputs + seals) | the audit horizon, years | the closed book |
-| run rows (§6a) | longer than the spools they summarize | one row per run is small; the trend is the point, and it outlives the logs |
-| run spools and job output | the operational horizon, weeks | investigation, and they are large and `0600` |
-| the decision index | the client retry horizon, hours | dedup only matters while a retry can arrive (§1.3) |
+| closed-period evidence: seals, attestations, receipts | the reachable seals and the newest attestation are floored; older ones are *held*; an archived period's receipt, attestation and sidecar are floored permanently | the closed book. `archive-inputs` deletes the period's WAL and a committed candidate's `staged_manifest.json` and `candidate.json`, and drops that period to the attestation-verified tier |
+| run rows (§6a) | *as long as the period's WAL* — see below | they are folded on demand, not stored |
+| run spools and job output | floored until the run is terminal and the last period that can reference it is attested; site policy after that | investigation, and they are large and `0600` |
+| the decision index | not a retention clock — see below | |
 
-Pruning the decision index at a seal is the obvious bug and this table exists to
-prevent it.
+Retention remains a business decision, as `deployment-runbook.md` §2 says, and
+the operator flags are in its §2a. What changes is that there is more than one
+clock and they are not interchangeable.
 
-Retention remains a business decision, as `deployment-runbook.md` §2 says. What
-changes is that there are four of them and they are not interchangeable. The run
-rows deliberately outlive the spools they summarize: a trend is worth keeping
-after the logs it was computed from are gone.
+*(Corrected at build.)*
 
-## 8. Authority — the gap ops will hit first
+**Run rows do not outlive the WAL they are folded from.** This section wanted
+them to, on the argument that a trend is worth keeping after the logs it was
+computed from are gone. That argument needed §6a.1's materialize-at-the-seal,
+which was withdrawn: `dsl41 runs` folds a row out of a period's own WAL every
+time it is asked. So an archived period contributes no rows, and the tool says
+so by name rather than answering shorter (`archived_coverage` in
+`src/dsl41/runner_history.py`, DL-144). A pruned **spool** is the softer case:
+the row survives on the journal's clock, and `clock_source` says so. Keeping
+the trend past the WAL would need a materializer this build does not have.
 
-`control-protocol.md` §7 gap 2 is honest: there is no authentication. The socket
-mode plus filesystem ownership is the whole access-control model, `claimed_actor`
-is a claim, and `forced_by` records who *said* they were asking (DL-111).
+**The decision index is not pruned on a clock at all.** The retry horizon
+landed as a **soft gate on sealing**, not as a retention period: a boundary
+committed within `retry_horizon_us` of the last admitted externally requested
+attempt warns and needs `--force-seal`, and the override is recorded
+(period-model §9; `retry_horizon_us` on `RuntimeProfile` in
+`src/dsl41/period.py`, default 60 s). The index itself is log-local and a new
+period opens with a new one, so nothing sweeps it. What §1.3 was guarding
+against — pruning dedup state while a retry can still arrive — is answered by
+the gate rather than by a clock.
+
+What may never be deleted is not a business decision and is itemized:
+`src/dsl41/retention.py` computes the floor from one root, and `estate prune`
+can reach only what a named rule licenses (period-model §11a, §12).
+
+## 8. Authority — the gap ops would have hit first
+
+*(Mostly closed. `docs/access-model.md` and DL-146…DL-148 are the answer, and
+they arrived by a route this section did not predict. The argument is kept and
+the outcome is stated after it.)*
+
+The problem, as it stood. `control-protocol.md` §7 gap 2 was honest: there was
+no authentication. The socket mode plus filesystem ownership was the whole
+access-control model, `claimed_actor` was a claim, and `forced_by` recorded who
+*said* they were asking (DL-111).
 
 For a laptop and a single host that is a documented limit. For a booking center
 under BCP governance it is the finding an audit opens with, because the two
 questions an auditor asks about a manual intervention are *who* and *by what
-authority*, and today the answer to both is "whoever had the uid".
+authority*, and the answer to both was "whoever had the uid".
 
-`concurrency-model.md` §6 already promises the resolution — *"the leader stamps
-the authenticated principal"* — and states its own blocker: there is no leader
-that can authenticate one. The store-backed term (S8a) and the relay's principals
-(E15) are what unblock it. The ops consequence is worth pinning now, before the
-relay's principal scheme is designed around a different requirement:
+`concurrency-model.md` §6 already promised the resolution — *"the leader stamps
+the authenticated principal"* — and stated its own blocker: there was no leader
+that could authenticate one. This section predicted the store-backed term (S8a)
+and the relay's principals (E15) would unblock it. **That prediction was
+wrong, and the correction is worth keeping.** Neither was needed. The kernel
+already authenticates a local peer, so DL-146 read the peer credential at
+accept (`SO_PEERCRED` / `LOCAL_PEERCRED`), resolved it to a principal
+`(realm, name, groups)`, and mapped it through one role map to three nested
+tiers — read < ops < adm. When access is configured the server **overwrites**
+`claimed_actor` with the canonical authenticated spelling before anything is
+fingerprinted or logged, so `forced_by` stops being a claim.
 
-> Break-glass verbs (`evict --force`, `supervise shutdown`, bulk resolution of
+Three qualifications an operator needs:
+
+- **It is opt-in.** With no role map installed, the old model still stands and
+  the claim passes through untouched.
+- **It covers local peers only.** A web tier runs one service account per
+  exposed tier behind the corporate proxy, so a receipt names the **service
+  account, not the human in the browser**; the deferred seam is named
+  `web-session-principal-v2` (`access-model.md` §9). A non-local principal is
+  still open, and that is what D5's remaining gap is.
+- **`supervisor.sock` is governed but not tiered** by v1 ruling: owner-`0600`
+  plus a same-uid peer check, on the argument that anyone with the filesystem
+  is adm by definition.
+
+This section's pin does not survive as written:
+
+> ~~Break-glass verbs (`evict --force`, `supervise shutdown`, bulk resolution of
 > unknown outcomes) require an authenticated principal, and their records survive
-> every seal.
+> every seal.~~
 
-Whether that also means four-eyes on break-glass is the client's control
-framework's call, not dsl41's — but the record has to be able to carry a second
-principal if the answer is yes, and that is a schema decision, not a policy one.
+Half of it landed and half of it was ruled against. Break-glass is **not** an
+authorization tier: `FORCE_STARTJOB`, `CHANGE_STATUS`, forced eviction and
+`force_seal` are all ops, and there is no fourth tier and no per-verb deny
+overlay, because that would be a second policy axis. Break-glass is a
+**receipt category** instead: the perimeter writes `privileged_admitted` for
+each admitted ops-or-higher control request, **best effort and unsynced**, so
+the admission stands when the receipt does not. That journal is deliberately
+NOT in the WAL and therefore not carried by any seal — a policy decision is
+not an engine input, and replay must not see policy. `supervise shutdown` is
+not in it either: it goes to the owner-only supervisor socket. What survives
+the seal is the *effect* of the act, on the rows: `forced_by` on an evicted
+host row, `force_seal` and `forced_gate` on the `seal` record.
+
+Whether four-eyes is required on break-glass remains the client's control
+framework's call, not dsl41's.
 
 ## 8a. The seal programme — stage order
 
@@ -870,6 +1064,20 @@ dsl41 seal --run-root <old>        # closes it: sidecar state + a `seal` record
 dsl41 run  --from-seal <old>/seals/<id>.json --run-root <new> <estate>...
 ```
 
+*(The spelling changed. `--from-seal` never existed. The shipped physical roll
+names the lineage **anchor**, not a sidecar path, and the closing period must
+also be attested:*
+
+```sh
+dsl41 seal  --run-root <old> --estate-anchor <anchor> --next <estate>...
+dsl41 audit --run-root <old> --estate-anchor <anchor>
+dsl41 run   --open-from <anchor> --run-root <new> <estate>...
+```
+
+*`--next` is required on every seal, even when the catalog does not change.
+And rolling the root is optional: `dsl41 run --resume` on the same root is the
+other opener.)*
+
 No store, no transaction manager, no HA. `docs/ha-deployment.md`'s S8a is not a
 prerequisite of any of this.
 
@@ -894,7 +1102,7 @@ write-ahead ordering `dispatch` and `spawn.json` already have, not a new one.
 | --- | --- | --- | --- |
 | 1 | **the period transition, in place** — schema + canonical form, rotating `baseline_id`, content-addressed catalogs, segmented WAL, resume-from-latest-seal, the cutoff barrier, the retry horizon, **`dsl41 audit`**, and DL-113 made period-aware | the provable core, with its proof | — |
 | 2 | **the carry across a catalog change** — the classifier over a transitive blast radius, genesis-for-new-rows-only, the boundary truth diff | **a JIL release stops resetting the estate** | 1 |
-| 3 | **the version boundary** — `state_machine_version` may move only across a seal | an upgrade keeps estate state (§3) | 1 |
+| 3 | ~~**the version boundary** — `state_machine_version` may move only across a seal~~ **withdrawn** (§3): an SM bump is not a transition, so no state crosses one | an upgrade that keeps the SM version keeps estate state (§3) | 1 |
 | 4 | **the physical roll while live** — the multi-root execution bridge: each live run's old supervisor endpoint and spool root carried until it drains | rolling the directory without draining. Needed ONLY for a physical roll: an in-place transition (stage 1) never crosses a supervisor | 1 |
 | 5 | **the seal in the store** — many periods in one ledger, so "replay starts at the last seal" becomes a mechanism rather than a side effect of a new run root | bounded replay across a takeover | S8a, and it gates S8e |
 
@@ -959,8 +1167,10 @@ ownership question in one line: **C1 owns every tick ≤ T, C2 owns every tick
 
 ### 8a.3 What must be frozen before stage 1 writes code
 
-1. **The seal record schema.** §3 makes it the only cross-version compatibility
-   surface, so it is the one thing here that is expensive to get wrong.
+1. **The seal record schema.** It is the one thing here that is expensive to
+   get wrong, because it has to stay readable for the estate's retention
+   lifetime. *(Not, as §3 first argued, because it is a cross-SM-version
+   translation surface — an SM bump is a new estate.)*
 2. **The carried-state inventory** — swept in §8b, which found five more gaps
    than §1.2's one.
 3. **Where the state lives**: sidecar plus record, write-ahead ordered (§8a.1).
@@ -1006,17 +1216,42 @@ precondition that matters:
 - **catalog change** — refused while any R-classified job is live (§2.2). Not
   the whole-estate quiesce the runbook has today.
 
+*(Corrected at build. The discriminator is not the catalog alone: a
+**runtime-profile** change with no catalog change is a transition too, and it
+classifies jobs, so it can produce R verdicts of its own. And "no
+precondition" was never right — every boundary runs the same gates whatever
+changed: the SM version must match, the cutoff barrier runs, and the
+retry-horizon gate warns. What an unchanged C2 buys is an empty changed
+closure, so the R gate has nothing to refuse on.)*
+
 The daily "close the books" cadence E16 asks about is a **store-era** trigger:
 on the file substrate a period ends when a run root does, so sealing daily would
 mean restarting daily. That is worth saying before someone builds a timer for
 it.
 
+*(Half wrong, corrected at build. A period does NOT end when a run root does:
+one root holds many periods, and "to roll a segment, seal" is period-model
+§1's own line. So a daily seal is available on the file substrate. What
+survives is the cost — a transition is a restart, not a reload — and the
+warning about the timer, which period-model §12 made a non-goal outright.)*
+
 ## 8b. The state-inventory sweep
 
 *Superseded by `period-model.md` §3.3 (carried / not carried, with the
 reconstruction rule for each derived item) and §5 (the capacity decomposition,
-which is §8b.4's "right fix"). G1–G11 below are the findings as made; period-
-model carries their resolutions.*
+which is §8b.4's "right fix"). G1–G11 below are the findings **as made**, in
+the present tense they were written in. **All eleven are answered** —
+G1–G4 by the capacity decomposition (DL-120), G5–G9 by the seal record and the
+cutoff watermark (DL-132, DL-133), G10 by the boundary-aware history fold
+(DL-136), and G11 by the supervisor's bounded `LIST` window
+(`_evict_completed` in `src/dsl41/runner_supervisor.py`). Read no sentence
+here as a live defect. Two caveats: G6 was never a modelling defect — when C2
+lowers a pool below the carried use, classification still follows the three
+tiers, so an executing dependent is R, a latent one is A and a not-live one
+carries; and G10's
+residue is stated rather than removed — a run that spans a boundary still
+reports RUNNING in run history, because the fold reads one segment at a time
+(§6a.1).*
 
 Every piece of live state, walked against one question: **is this
 reconstructible from the rows a seal carries, or only from the transitions a
@@ -1061,7 +1296,8 @@ job. So a depletable resource's spent units are recorded **nowhere in the
 rows**. Recomputing `_bucket_used` at a seal by summing the demand of RUNNING
 jobs, which is the obvious implementation and the one DL-86's invariant
 invites, would silently **refill every depletable resource in the estate** —
-SEM-16's entire meaning, inverted, quietly. This is the most dangerous item in
+mid-run replenishment, which is the SEM-16-class non-goal (DL-50), performed
+by accident and in reverse. This is the most dangerous item in
 the sweep, and it is invisible in any test whose estate has no depletables.
 
 Reproduced rather than reasoned — a `res_type: D` resource of 10, one job
@@ -1187,8 +1423,8 @@ properties, and the first does not imply the second.
 `_enqueue_counter` — as four maps in the seal record. It removes G1, G2 and G3
 today. Three reasons not to.
 
-It **freezes private internals into the one schema that must survive a version
-bump** (§3). `_held`'s entries are tuples of `(bucket_key, units, policy)`
+It **freezes private internals into a long-lived artifact schema** (§3).
+`_held`'s entries are tuples of `(bucket_key, units, policy)`
 chosen for a mutator's convenience, never for persistence. Put them in the seal
 and the pool can never be refactored without a migration.
 
@@ -1203,9 +1439,10 @@ why G1 could exist.
 And it **leaves the modelling error in place.** Look at what G1 actually is:
 `_bucket_used` sums two facts with different lifetimes and different truth
 conditions — units **held by live runs** (transient, and a function of which
-jobs are running) and units **permanently spent** (authoritative, irreversible,
-SEM-16). Recomputation is not wrong; the *sum is not decomposable*. Any fix
-that keeps them added together is carrying a number nobody can explain.
+jobs are running) and units **permanently spent** (authoritative, irreversible:
+a `res_type: D` or `FREE: N` acquire never releases, DL-50). Recomputation is
+not wrong; the *sum is not decomposable*. Any fix that keeps them added
+together is carrying a number nobody can explain.
 
 **The right fix: move the pool's state onto the entities it describes, and the
 pool becomes derived.**
@@ -1276,9 +1513,10 @@ new revision churn.
 
 `consumed` deliberately does **not** become a fourth `expect` namespace. It is
 authoritative state under the owner, like the timer heap, and no operator holds
-a revision on it today. It gains a namespace on the day SEM-16 replenishment
-(`update_resource`, out of scope per `runner-design.md` §12) needs one, which is
-also the day an operator has a reason to address it.
+a revision on it today. It gains a namespace on the day depletable
+replenishment needs one — mid-run `update_resource`, the SEM-16-class non-goal
+of DL-50, out of scope per `runner-design.md` §12 — which is also the day an
+operator has a reason to address it.
 
 **This is DL-86's own move, finished.** That entry moved `_box_ran` onto
 `JobRuntime.ran_members` — *"projected with the entity it describes"* — deleted
@@ -1290,7 +1528,8 @@ question because replay always started at genesis. Doing this closes
 `concurrency-model.md` §3's state inventory, which has been down to one open
 item since.
 
-**Why before stage 1, not after.** The seal schema is the version boundary (§3).
+**Why before stage 1, not after.** The seal schema is the long-lived artifact
+schema (§3).
 Shipping the cheap fix and then this one means a schema migration bought
 nothing. This is the irreversible-commit case where the carpenter's rule
 applies.
@@ -1309,37 +1548,40 @@ replacing it, and it would inherit the same undecomposable sum.
 ## 9. Obligations
 
 *Superseded.* The CM-24…CM-38 rows drafted here became `period-model.md` §13's
-**PR-** series (109 obligations, namespace `PR-\d{2}[a-z]?`), rewritten
-against "what would a plausible-but-wrong implementation still pass?". The
-run-history pair landed without a namespace under DL-113. Nothing here is
-cited by code.
+**PR-** series (namespace `PR-\d{2}[a-z]?`), rewritten against "what would a
+plausible-but-wrong implementation still pass?". The table has grown since;
+period-model §13 is the count. The run-history pair landed without a namespace
+under DL-113. One number is still cited by code: **CM-37**, in
+`runner_history.py`'s run-history fold. It is residue — DL-113 landed that pair
+with no obligation row, so the token names nothing.
 
 ## 10. Decision-log entries this implies
 
-*Superseded by `period-model.md` §15 and §16 for the mechanism.* What landed:
-**DL-113** (run history, committed). Still proposed, in order, numbers
-provisional: the ha-deployment set (topology, leadership, RPO=0, affinity,
-uncertainty, no-auto-reroute); then the period-model set — the period and the
-seal; the lineage fence and the optional run root; `baseline_id` per period;
-the atomic `decision` record and control-protocol v3; the capacity
-decomposition; the classification tiers; `catalog_hash` v2; the retry horizon
-as a profile field; armed latches crossing a release; the SPAWN idempotency
-protocol; the FW spool. Adoption was on that list and is retired unbuilt
-(DL-138). Two from this document survive on their own:
-**run-root exclusion and estate leadership are two mutexes** (§4a) and **the
-local multi-executor rig is a third proving tier** (§4a.5).
+*Superseded by `period-model.md` §15 and §16 for the mechanism.* The whole
+period-model set landed: the period and the seal, the lineage fence and the
+optional run root, `baseline_id` per period, the atomic `decision` record, the
+capacity decomposition, the classification tiers, `catalog_hash` v2, the retry
+horizon as a profile field, armed latches crossing a release, the SPAWN
+idempotency protocol and the FW spool — DL-114…DL-136, with run history under
+DL-113. Adoption was on that list and is retired unbuilt
+(DL-138). Still proposed: the ha-deployment set (topology, leadership, RPO=0,
+affinity, uncertainty, no-auto-reroute). Two from this document survive on
+their own: **run-root exclusion and estate leadership are two mutexes** (§4a)
+and **the local multi-executor rig is a third proving tier** (§4a.5).
 
 ## 11. Open questions
 
 Continuing the runner E-series (`runner-design.md` §15, extended by
 `ha-deployment.md` §11 to E15).
 
-- **E16** — seal cadence, and it is a **store-era** question only (§8a.5): on the
-  file substrate a period ends when a run root does, so the cadence is the
-  re-baseline cadence and nothing is left to choose. Once periods live in one
-  ledger, daily at the cutoff is the proposal — but is the boundary per estate,
-  per booking center, or per regulatory period? The answer sets the replay
-  bound, so it also sets the takeover time. Client question.
+- **E16** — seal cadence. *(Reframed. §8a.5 called this store-era only, on the
+  reading that a period ends when a run root does. Period-model §1.1 removed
+  that: one root holds many periods, so a daily seal is available on the file
+  substrate now.)* Every boundary is an operator act — automatic sealing on a
+  timer is a period-model §12 non-goal — and it costs a **restart**, not a new
+  root. So the cadence is a real choice: is the boundary per estate, per
+  booking center, or per regulatory period? The answer sets the replay bound,
+  so it also sets the takeover time. Client question.
 - **E17** — what `standby check` must assert before BCP governance will accept a
   green. Client question, and the answer probably has a form to fill.
 - **E18** — does an A-classified boundary truth flip need an operator
@@ -1371,9 +1613,10 @@ Continuing the runner E-series (`runner-design.md` §15, extended by
 
 ## 12. Amendments this requires
 
-*Superseded by `period-model.md` §15, which is the authoritative list.* Two rows
-from the earlier table survive as this document's own: `ha-deployment.md` §9's
-amendment table omits the `citation-index` row for `E\d{1,2}`, whose prose
-still reads "E1–E11" while §11 there opens E12–E15; and `runner_hosts.py`'s
-*"One host, for now"* docstring scopes to "until there is a relay", while the
+*Superseded by `period-model.md` §15, which is the authoritative list.* One row
+from the earlier table survives as this document's own: `runner_hosts.py`'s
+*"One host, for now"* docstring scopes to "there is no relay", while the
 local two-row rig (§4a.5) arrives before the relay does.
+
+The other row is done: the `citation-index` row for `E\d{1,2}` now names
+E1–E23.

@@ -140,9 +140,11 @@ map); this list stays as the normative order and scope of each unit.
   metaprogramming in the IR.
 
 ## When live-instance access is available (ask the user, don't assume)
-`docs/live-instance-runbook.md` has the exact CLI protocols for every open
-item plus the DL-58 source catalog (KB/thread/TechDocs URLs and the fetch
-technique) — start there. Summary:
+`docs/live-instance-runbook.md` has the exact CLI protocols for the
+AutoSys open items plus the DL-58 source catalog (KB/thread/TechDocs
+URLs and the fetch technique) — start there. The Universal Controller
+items (U1, U3b, U6b) and the runner parity defaults (E5, E6, E7, E9,
+E10) have no probe there. Summary:
 - Resolve E8 (one mid-run external kill + the trap-TERM KILLJOB variant to
   discriminate the mechanism), Q3c (member latch across box runs), and Q6
   (box_success over an iced member) with tiny throwaway jobs; record answers

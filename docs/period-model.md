@@ -260,8 +260,8 @@ directory is doing a job that belongs to a record.
   double-run / unauditable-checkpoint defects; four text residuals.
 - **Draft 28** — the four residuals. Review (R33): zero class defects; one
   MEDIUM — `PR-28a1` fit neither the regex nor the test convention; **YES**.
-- **Draft 29** — this text: `PR-28a1` → `PR-28e`. Converged with
-  `gpt-5.6-sol` after 33 rounds. §1.3 and §11 agree that
+- **Draft 29** — `PR-28a1` → `PR-28e`, and the text converged after 33
+  adversarial rounds. §1.3 and §11 agree that
   adoption's finalize is folded into `adopting → closed`; PR-02c says exactly
   when period 1's row flips; `PR-\d{2}[a-z]?` is the namespace regex and
   suffixed ids are cited; §3.2 says `deadman_us` once; the SPAWN replay
@@ -329,13 +329,18 @@ and a revision mean one thing for the life of the estate.
     000003.jsonl        period 3, ACTIVE
   seals/
     000001.json         the seal that closed period 1
+    000001.audit.json   its attestation (§11)
+    000001.archive.json its archive receipt, if its inputs were archived (§12a)
   catalogs/
     <source_bundle_hash>/   content-addressed BY BYTES, immutable
       *.jil                 the post-placeholder JIL, byte-exact (F1)
       sources.json          input sha256s and original paths
   periods/
     000002/manifest.json   catalog_hash + source_bundle_hash + runtime profile
+    .staging/<stage_digest>/    a staged candidate, before its seal commits — §7
+    .quarantine/<stage_digest>/<manifest digest>/   a superseded one — §7
   runs/<job>.<run_number>/    spool; run_number monotone for the estate's life
+  runs/.by_run_id/<run_id>    the SPAWN idempotency index — §11a
   logs/
 
 <anchor-dir>/            NOT inside any archivable root — §1.3
@@ -377,7 +382,14 @@ this very claim, left by our own crash. "Fresh root" was not a checkable rule:
 E1 could take the free `leader.lock` of a dormant estate E2's root R, overwrite
 R's sentinel and install its imports while E2's anchor still named R; and two
 estates racing for R could leave one anchor `claimed(R)` while the other
-replaced R's sentinel (PR-01c). For an **anchor**: creating it refuses an
+replaced R's sentinel (PR-01c). **Absence of the sentinel is not by itself
+absence of an estate.** A root that lost only its `journal.jsonl` but still
+holds `wal/`, `seals/`, a committed `periods/<N>/` or a populated `runs/` is
+somebody's work. A genesis there would relabel foreign history, or run beside
+detached processes still writing into it, so it refuses too and names what it
+found. Two directories are excluded, because the launcher legitimately writes
+them before genesis: `catalogs/` is content-addressed bundle storage and
+`periods/.staging/` holds candidates. For an **anchor**: creating it refuses an
 existing `anchor.json`, *even if its incumbent is dead* — an existing anchor is
 an existing estate whose detached work may still be alive, and "two geneses
 are two estates" never licensed two estates to share one anchor (PR-01b) —
@@ -409,8 +421,9 @@ that ignored order would map one directory to two catalog hashes and one
 vector, and reopening uses it verbatim.
 
 `catalog_hash` is a **different** thing and there are **two** of them in the
-code today: `runner_journal.catalog_hash` hashes the raw `CatalogIR` including
-spans, and `equiv.py`'s canonical hash strips spans and annotations first.
+code: the runner hash — `period.catalog_hash_v2`, which the journal reaches
+through `catalog_hash_at` — and `equiv.catalog_hash`, which strips spans and
+annotations first.
 Draft 4 said the runner hash collides across byte-different sources; it does
 not — the *equivalence* hash does, by design. This spec pins the runner
 hash **with one exclusion, and versions it**: `catalog_hash` v2 is sha256 over
@@ -420,8 +433,8 @@ leave; spans stay. The version rides explicitly as `catalog_hash_version: 2` on
 `segment`, seal and period manifest, and a hash-v2 golden vector ships with
 PR-08. Version 1 is retired: it is refused by name (DL-138,
 `docs/protocol-evolution.md`), and no record carries a v1 value beside a v2 one.
-Today's hash
-serializes the whole model, and `CatalogMeta.tool_version` is the installed
+The version-1 hash
+serialized the whole model, and `CatalogMeta.tool_version` is the installed
 package version — reversing nothing but the version string from 1.2.3 to 1.2.4
 changes the hash. Under that hash a seal committed by 1.2.3 could never be
 opened by 1.2.4, and PR-07's byte-identical openings across a patch release
@@ -563,7 +576,11 @@ replacement and lifetime:
   next_period, target_root, claimed_at, diag: {pid, start_time, boot_id}}`.
 - `anchor.json` is written by the same liturgy under the held lock and carries
   `{artifact_format_version, estate_id, head: open|closed|claimed,
-  periods: {N: {root, segment_durable, seal_digest, attested}}}`. **A period's registry row is
+  periods: {N: {root, segment_durable, seal_digest, attested}},
+  reclaimed: [{claim_id, target_root, next_period, claimed_actor, at}]}`.
+  `reclaimed` is the break-glass ledger: append-only, never consumed, and
+  copied into the next opening `segment`'s own `reclaimed` field, so the fork
+  is recorded in the lineage's log as well as in the fence that permitted it. **A period's registry row is
   inserted when a root first owns it, and is provisional until that period's
   first segment is durable**: genesis writes `periods[1]` in its `absent →
   open(1, root)` — before any segment exists, so that row carries
@@ -678,7 +695,7 @@ class RuntimeProfile(BaseModel):
     cmd_grace_us: int                     # default 10_000_000; > 0
     reconcile_settle_us: int              # default 5_000_000; >= 0
     spawn_window_us: int                  # default 5_000_000; >= 0
-    retry_horizon_us: int                 # the §9 soft gate; > 0; carried here so audit can read it
+    retry_horizon_us: int                 # the §9 soft gate; default 60_000_000; > 0; carried here so audit can read it
 ```
 
 Seconds from the CLI convert to microseconds by `round(seconds * 1_000_000)`;
@@ -795,7 +812,7 @@ The v3 request and answer:
  "digest": "sha256:…", "next_period_id": 3, "next_baseline_id": "…", …header…}
 ```
 
-**The route wire, frozen with v3.** `Attempt.host` becomes a discriminated
+**The route wire, frozen with v3 — and not yet built (below).** `Attempt.host` becomes a discriminated
 union `HostCommand | RouteCommand`; on the wire it is the existing `host` cmd
 with a fourth verb:
 
@@ -809,15 +826,20 @@ with a fourth verb:
     "state_rev": 3}}, …header…}
 ```
 
-On the `hosts` query's own corners: an absent role answers `{"present":
-false, "state_rev": 0}`; omitting `roles` answers the whole table, because the
-takeover barrier reconciles every route as it reconciles every host. The
+The `routes` query keeps the `hosts` query's corners: an absent role answers
+`{"present": false, "state_rev": 0}`; omitting `roles` answers the whole
+table, because the takeover barrier reconciles every route as it reconciles
+every host. The
 subscription gap record (§11) is `{"gap": true, "earliest_retained": <index>}`.
 
 The WAL record is `host: {verb: "route", id, executor_id}` (§3.3),
 and the answer is the same decision shape and four outcomes as every host
 verb. Two competent implementations could otherwise choose incompatible JSON
-for one fact.
+for one fact. **The wire is specified and not yet built**: neither the
+`RuntimeState` storage, the `route` verb, the `routes` query nor the `route:`
+`expect` namespace exists today, and the shipped table is the one implicit
+row §3.3 describes. This section is what the unit that adds the storage
+implements; it changes the producer, never the seal artifact.
 
 `expect` is absent by design on the **seal** request: a seal addresses no row. **`request_id`
 collides across the whole period, not only seal-to-seal**: readiness checks
@@ -830,9 +852,11 @@ that finds the seal committed, is `applied` from the new period. This is what cl
 seal commits, the socket drops as the engine exits, and the client holds
 `unknown` with no durable key to ask about (PR-30a).
 
-The record duplicates the fields recovery needs to select the sidecar and refuse
-a wrong one — `digest`, `period_id`, `closes_at_index`, `at`,
-`next_period_id`, `next_baseline_id` — and §11 requires each to agree.
+The record duplicates the fields recovery needs to select the sidecar and
+refuse a wrong one — `digest`, `period_id`, `closes_at_index`, `at`,
+`next_period_id`, `next_baseline_id` among them — and §11 requires **every**
+duplicated field to agree, derived from the record shape above rather than
+from a list kept beside it, so a field added here is compared for free.
 
 ### 2.3 `decision` — one atomic batch
 
@@ -877,8 +901,8 @@ and refused as its own distinct error: an absent flag is not a false one, and a
 reader that defaulted it would accept a record no writer of this estate wrote.
 The three cases are decided at one validator, so every consumer that parses a
 `decision` inherits them.
-`index`, not `seq`, exactly as `result` today: `seq` is the subscribe cursor and
-a decision shares its attempt's number (DL-89). `decision` is an unsequenced,
+`index`, not `seq`, exactly as the retired `result` carried it: `seq` is the
+subscribe cursor and a decision shares its attempt's number (DL-89). `decision` is an unsequenced,
 at-least-once record on the subscribe stream, as `result` was.
 
 **This is a wire break.** `control-protocol.md` §5 promises raw `result`,
@@ -894,8 +918,9 @@ There is deliberately **no transition record**. A period opens because a
 
 ### 2.4 `leader` and the epoch
 
-Unchanged in shape. `next_epoch` today reads the log to allocate; it now reads
-the seal's `epoch` and every `leader` record in the segments after it. I2 makes
+Unchanged in shape. Allocation reads the log, and now the seal with it: the
+next term is one past the highest `leader` epoch in the segments after the
+seal, and never below `seal.epoch + 1`. I2 makes
 the epoch estate-monotone, so a new period's first term is `seal.epoch + 1`.
 
 ## 3. The seal artifact
@@ -1050,9 +1075,9 @@ nothing.
 
 - JSON, UTF-8, `ensure_ascii=false`, separators `(",", ":")`. **Strings are
   Unicode scalar values.** Python's decoder accepts `"\ud800"` — an unpaired
-  surrogate — as a string, the control server accepts any string as a global
-  value, and today's journal writes it safely under ASCII escaping; encoding it
-  later with `ensure_ascii=false` raises. One legal control input could make
+  surrogate — as a string, the control server **once** accepted any string as a
+  global value, and the journal writes one safely under ASCII escaping;
+  encoding it later with `ensure_ascii=false` raises. One legal control input could make
   the estate unsealable. So every ingress — the control socket, catalog
   loading, spool decode — refuses a non-scalar string, and canonicalization
   never meets one (PR-10a).
@@ -1061,7 +1086,11 @@ nothing.
   floats at any depth.** `deadman_s` is a float in `HostRuntime`; its
   canonical form is `deadman_us: int | null`, which is also what
   `RuntimeProfile` already stores.
-- Datetimes as ISO-8601 naive UTC with exactly six fractional digits.
+- Datetimes as ISO-8601 naive UTC with **exactly six fractional digits**,
+  zero microseconds included. The rule governs the values this form encodes,
+  and a schema field that stores a timestamp as a **string** carries the same
+  spelling — `claimed_at`, `audited_at`, `archived_at`, a `reclaimed` entry's
+  `at`. It does not reach the WAL, which is not one of the artifacts below.
 - **Typed schema fields are always present** — explicit `null` for an unset
   optional, `[]`/`{}` for an empty collection. Default-filling happens **only at
   typed schema boundaries** (`JobRuntime`, `HostRuntime`, `Effect`, the seal's
@@ -1083,6 +1112,12 @@ nothing.
   **top-level** `digest` key removed — only that one. A nested opaque payload
   key named `"digest"` is data and stays; a recursive "strip every digest key"
   implementation would collide documents that differ there (PR-13).
+- **A digested artifact's stored bytes ARE its canonical bytes**, and its
+  reader asks that first — the seal sidecar, the attestation and the archive
+  receipt. A whitespace-padded copy, a key-reordered copy and a copy that omits
+  a defaulted key all carry the real artifact's digest. Each one passes every
+  later check. This rule is what separates the artifact from its look-alikes,
+  and each reader names its own artifact when it refuses.
 
 **A golden vector ships with the spec** — one document exercising control
 characters, `/`, non-ASCII, nulls, defaults, empty and non-empty nested
@@ -1100,7 +1135,8 @@ payload the oracle constructs is canonicalizable, and that is an obligation
 artifact this spec defines — the seal sidecar, the attestation, the period
 manifest, `staged_manifest.json`, `candidate.json`, `sources.json`,
 `receipt.json`, `reply.json`, every `watch.jsonl`
-line, the `run_id` index entry, `anchor.json`, the claim file, and the sentinel
+line, the `run_id` index entry, `anchor.json`, the claim file, the sentinel,
+and the archive receipt (§12a)
 — each carrying the field, each refused when it names a version this binary
 does not implement (PR-08d), and each digested, where digested, over its
 canonical bytes with only its top-level `digest` removed. Draft 10 promised a
@@ -1119,10 +1155,10 @@ that.
 | --- | --- |
 | `jobs` (incl. `reservations`, `waiter_seq`) | authoritative rows |
 | `globals` | authoritative rows |
-| `hosts`, minus `last_contact` and minus `deadman_us` | durable routing state (`concurrency-model.md` §8) — see the not-carried row for the two exclusions. **An evicted host's return is not this spec's.** Draft 19 named an admitted `host{verb: register}` input for it, and naming it was the mistake: a returning host must present its generation, prove it self-fenced (CM-12), and be reconciled against two frozen rules — a stale generation is refused, ordinary re-registration preserves operator state — and none of that has a producer before the relay exists (DL-97). On one host today an evicted row is a dead end: `evict local` leaves `local` routing nothing and nothing brings it back, because the un-evict is the relay's act. So this spec records **nothing** for a host's return, carries an evicted row as it stands, and leaves the register record, its proof and its transition table to the HA track where the relay is built. Registration stays unjournaled here: the genesis seed is identical on every replay, and a deadman refresh is unprojected (PR-24c) |
-| `routes` | the role→executor table, authoritative under CAS (`ha-deployment.md` §4); today one row — and a **row like the other three**: `RouteRuntime {executor_id, state_rev}`, frozen, owned by `RuntimeState`, projected on the same rule, read through a v3 `routes [roles]` verb answering `{present, executor_id, state_rev}` per role, addressed by the fourth `expect` namespace `route:<role>`. **A route names an executor and nothing else.** Drafts 15–18 gave the route a `generation` and then spent four rounds on what a route whose generation had gone stale meant — and the answer was always "the evicted-host case", which §8 defines and the HA track builds, and which this spec has no business re-defining. So the generation is **not** on the route: at effect birth `executor_id` comes from the route and `generation` from the host row's **current** value, exactly as `plan_effects` binds today; a stale route cannot exist; an evicted host routes nothing, so an effect born for one is held pending by the routing gate as today; and §8's re-drive-as-new-run stays where it is, unbuilt until HA's relay, named here as out of scope. **A remap is an admitted input** on the `host` record's pattern (DL-94): `host: {verb: "route", id: <role>, executor_id}`, applied to the owner, no oracle event, rejected if `executor_id` names no host row. A→B→A moves the revision twice and the seal carries it (PR-16b) |
+| `hosts`, with `last_contact` **omitted from the shape** and `deadman_us` **present and null** | durable routing state (`concurrency-model.md` §8) — see the not-carried row for the two exclusions. **An evicted host's return is not this spec's.** Draft 19 named an admitted `host{verb: register}` input for it, and naming it was the mistake: a returning host must present its generation, prove it self-fenced (CM-12), and be reconciled against two frozen rules — a stale generation is refused, ordinary re-registration preserves operator state — and none of that has a producer before the relay exists (DL-97). On one host today an evicted row is a dead end: `evict local` leaves `local` routing nothing and nothing brings it back, because the un-evict is the relay's act. So this spec records **nothing** for a host's return, carries an evicted row as it stands, and leaves the register record, its proof and its transition table to the HA track where the relay is built. Registration stays unjournaled here: the genesis seed is identical on every replay, and a deadman refresh is unprojected (PR-24c) |
+| `routes` | the role→executor table, authoritative under CAS (`ha-deployment.md` §4); today one row — and a **row like the other three**: `RouteRuntime {executor_id, state_rev}`, frozen, owned by `RuntimeState`, projected on the same rule, read through a v3 `routes [roles]` verb answering `{present, executor_id, state_rev}` per role, addressed by the fourth `expect` namespace `route:<role>` — **the storage and that verb are specified and unbuilt (§2.2)**, so today the table is projected as one row whose role IS the local executor's id, at revision 0, and the seal carries it in the frozen shape. **A route names an executor and nothing else.** Drafts 15–18 gave the route a `generation` and then spent four rounds on what a route whose generation had gone stale meant — and the answer was always "the evicted-host case", which §8 defines and the HA track builds, and which this spec has no business re-defining. So the generation is **not** on the route: at effect birth `executor_id` comes from the route and `generation` from the host row's **current** value, exactly as `plan_effects` binds today; a stale route cannot exist; an evicted host routes nothing, so an effect born for one is held pending by the routing gate as today; and §8's re-drive-as-new-run stays where it is, unbuilt until HA's relay, named here as out of scope. **A remap is an admitted input** on the `host` record's pattern (DL-94): `host: {verb: "route", id: <role>, executor_id}`, applied to the owner, no oracle event, rejected if `executor_id` names no host row. A→B→A moves the revision twice and the seal carries it (PR-16b) |
 | `timers` + `timer_seq` | an armed deadline is state no status field records; the token carries cross-job firing order |
-| `consumed` | irreversible depletion (SEM-16) that no row holds — §5. **Keys survive their resource**: a `consumed["r:FUEL"]` whose resource C2 removes is retained as a ghost bucket, and if C3 reintroduces `FUEL` its consumption is still spent — a loader that rebuilt capacity from the catalog alone would silently refund it on reintroduction (PR-19a) |
+| `consumed` | irreversible depletion (DL-50) that no row holds — §5. **Keys survive their resource**: a `consumed["r:FUEL"]` whose resource C2 removes is retained as a ghost bucket, and if C3 reintroduces `FUEL` its consumption is still spent — a loader that rebuilt capacity from the catalog alone would silently refund it on reintroduction (PR-19a) |
 | `enqueue_counter` | the waiter-rank allocator's high-water mark |
 | `now` + `clock_domain` | feed times must be non-decreasing across the boundary |
 | `scheduler_admitted_through` | which same-instant ticks were consumed — §6 |
@@ -1224,9 +1260,9 @@ value at T, so a later audit of C1 saw C2's evidence. With a log, the seal's
   fence** → append the line and fsync → *then* update progress or emit
   completion. An observation that changed progress before it was durable is
   one audit cannot see; and an append after leadership was lost is evidence
-  written by a non-leader — the fence lives in the journal writer today and
-  `AdapterContext` has no fence capability, so the FW adapter gains one and
-  PR-03 replaces the anchor between an observation and its append;
+  written by a non-leader. The fence otherwise lives in the journal writer,
+  so `AdapterContext` carries one for the FW adapter, and PR-03 replaces the
+  anchor between an observation and its append;
 - **a seal barrier**: at §6 step 2 the engine parks every FW task at a poll
   boundary — it awaits any poll in flight and forbids further C1 appends —
   before T is chosen. Otherwise a second qualifying poll can land after the
@@ -1297,7 +1333,8 @@ a stale *period* rather than a stale *log*.
 ## 5. Capacity, decomposed
 
 `_bucket_used` sums units **held by live runs** and units **permanently spent**
-(SEM-16). `release()` decrements only for `completion`, or `success` on a
+(DL-50: a depletable drains, and replenishing one is `update_resource` — a
+definition-time mutation of the SEM-16 class, and a non-goal here). `release()` decrements only for `completion`, or `success` on a
 succeeded job, while `_held.pop` drops the job unconditionally, so a
 depletable's spent units are in no row. A seal recomputing usage from holders
 would refill every depletable:
@@ -1414,7 +1451,8 @@ dsl41 seal --run-root <root> --estate-anchor <dir> \
   repeat is idempotent and a concurrent client writing the same bytes is
   harmless — and then writes only `staged_manifest.json` and `candidate.json`
   under `periods/.staging/<stage_digest>/`, where **`stage_digest`** is
-  sha256 over the canonical `next_period` and is carried in the request beside
+  sha256 over the canonical `StagedNextPeriod` — the staged fields alone, never
+  the engine-derived five (§3.4) — and is carried in the request beside
   — not instead of — the request's own `fingerprint` over the whole envelope
   (§2.2). Draft 10 used one name for both; they differ whenever `force_seal` or
   the actor differs. Then it speaks to the engine over the control socket
@@ -1506,32 +1544,38 @@ segment → open` — the sentinel **before** the claim. Draft 11 said
 claim-first, which let B move the head to `claimed(B)`, die before its
 sentinel, and leave a root an old binary treats as unused and geneses into;
 after a `reclaim` that is a fork. No state may exist in which the head is
-`claimed(target_root)` while `target_root` lacks a valid sentinel (PR-01a). Live-mode exit is **code 3, without touching detached work**
-— today `run` treats an engine-loop return as failure code 1 and only sets
-detached-stop before ordinary teardown, so this exit path is its own
-obligation (PR-30b), not a footnote.
+`claimed(target_root)` while `target_root` lacks a valid sentinel (PR-01a). Live-mode exit is **code 3, without touching detached work** — an
+engine-loop return is otherwise failure code 1, and detached-stop is otherwise
+set before ordinary teardown, so this exit path is its own obligation
+(PR-30b), not a footnote.
 
-Three pure functions, with **disjoint inputs**, because each runs at a
-moment when a different subset of the facts exists. Draft 16 defined the
+Three pure functions, each over its own inputs. Each runs at a moment when a
+different subset of the facts exists. Draft 16 defined the
 first as "the second minus one check", and the second's checks — a seal to
 parse, a digest, record-vs-sidecar agreement, `T` — do not exist at readiness.
 
-Each phase takes a **typed context** naming every fact it reads, and reads
-nothing else — "pure" means exactly that, and draft 17's signatures named two
+The first two phases take a **typed context** naming every fact they read,
+and read nothing else — "pure" means exactly that, and draft 17's signatures named two
 parameters for functions that had to read seven things, which invited an
 implementation on filesystem lookups and engine globals that passes every
-functional case and races. `StagedContext {staged, boundary_request, c1:
-CatalogIR, c2: CatalogIR, staged_bytes, runtime_profile, carried_state:
-RuntimeState view, decision_index: read view}`; `BoundaryContext` = that plus
-`{committed, committed_manifest, candidate_sidecar, candidate_record, T,
-post_barrier_state}`; `ResumeContext {committed, committed_manifest, sidecar,
-naming_record, c2}` — the `RuntimeProfile` is **inside** the committed
-manifest and is read from there, not passed beside it. `OpenedRuntime`
-carries the validated profile and the catalog identity it was opened under, so
-`assemble_engine` builds the engine from *those* and not from ambient CLI
-defaults — an implementation that validated a non-default C2 profile and then
-assembled with a default timezone or grace would otherwise pass every
-functional case (PR-22b).
+functional case and races. `StagedContext {staged, staged_bytes, boundary_request,
+request_fingerprint, c1: closing catalog + profile, c2: CatalogIR,
+carried_state, decision_index: read view, state_machine_version, at}`;
+`BoundaryContext` = `{staged: StagedContext, committed, committed_manifest,
+at, post_barrier_state}` — `at` is T, spelled as the field is. The candidate sidecar and the candidate record are
+**not** in it: phase 2 splits at the sidecar, because the sidecar's
+`classification` field IS phase 2's output and the classifier has to run
+before there is a sidecar to put it in (below). Phase 3 takes no context
+type: it takes the sidecar, the digest the naming record carries, and the
+opening period's committed manifest. The `RuntimeProfile` is **inside** that
+manifest and is read from there, not passed beside it — `OpenedRuntime`
+carries the catalog identity the period opens under and never a profile of
+its own. Two rules govern the engine an opener then assembles. A setting the wiring
+CAN express and that disagrees with the pin **refuses the resume**, naming the
+fields that moved: a runtime-profile change is a new period (§2.1). A setting
+the wiring cannot express — the reconciliation and grace windows have no wire
+flag — takes the pin as its default. An opener that assembled with ambient CLI
+defaults instead would pass every functional case (PR-22b).
 
 **Phase 1 — `validate_staged(StagedContext)`**, at
 readiness, before the barrier. Inputs: the context above; no seal, no T. Checks: the candidate parses under a supported
@@ -1543,11 +1587,14 @@ under another fingerprint; and the **classifier** (§10) runs over the
 carried state's live closure and the R gate passes. Nothing here touches a
 seal.
 
-**Phase 2 — `validate_boundary(BoundaryContext)`**, after §6 step 6 and
-before the `seal` record, over **in-memory** candidates. Checks: the committed form's `first_index ==
-closes_at_index + 1`; every field duplicated between the candidate record and
-sidecar agrees; the **classifier runs again** over the post-barrier live
-closure — the barrier's own admissions and any reconciliation injections may
+**Phase 2**, after §6 step 6 and before the `seal` record, over **in-memory**
+candidates. It is **two functions**, because its checks straddle the sidecar.
+`validate_boundary(BoundaryContext)` runs first and returns the map;
+`check_candidate(BoundaryContext, sidecar, record)` runs over the document
+built from that map. Checks, across the two: the committed form's
+`first_index == closes_at_index + 1`; every field duplicated between the
+candidate record and sidecar agrees; the **classifier runs again** over the
+post-barrier live closure — the barrier's own admissions and any reconciliation injections may
 have created executions or latent intent that phase 1 never saw, and an
 offline seal's recovery barrier can reconcile a FAILURE that leaves a
 `pending_spawn` for a job C2 changes — **and its output is the committed
@@ -1590,16 +1637,23 @@ would leave durable successors depending on a seal that vanished; if the
 and reopen C1; a seal line with records after it, or interior corruption →
 refuse (PR-28d).
 
-**Phase 3 — `open_from_seal(ResumeContext) -> OpenedRuntime`**, at resume
-and at the tail of phase 2, where `sidecar` is the durable artifact and
-`naming_record` the durable `seal`/`segment` record at resume, and both are
-the in-memory candidates in phase 2. It returns an **`OpenedRuntime`** — the
-`RuntimeState`, the outbox, the executions, the derived structures
-(`_dispatched`, referencers, capacity) and the scheduler frontier — and
-**not** an `Engine`: `Engine.__init__` takes a clock and adapters, calls
-`clock.now()` and seeds the host row, none of which a pure function may do.
-A separate, impure `assemble_engine(OpenedRuntime, clock, adapters, …)` builds
-the engine from it. Draft 18 promised an `Engine` from a function that touched
+**Phase 3 — `open_from_seal(sidecar, expected_digest, manifest) ->
+OpenedRuntime`**, at resume and at the tail of phase 2. `sidecar` is the
+durable artifact at resume and the in-memory candidate in phase 2;
+`expected_digest` is the digest the naming record carries — the committed
+`seal` record at resume, the opening `segment`'s `opens_from_seal` in a
+rolled root; `manifest` is the opening period's committed manifest, and
+every field it shares with `next_period` must agree. Both facts are
+required: an opening that skipped either would seed an engine from a
+self-consistent sidecar that is not the one the lineage names, or under a
+manifest that is not this boundary's. It returns an **`OpenedRuntime`** —
+the carried `state`, the outbox, the executions, the classification, the
+opening identity, and the ghost-run gate `_dispatched` — and **not** an
+`Engine`: `Engine.__init__` takes a clock and adapters, calls `clock.now()`
+and seeds the host row, none of which a pure function may do. The
+catalog-derived half — referencers, the capacity pool, the scheduler
+frontier and genuinely new rows — belongs to the impure loader that holds C2
+and builds the engine from this. Draft 18 promised an `Engine` from a function that touched
 no clock, which no implementation could honour without reaching past its
 context. The load:
 
@@ -1612,8 +1666,10 @@ context. The load:
    one; a naive "construct C2 then overwrite" would seed carried entities
    first and move revisions;
 4. seed only genuinely new rows (SEM-24 flags, declared globals);
-5. rebuild referencers, capacity, scheduler, adapter routing, and the
-   ghost-run gate `_dispatched` from every row with `run_number > 0` (§3.3);
+5. rebuild the ghost-run gate `_dispatched` from every row with
+   `run_number > 0` (§3.3) — the pure function's own output; referencers,
+   capacity, the scheduler and adapter routing are the loader's, because they
+   are derived from C2 and not from the seal;
 6. validate: timer tokens unique, positive and ≤ `timer_seq` — two equal
    `(due, token)` entries would force the heap to compare two non-orderable
    `Event` objects; unique positive `waiter_seq`;
@@ -1631,7 +1687,7 @@ phase-1 check is one in PR-28; every phase-2 check is one in PR-28a.
 
 A seal **refuses** rather than proceeds when any check fails.
 
-**Readiness — before the current period closes**, and identical in live,
+**Readiness — before the current period closes**, and identical in live and
 offline mode: C2 loaded from exactly the staged bytes `stage_digest` names;
 `catalog_hash` v2 and `source_bundle_hash` computed and bound in the candidate
 manifest; `RuntimeProfile` constructed and hashed; `next_period.
@@ -1640,11 +1696,11 @@ state_machine_version == seal.state_machine_version` (§2.1) and
 preflight-valid; classified against the carried state (§10) and accepted by the
 R gate; the seal request's `request_id` absent from the current period's
 `DecisionIndex` under any other fingerprint (§2.2); the staged directory
-fsynced with its `candidate.json`; and **phase 1** `validate_staged(C2,
-carried state)` succeeds (§7). A failure here refuses while C1 is still open
-and correct. **Then, after the cutoff and before the record**, **phase 2**
-`validate_boundary(committed C2, candidate sidecar, candidate record, T)`
-succeeds — a second failure there also refuses, and the cutoff work already
+fsynced with its `candidate.json`; and **phase 1** `validate_staged` succeeds
+over its `StagedContext` (§7). A failure here refuses while C1 is still open
+and correct. **Then, after the cutoff and before the record**, **phase 2** succeeds —
+`validate_boundary(BoundaryContext)` for the classifier half, and
+`check_candidate` over the sidecar and record built from its output — a second failure there also refuses, and the cutoff work already
 admitted stays as legitimate C1 activity (§7 exit codes).
 
 **Always:**
@@ -1754,7 +1810,7 @@ Nodes and what moves them:
 
 | node | changed when |
 | --- | --- |
-| job | its `JobIR` fingerprint moves (`runner_history._job_fingerprints`, the leaf test) |
+| job | its `JobIR` fingerprint moves (`period.job_fingerprints`, the leaf test — renamed out of `runner_history` by DL-131, §15) |
 | box containment | `box_name` on any member moves, at any nesting depth |
 | global | declared default moves; added; removed |
 | external instance (`name^INST`) | the `insert_xinst` declaration moves |
@@ -1839,8 +1895,9 @@ new-format estate that crashes before its first seal with no path back:
    resume the claim; `claimed` with another → refuse naming the holder;
    `open(1, this root)` with `segment_durable: false` and a durable segment →
    finalize;
-5. `open_from_seal(next_period, seal)` (§7) — or, with no seal in the lineage,
-   `Oracle(catalog)` genesis from segment 1 exactly as today;
+5. `open_from_seal` (§7 phase 3) over that seal, under the digest the naming
+   record carries and this period's committed manifest — or, with no seal in
+   the lineage, `Oracle(catalog)` genesis from segment 1 exactly as today;
 6. replay the segments after the seal in order, each in its own period context;
 7. run the reconciliation ladder (`runner-design.md` §7), amended so that a
    live wrapper under a terminal row is re-driven regardless of its KILL
@@ -1939,7 +1996,11 @@ that produced the attestation. Resume from a seal with no attestation whose
 period inputs are corrupt or pruned is **refused by default**;
 `--trust-unaudited-seal` overrides it, recorded in the opening `segment`'s
 `trust_unaudited` field with the claimed actor. Availability is sometimes worth
-more than proof; that is the operator's call, made in writing.
+more than proof; that is the operator's call, made in writing. **The switch is
+specified and not yet built** (deferred by DL-133: it is resume's switch, not
+an estate verb's). The `segment` field is there and every opener writes it
+null, so the artifact does not move when the switch lands; until it does,
+there is no override and PR-47's third clause is undischarged.
 
 **Auditing an old period runs the interpreter that produced it.** `audit`
 refuses a period whose `state_machine_version` it does not implement, naming
@@ -1963,7 +2024,7 @@ release discipline this implies, and it closes what draft 3 left open as PR-Q4.
 | new-format estate, crash in period 1 before any seal | replay from the genesis segment |
 | anchor directory deleted or replaced under a live incumbent | the incumbent stops on its next append/dispatch (`anchor.lock` re-check) |
 | torn final line in the active segment | truncate to the last complete record |
-| torn or empty **first** line of a new segment | the segment never opened; re-open from the boundary |
+| torn or empty **first** line of a new segment | the segment never opened; the file is removed and re-opened from the boundary, which is byte-identical (PR-07). The repair needs an **earlier segment in this root** to re-open from: `select_seal` falls back to the previous segment and reads the `seal` record there. A root holding exactly that one segment — a rolled root, or a fully archived one — **refuses** instead, naming the missing segment record. That is a refusal and not damage, and lifting it means teaching seal selection to open from the anchor head, which is a unit of its own (DL-144) |
 | corrupt line inside a **closed** segment | that period is unauditable; later periods resume from a **verified** seal only, else refused (above) |
 | a closed period's WAL absent, its **archive receipt** present and licensing it | archived (§12): the period stands at the attestation-verified tier; `audit` verifies the checkpoint, `journal` narrates an unreplayable gap and crosses on that checkpoint, `runs` names the missing coverage, `estate prune` re-plans the root |
 | a closed period's WAL absent, **no receipt** | **loss, not an archive**: refused by name at the walk, at the replay and at the plan. The receipt is written before any deletion precisely so the two can never be confused |
@@ -2007,22 +2068,26 @@ in the stream.
 
 ## 11a. SPAWN idempotency that outlives the supervisor
 
-The supervisor's SPAWN dedup is an in-memory `self.runs` lookup, and a run's
-entry is what makes a replayed `run_id` a duplicate. Once an estate root never
-rolls, `LIST` must be bounded, so completed entries must leave memory — and the
-moment they do, a delayed duplicate SPAWN becomes a fresh execution. "Tombstones"
+The supervisor's SPAWN dedup **was** an in-memory `self.runs` lookup, and a
+run's entry was what made a replayed `run_id` a duplicate. Once an estate root
+never rolls, `LIST` must be bounded, so completed entries must leave memory —
+and the moment they do, a delayed duplicate SPAWN becomes a fresh execution.
+`self.runs` survives as the bounded `LIST` window and is **not** the
+idempotency store; the store is the directory below. "Tombstones"
 was a word in draft 5's amendment table; this is the protocol, and it is a
 `supervisor-protocol.md` §5 amendment with its own decision-log entry.
 
 The tombstone is the run directory, made crash-safe by two extra files and one
-ownership change. Today the **engine** creates the run directory before it
-sends SPAWN; under this protocol a detached run's directory is created by the
-**supervisor** on receipt, and the engine keeps ownership only for tethered
-runs. Otherwise the engine creates the directory, dies before sending, the
+ownership change. Before this protocol the **engine** created the run
+directory before it sent SPAWN; under it a detached run's directory is created
+by the **supervisor** on receipt, and the engine keeps ownership only for
+tethered runs. Otherwise the engine creates the directory, dies before sending, the
 retry reaches the supervisor, "directory exists, no receipt" reads as
 indeterminate, and a run that provably never reached the supervisor is lost.
 
-1. `mkdir runs/<job>.<run_number>` — no `exist_ok`;
+1. `mkdir runs/<job>.<run_number>` — the directory can exist already in one
+   case only, the orphan the last row of the table below cleared for reuse,
+   because the replay resolution runs first;
 2. write the **`run_id` index** entry by the liturgy:
    `runs/.by_run_id/<run_id>` — `{artifact_format_version, run_id, job,
    run_number}`. **Index before receipt**:
@@ -2038,7 +2103,8 @@ indeterminate, and a run that provably never reached the supervisor is lost.
    indeterminate, no process. `run_id` is constrained to a **filename-safe
    grammar** at the wire — the canonical uuid4 string form the shipped adapter
    already mints, `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
-   — refused otherwise; the supervisor accepts any string today. **Ownership is
+   — refused otherwise, at the wire and again when the index is read.
+  **Ownership is
    one-to-one in both directions**: one `run_id` maps to one `(job,
    run_number)`, and one `(job, run_number)` maps to one `run_id`. With
    `run_id` minted in the effect (§2.3) that holds by construction on the
@@ -2046,9 +2112,16 @@ indeterminate, and a run that provably never reached the supervisor is lost.
    receipt or an index for a *different* `run_id` is a **collision**, refused —
    never reused, never given a second index;
 3. write `receipt.json` by the liturgy: `{artifact_format_version, run_id,
-   spec_fingerprint, received_at}` — **before** the wrapper is spawned. `spec_fingerprint` is
-   sha256 over the §3.2 canonical form of the frozen wrapper input spec
-   (`supervisor-protocol.md` §2) with `lifeline_fd` removed;
+   spec_fingerprint, received_at}` — **before** the wrapper is spawned. `spec_fingerprint` covers the
+   frozen wrapper input spec (`supervisor-protocol.md` §2) in three steps:
+   remove `lifeline_fd` — the fd is ours to fill, so a retry carrying one
+   would fingerprint differently from the receipt we wrote; replace every
+   float, at any depth, with `"float:" + float.hex()` — §3.2's grammar has no
+   floats and the frozen spec carries one in `grace_seconds`, so the exact
+   bits go in, tagged so no plausible string field can collide with them;
+   then sha256 the §3.2 canonical form of the result. It is hashed over the
+   whole body and not through the `digest` helper, which strips a top-level
+   `digest` key by design;
 4. spawn the wrapper; the wrapper writes `spawn.json` (frozen, unchanged);
 5. write `reply.json` by the liturgy: `{artifact_format_version, run_id,
    wrapper_pid, spawned_at}` — the answer as first given;
@@ -2067,7 +2140,10 @@ the incoming path, and answers from the directory, not memory:
 | `receipt.json` with a different fingerprint | collision: refused |
 | index entry → directory with no `receipt.json` | crash between index and receipt: indeterminate, same rule |
 | index entry names a directory that does not exist | impossible by write order (`mkdir` precedes the index); treated as indeterminate if ever seen |
+| index entry unreadable, or naming a `run_id` that is not its own filename | **indeterminate**. Corruption is not absence: "no index entry" AUTHORIZES a spawn, so an entry that cannot be read must never answer as one that is not there |
 | no index entry | first application — an orphan directory at the incoming path with no index and no receipt is a crash between `mkdir` and index and is reused, because nothing durable names its run |
+| no index entry, and **another** `run_id`'s index names this `(job, run_number)` | collision: the same crash under a different id, refused. The index is scanned for that owner here and only here — after a crash, never on a healthy spawn |
+| no index entry, no receipt, and the directory holds a `spawn.json` or a `status.json` | **indeterminate** — a run made under the old rule, where the engine owned the directory and no receipt was ever written. It holds that run's evidence, and forking into it would overwrite it |
 
 Writing the receipt *before* the spawn is the safe direction: the failure mode
 is a run that never happened being reported unknown, which E7 already handles;
@@ -2099,7 +2175,11 @@ presented against a different `(job, run_number)`, and a fingerprint collision.
 - cross-node resource coordination (DL-49);
 - a retention/compaction **policy** — but not its floors. Which periods, spools
   and tombstones may be pruned and when is a business decision
-  (`deployment-runbook.md` §2). What may **never** be pruned is stated here,
+  (`deployment-runbook.md` §2). **Three verdicts, because there is a middle.**
+  An artifact is **floored** (reachable from the head; refused), **held** (the
+  head has moved past it and no class licenses removing it, so it stays and
+  the verdict names the dependency in the way) or **prunable** (licensed by
+  name). What may **never** be pruned is stated here,
   and it is *everything reachable from the lineage head*: the sentinel; the
   anchor and any active claim; the seal sidecar the current period opened
   from and the one it will close with; the current and committed-next period
@@ -2188,7 +2268,7 @@ one state a reader can report a tier from:
 
 | artifact | in the class when |
 | --- | --- |
-| `wal/<period>.jsonl` | the period is **attested** *in this root*; a **later** chain checkpoint covers it *anywhere in the estate*; every run **born** in it has had its directory, `.by_run_id` entry and default logs pruned already; every older period this root retains is already archived; and it is below the estate's **head** period |
+| `wal/<period>.jsonl` | the period is **attested** *in this root*; a **later** chain checkpoint covers it *anywhere in the estate*; every run **born** in it has had its directory, `.by_run_id` entry and default logs pruned already; every older period this root retains is archived, or is archived ahead of it by this same sweep, oldest first; and it is below the estate's **head** period |
 | a **committed** candidate's `staged_manifest.json` + `candidate.json` | that period's WAL is in the class — the same cover, in the same receipt |
 
 The cover is an **estate** fact and the period's own attestation is a **root**
@@ -2202,11 +2282,17 @@ bindings stand between a row and a cover: a `period_root` sentinel of this
 estate; a sidecar that is this estate's and that period's; that sidecar's
 digest equal to the digest **the row committed**; and `verify_attestation`
 binding the checkpoint to that sidecar and to its own `chain_through_period`.
-A row whose root is **present** and fails any of the four REFUSES the plan —
-otherwise an edited row could point at a stranger's root, or at a same-estate
-root holding a second valid pair for that period, and release WAL belonging to
-the branch that actually ran. A row whose root is **missing** is skipped, not
-refused: an off-line directory proves no cover, which only ever holds more. The
+**Disagreement refuses; absence only fails to prove.** A present root whose
+sentinel is missing or names another estate, whose sidecar attests another
+estate or another period, or whose sidecar digests to something other than the
+digest the row committed, REFUSES the plan — otherwise an edited row could
+point at a stranger's root, or at a same-estate root holding a second valid
+pair for that period, and release WAL belonging to the branch that actually
+ran. Missing proof is the other case and it is **skipped**: a root that is
+off-line, a row with no `seal_digest`, an absent checkpoint, a sidecar that
+will not parse, an attestation that does not verify. None of them says
+anything false; each supplies no cover, and the walk keeps looking further
+down. Skipping only ever holds more. The
 live re-check before the receipt reads the anchor again rather than a snapshot
 the plan carried, because the window it exists to close is exactly a row moved
 in between.
@@ -2277,7 +2363,11 @@ says otherwise. A **retired** row names the decision-log entry that retired it
 and the refusal tests that replaced it. It stays in the table: the citations
 that point at it must still resolve, and a reader of an older commit has to be
 able to find what the obligation was. A retired row is never deleted, never
-renumbered and never re-used for a different property.
+renumbered and never re-used for a different property. An active row may still
+name a clause whose producer does not exist yet — PR-16's remap half, PR-47's
+`--trust-unaudited-seal` half. The row stays active, the clause is named as
+undischarged where it appears, and it is discharged by the unit that builds
+the producer. Silence there would read as coverage.
 
 ### 13.1 Lineage
 
@@ -2323,6 +2413,14 @@ renumbered and never re-used for a different property.
 | PR-14 | `outbox_pending`/`executions` order is `(index, effect_id)`; a SPAWN precedes its run's later KILL |
 
 ### 13.3 Period identity
+
+**Every obligation that needs a REMAP lands with the storage.** The `route`
+verb, the `routes` query and the `route:` `expect` namespace are specified and
+unbuilt (§2.2), so PR-16, PR-16a and PR-16b are discharged today only in their
+carry and hash halves: `runtime_hash` ignores the table, the seal carries a
+route in its frozen shape, and audit derives it. Their remap halves are
+undischarged until the producer exists. PR-16c needs no remap and is active
+whole.
 
 | # | obligation |
 | --- | --- |
@@ -2371,7 +2469,7 @@ renumbered and never re-used for a different property.
 | PR-28d | fault injection **on the seal append itself** — write error mid-line, `fsync` error after a complete line, power loss after flush before fsync: the engine fail-stops with an unknown outcome, never reopens admission; recovery then finds a complete line → `fsync`s the WAL and only then promotes it, **with power loss injected before and after that confirming `fsync`, and with the confirming `fsync` itself raising** — before it the seal may vanish and no successor exists; after it the seal is durable; when it raises, no anchor transition, no successor segment, admission stays closed, and a repeated recovery stays fail-stopped — a torn or absent line → truncated and C1 reopened, a line with records after it → refused |
 | PR-28c | one operator hold, one **pre-armed** job and one held, **initially unarmed** job, a tick at T for the latter, then both a refused and a committed boundary: the pre-armed row is exactly as the operator left it; the initially unarmed row is `armed: true` with exactly the one legitimate C1 revision increment the tick caused — in **both** outcomes, so an abort that restored a pre-freeze snapshot fails; after the commit the operator's `OFF_HOLD` in C2 produces exactly one start |
 | PR-30f | crash before and after the engine's committed-manifest write, before the rename: the retry re-validates, overwrites with its own, and the installed `periods/N+1/` holds both files |
-| PR-22b | resume with ambient CLI defaults deliberately conflicting with the committed profile: the engine runs the committed profile |
+| PR-22b | resume never runs a profile the period did not pin: a launch option that disagrees with the committed manifest's `RuntimeProfile` **refuses the resume**, naming the fields that moved, and the settings the wiring cannot express resolve from the pin rather than from an ambient default. Both halves, one case each — including the deadman, which compares at its OBSERVED value and not the asked one |
 | PR-30d | the engine dies after installing `periods/N+1/` and before the `seal` record, under power loss: a retry with the same `stage_digest` — **after an intervening indexed C1 admission** — reuses the staged identity and regenerates `manifest.json` with the new `first_index`; a retry differing in **each staged field** (`catalog_hash`, `catalog_hash_version`, `source_bundle_hash`, `runtime_hash`, `state_machine_version`, `artifact_format_version`) quarantines it and installs its own; alternating S1 → S2 → S1 → S2 quarantines without collision; and the engine-derived committed fields never alter `stage_digest`; the committed boundary opens either way |
 | PR-30a | the live `seal` request: a lost response **before** the seal record → the retry is a fresh request that seals (the period was still open, nothing named the first attempt); **after** it → the exact retry is answered from the committed seal in the new period; a collision refuses |
 | PR-30b | live-mode seal exits code 3 and no detached command is signalled |
@@ -2414,7 +2512,7 @@ renumbered and never re-used for a different property.
 | --- | --- |
 | PR-45 | every §11 matrix row as its own crash-injection test, the three claim-state rows and the period-1 row included |
 | PR-46 | an orphan sidecar is never selected |
-| PR-47 | resume from an unattested seal with corrupt inputs refuses; a self-consistent digest alone is **not** accepted; `--trust-unaudited-seal` proceeds and the opening `segment` records it |
+| PR-47 | resume from an unattested seal with corrupt inputs refuses; a self-consistent digest alone is **not** accepted; `--trust-unaudited-seal` proceeds and the opening `segment` records it. The third clause lands with the switch (§11, DL-133) and is undischarged until then; the first two are active |
 | PR-47a | `audit` refuses a period whose `state_machine_version` it does not implement, naming the version and the `dsl41_version` that produced it |
 | PR-47d | `baseline_id` of the successor is reproduced by audit from `{estate_id, period_id, stage_digest}`; mutated **consistently in every artifact that carries it** — sidecar, `seal` record, `manifest.json`, and the successor `segment` if one exists — with every incidental digest recomputed, audit fails **solely** because the value ≠ the derivation |
 | PR-24c | an evicted host row carries across a seal as evicted; nothing in this spec un-evicts it; a re-registration of a non-evicted host that changes only `deadman_us` or `last_contact` writes no record and moves no revision |
@@ -2436,7 +2534,7 @@ renumbered and never re-used for a different property.
 | PR-55a | **one door, seven bindings.** Table-driven over a receipt whose integrity is intact and whose BINDING is not — a wrong `seal_digest`, a wrong `attestation_digest`, a wrong `chain_through_period`, a foreign `estate_id`, a **correlated foreign seal-and-attestation pair** with the receipt restamped onto it, and bytes that do not parse: each refuses in the walk, the plan, the tier, `audit`, `journal`, `runs` and `estate prune`, with the same reason, and **none of them answers shorter instead**. `audit_period` and the re-derivation refuse it as FUNCTIONS, with no CLI in front of them. A receipt naming a file it does not license excuses nothing. The cover, likewise: a registry row redirected to a **present** root of another estate, **or to a same-estate root holding a second valid pair for that period**, refuses the plan and the live re-check, and releases nothing |
 | PR-55 | **permanent floors and irreversibility.** The receipt, the archived period's attestation and its seal sidecar are unreachable by `prune` — one case each, `_remove` refused rather than merely not asked. Restoring the archived inputs beside the receipt leaves every reader at the **attestation-verified** tier. A receipt whose attestation or sidecar is absent refuses. Deleting a WAL over an older period whose deletion failed does not happen: the retained segments are a contiguous suffix after every partial sweep |
 | PR-56 | **no reader answers shorter in silence.** Over a multi-period archive, in place and across a physical roll: the estate walk resolves an archived registry row and refuses an unreceipted absence BY NAME; `audit` reports the archived period at the attestation-verified tier in wording it shares with no derivation-verified line, and still audits the rest; `journal` prints the unreplayable gap on STDOUT and crosses the next boundary by the predecessor's attestation; `runs` names the coverage it lacks; `estate prune` re-plans an archived root, including one whose every period is archived. The subscriber's backfill answers a cursor below the archive with §11's gap marker at the oldest RETAINED record — unchanged, and only because the archive is a prefix — and a live engine still resumes, because recovery selects its seal by the sidecar. Accidental loss with no receipt refuses in the walk, in `audit` and in `journal`, each naming the receipt it did not find |
-| PR-52 | `scripts/arch_check.py`'s ownership gate covers `consumed`, `routes`, `enqueue_counter`, `start_period`, `reservations`, `waiter_seq` and the execution/FW-spool models: a mutable one reachable outside its owner fails the build |
+| PR-52 | `scripts/arch_check.py`'s ownership gate covers `RuntimeState`'s own state — the row models (`JobRuntime`, `HostRuntime`, `CapacityReservation`, so `start_period`, `reservations` and `waiter_seq` with them), the private maps, and the scalars `consumed`, `enqueue_counter` and `timer_seq`: a mutable one reachable outside its owner fails the build. `routes` joins the gate with its storage (§2.2); the seal's own frozen artifact models are not runtime state and are not in it |
 
 ## 14. The worked estate
 
@@ -2513,8 +2611,8 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `concurrency-model.md` §4/§5 | `result` + `effect` → atomic `decision`; CM-17 closes on the file substrate |
 | `concurrency-model.md` §7 | leader eligibility reads the current period's pins; `next_epoch` reads the seal; **`catalog_hash` becomes v2 — `meta.tool_version` excluded** |
 | `concurrency-model.md` §11 | the catalog is immutable **per period** |
-| `control-protocol.md` | **v3**: `baseline_id` is the period's; `seal` verb; the `host` cmd's `route` verb and the `routes` query with the `route:` namespace; `decision` in the subscribe stream; the gap marker; exact-retry expiry |
-| `runner_admission.py` | `Attempt.host` becomes `HostCommand \| RouteCommand`; `RuntimeState.revision()` gains the `route:` namespace |
+| `control-protocol.md` | **v3**: `baseline_id` is the period's; `seal` verb; the `host` cmd's `route` verb and the `routes` query with the `route:` namespace *(pending — §2.2)*; `decision` in the subscribe stream; the gap marker; exact-retry expiry |
+| `runner_admission.py` | `Attempt.host` becomes `HostCommand \| RouteCommand`; `RuntimeState.revision()` gains the `route:` namespace *(pending — §2.2)* |
 | `supervisor-protocol.md` §3/§5 | `receipt.json` `{artifact_format_version, run_id, spec_fingerprint, received_at}`, `reply.json` `{artifact_format_version, run_id, wrapper_pid, spawned_at}` and the `run_id` index entry `{artifact_format_version, run_id, job, run_number}` join the spool, each §3.2-canonical and liturgy-written; a detached run's directory is created by the supervisor; SPAWN idempotency is directory-backed (§11a) and outlives `LIST` presence and supervisor restart; `run_id` grammar enforced at the wire |
 | `runner_adapters.py` FW | append-only `watch.jsonl`: a `start` line on dispatch, then one line per poll |
 | `runner_adapters.py` CMD / `runner_effects.py` | `run_id` minted in `plan_effects`, carried on the SPAWN effect; the adapter reads it from the effect instead of minting |

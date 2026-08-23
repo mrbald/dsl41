@@ -26,7 +26,9 @@ write path (one live POST + GET readback) is the U3b residue
 
 The endpoint is `POST http://<controller>/uc/resources/task`, and each
 workflow has one record ("Creates a new Workflow task." — Workflow Task
-Web Services). `dsl41 uc` emits this minimal create subset:
+Web Services). This is the minimal create subset. `dsl41 uc` emits a JSON
+bundle — stdout by default, a file with `--out` — and each element of the
+bundle's `records` array has this shape:
 
 ```json
 {
@@ -58,10 +60,14 @@ Web Services). `dsl41 uc` emits this minimal create subset:
   table). The docs give NO character-set or length constraint for the task
   `name` field. We searched the property tables (NOT FOUND). This is
   unlike calendar names, for example, which carry
-  "Maximum 100 alphanumeric". As a result, the backend copies job/box
-  names into the record verbatim. An invalid name causes an error on the
-  controller at create time. Every bundle records this fact as an
-  assumption note.
+  "Maximum 100 alphanumeric". As a result, the backend copies names into
+  the record verbatim. Every vertex `task` value is the job name. A record
+  that a box produced takes the box name. A record for a group of loose
+  jobs has no estate name to copy, so it gets a synthesized one,
+  `wf_<first task>`. The bundle notes name every emitted record whose name
+  is not a job name in the set.
+  An invalid name causes an error on the controller at create time. A
+  bundle that emits at least one record carries this fact as a note.
 - **`retainSysIds`**: This is a RECORD attribute (a JSON top-level field),
   NOT a URI or query parameter ("In XML web services, retainSysIds is
   specified as an attribute in the `<task type>` element."). The docs say:
@@ -78,11 +84,21 @@ Web Services). `dsl41 uc` emits this minimal create subset:
 - **`workflowVertices[]`** — fields for each vertex: `task` is a value
   wrapper (`{"task": {"value": "Sleep 0"}}`). `vertexId` is an explicit
   STRING in the whole-record shape (doc example: `"vertexId": "2"`), and
-  edges use this id. `vertexX`/`vertexY` are optional strings
-  ("Default is 0."). `alias`/`conditionExpression` are nullable, and the
+  edges use this id. The serializer numbers the vertices in the record's
+  own vertex order: `"1"`, `"2"`, and so on.
+  `vertexX`/`vertexY` are optional strings ("Default is 0."), and the
+  records always emit both. A deterministic layered pass sets them:
+  longest-path depth gives y, arrival order inside a layer gives x. A cycle
+  has no longest path, and a cycle is legal AutoSys (L010), so the pass
+  measures depth over the DFS-forward subgraph and ignores back edges. So
+  one catalog always serializes to the same record.
+  `alias`/`conditionExpression` are nullable, and the
   records omit them. Aliases exist for duplicate tasks in one canvas.
-  Duplicates are impossible in v1, because task names are catalog-unique
-  and appear once per workflow. Note: for the *incremental* endpoint
+  Exact duplicates are impossible in v1: job names are unique in the set,
+  and each job goes into one workflow only. Names that differ by case
+  alone are L014's business — UC name addressing treats them as one task
+  (UCS-12) — and `dsl41 uc` does not run the linter itself.
+  Note: for the *incremental* endpoint
   (`POST /resources/workflow/vertices`), the server assigns the vertexId.
   The whole-record create carries explicit ids. The base serializer uses
   the whole-record form only.
@@ -105,6 +121,9 @@ Approved / Approval Required / Exit Code … / Step Condition … / Variable.
 (forward slash). The doc's own worked examples show this spelling
 (`<condition>Success/Failure</condition>`).
 
+The serializer maps the twin's edge conditions to these three tokens:
+`success` → `Success`, `failure` → `Failure`, `done` → `Success/Failure`.
+
 There is NO `Cancelled` edge condition. It has zero occurrences across the
 fetched web-services and properties pages and both OSS client source
 trees. As a result, the twin's `cancelled` edge condition (DL-16a, the M06
@@ -114,9 +133,14 @@ workflow (see below).
 Caveat, verbatim: "Success/Failure and Failure are not valid for Workflow,
 Timer, and Manual tasks." Our interpretation (inference, not quote): this
 is a source-task-type constraint. It agrees with resolved U2 (a workflow
-instance is never Failed). This constraint is unreachable in v1 output,
+instance is never Failed). The Workflow half is unreachable in v1 output,
 because v1 emits only flattened leaf-task vertices (DL-16 M18 v1). When
-sub-workflow nesting is added, this constraint becomes applicable.
+sub-workflow nesting is added, that half becomes applicable. The Timer and
+Manual halves are an apply-time constraint. A vertex names a task the
+estate already created, and this freeze does not cover task bodies or task
+types, so the serializer cannot check the source task's type. A `Failure`
+or `Success/Failure` edge out of a Timer or Manual task fails on the
+controller at create time.
 
 ## Excluded rich forms (U3b residue)
 
@@ -137,12 +161,35 @@ sub-workflow nesting is added, this constraint becomes applicable.
   from the saved bytes. The doc is the authority here. When the live
   OpenAPI pull occurs, do this test again.
 
-**Serializer consequence (the safe-freeze rule, 2026-07-12 audit):**
-each edge outside the three base tokens — this includes the twin's
+## Quarantine (the safe-freeze rule, 2026-07-12 audit)
+
+Each edge outside the three base tokens — this includes the twin's
 `cancelled` and each `var_condition` — QUARANTINES its whole workflow. The
-serializer does not emit the record. The bundle's quarantine ledger lists
-each edge that caused the quarantine. A partial workflow never goes into
-the bundle. The serializer never deletes an edge silently (DL-04).
+serializer does not emit the record. It does not emit a part of it either:
+the serializer never drops one edge and ships the rest.
+
+A record name collision quarantines as well (DL-55). Two workflows can
+serialize to one record name — a box named `wf_x` beside a loose job `x`,
+for example. One POST per record makes the second create fail, and an
+upsert wrapper would clobber the first record silently. So every workflow
+in the collision quarantines, including one whose edges are all base
+tokens. The collision check runs over the workflows that survive the edge
+check: if the other party quarantined already, one record carries the name
+and it emits.
+
+The bundle's quarantine ledger names every workflow it withheld and gives
+the reason for each: one line for every defect it found on an offending
+edge, or the collision. One edge can carry two defects and get two lines.
+The serializer never deletes an edge silently (DL-04).
+
+This quarantine rule governs the serialization step only. The twin lowering
+runs first, and it leaves out what UC has no shape for: R-classified edges,
+`notrunning` edges, edges that span two workflows, and global gates it
+cannot attach to a predecessor edge. It leaves out node-level constructs
+too, such as resources and definition-time status. A record can therefore
+carry fewer edges than its AutoSys source. Those omissions are not silent
+either: the bundle's `excluded` ledger carries the twin's list verbatim, in
+the same file as the records.
 
 ## Apply-time requirements
 
@@ -151,11 +198,13 @@ the bundle. The serializer never deletes an edge silently (DL-04).
   are estate-specific and NOT part of this freeze. A create against a
   missing task name causes an error on the controller. The notes in the
   bundle list every referenced name.
-- Each record needs one `POST /uc/resources/task`. The bundle file is an
+- Each record needs one `POST /uc/resources/task`. The bundle is an
   artifact of dsl41, not a UC bulk-import file.
 - The records pin `retainSysIds: false` and contain no sysIds. As a
-  result, the controller autogenerates all ids, and the records are
-  environment-portable.
+  result, the controller autogenerates every sysId, and the records are
+  environment-portable. The `vertexId` values are a different thing. They
+  are record-local ids that the serializer assigns, and the edges use
+  them.
 
 ## Sources
 

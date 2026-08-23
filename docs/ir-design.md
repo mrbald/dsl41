@@ -14,7 +14,7 @@ no runtime. A failed translation is a loud, classified error, never silent loss.
 ## 1. Pipeline & representations
 
 ```
-JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──▶ IR-G ──compile──▶ UC records (XML/JSON)
+JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──▶ IR-G ──compile──▶ UC record bundle (JSON)
    ▲                 │               │                 │        └────▶ migration report (md)
    └───render────────┘               │                 ├────▶ Mermaid
         (fidelity round trip)        │                 └────▶ DSL source (decompiler)
@@ -22,14 +22,19 @@ JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──�
                                      └────▶ oracle (discrete-event interpreter)
 ```
 
+Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
+consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
+`decompile(catalog, graph)` all need the faithful layer. The linter has the same shape —
+L001–L007 and L015–L019 read IR-F, L008–L014 read IR-G next to it.
+
 The four representations have four contracts:
 
 | repr | contract | loss policy |
 |---|---|---|
-| **AST** | byte-faithful syntax; `parse∘render == id` (preserve mode); `render∘parse∘render == render` (canonical mode is a fixpoint) | zero loss, ever. Unknown attributes, comments, ordering, and whitespace style all survive |
+| **AST** | byte-faithful syntax; `render∘parse == id` on the source text (preserve mode, F1); `render∘parse∘render == render` (canonical mode is a fixpoint, F2) | zero loss, ever. Unknown attributes, comments, ordering, and whitespace style all survive |
 | **IR-F** (faithful) | semantics-complete per SEM entries; `AST→IR-F` total on the supported attribute set, hard error on semantically load-bearing constructs we don't model | lowering can normalize syntax (abbreviations, formats) but never semantics |
 | **IR-G** (derived) | analysis product: dependency graph + classifications; regenerable from IR-F at any time (`derive` is pure) | explicitly lossy. Every loss is materialized as an annotation |
-| **UC records** | valid UC 7.x import payloads; only E/A-classified edges compile | R-classified constructs become migration-report items, compile refuses to emit them silently |
+| **UC record bundle** | CREATE-ONLY UC workflow records in the frozen base schema (`uc-edge-schema.md`), carried in one self-describing JSON bundle beside its own quarantine and exclusion ledgers; only E/A-classified edges compile | R-classified constructs become migration-report items, compile refuses to emit them silently. Twin lowering drops what UC has no edge condition for (an R row, an `n()` edge) into the bundle's exclusion ledger; an edge that SURVIVES lowering but has no base wire form withholds its whole workflow (DL-55), never part of it |
 
 `IR-F` is the source of truth for equivalence and simulation. Never hand-edit `IR-G`, and
 never serialize it as authority (this mirrors the `.nodebook/`-style "index is not truth"
@@ -74,13 +79,19 @@ class JilFile(BaseModel):
 Notes:
 - **No interpretation at this layer.** `condition` is a RawAttr like any other attribute.
   Lowering parses its expression. This keeps `jil→ast→jil` trivially total.
-- There are three fidelity tests. Test (1) is preserve-mode identity on the whole test corpus.
-  Test (2) is the canonical-mode fixpoint. Test (3) is fuzz: parse-render-parse equality on
-  random JIL-shaped text where parse succeeds.
+- The shipped models carry more than the sketch above: every layout detail preserve mode needs
+  rides on the same rows (`pre_blank_lines`, `indent`, `sep`, `post`, `inline_gap`,
+  `inline_key`, `inline_sep`, `eof_blank_lines`, `final_newline`, `JilFile.file`). They are
+  trivia to the reader and load-bearing to F1.
+- There are four fidelity tests, F1–F4, defined in `jil-statement-syntax.md`. F1 is
+  preserve-mode identity on the whole test corpus. F2 is the canonical-mode fixpoint. F3 is
+  fuzz over generated JIL-shaped text and raw character soups: where parse succeeds, F1 holds.
+  F4 is the lexical torture matrix (escaped and quoted colons, key-shaped lookalikes inside a
+  value, and the rest).
 - Canonical mode (used for diffs and stored artifacts) has a stable attribute order (subcommand
   first, then a fixed key order, unknown keys alphabetically last) and a single space after the
-  colon. Canonical mode does NOT expand abbreviations (that step is IR-level, and the AST
-  canonical form is purely lexical).
+  colon — nothing after the colon when the value is empty. Canonical mode does NOT expand
+  abbreviations (that step is IR-level, and the AST canonical form is purely lexical).
 
 ## 3. IR-F: condition algebra
 
@@ -92,7 +103,7 @@ CmpOp  = Literal["=","!=","<",">","<=",">="]
 
 class Lookback(BaseModel):
     kind: Literal["window","zero","indefinite"]   # SEM-04
-    minutes: int | None       # for kind=window; parsed from hhhh.mm / hhhh\:mm
+    minutes: int | None       # for kind=window; from hhhh.mm, hhhh\:mm, or bare hours
     raw: str                   # original token, for round-trip + Q2 auditing
 
 class JobRef(BaseModel):
@@ -111,7 +122,7 @@ class ExitCodeAtom(BaseModel):
 
 class GlobalAtom(BaseModel):
     kind: Literal["global"] = "global"
-    name: str; op: CmpOp; value: str      # lookback FORBIDDEN here (SEM-04) — validator enforces
+    name: str; op: CmpOp; value: str      # lookback FORBIDDEN here (SEM-04) — see below
 
 class And(BaseModel):
     kind: Literal["and"] = "and"; operands: list["Cond"]   # n-ary, flattened
@@ -128,6 +139,10 @@ Cond = Annotated[StatusAtom|ExitCodeAtom|GlobalAtom|And|Or|Paren, Field(discrimi
   from left to right." There is a single grammar rule (the earlier C-style candidate is
   deleted). The pinning tests `test_sem03_flat_left_to_right_precedence_pinned` (grammar) and
   `test_sem03_precedence_pinned_model_level` (Cond model) hold this shape.
+- A lookback on a `value()` atom is impossible by construction, not by validation: the
+  grammar gives `global_atom` no lookback slot, and `GlobalAtom` carries no `lookback` field.
+  L003 stays in the §9 table as a reserved tripwire, and fires only if the model ever grows
+  one.
 - There is no negation node (SEM-03): the atom set is closed under the actual language of
   AutoSys.
 
@@ -150,15 +165,31 @@ class BoxLinkage(BaseModel):
     box_terminator: bool = False         # SEM-14
     job_terminator: bool = False
 
-class ExecSpec(BaseModel):               # command jobs; FW/other types analogous subclasses
-    command: str                         # may contain $$VAR sites — kept verbatim,
-    machine: str | None                  #   substitution sites indexed separately (below)
+class ExecSpecBase(BaseModel):           # shared by every executable type
+    machine: str | None
     owner: str | None
     profile: str | None
-    std_in_file: str | None              # CMD-only; may name a blob (DL-32)
     std_out_file: str | None
     std_err_file: str | None
-    envvars: str | None                  # CMD-only; NAME=value list, verbatim (DL-32)
+
+class ExecSpec(ExecSpecBase):            # command jobs
+    kind: Literal["cmd"] = "cmd"
+    command: str                         # may contain $$VAR sites — kept verbatim,
+    std_in_file: str | None              #   substitution sites indexed separately (below)
+    envvars: str | None                  # CMD-only pair; NAME=value list, verbatim (DL-32)
+
+class FwSpec(ExecSpecBase):              # file-watcher jobs: a SOURCE node in derived graphs
+    kind: Literal["fw"] = "fw"
+    watch_file: str
+    watch_interval: int | None
+    watch_file_min_size: int | None
+
+ExecUnion = Annotated[ExecSpec | FwSpec, Field(discriminator="kind")]
+
+class ResourceRef(BaseModel):            # one group of `resources:` (DL-21)
+    name: str
+    quantity: int                        # QUANTITY, required
+    free: Literal["Y","N","A"] | None    # absent = engine default, never guessed
 
 class CondAttr(BaseModel):               # one condition-bearing attribute (DL-73)
     cond: Cond
@@ -174,23 +205,30 @@ class Semantics(BaseModel):              # attributes with control-flow teeth (�
     box_success: CondAttr | None         # box jobs only; SEM-12
     box_failure: CondAttr | None
     auto_hold: bool = False
+    initial_status: InitialStatus | None # SEM-24 [A]/DL-18: `status:` on insert, limited
+                                         #   to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
 
 class JobIR(BaseModel):
     name: str
     job_type: str                        # 'CMD','BOX','FW', + extensible
     box: BoxLinkage
     schedule: ScheduleBlock | None
-    exec_: ExecSpec | None
+    exec_: ExecUnion | None
     sem: Semantics
     annotations: dict[str, str] = {}     # alarms, notifications — no control flow
-    passthrough: dict[str, str] = {}     # unknown/unmodeled attrs, verbatim (AST-sourced)
+    passthrough: dict[str, str] = {}     # unmodeled attrs, AST-sourced text, whitespace-trimmed
+    resources: list[ResourceRef] = []    # `resources:` groups (DL-21), typed carry
     var_sites: list[VarSite] = []        # indexed $$VAR occurrences across string attrs
+    span: SourceSpan | None              # the statement's own span, for findings
 
 class CatalogIR(BaseModel):              # the compilation unit
+    ir_version: Literal["0.2"]           # §8
     jobs: dict[str, JobIR]
     globals_declared: dict[str, str]     # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
     machines: dict[str, MachineIR]
+    resources: dict[str, ResourceIR]     # insert_resource, opaque v1 (DL-18); `amount` is
+                                         # the bucket size the oracle draws QUANTITY from
     calendars: dict[str, CalendarIR]     # autocal exports, opaque; standard+extended share
                                          # the run_calendar namespace (DL-36); repeatable
                                          # `condition:` lines in a .conditions lane (DL-57)
@@ -200,10 +238,14 @@ class CatalogIR(BaseModel):              # the compilation unit
 ```
 
 Important lowering rules:
-- `passthrough` is the **semantic firewall**: an attribute goes there only if it is on the
-  allow-list of known-inert attributes OR the user passes `--permit-unknown`. An unknown
-  attribute NOT on the inert list is a lowering error by default (constitutional: no silent
-  loss of possibly-semantic content).
+- `passthrough` is the **semantic firewall**. Three routes reach it, and only three: an
+  attribute on the allow-list of known-inert attributes; an exec-shaped attribute that is
+  inert on this job's type (a box does not execute, SEM-10); and the SEM-30 dead time cluster
+  (the time attributes plus the falsy `date_conditions` switch itself), carried so L005 can
+  see it. Anything else needs `--permit-unknown`. An unknown attribute NOT on the inert list
+  is a lowering error by default (constitutional: no silent loss of possibly-semantic
+  content). Values are the AST text with leading and trailing whitespace trimmed — syntax
+  normalization, which IR-F is allowed; the byte-exact text stays in the AST.
 - The box tree is implicit via `box.box_name`. A validator materializes the tree and validates
   it (acyclic, members exist, ≤ depth sanity). The tree itself is Layer-G derived data.
 - Every `Cond` keeps a pointer to its AST `SourceSpan` for end-to-end error reports: the
@@ -222,8 +264,9 @@ class DerivedEdge(BaseModel):
     lookback: Lookback | None
     cls: EdgeClass
     mapping_row: str                      # "M01".."M36"
-    assumption: str | None                # human-readable, mandatory iff cls=="assumed"
-    source_atom: SourceSpan               # provenance
+    assumption: str | None                # required for "assumed", forbidden for "exact",
+                                          #   permitted on "redesign" as context
+    source_atom: SourceSpan | None        # provenance: the owning attribute's span
 
 class DerivedGraph(BaseModel):
     nodes: list[str]
@@ -231,43 +274,75 @@ class DerivedGraph(BaseModel):
     mutex_groups: list[list[str]]         # from n() detector (M07)
     or_shapes: list[OrShape]              # M12 classifier output, each with lowering choice
     box_tree: BoxTree
-    external_boundary: list[JobRef]       # cross-instance refs (M33)
+    external_boundary: list[JobRef]       # every cross-instance ref: M33 from `condition`,
+                                          #   M16 from a box override
+    redesign_flags: list[RedesignFlag]    # pass 6: per-job R constructs that are not edges
+    chains: list[list[str]]               # pass 7: maximal linear chains (feeds the DSL)
+    parallel_groups: list[list[str]]      # pass 7: same-(preds,succs) sibling groups
+    cycles: list[list[str]]               # pass 7: SCCs > 1 and self-loops (L010)
 ```
 
 Derivation passes (pure functions IR-F → IR-G, ordered):
 1. atom extraction → raw edges.
 2. `n()` mutex detection (deletes those edges from the edge set, adds mutex_groups) — M07.
+   Only an UNQUALIFIED, LOCAL `n()` atom under `condition` converts. An `n()` with a lookback
+   (M03), one naming a cross-instance job, and one under `box_success`/`box_failure` all stay
+   edges: there the atom is a completion predicate, not a start gate, and a mutex group cannot
+   carry the qualifier (DL-12).
 3. same-cycle analysis (trigger cadence inference from schedule blocks + box tree) →
-   classify M01 vs M02, set cls/assumption.
+   classify M01 vs M02, set cls/assumption. One rule runs BEFORE the atom-shape branches: an
+   atom naming a local producer the catalog does not define is redesign on M02 whatever its
+   shape, because latching cannot be assessed against a job that never runs (DL-12; L001
+   carries the error).
 4. OR-shape classification (common-ancestor diamond / independent-OR / mixed) — M12.
-5. box_success/failure external-ref detection — M14/M16 (R).
+5. box_success/box_failure reference classification — a reference transitively inside the box
+   is M15 (A); a non-member, global, or cross-instance reference is M16 (R, the hung-RUNNING
+   pattern).
 6. run_window presence → M27 (R).
-7. structural: parallel antichains & chains detection (feeds DSL decompiler),
-   cycle detection over *derived* edges (a cycle here is legal AutoSys but a linter warning:
-   possible tight loop / re-trigger pattern).
+7. structural: parallel antichains & chains detection (feeds DSL decompiler), and cycle
+   detection. Both run over the LOCAL job→job edges of `condition` origin only — the M15/M16
+   box-override edges describe completion folding, not flow, and would fabricate cycles out of
+   ordinary box behavior (DL-12). A cycle here is legal AutoSys but a linter warning: possible
+   tight loop / re-trigger pattern.
 
 ## 6. Canonical form & equivalence (validator tier a/b)
 
 Canonicalization `C(IR-F)`:
-- Expand all atom abbreviations. Normalize lookback to `minutes|zero|indefinite` (the raw
-  token is deleted).
-- Erase `Paren`. Flatten nested And/And, Or/Or. Sort operand lists by a stable structural key.
-- Normalize schedule lists (sorted times, dedup). Delete annotations from the comparison view
-  (a separate, softer tier compares them).
+- Expand all atom abbreviations. Normalize the lookback: the raw token is deleted, and an
+  explicit indefinite (`9999`) becomes no qualifier at all, so only `window` and `zero`
+  survive.
+- Erase `Paren`. Flatten nested And/And, Or/Or. Sort operand lists by a stable structural key,
+  drop duplicate operands, and collapse a one-operand And/Or to that operand.
+- Normalize schedule lists (sorted times, dedup), each list on its own. Empty the
+  `annotations` dict in the comparison view; no tier compares annotations today. This is the
+  dict only — `must_start` and `must_complete` are annotation-CLASS semantics but live on
+  `ScheduleBlock`, so they stay in the compare and a difference in them is tier (a)'s to
+  report.
 - Job identity: names are case-sensitive (JIL job names are case-sensitive on UNIX targets —
   [?] the Windows-instance behavior is an open question). Canonical compare takes a
   `--case-fold` override.
 - Rename maps: equivalence accepts an explicit `old→new` name bijection and applies it before
-  the compare.
+  the compare. It maps job names, `box_name` links, and LOCAL job refs inside all three
+  condition attributes. A cross-instance ref is identity in both halves — neither the job name
+  nor the instance is renamed — and so are global names, v1.
 
 Tier (a): `C(A) == C(B)` structural equality (Pydantic model equality on canonical form).
-Tier (b): per-job condition equivalence — a truth table over the atom alphabet (atoms compare
-equal after canonicalization, including lookback). This is feasible because per-condition atom
-counts are small (<20 in practice). Guard the computation with an atom-count ceiling. If the
-count is more than the ceiling, use BDD via `dd` or report "too large, tier-c only". Tier (b)
-also includes graph bisimulation on DerivedGraph for structural refactors (subgraph wrapping
-must be status-flow-preserving).
-Tier (c): oracle trace comparison (below).
+Tier (b): per-job condition equivalence by finite-state enumeration, not by a truth table over
+independent atom booleans — independent atoms cannot see that `s(x)&f(x)` is unsatisfiable,
+which is L006's own flagship case. Each referenced job scope contributes its status, an
+ON_ICE flag, an age bucket cut by the referenced lookback windows, a zero-freshness flag, and
+a last exit code over the comparison cutpoints; each referenced global contributes its literal,
+numeric and string cutpoints, and UNSET. Atoms then evaluate as functions of that state, so
+status exclusion and window nesting hold by construction. Guard the computation with a
+state-space ceiling of 2^18; past it, the condition reports "too large, tier-c only" —
+inconclusive, never divergent. The `dd` BDD fallback is deliberately not taken v1 (DL-14): no
+new dependency for a path the corpus has never needed. Tier (b) also compares the derived
+graph, as exact equality of canonical edge tuples, mutex groups and box tree — the v1 stand-in
+for a bisimulation check, which is NOT implemented. Tier (b) reads the jobs the two catalogs
+have in COMMON, and its graph half compares edges, mutex groups and the box tree, not the node
+list: which jobs exist at all is tier (a)'s question, so run tier (a) beside it.
+Tier (c): oracle trace comparison (below), over the `(at, job, transition)` projection of each
+trace. `cause` is excluded: it carries names and wording, not semantics.
 
 ## 7. Oracle interface (semantics interpreter)
 
@@ -275,23 +350,37 @@ Tier (c): oracle trace comparison (below).
 class Event(BaseModel):                   # injectable + internally generated
     at: datetime
     kind: Literal["STATUS","STARTJOB","FORCE_STARTJOB","SET_GLOBAL","ON_ICE","OFF_ICE",
-                  "ON_HOLD","OFF_HOLD","ON_NOEXEC","OFF_NOEXEC","KILLJOB","TIMER"]
+                  "ON_HOLD","OFF_HOLD","ON_NOEXEC","OFF_NOEXEC","KILLJOB","TIMER",
+                  "MUST_START_ALARM","MUST_COMPLETE_ALARM"]
     payload: dict
+    source: str | None                    # provenance of an injected event (DL-68); None
+                                          #   for oracle-internal and script events
 
-class StatusStore(BaseModel):             # SEM-01 latching store
-    job: dict[str, JobRuntime]            # status, status_at, exit_code, run_number
-    globals_: dict[str, str]
+class RuntimeState:                       # SEM-01 latching store; the ONE write path (DL-86)
+    job: Mapping[str, JobRuntime]         # read-only view; rows are FROZEN — a change is a
+    globals_: Mapping[str, GlobalRuntime] #   replacement, and every write names what changed
+                                          # the two members the interpreter reads. The same
+                                          # owner also holds the timer heap and the runner's
+                                          # published state (hosts, capacity); the oracle
+                                          # never reads a host row (DL-93)
 
-class Oracle(Protocol):
+class Oracle:                             # one concrete interpreter, no protocol
     def feed(self, ev: Event) -> list[Event]     # returns emitted events (starts, alarms)
     def trace(self) -> list[TraceEntry]          # ordered (at, job, transition, cause)
 ```
 
-- Deterministic: single logical clock, tie-break by (event kind priority, insertion order).
+- Deterministic: single logical clock. One `feed()` first fires every timer due at or before
+  its stamp, in time order, and drains each cascade; the injected event goes second. Within a
+  cascade the queue is FIFO — the event, then its consequences in insertion order, jobs in
+  catalog order. Feed times must be non-decreasing. A cascade is never a mixed-kind queue, so
+  the (event kind priority, insertion order) tie-break has no observable cross-kind half to
+  define.
 - Box status is derived state, recomputed on member transitions (SEM-11/12/15 rules).
-- Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)` — pytest
-  parametrized. hypothesis generates event scripts for tier (c) and the expected-divergence
-  pairs (P-Mxx) against the minimal UC interpreter.
+- Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)`, written one
+  test per behavior. Tier (c) scripts come from the caller; `equiv_scripts()` is a seeded
+  deterministic generator so CLI runs reproduce. The expected-divergence pairs (P-Mxx) are
+  fixed scripts run through both interpreters. hypothesis fuzzes oracle and canonical-form
+  properties beside all three; it does not author the scripts.
 - The oracle DOES model machines/load and `resources:` as capacity buckets (DL-50). A job
   acquires an atomic demand vector (job_load vs machine max_load, QUANTITY vs insert_resource
   `amount`) before RUNNING. If the job cannot acquire the vector, it goes to QUE_WAIT (a real
@@ -301,9 +390,9 @@ class Oracle(Protocol):
 
 ## 8. Serialization & identity
 
-- IR-F serializes as JSON (Pydantic `model_dump_json`, sorted keys, explicit version field
-  `ir_version: "0.2"`). One catalog is one file. The output is deterministic (diff-able
-  in git).
+- IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
+  indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.2"`. One
+  catalog is one file. The output is deterministic (diff-able in git).
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
 - Hashing: `catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
@@ -317,9 +406,9 @@ follows, with each rule traceable to a SEM/M row:
 
 | code | severity | rule | source |
 |---|---|---|---|
-| L001 | error | condition references undefined job | SEM-06 |
-| L002 | error | unresolved global reference: `$$VAR` sites and `v(NAME)` atoms (no insert_global, no SET_GLOBAL producer in catalog; DL-25) | SEM-08 |
-| L003 | error | lookback on `value()` atom | SEM-04 |
+| L001 | error | a condition-bearing attribute (`condition`, `box_success`, `box_failure`) references an undefined local job, or a job on an instance with no insert_xinst | SEM-06/SEM-07 |
+| L002 | error/warn | unresolved global reference: no insert_global, and no producer in the catalog. "Producer" is a textual heuristic over command strings (DL-11) — a command containing `SET_GLOBAL` is read as producing every `-G NAME=`-shaped assignment in it. Severity splits by read site (DL-25): a `$$VAR` substitution site is an error (a stale or empty value lands in a command line), a `v(NAME)` condition atom is a warn (a comparison waiting on an external setter can be an intended cross-system gate) | SEM-08 |
+| L003 | error | lookback on `value()` atom — a reserved tripwire: the grammar and the model already make the shape unbuildable (§3), so the rule fires only if `GlobalAtom` ever grows the field | SEM-04 |
 | L004 | error | start_times+start_mins / days_of_week+run_calendar | SEM-31 |
 | L005 | warn | time attributes present, date_conditions falsy (dead config) | SEM-30 |
 | L006 | warn | contradiction: `s(x)&f(x)` same lookback scope | tier-b engine |
@@ -327,28 +416,34 @@ follows, with each rule traceable to a SEM/M row:
 | L008 | warn | box_success/box_failure references non-member (hung-RUNNING risk) | SEM-12/M16 |
 | L009 | warn | unqualified `s()` feeding a scheduled consumer (stale-latch bug) | SEM-01/R1 |
 | L010 | warn | derived-graph cycle | §5 pass 7 |
-| L011 | warn | dangling job: no schedule, no consumers, no producers, not in box | hygiene |
+| L011 | warn | dangling job: no schedule, no derived wiring in or out (edges, globals, mutex groups), no box membership either way, and not an FW source — only reachable by a manual sendevent | hygiene |
 | L012 | info | `n()` atoms → mutex candidates (suggest M07 modeling) | M07 |
 | L013 | warn | box member with own schedule (double-gate; often unintended) | SEM-31 note |
-| L014 | error | duplicate job name within compilation set / name collides per UC rules | UCS-12 |
+| L014 | error | job names that collide case-insensitively, which UC addresses as one task. An exact duplicate never reaches the linter — lowering refuses it (§4) | UCS-12 |
 | L015 | warn/info | lookback format pitfalls in raw — single-digit minutes (`2.5` = 2h05m) warn; bare-hours (`30` = 30h) info, valid + unambiguous, DL-24 — parse-time | SEM-04 |
 | L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
 | L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 | L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
 | L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, cited-resolved DL-58) have no UC-side arm concept — per-estate migration-attention item | SEM-32/M02 |
 
-## 10. Open design decisions (deliberately deferred)
+## 10. Design decisions D1–D4
 
-- D1: `Cond` sharing between `condition` and `box_success/box_failure` is done above. The open
-  part is whether Layer-G also derives edges from box_success refs (probably yes, class per
-  M15/M16).
-- D2: DSL surface — postponed by plan. The decompiler emits builder calls
-  (`job()`, `box()`, `sequence()`, `parallel()`) over IR-F. The context/interpolation design
-  lands after the first corpus pass shows real patterns.
+Three of the four are closed. The numbers stay: they are cited in the sources.
+
+- D1: `Cond` sharing between `condition` and `box_success/box_failure` is done above. CLOSED as
+  its own "probably yes": Layer-G derives edges from box-override refs, classed M15 for a
+  reference transitively inside the box and M16 for a non-member, global, or cross-instance one
+  (§5 pass 5).
+- D2: DSL surface — SHIPPED as phase 10. `dsl41 decompile` emits a runnable builder module over
+  IR-F. The flow verbs are `job()`, `box()`, `sequence()`, `parallel()`, `mutex()` and
+  `contend()`, beside the declaration verbs (`global_()`, `machine()`, `resource()`,
+  `xinst()`, the calendar family). The fold registry is closed at T-001–T-007 (DL-38). The
+  surface was extracted from corpus patterns, never designed ahead.
 - D3: UC record emission templates — the base subset is SHIPPED (U3a, DL-55: CREATE-ONLY
   records per docs/uc-edge-schema.md). Rich condition forms come after U3b (live openapi.json).
-- D4: whether the UC twin of the oracle shares the Event/trace types (goal: yes, one
-  comparator).
+  This is the one still open, and it is gated on U3b, not on a decision.
+- D4: CLOSED, yes: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one
+  comparator reads both traces.
 
 ## 11. What Q1/Q2/Q3 resolution changes (impact ledger)
 

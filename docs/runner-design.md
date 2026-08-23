@@ -39,8 +39,10 @@ only.
 
 The runner consumes IR-F (`CatalogIR`) through the existing loaders
 (JIL → ast_jil → lowering, or the DSL surface). IR-G stays derived, and the
-runner uses it only for `plan` output and UI layout. The runner adds
-**no semantics**: the oracle is the single semantics authority. The runner
+runner does not consume it: `plan` walks the AND-success skeleton over IR-F
+(§8) and the UI lays out boxes from the catalog's own `box_name`. The
+runner adds **no semantics**: the oracle is the single semantics
+authority. The runner
 contributes effects (processes, files), wall time, durability, and a
 control surface.
 
@@ -64,11 +66,15 @@ The cut line comes directly from the oracle's existing event contract:
 
 - **Oracle → shell**: the oracle emits every internal transition as a
   STATUS event (`_set_status` → `_emit`). An emitted
-  `STATUS(job, STARTING)` *is* the dispatch instruction.
-- **Shell → oracle**: the shell injects a process exit as
-  `STATUS {job, exit_code}`. The payload carries the raw exit code only.
-  The oracle applies the SEM-09 / DL-33 boundary itself
-  (`exit_is_success`). **Adapters never classify**.
+  `STATUS(job, STARTING)` *is* the dispatch instruction, and only when its
+  run number is past the last dispatched one (§4).
+- **Shell → oracle**: the shell injects a completion as
+  `STATUS {job, run_number, …}`. A normal exit carries the raw exit code
+  only, and the oracle applies the SEM-09 / DL-33 boundary itself
+  (`exit_is_success`). **Adapters never classify an exit code.** The two
+  outcomes that have no exit code carry the status the shell observed
+  instead: an observed kill is `{status: TERMINATED, cause}`, and a spawn
+  failure or an unobservable exit is `{status: FAILURE, cause}` (§6, §7).
 - **Oracle keeps**: KILLJOB termination, term_run_time auto-TERMINATE
   (dossier §5, timer-heap scheduled), run_window closer-edge (SEM-33), SLA
   alarms (SEM-34), box folds, ON_ICE/ON_HOLD/ON_NOEXEC (SEM-20/21/22),
@@ -95,7 +101,7 @@ scheduler (§5), and the oracle's own timers. Each iteration does these
 steps:
 
 1. `next_wake = min(oracle.next_timer_due(), scheduler.next_occurrence(),
-   first queued event)`.
+   clock.next_sleeper_due(), first queued event)`.
 2. The clock waits (§9). A real clock sleeps until `next_wake` and wakes
    early when the queue gains an event. A virtual clock jumps.
 3. **Journal first** (§7): WAL-append and fsync the injected event, *then*
@@ -109,18 +115,31 @@ Dispatch table (emitted event → side effect):
 |-------------------------------------------|---------------------------------|
 | `STATUS STARTING`, job_type CMD           | spawn LocalCommandAdapter task  |
 | `STATUS STARTING`, job_type FW            | spawn FileWatcherAdapter task   |
-| terminal status, job has a live task      | signal command pgid (§6a); the wrapper records the outcome |
-| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| journal + UI surface only       |
+| terminal status, job has a live task      | cancel the adapter task (see below) |
+| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none; they reach the operator through the trace and the UI |
 | anything on a BOX                         | none (folds are oracle logic)   |
 
 The terminal-status row makes KILLJOB and term_run_time work with no
-adapter timeout logic: the oracle decides, the shell kills. ON_NOEXEC needs
+adapter timeout logic: the oracle decides, the shell kills. The shell's own
+act is the cancellation; what a cancellation costs is the adapter's
+business. A CMD cancellation signals the command pgid (§6a) and the wrapper
+records the outcome. An FW cancellation only stops polling — a watch owns
+no process. ON_NOEXEC needs
 no row. The SEM-22 bypass emits SUCCESS and never emits STARTING, so
-nothing spawns by construction.
+nothing spawns by construction. The alarm row writes no WAL record of its
+own: emitted events are never journaled (§7), so an alarm exists in the
+replayed trace and nowhere else.
 
-**Stale-completion gate.** Completions carry `(job, run_number)`. The
-engine drops each completion whose run_number does not match the current
-one or whose job is already terminal. The engine also journals the drop.
+The two STARTING rows carry one more condition, the **ghost-run gate**: a
+STARTING spawns only when the job's run number is past the last one this
+engine dispatched. A CHANGE_STATUS overwrite re-emits STARTING without
+advancing the run number, and vendor parity launches nothing.
+
+**Stale-completion gate.** Completions carry `(job, run_number)`. Every
+completion enters the common admission order first, so it is durable before
+it is judged (§7). The gate then rejects one whose run_number does not match
+the current one, or whose job is already terminal. The rejection is that
+attempt's `decision` record with its reason; no `drop` record is written.
 This gate closes the race between a natural exit and a concurrent
 KILLJOB/term_run_time kill. The gate must live in the shell. The oracle
 contract deliberately lets injected STATUS overwrite terminal statuses
@@ -148,7 +167,9 @@ simulation.
 
 `run_calendar` / `exclude_calendar` resolve against the loaded calendar
 export (DL-56). A **standard** calendar's date rows (`mm/dd/yyyy` with an
-optional `HH:MM` tail) become an explicit day set. Day-eligibility is
+optional `HH:MM` or `HH:MM:SS` tail — the export sample stamps `00:00:00`,
+Q9/DL-60) become an explicit day set and a per-day row-tick map. Seconds
+truncate, because ticks are minute-grained. Day-eligibility is
 membership for `run_calendar` (SEM-31: XOR `days_of_week`) minus
 `exclude_calendar`'s days (SEM-31: subtracts from whichever is active).
 The runner evaluates eligibility on the job's LOCAL day. When
@@ -180,8 +201,13 @@ uses real calendar arithmetic.
 
 ## 6. Adapters
 
-`JobAdapter` protocol: `async run(job_ir, run_number, ctx) -> int` (raw exit
-code). Cancellation must kill the whole process group and never report.
+`JobAdapter` protocol: `async run(job_ir, run_number, ctx) -> AdapterResult`,
+where `AdapterResult` is `int | Terminated | Failed`. An `int` is the raw
+exit code, and only the oracle classifies it. `Terminated(cause)` reports a
+kill the wrapper observed. `Failed(cause)` reports a completion with no exit
+code — a spawn failure, or the E7 unobservable case. A cancelled adapter must
+never report. An adapter that owns a process group must kill the whole group
+before the cancellation finishes.
 
 **LocalCommandAdapter** (CMD): an engine-side task that spawns the per-run
 **wrapper** (§6a) and awaits it. The wrapper spawns `/bin/sh -c`. When
@@ -195,7 +221,7 @@ signals the command pgid SIGTERM, grace, then SIGKILL. The wrapper
 observes the deaths and durably records the outcome like any other
 completion. When `std_out_file` / `std_err_file` are set, stdout/stderr
 **append** to them (the vendor appends). Otherwise they append to
-`<run_dir>/logs/<job>.<run_number>.{out,err}`. Whether the engine
+`<run_root>/logs/<job>.<run_number>.{out,err}`. Whether the engine
 unescapes `\:` inside command/std_* values is the DL-39 [?]. Verbatim
 carry applies here too. There is no timeout logic (term_run_time is the
 oracle's timer). **No retry logic**: n_retrys is FAILURE-only (Q4
@@ -269,9 +295,11 @@ extraction boundary (DL-42; *amended by DL-129*: the supervisor also writes
 those three plus the run directory itself are what make SPAWN idempotent
 across its own restart). Clients split into **unlimited read-only
 observers** and **exactly one controller**. Mutating verbs require a
-controller lease (controller_id, expiry, fencing token). Mutations carry
-the token and an idempotency key. This lease is a v1 correctness feature,
-not ceremony. A TUI, a script, and the engine that race SPAWN/SIGNAL on
+controller lease (controller_id, expiry, fencing token). Every mutation
+carries the incarnation and the fencing token. Only SPAWN carries an
+idempotency key, and it is the `run_id` itself; SIGNAL and SHUTDOWN carry
+none, because neither is a second act when it repeats. This lease is a v1
+correctness feature, not ceremony. A TUI, a script, and the engine that race SPAWN/SIGNAL on
 the same job graph corrupt scheduler semantics long before security is at
 risk. dsl41's own *engine* socket (§10) deliberately has no lease:
 sendevent is multi-writer by AutoSys nature, and the single-writer engine
@@ -282,8 +310,10 @@ lives here under an enforced import boundary: wrapper and supervisor
 import nothing from dsl41, stdlib only, tested.
 
 **Tier 0 — per-run wrapper** (phase 11b, the correctness tier, always
-present). This tier is a dumb stdlib-only shim (`runner_wrapper.py`, run
-as `python -m`, no third-party imports). The shim is parent-agnostic: it
+present). This tier is a dumb stdlib-only shim (`runner_wrapper.py`, no
+third-party imports). Both spawners run it BY FILE PATH, never as
+`python -m`: `-m` would import the `dsl41` package first and drag
+third-party imports into the recorder. The shim is parent-agnostic: it
 does not know or care whether the engine or the supervisor spawned it.
 This property lets Tier 1 attach later without a change to the shim.
 Duties:
@@ -294,9 +324,10 @@ Duties:
    member, and a wrapper inside the group dies *before it writes the
    record*. The wrapper stays outside the group that it (or the engine)
    signals.
-2. Durably write `runs/<job>.<run_number>/spawn.json`: run_id, job,
-   run_number, wrapper pid + start-time, command pid, command pgid,
-   started_at, and **boot_id** (`kern.bootsessionuuid` /
+2. Durably write `runs/<job>.<run_number>/spawn.json`: a schema `version`,
+   run_id, job, run_number, wrapper pid + start-time, command pid,
+   command pgid, command start-time, started_at, and
+   **boot_id** (`kern.bootsessionuuid` /
    `/proc/sys/kernel/random/boot_id`). A reboot recycles the whole
    (pid, start-time) identity space. Thus a boot_id mismatch both voids
    liveness checks and *proves* that nothing survived. Durability liturgy
@@ -305,7 +336,7 @@ Duties:
    creation. The run directory must be a **local** filesystem.
    Rename-over-NFS has ambiguous crash semantics.
 3. Spawn the command with the `DSL41_RUN` env tag (base64url JSON:
-   run_id, job, run_number, engine_boot_id). The tag is **forensics, not
+   run_id, job, run_number, boot_id). The tag is **forensics, not
    correctness**: macOS `KERN_PROCARGS2` omits env for restricted
    (platform/code-signed) targets like `/bin/sh` (shown empirically and
    in XNU source), and Linux `/proc/pid/environ` is ptrace-gated. The
@@ -319,8 +350,11 @@ Duties:
    at the instant the parent dies must be recorded as completed, not as
    "parent lost".
 5. On child exit: observe with `waitid(WNOWAIT)` where available, durably
-   write `status.json` {exit_code | signal, ended_at}, *then* reap. This
-   order narrows the observe-to-record hole to a few syscalls. The status
+   write `status.json` — the same identity fields, an `outcome`, `ended_at`,
+   and whichever of `exit_code` or `signal` applies — *then* reap. This
+   order narrows the observe-to-record hole to a few syscalls. Both spool
+   records are frozen field by field in `docs/supervisor-protocol.md` §3,
+   which is the schema; this list is what each duty owes. The status
    file is the **authority**. The live reaping chain is only a
    notification that the file exists.
 6. On lifeline EOF: the parent died, which includes `kill -9`, because
@@ -455,13 +489,22 @@ the sentinel itself, which is not in the WAL at all.
 - `drop` — an input refused BEFORE admission, which today means only
   scheduler ticks missed across downtime, skipped-and-recorded at resume
   (E9, DL-45).
+- `seal` — `{rec, estate_id, period_id, closes_at_index, at, digest,
+  next_period_id, next_baseline_id, catalog_hash_version, source,
+  request_id, request_fingerprint, claimed_actor, force_seal}`: the last
+  record of a period's last segment and the boundary's commit point
+  (`docs/period-model.md` §2.2, which owns the schema). It names the period
+  it closes, the index it closes at, the sidecar digest that must verify,
+  and the identity the next period opens with. Not an input: replay applies
+  nothing from it.
 
-*(Amended by DL-89, stage S2.* The three admission fields and the `result`
-record (since DL-118: `decision`) are new here, and `drop` narrowed. A completion the §4 gate drops
+*(Amended by DL-89, stage S2.* The three admission fields and the
+`decision` record (`result` until DL-118 renamed and merged it) are new
+here, and `drop` narrowed. A completion the §4 gate drops
 used to be a `drop` record — the input was refused before it was
 journaled, so its refusal was an ABSENCE in the log, and absence cannot be
 told apart from a crash. It is now admitted like every other input and its
-rejection is that attempt's `result`, which replay can honour rather than
+rejection is that attempt's `decision`, which replay can honour rather than
 guess at. `docs/concurrency-model.md` §4 is normative for the order; this
 section stays normative for what the records hold.*)
 
@@ -522,9 +565,12 @@ existing journal's resume gate).
 at resume); the journal, wrapper spool files, and job stdout/stderr are
 `0600` at creation. The WAL carries globals and every control input, and
 job output carries whatever commands print — owner-only, not
-umask-hopeful.
+umask-hopeful. One deliberate exception: arming the DL-146 perimeter with a
+named `socket_group` opens the run root to `0710` for traversal and the
+socket to `0660`, and tightens every direct child first
+(`docs/access-model.md` §8). Nothing else moves.
 
-**Resume** (`dsl41 run --resume <journal>`):
+**Resume** (`dsl41 run <files> --run-root <root> --resume`):
 
 *(Amended by DL-133, at build of period-model §11.)* **Four steps run
 before step 1 below, and they decide which segment step 1 is about.** The
@@ -558,7 +604,8 @@ verb that lifts it. The question asked is still narrow — the first record is a
 was, and its own refusals are unchanged.
 
 1. On catalog-hash mismatch, refuse — no silent semantic drift. A changed
-   estate re-baselines explicitly.
+   estate re-baselines explicitly. A clock-domain mismatch refuses on the
+   same pin: a real run and a rehearsal are not one record.
 2. Replay inputs in seq order through a fresh Oracle (original timestamps).
 3. Reconcile from the §6a records, sweep = union(journal dispatch records,
    `runs/` directory). In tethered mode, the wrappers self-terminated
@@ -668,8 +715,10 @@ fixture pair.
 
 ERROR:
 - `job_type` outside {CMD, BOX, FW}.
-- `machine` set and not local. Locality is decided against this runner's
-  DECLARED IDENTITY (`--as-machine NAME`, repeatable, DL-52). The runner is
+- `machine` set and not local. This rule and the `owner` rule below apply
+  to `run` only: rehearse spawns no process, so preflight skips both there.
+  Locality is decided against this runner's DECLARED IDENTITY
+  (`--as-machine NAME`, repeatable, DL-52). The runner is
   TOLD what machine it is — no FQDN/reverse-DNS guessing. A job whose
   `machine:` IS an identity name runs here directly. Otherwise the name
   resolves through `insert_machine` (DL-49): an agent's `node_name`, a real
@@ -704,8 +753,11 @@ ERROR:
   set, or with no parseable `amount` — an unsized semaphore cannot be
   honored (DL-50: fail-closed, stricter than L016's warn). A
   `--resource-capacity` override is a documented future escape hatch.
-  Unknown `res_type` (not R/D/T). Malformed (non-integer) `job_load` /
-  `priority` / machine `max_load`. Refused in BOTH run and rehearse
+  Unknown `res_type` (not R/D/T). The same resource named twice in one
+  `resources:` list — the demand is ambiguous. A `QUANTITY` above the
+  resource's `amount` — the job would wait in QUE_WAIT forever.
+  Malformed (non-integer) `job_load` / `priority` / machine `max_load`.
+  Refused in BOTH run and rehearse
   (resource semantics gate the oracle in either clock domain).
 - Oracle construction failure (surfaces IR-level refusals unchanged).
 
@@ -717,6 +769,16 @@ WARN:
   silent-never-fires is preflight's business). Extended sources probe
   their generator from the anchor instead (DL-57). Without an anchor
   there is no probe, only compile validation.
+- an **extended** `exclude_calendar` that covers every eligible day within
+  two years of the anchor, on a job whose source is `days_of_week` — a
+  standard exclusion can never cover a weekly source, an extended one can
+  (DL-57). Two years is the probe bound, so the WARN says the job never
+  fires within it.
+- `timezone` read as a POSIX fixed offset with a NON-ZERO offset — the sign
+  is west-positive, so `GMT+5` means five hours WEST of GMT. The WARN
+  prints the offset it resolved to. A zero offset has no sign to misread,
+  so it passes silently. A unique zoneinfo city match WARNs on a different
+  principle: the name was guessed, and the remedy is `--timezone-map`.
 - `n_retrys > 0` — the job runs WITHOUT retries (Q4 resolved, DL-53:
   retries stay deliberately unmodeled in v1 by scope decision).
 - `job_load` on a **pool** machine — the machine-load throttle is
@@ -735,7 +797,11 @@ oracle's edge-triggered referencer machinery, not a topological order.
 
 ## 9. Time domains (E2)
 
-`Clock` protocol: `now()`, `wait_until(t, interrupt)`. **RealClock** sleeps
+`Clock` protocol: `virtual`, `now()`, `wait_until(t, interrupt)`,
+`sleep_until(t)`, `next_sleeper_due()`, `pending_sleepers()`. The first
+three are the engine's; `sleep_until` is the adapter's only legal block; the
+last two are the virtual domain's bookkeeping, and the real clock answers
+None and 0 to them. **RealClock** sleeps
 (interruptible by queue activity). **VirtualClock** jumps to the next wake
 instantly. The oracle takes explicit timestamps everywhere, which makes
 this jump possible.
@@ -752,9 +818,16 @@ The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
 `docs/access-model.md` §8), with a JSON-lines protocol.
 
+There are three mutating commands — `sendevent`, `host` and `seal` — a set
+of queries, and the streaming `subscribe`. `docs/control-protocol.md` is the
+frozen inventory; what follows is what each is for.
+
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
   ON_NOEXEC/OFF_NOEXEC, SET_GLOBAL, CHANGE_STATUS (inject STATUS).
+- **host** (S5a, DL-94) and **seal** (DL-133) are the other two mutations.
+  `host` changes the execution-host routing table (§7's `host` record);
+  `seal` ends a period. Both take the same admission order as sendevent.
 - **Queries**: `status [job]`, `trace [--since seq]`, `explain <job>` — the
   job's condition shown with per-atom truth over the current store (the
   Cond IR makes this nearly free), `spec <job>` — the preserve-rendered
@@ -766,11 +839,15 @@ The control plane is a Unix domain socket in the run directory, mode 0600
   every pending oracle timer plus each scheduled job's next calendar
   tick, due-ordered (DL-65); `due` is nullable since DL-68 — live
   filewatches join as trailing rows with `due: null` (they fire on a
-  file, not a clock), and `plan` (acyclic estates only). The
+  file, not a clock), `global <name>` / `globals <names>` — a named
+  global's value and its revision, inserting nothing (DL-87), `hosts [ids]`
+  — the routing table's rows, and `plan` (acyclic estates only). The
   status response also carries per-job `job_type`/`box_name` (the ss11
   tree), `started_by` — the trace cause of the most recent actual start
-  — plus, for a live FW run, a `watching {file, interval, min_size}`
-  object (both DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
+  — `state_rev` (the revision an `expect` may name, DL-87), `held` (the
+  oracle started it and its executor routes no new effect, DL-94), plus,
+  for a live FW run, a `watching {file, interval, min_size}`
+  object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; there is no reload, the flag tells the operator
   the running catalog no longer matches the disk (DL-65). The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
@@ -807,7 +884,10 @@ hidden count and a red problem tally), `/` filters by name, `v` cycles
 all → problems → active — filtered and non-all views flatten so a match
 never hides inside a fold. The console focuses with `:`.
 
-`dsl41 run --ui` starts the engine and attaches the TUI in the terminal.
+`dsl41 run --ui` starts the engine and attaches the TUI in the terminal, and
+that terminal owns the run. `dsl41 ui --socket <path>` attaches the same app
+to an engine already running, from another terminal; quitting detaches the
+viewer and leaves the run alone.
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web
 posture (E3): textual-serve ships no auth. Deploy it behind a reverse
 proxy or SSH tunnel. This posture is documented in README deployment
@@ -833,7 +913,8 @@ doc-defective tokens stay materialize-on-a-live-instance).
 Also retry semantics (Q4 resolved DL-53, kept deliberately unmodeled by
 scope decision). Also non-child orphan adoption (dissolved by design: the
 11f supervisor makes survival a *reattachment*, never an adoption — E4).
-Also alarm delivery beyond journal + UI (no mail/pager integrations).
+Also alarm delivery beyond the replayed trace and the UI (no mail/pager
+integrations; an alarm is never a WAL record of its own, §4).
 Also cgroup/scope containment (documented Linux hardening path, §6a).
 Resource/load management LANDED single-node (DL-50): the oracle honors it
 as capacity buckets, and preflight refuses the unmodelable. Still out:
@@ -864,14 +945,17 @@ refusal — a distributed concern, DL-49 future track).
 4. **Preflight**: trigger/non-trigger fixture pair per rule.
 5. **Adapters**: pgid kill, append semantics, profile sourcing. Also the
    FW watcher over a tmpfile that grows to stability.
-6. **TUI**: textual pilot snapshot smoke only.
+6. **TUI**: pure view tests over the parser and the control client, plus
+   textual pilot tests that press the keys — operator verbs, navigation,
+   details, triggers, pane geometry, the log pager. There is no visual
+   snapshot suite.
 
 ## 14. Module layout and phasing
 
-The house layout is flat — no `runner` subpackage — and the runner is seven
-sibling modules, split along the seams its own test files already used
-(DL-74, continued by DL-78): `runner.py` (the §4 engine loop and the run
-lifecycle), `runner_control.py` (the §10 control plane — the socket server,
+The house layout is flat — no `runner` subpackage — and the phase-11 runner
+is seven sibling modules, split along the seams its own test files already used
+(DL-74, continued by DL-78): `runner.py` (the §4 engine loop),
+`runner_control.py` (the §10 control plane — the socket server,
 its wire vocabulary, and both clients; frozen in
 `docs/control-protocol.md`, the outer counterpart to the lifecycle tier's
 `docs/supervisor-protocol.md`), `runner_clock.py` (the §9 clock domains,
@@ -890,9 +974,24 @@ shim: stdlib-only, no third-party imports — its dumbness is a correctness
 property), `runner_supervisor.py` (the §6a Tier-1 daemon, held to the same
 boundary), `runner_procid.py` (the process-identity helpers those two share,
 stdlib-only for the same reason — DL-72), and `runner_tui.py` (guarded
-textual import). CLI verbs in cli_run.py (`run`, `rehearse`, `journal`) and
-cli_control.py (`sendevent`, `serve`) -- the five-module CLI split of
-DL-137, assembled by cli.py.
+textual import).
+
+Later phases added seven more siblings under the same rule, each documented
+by the entry that built it rather than by this section: `runner_startup.py`
+(taking possession of a run root — genesis, resume and the takeover barrier,
+DL-106; §7's resume ladder lives there, not in `runner.py`),
+`runner_admission.py` (the one admission order,
+`docs/concurrency-model.md` §4), `runner_effects.py` (the effect outbox, §5
+there), `runner_hosts.py` (the execution-host routing table, §8 there),
+`runner_ledger.py` (leadership over one run root, §7 there),
+`runner_history.py` (the offline `dsl41 runs` projection, DL-113), and
+`runner_access.py` (the control-socket access perimeter,
+`docs/access-model.md`). Eighteen `runner*.py` modules in all.
+
+Runner CLI verbs in cli_run.py (`run`, `rehearse`, `journal`, `runs`) and
+cli_control.py (`sendevent`, `host`, `ui`, `serve`, `query`, `supervise`) --
+the five-module CLI split of DL-137, assembled by cli.py. The period verbs
+are cli_estate.py's.
 
 - **11a** — oracle additions (`next_timer_due`, `advance`) + engine loop +
   FakeAdapter + VirtualClock + bisimulation suite. Proves the design.

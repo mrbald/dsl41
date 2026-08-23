@@ -618,13 +618,14 @@ class CompiledCalendar:
             return day + timedelta(days=1)
         if code == "n":
             # [V] 'include the next workday that also meets all other
-            # criteria' -- pinned as the next non-holiday workday, the
-            # date-conditions NOT re-checked (PENDING: Q8c)
+            # criteria' -- pinned as the next non-holiday workday.
+            # PENDING: Q8c -- the date-conditions are NOT re-checked
             return self._walk(day, 1, holiday_free=True, code=code, category=category)
         step = 1 if code == "w" else -1
         # holiday W/P demand a NON-HOLIDAY workday ([V] worked examples);
-        # non_workday W/P say only 'work day' (PENDING: Q8c -- no worked
-        # example; holiday-ness of the target deliberately not re-checked)
+        # non_workday W/P say only 'work day'.
+        # PENDING: Q8c -- no worked example; holiday-ness of the target
+        # deliberately not re-checked
         return self._walk(
             day, step, holiday_free=category == "holiday", code=code, category=category
         )

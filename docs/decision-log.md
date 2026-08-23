@@ -1265,7 +1265,7 @@ relitigate an entry; append a new one.
   std_out_file leaves log_err on the computed default, vendor-parity with
   the wrapper's own spec resolution.
 - DL-47 Phase 11e landed: `serve` verb (2026-07-11; found and decided during
-  implementation, within DL-41's frame; cli.py's `serve`/
+  implementation, within DL-41's frame; cli_control.py's `serve`/
   `_import_textual_serve_or_exit_2` are normative detail). Decisions:
   (1) TEXTUAL-SERVE FLOOR VERIFIED, NOT ASSUMED: `[ui]` gains
   `textual-serve>=1.1` (dev extra too) after installing textual-serve 1.1.3
@@ -1288,31 +1288,31 @@ relitigate an entry; append a new one.
   (3) IMPORT/REFUSAL ORDER MATCHES `ui`: guarded `textual_serve.server`
   import first (missing extra -> exit 2, pip-install hint), then the
   socket-exists check (missing socket -> exit 2) -- the same
-  "refuse before touching anything" shape as `_import_tui_or_exit_2`. A
+  "refuse before touching anything" shape as `import_tui_or_exit_2`. A
   bind failure from `Server.serve()` itself (port in use, etc.) is also
-  exit 2: cli.py's exit-code contract treats it as "never started," the
-  same class as the other two gates. (4) LOOPBACK DEFAULT, PROXY/TUNNEL
-  DOCUMENTED NOT BUILT (E3 CLOSED): `--host` defaults to `127.0.0.1` --
-  textual-serve ships no authentication of its own, so widening the bind
-  is an explicit operator choice, never the default. README gains one
-  section: an `ssh -L` tunnel and one nginx `location` block, plus the
-  reminder that the control socket's own 0600-from-birth (ss10/DL-45)
-  means `serve` cannot see anything its user couldn't already reach
-  directly -- it publishes reach, not access. E3 is closed exactly as
-  runner-design ss11 scoped it: documented, not built. (5) TESTS MOCK THE
-  SERVER, NOT THE VERIFICATION: the manual end-to-end pass in (1)
-  established the wiring works; `tests/test_runner_serve.py` (new, 5
-  tests) then unit-tests the CLI wrapper against a monkeypatched `Server`
-  (CLAUDE.md's "no runtime dependency in any emitted artifact" applied to
-  the tests too -- textual-serve's real `serve()` blocks on its own event
-  loop and has no place in a unit test): missing-socket exit 2,
-  missing-extra exit 2 with the pip hint (forced via
-  `sys.modules[...] = None` on both the package and submodule entries --
-  an already-imported submodule survives its parent alone being cleared,
-  so both need clearing), the quoted-command construction, the loopback
-  default, and the bind-failure exit 2. `runner.py`/`runner_wrapper.py`/
-  `runner_tui.py` untouched -- 11f (the supervisor tier) is a separate
-  unit landing after this one.
+  exit 2: cli_common.py's exit-code contract treats it as "never
+  started," the same class as the other two gates. (4) LOOPBACK DEFAULT,
+  PROXY/TUNNEL DOCUMENTED NOT BUILT (E3 CLOSED): `--host` defaults to
+  `127.0.0.1` -- textual-serve ships no authentication of its own, so
+  widening the bind is an explicit operator choice, never the default.
+  README gains one section: an `ssh -L` tunnel and one nginx `location`
+  block, plus the reminder that the control socket's own 0600-from-birth
+  (ss10/DL-45) means `serve` cannot see anything its user couldn't
+  already reach directly -- it publishes reach, not access. E3 is closed
+  exactly as runner-design ss11 scoped it: documented, not built.
+  (5) TESTS MOCK THE SERVER, NOT THE VERIFICATION: the manual end-to-end
+  pass in (1) established the wiring works; `tests/test_runner_serve.py`
+  (new, 5 tests) then unit-tests the CLI wrapper against a monkeypatched
+  `Server` (CLAUDE.md's "no runtime dependency in any emitted artifact"
+  applied to the tests too -- textual-serve's real `serve()` blocks on its
+  own event loop and has no place in a unit test): missing-socket exit 2,
+  missing-extra exit 2 with the pip hint (forced via `sys.modules[...] =
+  None` on both the package and submodule entries -- an already-imported
+  submodule survives its parent alone being cleared, so both need clearing),
+  the quoted-command construction, the loopback default, and the
+  bind-failure exit 2. `runner.py`/`runner_wrapper.py`/`runner_tui.py`
+  untouched -- 11f (the supervisor tier) is a separate unit landing after
+  this one.
 - DL-48 Phase 11f landed: supervisor tier + detached mode (2026-07-11; found
   and decided during implementation, all within DL-41a/DL-42's frame;
   runner_supervisor.py's docstring + docs/supervisor-protocol.md ss5 are
@@ -2183,11 +2183,11 @@ relitigate an entry; append a new one.
   stays keyboard-only: `m` maximize-toggles the log tail, `]`/`[` and
   `}`/`{` nudge the two splits; no mouse splitters (value/effort, and
   textual-serve keeps keyboard parity in the browser). Tests 1710 → 1716
-  (SEM-10c refusal records on both bisimulation paths, spec verb wire
-  shape, _spec_texts rendering, spec popup pilot, geometry pilot); the
-  SEM-32 dead-tick test now expects the tick's START_REFUSED record --
-  its "no trace at all" wording was a proxy for the pinned no-arm, which
-  stands unchanged.
+  (the SEM-10 gate's refusal records on both bisimulation paths, spec
+  verb wire shape, _spec_texts rendering, spec popup pilot, geometry
+  pilot); the SEM-32 dead-tick test now expects the tick's START_REFUSED
+  record -- its "no trace at all" wording was a proxy for the pinned
+  no-arm, which stands unchanged.
 - DL-65 navigation & observability at estate scale (2026-08-09). Origin:
   bank-profile training (518 rows) made the flat jobs table unnavigable,
   and a deliberate systemctl/systemd API review supplied the orthogonal
@@ -2215,24 +2215,21 @@ relitigate an entry; append a new one.
   daemon-reload (cold-restart doctrine stands), drop-in overrides (the
   properties file is the one templating layer), mouse splitters.
   `analyze` (blame/critical-chain over the WAL) is noted as the next
-  standalone unit, not built here. Review round (standing flow, run as a
-  parallel five-agent workflow: two test writers + three adversarial
-  lenses): 13 breadth tests green first pass; 10 findings, all fixed
-  same session -- 4 MAJOR: rebuilds bounced the selection through row 0
-  wiping the log tail on every filter keystroke (restore-guard in the
-  highlight handler); an empty filtered view left keyed verbs aimed at
-  an invisible job (selection cleared); CHANGE_STATUS refused the
-  "JOB^INST" pseudo-entity so the cross-instance runbook play could
-  never fire (declared-xinst suffixes now pass the gate, SEM-07); the
-  folded-box rollup and the problems view disagreed on QUE_WAIT one
-  keystroke apart (single _is_problem predicate). MINORs: deps
-  classified by key-string sniffing (atom-type walk now; a job legally
-  named 'g:x' no longer reads as global x), deps omitted box
-  containment (box_name/members served + popup lines -- condition edges
-  are not a box's blast radius), fingerprint re-read raced the loader
-  (hashes the loaded bytes, inside the exit-2 guard), flat views wore
-  stale fold decoration, }/{ resized the wrong node after the layout
-  change. Tests 1716 -> 1731.
+  standalone unit, not built here. Review round: 13 breadth tests green
+  first pass; 10 findings, all fixed in the same unit -- 4 MAJOR: rebuilds
+  bounced the selection through row 0 wiping the log tail on every filter
+  keystroke (restore-guard in the highlight handler); an empty filtered view
+  left keyed verbs aimed at an invisible job (selection cleared);
+  CHANGE_STATUS refused the "JOB^INST" pseudo-entity so the cross-instance
+  runbook play could never fire (declared-xinst suffixes now pass the gate,
+  SEM-07); the folded-box rollup and the problems view disagreed on QUE_WAIT
+  one keystroke apart (single _is_problem predicate). MINORs: deps
+  classified by key-string sniffing (atom-type walk now; a job legally named
+  'g:x' no longer reads as global x), deps omitted box containment
+  (box_name/members served + popup lines -- condition edges are not a box's
+  blast radius), fingerprint re-read raced the loader (hashes the loaded
+  bytes, inside the exit-2 guard), flat views wore stale fold decoration,
+  }/{ resized the wrong node after the layout change. Tests 1716 -> 1731.
 - DL-66 recovery, artifact, and truthfulness hardening (2026-08-09). An
   independent adversarial review of the DL-63/64 state (8 findings)
   drove one batch; every High/Major addressed, two defers recorded.
@@ -4510,7 +4507,7 @@ relitigate an entry; append a new one.
   eviction gate's never-been-in-contact arm; quarantine and reinstate
   idempotence; the envelope's three refusals; the WAL's preflight record,
   double-unsubscribe and empty-interior-line corruption; and six arms of the
-  ss7 reconciliation ladder. Plus the two S6a error paths this session's own
+  ss7 reconciliation ladder. Plus the two S6a error paths this unit's own
   code shipped without: a lock file that vanishes or is replaced DURING the
   acquire, and a refusal whose holder note is unreadable.
   **Four guards are unreachable by construction and now say so.** Each keeps
@@ -4763,13 +4760,13 @@ relitigate an entry; append a new one.
   ss7 one failover in order, ss8 the eviction bound in seconds. Every example
   cites the tests that hold it, and DL-110's gate fails the build if one of
   those names stops existing.
-  **The examples were GROUNDED by agents and WRITTEN by hand,** which is the
-  division that matters for a frozen document: four agents traced the code
-  and returned real values, real record shapes and real strings; four more
-  tried to refute each trace; every correction they found was applied, and
-  every value in the four examples was then reproduced here against the
-  shipped code before it went in. Voice and argument are not delegable in a
-  document whose value is its argument.
+  **The examples were GROUNDED by tracing and WRITTEN by hand,** which is
+  the division that matters for a frozen document: each trace read the code
+  and returned real values, real record shapes and real strings; each was
+  then attacked for error; every correction was applied, and every value in
+  the four examples was reproduced here against the shipped code before it
+  went in. Voice and argument are not delegable in a document whose value
+  is its argument.
   **What the exercise found, which is the answer to "proof of being real".**
   (1) ss4 says the step-4 batch is "`TimeAdvanced(at)` + `InputAttempt`" --
   two records. It is one, and one is STRONGER: a single line cannot be torn
@@ -4895,9 +4892,11 @@ relitigate an entry; append a new one.
   `dsl41 runs <run-root>... [--job NAME] [--since ISO8601]
   [--format table|json|csv]` folds one or more run roots' `journal.jsonl` +
   `manifest/` + spool into one row per job run --
-  `src/dsl41/runner_history.py`'s `RunRow`, the pure `fold_run_rows` (CM-37),
-  and the thin I/O shell `read_run_root`/`read_run_roots`. Offline only, no
-  control-protocol change (`docs/control-protocol.md` stays frozen at v2).
+  `src/dsl41/runner_history.py`'s `RunRow`, the pure `fold_run_rows` (no
+  obligation row -- ops-model ss9 records that the run-history pair landed
+  without one) and the thin I/O shell `read_run_root`/`read_run_roots`.
+  Offline only, no control-protocol change (`docs/control-protocol.md`
+  stays frozen at v2).
   **Four decisions.** (1) Clock: a row's `started_at`/`ended_at` come from
   the spool WHOLESALE when spawn.json (and, for a complete run, status.json)
   name that exact run; journal otherwise -- never a per-field mix, which
@@ -5113,6 +5112,9 @@ relitigate an entry; append a new one.
   period 1 through the common body, `adopting → closed`. Refuses a live
   wrapper, a live FW, a pending legacy outbox, or an admitted input without
   a durable `result`. Retries under the same `estate_id` with a corrected C2.
+  SUPERSEDED BY DL-138: adoption from a legacy estate is ruled out and the
+  whole `dsl41 estate adopt` path is stripped. This entry stays for its
+  citations and for the shape a migration would have to take.
 - DL-126 `deadman_s` leaves the host semantic projection (2026-08-20;
   concurrency-model §3 amended by period-model §3.3). It joins `last_contact`
   in `_UNPROJECTED_HOST`: it is observed liveness configuration read back from
@@ -5454,14 +5456,14 @@ relitigate an entry; append a new one.
 
 - DL-133 the period gets a boundary: the anchor, the cutoff, and the three
   writes that end a period (2026-08-20; period-model ss1.1, ss1.2, ss1.3,
-  ss6, ss7, ss8, ss9 and ss11 steps 1-4, built as U6b -- PR-01a, PR-01b,
-  PR-01c, PR-02, PR-02b, PR-02c, PR-03, PR-04, PR-05, PR-05b, PR-07's
-  operational half, PR-25, PR-25a, PR-26, PR-27, PR-28, PR-28b, PR-28d,
-  PR-28e, PR-29, PR-30, PR-30a, PR-30b, PR-30c, PR-30d, PR-30e, PR-30f,
-  PR-32, PR-33, PR-34's barrier half, PR-45's in-place rows and PR-46;
-  PR-27's engine-visible and supervisor clauses -- see (13) -- and PR-31
-  not at all, because a bound detached run crossing a boundary live is
-  first exercised with the `seal` CLI surface).
+  ss6, ss7, ss8, ss9 and ss11 steps 1-4, built as build unit U6b --
+  PR-01a, PR-01b, PR-01c, PR-02, PR-02b, PR-02c, PR-03, PR-04, PR-05,
+  PR-05b, PR-07's operational half, PR-25, PR-25a, PR-26, PR-27, PR-28,
+  PR-28b, PR-28d, PR-28e, PR-29, PR-30, PR-30a, PR-30b, PR-30c, PR-30d,
+  PR-30e, PR-30f, PR-32, PR-33, PR-34's barrier half, PR-45's in-place
+  rows and PR-46; PR-27's engine-visible and supervisor clauses -- see
+  (13) -- and PR-31 not at all, because a bound detached run crossing a
+  boundary live is first exercised with the `seal` CLI surface).
   `seal.py` is the artifact; `boundary.py` is the OPERATION -- what must be
   true before a period may close, in what order the bytes hit the disk,
   which single writer performs the cutoff, and who may open next.
@@ -5708,10 +5710,10 @@ relitigate an entry; append a new one.
   that lets a root be archived, and the two ways a root joins a lineage
   (2026-08-20; period-model ss1.3, ss7, ss8, ss11 and ss13's PR-01c,
   PR-02a, PR-02d, PR-02e, PR-02f, PR-47a, PR-47b and PR-48's readiness,
-  drain, idempotency and `adopting` rows, built as U7). DL-133 built the
-  boundary and left five things out by construction: the `dsl41 seal` CLI,
-  the physical roll, adoption, `audit`/`verify`, and `estate reclaim`.
-  This unit builds all five and flips DL-133 item 14.
+  drain, idempotency and `adopting` rows, built as build unit U7). DL-133
+  built the boundary and left five things out by construction: the
+  `dsl41 seal` CLI, the physical roll, adoption, `audit`/`verify`, and
+  `estate reclaim`. This unit builds all five and flips DL-133 item 14.
   (1) **The lock decides which seal mode you get, not a flag.** ss7 has
   two entry modes and one body. `dsl41 seal` tries to take `leader.lock`:
   refused means a live engine leads the root, so the CLI stages C2 and
@@ -5982,9 +5984,9 @@ relitigate an entry; append a new one.
   observed checkpoint on the same rule.
 - DL-135 what may never be deleted, and the subscriber that stopped
   losing a period (2026-08-20; period-model ss11a, ss12 and ss13's PR-36b,
-  PR-36c and PR-49's backfill half, built as U8). DL-134 left the estate
-  with verbs and no way to stop it growing, and with one reader that had
-  quietly become wrong when the WAL became many files.
+  PR-36c and PR-49's backfill half, built as build unit U8). DL-134 left
+  the estate with verbs and no way to stop it growing, and with one reader
+  that had quietly become wrong when the WAL became many files.
   (1) **A floor is computed, not asserted.** ss12 itemizes what may never
   be pruned -- everything reachable from the lineage head -- and
   `retention.py` reads one root and returns that list with a citation on
@@ -6296,10 +6298,10 @@ relitigate an entry; append a new one.
   is gone.
 - DL-136 the boundary era becomes operable, and one reader stops losing a
   period (2026-08-20; period-model ss7, ss8, ss9, ss11, ss11a, ss12 and
-  ss13's PR-50, built as U9). DL-133, DL-134 and DL-135 built the boundary,
-  its verbs and its floors, each pinned by unit tests over two-job
-  fixtures. Nothing had ever driven them over an ESTATE, and nothing told
-  an operator how to run one.
+  ss13's PR-50, built as build unit U9). DL-133, DL-134 and DL-135 built
+  the boundary, its verbs and its floors, each pinned by unit tests over
+  two-job fixtures. Nothing had ever driven them over an ESTATE, and
+  nothing told an operator how to run one.
   (1) **The training estate gets the boundary, as exercises and as
   scenarios.** `examples/nightbank/RUNBOOK.md` grows exercises 15-21 --
   seal the night live and offline, open period 2 in place and see what
@@ -6489,9 +6491,8 @@ relitigate an entry; append a new one.
 
 - DL-137 the review after the programme: what ten units of adversarial
   hardening left behind (2026-08-21; the DL-75 architecture review over
-  the U6b-U9 tree, run by three parallel readers with the arch-review
-  lens; 29 size advisories left to the script, this entry is the half a
-  script cannot see).
+  the U6b-U9 build-unit tree, under the arch-review lens; 29 size
+  advisories left to the script, this entry is the half a script cannot see).
   THREE DEFECTS found and fixed with pins. (1) The resume sweep parsed
   run directories with an inline `rpartition` that accepted `b.01` as
   run 1 -- sorted-first, a directory this estate never wrote could
@@ -7272,8 +7273,8 @@ relitigate an entry; append a new one.
 - DL-145 the review after the reset: what seven units of building left
   behind (2026-08-22; the DL-75 architecture review over the
   DL-138..DL-144 drift -- 22,296 lines since arch-review/2026-08-21 --
-  run by three parallel read-only readers with the arch-review lens;
-  the script's 22 size advisories stay the script's).
+  under the arch-review lens, read-only; the script's 22 size advisories
+  stay the script's).
   SEVEN DEFECTS found and fixed with pins. (1) `_catalog_from_root`
   was a weaker second bundle loader: it dropped the owner's
   JilParseError/LoweringError wrap, so an offline seal over a bundle
@@ -7367,9 +7368,9 @@ relitigate an entry; append a new one.
   arch-review/2026-08-22.
 - DL-146 three tiers at the perimeter: the access model is designed and
   the core stays authz-free (2026-08-22; a three-way design round --
-  the user's constraints, one Claude sketch, one codex-sol sketch, two
-  adversarial rounds to convergence; docs/access-model.md is the
-  product and will freeze when its ss12 obligations are green).
+  the user's constraints, two independent sketches, two adversarial rounds
+  to convergence; docs/access-model.md is the product and will freeze when
+  its ss12 obligations are green).
   THE MODEL. Three tiers, strictly nested, read < ops < adm, an enum
   and nothing else. User pins: exactly three tiers; seal=ops;
   prune/reclaim=adm; FORCE_STARTJOB and evict stay ops. A principal is
@@ -7421,7 +7422,7 @@ relitigate an entry; append a new one.
   reload keeps the old policy. OS group changes propagate on
   reconnect; forcing reconnects is administration, not reload.
   MODES: the run root is forced 0700 today, so a 0660 socket alone is
-  unreachable (codex catch) -- access configured flips the root to
+  unreachable (review catch) -- access configured flips the root to
   0710 (execute-only traversal for socket_group, no listing) and the
   socket to 0660. The 0700 root was the FENCE for its children (logs/
   and runs/ are born 0755 -- the obligation test caught this), so
@@ -7440,18 +7441,18 @@ relitigate an entry; append a new one.
   DEFERRED: it routes but does not contain under the current process
   model; not PR-sized). Receipt identity is the service account, loss
   accepted and named; the deferred seam is web-session-principal-v2
-  with codex's round-1 broker sketch as the reference design.
+  with the round-1 broker sketch as the reference design.
   BREAK-GLASS is a receipt category, not an authorization dimension:
   no fourth tier, no per-verb deny overlay (a second policy axis and a
   sparse flag matrix -- the arch-review lens says no). Ops is
   documented as destructive.
   runner_access.py joins the DL-105 coverage gate at 100% branch --
   an authorization guard's untaken false arm is an untested denial.
-  BUILT the same day, three-review convergence (codex adversarial
-  round + the house self-review agent + the author's pass), every
-  finding folded: a symlinked map PARENT refuses (O_NOFOLLOW guards
-  only the last component); format_version rejects bool/float (TOML
-  true == 1 in Python) and tier rejects non-strings; access_seq
+  BUILT the same day, three-review convergence (an external adversarial
+  round, a self-review pass and the author's pass), every finding folded:
+  a symlinked map PARENT refuses (O_NOFOLLOW guards only the last
+  component); format_version rejects bool/float (TOML true == 1 in
+  Python) and tier rejects non-strings; access_seq
   RESUMES from the last complete record and heals a torn tail (a
   reissued 1 is a duplicate audit key); the receipt writer loops a
   short os.write (a partial line must not pass the receipt gate);
@@ -7490,15 +7491,15 @@ relitigate an entry; append a new one.
   through _committed_seal across arming, a different-principal
   collision) -- the mechanism is pinned at the fingerprint layer and
   the boundary suite owns the stand-in. 3076 -> 3121 collected.
-  RETIRES: the runner-design ss0/ss12 RBAC non-goal (annotated in
+  RETIRES: the runner-design ss1/ss12 RBAC non-goal (annotated in
   place); the authorization half of control-protocol ss7 gap 2 (the
   local authentication half closes with it; web session identity stays
   open under the named seam). Gap 4 (prose errors) deliberately
   stands.
-- DL-147 the conformance round before the freeze: eight sol findings,
+- DL-147 the conformance round before the freeze: eight review findings,
   five frozen docs amended, two armed modes named (2026-08-22; a
-  codex-sol conformance review of docs/access-model.md against the
-  frozen sources and the shipped code; all eight findings held on
+  conformance review of docs/access-model.md against the frozen
+  sources and the shipped code; all eight findings held on
   verification and are folded -- the doc stays DRAFT; the ss12 freeze
   mechanism stands, obligations 8 and 10 reworded, none removed).
   FROZEN SOURCES AMENDED (the amendments this entry authorizes):
@@ -7567,8 +7568,8 @@ relitigate an entry; append a new one.
   semantic tier -- explained in ss10, not reclassified.
 - DL-148 the second conformance round: forty-two findings held
   over ten passes, four frozen docs amended, the headerless answers
-  enumerated (2026-08-22..23; a second codex-sol conformance review
-  of docs/access-model.md against the frozen sources and the shipped
+  enumerated (2026-08-22..23; a second conformance review of
+  docs/access-model.md against the frozen sources and the shipped
   code, run to convergence; all forty-two findings held on
   verification; the doc stays DRAFT and the ss12 freeze mechanism
   stands). The normative text of every ruling below lives in the
@@ -7645,3 +7646,217 @@ relitigate an entry; append a new one.
   integer literal refuses as not-valid-TOML, and a reload over a
   failing descriptor receipts the failure and keeps the old
   generation.
+- DL-150 the conformance round over the whole spec set: what eighteen
+  sweeps found, what the code still owes, and what was deliberately left
+  open (2026-08-23; a conformance round over every docs/*.md spec, one
+  sweep per document, every finding verified against the shipped code
+  before folding).
+  THE RULING. A specification that has drifted from the code is worse than
+  no specification: it is read as authority and it is wrong. Every
+  docs/*.md spec was swept against the shipped tree -- all eighteen,
+  frozen and draft alike -- and about 460 findings held and were folded,
+  about 100 were refuted on verification and dropped with their reason.
+  Every fix is doc-side. Code was NOT changed to close a doc finding: where
+  the code is right the doc moved, where the code is wrong the defect is
+  recorded below rather than patched under a documentation round. The one
+  source edit is comment-only, `autocal.py` spelling two `# PENDING: Q8c`
+  markers in the canonical form a marker audit can see.
+  THE STANDARD THE SWEEPS APPLIED. A finding needed a doc section, a code
+  path and the exact contradiction; a claim that did not reproduce against
+  the tree was dropped, not softened. This is why the refuted share is
+  large and why it is recorded: an unverified amendment to a frozen
+  document is the drift it claims to fix.
+  WHAT THE FROZEN DOCS NOW SAY. Three documents carry `(Amended by
+  DL-150.)` markers in place, so a reader meets the amendment where the
+  rule is rather than here.
+  `docs/supervisor-protocol.md` (29 markers) -- the widest correction. The
+  lease vocabulary is separated from liveness: `wrong_incarnation` means
+  the known supervisor is gone, `stale_token` says only that the presented
+  token cannot mutate this incarnation and proves nothing about wrapper
+  liveness, and an unexpired lease whose holder connection is gone is
+  freely grantable, because EOF proves connection closure and not death.
+  `RENEW` and `RELEASE` are named where the doc had listed neither. §3
+  gains the record-and-read-back frame, `spawn_failed` gains the spawn
+  branch, the peer-credential check is scoped to a differing uid, SHUTDOWN
+  signals only a command still alive, an unreadable spec exits before it
+  can act, `reply.json` is named as the one non-`run_dir` file,
+  ownership is scoped to tethered runs, "absent" is pinned to ENOENT and
+  nothing else, the two bounds that keep the shutdown wait finite are
+  stated, and the DL-83 third answer is recorded.
+  `docs/protocol-evolution.md` (8 markers) -- the matrix was incomplete
+  against its own rule. Two rows added: the wrapper input spec, whose
+  field rule is the opposite of the spool row beside it, and the access
+  role map. The retired-dialect count went from six to seven --
+  `legacy_batch: true` was missing. Socket dialects have a REQUEST
+  lifetime, not a connection lifetime, with `subscribe` named as the one
+  exception. `catalog_hash_version` is stated as a five-carrier union gate
+  and `state_machine_version` as a seven-carrier one, so the gate no
+  longer undercounts. The reset clause retires "without §2's lifecycle",
+  not "without the §3 gate" -- DL-138's own classification says the gate
+  is met, trivially -- and the clause's licence is distinguished from its
+  justification.
+  `docs/concurrency-model.md` (1 marker, one sweep) -- §0's safety
+  sentence names the `evict --force` exception; identity gains the host
+  row's `state_rev` and the effect's birth `generation`; the projection is
+  stated for all three entity kinds; `last_contact` and `deadman_s` are
+  listed as unprojected with their reason; §4 step 2's unimplementable
+  "attach to an in-flight attempt" is replaced by what happens; the
+  envelope reads `"v": 3`; and the retired standalone `effect` record is
+  replaced by `decision{effects:[...]}` in the WAL order.
+  The other fifteen documents took their amendments without a marker
+  convention of their own; their rulings are unchanged and only their
+  descriptions moved.
+  THE CODE FOLLOW-UP LEDGER. The round's obligation is no silent loss:
+  every defect a sweep found is written down here whether or not anyone
+  acts on it. "Reproduced" means a sweep drove it against the tree.
+  USER-VISIBLE BREAK, first because it is the only one an operator meets
+  today: `dsl41 supervise shutdown` is broken -- `runner_adapters.py:921`
+  stamps `v:1` only and `cli_control.py:477` discards the incarnation, so
+  every CLI SHUTDOWN answers `wrong_incarnation` and exits 2. A DL-80
+  regression on an untested verb. Reproduced.
+  `runner_history.py` -- `_leaf_rows` (:398-415, :436-439) takes any
+  STATUS input without checking the attempt's decision, so a
+  gate-REJECTED late completion decides the row (SUCCESS 0 over the real
+  FAILURE) and reaches `dsl41 runs` and `read_run_root`; reproduced. :736
+  replay accepts a foreign `state_machine_version` that period-model ss2.1
+  says cannot replay; probed. :490 cites the superseded `CM-37`.
+  `oracle.py` -- :849-855 an ON_NOEXEC BOX bypasses to SUCCESS and its
+  members never start, against SEM-22 [V] and the module's own docstring;
+  :956-1028 `box_success` over a transitive member never fires, so oracle
+  and derive disagree on SEM-12; :797-817 with `runner_scheduler.py:111-122`
+  compares `run_window` on a naive-UTC clock against job-timezone values --
+  a clock-domain mixup; all three probed.
+  :1106/:1127 relative `must_*` alarms always read `offsets_min[0]`, so
+  later offsets are dead. A `run_window` SKIP leaves the member outside
+  `ran_members` and the box never folds -- blocked on the SEM-33-vs-SEM-11
+  question below.
+  `equiv.py` -- :366 the `"<unset>"` string sentinel collides with real
+  literals, a tier-b wrong-answer class; :196 canonicalization loses
+  SEM-34 positional pairing; :672/:686 tier-b alone can equate disjoint
+  catalogs while `--tier b` is selectable.
+  `ir.py` -- :1249-1252 no range check on relative offsets (`+-1` lowers
+  as -1, `+99999` is accepted); probed. :375 stale `ResourceRef`
+  docstring.
+  `ast_jil.py` -- :266 `_mask_closed_blocks` is quote-unaware, so
+  `description: "/* " */ key: value` silently folds a second pair into
+  `raw_value`: the DL-30 loss class, verified by hand. :526 the subcommand
+  path lacks block masking, :441 an optional guard, :3/:209 a stale rules
+  range, and no fixture pins `command:/* c */`.
+  `runner_control.py` -- :332/:335 a `RecursionError` from `json.loads`
+  escapes the except tuple and the connection dies unreplied, the DL-149
+  escape class; reproduced. :583 `force_seal=bool()` coerces the JSON
+  string `"false"` to True, so a string forces a boundary and force is an
+  authorization. Bool-as-int at three gates (`exit_code: true` reaches the
+  WAL); two `ControlClientError` contract violations; two unbounded
+  raw-socket readers; stale v2 help text; `"expect": null` on a fresh
+  seal; stale comment :958 and stale docstrings :19/:152/:160/:1361.
+  `cli_control.py` -- :421-431 `subscribe` never parses the ack, so a
+  denial prints, exits 0 and blocks forever.
+  `runner_access.py` -- :339 `_recover_seq` crashes with AttributeError on
+  a valid-JSON non-object line, with a bool-as-int gap beside it; :361
+  `PerimeterJournal.write` never fsyncs the parent directory on file
+  creation, against the DL-137 rule `runner_procid.fsync_dir` states, so
+  an arming receipt can vanish on power loss and `access_seq` restarts.
+  The lifecycle tier -- `runner_supervisor.py:1124-1147` with
+  `runner_procid.py:252-270`: SIGNAL checks only `command_pid` and
+  `command_start_time`, never `boot_id` and never `command_pgid ==
+  command_pid` before it signals the stored group. :801-837
+  `_resolve_replay` reads `receipt.json` from the incoming path when the
+  index is absent, so a matching receipt answers duplicate instead of
+  first application, against DL-129. Invalid UTF-8 in a tombstone or in
+  JSON answers `internal:` (:1420, :1381, `canon.py:162`); reproduced. NUL
+  in `job` answers `internal:` rather than `bad_spec`, and NUL in the
+  command or a path kills the wrapper with no `status.json`
+  (`runner_wrapper.py:274-311`), which reads as E7; reproduced.
+  `grace_seconds` Infinity gives an unbounded SHUTDOWN and
+  `--deadman-seconds nan` fires immediately; reproduced. `v` and token
+  equality accept `true` and `1.0` (:553 `v != 1` lets JSON `true` pass).
+  `runner_procid.py:106` ignores a short `os.write`. No reader checks the
+  spool version at all, though the evolution matrix and
+  supervisor-protocol ss3 require refusal.
+  `runner_hosts.py` / `runner_admission.py` -- `evict --force` with no
+  actor writes `forced_by=None` and breaks the attribution promise
+  (`runner_hosts.py:273`, `runner_admission.py:264`; the CM-11 test always
+  supplies an actor). `runner_hosts.py:94` fixes `T_KILL_S=30.0` against
+  an unbounded per-period `cmd_grace_us`: above roughly 15 s of grace,
+  evict is permitted during the TERM grace, which is the double run the
+  bound exists to prevent. :293 diagnostic wording; stale comments
+  :75/:196.
+  The UC backend -- `backend_uc.py:733` a case-only record-name collision
+  escapes `--strict` against L014/UCS-12; :771 note text broader than the
+  doc; :240/:594/:716 with `cli_compile.py:217` omit the name-collision
+  cause from the quarantine wording; :415/:683 an M03 lookback edge loses
+  its window in the bundle; :479-514 the M15 member-to-box edge is dropped
+  and the ledger mislabelled; :519-525 every `initial_status` is ledgered
+  as M20; :157/:237 the report omits `bundle.excluded` and notes and M17
+  has no path at all; :463-467 the OR note states the wrong join
+  semantics; :794-800 the M31 note lacks values; :153 `used_rows` M26 is
+  dead; there is no iced-consumer detector (M19, Part II requirement 3);
+  the M07 more-than-one-waiter flag is unimplemented (DL-54).
+  `derive.py:396-401` a cross-stream `f()`/`d()` latch silently compiles
+  against UCS-13; :383-390 the M01 assumption string is false for a
+  same-box pair. `uc_oracle.py:47/:206` cite KILLJOB as M23, which is not
+  a row.
+  The estate artifacts -- `seal.py:1003` defers the ss3.5 executions-row
+  check to a loader that does not exist, so a forged sidecar is
+  reachable; :97 a generic refusal where a DL-138 tombstone belongs.
+  `period.py:943` `read_sentinel` swallows `CanonError` against its
+  docstring; `artifact_format_version` carries a pydantic default on
+  Sentinel, Anchor, Claim and Candidate, so an absent field reads as v1.
+  The estate CLI -- a two-step in-place profile-change open:
+  `cli_run.py:355`'s gate reads the wrong manifest and
+  `runner_startup.py:700` writes the segment then refuses, and the second
+  try succeeds. `--next-as-machine` opens SILENTLY with the old machine
+  identity (`runner_startup.py:127-142`). `seal --request-id` has no
+  reachable retry route: `cli_estate.py:309/:438` compose the envelope
+  under the current epoch. There is no operator disarm verb although
+  period-model ss10.4 names one. All probed. `runner_scheduler.py:406-408`
+  disagrees with `runner_startup.py:821`'s inclusive-resume call; stale
+  comments `runner_effects.py:31/:77`, `runner_startup.py:1481`.
+  `scripts/arch_check.py:208` -- `_STATE_MODELS` omits `GlobalRuntime`.
+  Tests -- eighteen conversation-pointer citations of the shape DL-75
+  deleted survive in `test_uc_oracle.py`, `test_runner_lifecycle.py` and
+  `test_seal_artifact.py`, because that sweep covered `src/` only.
+  Missing, each named by a doc that claims it: the ENOSPC-on-runs-dir
+  lifecycle case; the wrapper rc-3 path; access-model ss12 obligations
+  5-7 at caller level; the two named refusal sources (RecursionError in
+  tomllib, OSError in getgrouplist); a `test_pr30g_*`; PR-17; a PR-28
+  case that mutates `state_machine_version`; HostRuntime, `_hosts` and
+  `timer_seq` in PR-52's mutation test. `test_runner_supervisor.py:823`
+  never reaches the server dispatcher it claims to test, and PR-53..56 are
+  discharged by `test_b*_` rather than `test_prNN_*`. One test is
+  proposed: compile `docs/probes/dsl41_q8_cals.txt` and assert the
+  runbook's pinned date sets.
+  WHAT THE ROUND DID NOT SETTLE, and why each is a decision rather than a
+  defect. The S8a admission-transaction collapse (ha-deployment ss2):
+  whether the store may collapse concurrency-model ss4's two atomic
+  appends into one is undecided, and the doc now says so instead of
+  implying an answer. SEM-33 against SEM-11: whether a member skipped by
+  its `run_window` counts toward the box fold -- the oracle fix waits on
+  it, because either answer is implementable and only one is AutoSys.
+  SEM-34 relative offsets: the dossier demands a strict count match while
+  its own worked example carries one offset, so whether a single offset
+  broadcasts over several `start_times` is open and two follow-ups are
+  blocked behind it. The missing-version-field discriminator
+  (protocol-evolution): the matrix has no column for an ABSENT version and
+  the shipped readers split both ways; no document rules it. The
+  deployment-runbook ss7 upgrade defaults: the DL-133 amendment reads
+  opt-OUT and the closing paragraph opt-IN, and which is the default is
+  the owner's call. M04/M05: the rows are E-classified while no
+  cross-stream test exists, which is a semantic decision about the class,
+  not a missing test. M24: the row is E-or-A with no discriminator stated,
+  so nothing decides which a given catalog gets. None of these is guessed;
+  each stands with a named owner or a named blocking question.
+  BOOKKEEPING THIS ENTRY RULES. DL-137's DEFERRED list has LANDED: the
+  cli.py split shipped as its own slices and the CLI is five modules by
+  domain behind one door, so that list is a record of work done, not work
+  owed. The LICENSING.md item-6 lifecycle-tier earmark is rewritten and
+  recorded here: it covers four modules -- `runner_wrapper.py`,
+  `runner_supervisor.py`, `runner_procid.py`, `canon.py` -- plus
+  `docs/supervisor-protocol.md`, widened by DL-72 and DL-129, and it drops
+  the word "future" because the tier exists. Three non-spec fixes landed
+  with the round: `docs/probes/dsl41_q8_cals.txt` now matches the
+  extended-calendar text the runbook pins, README names the UC
+  name-collision quarantine cause and links protocol-evolution.md and
+  access-model.md, and CLAUDE.md's live-instance paragraph is scoped to
+  the AutoSys items the runbook actually carries.

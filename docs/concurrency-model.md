@@ -31,6 +31,17 @@ proved by two OS processes, or by one and the kernel:
 arithmetic — waiting out §8's real `T_kill` proves nothing a controlled
 clock does not.*)*
 
+*(Amended by DL-150 — a conformance round against the shipped runner.*
+Thirty-six findings held. Every one was a defect in this document, not in
+the code, and no code changed. The corrections are folded **in place**
+rather than added as blocks below: they repair sentences that had gone
+stale, and a block per repair would bury the rule it repairs. §0 through
+§11 all moved. The four largest: the log's unit is one estate of
+period-bounded segments, not one run root (§2); the semantic projection is
+stated for all three entity kinds (§3); the wire is v3 and `expect` has a
+third namespace (§6); the catalog is immutable per PERIOD (§11). The code
+follow-ups the round found are recorded in that entry, not here.*)*
+
 Already landed: DL-82 (state ownership), DL-83 (the spawn-window signal
 fix and the derived-field gate).
 
@@ -61,15 +72,20 @@ tested.*)*
 
 **Enforcement point.** The mandate is one function
 (`runner_admission.parse_envelope`), not a rule each transport
-re-implements — the §7 relay must reach the same verdict as the §10
-socket. In-process callers holding the `Engine` object are not external
-and do not pass through it; they are the trust domain the scheduler and
-the adapters inject from.
+re-implements — the §7 relay must reach the same verdict as the control
+socket (`docs/runner-design.md` §10). In-process callers holding the
+`Engine` object are not external and do not pass through it; they are the
+trust domain the scheduler and the adapters inject from.
 
 **The safety property, stated once:**
 
 > No `(job, run_number)` ever executes twice, under any interleaving of
 > leader failover, host reroute, message loss and duplication.
+
+There is exactly one documented exception and §8 names it. `evict
+--force` skips the proof that the old executor is dead, so it can produce
+a double run. It is an opt-out an operator takes deliberately, and the
+row records who took it.
 
 §5 exists to make that true; §9 exists to make it testable. Everything
 else is scaffolding around those two sentences.
@@ -132,19 +148,28 @@ section describes. What it gets from S6a is a fencing token that moves.*)*
 
 | domain | unit | identity |
 | --- | --- | --- |
-| the log | one run root | `baseline_id`, `epoch`, `committed_index`, `applied_index` |
-| oracle state | one job / one global | `state_rev` |
-| effects | one effect | `effect_id` **bound to** `executor_id` |
+| the log | one estate of period-bounded segments | `baseline_id` (per period), `epoch`, `committed_index`, `applied_index` |
+| oracle state | one job / one global / one host | `state_rev` |
+| effects | one effect | `effect_id` **bound to** `executor_id` and `generation` |
 | execution host | one relay | `host_id`, `generation` (§8) |
 
-`run_id` keeps its existing meaning: the per-spawn uuid4 in the wrapper
-spec.
+The log's unit was one run root before the period model. It is one
+estate now: a lineage of period-bounded segments that may share a run
+root, each period carrying its own `baseline_id` (`docs/period-model.md`
+§1, §2.1). `epoch` and the two indices stay monotone across a boundary.
+
+`run_id` is the run's process identity, a uuid4. Since DL-118 it is
+minted inside the step-7 decision transaction and rides on the durable
+effect, so the WAL, the wrapper spec and the spool name one key
+(`docs/period-model.md` §2.3, PR-36a).
 
 ## 3. State ownership and `state_rev`
 
-**Owner.** `RuntimeState`: frozen `JobRuntime` / `GlobalRuntime` rows,
-private maps, typed operations (`transition`, `start_run`, `set_flags`,
-`set_armed`, `set_global`, `enqueue_timer`). No mutable map escapes and no
+**Owner.** `RuntimeState`: frozen `JobRuntime`, `GlobalRuntime` and
+`HostRuntime` rows; private job, global, host, timer and capacity state;
+typed operations for every one of them (`transition`, `start_run`,
+`set_flags`, `set_armed`, `set_global`, `enqueue_timer`, the §8 host verbs
+and the DL-120 capacity five). No mutable map escapes and no
 generic `setattr` reaches a row. `StatusStore` (DL-82) is the intermediate
 form and is replaced here — this evolves it, it does not undo it. Note
 that `model_copy(update=)` does **not** validate, so the owner needs a
@@ -163,13 +188,19 @@ Implemented as an input transaction: snapshot the touched entities,
 compare at the boundary, replace each changed entity exactly once.
 Over-approximating the touched set is safe; under-approximating is not.
 
-**The semantic projection.**
+**The semantic projection.** Three entity kinds carry a revision, so the
+projection has three parts.
 
-Include: `JobRuntime`'s semantic fields, and the timer **ordering token**.
+Include: a global's value; every `JobRuntime` field, plus that job's own
+timers **with their ordering tokens**; every `HostRuntime` field.
 
 Exclude: `state_rev` itself (else it justifies itself), `watching`
 (effect state that moves with adapter activity and no committed input),
-log locations, catalog metadata, and `spec_drift` (disk state).
+log locations, catalog metadata, and `spec_drift` (disk state). On the
+host row, exclude `last_contact` (§8, DL-95) and `deadman_s`. Both are
+observed liveness that the lease exchange moves with no committed input,
+and a revision moved by either is one an audit cannot derive
+(`docs/period-model.md` §3.3, PR-24b).
 
 The timer heap is ordered globally by `(due, insertion seq)`. A per-job
 set digest does **not** capture the relative order of equal-time timers
@@ -201,7 +232,7 @@ which is exactly why the heap carries a token and the queue does not.*)*
 *(Amended by DL-120, at build — U1.* The pool did not stay. DL-86's
 argument — "replaying the transitions replays the order" — is true only while
 replay starts at genesis, and a seal does not; and `_bucket_used` summed units
-held by live runs with units permanently spent (SEM-16), so a checkpoint
+held by live runs with units permanently spent (DL-50), so a checkpoint
 recomputing usage from holders would have refunded every depletable. The
 inventory is now closed: `reservations` and `waiter_seq` are `JobRuntime`
 fields, projected with the row; `consumed` and `enqueue_counter` are under
@@ -228,14 +259,18 @@ For every input, in log order:
 
 1. Validate framing, protocol version, `baseline_id`.
 2. **Deduplicate**: look up `request_id` and compare fingerprints. Return
-   the prior decision, or attach to an in-flight attempt. *Only now*
-   reject an unseen stale epoch — so an exact old-epoch retry recovers
-   its original result, while an unseen old-epoch request is refused.
+   the prior durable decision. An id that is admitted and undecided cannot
+   occur while one writer owns the oracle and steps 5–7 do not yield, so
+   meeting one is an error and fail-stops; the crash case is answered by
+   replay, not by attaching to an attempt. *Only now* reject an unseen
+   stale epoch — so an exact old-epoch retry recovers its original result,
+   while an unseen old-epoch request is refused.
 3. Assign the leader timestamp, monotone across inputs already admitted
    but not yet applied.
 4. Atomically append one ordered batch: `TimeAdvanced(at)` +
-   `InputAttempt`. Emit `command_committed` — the envelope is durable,
-   which is not the same as a decision.
+   `InputAttempt`, and publish that record to subscribers. The envelope
+   is durable, which is not the same as a decision, so the socket
+   deliberately does not answer here.
 5. Apply: earlier committed inputs, then this batch's time observation,
    firing timers through it. Timers fire **before** the precondition
    gate, because `feed()` fires timers due at or before the event's
@@ -243,17 +278,20 @@ For every input, in log order:
    gate and apply would defeat the precondition it just passed.
 6. Evaluate `expect`; feed, or record the rejection.
 7. Atomically record `ApplyResult`, revisions, outbox entries and the new
-   `applied_index`. Emit `oracle_applied`.
+   `applied_index` as one `decision` record, publish it, and resolve the
+   caller's result.
 
 Steps 5–7 must not yield to another state-changing input.
 
 **Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what
-the log gets, verbatim from a run of the shipped code:
+the log gets from a run of the shipped code, with the hashes elided and
+the keys in reading order rather than the sorted order the writer emits:
 
 ```jsonl
 {"rec":"input","seq":2,"at":"…T02:00:30","kind":"KILLJOB","payload":{"job":"nightly"},
- "expect":{"job:nightly":1},"epoch":1,"request_id":"k1"}
+ "source":"control","fingerprint":"…","expect":{"job:nightly":1},"epoch":1,
+ "request_id":"k1"}
 {"rec":"decision","index":2,"request_id":"k1","decision":"applied","reason":null,
  "revisions":{"job:nightly":2},"legacy_batch":false,
  "effects":[{"effect_id":"e2:KILL:nightly.1","kind":"KILL","job":"nightly",
@@ -310,8 +348,9 @@ torn in half by a crash"); §1's own DL-100 amendment already describes it
 that way — "atomic multi-record commit IS the one-line attempt record".
 The `advance` record is a different thing and still exists: a time
 observation with no verb, which is the other half of the input alphabet
-(DL-44). Two code comments still assert the two-record reading and are
-wrong.*)*
+(DL-44). The code comments this amendment called wrong have been
+corrected: they now describe `TimeAdvanced` and the attempt as two
+logical halves carried by one record.*)*
 
 **Replay is two-pass.** `ApplyResult` is appended *after* `InputAttempt`,
 so replay cannot meet an attempt and skip it by kind: it builds the
@@ -329,7 +368,9 @@ two processes run. That is the failure this whole model exists to
 prevent.
 
 - Every SPAWN is atomically bound in the outbox to
-  `{effect_id, run_id, job, run_number, executor_id}`.
+  `{effect_id, run_id, job, run_number, executor_id, generation}` — the
+  host row's generation at birth, so an effect born before an eviction
+  cannot pass for one born after it (PR-16).
 - **Retries always go to that executor.** Rerouting requires a *new run
   and a new effect*, plus proof (§8) that the old executor cannot still
   apply the old one.
@@ -357,7 +398,10 @@ because **KILLJOB does not advance `run_number`**: a delayed SPAWN for
 run N is still "current" after run N has been TERMINATED.
 
 - SPAWN applies only if exactly `(job, run_number, run_id)` is still
-  desired running and not terminal.
+  desired running and not terminal. The dispatch-time test is the row's
+  status and its `run_number`; the `run_id` half is held by the outbox's
+  one-to-one binding, which refuses a second identity for one run and a
+  second run for one identity (DL-118).
 - TERM and KILL apply only against exact run identity and the expected
   kill stage; they are **distinct effect stages with distinct ids**.
 - SHUTDOWN binds to the intended supervisor incarnation and scheduler
@@ -432,15 +476,18 @@ not be forgotten" are different facts. The enumeration above was written
 before the rule below it had an implementation, and never caught up.
 
 **"Tombstones carry fingerprints and reject collisions" is not built.**
-Neither `Effect` nor `EffectOutcome` carries a fingerprint, and
-`Outbox.record` is silently idempotent on `effect_id` — a second, different
-effect under one id overwrites rather than collides. It is not obviously
-needed either, which is why it went unnoticed: DL-96 made `effect_id`
-*derived* from `(index, kind, job, run_number)`, so two different effects
+Neither `Effect` nor `EffectOutcome` carries a fingerprint. It is not
+obviously needed either, which is why it went unnoticed: DL-96 made
+`effect_id` *derived* from `(index, kind, job, run_number)`, so two different effects
 cannot share an id unless the log itself is inconsistent, which is a
 corruption case and not a client one. Left unbuilt, named here rather than
 quietly dropped; it becomes real if an id is ever minted rather than
-derived — which is exactly what the relay would need.
+derived — which is exactly what the relay would need. *(This paragraph
+also said `Outbox.record` overwrites a differing effect under one id.
+Since DL-118 it does not: an exact repeat is a no-op, a differing record
+is refused as a log that disagrees with itself, and the same method
+refuses either direction of a broken `(job, run_number)`-to-`run_id`
+binding.)*
 
 **DL-96's amendment overstates the live path.** It defends dropping §5's
 pre-attempt `run_id` binding with "the outbox records the process identity
@@ -474,7 +521,11 @@ engine-visible state between them for a second id to name; a re-driven kill
 re-runs the whole ladder, and TERM to a dead group is a no-op.
 
 **SHUTDOWN is not an effect yet.** It binds to a supervisor incarnation and
-a scheduler epoch, and neither is allocated until S6.
+a scheduler epoch. Both are allocated now — the incarnation by the
+supervisor at start (DL-80), the epoch by S6a — so what defers it is no
+longer a missing identity. It is that nothing needs it: the shutdown path
+speaks to the supervisor directly and leaves no intent for an outbox to
+carry.
 
 **A pending SPAWN is not re-driven at resume.** `docs/runner-design.md` §7
 fails a start with no spool trace rather than re-running it, which DL-41a
@@ -492,17 +543,21 @@ and names it "recorded kills".*)*
 ## 6. The envelope and reads
 
 ```json
-{"v": 2, "baseline_id": "…", "epoch": 7, "request_id": "…",
+{"v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
  "verb": "CHANGE_STATUS", "payload": {…}, "expect": {"job:nightly": 12},
  "claimed_actor": "alice@host"}
 ```
 
 No client-supplied `at`: a future stamp is a timer fast-forward and a
-backdated one breaks monotonicity. `epoch` ships in v2 though it is inert
-single-host, because adding it after the CLI and TUI migrate is a second
-wire break. `expect` names only the addressed entity, with keys
-namespaced `job:` / `global:`. `claimed_actor` is a client hint — **the
-leader stamps the authenticated principal** into the admitted record.
+backdated one breaks monotonicity. `epoch` shipped in v2 while it was
+still inert on one host, because adding it after the CLI and TUI migrate
+is a second wire break; it is required in v3 and S6 allocates it for
+real. The wire is **v3** (`docs/control-protocol.md`); v1 and v2 are
+retired and refused by version. `expect` names only the addressed entity,
+with keys namespaced `job:` / `global:` / `host:` (DL-93).
+`claimed_actor` is a client hint — **the leader stamps the authenticated
+principal** into the admitted record where there is one to stamp (§8,
+DL-147).
 
 Fingerprint = the complete semantic envelope including `baseline_id` and
 `epoch`, excluding transport framing.
@@ -511,7 +566,14 @@ Reads publish `baseline_id`, `epoch`, `applied_index` and `state_rev`.
 `global {name}` / `globals {names: […]}` answer
 `{present, value, state_rev}` for a *named* entity and insert nothing — a
 map of existing globals cannot express the absence that a conditional
-create must condition on. Revision-bearing reads are leader-only in v2.
+create must condition on. `hosts` answers the routing table the same
+way, and with no `ids` it answers the WHOLE table, because a routing
+table is a small inventory the §7 barrier walks in full.
+Revision-bearing reads are leader-only. What a read re-proves at the door
+is the LINEAGE — an engine that can no longer prove it leads the estate's
+lineage refuses, without the header (`docs/period-model.md` §1.3,
+DL-133). The run-root proof is re-checked before the next append and
+before dispatch (§7), not per read.
 
 ## 7. Leadership, relay, takeover
 
@@ -589,10 +651,13 @@ B starts on the same run root
 
 1. **ACQUIRE.** B `flock`s `leader.lock` and, after the lock is held,
    checks that the name still points at the inode it locked — a lock on an
-   unlinked inode excludes nobody. Only then does it read the log. The
-   epoch is allocated by being *appended*: a `leader` record naming epoch 2,
-   so every input after it is attributable to B and every input before it
-   to A.
+   unlinked inode excludes nobody. It then reads the sentinel and, on a
+   root that has one, acquires and validates the lineage anchor the same
+   way, composing both into one `Fence` (`docs/period-model.md` §1.3); a
+   root with no anchor holds a fence of one lock. Only then does it read
+   the log. The epoch is allocated by being *appended*: a `leader` record
+   naming epoch 2, so every input after it is attributable to B and every
+   input before it to A.
 2. **Reconcile every execution host.** The candidate set is the union of
    the log's `dispatch` records, the `runs/` directory, and what the host
    LISTs — three witnesses to one question, because concluding "never
@@ -613,7 +678,7 @@ B starts on the same run root
 The ordering that matters is the one a reader is most likely to invert:
 **an effect is recorded `applied` before the work starts.** `_launch`
 creates a task and the outcome is written on the next statement, with no
-await between, so the WAL order on a real run is `effect` →
+await between, so the WAL order on a real run is `decision{effects:[…]}` →
 `effect_result{applied}` → `dispatch`, and the wrapper's own `spawn.json`
 — written by the process that spawned, not by the engine — arrives later
 still. That is why a *pending* SPAWN means something so specific: not "a
@@ -657,14 +722,17 @@ no `request_id`.*)*
 *(Amended by DL-101, at build — stage S6b.* Where the re-check goes, and
 what it can and cannot do.
 
-**Every append, and that is enough for every dispatch.** The re-check is
-one `stat` at the top of the WAL append, before the write, so a leader that
-cannot prove it leads admits nothing rather than admitting and then
-discovering it had no right to. It covers dispatch for free because §5 puts
-the outbox record *before* the attempt: an append this engine may not make
-is an effect it never applies. There is deliberately no background prober —
-an engine with nothing to append dispatches nothing, so the only proof that
-goes unchecked is proof nothing was about to rely on.
+**Every append, and again before dispatch.** The re-check is one `stat`
+at the top of the WAL append, before the write, so a leader that cannot
+prove it leads admits nothing rather than admitting and then discovering
+it had no right to. For the run-root lock that covers dispatch on its
+own, because §5 puts the outbox record *before* the attempt: an append
+this engine may not make is an effect it never applies. The period
+model added a second proof, the lineage anchor, and an append and a
+dispatch are two acts — so the whole `Fence` is re-proved once more
+immediately before the outbox is drained (`docs/period-model.md` §1.3,
+PR-03). There is deliberately no background prober: an engine with nothing
+to append and nothing to dispatch is relying on no proof.
 
 **What losing proof means on this substrate.** Not a lapsed lease: the lock
 file was deleted or replaced under the holder. That is not hypothetical —
@@ -737,7 +805,7 @@ courtesy above: a `header` "that pins none" cannot arrive, so nothing reads
 as state-machine version 1 by default. The record at position zero is a
 `segment`, and it pins both.*)*
 
-## 8. Host lifecycle: active, passive, evicted
+## 8. Host lifecycle: active, passive, quarantined, evicted
 
 Quarantine (§7) is safe and it is not sufficient on its own: one dead
 host would hold its jobs forever. The operator therefore owns an explicit
@@ -765,10 +833,13 @@ wrappers by lifeline"), not a new kill path. The deadman is one number
 and one exit; it adds no policy to the tier and so does not breach
 DL-42's counter-fence.
 
-It is **opt-in per run root**, because it costs something real: today a
+It is **opt-in per period**, because it costs something real: today a
 supervisor tolerates an absent controller indefinitely, which is what
-lets an engine crash and resume with its runs intact (DL-79). A run root
-without a deadman is never reroutable except by force.
+lets an engine crash and resume with its runs intact (DL-79).
+`RuntimeProfile.deadman_us` pins what a period asks for, and the bound
+uses the value read back into the host row, so successive periods in one
+run root may differ. A host row with no observed deadman is never
+reroutable except by force.
 
 **Eviction preconditions.** `evict` is refused unless all hold:
 
@@ -777,7 +848,8 @@ without a deadman is never reroutable except by force.
 3. `now - last_contact > T_deadman + T_kill + T_skew`.
 
 `T_skew` covers monotonic-clock **drift** between hosts (parts per
-million over the interval), not clock synchronization — the argument is
+million over the interval it is added to, which is
+`T_deadman + T_kill`), not clock synchronization — the argument is
 the standard lease argument and depends only on bounded drift. A refusal
 reports the remaining wait, so the operator waits rather than guesses.
 
@@ -810,9 +882,12 @@ at 02:01:00 is told, verbatim:
 > host 'local' was in contact 60.0s ago and the ss8 bound is 91.0s (deadman
 > 60.0s + kill 30.0s + skew): wait 31.0s more, or --force with proof it is dead
 
-That is a **rejection**, not a refusal: it read mutable state, so it is a
+The bound and the wording are pinned by
+`test_cm11_eviction_is_refused_before_the_bound_and_permitted_after`. That
+is a **rejection**, not a refusal: it read mutable state, so it is a
 decision at a real log index and replay reaches the same verdict from the
-same row (`test_cm11_eviction_is_refused_before_the_bound_and_permitted_after`).
+same row, which is pinned by
+`test_a_rejected_host_command_replays_as_the_rejection_it_was`.
 At 02:02:00 the same command returns no reason at all and applies — the row
 becomes `evicted`, `generation` goes 0 → 1, and `forced_by` stays `None`,
 because on the gated path the preconditions *are* the justification.
@@ -850,13 +925,21 @@ authenticated principal to stamp.
 
 **A one-host table makes half this section unreproducible today,** which is
 worth saying plainly because the example above had to be written against
-`local`. `register_host` has exactly one caller (`seed_local_executor`),
-which has exactly one caller (`Engine.__init__`), and no CLI or startup path
-can set `executor_id`. So the routing table holds exactly one row, and
+`local`. `register_host` has one caller, `seed_local_executor`, and every
+caller of that passes `LOCAL_EXECUTOR_ID`: no CLI or startup path can set
+`executor_id`. So the routing table holds exactly one row, and
 `dsl41 host evict prod-a` answers "no host 'prod-a' in the routing table"
 rather than anything about a bound. Every rule in this section is
 implemented and tested; what is missing is a second row to point them at,
 which is the relay's business (DL-97, DL-103).
+
+**Two things are missing, not one.** Beside the second row there is the map
+from a ROLE to an executor. `seal.RouteRuntime` freezes that row's shape and
+`implicit_routes` projects the only honest value today: one route whose role
+IS the local executor's id, at revision 0, because no verb that could move it
+exists. The storage under §3's owner and the `host: {verb: "route", id,
+executor_id}` wire record both arrive with the relay
+(`docs/period-model.md` §3.3).
 
 **And one latent bug, fixed rather than documented.** `evict_host` left
 `state_before_quarantine` set, while the field documents itself as non-null
@@ -971,7 +1054,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
 | CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
-| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); eviction's last precondition with S5d |
+| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); every eviction precondition landed with S5d (DL-97) and is pinned by the CM-11 tests |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | landed: the phase-11a gate, which every SEM trace already runs through both interpreters. No `test_cm08_*` of its own -- the obligation is that the existing suite stays green |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); both re-proved against real processes at S7c (DL-112) -- an engine that really died in the outbox window, and a quarantine set by renewals that really failed; remote delivery waits on the relay |
@@ -980,6 +1063,12 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
 | CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 81-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. S7c (DL-112) adds the half no interpreter can hold: the mutex is refused between two OS processes, and an engine that loses its lock file stops before the work rather than after it. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
+
+CM-01–CM-14 are this document's. `docs/ha-deployment.md` §7 drafts
+CM-15–CM-23 for the second host and the second site. One of them landed
+early: CM-17 — a decision and the effects it implies commit together or
+not at all — is held on the file substrate by DL-118's single `decision`
+record, and pinned by `docs/period-model.md` PR-35.
 
 Pause, drift and thundering-herd tests are **not mandatory** until their
 clock model, client count, attempt limits and pass criteria are
@@ -994,7 +1083,7 @@ H   the model harness — before the code it validates
 S1b RuntimeState: frozen rows, private maps, timers WITH ordering, inventory
 S1c state_rev + input transaction + read verbs
 S2  typed frontiers, atomic admission, decision index, two-pass replay
-S3  mandatory preconditions + protocol v2
+S3  mandatory preconditions + protocol v2 (retired at DL-118; wire is v3)
 S4  CLI / TUI          ∥   S5  relay + host identity, effects, barrier,
                               deadman, host states + evict
                               (S5a-d landed; the relay and the barrier moved
@@ -1034,8 +1123,16 @@ table exists. Everything else is sequential.
 
 ## 11. Deliberately not versioned
 
-The supervisor tier (fencing plus effect idempotency is enough; it holds
-no semantics to version); the catalog, immutable per run root by three
-guards — one read hashed and parsed from the same bytes, no reload path,
-and a used run root refusing re-baselining; and time observations, which
-are consequences rather than commands.
+The supervisor tier's SEMANTICS: fencing plus effect idempotency is
+enough, and it holds no job definitions to version. Its WIRE is versioned
+like every other — `"v"` on each request and an `unsupported_version`
+refusal (`docs/supervisor-protocol.md` §5,
+`docs/protocol-evolution.md` §1).
+
+The catalog, immutable per **period** by three guards — one read hashed
+and parsed from the same bytes, no reload path, and a used period
+refusing re-baselining. A catalog change is a sealed transition and a
+restart, and the successor segment and manifest pin the new hash and the
+recipe it was taken under (`docs/period-model.md` §2.1).
+
+Time observations, which are consequences rather than commands.
