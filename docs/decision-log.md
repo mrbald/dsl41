@@ -7571,16 +7571,18 @@
   policy_loaded write keep the old snapshot and attempt the failure
   receipt, while an error outside those paths (the loader's own
   descriptor I/O failing mid-read) escapes into the event loop's
-  handler-exception log with no receipt attempted; the ss4 reload
+  handler-exception log with no receipt attempted (superseded by
+  DL-149); the ss4 reload
   clause now points at that escape path instead of promising a
   receipt for every failure; and "validate the complete candidate"
-  qualified — v1 validates what ONE descriptor read returned, a
+  qualified — v1 validates what ONE descriptor read returned
+  (superseded by DL-149), a
   short read ending at valid TOML would install the prefix, the
   temp-fsync-rename procedure is what keeps the file stable under
   the read. TWO code-side hardenings are named candidate follow-ups,
   out of this entry's doc-only scope: wrapping the loader's
   descriptor I/O into the AccessError refusal path, and a full-read
-  loop with an EOF check.
+  loop with an EOF check (both landed: DL-149).
   FROZEN SOURCES AMENDED (the amendments this entry authorizes):
   control-protocol ss2 — the read header is stamped in ONE place, on
   the answer of a request that passed routing and the ss4 lineage
@@ -7711,3 +7713,31 @@
   readable wreckage named — an unreadable journal refuses arming,
   but a readable file with no complete record starts the series at
   zero, the next append issuing 1 like a fresh journal.
+- DL-149 the DL-148 code follow-ups land and the loader's escape
+  class closes whole (2026-08-23; executes the two hardenings DL-148
+  named as out of its doc-only scope, plus two more the slice's
+  adversarial review surfaced). `load_policy` reads the opened
+  descriptor in a loop until EOF, so validation sees everything the
+  descriptor holds — the short read that could install a valid-TOML
+  prefix is gone — and refuses past a 1 MiB ceiling, so a growing or
+  mistaken file cannot park the reload handler (it runs on the event
+  loop). `fstat`, the read loop and `close` are wrapped: an `OSError`
+  there raises `AccessError` like every other loader refusal. The
+  parse step's catch widened from the two named decode errors to
+  `ValueError` (which TOMLDecodeError and UnicodeDecodeError
+  subclass, and which a several-thousand-digit integer literal
+  raises BARE) plus `RecursionError` (deep nesting) — both verified
+  to escape reload before this entry. Reload now answers every
+  loader failure with a `policy_reload_failed` receipt and the kept
+  old snapshot; no known escape path remains. Three access-model
+  passages updated in place (the ss4 escape-path aside, the ss7
+  one-read qualification, the ss7 reload-failure enumeration) plus
+  the ss4 validation list (the ceiling); the two DL-148 clauses that
+  described the v1 behavior carry a superseded-by-DL-149 mark;
+  access-model stays DRAFT, no frozen doc touched. The new branches
+  sit under the DL-105 100%-branch gate: a dribbling read still
+  assembles the full map and digest, a raised read surfaces as
+  `AccessError`, an over-ceiling map refuses, a bare-ValueError
+  integer literal refuses as not-valid-TOML, and a reload over a
+  failing descriptor receipts the failure and keeps the old
+  generation.

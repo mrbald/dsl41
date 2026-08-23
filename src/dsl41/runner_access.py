@@ -113,11 +113,17 @@ def _subject_valid(subject: str) -> bool:
     return bool(sep) and bool(realm) and bool(name) and "*" not in subject
 
 
+#: ss4/DL-149: a role map is tiny; past this the loader refuses rather
+#: than reading on (the reload handler runs on the event loop)
+_MAP_BYTES_CEILING = 1 << 20
+
+
 def load_policy(path: Path, *, generation: int) -> Policy:
     """Load and validate the strict-TOML role map (access-model ss4).
 
     Refuses: a missing/unreadable file, a symlink, a group- or
-    other-writable file or one owned by someone else, an unknown key, an
+    other-writable file or one owned by someone else, a descriptor I/O
+    failure mid-read, a file over the 1 MiB ceiling, an unknown key, an
     unknown tier, a duplicate subject, a wildcard, a subject without a
     realm. Refusal is `AccessError` — the caller turns it into a startup
     refusal or a kept-old-policy reload receipt (ss7)."""
@@ -146,22 +152,45 @@ def load_policy(path: Path, *, generation: int) -> Policy:
     except OSError as exc:
         raise AccessError(f"access map {path}: cannot open: {exc}") from exc
     try:
-        stat = os.fstat(fd)
-        if not stat_lib.S_ISREG(stat.st_mode):
-            raise AccessError(f"access map {path}: not a regular file")
-        if stat.st_uid != os.geteuid():
-            raise AccessError(f"access map {path}: owned by uid {stat.st_uid}, not this process")
-        if stat.st_mode & 0o022:
-            raise AccessError(
-                f"access map {path}: mode {oct(stat.st_mode & 0o777)} is group- or"
-                " other-writable; policy must be owner-writable only"
-            )
-        raw = os.read(fd, stat.st_size + 1)
-    finally:
-        os.close(fd)
+        try:
+            stat = os.fstat(fd)
+            if not stat_lib.S_ISREG(stat.st_mode):
+                raise AccessError(f"access map {path}: not a regular file")
+            if stat.st_uid != os.geteuid():
+                raise AccessError(
+                    f"access map {path}: owned by uid {stat.st_uid}, not this process"
+                )
+            if stat.st_mode & 0o022:
+                raise AccessError(
+                    f"access map {path}: mode {oct(stat.st_mode & 0o777)} is group- or"
+                    " other-writable; policy must be owner-writable only"
+                )
+            # read to EOF (DL-149): one os.read may return a prefix, and a
+            # prefix that ends at valid TOML must never install. The ceiling
+            # keeps a growing or mistaken file from parking the reload
+            # handler, which runs on the event loop
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := os.read(fd, 1 << 16):
+                total += len(chunk)
+                if total > _MAP_BYTES_CEILING:
+                    raise AccessError(f"access map {path}: over the 1 MiB ceiling")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        # descriptor I/O joins the refusal path (DL-149): reload turns
+        # AccessError into a policy_reload_failed receipt; a raw OSError
+        # would escape into the handler-exception log with no receipt
+        raise AccessError(f"access map {path}: descriptor I/O failed: {exc}") from exc
     try:
         table = tomllib.loads(raw.decode("utf-8"))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers TOMLDecodeError and UnicodeDecodeError, and the
+        # BARE ValueError a several-thousand-digit integer literal raises;
+        # RecursionError is deep nesting. Both escaped reload before DL-149,
+        # and reload must refuse, never raise (ss7)
         raise AccessError(f"access map {path}: not valid TOML: {exc}") from exc
 
     known_top = {"format_version", "unmapped", "socket_group", "binding"}

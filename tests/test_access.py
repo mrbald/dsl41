@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -1064,6 +1065,90 @@ def test_access_map_must_be_a_regular_file(tmp_path: Path) -> None:
     os.mkfifo(fifo)
     with pytest.raises(AccessError, match="not a regular file"):
         load_policy(fifo, generation=1)
+
+
+def test_access_map_short_reads_assemble_the_whole_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss7/DL-149: the loader reads to EOF. A read that returns one byte
+    at a time still yields the complete map — the digest proves the
+    exact bytes, so no valid-TOML prefix can install."""
+    map_path = _map_granting(tmp_path / "roles.toml", "ops")
+    raw = map_path.read_bytes()
+    real_read = os.read
+
+    def dribble(fd: int, n: int) -> bytes:
+        return real_read(fd, 1)
+
+    monkeypatch.setattr(os, "read", dribble)
+    policy = load_policy(map_path, generation=1)
+    monkeypatch.setattr(os, "read", real_read)
+    assert policy.resolve(Principal("os", ME, frozenset())) is Tier.OPS
+    assert policy.digest == "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def test_access_map_descriptor_io_failure_is_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss4/DL-149: an OSError in the loader's descriptor I/O surfaces
+    as AccessError, the same refusal every other load defect raises."""
+    map_path = _map_granting(tmp_path / "roles.toml", "ops")
+    real_read = os.read
+
+    def broken(fd: int, n: int) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "read", broken)
+    try:
+        with pytest.raises(AccessError, match="descriptor I/O failed"):
+            load_policy(map_path, generation=1)
+    finally:
+        monkeypatch.setattr(os, "read", real_read)
+
+
+def test_access_map_over_the_ceiling_refuses(tmp_path: Path) -> None:
+    """ss4/DL-149: the loader refuses past 1 MiB instead of reading a
+    growing or mistaken file whole on the event loop."""
+    body = 'format_version = 1\nunmapped = "deny"\n' + "# padding\n" * (1 << 17)
+    map_path = _write_map(tmp_path / "roles.toml", body)
+    with pytest.raises(AccessError, match="over the 1 MiB ceiling"):
+        load_policy(map_path, generation=1)
+
+
+def test_access_map_parser_blowup_is_a_refusal(tmp_path: Path) -> None:
+    """ss7/DL-149: tomllib raises OUTSIDE TOMLDecodeError too — a
+    several-thousand-digit integer literal raises BARE ValueError (the
+    CPython digit limit) — and the loader must answer AccessError, not
+    let a raw parser error escape reload."""
+    map_path = _write_map(tmp_path / "roles.toml", "format_version = " + "1" * 5000 + "\n")
+    with pytest.raises(AccessError, match="not valid TOML"):
+        load_policy(map_path, generation=1)
+
+
+def test_access_reload_receipts_a_mid_read_io_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss7/DL-149: reload over a descriptor that fails mid-read does not
+    raise — it writes policy_reload_failed and keeps the old snapshot."""
+    map_path = _map_granting(tmp_path / "roles.toml", "ops")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    access = AccessControl.arm(map_path, run_root)
+    real_read = os.read
+
+    def broken(fd: int, n: int) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "read", broken)
+    try:
+        access.reload()
+    finally:
+        monkeypatch.setattr(os, "read", real_read)
+    assert access.policy.generation == 1  # the old snapshot stayed active
+    recs = _receipts(run_root)
+    assert [r["rec"] for r in recs] == ["policy_loaded", "policy_reload_failed"]
+    assert recs[1]["generation"] == 1
+    assert "descriptor I/O failed" in recs[1]["error"]
 
 
 def test_access_unreadable_existing_journal_refuses_arming(tmp_path: Path) -> None:

@@ -140,7 +140,8 @@ Resolution, in order:
    section.
 
 Validation refuses: duplicate subjects, unknown fields, unknown tiers,
-wildcards, a subject without a realm. The loader opens the file without
+wildcards, a subject without a realm, a map over the loader's 1 MiB
+ceiling (DL-149). The loader opens the file without
 following symlinks (and non-blocking: a FIFO refuses instead of parking
 startup) and checks four predicates — the parent before the open, the
 file on the opened descriptor:
@@ -164,9 +165,11 @@ the sealed estate artifacts; it is policy, not evidence.
 **Configured vs absent is explicit.** No `access_map` configured: today's
 model stands — socket `0600`, owner-only, nothing changes for zero-config
 estates. `access_map` configured but the file is missing, unreadable, or
-invalid: **startup refuses**; on reload, the old policy stays and a
-refused candidate gets a best-effort failure receipt — the §7 escape
-path (an unwrapped descriptor error) attempts none. A configured path
+invalid: **startup refuses**; on reload, the old policy stays and the
+refused candidate gets a best-effort failure receipt — descriptor I/O
+errors and parser errors of every kind are wrapped into the same
+refusal (DL-149), so no loader failure escapes without attempting
+one. A configured path
 never silently falls back to owner-wide authority. The preflight
 refusal writes nothing: the same loader that arming runs is called
 read-only first, and `socket_group` is resolved against the host, both
@@ -346,17 +349,15 @@ explicit: write a temp file, fsync, rename, `SIGHUP`. Install is
 receipt-gated, in this order: validate the complete candidate, sync the
 `policy_loaded` receipt, then install the snapshot — a policy change
 that cannot be receipted does not happen, and the old snapshot stays
-active. "Complete" is the candidate policy, not a proven byte count:
-v1 validates what one descriptor read returned, so a short read that
-ends at valid TOML would install that prefix — the temp-fsync-rename
-procedure above is what keeps the file stable under the read;
-full-read enforcement is a named code follow-up (DL-148). A refused candidate, a changed `socket_group` (below) and a
-failed `policy_loaded` write each keep the old snapshot and attempt
-`policy_reload_failed` (best effort). An error outside those paths —
-the loader's own descriptor I/O failing mid-read — escapes the reload
-call into the event loop's handler-exception log instead: the old
-snapshot stays active and no failure receipt is attempted. Startup
-with a configured but
+active. "Complete" is everything the descriptor holds: the loader
+reads to EOF, up to a 1 MiB ceiling past which it refuses (DL-149),
+so a short read cannot install a valid-TOML prefix; the
+temp-fsync-rename procedure above still keeps the file stable under
+the read. A refused candidate, a changed `socket_group` (below), a
+failed `policy_loaded` write, a descriptor I/O error mid-read and a
+parser error of any kind (each wrapped into the refusal, DL-149) all
+keep the old snapshot and attempt `policy_reload_failed` (best
+effort); reload does not raise. Startup with a configured but
 invalid map, or one whose arming receipt cannot be synced, refuses
 (§4).
 
