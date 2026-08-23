@@ -1551,9 +1551,9 @@ replacing it, and it would inherit the same undecomposable sum.
 **PR-** series (namespace `PR-\d{2}[a-z]?`), rewritten against "what would a
 plausible-but-wrong implementation still pass?". The table has grown since;
 period-model §13 is the count. The run-history pair landed without a namespace
-under DL-113. One number is still cited by code: **CM-37**, in
-`runner_history.py`'s run-history fold. It is residue — DL-113 landed that pair
-with no obligation row, so the token names nothing.
+under DL-113. No number here is cited by code any more: `runner_history.py`'s
+pure run-history fold cited **CM-37** and now cites DL-113, the entry that
+landed that pair with no obligation row.
 
 ## 10. Decision-log entries this implies
 

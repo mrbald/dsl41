@@ -530,9 +530,18 @@ re-driven, which is that sentence made literal rather than widened.*)*
   input, and replay ignores it.
 
 `dsl41 runs` is not a new record kind: its rows are a projection folded from
-the records above (`dispatch`, `input(kind=STATUS)`, the effects nested in
-`decision`) plus the replayed trace and the spool, offline, with nothing
-appended to the journal (DL-113).
+the records above (`dispatch`, `input(kind=STATUS)`, and each `decision` —
+both the effects nested in it and its verdict) plus the replayed trace and
+the spool, offline, with nothing appended to the journal (DL-113).
+
+*(Amended by DL-151.)* The **verdict** is read for the same reason §4's gate
+writes it. A completion that gate REJECTED never reached the oracle, so the
+fold skips it too. Read without the verdict, a late `exit 0` decided the row
+over the real FAILURE — the offline half of what the gate exists to prevent.
+The **crash window is not covered**: an attempt whose `decision` record was
+never written is re-decided through the gate on replay, and a fold reading
+records alone cannot run that gate, so such a completion still decides its
+row. Only an explicit `rejected` is skipped.
 
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence — external events plus time observations (oracle

@@ -2,11 +2,11 @@
 
 `docs/runner-design.md` ss7 lists every record the journal ever writes; this
 module invents none of them. It reads what is already there -- `dispatch`,
-the `input` records the ss4 stale-completion gate journals, the effects
-nested in each `decision`, and the run root's manifest/spool -- and folds
-them into one row per job run: "how long did it take, run after run, and
-did it change." Offline only: no engine, no control socket, no new verb on
-the wire.
+the `input` records the ss4 stale-completion gate journals, each `decision`
+(its verdict on a completion and the effects nested in it), and the run
+root's manifest/spool -- and folds them into one row per job run: "how long
+did it take, run after run, and did it change." Offline only: no engine, no
+control socket, no new verb on the wire.
 
 Two layers, deliberately split so the fold stays testable with no
 filesystem: `fold_run_rows` is a pure function of already-parsed journal
@@ -136,6 +136,7 @@ from dsl41.runner_adapters import load_json
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
 from dsl41.runner_journal import decision_effects, read_journal, replay_inputs
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
 
 class RunHistoryError(Exception):
@@ -367,6 +368,49 @@ def _leaf_status(
     return "RUNNING", None
 
 
+def _attempt_index(record: Mapping[str, Any]) -> int | None:
+    """A record's attempt number, read exactly: `seq` on an input, `index`
+    on the `decision` that answers it (runner-design ss7 writes the same
+    number under two names). None when the field is absent or is not an
+    int -- `true` is not 1, the same rule `period.check_segment_record`
+    applies, spelled here because these two fields are compared to each
+    other.
+
+    None FAILS OPEN at the one call site that matters: a `decision` whose
+    `index` is `"3"` or `true` drops out of the rejected set and its
+    completion decides the row again. That is the module's degrade posture
+    (decision 5) and not a second authority -- a malformed decision is
+    already refused by `decision_effects` when it carries effects."""
+    key = "index" if record.get("rec") == "decision" else "seq"
+    value = record.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _rejected_attempts(records: list[dict[str, Any]]) -> set[int]:
+    """The attempt indices a durable `decision` REJECTED.
+
+    A decision is AUTHORITATIVE (concurrency-model ss4): `replay_inputs`
+    does not feed a rejected attempt to the oracle, so a fold that read the
+    same record would report history the engine refused to make.
+
+    Only an EXPLICIT `rejected` is here. An attempt with no decision at all
+    -- the ss4 crash window -- is absent, because the records do not say
+    what became of it: `replay_inputs` re-decides such an attempt through
+    the gate (`apply_attempt` with `decided=None`), and a fold reading
+    records alone cannot run that gate. So a completion whose decision
+    record was lost, and which a replay would reject, still decides its
+    row. That residue is the crash-window half of this defect and is
+    recorded rather than guessed at."""
+    rejected: set[int] = set()
+    for record in records:
+        if record.get("rec") != "decision" or record.get("decision") != "rejected":
+            continue
+        index = _attempt_index(record)
+        if index is not None:
+            rejected.add(index)
+    return rejected
+
+
 def _leaf_rows(
     records: list[dict[str, Any]],
     catalog: CatalogIR | None,
@@ -385,6 +429,9 @@ def _leaf_rows(
     last_run_number: dict[str, int] = {}
     completion_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     executor_by_key: dict[tuple[str, int], str] = {}
+    # BEFORE the walk: a decision is a later record than the attempt it
+    # answers, so one pass would store a completion it cannot yet judge
+    rejected = _rejected_attempts(records)
 
     for record in records:
         rec = record.get("rec")
@@ -396,6 +443,11 @@ def _leaf_rows(
             dispatch_by_key[key] = record
             last_run_number[d_job] = d_run
         elif rec == "input" and record.get("kind") == "STATUS":
+            if _attempt_index(record) in rejected:
+                # the ss4 gate REJECTED this one and the oracle never saw it,
+                # so neither does the row: taking it let a late `exit 0` the
+                # engine refused overwrite the real FAILURE
+                continue
             payload = record.get("payload") or {}
             c_job = payload.get("job")
             if not isinstance(c_job, str):
@@ -487,7 +539,7 @@ def fold_run_rows(
     spool: Mapping[tuple[str, int], SpoolRead] | None = None,
     carried: Mapping[str, int] | None = None,
 ) -> list[RunRow]:
-    """The pure fold (CM-37): a function of already-parsed journal records
+    """The pure fold (DL-113): a function of already-parsed journal records
     plus, optionally, a catalog (box_name/job_type/SEM-09) and a replayed
     trace (box run boundaries, started_by, and the KILLJOB/term_run_time
     close fallback -- decision 2). No filesystem, no Oracle, no Engine: both
@@ -716,6 +768,51 @@ def stored_input_paths(run_root: Path, period_id: int | None = None) -> list[Pat
         raise RunHistoryError(f"{run_root}: {exc}") from exc
 
 
+def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None:
+    """period-model ss2.1's other half: a build may replay only a log its
+    own state machine wrote.
+
+    One executable implements exactly one `STATE_MACHINE_VERSION` and
+    refuses any other, so "a v2 binary cannot lead **or replay** C1".
+    `runner_ledger.check_leader_eligibility` is the LEAD half and runs on
+    resume only; this is the REPLAY half. Without it a foreign log replays
+    in silence and the trace narrates transitions THIS build's semantics
+    invented, which is worse than a refusal: it reaches `dsl41 runs` and
+    `read_run_root` as ordinary rows.
+
+    Three doors call it, which is every offline reader of a segment:
+    `replay_trace` below, `_read_segment` (so the two DEGRADED paths that
+    fold records with no replay refuse as well -- a foreign version is a
+    WRONG fact, and decision 5 degrades only on a missing one), and the
+    `dsl41 journal` lineage walk, where it sits beside the other opening
+    checks so the refusal lands before a crossing is proved and announced.
+    In `_read_segment` it runs AFTER `prove_opening`: identity before
+    semantics, so a root that cannot prove its own opening is told that.
+
+    No well-formed log can trip it while one version exists. A TAMPERED
+    segment can, and that is the gate it is today; the version gate is what
+    it becomes when a second version exists.
+
+    The version is read EXACTLY, and an absent field refuses.
+    `period.check_segment_record` already requires it with its type on
+    every record `read_journal` returns, so an opening without one is
+    hand-built and names no semantics at all -- history does not guess.
+    This is DELIBERATELY stricter than the lead half, which reads an absent
+    field as version 1 on the pre-S6a courtesy: that courtesy describes a
+    journal `read_journal` has refused unconditionally since DL-138, so the
+    two gates cannot disagree about a file on disk."""
+    pinned = opening.get("state_machine_version")
+    if isinstance(pinned, int) and not isinstance(pinned, bool) and pinned == STATE_MACHINE_VERSION:
+        return
+    named = f"{where}: " if where else ""
+    raise RunHistoryError(
+        f"{named}this segment names state_machine_version {pinned!r} and this build"
+        f" derives v{STATE_MACHINE_VERSION} -- one executable implements one state"
+        " machine, so this build can neither lead nor replay this log"
+        " (period-model ss2.1)"
+    )
+
+
 def replay_trace(
     run_root: Path,
     records: list[dict[str, Any]],
@@ -727,12 +824,17 @@ def replay_trace(
     own executor seeded (S6a routing reads it, `cli.py`'s `journal` command
     docstring explains why), then `replay_inputs`.
 
+    A foreign `state_machine_version` refuses here before anything is
+    replayed (`check_replay_version`): this build derives its own
+    semantics, and narrating another one's log is silent loss.
+
     `carried` is None for period 1 and for a period whose opening seal this
     root no longer holds. Everywhere else it is required, not an
     optimization: revisions and run numbers are monotone across the ESTATE
     (I2), so an empty oracle derives numbers the log never recorded and
     `replay_inputs` refuses at the first admitted input that touches a
     carried entity (DL-136)."""
+    check_replay_version(records[0], where=str(run_root))
     oracle = Oracle(catalog, carried=carried)
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:
@@ -825,6 +927,11 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
         )
     period_id = records[0]["period_id"]
     prove_opening(run_root, records[0])
+    # AFTER the opening proof and before the manifest: identity first, then
+    # semantics -- a segment this root cannot prove is that, not a version
+    # complaint. Here rather than at `replay_trace` so the two DEGRADED
+    # paths below, which fold records with no replay at all, refuse too
+    check_replay_version(records[0], where=str(run_root))
     spool = _read_all_spool(records)
     period_manifest = _period_manifest_or_refuse(run_root, period_id)
     if period_manifest is None:

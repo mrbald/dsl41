@@ -1110,6 +1110,7 @@ def _replay_lineage(
     is still an estate-wide answer, and its refusals name the period."""
     from dsl41.period import root_of_wal
     from dsl41.runner_clock import EngineError
+    from dsl41.runner_history import RunHistoryError, check_replay_version
     from dsl41.runner_journal import (
         check_segment_adjacency,
         check_segment_identity,
@@ -1147,11 +1148,17 @@ def _replay_lineage(
                 # after it (`check_segment_tail`: positioned per caller)
                 check_segment_tail(segment, records)
             check_segment_identity(segment, records[0])
+            # period-model ss2.1: a foreign state machine cannot lead OR
+            # replay, and the resume-side gate never runs here. HERE and not
+            # at the replay: the crossing below is proved, paid for and
+            # announced first, and a refusal after that has already stated
+            # as fact the crossing it then denies
+            check_replay_version(records[0])
             if previous is not None:
                 check_segment_adjacency(
                     previous, records, where=f"journal {previous_segment} -> {segment}"
                 )
-        except (OSError, EngineError) as exc:
+        except (OSError, EngineError, RunHistoryError) as exc:
             raise typer.Exit(refuse(exc, prefix=where)) from exc
         root = root_of_wal(segment)
         if records[0].get("opens_from_seal") is not None:

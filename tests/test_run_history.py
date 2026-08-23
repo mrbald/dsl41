@@ -44,15 +44,19 @@ from dsl41.runner_history import (
     read_run_root,
     read_run_roots,
     read_spool,
+    replay_trace,
 )
-from dsl41.period import read_period_manifest, runtime_profile_from_cli
-from dsl41.runner_journal import read_outbox
+from dsl41.period import read_period_manifest, runtime_profile_from_cli, wal_path
+from dsl41.runner_journal import read_journal, read_outbox
 from dsl41.runner_startup import resume_run, start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
 #: a run_id in the ss11a grammar, spelled as test_decision_record.py spells it
 _RID = "00000000-0000-4000-8000-000000000001"
+
+#: one CMD job, the smallest estate a replay can be asked about
+_SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
 
 
 # ---------------------------------------------------- record-shape builders
@@ -1020,6 +1024,127 @@ def test_cli_runs_since_filters_out_earlier_runs(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["runs", str(run_root), "--since", far_future])
     assert result.exit_code == 0
     assert "j1" not in result.output
+
+
+# ------------------------------------------ 4. what the ss4 gate decided
+
+
+async def _run_then_late_completion(run_root: Path, source: str) -> None:
+    """A real run that FAILS, then a late `exit 0` for the same run.
+
+    No hand-built `decision` records: the shapes this scenario turns on are
+    the gate's own verdicts, and a fixture that spelled them would be
+    asserting against its own guess. `source` picks which verdict the ss4
+    gate reaches -- an `adapter` completion is stale-gated and REJECTED
+    ("job already terminal"), a `control` CHANGE_STATUS is never gated and
+    is APPLIED (SEM-01 parity, `runner_admission._gate`)."""
+    jil = parse("insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil")
+    catalog = lower_catalog([jil], permit_unknown=False)
+    clock = RealClock()
+    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+        staged=staged,
+    )
+    engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
+    await engine.run_until_quiescent(datetime.max)
+    engine.inject(
+        Event(
+            at=clock.now(),
+            kind="STATUS",
+            payload={"job": "j1", "run_number": 1, "exit_code": 0},
+        ),
+        source=source,
+    )
+    await engine.run_until_quiescent(datetime.max)
+    await engine.shutdown()
+    assert engine.journal is not None
+    engine.journal.close()
+
+
+def _verdicts(run_root: Path) -> list[tuple[str, str | None]]:
+    records = read_journal(wal_path(run_root, 1))
+    return [(r["decision"], r.get("reason")) for r in records if r.get("rec") == "decision"]
+
+
+def test_a_completion_the_gate_rejected_never_decides_the_row(tmp_path: Path) -> None:
+    """A durable decision is AUTHORITATIVE (concurrency-model ss4).
+    `replay_inputs` does not feed a rejected attempt to the oracle, so the
+    fold does not read one either.
+
+    The reproduction: the run really reaches FAILURE exit 1, the late `exit
+    0` is admitted and REJECTED, and `read_run_root` reported SUCCESS 0 --
+    the offline half of exactly what the ss4 gate exists to prevent,
+    reaching `dsl41 runs` and `read_run_root` alike."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_then_late_completion(run_root, "adapter"))
+    assert ("rejected", "job already terminal") in _verdicts(run_root)
+
+    [row] = read_run_root(run_root)
+    assert row.status == "FAILURE"
+    assert row.exit_code == 1
+
+
+def test_a_completion_the_gate_applied_still_decides_the_row(tmp_path: Path) -> None:
+    """The skip reads the DECISION, never lateness. The same late `exit 0`
+    as a control CHANGE_STATUS is never stale-gated (SEM-01 parity), the
+    gate APPLIES it, and it still overwrites the row -- exactly as it
+    overwrites oracle state."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_then_late_completion(run_root, "control"))
+    assert all(verdict == "applied" for verdict, _ in _verdicts(run_root))
+
+    [row] = read_run_root(run_root)
+    assert row.status == "SUCCESS"
+    assert row.exit_code == 0
+
+
+# ---------------------------------------- 5. the replay version gate
+
+
+def test_replay_refuses_a_segment_naming_a_foreign_state_machine_version(
+    tmp_path: Path,
+) -> None:
+    """period-model ss2.1: one executable implements one state machine, so a
+    foreign binary "cannot lead OR replay". The LEAD half
+    (`runner_ledger.check_leader_eligibility`) runs on resume only; without
+    the replay half a v999 log replayed in silence and the trace narrated
+    transitions this build's semantics invented."""
+    foreign = dict(_header())
+    foreign["state_machine_version"] = 999
+    with pytest.raises(RunHistoryError, match="state_machine_version 999"):
+        replay_trace(tmp_path, [foreign], lower_source(_SOLO_JIL))
+
+
+def test_replay_accepts_the_state_machine_version_this_build_derives(tmp_path: Path) -> None:
+    assert replay_trace(tmp_path, [_header()], lower_source(_SOLO_JIL)) == []
+
+
+def test_dsl41_journal_refuses_a_foreign_state_machine_version(tmp_path: Path) -> None:
+    """The same gate on the other replay door. `dsl41 journal` builds its
+    catalog from the bundle the segment pins, so a version bump alone leaves
+    every other check green and the trace would print.
+
+    Only the SEGMENT is edited. `period.Sentinel` does not carry the version
+    at all, so the sentinel cannot refuse on one; what guards the other
+    doors is PR-22's manifest-vs-segment agreement, which a segment-only
+    edit trips first. Editing the segment alone therefore isolates this
+    gate on the one reader that has no other."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_real_and_manifest(_SOLO_JIL, run_root, ["j1"]))
+    segment = wal_path(run_root, 1)
+    lines = segment.read_text().splitlines()
+    opening = json.loads(lines[0])
+    opening["state_machine_version"] = 999
+    lines[0] = json.dumps(opening, sort_keys=True)
+    segment.write_text("\n".join(lines) + "\n")
+
+    result = CliRunner().invoke(app, ["journal", str(segment)])
+    assert result.exit_code == 2
+    assert "state_machine_version 999" in result.output
 
 
 # ------------------------------------------ peer-review round-1 pins (DL-136)
