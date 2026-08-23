@@ -665,6 +665,91 @@ def test_shutdown_orderly_records_signaled_never_parent_lost(short_root: Path) -
         teardown_supervisor(short_root, proc)
 
 
+def _supervise_cli(run_root: Path, action: str) -> subprocess.CompletedProcess:
+    """The real operator entry point, out of process: `dsl41 supervise ...`.
+    Driving the typer callback in-process would miss the transport, which is
+    where the DL-80 envelope rule lives."""
+    return subprocess.run(
+        [sys.executable, "-m", "dsl41", "supervise", action, "--run-root", str(run_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_dl80_the_supervise_cli_shutdown_carries_the_incarnation(short_root: Path) -> None:
+    """DL-151. `dsl41 supervise shutdown` is the one CLI path that MUTATES on
+    the ss6a socket, and nothing drove it end to end until this test. DL-80
+    put the incarnation beside the token on every mutating verb (frozen ss5);
+    `SupervisorConn` stamped only `v`, so the operator verb answered
+    wrong_incarnation and exited 2 while the supervisor kept running and its
+    wrappers kept their commands alive -- the opposite of what was asked.
+
+    The live shape is the one an operator meets: an engine spawned a command
+    and then died, so the lease is unexpired with its holder connection gone
+    (freely grantable, frozen ss5), and the CLI must take it, TERM the
+    command and end the supervisor."""
+    proc = start_supervisor(short_root)
+    engine_side = RawClient(short_root)
+    rd = short_root / "runs" / "j.1"
+    try:
+        tok = engine_side.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})[
+            "token"
+        ]
+        engine_side.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(rd, "sleep 30")})
+        wait_for(lambda: (rd / "spawn.json").exists())
+        # the engine dies. Its lease is unexpired but its connection is gone,
+        # so the lease is orphaned and grantable. The supervisor sees the EOF
+        # on its next select, long before the CLI's interpreter has started.
+        engine_side.close()
+
+        listed = _supervise_cli(short_root, "list")
+        assert listed.returncode == 0, listed.stderr
+        rows = json.loads(listed.stdout)["runs"]
+        assert [r["job"] for r in rows] == ["j"] and rows[0]["wrapper_alive"] is True
+
+        stopped = _supervise_cli(short_root, "shutdown")
+        assert "wrong_incarnation" not in stopped.stdout  # the regression itself
+        assert json.loads(stopped.stdout) == {"ok": True}
+        assert stopped.returncode == 0, stopped.stderr
+        proc.wait(timeout=10)
+        assert proc.returncode == 0
+        assert json.loads((rd / "status.json").read_text())["outcome"] == "signaled"
+        assert not (short_root / "supervisor.sock").exists()
+        assert not (short_root / "supervisor.pid").exists()
+    finally:
+        with contextlib.suppress(OSError):
+            engine_side.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl80_the_blocking_transport_learns_the_incarnation_but_not_from_a_refusal(
+    short_root: Path,
+) -> None:
+    """The incarnation is the supervisor's to name, never the client's to
+    invent: `SupervisorConn` reads it back off a reply that carries one, as
+    `SupervisorClient` does off ACQUIRE. A REFUSAL also carries it -- to tell
+    a stale client what the world is now -- and adopting it there would let a
+    client re-send a verb the supervisor just refused, pairing a fresh
+    incarnation with a token from a vanished world."""
+    from dsl41.runner_adapters import SupervisorConn
+
+    proc = start_supervisor(short_root)
+    conn = SupervisorConn(short_root / "supervisor.sock")
+    try:
+        refusal = conn.send({"cmd": "SHUTDOWN", "token": 1})
+        assert refusal["error"] == "wrong_incarnation"
+        assert isinstance(refusal["incarnation"], str)
+        assert conn.incarnation is None  # a refusal is not a source
+        assert conn.send({"cmd": "PING"})["ok"] is True
+        assert conn.incarnation == refusal["incarnation"]  # a reply is
+        acq = conn.send({"cmd": "ACQUIRE", "controller_id": "cli", "ttl_s": 60})
+        assert conn.send({"cmd": "RENEW", "token": acq["token"], "ttl_s": 60})["ok"] is True
+    finally:
+        conn.close()
+        teardown_supervisor(short_root, proc)
+
+
 def test_stale_socket_is_reclaimed(short_root: Path) -> None:
     """spec ss1: a dead supervisor's leftover socket is unlinked and a fresh
     one binds (parity with the engine's ss10 control-socket gate)."""

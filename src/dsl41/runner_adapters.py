@@ -906,9 +906,10 @@ class SupervisorConn:
 
     It lives beside `SupervisorClient` for the reason `roundtrip` lives
     beside `ControlClient` (DL-78, DL-91): two transports for ONE protocol,
-    not two protocols. The framing rule below -- stamp `"v": 1`, read
-    newline-delimited JSON, drop pushes -- was written once here and once in
-    cli.py, which is one place too many for a rule a frozen document owns."""
+    not two protocols. The framing rule below -- stamp `"v": 1` AND the
+    incarnation, read newline-delimited JSON, drop pushes -- was written once
+    here and once in cli.py, which is one place too many for a rule a frozen
+    document owns."""
 
     def __init__(self, sock_path: Path) -> None:
         self.conn = socket.socket(socket.AF_UNIX)
@@ -917,9 +918,18 @@ class SupervisorConn:
         self.conn.settimeout(60.0)
         self.conn.connect(str(sock_path))
         self.buf = b""
+        #: DL-80: the incarnation rides every mutating verb beside the token
+        #: (supervisor-protocol ss5). It is part of the envelope, not of the
+        #: caller's request, so it is stamped here rather than remembered by
+        #: each verb -- `SupervisorClient._request` stamps it the same way.
+        #: An unstamped SHUTDOWN answers `wrong_incarnation` and stops
+        #: nothing, which is what this transport did until DL-151.
+        self.incarnation: str | None = None
 
     def send(self, request: dict[str, Any]) -> dict[str, Any]:
-        self.conn.sendall(json.dumps({**request, "v": 1}).encode("utf-8") + b"\n")
+        self.conn.sendall(
+            json.dumps({**request, "v": 1, "incarnation": self.incarnation}).encode("utf-8") + b"\n"
+        )
         while True:
             while b"\n" not in self.buf:
                 chunk = self.conn.recv(65536)
@@ -930,7 +940,21 @@ class SupervisorConn:
             obj = json.loads(line)
             if isinstance(obj, dict) and obj.get("push"):
                 continue  # notifications are droppable (supervisor-protocol ss5)
+            if isinstance(obj, dict):
+                self._learn_incarnation(obj)
             return obj
+
+    def _learn_incarnation(self, reply: dict[str, Any]) -> None:
+        """The supervisor names its own incarnation in every reply that
+        carries one (PING, LIST, ACQUIRE). The client never invents it: it
+        reads it back, exactly as `SupervisorClient` reads it off ACQUIRE.
+        A REFUSAL is not a source -- its `incarnation` field tells a stale
+        client what the world is now, and adopting it would let a client
+        retry a verb the supervisor just refused with a token from a
+        vanished world."""
+        value = reply.get("incarnation")
+        if isinstance(value, str) and reply.get("error") is None:
+            self.incarnation = value
 
     def close(self) -> None:
         self.conn.close()

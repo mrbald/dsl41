@@ -475,6 +475,11 @@ def supervise(
         if not acq.get("ok"):
             typer.echo(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}", err=True)
             raise typer.Exit(2)
+        # the token alone does not authorize a mutating verb: DL-80 pairs it
+        # with the incarnation the same ACQUIRE reply names, and `conn` has
+        # read that back off this reply and stamps it on every later request
+        # (supervisor-protocol ss5). Sending only the token answers
+        # wrong_incarnation.
         resp = conn.send({"cmd": "SHUTDOWN", "token": acq["token"]})
         typer.echo(json_mod.dumps(resp, sort_keys=True))
         raise typer.Exit(0 if resp.get("ok") else 2)
