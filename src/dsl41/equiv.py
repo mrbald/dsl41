@@ -58,6 +58,7 @@ import hashlib
 import itertools
 import json
 import random
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel
@@ -76,7 +77,7 @@ from dsl41.conditions import (
     iter_atoms,
 )
 from dsl41.derive import derive_graph
-from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, Time
+from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, ScheduleBlock, SlaSpec, Time
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, TraceEntry
 
@@ -172,6 +173,81 @@ def _canon_attr(attr: CondAttr | None, rename: dict[str, str], case_fold: bool) 
     return CondAttr(cond=_canon(_map_cond(attr.cond, rename, case_fold)))
 
 
+def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[Time | int] | None:
+    """The SLA entries that pair one-to-one with start_times, or None when
+    there is no pairing to keep. SEM-34 pairs them BY POSITION; a single
+    relative offset that covers several start times (the broadcast form) has
+    no order to lose, and neither has a one-element schedule."""
+    if spec is None or n_starts < 2:
+        return None
+    values: Sequence[Time | int] | None = (
+        spec.times if spec.kind == "absolute" else spec.offsets_min
+    )
+    if values is None or len(values) != n_starts:
+        return None
+    return values
+
+
+def _sla_key(value: Time | int | None) -> tuple[int, int]:
+    """Sort key for one SLA entry, one shape for both kinds (a Time is its
+    (hour, minute), an offset is its own value). None is the absent column."""
+    if value is None:
+        return (0, 0)
+    if isinstance(value, Time):
+        return (value.hour, value.minute)
+    return (value, 0)
+
+
+def _reordered(spec: SlaSpec, values: Sequence[Time | int]) -> SlaSpec:
+    field = "times" if spec.kind == "absolute" else "offsets_min"
+    return spec.model_copy(update={field: list(values)})
+
+
+def _canon_schedule(schedule: ScheduleBlock) -> ScheduleBlock:
+    """C() for one ScheduleBlock: trigger lists sorted and deduped, with the
+    SEM-34 must_start/must_complete entries kept IN STEP with start_times.
+
+    Sorting start_times alone loses the positional pairing SEM-34 defines:
+    (10:00,+5),(09:00,+10) and (09:00,+5),(10:00,+10) would canonicalize
+    alike although they alarm at different times (DL-151). The three lists
+    therefore sort as ONE row set, and a duplicate row -- same start time,
+    same alarms -- collapses as before."""
+    update: dict[str, object] = {
+        "start_mins": sorted(set(schedule.start_mins))
+        if schedule.start_mins is not None
+        else None,
+        "days_of_week": sorted(set(schedule.days_of_week))
+        if schedule.days_of_week is not None
+        else None,
+    }
+    starts = schedule.start_times
+    if starts is not None:
+        must_start = _sla_column(schedule.must_start, len(starts))
+        must_complete = _sla_column(schedule.must_complete, len(starts))
+        rows: list[tuple[tuple[int, int], tuple[int, int], tuple[int, int], int]] = []
+        seen: set[tuple[tuple[int, int], tuple[int, int], tuple[int, int]]] = set()
+        for i, start in enumerate(starts):
+            key = (
+                (start.hour, start.minute),
+                _sla_key(None if must_start is None else must_start[i]),
+                _sla_key(None if must_complete is None else must_complete[i]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((*key, i))
+        rows.sort()
+        order = [row[-1] for row in rows]
+        update["start_times"] = [Time(hour=starts[i].hour, minute=starts[i].minute) for i in order]
+        if must_start is not None and schedule.must_start is not None:
+            update["must_start"] = _reordered(schedule.must_start, [must_start[i] for i in order])
+        if must_complete is not None and schedule.must_complete is not None:
+            update["must_complete"] = _reordered(
+                schedule.must_complete, [must_complete[i] for i in order]
+            )
+    return schedule.model_copy(update=update)
+
+
 def canonical_catalog(
     catalog: CatalogIR,
     *,
@@ -195,21 +271,7 @@ def canonical_catalog(
         )
         schedule = job.schedule
         if schedule is not None:
-            start_times = None
-            if schedule.start_times is not None:
-                unique = sorted({(t.hour, t.minute) for t in schedule.start_times})
-                start_times = [Time(hour=h, minute=m) for h, m in unique]
-            schedule = schedule.model_copy(
-                update={
-                    "start_times": start_times,
-                    "start_mins": sorted(set(schedule.start_mins))
-                    if schedule.start_mins is not None
-                    else None,
-                    "days_of_week": sorted(set(schedule.days_of_week))
-                    if schedule.days_of_week is not None
-                    else None,
-                }
-            )
+            schedule = _canon_schedule(schedule)
         box = job.box.model_copy(
             update={
                 "box_name": _fold(_apply_rename(job.box.box_name, rename), case_fold)
@@ -363,7 +425,14 @@ def equivalent_tier_a(
 
 _STATUSES = ("NEVER_RAN", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
 
-_UNSET = "<unset>"
+#: "this global has no value" as a value OUTSIDE the string domain. A string
+#: sentinel shared the domain with real literals: a JIL global whose literal
+#: is exactly the sentinel text read as unset, so `v(G) = <that text>` came
+#: back unsatisfiable and L006 called it a contradiction (DL-151). None
+#: cannot collide -- JIL carries text, never null.
+_UNSET: None = None
+#: How the unset state is SPELLED in a counterexample. Display only.
+_UNSET_LABEL = "<unset>"
 
 
 class _JobScope(BaseModel):
@@ -378,7 +447,7 @@ class _JobScope(BaseModel):
 
 class _Alphabet(BaseModel):
     jobs: dict[str, _JobScope] = {}
-    globals_: dict[str, list[str]] = {}  # name -> candidate values (incl UNSET/OTHER)
+    globals_: dict[str, list[str | None]] = {}  # name -> candidate values (None == unset)
 
 
 def _job_key(atom: StatusAtom | ExitCodeAtom) -> str:
@@ -415,7 +484,7 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
     for scope in jobs.values():
         scope.windows.sort()
         scope.exit_cutpoints.sort()
-    globals_: dict[str, list[str]] = {}
+    globals_: dict[str, list[str | None]] = {}
     for name, values in global_values.items():
         # Region representatives for BOTH comparison behaviors
         # conditions.compare_value exhibits (int when both sides parse, else
@@ -433,7 +502,7 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
             if literal.lstrip("-").isdigit():
                 value = int(literal)
                 points.update(str(p) for p in (value - 1, value + 1))
-        globals_[name] = [*sorted(points), _UNSET]
+        globals_[name] = [*sorted(points), _UNSET]  # None sorts nowhere: append it
     return _Alphabet(jobs=jobs, globals_=globals_)
 
 
@@ -446,7 +515,7 @@ class _State(BaseModel):
     job_age_bucket: dict[str, int]  # index into windows; len(windows) == beyond all
     job_zero_fresh: dict[str, bool]  # zero-lookback anchor test passes (Q2, DL-54)
     job_exit: dict[str, int | None]
-    globals_: dict[str, str]
+    globals_: dict[str, str | None]  # None == unset (never a literal)
 
 
 def _state_count(alphabet: _Alphabet) -> int:
@@ -480,7 +549,7 @@ def _iter_states(alphabet: _Alphabet):
                         for code in exits:
                             axis.append((scope.key, status, iced, age, day, code))
         job_axes.append(axis)
-    global_axes = [
+    global_axes: list[list[tuple[str, str | None]]] = [
         [(name, value) for value in domain] for name, domain in alphabet.globals_.items()
     ]
     for job_choice in itertools.product(*job_axes):
@@ -504,7 +573,7 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
         return _eval_cond(cond.inner, state, alphabet)
     if isinstance(cond, GlobalAtom):
         actual = state.globals_.get(cond.name, _UNSET)
-        if actual == _UNSET:
+        if actual is None:  # unset: no comparison holds (never a literal)
             return False
         return compare_value(actual, cond.op, cond.value)
     key = _job_key(cond)
@@ -574,7 +643,7 @@ def _describe(state: _State) -> dict[str, str]:
             bits.append(f"exit={state.job_exit[key]}")
         out[key] = ",".join(bits)
     for name, value in state.globals_.items():
-        out[f"${name}"] = value
+        out[f"${name}"] = _UNSET_LABEL if value is None else value
     return out
 
 

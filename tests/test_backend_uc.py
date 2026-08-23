@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from dsl41.ast_jil import parse_file
 from dsl41.backend_uc import (
+    _U_QUESTIONS,
     classify_edges,
     compile_to_uc,
     compile_twin,
@@ -684,7 +685,7 @@ def test_report_u3a_summary_bullet_and_quarantine_section_match_bundle_counts() 
         f" {len(bundle.records) + len(bundle.quarantined)} workflows emit;"
         f" {len(bundle.quarantined)} quarantined" in report
     )
-    assert "## Quarantined workflows (U3a base schema cannot express these)" in report
+    assert "## Quarantined workflows (withheld from the U3a bundle)" in report
     (workflow,) = bundle.quarantined
     assert f"- `{workflow.name}`" in report
     for reason in workflow.reasons:
@@ -874,3 +875,171 @@ def test_hypothesis_bundle_determinism_and_referential_integrity(source: str) ->
         for edge in record["workflowEdges"]:
             assert edge["sourceId"]["value"] in vertex_id_set
             assert edge["targetId"]["value"] in vertex_id_set
+
+
+# ---------------------------------------------- DL-151: the UC-backend debt series
+
+
+def test_compile_to_uc_quarantines_case_only_record_name_collision() -> None:
+    """DL-151: UC addresses names case-insensitively (UCS-12, the L014
+    reading), so a box `WF_x` and a loose job `x` (record `wf_x`) are ONE
+    record on the controller. The exact-string check let the pair through
+    and `--strict` exited 0."""
+    catalog = lower_source(
+        "insert_job: WF_x\njob_type: b\n\n"
+        "insert_job: member\njob_type: c\ncommand: a\nmachine: m1\nbox_name: WF_x\n\n"
+        "insert_job: x\njob_type: c\ncommand: b\nmachine: m1\n"
+    )
+    bundle = compile_to_uc(catalog)
+    assert bundle.records == []
+    assert sorted(q.name for q in bundle.quarantined) == ["WF_x", "wf_x"]
+    for workflow in bundle.quarantined:
+        (reason,) = workflow.reasons
+        assert "record name collision" in reason and "2 workflows" in reason
+        assert "'wf_x'" in reason and "WF_x, wf_x" in reason
+
+
+def test_compile_to_uc_name_note_states_the_documented_constraint_scope() -> None:
+    """DL-151: the doc's finding is narrow -- UC documents no character-set
+    or length constraint for a task NAME. The old note claimed no name
+    constraint at all, which is broader than uc-edge-schema.md says."""
+    catalog = lower_source("insert_job: solo\njob_type: c\ncommand: a\nmachine: m1\n")
+    (note,) = [n for n in compile_to_uc(catalog).notes if "verbatim" in n]
+    assert "no character-set or length constraint for a task name" in note
+
+
+def test_compile_to_uc_lookback_edge_carries_its_window_as_an_apply_note() -> None:
+    """DL-151/M03: an M03 lookback edge has a base wire form (a plain
+    Success edge), so the workflow emits -- and the window would be silently
+    lost. The frozen schema has no field for it, so it travels as a bundle
+    note, one per edge."""
+    catalog = lower_source(
+        "insert_job: prod\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\n"
+        "condition: s(prod, 2.30)\n"
+    )
+    bundle = compile_to_uc(catalog)
+    assert len(bundle.records) == 1  # the edge still serializes
+    (note,) = [n for n in bundle.notes if n.startswith("M03 edge")]
+    assert "prod -> cons" in note and "2.30" in note
+    assert "Task Monitor with Time Scope" in note
+    # a plain edge carries no such note
+    plain = lower_source(
+        "insert_job: prod\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(prod)\n"
+    )
+    assert not [n for n in compile_to_uc(plain).notes if n.startswith("M03 edge")]
+
+
+def test_compile_twin_ledgers_member_to_box_edge_as_m15_restructuring() -> None:
+    """DL-151: a box_success reference to a member is an M15 edge whose
+    target is the workflow itself, never a task vertex. It was dropped with
+    the cross-workflow Task Monitor wording, which names the wrong row."""
+    catalog = lower_source(
+        "insert_job: nightly\njob_type: b\nbox_success: s(step1)\n\n"
+        "insert_job: step1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nightly\n"
+    )
+    model = compile_twin(catalog)
+    (entry,) = [e for e in model.excluded if e.startswith("M15 edge")]
+    assert "step1 -> nightly" in entry
+    assert "Skip-path restructuring" in entry
+    assert "spans workflows" not in entry
+
+
+def test_compile_twin_ledgers_each_initial_status_under_its_own_row() -> None:
+    """DL-151: ON_ICE is M19 (Skip) and ON_NOEXEC is M21 (Skip); only
+    ON_HOLD is M20 (Hold on Start). One row per status, one cutover control
+    per row."""
+    catalog = lower_source(
+        "insert_job: heldj\njob_type: c\ncommand: a\nmachine: m1\nstatus: ON_HOLD\n\n"
+        "insert_job: icedj\njob_type: c\ncommand: b\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: noexecj\njob_type: c\ncommand: c\nmachine: m1\nstatus: ON_NOEXEC\n"
+    )
+    ledger = compile_twin(catalog).excluded
+    (held,) = [e for e in ledger if "heldj" in e]
+    (iced,) = [e for e in ledger if "icedj" in e]
+    (noexec,) = [e for e in ledger if "noexecj" in e]
+    assert held.startswith("M20 heldj:") and "Hold on Start" in held
+    assert iced.startswith("M19 icedj:") and "Skip" in iced
+    assert noexec.startswith("M21 noexecj:") and "Skip" in noexec
+
+
+def test_report_renders_the_bundle_exclusion_ledger_and_apply_notes() -> None:
+    """DL-151: the report rendered neither `bundle.excluded` nor
+    `bundle.notes`, so a reader of the markdown could not see what the twin
+    dropped or what a record cannot carry."""
+    catalog = lower_source(
+        "insert_job: iced\njob_type: c\ncommand: a\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(iced)\n"
+    )
+    graph = derive_graph(catalog)
+    bundle = compile_to_uc(catalog, graph)
+    report = render_migration_report(catalog, graph)
+    assert "## Twin exclusions (recorded, never compiled)" in report
+    assert "## Apply notes (what a workflow record cannot carry)" in report
+    for entry in bundle.excluded:
+        assert f"- {entry}" in report
+    for note in bundle.notes:
+        assert f"- {note}" in report
+
+
+def test_report_gives_m17_terminators_their_own_entry() -> None:
+    """DL-151: M17 (box_terminator/job_terminator, SEM-14) had no derive,
+    lint or report path at all -- a catalog full of terminators produced a
+    clean report. It is a named construct, class A/R per case."""
+    catalog = lower_source(
+        "insert_job: nightly\njob_type: b\n\n"
+        "insert_job: killer\njob_type: c\ncommand: a\nmachine: m1\n"
+        "box_name: nightly\nbox_terminator: y\n\n"
+        "insert_job: victim\njob_type: c\ncommand: b\nmachine: m1\n"
+        "box_name: nightly\njob_terminator: y\n"
+    )
+    report = render_migration_report(catalog)
+    assert "## Terminators (M17 — box_terminator / job_terminator)" in report
+    assert "**M17** `killer`: box_terminator (SEM-14)" in report
+    assert "**M17** `victim`: job_terminator (SEM-14)" in report
+    quiet = lower_source("insert_job: solo\njob_type: c\ncommand: a\nmachine: m1\n")
+    assert "## Terminators" not in render_migration_report(quiet)
+
+
+def test_compile_twin_or_note_states_the_naive_single_successor_join() -> None:
+    """DL-151: the note claimed duplicate-successor join semantics. The
+    shipped lowering attaches every branch to ONE successor, which UC joins
+    conjunctively -- an AND for independent branches (P-M12)."""
+    catalog = lower_source(
+        "insert_job: a1\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: b1\njob_type: c\ncommand: b\nmachine: m1\n\n"
+        "insert_job: c1\njob_type: c\ncommand: c\nmachine: m1\ncondition: s(a1) | s(b1)\n"
+    )
+    (note,) = [e for e in compile_twin(catalog).excluded if e.startswith("M12 OR shapes")]
+    assert "every branch" in note and "ONE successor" in note
+    assert "U1-gated and NOT emitted" in note
+    assert "duplicate-successor join semantics apply" not in note
+
+
+def test_compile_to_uc_m31_note_carries_the_configured_values() -> None:
+    """DL-151: the note named the tasks but not the boundaries, though the
+    twin model holds them -- a cutover operator had to go back to the JIL."""
+    catalog = lower_source(
+        "insert_job: coded\njob_type: c\ncommand: a\nmachine: m1\nmax_exit_success: 2\n\n"
+        "insert_job: ranged\njob_type: c\ncommand: b\nmachine: m1\n"
+        "success_codes: 0,4-8\nfail_codes: 9\n"
+    )
+    (note,) = [n for n in compile_to_uc(catalog).notes if n.startswith("M31")]
+    assert "coded (max_exit_success=2)" in note
+    assert "ranged (success_codes=0,4-8, fail_codes=9)" in note
+
+
+def test_report_open_questions_do_not_depend_on_a_dead_m26_row() -> None:
+    """DL-151: `used_rows.add("M26")` had been dead since DL-53 resolved
+    U6a. The fact that keeps it dead is the registry -- no `_U_QUESTIONS`
+    row depends on M26 -- so pin THAT, not the empty section it produced
+    (which a timezone catalog reached either way)."""
+    depended_on = {row for _question, rows, _why in _U_QUESTIONS for row in rows}
+    assert depended_on == {"M12", "M24"}
+    assert "M26" not in depended_on
+    catalog = lower_source(
+        "insert_job: tzjob\njob_type: c\ncommand: a\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "03:00"\ntimezone: Zurich\n'
+    )
+    assert "## Open questions" not in render_migration_report(catalog)

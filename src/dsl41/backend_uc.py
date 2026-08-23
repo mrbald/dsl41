@@ -27,10 +27,11 @@ Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
   catalog hash, so a pipeline cannot apply the records while missing what
   they exclude.
 - QUARANTINE, never partial-emit (the safe-freeze rule, DL-55): a workflow
-  containing ANY edge the base schema cannot express -- the twin's
-  `cancelled` (M06 t(); UC documents no Cancelled edge condition) or any
-  var_condition (U3b rich forms) -- is withheld WHOLE, with every offending
-  edge listed. No silent edge drop (DL-04).
+  is withheld WHOLE for either of two causes -- an edge the base schema
+  cannot express (the twin's `cancelled`, M06 t(); or any var_condition,
+  U3b rich forms), or a record name a second workflow also serializes to
+  (UC folds case when it addresses a name, UCS-12/L014). Every cause is
+  listed. No silent drop (DL-04).
 - CREATE-ONLY hygiene (uc-edge-schema.md): records pin retainSysIds=false
   and omit sysId/version/exportTable/exportReleaseLevel; vertexIds are
   explicit strings; layout coordinates are deterministic.
@@ -121,6 +122,76 @@ def _edge_line(edge: DerivedEdge) -> str:
     return line
 
 
+def _terminator_lines(catalog: CatalogIR) -> list[str]:
+    """The M17 report section (SEM-14 box_terminator/job_terminator), or []
+    when the catalog declares none.
+
+    M17 is a NAMED CONSTRUCT, not an edge: no derived edge carries it, so
+    without this section a catalog full of terminators produced a clean
+    report. The row is A/R per case and states no discriminator, so the
+    report names the construct and leaves the class to a human."""
+    lines: list[str] = []
+    for name, job in catalog.jobs.items():
+        flags = ", ".join(
+            flag
+            for flag, on in (
+                ("box_terminator", job.box.box_terminator),
+                ("job_terminator", job.box.job_terminator),
+            )
+            if on
+        )
+        if not flags:
+            continue
+        where = ""
+        if job.span is not None:
+            where = f" — `{job.span.file}:{job.span.line_start}`"
+        lines.append(f"- **M17** `{name}`: {flags} (SEM-14){where}")
+    if not lines:
+        return []
+    return [
+        "",
+        "## Terminators (M17 — box_terminator / job_terminator)",
+        "",
+        "Not an edge and not a record field. UC has no automatic"
+        " kill-siblings-on-my-failure link: emulate with task-level failure"
+        " handling plus workflow Cancel actions. The M17 row is **A/R** per"
+        " case and names no discriminator, so each one is a human decision.",
+        "",
+        *lines,
+    ]
+
+
+def _bundle_ledger_lines(bundle: UcBundle) -> list[str]:
+    """The bundle's own two ledgers, rendered into the report: what the twin
+    lowering recorded instead of compiling, and what a workflow record
+    cannot carry. Both travel IN the bundle (DL-55); the report used to show
+    neither, so a reader of the markdown alone could not see them."""
+    lines: list[str] = []
+    if bundle.excluded:
+        lines += [
+            "",
+            "## Twin exclusions (recorded, never compiled)",
+            "",
+            "The twin lowering's own ledger, verbatim -- every construct it"
+            " recorded instead of compiling (no silent loss, DL-04). The"
+            " `dsl41 uc` bundle carries the same list, which is why the R-class"
+            " edges above appear here a second time, in the bundle's wording.",
+            "",
+            *[f"- {item}" for item in bundle.excluded],
+        ]
+    if bundle.notes:
+        lines += [
+            "",
+            "## Apply notes (what a workflow record cannot carry)",
+            "",
+            "These travel in the `dsl41 uc` bundle beside the records, so the"
+            " records cannot be applied without them (DL-55).",
+            "",
+            *[f"- {note}" for note in bundle.notes],
+        ]
+    return lines
+
+
 def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
     """Per-catalog markdown migration report (Part II requirement 3).
 
@@ -149,8 +220,6 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         for calendar in (schedule.run_calendar, schedule.exclude_calendar):
             if calendar:
                 calendars.setdefault(calendar, []).append(name)
-        if schedule.timezone:
-            used_rows.add("M26")
     if calendars:
         used_rows.add("M24")
 
@@ -214,6 +283,10 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
             branches = "; ".join("{" + ", ".join(branch) + "}" for branch in shape.branches)
             lines.append(f"- `{shape.job}`.{shape.attr} ({shape.kind}) branches: {branches}")
             lines.append(f"  - {shape.lowering}")
+    terminator_lines = _terminator_lines(catalog)
+    if terminator_lines:
+        used_rows.add("M17")
+        lines += terminator_lines
     if graph.external_boundary:
         lines += ["", "## External boundary (M33 — cross-instance producers)", ""]
         for ref in graph.external_boundary:
@@ -237,15 +310,18 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
     if bundle.quarantined:
         lines += [
             "",
-            "## Quarantined workflows (U3a base schema cannot express these)",
+            "## Quarantined workflows (withheld from the U3a bundle)",
             "",
-            "Withheld WHOLE from the `dsl41 uc` bundle -- no partial workflow"
-            " ever ships (DL-55). Each offending edge:",
+            "Two causes: the base schema cannot express one of the workflow's"
+            " edges, or two workflows serialize to one UC record name. Withheld"
+            " WHOLE from the `dsl41 uc` bundle -- no partial workflow ever ships"
+            " (DL-55). Each cause:",
             "",
         ]
         for workflow in bundle.quarantined:
             lines.append(f"- `{workflow.name}`")
             lines += [f"  - {reason}" for reason in workflow.reasons]
+    lines += _bundle_ledger_lines(bundle)
     open_questions = [
         (question, dep_rows, why)
         for question, dep_rows, why in _U_QUESTIONS
@@ -303,6 +379,11 @@ class UcEdge(BaseModel):
     condition: UcEdgeCondition
     var_condition: UcVarCondition | None = None
     mapping_row: str  # provenance: the M-row that produced this edge
+    #: M03 provenance: the AutoSys lookback token this edge dropped. UC has
+    #: no window on an edge, so the base record spells the plain condition
+    #: and the bundle carries the window as an apply note (never silently
+    #: lost, DL-04). Not a record field -- U3a is frozen.
+    lookback: str | None = None
 
 
 class UcWorkflow(BaseModel):
@@ -328,12 +409,32 @@ class UcModel(BaseModel):
     excluded: list[str] = []  # human-readable ledger of everything NOT compiled
 
 
+#: SEM-24 definition-time status -> (mapping row, the UC control it maps to
+#: at cutover). Each status has its OWN row: ON_HOLD is M20 Hold, ON_ICE is
+#: M19 Skip, ON_NOEXEC is M21 path-level Skip. INACTIVE never reaches here.
+_INITIAL_STATUS_ROWS: dict[str, tuple[str, str]] = {
+    "ON_HOLD": ("M20", "map via UC Hold on Start at cutover"),
+    "ON_ICE": ("M19", "map via UC Skip at cutover; L020 flags the all-skipped cascade"),
+    "ON_NOEXEC": ("M21", "map via UC Skip (path-level) at cutover; the M19 caveat applies"),
+}
+
+
 _VIA_TO_UC: dict[str, UcEdgeCondition] = {
     "success": "success",
     "failure": "failure",
     "done": "done",
     "terminated": "cancelled",  # M06: t() maps to the Cancelled condition
 }
+
+
+def _lookback_token(edge: DerivedEdge) -> str | None:
+    """The lookback token an edge carries, for the twin's provenance field.
+    Every compiled edge sets it, exitcode edges included: those quarantine
+    their workflow today, but the day U3b unfreezes the rich forms an unset
+    field would be a silent window loss."""
+    if edge.lookback is None:
+        return None
+    return edge.lookback.raw or edge.lookback.kind
 
 
 def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcModel:
@@ -409,6 +510,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                         value=str(edge.atom.value),
                     ),
                     mapping_row=edge.mapping_row,
+                    lookback=_lookback_token(edge),
                 )
             )
             continue
@@ -418,6 +520,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 dst=edge.dst,
                 condition=_VIA_TO_UC[edge.via],
                 mapping_row=edge.mapping_row,
+                lookback=_lookback_token(edge),
             )
         )
     # attach global gates to the consumer's edges; anything that cannot be
@@ -462,8 +565,12 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
         excluded.append(f"{flag.mapping_row} {flag.job}: {flag.reason}")
     if graph.or_shapes:
         excluded.append(
-            "M12 OR shapes present: duplicate-successor join semantics apply"
-            " (UCS-03); alternative lowerings are U1-gated"
+            "M12 OR shapes present: the NAIVE lowering ships -- every branch"
+            " attaches to ONE successor, and UC joins conjunctively over"
+            " non-skipped incoming edges (UCS-02/03), so independent branches"
+            " read as an AND. It reproduces `|` only for common-ancestor"
+            " diamonds. The restructure / Task-Monitor / duplicate-successor"
+            " lowerings are U1-gated and NOT emitted"
         )
     # workflows: boxes first (nested flatten to top), then edge components
     workflows: list[UcWorkflow] = []
@@ -508,30 +615,22 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
         if not any(e.src in tasks and e.dst in tasks for tasks in workflow_task_sets)
     ]
     for e in cross:
+        if e.mapping_row == "M15":
+            # the box IS the workflow, never a task vertex, so a member ->
+            # box override edge has no wire form. It is M15 restructuring,
+            # not the cross-workflow Task Monitor case below.
+            excluded.append(
+                f"M15 edge {e.src} -> {e.dst}: box completion override on a"
+                " transitive member; the box is the workflow itself, not a task"
+                " vertex, so the early exit needs explicit Skip-path"
+                " restructuring at cutover (SEM-12/UCS-04)"
+            )
+            continue
         excluded.append(
             f"{e.mapping_row} edge {e.src} -> {e.dst} spans workflows"
             " (Task Monitor territory, M02/M03; not modeled v1)"
         )
-    # SEM-24/DL-18: definition-time state is not modeled in the twin v1; the
-    # eventual mapping is M20 Hold ("Hold on Start", E-class). Recorded, never
-    # silently dropped -- the AutoSys-vs-twin comparator diverging on such
-    # catalogs is the correct polarity.
-    for name, job in catalog.jobs.items():
-        initial = job.sem.initial_status
-        if initial is not None and initial != "INACTIVE":
-            excluded.append(
-                f"M20 {name}: definition-time status {initial} not modeled in the"
-                " twin v1 (map via UC Hold on Start at cutover, SEM-24)"
-            )
-        if job.resources:
-            groups = ", ".join(
-                f"{r.name} x{r.quantity}" + (f" FREE={r.free}" if r.free else "")
-                for r in job.resources
-            )
-            excluded.append(
-                f"M34 {name}: resource requirements ({groups}) not modeled in the"
-                " twin v1 (map to UC Virtual Resources, UCS-09; DL-21)"
-            )
+    excluded += _per_job_exclusions(catalog)
     return UcModel(
         workflows=workflows,
         mutex_groups=[list(g) for g in graph.mutex_groups],
@@ -552,6 +651,34 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
         },
         excluded=excluded,
     )
+
+
+def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
+    """Per-JOB constructs the twin does not model, in catalog order.
+
+    SEM-24/DL-18 definition-time state: recorded, never silently dropped --
+    the AutoSys-vs-twin comparator diverging on such catalogs is the correct
+    polarity. Each status keeps its OWN row and its own cutover control
+    (_INITIAL_STATUS_ROWS). M34 resources ride here too (DL-21)."""
+    out: list[str] = []
+    for name, job in catalog.jobs.items():
+        initial = job.sem.initial_status
+        if initial is not None and initial != "INACTIVE":
+            row, cutover = _INITIAL_STATUS_ROWS[initial]
+            out.append(
+                f"{row} {name}: definition-time status {initial} not modeled in the"
+                f" twin v1 ({cutover}; SEM-24)"
+            )
+        if job.resources:
+            groups = ", ".join(
+                f"{r.name} x{r.quantity}" + (f" FREE={r.free}" if r.free else "")
+                for r in job.resources
+            )
+            out.append(
+                f"M34 {name}: resource requirements ({groups}) not modeled in the"
+                " twin v1 (map to UC Virtual Resources, UCS-09; DL-21)"
+            )
+    return out
 
 
 def _top_of(graph: DerivedGraph, box: str) -> str:
@@ -592,8 +719,10 @@ _BASE_WIRE_TOKENS: dict[UcEdgeCondition, str] = {
 
 
 class QuarantinedWorkflow(BaseModel):
-    """One workflow withheld WHOLE from the bundle, with every offending
-    edge listed (no silent edge drop, DL-04; safe-freeze rule, DL-55)."""
+    """One workflow withheld WHOLE from the bundle, with every cause listed
+    -- an edge the base schema cannot express, or a record name another
+    workflow also serializes to (no silent drop, DL-04; safe-freeze rule,
+    DL-55)."""
 
     name: str
     reasons: list[str]
@@ -710,13 +839,53 @@ def _quarantine_reasons(workflow: UcWorkflow) -> list[str]:
     return reasons
 
 
+def _range_text(ranges: list[tuple[int, int]]) -> str:
+    return ",".join(str(low) if low == high else f"{low}-{high}" for low, high in ranges)
+
+
+def _exit_boundary(twin: UcModel, task: str) -> str:
+    """The M31 values a workflow record cannot carry, for one task (DL-33;
+    Q7 cited-resolved DL-58: a present fail_codes decides alone)."""
+    bits: list[str] = []
+    if task in twin.max_exit_success:
+        bits.append(f"max_exit_success={twin.max_exit_success[task]}")
+    if task in twin.success_codes:
+        bits.append(f"success_codes={_range_text(twin.success_codes[task])}")
+    if task in twin.fail_codes:
+        bits.append(f"fail_codes={_range_text(twin.fail_codes[task])}")
+    return f"{task} ({', '.join(bits)})"
+
+
+def _lookback_notes(workflows: list[UcWorkflow]) -> list[str]:
+    """One note per emitted edge that carries a lookback window (M03).
+
+    The base record has no field for a window -- the frozen schema spells
+    three condition tokens and nothing else (U3b gates the rich forms) -- so
+    the edge serializes as a plain wire edge. Without this note a pipeline
+    applying the records alone would silently lose the window (DL-04)."""
+    notes: list[str] = []
+    for workflow in workflows:
+        for edge in workflow.edges:
+            if edge.lookback is None:
+                continue
+            notes.append(
+                f"M03 edge {edge.src} -> {edge.dst} in workflow {workflow.name}"
+                f" serializes as a plain '{_BASE_WIRE_TOKENS[edge.condition]}' edge:"
+                f" its lookback window ({edge.lookback}) is NOT expressible in a"
+                " workflow record -- rebuild it as a Task Monitor with Time Scope"
+                " at cutover (SEM-04/M03)"
+            )
+    return notes
+
+
 def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBundle:
     """Serialize the twin model to the U3a base record bundle (DL-55).
 
     Deterministic for identical input -- no timestamps (callers stamp their
-    own). Workflows the base schema cannot express are quarantined WHOLE
-    with per-edge reasons; everything else becomes one CREATE-ONLY
-    taskWorkflow record per docs/uc-edge-schema.md."""
+    own). A workflow is quarantined WHOLE for either cause -- an edge the
+    base schema cannot express, or a record name that collides with another
+    workflow's -- with a reason per cause; everything else becomes one
+    CREATE-ONLY taskWorkflow record per docs/uc-edge-schema.md."""
     if graph is None:
         graph = derive_graph(catalog)
     twin = compile_twin(catalog, graph)
@@ -729,21 +898,26 @@ def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBu
         else:
             emitted.append(workflow)
     # duplicate record names silently clobber under any upsert wrapper --
-    # every collision party quarantines (DL-55 review amendment)
-    name_counts = Counter(workflow.name for workflow in emitted)
-    collided = {name for name, n in name_counts.items() if n > 1}
+    # every collision party quarantines (DL-55 review amendment). The
+    # comparison folds case: UC addresses names case-insensitively, so WF_x
+    # and wf_x are ONE record on the controller (UCS-12, the L014 reading).
+    name_counts = Counter(workflow.name.lower() for workflow in emitted)
+    collided = {folded for folded, n in name_counts.items() if n > 1}
     if collided:
         survivors: list[UcWorkflow] = []
         for workflow in emitted:
-            if workflow.name in collided:
+            folded = workflow.name.lower()
+            if folded in collided:
+                parties = ", ".join(sorted({w.name for w in emitted if w.name.lower() == folded}))
                 quarantined.append(
                     QuarantinedWorkflow(
                         name=workflow.name,
                         reasons=[
-                            f"record name collision: {name_counts[workflow.name]}"
-                            f" workflows serialize to '{workflow.name}'"
-                            " (one-POST-per-record fails the second create; an"
-                            " upsert wrapper would silently clobber)"
+                            f"record name collision: {name_counts[folded]}"
+                            f" workflows serialize to one folded name '{folded}'"
+                            f" ({parties}) -- UC name addressing folds case"
+                            " (UCS-12/L014); one-POST-per-record fails the second"
+                            " create and an upsert wrapper would silently clobber"
                         ],
                     )
                 )
@@ -760,6 +934,7 @@ def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBu
                 f" record (M18 v1, DL-16); the alias names ({aliases}) have no UC"
                 " record of their own"
             )
+    notes += _lookback_notes(emitted)
     referenced = sorted({task for workflow in emitted for task in workflow.tasks})
     if referenced:
         notes.append(
@@ -768,9 +943,9 @@ def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBu
         )
     if records:
         notes.append(
-            "task names pass through verbatim: UC documents no name"
-            " constraint (uc-edge-schema.md); an invalid name fails loudly at"
-            " create time"
+            "task names pass through verbatim: UC documents no character-set"
+            " or length constraint for a task name (uc-edge-schema.md); an"
+            " invalid name fails loudly at create time"
         )
     synthesized = [w.name for w in emitted if w.name not in catalog.jobs]
     if synthesized:
@@ -793,10 +968,11 @@ def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBu
         )
     exit_tasks = sorted(set(twin.max_exit_success) | set(twin.success_codes) | set(twin.fail_codes))
     if exit_tasks:
+        rendered = "; ".join(_exit_boundary(twin, task) for task in exit_tasks)
         notes.append(
-            f"M31 exit-code success boundaries for task(s) {', '.join(exit_tasks)}"
-            " are NOT in workflow records -- configure per-task Exit Code"
-            " Processing at cutover (task bodies are estate work)"
+            f"M31 exit-code success boundaries are NOT in workflow records --"
+            f" configure per-task Exit Code Processing at cutover (task bodies"
+            f" are estate work): {rendered}"
         )
     return UcBundle(
         catalog_hash=catalog_hash(catalog),

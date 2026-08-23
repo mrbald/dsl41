@@ -61,6 +61,11 @@ Phase-5 graph-rule readings (each with a test):
 - L014 UC-side name collision (UCS-12): lowering already refuses exact
   duplicates, so the linter's residual check is case-insensitive collision
   (UC name addressing is the migration hazard); error severity per ss9.
+- L020 iced consumer (M19, the last Part II requirement-3 detector): every
+  immediate predecessor translates to a UC Skip, so AutoSys runs the
+  consumer (SEM-05/SEM-20) while UC cascades the skip (UCS-02). One live
+  predecessor converges, so the rule needs ALL of them; box-override edges
+  and global gates are not start gates and do not count.
 """
 
 from __future__ import annotations
@@ -872,6 +877,65 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
+#: SEM-24 definition-time statuses that translate to a UC Skip: ON_ICE is
+#: M19 (Skip task), ON_NOEXEC is M21 (path-level Skip). ON_HOLD is M20 Hold
+#: -- it blocks downstream on BOTH sides, so it is not this rule's business.
+_SKIP_TRANSLATED = ("ON_ICE", "ON_NOEXEC")
+
+
+def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
+    """Iced consumer (M19; Part II requirement 3's last detector): EVERY
+    immediate predecessor of the job translates to a UC Skip.
+
+    This is where the two engines part. In AutoSys an iced producer
+    satisfies every atom that names it (SEM-05/SEM-20), so the consumer
+    RUNS. In UC a task whose incoming edges are all skipped is Skipped
+    itself, and the skip cascades on (UCS-02). One live predecessor is
+    enough to converge, which is why the rule needs ALL of them.
+
+    Predecessors are start-gate producers only: box-override edges (M15/M16)
+    are completion predicates on a box, not start gates, and a global gate
+    (via="global") names no job at all. An undefined or cross-instance
+    producer cannot be iced in this catalog, so it keeps the rule quiet --
+    the conservative direction."""
+    predecessors: dict[str, list[str]] = {}
+    for edge in graph.edges:
+        if edge.via == "global" or edge.mapping_row in ("M15", "M16"):
+            continue
+        predecessors.setdefault(edge.dst, []).append(edge.src)
+    out: list[Violation] = []
+    for name, job in catalog.jobs.items():
+        if job.sem.initial_status in _SKIP_TRANSLATED:
+            continue  # skipped on BOTH sides: no cascade divergence to flag
+        sources = sorted(set(predecessors.get(name, [])))
+        if not sources:
+            continue
+        iced = [
+            src
+            for src in sources
+            if src in catalog.jobs and catalog.jobs[src].sem.initial_status in _SKIP_TRANSLATED
+        ]
+        if len(iced) != len(sources):
+            continue
+        listed = ", ".join(repr(src) for src in sources)
+        out.append(
+            Violation(
+                code="L020",
+                severity="warn",
+                message=(
+                    f"every immediate predecessor of {name!r} ({listed}) translates to"
+                    " a UC Skip (M19/M21): AutoSys runs the consumer -- an iced"
+                    " producer satisfies its atoms (SEM-05/SEM-20) -- while UC"
+                    " cascades the skip onto it (UCS-02)"
+                ),
+                jobs=[name],
+                span=job.span,
+                detail=",".join(sources),
+            )
+        )
+    return out
+
+
 # -------------------------------------------------------------------------- registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -901,6 +965,7 @@ GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
     ("L012", rule_l012),
     ("L013", rule_l013),
     ("L014", rule_l014),
+    ("L020", rule_l020),
 )
 
 

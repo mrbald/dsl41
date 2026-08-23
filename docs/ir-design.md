@@ -25,7 +25,7 @@ JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──�
 Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
 consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
 `decompile(catalog, graph)` all need the faithful layer. The linter has the same shape —
-L001–L007 and L015–L019 read IR-F, L008–L014 read IR-G next to it.
+L001–L007 and L015–L019 read IR-F, L008–L014 and L020 read IR-G next to it.
 
 The four representations have four contracts:
 
@@ -313,7 +313,11 @@ Canonicalization `C(IR-F)`:
   survive.
 - Erase `Paren`. Flatten nested And/And, Or/Or. Sort operand lists by a stable structural key,
   drop duplicate operands, and collapse a one-operand And/Or to that operand.
-- Normalize schedule lists (sorted times, dedup), each list on its own. Empty the
+- Normalize schedule lists (sorted times, dedup). The trigger lists sort on their own, with
+  one exception: SEM-34 pairs each `must_start`/`must_complete` entry with a `start_time` BY
+  POSITION, so those lists sort as ONE row set and a duplicate row collapses whole (DL-151). A
+  single relative offset covering several start times has no pairing to lose and stays as it
+  is. Empty the
   `annotations` dict in the comparison view; no tier compares annotations today. This is the
   dict only — `must_start` and `must_complete` are annotation-CLASS semantics but live on
   `ScheduleBlock`, so they stay in the compare and a difference in them is tier (a)'s to
@@ -332,7 +336,8 @@ independent atom booleans — independent atoms cannot see that `s(x)&f(x)` is u
 which is L006's own flagship case. Each referenced job scope contributes its status, an
 ON_ICE flag, an age bucket cut by the referenced lookback windows, a zero-freshness flag, and
 a last exit code over the comparison cutpoints; each referenced global contributes its literal,
-numeric and string cutpoints, and UNSET. Atoms then evaluate as functions of that state, so
+numeric and string cutpoints, and UNSET (a marker OUTSIDE the string domain, so no literal
+can be read as unset — DL-151). Atoms then evaluate as functions of that state, so
 status exclusion and window nesting hold by construction. Guard the computation with a
 state-space ceiling of 2^18; past it, the condition reports "too large, tier-c only" —
 inconclusive, never divergent. The `dd` BDD fallback is deliberately not taken v1 (DL-14): no
@@ -425,6 +430,7 @@ follows, with each rule traceable to a SEM/M row:
 | L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 | L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
 | L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, cited-resolved DL-58) have no UC-side arm concept — per-estate migration-attention item | SEM-32/M02 |
+| L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer — an iced producer satisfies its atoms — while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
 
 ## 10. Design decisions D1–D4
 

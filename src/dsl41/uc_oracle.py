@@ -44,9 +44,11 @@ Interpreter decisions (each with a test; recorded as DL-16):
   (instance launch or edges satisfied) it goes Skipped and the skip
   cascades. OFF_ICE unmarks. ON_HOLD holds an eligible task (Held blocks
   the instance from completing, M20); OFF_HOLD starts it if its edges were
-  already satisfied. KILLJOB -> Cancelled (M23: Force Finish/Cancel
-  analog). FORCE_STARTJOB starts the task inside the open instance
-  regardless of edges (M22: forced runs feed no latches -- there are none).
+  already satisfied. KILLJOB -> Cancelled (the UCS-11 Force Finish/Cancel
+  command; the mapping table has no KILLJOB row -- M23 is CHANGE_STATUS,
+  whose Force Finish deliberately does NOT stop the process). FORCE_STARTJOB
+  starts the task inside the open instance regardless of edges (M22: forced
+  runs feed no latches -- there are none).
 - Workflow completion: every task terminal (Success/Failed/Skipped/
   Cancelled) -> instance closes; the workflow itself gets a trace entry,
   Failed if any task Failed/Cancelled else Success. U2 is resolved (DL-53):
@@ -203,7 +205,9 @@ class UcOracle:
             job = self._required_job(ev)
             instance = self._open_instance_of(job)
             if instance is not None and instance.task_status.get(job) == "Running":
-                self._complete(instance, job, "Cancelled", cause="KILLJOB (M23)")
+                self._complete(
+                    instance, job, "Cancelled", cause="KILLJOB (UCS-11 Force Finish/Cancel)"
+                )
         else:
             raise UcOracleError(f"uninjectable event kind for the UC twin: {kind!r}")
 

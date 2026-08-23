@@ -170,12 +170,14 @@ A slashed class (**A/R**, **E/A**) means the row splits by case. Where the Notes
 a discriminator the classifier applies it, and every derived edge then carries exactly ONE
 class. Rows without an implemented discriminator keep the slash as a statement of what the
 migration can cost — M12, for one, produces an OR-shape record with a suggested lowering
-instead of an edge class (U1-gated), and M17 has no derived item at all.
+instead of an edge class (U1-gated), and M17 derives no edge at all: the report names the
+construct and leaves the class to a human (DL-151).
 
 Every A/R row that becomes a derived edge becomes a migration-report entry. The non-edge
-entries the report carries are M07, M12, M24, M27 and M33; a row outside both sets has no
-report path. Only six rows also have a dedicated linter rule — L008 (M16), L009 (M01/M02), L012 (M07), L016
-(M34), L018 (M24), L019 (M02). The rule inventory is `ir-design.md` §9.
+entries the report carries are M07, M12, M17, M24, M27 and M33; a row outside both sets has no
+report path. Only seven rows also have a dedicated linter rule — L008 (M16), L009 (M01/M02),
+L012 (M07), L016 (M34), L018 (M24), L019 (M02), L020 (M19). The rule inventory is
+`ir-design.md` §9.
 
 | # | AutoSys construct (SEM) | UC target | Class | Notes / assumption |
 |---|---|---|---|---|
@@ -195,10 +197,10 @@ report path. Only six rows also have a dedicated linter rule — L008 (M16), L00
 | M14 | box with member conditions (SEM-10) | workflow with edges | **A** | assumes member conditions reference siblings. A member's unqualified `s()` naming a job outside its top-level box → M02. Other atom kinds keep their own row (M03–M08); the twin's cross-workflow gate is what catches them, and it excludes them by record |
 | M15 | box_success/box_failure internal ref (SEM-12) | restructure: terminal vertex placement / workflow status by path design | **A** | early-exit semantics needs explicit Skip paths. Membership is transitive (SEM-12 "inside"), so any descendant lands here; a non-member, global or cross-instance reference is M16 instead |
 | M16 | box_success external ref, hung-RUNNING gate (SEM-12) | — | **R** | no analog — redesign (this is a bug-as-feature pattern) |
-| M17 | box_terminator/job_terminator (SEM-14) | task-level failure handling + workflow Cancel actions | **A/R** | UC has no auto "kill siblings on my failure" edge. Emulate with actions/monitors — per-case |
+| M17 | box_terminator/job_terminator (SEM-14) | task-level failure handling + workflow Cancel actions | **A/R** | UC has no auto "kill siblings on my failure" edge. Emulate with actions/monitors — per-case. No derived edge carries it: the migration report lists each declaring job under its own section, with the class left open because this row states no discriminator |
 | M18 | nested boxes (SEM-17) | sub-workflows | **E** | UC sub-workflows are the exact analog. The v1 backend does not use them yet: nested boxes flatten into the top-level workflow record and the nested box names get no record of their own, travelling as an apply note instead (DL-16) |
-| M19 | ON_ICE (SEM-20) | Skip task (definition-level Skip flag / instance Skip) | **A** | Verified: a skipped predecessor does not block successors (UCS-02) — downstream-satisfied matches. BUT the all-skipped cascade differs from AutoSys: an iced predecessor satisfies every atom there (SEM-05), so the consumer runs even when ice is its only predecessor, while in UC all-predecessors-skipped cascades the skip onto the consumer. Linter: flag a consumer when ALL of its immediate predecessors translate to Skip |
-| M20 | ON_HOLD (SEM-21) | Hold task/instance | **E** | downstream blocked in both |
+| M19 | ON_ICE (SEM-20) | Skip task (definition-level Skip flag / instance Skip) | **A** | Verified: a skipped predecessor does not block successors (UCS-02) — downstream-satisfied matches. BUT the all-skipped cascade differs from AutoSys: an iced predecessor satisfies every atom there (SEM-05), so the consumer runs even when ice is its only predecessor, while in UC all-predecessors-skipped cascades the skip onto the consumer. Linter: L020 flags a consumer when ALL of its immediate predecessors translate to Skip (ON_ICE here, or ON_NOEXEC under M21); one live predecessor converges, and a box-override reference is not a start gate |
+| M20 | ON_HOLD (SEM-21) | Hold task/instance | **E** | downstream blocked in both. The twin does not model definition-time state: each status lands in the `dsl41 uc` exclusion ledger under its OWN row — ON_HOLD here, ON_ICE under M19, ON_NOEXEC under M21 — with the UC control it maps to at cutover |
 | M21 | ON_NOEXEC (SEM-22) | Skip (path-level) | **A** | close, but the M19 skip-cascade caveat applies |
 | M22 | FORCE_STARTJOB (SEM-23) | Launch task / Clear Dependencies | **A** | forced runs do not satisfy latches in UC (no latches) — ops retraining, R8 |
 | M23 | CHANGE_STATUS | Force Finish / Set status via API | **A** | Force Finish does not stop the underlying process **[V]** — runbook warning |
@@ -223,22 +225,27 @@ report path. Only six rows also have a dedicated linter rule — L008 (M16), L00
    rows compile silently. This is dsl42's "failed translation is a compile error" made
    granular. Two narrower gates sit after it, and each records what it drops — never a silent
    loss. (i) The twin also excludes edge shapes it cannot hold: a `notrunning` edge (no UC
-   condition reads "not running"), a global gate it cannot attach, and every edge that spans
-   two workflows — including E-class M04/M05 ones, which is Task Monitor territory. (ii)
-   Record emission quarantines a WHOLE workflow when the base record schema cannot spell one
-   of its edges — a `cancelled` condition, any variable condition (U3a;
+   condition reads "not running"), a global gate it cannot attach, an M15 member-to-box
+   override (the box IS the workflow, never a task vertex, so the early exit needs explicit
+   Skip-path restructuring), and every edge that spans two workflows — including E-class
+   M04/M05 ones, which is Task Monitor territory. (ii) Record emission quarantines a WHOLE
+   workflow for either of two causes: the base record schema cannot spell one of its edges —
+   a `cancelled` condition, any variable condition — or two workflows serialize to one record
+   name, compared the way UC addresses names, case folded (U3a;
    `docs/uc-edge-schema.md`).
 2. **The migration report is a first-class output artifact** (per-catalog markdown): every
    A-classified edge with its assumption, every R-classified edge, the non-edge constructs
    this table routes to a human (M07 mutex groups, M12 OR shapes, M27 run_window flags, M33
-   external refs, M24 calendars), the quarantine ledger, and the open questions the catalog's
-   rows depend on. The record bundle carries its OWN ledgers next to the records — what the
-   twin excluded, and what a workflow record cannot hold (M20 definition-time status, M34
-   resources, M31 exit-code boundaries) — so records can never be applied without them.
+   external refs, M24 calendars, M17 terminators), the quarantine ledger, both bundle ledgers,
+   and the open questions the catalog's rows depend on. The record bundle carries its OWN
+   ledgers next to the records — what the twin excluded, and what a workflow record cannot
+   hold (M19/M20/M21 definition-time status, M34 resources, M31 exit-code boundaries with
+   their configured values, an M03 lookback window per edge) — so records can never be
+   applied without them.
 3. **Detectors needed in analysis passes:** same-cycle detector (M01 versus M02), `n()`-mutex
    detector (M07), OR-shape classifier (M12), box-reference detector (a member's unqualified
    `s()` naming a job outside its top-level box → M02; a box override naming a transitive
-   member → M15, naming anything else → M16), iced-consumer detector (M19).
+   member → M15, naming anything else → M16), iced-consumer detector (M19, shipped as L020).
 
 ## Part III — Open questions (live UC instance / OpenAPI dive)
 

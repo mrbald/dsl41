@@ -159,6 +159,10 @@ _DAY_FULL = {
 #: must stay distinct (never matched here).
 _VAR_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
+#: SEM-34 relative must_*_times token: a plus sign and DECIMAL digits. `\d`
+#: would take non-ASCII digits int() then rejects, so the class is explicit.
+_REL_OFFSET_RE = re.compile(r"\+[0-9]+")
+
 IR_VERSION: Literal["0.2"] = "0.2"
 
 
@@ -371,9 +375,11 @@ def _int_attr(mapping: dict[str, str], key: str, *, label: str) -> int | None:
 
 class ResourceRef(BaseModel):
     """One group of the `resources:` job attribute (DL-21; TechDocs 12.x:
-    `(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)`). Typed carry, no oracle
-    gate semantics v1 (Resource Wait / QUE_WAIT is out of interpreter
-    scope); UCS-09 maps these to UC Virtual Resource requirements."""
+    `(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)`). DL-50 made this a GATE,
+    not a carry: the oracle holds one capacity bucket per resource, a job
+    acquires its whole demand vector atomically before RUNNING, and a short
+    bucket parks it in QUE_WAIT. UCS-09 maps the same requirement to a UC
+    Virtual Resource."""
 
     name: str
     quantity: int = Field(ge=1)
@@ -1247,11 +1253,19 @@ class _Lowerer:
         if all(relative):
             offsets: list[int] = []
             for t in tokens:
-                try:
-                    offsets.append(int(t[1:]))
-                except ValueError:
-                    self.err(f"{attr.key}: invalid relative offset {t!r}", attr.span)
+                # int() alone accepted "+-1" as -1 and "+1_0" as 10: a sign,
+                # underscores and non-ASCII digits all pass it. SEM-34's
+                # relative form is a plus and decimal digits, nothing else
+                # (DL-151). Vendor RANGE limits are deliberately not checked
+                # here -- the doc records them as vendor constraints.
+                if _REL_OFFSET_RE.fullmatch(t) is None:
+                    self.err(
+                        f"{attr.key}: invalid relative offset {t!r}"
+                        " (SEM-34: '+' followed by decimal digits)",
+                        attr.span,
+                    )
                     return None
+                offsets.append(int(t[1:]))
             if len(offsets) not in (1, n_start_times):
                 self.err(
                     f"{attr.key}: {len(offsets)} offsets for {n_start_times} start_times"

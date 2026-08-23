@@ -157,6 +157,16 @@ def equiv(
             divergent |= _print_tier_b(
                 equivalent_tier_b(catalog_a, catalog_b, rename=rename_map, case_fold=case_fold)
             )
+            if tier == "b":
+                # tier b reads set(A.jobs) & set(B.jobs) and compares edges,
+                # not the node list: two disjoint catalogs can both come back
+                # equivalent. Tier (a) owns the job-set question (ir-design
+                # ss6), so say so rather than let "equivalent" over-read.
+                typer.echo(
+                    "  note: tier b compares only the jobs both catalogs define;"
+                    " a job present in one catalog alone is tier (a)'s question"
+                    " (ir-design ss6) -- run --tier a or --tier all to settle it"
+                )
         if tier in ("c", "all"):
             divergent |= _print_tier_c(
                 equivalent_tier_c(
@@ -215,11 +225,12 @@ def uc(
     """Emit the U3a base CREATE-ONLY UC workflow record bundle (JSON).
 
     One taskWorkflow record per serializable workflow, exactly the shape
-    frozen in docs/uc-edge-schema.md; workflows the base schema cannot
-    express are QUARANTINED whole and listed in the bundle's own ledger
-    (summarized on stderr). Exit 0 once a bundle is generated (1 with
-    --strict when anything was quarantined); exit 2 when the input never
-    reached the backend.
+    frozen in docs/uc-edge-schema.md. A workflow is QUARANTINED whole for
+    either of two causes -- an edge the base schema cannot express, or a
+    record name a second workflow also serializes to -- and every one is
+    listed in the bundle's own ledger (summarized on stderr). Exit 0 once a
+    bundle is generated (1 with --strict when anything was quarantined);
+    exit 2 when the input never reached the backend.
     """
     from dsl41.backend_uc import compile_to_uc
 

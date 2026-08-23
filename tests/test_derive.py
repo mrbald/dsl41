@@ -46,6 +46,7 @@ from dsl41.lint import (
     rule_l012,
     rule_l013,
     rule_l014,
+    rule_l020,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -411,6 +412,33 @@ def test_box_siblings_are_same_cycle_regardless_of_schedule() -> None:
     assert edge.mapping_row == "M01"  # one box run == one cycle (ir-design ss5)
 
 
+def test_m01_assumption_names_the_half_of_the_detector_that_fired() -> None:
+    """DL-151: the M01 assumption used to claim a shared trigger cadence for
+    every same-cycle pair. Two unscheduled box siblings have NO cadence, so
+    the record asserted a fact the catalog does not carry. The box half and
+    the cadence half now state their own reason."""
+    boxed = _only_edge(
+        "insert_job: box_z\njob_type: b\n\n"
+        "insert_job: sib_p\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_z\n\n"
+        "insert_job: sib_q\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box_z\n"
+        "condition: s(sib_p)\n"
+    )
+    assert boxed.mapping_row == "M01"
+    assert boxed.assumption is not None
+    assert "members of one top-level box" in boxed.assumption
+    assert "trigger cadence" not in boxed.assumption
+    cadenced = _only_edge(
+        "insert_job: tick_p\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n\n'
+        "insert_job: tick_q\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "condition: s(tick_p)\n"
+    )
+    assert cadenced.mapping_row == "M01"
+    assert cadenced.assumption is not None
+    assert "share one trigger cadence" in cadenced.assumption
+
+
 def test_member_inherits_box_cadence_and_it_propagates_to_a_condition_consumer() -> None:
     text = (
         "insert_job: box_y\njob_type: b\ndate_conditions: 1\ndays_of_week: all\n"
@@ -608,12 +636,14 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     fold_t004_typed_links.jil's uniform f-chain, uniform d-fan-out, and
     mixed s/f/f/d chain add 4 exact M04 (failure) edges, 3 exact M05 (done)
     edges, and 1 more same-cadence M01 success edge; names_colon_join.jil
-    (DL-39) adds 1 M01 success edge between colon-named jobs."""
+    (DL-39) adds 1 M01 success edge between colon-named jobs.
+    l020_iced_consumer.jil (DL-151) adds 3 M02 edges: its four jobs are all
+    unscheduled and unboxed, so every s() latch there is cross-stream."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 37
+    assert len(graph.edges) == 40
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 13, "M02": 8, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 13, "M02": 11, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
@@ -836,6 +866,78 @@ def test_l014_fires_on_case_colliding_names() -> None:
 def test_l014_quiet_on_the_whole_corpus() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     assert rule_l014(catalog, derive_graph(catalog)) == []
+
+
+def test_l020_fires_when_every_immediate_predecessor_translates_to_skip() -> None:
+    """M19 (DL-151, Part II requirement 3): an iced producer satisfies its
+    atoms in AutoSys, so the consumer runs; UC cascades the skip onto it."""
+    text = (
+        "insert_job: icy\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: skipped_path\njob_type: c\ncommand: y\nmachine: m1\n"
+        "status: ON_NOEXEC\n\n"
+        "insert_job: downstream\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: s(icy) & s(skipped_path)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    assert violation.code == "L020"
+    assert violation.severity == "warn"
+    assert violation.jobs == ["downstream"]
+    assert violation.detail == "icy,skipped_path"
+    assert "UCS-02" in violation.message
+
+
+def test_l020_quiet_when_one_predecessor_still_runs() -> None:
+    """One live predecessor converges: UC skips only the iced branch and the
+    consumer still runs, so the rule needs ALL of them (M19 note)."""
+    text = (
+        "insert_job: icy2\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: livewire\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: mixed_cons\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: s(icy2) & s(livewire)\n"
+    )
+    catalog = lower_source(text)
+    assert rule_l020(catalog, derive_graph(catalog)) == []
+
+
+def test_l020_quiet_on_a_held_predecessor_and_on_a_box_override_ref() -> None:
+    """ON_HOLD is M20: it blocks downstream on BOTH sides, so it is not this
+    divergence. A box_success reference is a completion predicate on the
+    box, never a start gate, so it does not make the box an iced consumer."""
+    held = lower_source(
+        "insert_job: onhold\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_HOLD\n\n"
+        "insert_job: after_hold\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(onhold)\n"
+    )
+    assert rule_l020(held, derive_graph(held)) == []
+    override = lower_source(
+        "insert_job: icebox\njob_type: b\nbox_success: s(frozen)\n\n"
+        "insert_job: frozen\njob_type: c\ncommand: x\nmachine: m1\n"
+        "box_name: icebox\nstatus: ON_ICE\n"
+    )
+    assert rule_l020(override, derive_graph(override)) == []
+
+
+def test_l020_quiet_when_the_consumer_itself_translates_to_skip() -> None:
+    """A consumer inserted ON_ICE is skipped on BOTH sides, so there is no
+    cascade divergence to flag -- the rule exists for a consumer AutoSys
+    would run (review follow-up)."""
+    text = (
+        "insert_job: icy3\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: icy_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        "status: ON_ICE\ncondition: s(icy3)\n"
+    )
+    catalog = lower_source(text)
+    assert rule_l020(catalog, derive_graph(catalog)) == []
+
+
+def test_l020_fires_once_on_the_corpus_fixture() -> None:
+    """The house rule: one corpus fixture that trips the rule and one that
+    does not -- l020_iced_consumer.jil carries both (l20_consumer trips,
+    l20_mixed does not)."""
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    assert violation.jobs == ["l20_consumer"]
 
 
 # --------------------------------------------------------- 11. lint_catalog integration

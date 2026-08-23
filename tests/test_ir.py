@@ -205,7 +205,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     fold_or_*/fold_or2_* (T-003), fold_f_*/fold_d_*/fold_mixed_* (T-004/
     T-002), fold_res_* (T-006), and fold_sched_* (T-007) job sets;
     names_colon_join.jil (DL-39) the colon-named etl:*/night:box/
-    boxed:member set (semantic, unescaped keys)."""
+    boxed:member set (semantic, unescaped keys). l020_iced_consumer.jil
+    (DL-151) added the l20_* set (the M19 iced-consumer rule L020)."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -261,6 +262,10 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "job_b",
         "l16_writer",
         "l18_reporter",
+        "l20_consumer",
+        "l20_iced",
+        "l20_live",
+        "l20_mixed",
         "long_lists",
         "mutex_a",
         "mutex_b",
@@ -706,6 +711,17 @@ _SEM34_ERROR_CASES = [
         "missing-start-times",
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         "must_start_times: +5\n",
+    ),
+    # DL-151: int() alone read these as -1 and as 10.
+    (
+        "relative-offset-carrying-a-second-sign",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_times: "10:00"\nmust_start_times: +-1\n',
+    ),
+    (
+        "relative-offset-with-an-underscore-separator",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_times: "10:00"\nmust_start_times: +1_0\n',
     ),
 ]
 

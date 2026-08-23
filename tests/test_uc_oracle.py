@@ -358,8 +358,8 @@ def test_m20_hold_blocks_instance_completion_off_hold_starts_and_closes() -> Non
     assert transitions(o.trace(), "wf") == ["INSTANCE->Running", "INSTANCE->Success"]
 
 
-def test_m23_killjob_cancels_and_only_the_cancelled_edge_matches() -> None:
-    """M23 + UCS-01/M06: KILLJOB completes a Running task as Cancelled; a
+def test_ucs11_killjob_cancels_and_only_the_cancelled_edge_matches() -> None:
+    """UCS-11 + UCS-01/M06: KILLJOB completes a Running task as Cancelled; a
     failure-condition edge does NOT match Cancelled (UC separates them,
     UCS-01/M06) -- only a `cancelled` edge does."""
     model = make_model(
@@ -375,6 +375,11 @@ def test_m23_killjob_cancels_and_only_the_cancelled_edge_matches() -> None:
     assert transitions(o.trace(), "p") == ["Waiting->Running", "Running->Cancelled"]
     assert transitions(o.trace(), "cf") == ["Waiting->Skipped"]  # failure != cancelled
     assert transitions(o.trace(), "cc") == ["Waiting->Running"]
+    # DL-151: the kill analog is the UCS-11 Force Finish/Cancel command. The
+    # table has no KILLJOB row -- M23 is CHANGE_STATUS, whose Force Finish
+    # deliberately does NOT stop the process.
+    (killed,) = [e for e in o.trace() if e.job == "p" and e.transition.endswith("Cancelled")]
+    assert killed.cause == "KILLJOB (UCS-11 Force Finish/Cancel)"
 
 
 def test_m22_force_startjob_launches_then_forces_and_forces_within_open_instance() -> None:
@@ -698,8 +703,12 @@ def test_or_shape_presence_adds_a_u1_gated_ledger_note() -> None:
     )
     model = compile_twin(lower_source(text))
     assert model.excluded == [
-        "M12 OR shapes present: duplicate-successor join semantics apply"
-        " (UCS-03); alternative lowerings are U1-gated"
+        "M12 OR shapes present: the NAIVE lowering ships -- every branch"
+        " attaches to ONE successor, and UC joins conjunctively over"
+        " non-skipped incoming edges (UCS-02/03), so independent branches"
+        " read as an AND. It reproduces `|` only for common-ancestor"
+        " diamonds. The restructure / Task-Monitor / duplicate-successor"
+        " lowerings are U1-gated and NOT emitted"
     ]
 
 

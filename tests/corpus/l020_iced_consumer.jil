@@ -1,0 +1,26 @@
+/* L020 trigger (M19): l20_consumer's only predecessor is inserted ON_ICE, so
+   AutoSys runs the consumer (an iced producer satisfies its atoms, SEM-05/
+   SEM-20) while UC cascades the skip onto it (UCS-02). l20_mixed is the
+   in-file non-trigger: one iced predecessor and one live one. Synthetic. */
+insert_job: l20_iced
+job_type: c
+command: /usr/bin/true
+machine: m1
+status: ON_ICE
+
+insert_job: l20_live
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l20_consumer
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l20_iced)
+
+insert_job: l20_mixed
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l20_iced) & s(l20_live)

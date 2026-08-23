@@ -534,7 +534,8 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     (Q3, DL-54/58) joined via consumer_stale -- sem04_lookback.jil's scheduled
     consumer with a condition is exactly the schedule+condition composition
     the rule flags (one job, two distinct hazards: L009 staleness, L019
-    arm-and-wait with no UC arm concept)."""
+    arm-and-wait with no UC arm concept). L020 (M19, DL-151) joined with
+    l020_iced_consumer.jil's all-iced consumer."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -549,6 +550,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L016",
         "L018",
         "L019",
+        "L020",
     }
 
 
@@ -572,7 +574,9 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     deliberately missing exclude_calendar (DL-36; the calendar fixtures added
     no other finding -- every other count is unchanged). L019 x1 via
     sem04_lookback.jil's consumer_stale, the corpus's one schedule+condition
-    composition (Q3, DL-54)."""
+    composition (Q3, DL-54). L020 x1 via l020_iced_consumer.jil's
+    l20_consumer (DL-151); its l20_mixed sibling is the in-file non-trigger
+    and adds no other finding."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -589,6 +593,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L016": 1,
             "L018": 1,
             "L019": 1,
+            "L020": 1,
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))

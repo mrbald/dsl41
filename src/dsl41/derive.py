@@ -308,15 +308,26 @@ def _cadences(catalog: CatalogIR, cond_preds: dict[str, set[str]]) -> dict[str, 
     return cadence
 
 
-def _same_cycle(src: str, dst: str, tree: BoxTree, cadence: dict[str, str | None]) -> bool:
+def _same_cycle(
+    src: str, dst: str, tree: BoxTree, cadence: dict[str, str | None]
+) -> Literal["box", "cadence"] | None:
+    """WHY the two jobs are one stream (M01), or None for cross-stream (M02).
+
+    The detector has two halves (DL-12) and they license different
+    sentences: "box" is co-membership of one top-level box, which needs no
+    cadence at all, and "cadence" is two unboxed jobs under one derived
+    trigger signature. An edge's assumption record must not claim a shared
+    cadence that a same-box pair may not have."""
     top_src, top_dst = tree.top(src), tree.top(dst)
     if top_src is not None or top_dst is not None:
         # Boxes are streams: same top-level box == one cycle; different (or
         # only one) box == different UC workflows even under identical
         # schedules -- a trigger-signature collision is not a stream (M14
         # note: member conditions referencing jobs outside the box -> M02).
-        return top_src == top_dst and top_src is not None
-    return cadence.get(src) is not None and cadence.get(src) == cadence.get(dst)
+        return "box" if (top_src == top_dst and top_src is not None) else None
+    if cadence.get(src) is not None and cadence.get(src) == cadence.get(dst):
+        return "cadence"
+    return None
 
 
 def _is_inside(tree: BoxTree, job: str, box: str) -> bool:
@@ -381,7 +392,16 @@ def _classify_condition_edge(
             )
         return edge("assumed", "M03", assumption)
     if via == "success":
-        if _same_cycle(src, ref.dst, tree, cadence):
+        stream = _same_cycle(src, ref.dst, tree, cadence)
+        if stream == "box":
+            return edge(
+                "assumed",
+                "M01",
+                "producer and consumer are members of one top-level box, so one"
+                " box run is one cycle (neither job needs a cadence of its own);"
+                " assumes no cross-run staleness is relied upon (SEM-01/R1)",
+            )
+        if stream == "cadence":
             return edge(
                 "assumed",
                 "M01",

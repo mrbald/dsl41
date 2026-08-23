@@ -1137,3 +1137,87 @@ def test_tier_c_rename_collision_raises() -> None:
     catalog = lower_source(template)
     with pytest.raises(RenameError):
         equivalent_tier_c(catalog, catalog, [], rename={"a1": "a2"})
+
+
+# ----------------------------------------------- 10. DL-151: the equiv debt series
+
+
+_JIL_UNSET_LITERAL = (
+    "insert_job: sentinel_reader\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: v(G) = <unset>\n"
+)
+
+
+def test_tier_b_unset_sentinel_does_not_collide_with_a_real_literal() -> None:
+    """DL-151: the unset marker used to be the STRING "<unset>", so a global
+    whose literal is exactly that text read as unset. `v(G) = <unset>` came
+    back unsatisfiable and L006 would have called it a contradiction. The
+    marker is now outside the string domain."""
+    literal = parse_condition("v(G) = <unset>")
+    assert cond_truth_profile(literal) == (True, True)
+    assert rule_l006(lower_source(_JIL_UNSET_LITERAL)) == []
+    # a genuine contradiction on the same literal still reads as one
+    contradiction = parse_condition("v(G) = <unset> & v(G) = other")
+    assert cond_truth_profile(contradiction) == (False, True)
+
+
+def test_canonical_schedule_keeps_sem34_pairs_in_step_with_start_times() -> None:
+    """DL-151/SEM-34: must_start entries pair with start_times BY POSITION.
+    Sorting start_times alone made (10:00,+5),(09:00,+10) and
+    (09:00,+5),(10:00,+10) canonicalize alike, so tier a called two
+    different alarm schedules equal."""
+    a = lower_source(
+        "insert_job: sla_j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00,09:00"\n'
+        "must_start_times: +5,+10\n"
+    )
+    b = lower_source(
+        "insert_job: sla_j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00,10:00"\n'
+        "must_start_times: +5,+10\n"
+    )
+    assert catalog_hash(a) != catalog_hash(b)
+    canon = canonical_catalog(a).jobs["sla_j"].schedule
+    assert canon is not None and canon.must_start is not None
+    assert canon.start_times == [Time(hour=9, minute=0), Time(hour=10, minute=0)]
+    assert canon.must_start.offsets_min == [10, 5]  # 09:00 kept ITS offset
+    # the same rows in the other source order canonicalize to one form
+    same = lower_source(
+        "insert_job: sla_j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00,10:00"\n'
+        "must_start_times: +10,+5\n"
+    )
+    assert catalog_hash(a) == catalog_hash(same)
+    assert canonical_catalog(canonical_catalog(a)) == canonical_catalog(a)
+
+
+def test_canonical_schedule_leaves_a_broadcast_offset_alone() -> None:
+    """One relative offset covering several start_times has no pairing to
+    keep (SEM-34's broadcast form): start_times still sort, the offset list
+    stays as it is."""
+    catalog = lower_source(
+        "insert_job: bc_j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00,09:00"\n'
+        "must_start_times: +3\n"
+    )
+    schedule = canonical_catalog(catalog).jobs["bc_j"].schedule
+    assert schedule is not None and schedule.must_start is not None
+    assert schedule.start_times == [Time(hour=9, minute=0), Time(hour=10, minute=0)]
+    assert schedule.must_start.offsets_min == [3]
+
+
+def test_cli_equiv_tier_b_alone_says_tier_a_owns_the_job_set(tmp_path: Path) -> None:
+    """DL-151: tier b reads the COMMON jobs only, so two disjoint catalogs
+    can both come back equivalent. --tier b now says whose question that
+    is; --tier all does not repeat it."""
+    a = tmp_path / "only_a.jil"
+    a.write_text("insert_job: ja\njob_type: c\ncommand: x\nmachine: m1\n")
+    b = tmp_path / "only_b.jil"
+    b.write_text("insert_job: jb\njob_type: c\ncommand: x\nmachine: m1\n")
+    result = runner.invoke(app, ["equiv", str(a), "--against", str(b), "--tier", "b"])
+    assert result.exit_code == 0
+    assert "tier b: equivalent" in result.stdout
+    assert "tier (a)'s question" in result.stdout
+    both = runner.invoke(app, ["equiv", str(a), "--against", str(b), "--tier", "all"])
+    assert both.exit_code == 1  # tier a catches the disjoint job sets
+    assert "tier (a)'s question" not in both.stdout

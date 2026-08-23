@@ -70,10 +70,15 @@ TRIVIAL_BODY_STATEMENTS = 3
 
 #: sha256 of json.dumps(CatalogIR.model_json_schema(), sort_keys=True) at the
 #: pinned ir_version. Bumping IR_VERSION is what licenses a new hash here --
-#: changing both in one commit is the whole point of the check.
+#: changing both in one commit is the whole point of the check. One other
+#: move is licensed and must say so: pydantic carries a model DOCSTRING into
+#: the schema as `description`, so correcting prose moves the hash while the
+#: shape stands still. The hash below was re-pinned for exactly that, the
+#: DL-151 `ResourceRef` docstring; ir_version stays 0.2 because no reader of
+#: a persisted IR-F is affected.
 IR_SCHEMA_PIN = {
     "ir_version": "0.2",
-    "sha256": "84032aa2eaf2efb08b0c3a4f4342c75fd92fc5b5cf20aa0e1ee3d02629728b2b",
+    "sha256": "b1fc8e93e68d7ba5f6d65c776598e52dc23cd18ca2fd9c638688485aa1a23b00",
 }
 
 
@@ -205,7 +210,9 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
 #: and a gate that protected only the first would have been narrower the day
 #: after it was written. DL-120 adds `CapacityReservation`, which rides on a
 #: `JobRuntime` and is authoritative for what a live run holds (PR-52).
-_STATE_MODELS = ("JobRuntime", "HostRuntime", "CapacityReservation")
+#: `GlobalRuntime` was missing from that "whole set" although it is a frozen
+#: row with its own `state_rev` (concurrency-model ss2) -- added DL-151.
+_STATE_MODELS = ("JobRuntime", "HostRuntime", "CapacityReservation", "GlobalRuntime")
 _STATE_OWNER = "RuntimeState"
 #: Containers on the owner that a caller could reach through instead. Both the
 #: private maps and the read-only views over them (DL-86): the views raise at

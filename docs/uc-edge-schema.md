@@ -173,9 +173,12 @@ serialize to one record name — a box named `wf_x` beside a loose job `x`,
 for example. One POST per record makes the second create fail, and an
 upsert wrapper would clobber the first record silently. So every workflow
 in the collision quarantines, including one whose edges are all base
-tokens. The collision check runs over the workflows that survive the edge
-check: if the other party quarantined already, one record carries the name
-and it emits.
+tokens. The comparison folds case (DL-151), because UC addresses a name
+that way (UCS-12, the L014 reading): `WF_x` and `wf_x` are one record on
+the controller, and the ledger line gives the folded name and every party.
+The collision check runs over the workflows that survive the edge check: if
+the other party quarantined already, one record carries the name and it
+emits.
 
 The bundle's quarantine ledger names every workflow it withheld and gives
 the reason for each: one line for every defect it found on an offending
@@ -200,6 +203,11 @@ the same file as the records.
   bundle list every referenced name.
 - Each record needs one `POST /uc/resources/task`. The bundle is an
   artifact of dsl41, not a UC bulk-import file.
+- An edge that carried an AutoSys lookback window (M03) has a base wire
+  form — the plain condition token — so its workflow emits. The window
+  itself is not a record field, and the base subset stays frozen, so the
+  bundle carries it as one apply note per edge (DL-151): rebuild that edge
+  as a Task Monitor with Time Scope at cutover.
 - The records pin `retainSysIds: false` and contain no sysIds. As a
   result, the controller autogenerates every sysId, and the records are
   environment-portable. The `vertexId` values are a different thing. They
