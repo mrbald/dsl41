@@ -1231,3 +1231,194 @@ def test_access_cli_run_refuses_an_unknown_socket_group_before_the_root(
     assert "socket_group" in proc.stderr
     assert not (short_root / "run").exists()
     assert not (short_root / "run.anchor").exists()
+
+
+# ------------------------- ss12 obligations 5-7 at the CALLER, and two arms
+
+
+class _PickyJournal:
+    """A perimeter journal whose named record kinds never land.
+
+    ss12 obligations 5-7 each say a receipt is best effort: the denial, the
+    admission and the revocation stand on their own. The shipped journal
+    answers False only on a storage failure, so a test of the CALLER needs
+    the failure injected here (DL-151)."""
+
+    def __init__(self, path: Path, fails: frozenset[str]) -> None:
+        self.path = path
+        self.fails = fails
+        self.calls: list[tuple[str, bool]] = []
+
+    def write(self, rec: str, *, sync: bool, **fields: object) -> bool:
+        self.calls.append((rec, sync))
+        return rec not in self.fails
+
+
+def test_access_a_denial_stands_when_its_receipt_cannot_be_written(tmp_path: Path) -> None:
+    """ss6/ss12.5: the receipt does not gate the decision. A denial whose
+    access_denied write fails is still a denial, and it is attempted
+    SYNCED."""
+    map_path = _map_granting(tmp_path / "roles.toml", "read")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    access = AccessControl.arm(map_path, run_root)
+    journal = _PickyJournal(run_root / "perimeter.jsonl", frozenset({"access_denied"}))
+    access.journal = journal  # type: ignore[assignment]
+    allowed, why = access.decide(Principal("os", ME, frozenset()), "sendevent", "STARTJOB")
+    assert allowed is False
+    assert "needs ops tier" in why
+    assert journal.calls == [("access_denied", True)]
+
+
+def test_access_an_admission_stands_when_its_ledger_line_cannot_be_written(
+    tmp_path: Path,
+) -> None:
+    """ss6/ss12.6: the privileged ledger is corroborating and best effort --
+    a full disk must not become a total operations outage."""
+    map_path = _map_granting(tmp_path / "roles.toml", "ops")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    access = AccessControl.arm(map_path, run_root)
+    journal = _PickyJournal(run_root / "perimeter.jsonl", frozenset({"privileged_admitted"}))
+    access.journal = journal  # type: ignore[assignment]
+    allowed, why = access.decide(Principal("os", ME, frozenset()), "sendevent", "STARTJOB")
+    assert (allowed, why) == (True, "")
+    assert journal.calls == [("privileged_admitted", False)]  # attempted, unsynced
+
+
+def test_access_a_revocation_stands_when_its_receipt_cannot_be_written(tmp_path: Path) -> None:
+    """ss7/ss12.7: revocation is mandatory and its receipt best effort. The
+    stream that lost read closes and is dropped even when stream_revoked
+    never lands -- while policy_loaded stays the gate it is."""
+    map_path = _map_granting(tmp_path / "roles.toml", "ops")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    access = AccessControl.arm(map_path, run_root)
+    journal = _PickyJournal(run_root / "perimeter.jsonl", frozenset({"stream_revoked"}))
+    access.journal = journal  # type: ignore[assignment]
+
+    class _Writer:
+        closed = False
+
+        def close(self) -> None:
+            type(self).closed = True
+
+    class _Task:
+        cancelled = False
+
+        def cancel(self) -> None:
+            type(self).cancelled = True
+
+    writer, task = _Writer(), _Task()
+    access.streams = {writer: (Principal("os", "someone-else", frozenset()), task)}
+    _map_granting(tmp_path / "roles.toml", "ops")  # the loser is unmapped either way
+    access.reload()
+    assert access.policy.generation == 2  # the install itself happened
+    assert access.streams == {}
+    assert _Writer.closed is True and _Task.cancelled is True
+    assert journal.calls == [("policy_loaded", True), ("stream_revoked", True)]
+
+
+def test_access_the_denial_receipt_is_on_disk_before_the_answer_arrives(
+    short_root: Path,
+) -> None:
+    """ss6/ss12.5 at the real door: `access_denied` is synced BEFORE the
+    refusal is answered, so a client holding the refusal is holding proof
+    the receipt is already durable."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        map_path = _map_granting(short_root / "roles.toml", "read")
+        engine, server, loop_task, _access = await _serve_armed(run_root, TEXT, map_path)
+        try:
+            status = await _call(server.path, read_for("job:acc_job"))
+            denied = await _call(server.path, _envelope("STARTJOB", "acc_job", status))
+            assert denied["refused"] is True
+            # read the journal with the engine still up and the answer in hand
+            denials = [r for r in _receipts(run_root) if r["rec"] == "access_denied"]
+            assert [r["action"] for r in denials] == ["sendevent:STARTJOB"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_access_map_parser_recursion_is_a_refusal(tmp_path: Path) -> None:
+    """ss4/ss12.11: RecursionError is the second source named in the
+    loader's parse arm (DL-149) and nothing reached it -- deeply nested
+    TOML raises it, and the loader must answer AccessError like every other
+    parse failure, so reload receipts it instead of raising."""
+    body = "format_version = " + "[" * 20000 + "]" * 20000 + "\n"
+    map_path = _write_map(tmp_path / "roles.toml", body)
+    with pytest.raises(AccessError, match="not valid TOML"):
+        load_policy(map_path, generation=1)
+
+
+def test_access_peer_principal_refuses_when_the_group_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ss3/ss12.11: os.getgrouplist is the second source named in that
+    refusal arm. An OSError there is NO resolvable credential -- not a
+    principal with an empty group set, which would still match user rows."""
+    import dsl41.runner_access as ra
+
+    def nss_said_no(name: str, gid: int) -> list[int]:
+        raise OSError("group lookup failed")
+
+    monkeypatch.setattr(ra.os, "getgrouplist", nss_said_no)
+    left, right = _same_uid_socketpair()
+    try:
+        assert ra.peer_principal(left) is None
+    finally:
+        left.close()
+        right.close()
+
+
+def test_access_seq_recovery_reads_records_only(tmp_path: Path) -> None:
+    """ss6: recovery reads the last complete RECORD. A readable file with
+    none starts the series at zero -- a valid-JSON line that is not an
+    object used to raise AttributeError out of arming, and `true` is not a
+    sequence number."""
+    from dsl41.runner_access import PerimeterJournal
+
+    path = tmp_path / "perimeter.jsonl"
+    path.write_text('[]\n"a string"\n{"rec": "x", "access_seq": true}\n{"rec": "y"}\n')
+    journal = PerimeterJournal(path)
+    assert journal.write("policy_loaded", sync=True, generation=1) is True
+    records = [json.loads(line) for line in path.read_text().splitlines()[4:]]
+    assert [r["access_seq"] for r in records] == [1]
+
+
+def test_access_the_created_journal_is_durable_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss6: a create is a directory-entry write. Without the parent fsync
+    the NAME can vanish on power loss after arm() accepted the receipt as
+    synced, and access_seq would restart and forge duplicate audit keys."""
+    import dsl41.runner_access as ra
+    from dsl41.runner_access import PerimeterJournal
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    synced: list[str] = []
+    real_fsync_dir = ra.fsync_dir
+
+    def record(path: object) -> None:
+        synced.append(str(path))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(ra, "fsync_dir", record)
+    journal = PerimeterJournal(run_root / "perimeter.jsonl")
+    assert journal.write("policy_loaded", sync=True, generation=1) is True
+    assert synced == [str(run_root)]  # the create, and only the create
+    assert journal.write("access_denied", sync=True, principal="x") is True
+    assert synced == [str(run_root)]
+
+    # a directory fsync that fails is a storage failure like any other
+    def refuse(path: object) -> None:
+        raise OSError("no fsync on this directory")
+
+    monkeypatch.setattr(ra, "fsync_dir", refuse)
+    second = PerimeterJournal(tmp_path / "other" / "perimeter.jsonl")
+    (tmp_path / "other").mkdir()
+    assert second.write("policy_loaded", sync=True, generation=1) is False

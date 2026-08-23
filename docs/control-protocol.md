@@ -329,7 +329,10 @@ caller asserting what they read about an entity; a boundary reads no
 entity. Making it optional would turn the one command with no precondition
 into the door every other command could slip through, so the envelope
 parser takes "this command addresses no row" as an explicit input and
-rejects an `expect` that arrives anyway.
+rejects an `expect` that arrives anyway. *(Amended by DL-151: what arrives
+is the KEY. `"expect": null` is an `expect` and not its absence, and the
+seal door refuses it — just behind the retry route below, which answers a
+committed seal whatever rides beside it.)*
 
 **Its decision is a `seal` record, not a `decision` record.** Before the
 seal, a durable "applied" would name a boundary that never happened; after

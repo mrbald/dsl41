@@ -2109,3 +2109,322 @@ def test_pr03_a_backfill_error_from_a_displaced_leader_answers_the_refusal(
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+# ------------------------------------ the wire reads what it is sent (DL-151)
+
+
+class _RawServer:
+    """A control socket that answers one canned line and then HOLDS the
+    connection open.
+
+    Three client-side failures need answers no real engine gives: a refusal
+    on a connection the server keeps (ss2), a line past the ceiling, and a
+    torn ack. Blocking, in a thread, so a CLI subprocess can meet it."""
+
+    def __init__(self, path: Path, answer: bytes) -> None:
+        self.path = path
+        self.answer = answer
+        self._stop = threading.Event()
+        self._sock = socket_mod.socket(socket_mod.AF_UNIX)
+        self._sock.bind(str(path))
+        self._sock.listen(4)
+        self._sock.settimeout(0.2)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self._serve_one, args=(conn,), daemon=True).start()
+
+    def _serve_one(self, conn: socket_mod.socket) -> None:
+        with conn:
+            try:
+                conn.recv(65536)
+                conn.sendall(self.answer)
+                while not self._stop.wait(0.05):
+                    pass  # the caller must not be able to wait for our hangup
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self._sock.close()
+        self.path.unlink(missing_ok=True)
+
+
+async def _fake_answer_server(path: Path, answer: bytes) -> asyncio.Server:
+    """The async twin of `_RawServer`, for the two `ControlClient` doors."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()
+        writer.write(answer)
+        await writer.drain()
+        await reader.readline()  # hold until the client hangs up
+        writer.close()
+
+    return await asyncio.start_unix_server(handle, path=str(path))
+
+
+def test_a_deeply_nested_request_is_answered_bad_request_and_stays_in_sync(
+    short_root: Path,
+) -> None:
+    """ss2: a line the decoder cannot read is a BAD REQUEST, and the stream
+    stays in sync. Deep nesting raises RecursionError rather than
+    JSONDecodeError, and before DL-151 it escaped the framing gate and the
+    connection died unreplied -- the DL-149 escape class, one door on."""
+    from dsl41.runner_adapters import LINE_LIMIT
+
+    text = "insert_job: nest_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                str(server.path), limit=LINE_LIMIT
+            )
+            try:
+                deep = b"[" * 100_000 + b"]" * 100_000
+                assert len(deep) < LINE_LIMIT  # the ceiling is not what refuses it
+                writer.write(deep + b"\n")
+                await writer.drain()
+                answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+                assert answer["ok"] is False and answer["refused"] is True
+                assert answer["error"].startswith("bad request: ")
+                writer.write(json.dumps(_versioned({"cmd": "status"})).encode() + b"\n")
+                await writer.drain()
+                second = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+                assert second["ok"] is True  # the next line on the same connection
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_exit_code_true_is_not_an_integer_at_the_wire(short_root: Path) -> None:
+    """ss3: `exit_code` is an optional INT. `true` is an int in Python, so
+    it reached the WAL and the store as one -- the gate now excludes bool,
+    like the envelope's own gates always have."""
+    text = "insert_job: bool_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            wal_before = len(read_journal(run_root))
+            refused = await _sendevent(
+                server.path,
+                "CHANGE_STATUS",
+                job="bool_job",
+                status="SUCCESS",
+                exit_code=True,
+            )
+            assert refused["ok"] is False and refused["refused"] is True
+            assert refused["error"] == "exit_code must be an integer"
+            assert len(read_journal(run_root)) == wal_before  # nothing admitted
+            status = await _control_call(server.path, {"cmd": "status", "job": "bool_job"})
+            assert status["jobs"]["bool_job"]["exit_code"] is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_true_is_not_a_sequence_number_on_trace_or_subscribe(short_root: Path) -> None:
+    """The same bool-as-int door on the two `since` gates: a read that names
+    `true` as its cursor is a bad request, not a read from record 1."""
+    text = "insert_job: seq_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            traced = await _control_call(server.path, {"cmd": "trace", "since": True})
+            assert traced["ok"] is False
+            assert traced["error"] == "since must be an integer trace seq"
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            try:
+                writer.write(
+                    json.dumps(_versioned({"cmd": "subscribe", "since": True})).encode() + b"\n"
+                )
+                await writer.drain()
+                answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+                assert answer == {"ok": False, "error": "since must be an integer seq"}
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def _seal_wire(engine: Engine, **overrides: object) -> dict:
+    """A `seal` request with every wire field well-typed -- the tests below
+    mistype exactly one at a time."""
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
+    from dsl41.seal import StagedNextPeriod
+
+    staged = StagedNextPeriod(
+        catalog_hash="sha256:" + "0" * 64,
+        source_bundle_hash="sha256:" + "1" * 64,
+        runtime_hash="sha256:" + "2" * 64,
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    request: dict = {
+        "cmd": "seal",
+        "v": PROTOCOL_VERSION,
+        "baseline_id": engine.baseline_id,
+        "epoch": engine.epoch,
+        "request_id": "r-wire-types",
+        "next_period": staged.model_dump(mode="json"),
+        "stage_digest": staged.stage_digest,
+        "force_seal": False,
+        "claimed_actor": "tests@localhost",
+    }
+    return {**request, **overrides}
+
+
+def test_a_seal_reads_its_force_flag_and_never_coerces_it(short_root: Path) -> None:
+    """ss3: force is an AUTHORIZATION. `bool("false")` is True, so the
+    string "false" used to FORCE a boundary; only JSON true/false is a
+    flag now, and the same rule holds the rest of the seal's wire types."""
+    text = "insert_job: seal_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            forced = await _control_call(server.path, _seal_wire(engine, force_seal="false"))
+            assert forced["ok"] is False and forced["refused"] is True
+            assert "force_seal must be true or false" in forced["error"]
+            mistyped = await _control_call(server.path, _seal_wire(engine, epoch=True))
+            assert mistyped["refused"] is True and "epoch must be an integer" in mistyped["error"]
+            retyped = await _control_call(server.path, _seal_wire(engine, request_id=7))
+            assert retyped["refused"] is True and "request_id must be a string" in retyped["error"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_an_expect_that_arrives_on_a_seal_is_refused_by_the_key(short_root: Path) -> None:
+    """ss3: a boundary addresses no row, so an `expect` that ARRIVES is
+    refused -- and the KEY is what arrives. `"expect": null` read as "no
+    expect" made the one command with no precondition the door every other
+    command could slip through."""
+    text = "insert_job: seal_null\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            answer = await _control_call(server.path, _seal_wire(engine, expect=None))
+            assert answer["ok"] is False and answer["refused"] is True
+            assert "expect is not allowed" in answer["error"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_an_unreadable_response_line_leaves_as_a_delivered_client_error(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss1: every failure this client meets leaves as ControlClientError. A
+    response line past the ceiling makes readline raise ValueError, which
+    used to escape raw -- and its `delivered` reading was lost with it."""
+    import dsl41.runner_control as control_mod
+    from dsl41.runner_control import ControlClient, ControlClientError
+
+    monkeypatch.setattr(control_mod, "LINE_LIMIT", 64)
+
+    async def scenario() -> None:
+        path = short_root / "fake.sock"
+        server = await _fake_answer_server(path, b"x" * 4096)
+        client = ControlClient(path)
+        try:
+            with pytest.raises(ControlClientError) as caught:
+                await client.request({"cmd": "status"})
+            assert caught.value.delivered is True
+            assert "unreadable response line" in str(caught.value)
+        finally:
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_a_subscribe_ack_that_cannot_be_read_leaves_as_a_client_error(
+    short_root: Path,
+) -> None:
+    """ss1, the same promise on the other transport: a torn ack and a
+    non-object ack both left `subscribe` raising a raw decode error."""
+    from dsl41.runner_control import ControlClient, ControlClientError
+
+    async def drain(path: Path) -> None:
+        client = ControlClient(path)
+        try:
+            async for _record in client.subscribe():
+                pass
+        finally:
+            await client.close()
+
+    async def scenario() -> None:
+        for answer, expected in ((b'{"ok": tru\n', "bad subscribe ack"), (b"[]\n", "not a JSON")):
+            path = short_root / f"ack-{len(answer)}.sock"
+            server = await _fake_answer_server(path, answer)
+            try:
+                with pytest.raises(ControlClientError) as caught:
+                    await drain(path)
+                assert expected in str(caught.value)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_the_one_shot_client_reads_under_the_line_ceiling(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss6: open every connection with an explicit LINE_LIMIT. The blocking
+    client accumulated until the line ended -- a peer that never ends one
+    grew the buffer until the caller died."""
+    import dsl41.runner_control as control_mod
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    monkeypatch.setattr(control_mod, "LINE_LIMIT", 64)
+    path = short_root / "ceiling.sock"
+    server = _RawServer(path, b"y" * 4096)
+    try:
+        with pytest.raises(ControlClientError) as caught:
+            roundtrip(path, {"cmd": "status"}, timeout=5.0)
+        assert "over the 64-byte limit" in str(caught.value)
+        assert caught.value.delivered is True
+    finally:
+        server.close()
+
+
+def test_cli_subscribe_exits_nonzero_on_a_refused_ack_instead_of_blocking(
+    short_root: Path,
+) -> None:
+    """A refusal does not close the connection (ss2), so a client that never
+    reads the ack prints the refusal, exits 0 and then waits forever for
+    records that can never come. `query subscribe` reads it now."""
+    path = short_root / "refuse.sock"
+    server = _RawServer(path, b'{"error": "this run has no journal", "ok": false}\n')
+    try:
+        done = _query_cli(path, "subscribe")
+    finally:
+        server.close()
+    assert done.returncode == 2
+    assert "this run has no journal" in done.stderr
+    assert done.stdout == ""

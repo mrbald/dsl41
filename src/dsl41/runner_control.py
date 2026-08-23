@@ -16,10 +16,13 @@ two client implementations sat in two other modules.
 Phase 11c (ss10; DL-45 pins the decisions):
 
 - Control plane (ss10): unix socket in the run root, mode 0600, JSON
-  lines. sendevent parity verbs map 1:1 onto oracle EventKind and are
-  injected source=control (journaled by the queued-input path like every
-  input; the engine's single-writer loop serializes them -- deliberately
-  no controller lease here, DL-41a). Queries (status/trace/explain/plan)
+  lines. Each sendevent parity verb names exactly one oracle EventKind,
+  but the set is not the whole alphabet: CHANGE_STATUS is the wire name of
+  STATUS, and TIMER, MUST_START_ALARM and MUST_COMPLETE_ALARM are the
+  engine's own and have no wire door. They are injected source=control
+  (journaled by the queued-input path like every input; the engine's
+  single-writer loop serializes them -- deliberately no controller lease
+  here, DL-41a). Queries (status/trace/explain/plan)
   read the oracle store between feeds -- safe because feed() never yields.
   subscribe streams journal records live (at-least-once for unsequenced
   dispatch/drop/decision records during the backfill race; seq'd records
@@ -151,15 +154,21 @@ STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
 
 class ControlServer:
     """ss10 control plane: a unix domain socket in the run directory, mode
-    0600, JSON lines both ways. One request object per line; one response
-    object per line ({"ok": bool, ...}), except `subscribe`, which streams
-    journal records until the client hangs up.
+    0600 -- 0660 with its group set when an access map names a
+    `socket_group` (access-model ss8, DL-146) -- JSON lines both ways. One
+    request object per line; one response object per line ({"ok": bool,
+    ...}), except `subscribe`, which streams journal records until the
+    client hangs up.
 
     Every request names `"v": 3` (DL-90, DL-118). Queries: status [job], trace
     [since], explain job, spec job, deps job, timers, plan, global name,
-    globals names; and subscribe [since]. Every answer carries the ss6 read
-    header -- `baseline_id`, `epoch`, `applied_index` -- so a client can
-    tell which log a revision it holds was read from.
+    globals names; and subscribe [since]. An answer that passed routing and
+    the lineage proof carries the ss6 read header -- `baseline_id`, `epoch`,
+    `applied_index` -- so a client can tell which log a revision it holds
+    was read from. Everything sent BEFORE routing is headerless (DL-148):
+    the bad-request and version refusals, the perimeter's credential
+    refusal and denials, the lineage refusal, a raised handler's internal
+    error, and every line `subscribe` writes on its own connection.
 
     A mutation is `{"cmd": "sendevent"}` plus the ss6 envelope: `verb`,
     `payload`, `request_id`, `expect`, optional `claimed_actor`. Job
@@ -332,7 +341,12 @@ class ControlServer:
                     request = json.loads(line)
                     if not isinstance(request, dict):
                         raise ValueError("request must be a JSON object")
-                except (json.JSONDecodeError, ValueError) as exc:
+                except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+                    # RecursionError is what the decoder answers to deeply
+                    # nested JSON inside LINE_LIMIT, and that line is a bad
+                    # request like any other: without it here the connection
+                    # died unreplied, which ss2 forbids (the DL-149 escape
+                    # class, closed at the framing gate; DL-151)
                     await self._send(
                         writer, {"ok": False, "error": f"bad request: {exc}", "refused": True}
                     )
@@ -573,21 +587,36 @@ class ControlServer:
         the cutoff in its single-writer loop, and then exits with code 3
         ("sealed; period N+1 is ready to open"). It does NOT load C2 into
         itself: a transition is a restart, not a reload (DL-65)."""
+        if (wire := _seal_wire_error(request)) is not None:
+            return {"ok": False, "error": f"malformed seal request: {wire}", "refused": True}
         try:
             parsed = SealRequest(
-                baseline_id=str(request.get("baseline_id")),
-                epoch=int(request["epoch"]),
-                request_id=str(request.get("request_id")),
+                baseline_id=request["baseline_id"],
+                epoch=request["epoch"],
+                request_id=request["request_id"],
                 next_period=StagedNextPeriod.model_validate(request.get("next_period")),
-                stage_digest=str(request.get("stage_digest")),
-                force_seal=bool(request.get("force_seal", False)),
-                claimed_actor=str(request.get("claimed_actor") or ""),
+                stage_digest=request["stage_digest"],
+                force_seal=request.get("force_seal", False),
+                claimed_actor=request.get("claimed_actor") or "",
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             return {"ok": False, "error": f"malformed seal request: {exc}", "refused": True}
         answered = self._committed_seal(parsed)
         if answered is not None:
             return answered
+        if "expect" in request:
+            # ss3: a boundary addresses no row, so an `expect` that ARRIVES is
+            # refused -- and the key is what arrives. `"expect": null` read as
+            # "no expect" made the one command with no precondition the door
+            # every other command could slip through (DL-151). It sits behind
+            # the retry route above, which answers a committed seal whatever
+            # else rides beside it
+            return {
+                "ok": False,
+                "refused": True,
+                "error": "expect is not allowed on a command that addresses no row:"
+                " a boundary is not a row mutation (period-model ss2.2)",
+            }
         try:
             parse_envelope(request, addressed=None, baseline_id=self.engine.baseline_id)
         except EnvelopeError as exc:
@@ -783,7 +812,11 @@ class ControlServer:
                 }
             status_payload: dict[str, object] = {"job": job, "status": status}
             if "exit_code" in payload:
-                if not isinstance(payload["exit_code"], int):
+                if not isinstance(payload["exit_code"], int) or isinstance(
+                    payload["exit_code"], bool
+                ):
+                    # `true` is an int in Python and would reach the WAL as one
+                    # (DL-151); the envelope's own gates already exclude bool
                     return {"ok": False, "error": "exit_code must be an integer"}
                 status_payload["exit_code"] = payload["exit_code"]
             ev = Event(at=at, kind="STATUS", payload=status_payload)
@@ -914,7 +947,7 @@ class ControlServer:
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)
-        if not isinstance(since, int):
+        if not isinstance(since, int) or isinstance(since, bool):
             return {"ok": False, "error": "since must be an integer trace seq"}
         entries = self.engine.oracle.trace()
         return {
@@ -955,8 +988,10 @@ class ControlServer:
             }
             if isinstance(atom, GlobalAtom):
                 # DL-66 (review): atom truth alone hides WHY -- serve the
-                # effective global value (null = never set); there is no
-                # standalone show-globals verb, explain is the read path
+                # effective global value (null = never set) beside the atom's
+                # truth. `global`/`globals` answer a NAMED global's value and
+                # revision (DL-87); this is the same value read where the
+                # condition uses it
                 entry["actual"] = oracle.store.global_value(atom.name)
             atoms.append(entry)
         return {
@@ -1114,7 +1149,7 @@ class ControlServer:
             await self._send(writer, {"ok": False, "error": "this run has no journal"})
             return
         since = request.get("since")
-        if since is not None and not isinstance(since, int):
+        if since is not None and (not isinstance(since, int) or isinstance(since, bool)):
             await self._send(writer, {"ok": False, "error": "since must be an integer seq"})
             return
         queue = journal.subscribe()
@@ -1190,6 +1225,30 @@ class ControlServer:
 
 
 # ---------------------------------------------------------------- clients (ss10)
+
+
+def _seal_wire_error(request: Mapping[str, Any]) -> str | None:
+    """What is wrong with a `seal` request's WIRE TYPES, or None.
+
+    Read, never coerced. `bool("false")` is True and force is an
+    AUTHORIZATION (ss3), so a mistyped flag has to refuse rather than force
+    a boundary. The rest of the envelope is read the same way for one
+    reason: `str()` and `int()` would let a retry match a committed seal
+    under types the original never carried (DL-151)."""
+    force = request.get("force_seal", False)
+    if not isinstance(force, bool):
+        return f"force_seal must be true or false, got {force!r}"
+    epoch = request.get("epoch")
+    if not isinstance(epoch, int) or isinstance(epoch, bool):
+        return f"epoch must be an integer, got {epoch!r}"
+    for name in ("baseline_id", "request_id", "stage_digest"):
+        value = request.get(name)
+        if not isinstance(value, str):
+            return f"{name} must be a string, got {value!r}"
+    actor = request.get("claimed_actor")
+    if actor is not None and not isinstance(actor, str):
+        return f"claimed_actor must be a string, got {actor!r}"
+    return None
 
 
 def _seal_answer(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1358,9 +1417,11 @@ def command(
 
 
 def claimed_actor() -> str:
-    """What this process says it is (concurrency-model ss6). A CLAIM: the
-    control socket has no authentication (control-protocol ss7 gap 2), so
-    this is a breadcrumb in the log, never an authorization."""
+    """What this process says it is (concurrency-model ss6). A CLAIM, never
+    an authorization: on an estate with no access map the socket's mode is
+    the whole boundary and this is a breadcrumb in the log; on an armed one
+    the server overwrites it with the kernel-authenticated principal before
+    anything is fingerprinted or journaled (access-model ss3, DL-146)."""
     try:
         user = getpass.getuser()
     except Exception:  # no passwd entry (containers): the claim is still useful
@@ -1403,6 +1464,15 @@ class ControlClient:
             except OSError as exc:
                 await self._drop()
                 raise ControlClientError(str(exc), delivered=sent) from exc
+            except ValueError as exc:
+                # readline answers a line over LINE_LIMIT with ValueError: the
+                # answer is unreadable and the stream cannot resync, but the
+                # request was delivered. ss1: this client raises
+                # ControlClientError, never a raw decode error (DL-151)
+                await self._drop()
+                raise ControlClientError(
+                    f"unreadable response line: {exc}", delivered=sent
+                ) from exc
             except BaseException:
                 # a CANCELLED exchange (an exclusive worker superseded
                 # mid-request) leaves the response unread on the stream;
@@ -1416,7 +1486,7 @@ class ControlClient:
                 raise ControlClientError("engine hung up", delivered=True)
             try:
                 response = json.loads(line)
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 await self._drop()
                 raise ControlClientError(f"bad response line: {exc}", delivered=True) from exc
             if not isinstance(response, dict):
@@ -1441,7 +1511,12 @@ class ControlClient:
             ack_line = await reader.readline()
             if not ack_line:
                 raise ControlClientError("engine hung up before the subscribe ack")
-            ack = json.loads(ack_line)
+            try:
+                ack = json.loads(ack_line)
+            except (ValueError, RecursionError) as exc:
+                raise ControlClientError(f"bad subscribe ack: {exc}") from exc
+            if not isinstance(ack, dict):
+                raise ControlClientError("subscribe ack is not a JSON object")
             if not ack.get("ok"):
                 raise ControlClientError(str(ack.get("error", "subscribe refused")))
             while True:
@@ -1453,7 +1528,10 @@ class ControlClient:
                 except ValueError:
                     continue  # torn record: it is only a wake-up signal anyway
                 yield record
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError is asyncio's answer to a line over LINE_LIMIT: the
+            # stream cannot resync past it, and ss1 says every failure this
+            # client meets leaves as ControlClientError (DL-151)
             raise ControlClientError(str(exc)) from exc
         finally:
             writer.close()
@@ -1501,8 +1579,13 @@ def roundtrip(
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > LINE_LIMIT:
+                    # ss6: every connection reads under an explicit ceiling.
+                    # A peer that never ends the line would otherwise grow
+                    # this buffer until the caller died (DL-151)
+                    raise ValueError(f"response line over the {LINE_LIMIT}-byte limit")
             response = json.loads(buf)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise ControlClientError(
                 f"control socket {socket_path}: {exc}", delivered=True
             ) from exc

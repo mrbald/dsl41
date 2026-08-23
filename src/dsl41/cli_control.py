@@ -121,7 +121,7 @@ def sendevent(
     ),
 ) -> None:
     """Vendor-parity sendevent against a running engine (runner-design ss10),
-    over the v2 protocol (concurrency-model ss6).
+    over the v3 protocol (concurrency-model ss6).
 
     Every mutation names the revision it was composed against and is
     answered with its DECISION, in four kinds that call for four different
@@ -324,6 +324,69 @@ _QUERY_PREDICATES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _subscribe_refusal(ack: bytes) -> str | None:
+    """Why `subscribe` did not start, or None when the first line is an ack
+    that says it did.
+
+    The server answers a refusal -- no journal, a wrong version, a DL-146
+    perimeter denial -- on the same connection and KEEPS IT OPEN. A client
+    that does not read this line prints the refusal, exits 0 and then waits
+    forever for records that can never come (DL-151)."""
+    import json as json_mod
+
+    if not ack:
+        return "engine hung up before the subscribe ack"
+    if not ack.endswith(b"\n"):
+        return "the subscribe ack did not end within the read limit"
+    try:
+        parsed = json_mod.loads(ack)
+    except (ValueError, RecursionError) as exc:
+        return f"unreadable subscribe ack: {exc}"
+    if not isinstance(parsed, dict):
+        return "subscribe ack is not a JSON object"
+    if not parsed.get("ok"):
+        return str(parsed.get("error", "subscribe refused"))
+    return None
+
+
+def _stream_subscribe(socket_path: Path, request: dict) -> None:
+    """`query subscribe`: the ack, then journal records until the engine
+    hangs up or the operator interrupts.
+
+    The raw socket is a client like `roundtrip` is, and it owes the same two
+    things: a stamped version, and a bounded read (control-protocol ss6). An
+    unversioned subscribe is refused, and a refusal does NOT close the
+    connection."""
+    import json as json_mod
+    import socket as socket_mod
+
+    from dsl41.runner_adapters import LINE_LIMIT
+    from dsl41.runner_control import versioned
+
+    try:
+        conn = socket_mod.socket(socket_mod.AF_UNIX)
+        conn.connect(str(socket_path))
+        conn.sendall(json_mod.dumps(versioned(request)).encode("utf-8") + b"\n")
+        with conn.makefile("rb") as stream:
+            ack = stream.readline(LINE_LIMIT + 1)
+            if (why := _subscribe_refusal(ack)) is not None:
+                typer.echo(why, err=True)
+                raise typer.Exit(2)
+            typer.echo(ack.decode("utf-8", "replace").rstrip("\n"))
+            while line := stream.readline(LINE_LIMIT + 1):
+                # an unterminated line comes back AT the limit, and printing
+                # it would resync nothing -- the stream is unreadable from
+                # here (DL-151)
+                if not line.endswith(b"\n"):
+                    typer.echo(f"record line over the {LINE_LIMIT}-byte limit", err=True)
+                    raise typer.Exit(2)
+                typer.echo(line.decode("utf-8", "replace").rstrip("\n"))
+    except OSError as exc:
+        raise typer.Exit(refuse(exc, prefix=f"control socket {socket_path}")) from exc
+    except KeyboardInterrupt:
+        pass
+
+
 def query(
     what: str = typer.Argument(
         ...,
@@ -357,7 +420,6 @@ def query(
     than omitting it, because absence you cannot name is absence you cannot
     lock against."""
     import json as json_mod
-    import socket as socket_mod
 
     verb = what.lower()
     known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
@@ -416,23 +478,7 @@ def query(
             raise typer.Exit(0)
         typer.echo(json_mod.dumps(response, indent=2, sort_keys=True))
         raise typer.Exit(0 if response.get("ok") else 2)
-    from dsl41.runner_control import versioned
-
-    # the raw socket is a client like `roundtrip` is: an unversioned
-    # subscribe is refused, and a refusal does not close the connection, so
-    # without the stamp this loop prints the refusal and waits forever
-    request = versioned(request)
-    try:
-        conn = socket_mod.socket(socket_mod.AF_UNIX)
-        conn.connect(str(socket_path))
-        conn.sendall(json_mod.dumps(request).encode("utf-8") + b"\n")
-        with conn.makefile("rb") as stream:
-            for line in stream:
-                typer.echo(line.decode("utf-8").rstrip("\n"))
-    except OSError as exc:
-        raise typer.Exit(refuse(exc, prefix=f"control socket {socket_path}")) from exc
-    except KeyboardInterrupt:
-        pass
+    _stream_subscribe(socket_path, request)
 
 
 def supervise(

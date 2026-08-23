@@ -30,6 +30,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
+from dsl41.runner_procid import fsync_dir
 from dsl41.runner_supervisor import peer_uid
 
 __all__ = [
@@ -336,10 +337,15 @@ class PerimeterJournal:
         lines = raw.splitlines()
         for line in reversed(lines):
             try:
-                seq = json.loads(line).get("access_seq")
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                 continue  # the torn tail of a crashed writer
-            if isinstance(seq, int):
+            if not isinstance(record, dict):
+                continue  # valid JSON, but no record: ss6 reads records only
+            seq = record.get("access_seq")
+            # bool is an int in Python and `true` is not a sequence number;
+            # neither is a non-positive one -- the series starts at 1 (DL-151)
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq > 0:
                 return seq
         return 0
 
@@ -356,9 +362,7 @@ class PerimeterJournal:
         }
         line = json.dumps(record, sort_keys=True) + "\n"
         try:
-            # 0600 from birth: the run root is group-traversable when access
-            # is armed (ss8) and receipts are owner-only like the WAL
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            fd, created = self._open_append()
             try:
                 payload = line.encode("utf-8")
                 if self._dirty:
@@ -375,9 +379,26 @@ class PerimeterJournal:
                     os.fsync(fd)
             finally:
                 os.close(fd)
+            if created and sync:
+                # a create is a directory-entry write, and without this the
+                # NAME can vanish on power loss after arm() accepted the
+                # receipt as synced -- access_seq would then restart and forge
+                # duplicate audit keys (DL-137's one spelling; DL-151)
+                fsync_dir(self.path.parent)
         except OSError:
             return False  # ss6: a storage failure still denies; the decision stands
         return True
+
+    def _open_append(self) -> tuple[int, bool]:
+        """(fd, created). O_EXCL first, so the create is known without a
+        second stat: only a created journal owes its parent an fsync. 0600
+        from birth -- the run root is group-traversable when access is armed
+        (ss8) and receipts are owner-only like the WAL."""
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL
+        try:
+            return os.open(self.path, flags, 0o600), True
+        except FileExistsError:
+            return os.open(self.path, os.O_WRONLY | os.O_APPEND, 0o600), False
 
 
 # ------------------------------------------------------------ the perimeter

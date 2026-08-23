@@ -4,7 +4,8 @@ Status: **draft (2026-08-22, DL-146).** Designed in a three-way round: the
 user's constraints and two independent sketches, then two adversarial
 rounds to convergence. A post-build conformance round (2026-08-22) was
 folded by DL-147; a second round (2026-08-22..23) by DL-148; the code
-follow-ups and three amended passages by DL-149. Once frozen, each change
+follow-ups and three amended passages by DL-149; the §6 code follow-ups
+and their two amended passages by DL-151. Once frozen, each change
 to a frozen item requires a decision-log entry, the same rule as
 `docs/control-protocol.md`. This document retires the RBAC non-goal of
 `docs/runner-design.md` §1 and §12 and closes the authorization half of
@@ -310,7 +311,8 @@ A reported failure splits two ways: when no complete line landed, the
 number is a gap once a later write succeeds, and it can be reissued
 after a restart only if no later complete record carries a higher
 seq; when the line landed complete and only the I/O after it failed —
-the fsync, or the close — the record exists and carries its seq: the
+the fsync, the parent-directory fsync a CREATE owes its own name
+(DL-151), or the close — the record exists and carries its seq: the
 §7 void rule exists exactly for that case, and is built on this
 allocation order. Recovery reads
 the last complete record; an unreadable file refuses arming (§4),
@@ -338,7 +340,9 @@ journal is one append-only file for the life of its run root, pruned
 only with that root — truncating it in place would restart `access_seq`
 and forge duplicate keys. The writer trusts the path it owns:
 `perimeter.jsonl` is opened without the map loader's symlink and FIFO
-checks, and each recovery, heal and append resolves the name afresh —
+checks; the append that CREATES it fsyncs the run root, so the name is
+durable before the receipt it gates is answered (DL-151), and each
+recovery, heal and append resolves the name afresh —
 the run root has been owner-only since before arming (§8), so
 anything planted at that name is the owner's own act, and the
 one-file lifetime holds only while the owner keeps the name bound to
