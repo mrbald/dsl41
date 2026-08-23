@@ -1,5 +1,15 @@
 # Decision log
 
+**What this ledger is.** Precedent, not history. One entry = one
+decision: the ruling, the why -- including the alternatives rejected
+and why -- what it supersedes, and a pointer to the doc section that
+carries the normative text, never a quote of it. How a session got
+there (rounds, passes, reviewers, agents) stays in git and PRs.
+Entry numbers are permanent API: src and tests cite them by the
+thousand, so an entry is never deleted or renumbered -- a reversed
+ruling gets a superseded-by mark and a successor entry. Do not
+relitigate an entry; append a new one.
+
 - DL-01 New repo, dsl42 as quarry; forcing-function-first design (round-trip +
   equivalence as honesty checks) instead of constitution-first.
 - DL-02 IR is AutoSys-shaped first; vendor neutrality emerges at Layer G.
@@ -7559,32 +7569,13 @@
   over ten passes, four frozen docs amended, the headerless answers
   enumerated (2026-08-22..23; a second codex-sol conformance review
   of docs/access-model.md against the frozen sources and the shipped
-  code, run to convergence — twelve findings in pass one, eight in
-  pass two, five in pass three, four each in passes four, five and
-  six, one each in passes seven, eight and nine, two in pass ten,
-  each pass over the amended docs; all forty-two held on
+  code, run to convergence; all forty-two findings held on
   verification; the doc stays DRAFT and the ss12 freeze mechanism
-  stands). The pass 7-9 tail:
-  a complete line's failed CLOSE counts like a failed fsync (ss6,
-  then the ss7 echo), and reload's failure handling enumerated —
-  a refused candidate, a changed socket_group and a failed
-  policy_loaded write keep the old snapshot and attempt the failure
-  receipt, while an error outside those paths (the loader's own
-  descriptor I/O failing mid-read) escapes into the event loop's
-  handler-exception log with no receipt attempted (superseded by
-  DL-149); the ss4 reload
-  clause now points at that escape path instead of promising a
-  receipt for every failure; and "validate the complete candidate"
-  qualified — v1 validates what ONE descriptor read returned
-  (superseded by DL-149), a
-  short read ending at valid TOML would install the prefix, the
-  temp-fsync-rename procedure is what keeps the file stable under
-  the read. TWO code-side hardenings are named candidate follow-ups,
-  out of this entry's doc-only scope: wrapping the loader's
-  descriptor I/O into the AccessError refusal path, and a full-read
-  loop with an EOF check (both landed: DL-149).
+  stands). The normative text of every ruling below lives in the
+  amended docs; this entry authorizes the frozen-doc amendments and
+  records what was decided, not the wording.
   FROZEN SOURCES AMENDED (the amendments this entry authorizes):
-  control-protocol ss2 — the read header is stamped in ONE place, on
+  control-protocol ss2 -- the read header is stamped in ONE place, on
   the answer of a request that passed routing and the ss4 lineage
   proof; headerless by enumeration: the pre-routing answers (the
   malformed line, the version refusal, the perimeter's credential
@@ -7594,125 +7585,38 @@
   line. This enumerates what the shipped v3 server has always done;
   a perimeter denial names no revision and consumes no engine state,
   so it joins that family rather than forcing a wire change.
-  control-protocol ss3 and runner-design ss10 — "no second log"
+  control-protocol ss3 and runner-design ss10 -- "no second log"
   narrowed to engine decisions: the perimeter journal (access-model
   ss6) records access decisions, which never enter the WAL.
-  period-model ss3.1 — claimed_actor still originates in the request
+  period-model ss3.1 -- claimed_actor still originates in the request
   as this tier receives it, but on an armed estate the perimeter has
-  already overwritten it with the authenticated spelling (DL-146); on
-  an unconfigured estate it stays the caller's bare claim; the
-  gap-2 citation updated (the local-authentication half closed with
-  DL-146, so "there is no authentication at this tier" became "this
-  tier does no authentication of its own").
-  ACCESS-MODEL CLARIFIED, no behavior change: ss5 names the two doors
-  that precede the gate (JSON decode, the v3 check) in the shipped
-  order — a malformed or wrong-version request reaches neither the
-  policy nor the perimeter journal — and states that a denial carries
-  no read header; ss3 narrows "any resolution error refuses" to the
-  actual refusal points and names the deliberate exception (a
-  nameless gid is dropped, never refused — it can match no named
-  row); ss4 states the no-residue startup preflight (map validated
-  read-only and socket_group resolved before the root is claimed;
-  arming re-validates) and rewords the map-owner predicate to the
-  engine's own EFFECTIVE uid (any other owner refused, root included;
-  a root engine owns its map as uid 0); ss2 states that the local-CLI
-  exemption is the filesystem path alone (a CLI request through
-  control.sock passes the same gate) and names the supervisor
-  socket's second control (the same-uid peer-cred check on every
-  accept, supervisor-protocol ss5); ss6 pins the receipt wire forms
-  (at = UTC ISO-8601 at seconds precision, ordering nothing; digest =
-  "sha256:" + the hex of the exact map bytes the loader read; the
-  count field is named bindings; a reload-failure record's generation
-  is the installed generation that stays active); ss8 names the
-  receipt journal's mode (born 0600, owner-only in both armed modes,
-  never widened with the socket); ss12 obligations 2, 5, 6 and 7
-  reworded from guarantees to attempts, matching the ss6 durability
-  rules (the failure arms are held by the DL-105 100%-branch gate).
-  PASS 2, over the amended docs: the header boundary reconciled with
-  ss4 (above); the no-residue claim narrowed to the PREFLIGHT —
-  arming re-validates after the root is claimed, and a failure there
-  refuses with the root and WAL already in existence; the
-  reload-failure and stream_revoked receipts worded as best-effort
-  attempts in ss4 and ss7, not only ss12; orphaned_generation is
-  present whenever the policy_loaded write reports failure — landing
-  is unknowable (an fsync can fail after the bytes are out);
-  torn-tail healing is a best-effort attempt; the journal's mode stated
-  precisely — created 0600 before umask (which only narrows),
-  group-open arming's child-tightening also chmods an existing file,
-  owner-only arming leaves an existing file's mode alone, the
-  perimeter never widens; an unconfigured incarnation writes no new
-  receipts and leaves an earlier armed incarnation's journal for the
-  life of the root; decision-receipt sentinels pinned (principal is
-  the unqualified name with the realm in its own field, required_tier
-  null for an unlisted cmd, granted_tier null when resolution
-  denies). PASS 3, the corners of the pass-2 wordings: control-protocol ss4's
-  subscribe sentence narrowed — the same lineage proof, NOT the same
-  header; no subscribe line (ack, refusal, marker, record) carries
-  the read header, and ss4's "every response" now says every ss4
-  query answer. The arming-failure receipt trail split by failure
-  kind: re-validation writes no receipt; a failed receipt sync can
-  leave no, partial or complete policy_loaded bytes and no policy
-  stands; a group-grant failure leaves the already-synced
-  policy_loaded line with no failure record after it — a
-  policy_loaded line alone does not prove the engine served under
-  that policy. orphaned_generation voids by SEQ ADJACENCY (pass 4
-  narrowed pass 3's nearest-preceding rule, which could void a valid
-  line of an OLDER incarnation — the generation is process-local): a
-  failed write attempt still consumes its access_seq, so the void is
-  exactly a complete policy_loaded at the failure's access_seq - 1
-  carrying the named generation, or nothing — a failed reload does
-  not consume the number, a later successful reload may reuse it and
-  its line stands; the failure receipt is itself best effort. The
-  torn-tail corner accepted and
-  named: a failed heal followed by a successful append joins the
-  record to the fragment, unreadable to recovery, so a later
-  incarnation can reissue that seq. The unconfigured bullet no
-  longer says receipts "do not exist": no new receipt is attempted,
-  and an earlier armed incarnation's journal stays for the life of
-  the root.
-  PASS 4, the corners of the pass-3 wordings: the group grant is not
-  transactional — a failure can leave a prefix of the children
-  re-moded or the root re-grouped while still 0700, and startup
-  refuses without rollback (pass 5 narrowed the tightness claim:
-  exact modes mean group/other never widen but owner bits can change,
-  and a symlink child's TARGET is what changes); control-protocol
-  ss4's header sentences
-  scoped to answers that are ANSWERED (the lineage refusal and the
-  internal-error answer are headerless, per the ss2 enumeration) and
-  a subscription named a non-ss6 read (same lineage proof, no
-  revision published); the orphaned_generation void moved to seq
-  adjacency (folded above); access_seq's uniqueness claim replaced
-  by strictly-increasing-in-normal-operation plus the named
-  failed-heal corner, physical file order the tie-breaker for a
-  reissued seq.
-  PASS 5, the corners of the pass-4 wordings: journal recovery named
-  as its own arming stage (an existing perimeter.jsonl this engine
-  cannot read refuses BEFORE any new record, rather than restarting
-  the key series — the DL-146 ruling now stated in the doc's own
-  failure list); the child-tightening pass stated exactly (exact
-  modes, group/other never widen, owner bits can change — a 0400
-  file gains owner write — and a symlink child's target is what
-  changes, wherever it points; the owner's own artifacts inside a
-  root that was 0700 until that moment); the journal writer's trust
-  in its own path named (perimeter.jsonl is opened without the map
-  loader's symlink/FIFO checks; the run root is owner-only since
-  before arming, so anything planted there is the owner's act);
-  seq-before-I/O generalized to every record kind in the ss6
-  access_seq paragraph (the ss7 void rule builds on this allocation
-  order).
-  PASS 6, the corners of the pass-5 wordings: the ss8 journal bullet
-  no longer says "never widens" — never adds group or other
-  permissions, and the child pass can restore owner bits (0400 ->
-  0600); the failed-write split stated both ways — a gap only when no
-  complete line landed (reissued after restart only if no later
-  complete record carries a higher seq), while a complete line
-  followed by a failed fsync OR close exists and carries its seq (the
-  ss7 void rule's exact case; pass 7 added the close); the path-trust sentence extended — each recovery, heal and
-  append resolves the name afresh, so the one-file lifetime holds
-  only while the owner keeps the name bound to one regular file; and
-  readable wreckage named — an unreadable journal refuses arming,
-  but a readable file with no complete record starts the series at
-  zero, the next append issuing 1 like a fresh journal.
+  already overwritten it with the authenticated spelling (DL-146);
+  on an unconfigured estate it stays the caller's bare claim ("there
+  is no authentication at this tier" became "this tier does no
+  authentication of its own").
+  ACCESS-MODEL CLARIFIED, no behavior change -- the rulings are the
+  doc's own text now: ss2 (the local-CLI exemption is the filesystem
+  path alone; the supervisor socket's same-uid peer-cred check
+  named), ss3 (refusal points narrowed; a nameless gid is dropped,
+  never refused), ss4 (no-residue preflight; map owner = the
+  engine's own EFFECTIVE uid, root included; the arming-failure
+  receipt trail split by stage, journal recovery its own stage),
+  ss5 (the two doors before the gate; a denial carries no read
+  header), ss6 (receipt wire forms; access_seq allocated before
+  I/O; a complete line's failed CLOSE counts like a failed fsync),
+  ss7 (orphaned_generation voids by SEQ ADJACENCY -- the generation
+  is process-local; failure receipts are best-effort attempts),
+  ss8 (journal mode 0600 at birth; the child pass never adds group
+  or other bits but can restore owner bits; the failed-heal corner
+  can reissue a seq, physical order the tie-breaker; path trust:
+  each append resolves the name afresh), ss12 (obligations 2, 5, 6
+  and 7 reworded from guarantees to attempts, held by the DL-105
+  100%-branch gate).
+  Reload's v1 failure handling and the one-read "validate the
+  complete candidate" qualification were recorded here in full and
+  are SUPERSEDED BY DL-149; the two code-side hardenings this entry
+  named as follow-ups (descriptor I/O into the AccessError refusal
+  path, a full-read loop with an EOF check) both landed there.
 - DL-149 the DL-148 code follow-ups land and the loader's escape
   class closes whole (2026-08-23; executes the two hardenings DL-148
   named as out of its doc-only scope, plus two more the slice's
