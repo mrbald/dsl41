@@ -7860,3 +7860,165 @@ relitigate an entry; append a new one.
   name-collision quarantine cause and links protocol-evolution.md and
   access-model.md, and CLAUDE.md's live-instance paragraph is scoped to
   the AutoSys items the runbook actually carries.
+- DL-151 the DL-150 code ledger is paid: what the fixes closed, what
+  verification refuted, and what stays owed with its blocking question
+  (2026-08-23; every line of that ledger re-verified against the tree
+  before any fix).
+  THE RULING. DL-150's follow-up ledger was an obligation, not a note. A
+  defect that is written down and left alone becomes a defect the
+  documents authorize. Every line of that ledger was re-verified against
+  the shipped tree BEFORE any code moved. A claim that reproduced was
+  fixed and pinned by a test that fails against the pre-fix source; a
+  claim that did not reproduce was REFUTED here, with its ground, never
+  dropped in silence. This is DL-150's own standard turned on DL-150: an
+  unverified fix is the drift it claims to close. Eighteen `(Amended by
+  DL-151.)` markers over eight documents carry the doc half, so a reader
+  meets each amendment where the rule is.
+  WHAT WAS PAID.
+  The shutdown transport. `dsl41 supervise shutdown`, the round's one
+  user-visible break, works. The incarnation is envelope, like `v`, so
+  the blocking transport stamps it and learns it from a reply that names
+  one, never from a refusal; the caller was left alone, which keeps the
+  two transports symmetric (DL-78/DL-91).
+  The run-history fold and replay. A STATUS input whose durable decision
+  REJECTED it no longer decides the row, so a late completion cannot
+  report SUCCESS 0 over the real FAILURE through `dsl41 runs` or
+  `read_run_root`. A foreign `state_machine_version` is refused at every
+  offline reader of a segment -- replay, both DEGRADED record-only paths,
+  and the `dsl41 journal` lineage walk, ahead of the crossing proof.
+  runner-design ss7 amended; the superseded CM-37 citation is retired.
+  The scanner masks. `_mask_closed_blocks` is a quote-aware walk that
+  opens a span exactly where rule 5 opens a comment, so
+  `description: "/* " */ key: value` is a loud rule-4b error instead of a
+  silent fold into `raw_value` -- the DL-30 loss class. Subcommand lines
+  mask too and the inline tail slices the same mask, so one anchoring
+  governs the whole line. The fill is not whitespace, because a space
+  fill INVENTED a pair boundary. jil-statement-syntax rule 4 carries the
+  amendment and a `[?]` on the vendor's comment-strip order.
+  The control door and the perimeter. Every malformed line is answered
+  and the stream stays in sync: `RecursionError` joins the framing gate.
+  A seal reads its wire TYPES and coerces nothing, so the string
+  `"false"` can no longer force a boundary -- force was an
+  authorization. Three bool-as-int gates, both `ControlClientError`
+  contract holes, both unbounded raw readers and `query subscribe`'s
+  unparsed ack (a denial printed, exited 0 and blocked forever) are
+  closed. `PerimeterJournal.write` fsyncs the parent directory on the
+  write that CREATES the journal, through DL-137's one spelling, so an
+  arming receipt survives power loss and `access_seq` cannot restart.
+  control-protocol ss3 and access-model ss6 amended.
+  The lifecycle tier. Bad bytes refuse by name: `canon.decode` wraps
+  `UnicodeDecodeError` as `CanonError`, which all eleven other call sites
+  already turn into named refusals. A NUL in a spec is `bad_spec`, not
+  `internal:`, and the wrapper records a spawn it could not open instead
+  of dying with no `status.json`. `grace_seconds` must be finite and the
+  deadman interval finite and positive. `v` and `token` are wire
+  integers, so `true` and `1.0` are neither. Both spool readers refuse a
+  version they do not implement and leave ABSENCE unruled. `durable_write`
+  and `durable_create` write all the bytes. supervisor-protocol ss2/ss3/ss5
+  and protocol-evolution amended.
+  The oracle, four semantic alignments. SEM-22: an ON_NOEXEC box RUNS and
+  each member bypasses on its own flag or a containing box's; the bypass
+  is the tick's run, so it joins the fold's ran set and arms no
+  must-start alarm. SEM-12: an override fires over any descendant,
+  transitively, which is DL-12's reading -- oracle and derive agreed on
+  paper and disagreed in code. SEM-33: `run_window` endpoints are wall
+  times in the JOB's zone, and the deferred start converts back to the
+  engine clock so a DST shift in the gap cannot skew it. SEM-34: offsets
+  pair with `start_times` by position, so every offset after the first is
+  live; the single-offset broadcast branch is untouched.
+  The UC backend set. Case-only record-name collisions quarantine under
+  `--strict` (L014/UCS-12); M15 member-to-box edges, M19/M20/M21 initial
+  status, M17 terminators, M03 windows, M31 values and the OR join note
+  now say what the mapping table says, and the report renders
+  `bundle.excluded` with its apply notes. Tier b's `"<unset>"` string
+  sentinel is `None`, off the literal domain; canonicalization keeps
+  SEM-34's pairs in step; `--tier b` alone states that the job set is
+  tier (a)'s question. NEW RULE **L020**, the iced consumer: a job whose
+  every immediate predecessor translates to a UC Skip is warned, which is
+  the detector stonebranch-semantics Part II requirement 3 demands; box
+  overrides and global gates are not start gates, and a consumer that is
+  itself skipped stays quiet (ir-design ss9 carries the row). One
+  precedent from the same slice: a prose-only docstring edit moves the
+  CatalogIR schema hash, so `IR_SCHEMA_PIN` may be re-pinned with
+  `ir_version` unmoved, and the pin's comment now says so.
+  The estate openers. An in-place profile change opens in ONE command:
+  the launch gate reads the COMMITTED manifest and the runtime gate runs
+  before the next segment is written, so a refused try leaves no segment
+  behind. `--next-as-machine` is a DECLARED unwired field the launcher
+  overrides, so a resume can no longer open silently under the old
+  machine identity. `seal --request-id` reaches its retry route on both
+  doors, and the offline retry no longer closes a SECOND period. An
+  `evict --force` with no `claimed_actor` is refused, so the attribution
+  promise holds. `T_kill` derives from the period's grace instead of a
+  fixed 30 s that permitted an eviction inside a long TERM grace -- the
+  double run the bound exists to prevent. period-model ss3.5's
+  executions-row check is asked at the loader that holds C2, so a forged
+  sidecar naming a box row moves no head. `read_sentinel` refuses by name
+  what it cannot read, and the leader pin is read as an exact integer.
+  Every Oracle resolves `timezone:` through the period's alias map at ALL
+  FOUR construction sites -- engine, audit, history fold, journal
+  narration -- because wiring only the engine would ship a new
+  divergence: an estate the engine runs and the audit then refuses.
+  period-model ss3.5/ss7, concurrency-model ss8 and the deployment runbook
+  amended.
+  The test gaps, eight, each checked by mutation: with its rule disabled
+  the new test fails. ENOSPC on the runs dir; all three wrapper rc-3
+  returns; PR-30g, which drops one required fsync of a committed boundary
+  at a time; PR-17's first two clauses; a PR-28 case that mutates
+  `state_machine_version`; PR-52's `HostRuntime`, `_hosts` and
+  `timer_seq` driven through the ownership gate; and the q8 probe
+  calendars asserted against the date sets the live-instance runbook
+  pins. The eighteen conversation-pointer citations DL-75 deleted are
+  gone from `tests/` as well; each site now states its rule.
+  WHAT VERIFICATION REFUTED, and on what ground.
+  SIGNAL owes no `boot_id` and no `command_pgid == command_pid` check.
+  The amended supervisor-protocol ss5 states one obligation, the recorded
+  pid-and-start-time guard; ss3's `boot_id` sentence describes what the
+  wrapper WRITES. It is also unreachable: SIGNAL is gated on this
+  process's own spawns this boot, and the engine-side reader that CAN
+  meet a previous boot's spool does check `boot_id`.
+  The incoming-path receipt read is the contract, not a breach. The
+  amended ss5 documents it -- index first, the path only when no index
+  entry exists -- and it moves an answer AWAY from first application,
+  which is the direction DL-129 protects.
+  `supervise list` and SIGNAL never shared the shutdown hole. LIST and
+  PING are the two ungated verbs, and SIGNAL has no CLI path at all; the
+  CLI's SHUTDOWN was the one holed call site in `src/`.
+  PR-17's state-machine-mismatch clause was already discharged, under the
+  PR-28 name. Only its first two clauses were untested.
+  PR-52's `timer_seq` was not unguarded: a name-list assertion already
+  pinned it. `HostRuntime` and `_hosts` were the real gaps.
+  WHAT STAYS OWED, each with what blocks it.
+  The operator disarm verb (period-model ss10.4 names one). A new wire
+  verb is its own deliberate unit, not a debt payment.
+  The crash-window half of the history fold: a completion whose decision
+  record was LOST still decides the offline row. Probed and recorded in
+  runner-design ss7. Closing it gives the offline fold authority over an
+  undecided attempt, which the design has not granted.
+  `artifact_format_version` absent-field defaults on Sentinel, Anchor,
+  Claim and Candidate. Blocked on the absent-version discriminator, which
+  no document rules (DL-150's open item); the spool readers took the same
+  shape, refusing only what is present and unsupported.
+  The cross-stream `f()`/`d()` latch in derive still compiles silently
+  against UCS-13. The M04/M05 class question decides it, and that is a
+  semantic decision, not a missing branch.
+  The `run_window`-SKIP box fold stays blocked on SEM-33 against SEM-11:
+  either answer is implementable and only one is AutoSys.
+  Three PRE-EXISTING scanner defects, all reproduced on the pre-fix tree
+  and none caused by the mask work. F2 is not a fixpoint for an inline
+  pair with a more-than-one-space gap before a closed block: splitting
+  the pair turns the block into a TRAILING comment and the canonical
+  renderer normalizes its gap, which is a normative F2 violation. The
+  rule-4/4b detector never runs on continuation lines, nor on calendar
+  date rows. A multi-line TRAILING block comment turns its body into
+  attributes, although rule 5 lets a block comment span lines.
+  Severity-labelled review pointers and finding-id test FUNCTION names
+  survive in four test files. They are not citations, and renaming test
+  functions was out of scope.
+  Jobs with no `timezone:` still compare `run_window` on the engine clock
+  (E10).
+  THE COUNT, honestly. Sixty-eight ledger items fixed and five refuted.
+  One more was answered with a comment and no guard, because the guard
+  would have made a doc sentence false (the scanner's continuation
+  branch, jil-statement-syntax rule 11). Nine commits carry the work;
+  this entry is the tenth.
