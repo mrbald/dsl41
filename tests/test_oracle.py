@@ -940,6 +940,57 @@ def test_sem12_unmet_box_success_no_failures_stays_running_indefinitely() -> Non
     assert transitions(o, "box12d") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
 
 
+def test_sem12c_box_success_over_a_grandchild_fires_transitively() -> None:
+    """T12c (SEM-12): "inside the box" is transitive -- derive._is_inside
+    counts any ancestor container, and the oracle must agree. The OUTER
+    box's box_success names a grandchild (a member of the inner box), so it
+    is evaluated the moment that grandchild succeeds, "regardless of other
+    members": the inner box is still RUNNING with a sibling mid-run, and the
+    outer box completes anyway. Before the fix only the direct parent was
+    informed of a member transition, so the outer box hung RUNNING for ever
+    while the static classification said the edge was there."""
+    text = (
+        "insert_job: outer12c\njob_type: b\nbox_success: s(grand12c)\n\n"
+        "insert_job: inner12c\njob_type: b\nbox_name: outer12c\n\n"
+        "insert_job: grand12c\njob_type: c\ncommand: x\nmachine: m1\nbox_name: inner12c\n\n"
+        "insert_job: sib12c\njob_type: c\ncommand: y\nmachine: m1\nbox_name: inner12c\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="outer12c"))
+    assert transitions(o, "outer12c") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 1, job="grand12c", status="SUCCESS"))
+    assert transitions(o, "outer12c") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+    outer_entries = [t for t in o.trace() if t.job == "outer12c"]
+    assert "SEM-12" in outer_entries[-1].cause
+    assert o.store.job["inner12c"].status == "RUNNING"  # the direct parent is unaffected
+    assert o.store.job["sib12c"].status == "RUNNING"  # and its other member still runs
+
+
+def test_sem12c_an_ancestor_override_that_is_unmet_leaves_the_box_running() -> None:
+    """T12c (SEM-12, the non-triggering half -- green before the transitive
+    walk existed too, and that is its point): the walk EVALUATES the
+    ancestor's override, it never folds the ancestor by itself. The
+    grandchild FAILs, so box_success: s(grand12e) is unmet; the inner box
+    keeps a second member running, so nothing folds anywhere and the outer
+    box stays RUNNING -- the specified-but-unmet override suppresses the
+    default fold exactly as it does for a direct member."""
+    text = (
+        "insert_job: outer12e\njob_type: b\nbox_success: s(grand12e)\n\n"
+        "insert_job: inner12e\njob_type: b\nbox_name: outer12e\n\n"
+        "insert_job: grand12e\njob_type: c\ncommand: x\nmachine: m1\nbox_name: inner12e\n\n"
+        "insert_job: sib12e\njob_type: c\ncommand: y\nmachine: m1\nbox_name: inner12e\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="outer12e"))
+    o.feed(ev("STATUS", 1, job="grand12e", status="FAILURE"))
+    assert transitions(o, "outer12e") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "inner12e") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
 # ------------------------------------------------------------ 11. SEM-13 sticky TERMINATED
 
 
@@ -1214,6 +1265,104 @@ def test_sem22_noexec_bypass_job_and_box_member_fold_normally() -> None:
     ]
 
 
+def test_sem22_noexec_box_goes_running_and_every_member_bypasses() -> None:
+    """T22b (SEM-22): "Box in ON_NOEXEC scheduled to run -> goes RUNNING,
+    members are bypassed to SUCCESS as their conditions are met." The box
+    itself does NOT bypass; each member does, on the box's flag rather than
+    its own, including a member whose condition is only met by an earlier
+    member's bypass. The box then folds normally (SEM-11) -- it waits for
+    every member's bypass, it does not complete on the first one."""
+    text = (
+        "insert_job: box22b\njob_type: b\n\n"
+        "insert_job: mem_a22b\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box22b\n\n"
+        "insert_job: mem_b22b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box22b\n"
+        "condition: s(mem_a22b)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_NOEXEC", 0, job="box22b"))
+    o.feed(ev("STARTJOB", 1, job="box22b"))
+    assert transitions(o, "box22b") == [
+        "ON_NOEXEC",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+    # each member bypassed: SUCCESS with no STARTING/RUNNING of its own
+    assert transitions(o, "mem_a22b") == ["INACTIVE->SUCCESS"]
+    assert transitions(o, "mem_b22b") == ["INACTIVE->SUCCESS"]
+    bypass = next(t for t in o.trace() if t.job == "mem_b22b")
+    assert "ON_NOEXEC bypass" in bypass.cause
+
+
+def test_sem22_noexec_box_member_whose_condition_never_fires_keeps_the_box_running() -> None:
+    """T22b (SEM-22 x SEM-11 literal, DL-13): members bypass "as their
+    conditions are met" -- a member whose condition never becomes true is
+    never bypassed, so the ON_NOEXEC box stays RUNNING just as it would for
+    a member that never ran. The bypass is a start, not an exemption from
+    the fold."""
+    text = (
+        "insert_job: box22c\njob_type: b\n\n"
+        "insert_job: mem_a22c\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box22c\n\n"
+        "insert_job: mem_b22c\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box22c\n"
+        "condition: s(never22c)\n\n"
+        "insert_job: never22c\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_NOEXEC", 0, job="box22c"))
+    o.feed(ev("STARTJOB", 1, job="box22c"))
+    assert transitions(o, "mem_a22c") == ["INACTIVE->SUCCESS"]
+    assert transitions(o, "mem_b22c") == []
+    assert transitions(o, "box22c") == ["ON_NOEXEC", "INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 2, job="never22c", status="SUCCESS"))  # the condition finally fires
+    assert transitions(o, "mem_b22c") == ["INACTIVE->SUCCESS"]
+    assert transitions(o, "box22c") == [
+        "ON_NOEXEC",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+
+
+def test_sem22_bypass_is_the_ticks_run_so_no_must_start_alarm_follows() -> None:
+    """T22b (SEM-22 x SEM-34): the bypass IS the tick's run (the Q3/DL-54
+    reading the arm already used), so SEM-34's "no new run has begun by
+    tick+offset" is satisfied and no MUST_START_ALARM is emitted. A
+    deliberately bypassed job does not alarm for not running."""
+    text = (
+        "insert_job: nx22\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\nmust_start_times: +5\n\n'
+        "insert_job: dummy22\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_NOEXEC", 0, job="nx22"))
+    o.feed(ev("STARTJOB", 0, job="nx22"))
+    assert transitions(o, "nx22") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
+    emitted = o.feed(ev("STATUS", 6, job="dummy22", status="SUCCESS"))  # past the +5 deadline
+    assert all(e.kind != "MUST_START_ALARM" for e in emitted)
+    assert "MUST_START_ALARM" not in transitions(o, "nx22")
+
+
+def test_sem22_noexec_box_bypasses_a_nested_member_box_level_by_level() -> None:
+    """T22b (SEM-22, nesting): the box sentence is applied at each box
+    level, so a member BOX of an ON_NOEXEC box goes RUNNING too and its own
+    members bypass. The dry-run walks the whole tree; nothing runs."""
+    text = (
+        "insert_job: outer22d\njob_type: b\n\n"
+        "insert_job: inner22d\njob_type: b\nbox_name: outer22d\n\n"
+        "insert_job: grand22d\njob_type: c\ncommand: x\nmachine: m1\nbox_name: inner22d\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_NOEXEC", 0, job="outer22d"))
+    o.feed(ev("STARTJOB", 1, job="outer22d"))
+    assert transitions(o, "grand22d") == ["INACTIVE->SUCCESS"]
+    for box in ("inner22d", "outer22d"):
+        assert transitions(o, box)[-3:] == [
+            "INACTIVE->STARTING",
+            "STARTING->RUNNING",
+            "RUNNING->SUCCESS",
+        ]
+
+
 # ------------------------------------------------------------- 16. SEM-23 FORCE_STARTJOB
 
 
@@ -1486,7 +1635,183 @@ def test_sem33_box_variant_two_members_deferred_member_keeps_box_open() -> None:
     ]
 
 
+def test_sem33_window_is_read_in_the_job_timezone_not_the_engine_clock() -> None:
+    """T33c (SEM-33 x SEM-35): `timezone:` re-bases every time attribute of
+    the job, run_window included. The engine clock is naive UTC (the
+    scheduler converts local ticks to it and nothing converted them back),
+    so a New York job with run_window "08:00-10:00" is INSIDE its window at
+    13:00 UTC -- 09:00 local -- and OUTSIDE it at 09:00 UTC, which is 05:00
+    local: three hours from the next opening, nineteen from the previous
+    close, so the closer edge defers it. Same catalog, same window, two
+    engine instants; the clock domain is the whole difference."""
+    text = (
+        "insert_job: rw_tz\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "08:00-10:00"\ntimezone: America/New_York\n'
+    )
+    inside = oracle(text)  # 13:00 UTC == 09:00 EDT: inside
+    inside.feed(Event(at=datetime(2026, 7, 1, 13, 0), kind="STARTJOB", payload={"job": "rw_tz"}))
+    assert transitions(inside, "rw_tz") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+    outside = oracle(text)  # 09:00 UTC == 05:00 EDT: outside, closer to the next opening
+    outside.feed(Event(at=datetime(2026, 7, 1, 9, 0), kind="STARTJOB", payload={"job": "rw_tz"}))
+    assert transitions(outside, "rw_tz") == ["RUN_WINDOW_DEFER"]
+
+
+def test_sem33_window_without_a_timezone_stays_on_the_engine_clock() -> None:
+    """T33c (SEM-33 x SEM-35, the control): the same window on a job that
+    declares no `timezone:` is compared on the engine clock unchanged --
+    13:00 is outside "08:00-10:00" and 09:00 is inside. Pins that the tz
+    re-basing is per-job and does not leak into the ordinary case."""
+    text = (
+        "insert_job: rw_utc\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "08:00-10:00"\n'
+    )
+    inside = oracle(text)
+    inside.feed(Event(at=datetime(2026, 7, 1, 9, 0), kind="STARTJOB", payload={"job": "rw_utc"}))
+    assert transitions(inside, "rw_utc") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+    outside = oracle(text)
+    outside.feed(Event(at=datetime(2026, 7, 1, 13, 0), kind="STARTJOB", payload={"job": "rw_utc"}))
+    assert transitions(outside, "rw_utc") == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_deferred_start_timer_is_the_engine_instant_of_the_local_opening() -> None:
+    """T33c (SEM-33 x SEM-35): the closer-edge DEFER is decided on local
+    wall time but the timer it queues is an ENGINE instant. A Tokyo job
+    (UTC+9, no DST) attempting at 00:50 local -- 15:50 UTC the day before --
+    is 10 minutes from the 01:00 local opening, so the STARTJOB is queued
+    for 16:00 UTC, and that is when the job actually starts."""
+    text = (
+        "insert_job: rw_tokyo\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:50"\n'
+        'run_window: "01:00-02:00"\ntimezone: Asia/Tokyo\n\n'
+        "insert_job: dummy_tokyo\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 6, 30, 15, 50), kind="STARTJOB", payload={"job": "rw_tokyo"}))
+    assert transitions(o, "rw_tokyo") == ["RUN_WINDOW_DEFER"]
+    o.feed(
+        Event(
+            at=datetime(2026, 6, 30, 16, 5),
+            kind="STATUS",
+            payload={"job": "dummy_tokyo", "status": "SUCCESS"},
+        )
+    )
+    start = next(t for t in o.trace() if t.job == "rw_tokyo" and t.transition.endswith("STARTING"))
+    assert start.at == datetime(2026, 6, 30, 16, 0)  # 01:00 Tokyo, on the engine clock
+
+
 # --------------------------------------------------------------------- 19. SEM-34 must_*
+
+
+def test_sem34c_each_start_time_arms_its_own_must_complete_offset() -> None:
+    """T34c (SEM-34): "+n minutes from each start time" under the strict
+    count match -- two start_times with two offsets pair BY POSITION. The
+    08:00 tick's must_complete deadline is +7, the 09:00 tick's is +40: the
+    second run is still quiet at 09:07, where the first run alarmed at
+    08:07. Before the fix every tick read offsets_min[0], so the second
+    start inherited the first slot's deadline and every later offset was
+    dead configuration."""
+    text = (
+        "insert_job: sla34c\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00, 09:00"\n'
+        "must_complete_times: +7, +40\n\n"
+        "insert_job: dummy34c\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    first = oracle(text)
+    first.feed(Event(at=datetime(2026, 7, 1, 8, 0), kind="STARTJOB", payload={"job": "sla34c"}))
+    assert transitions(first, "sla34c") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    alarms = first.feed(
+        Event(
+            at=datetime(2026, 7, 1, 8, 7),
+            kind="STATUS",
+            payload={"job": "dummy34c", "status": "SUCCESS"},
+        )
+    )
+    assert any(e.kind == "MUST_COMPLETE_ALARM" and e.payload.get("job") == "sla34c" for e in alarms)
+
+    second = oracle(text)
+    second.feed(Event(at=datetime(2026, 7, 1, 9, 0), kind="STARTJOB", payload={"job": "sla34c"}))
+    quiet = second.feed(
+        Event(
+            at=datetime(2026, 7, 1, 9, 7),  # the FIRST slot's offset: not this tick's
+            kind="STATUS",
+            payload={"job": "dummy34c", "status": "SUCCESS"},
+        )
+    )
+    assert all(e.kind != "MUST_COMPLETE_ALARM" for e in quiet)
+    alarms = second.feed(
+        Event(
+            at=datetime(2026, 7, 1, 9, 40),
+            kind="STATUS",
+            payload={"job": "dummy34c", "status": "FAILURE"},
+        )
+    )
+    assert any(e.kind == "MUST_COMPLETE_ALARM" and e.payload.get("job") == "sla34c" for e in alarms)
+
+
+def test_sem34c_must_start_alarm_uses_the_slot_offset_of_its_own_tick() -> None:
+    """T34c (SEM-34): the same pairing on the must_start half. The job's
+    condition never becomes true, so no run begins and the alarm is due --
+    at tick+30 for the 09:00 slot, and NOT at tick+5, which is the 08:00
+    slot's offset and the value every tick used before the fix."""
+    text = (
+        "insert_job: sla34d\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00, 09:00"\n'
+        "must_start_times: +5, +30\ncondition: s(gate34d)\n\n"
+        "insert_job: gate34d\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: dummy34d\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 9, 0), kind="STARTJOB", payload={"job": "sla34d"}))
+    quiet = o.feed(
+        Event(
+            at=datetime(2026, 7, 1, 9, 5),  # the first slot's offset
+            kind="STATUS",
+            payload={"job": "dummy34d", "status": "SUCCESS"},
+        )
+    )
+    assert all(e.kind != "MUST_START_ALARM" for e in quiet)
+    alarms = o.feed(
+        Event(
+            at=datetime(2026, 7, 1, 9, 30),
+            kind="STATUS",
+            payload={"job": "dummy34d", "status": "FAILURE"},
+        )
+    )
+    assert any(e.kind == "MUST_START_ALARM" and e.payload.get("job") == "sla34d" for e in alarms)
+    # SCHED_ARM is the SEM-32 latch of the blocked tick; the alarm adds no
+    # control flow of its own -- the job never started
+    assert transitions(o, "sla34d") == ["SCHED_ARM", "MUST_START_ALARM"]
+
+
+def test_sem34c_a_single_offset_still_broadcasts_over_every_start_time() -> None:
+    """T34c (SEM-34, the exception left alone): one relative offset against
+    several start_times is the dossier's own [?] corner -- the strict count
+    rule and TechDocs' worked example disagree, and it stays a broadcast
+    until a live instance decides. The 09:00 tick alarms at +5, the same
+    offset the 08:00 tick gets."""
+    text = (
+        "insert_job: sla34e\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00, 09:00"\n'
+        "must_complete_times: +5\n\n"
+        "insert_job: dummy34e\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    for hour in (8, 9):
+        o = oracle(text)
+        o.feed(Event(at=datetime(2026, 7, 1, hour, 0), kind="STARTJOB", payload={"job": "sla34e"}))
+        alarms = o.feed(
+            Event(
+                at=datetime(2026, 7, 1, hour, 5),
+                kind="STATUS",
+                payload={"job": "dummy34e", "status": "SUCCESS"},
+            )
+        )
+        assert any(
+            e.kind == "MUST_COMPLETE_ALARM" and e.payload.get("job") == "sla34e" for e in alarms
+        )
 
 
 def test_sem34a_must_complete_alarm_not_emitted_when_job_finishes_in_time() -> None:

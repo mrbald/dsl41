@@ -404,8 +404,14 @@ class Scheduler:
 
     def reset(self, start: datetime, *, inclusive: bool = True) -> None:
         """Re-anchor every job's next tick at or (inclusive=False) strictly
-        after `start`. Resume uses the exclusive form anchored at the last
-        journal instant: a tick exactly there was already fed by replay.
+        after `start`. Resume anchors at the journal's scheduler frontier and
+        uses the INCLUSIVE form, dedupping against the ticks the journal
+        already holds: a crash between same-instant siblings leaves one of
+        them unjournaled, and an exclusive re-anchor would drop it with no
+        record (period-model ss6: the cutoff barrier). The exclusive form is for
+        the one case that cannot hold such a sibling -- a period opened from
+        a seal whose frontier IS the opening instant, where the closing
+        segment already admitted every tick due at or before it.
         Jobs whose calendar is already exhausted get no entry (DL-56)."""
         self._next = {}
         for job, plan in self._plans.items():

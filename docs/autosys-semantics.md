@@ -179,7 +179,9 @@ ended TERMINATED counts as failed for this fold — SEM-14 kills land here.
 ### SEM-12 · box_success / box_failure override — with evaluation gating **[V]**
 `box_success: <condition expr>` (same predicate language). Subtle, verified semantics:
 - If the referenced job is **inside** the box: the scheduler evaluates the box status the
-  moment that job enters the specified state, regardless of other members.
+  moment that job enters the specified state, regardless of other members. "Inside" is
+  **transitive** (DL-12): a job in a nested box is inside every box above it, so an outer
+  box's override fires on a grandchild's transition while the inner box is still RUNNING.
 - If the referenced job is **outside** the box (or an external job, or a global): the
   scheduler evaluates the box status when *some member completes after* the external
   condition became true. If all members complete *before* the external condition is met, the
@@ -255,6 +257,14 @@ in ON_NOEXEC scheduled to run → goes RUNNING, members are bypassed to SUCCESS 
 conditions are met, box returns to ON_NOEXEC afterward. The bypass overrides manual status
 changes to members while the box is ON_NOEXEC. This is the "dry-run wiring" state — a useful
 target concept for our own simulator semantics.
+*Model note:* the box sentence is applied at **each box level**, so a member box of an
+ON_NOEXEC box also goes RUNNING and bypasses its own members — the dry run walks the whole
+tree. A member bypasses on its own flag or on any containing box's, and the bypass counts as
+that member's start for the run: it joins the box's ran set, so the SEM-11 fold waits for
+every member's bypass and a member whose condition never fires keeps the box RUNNING like any
+member that never ran. The bypass is also the tick's run for SEM-34, so a bypassed job raises
+no MUST_START_ALARM. The vendor text states one box level; applying it per level is this
+project's pin. **[?]**
 
 ### SEM-23 · FORCE_STARTJOB vs STARTJOB **[C]**
 STARTJOB honors nothing extra (it *is* the normal start event). FORCE_STARTJOB starts the job
@@ -349,7 +359,9 @@ latch-until-consumed: an armed run can land in a LATER run_window cycle than its
 
 ### SEM-33 · run_window is a gate, not a trigger **[V]**
 `run_window: "02:00-04:00"` — not a starting condition, but an additional constraint on when
-a start can actually occur. If conditions become true outside the window, AutoSys picks the
+a start can actually occur. Its endpoints are wall times in the job's own zone (SEM-35), so
+the engine compares them in that zone and schedules the deferred start at the corresponding
+absolute instant. If conditions become true outside the window, AutoSys picks the
 closer edge. Closer to the next window opening → schedule STARTJOB at window open. Closer to
 the previous window's end → do not run, set INACTIVE. **[V]** Max span 24h. The window can
 cross midnight. Both endpoints are inclusive: an attempt at exactly the opening or the closing
@@ -381,7 +393,11 @@ checks the form and the count, never the span or the ordering. IR: model as SLA 
 not semantics.
 *Model note:* only the relative forms arm an alarm. Absolute `must_start_times` /
 `must_complete_times` lower to IR and are carried, but the oracle owns no calendar, so no
-absolute deadline is armed v1.
+absolute deadline is armed v1. Under the strict count match the offsets pair with the
+start_times **by position**: the oracle reads the tick's own time of day, in the job's
+timezone, to name the slot. A start at an instant that is no start_time — an operator's
+sendevent, or a start a condition edge released after the tick — cannot be paired and takes
+the first offset. **[?]**
 (Contrast `term_run_time`: that one *is* control flow — auto-TERMINATE after n minutes.)
 
 ### SEM-35 · timezone **[V]**
@@ -721,24 +737,28 @@ T08 SET_GLOBAL triggers re-eval (SEM-08) · T09 max_exit_success boundary, T09b 
 decide alone (unlisted → SUCCESS), T09c success_codes replacement, T09d success_codes
 ignored beside fail_codes (SEM-09, DL-58 cited composition) ·
 T10 unconditioned member starts with box (SEM-10) · T11 default box fold (SEM-11) ·
-T12a internal box_success early-exit, T12b external box_success hung-RUNNING (SEM-12) ·
+T12a internal box_success early-exit, T12b external box_success hung-RUNNING,
+T12c box_success over a grandchild fires transitively (SEM-12) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
-T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass (SEM-22) ·
+T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass,
+T22b an ON_NOEXEC box goes RUNNING and every member bypasses (SEM-22) ·
 T23 force start satisfies latch (SEM-23) ·
 T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
 (SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
 tick arms, edge starts, start consumes — cited, abandon switch deleted (SEM-32,
-DL-54/DL-58: `test_sem32_*`) · T33a/b run_window closer-edge both sides + box variant
-(SEM-33) · T34a/b must_* emit alarms only (SEM-34).
+DL-54/DL-58: `test_sem32_*`) · T33a/b run_window closer-edge both sides + box variant,
+T33c the window read in the job's timezone (SEM-33, with SEM-35) · T34a/b must_* emit alarms
+only, T34c each start_time arms its own relative offset (SEM-34).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
 pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15 has its
 own oracle test (`test_sem15_idle_box_recompute_derives_status_from_member_changes`). SEM-30 and
 SEM-31 are lowering rules, pinned in the IR suite (`test_sem30_*`, `test_sem31_*`). SEM-35 is
 pinned by the scheduler suite's `test_resolve_timezone_*` and `test_preflight_timezone_*`
-families, which carry no `sem35` in their names. SEM-36..39 are calendar rules, pinned in the autocal suite
+families, which carry no `sem35` in their names, and by T33c in the oracle suite for the
+re-basing of `run_window`. SEM-36..39 are calendar rules, pinned in the autocal suite
 (`test_sem36_*`..`test_sem39_*`). T34a/b's own `test_sem34a/b_*` cover must_complete only; the
 must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
 `test_must_start_alarm_quiet_when_the_run_began_in_time`. SEM-16 (definition-time mutation of a

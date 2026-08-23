@@ -56,7 +56,13 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   closer-edge rule -- nearer the next opening: schedule a TIMER STARTJOB at
   window open (box context stays RUNNING overnight); nearer the previous
   end: no run this cycle (INACTIVE stays). Exact midpoint: next opening
-  ([?] undocumented; pinned here, revisit with live access).
+  ([?] undocumented; pinned here, revisit with live access). The window is
+  read in the job's own `timezone` (SEM-35 re-bases every time attribute of
+  that job), so the comparison runs on local wall time and the queued timer
+  goes back on the engine clock; the name resolves through the runner's
+  ladder. A job with no `timezone:` compares on the engine clock -- the
+  run-level base zone is the scheduler's default, not the oracle's
+  (PENDING: E10).
 - Lookback (SEM-04): window -> status_at >= now - window. zero -> satisfied
   iff the predecessor's own last end (last_end_at) is at-or-after the
   EVALUATING job's last end (Q2a RESOLVED by citation, DL-54 -- "examines
@@ -80,19 +86,27 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   OFF_HOLD immediately re-evaluates that job's start (missed runs collapse
   to at most one).
 - ON_NOEXEC (SEM-22): when the job would start, it bypasses to SUCCESS
-  (STARTING/RUNNING skipped) and downstream runs normally. Members of an
-  ON_NOEXEC box bypass as their conditions are met.
+  (STARTING/RUNNING skipped) and downstream runs normally. A BOX does not
+  bypass: it goes RUNNING and its members bypass as their conditions are
+  met, box level by box level, so a member box walks its own members too.
+  A member bypasses on its own flag or on any containing box's. The bypass
+  joins the box's ran set like a real start, so the SEM-11 fold waits for
+  it and the once-per-box-run gate holds; it also counts as the tick's run
+  (the Q3/DL-54 reading), so no MUST_START_ALARM follows a bypass.
 - initial_status (SEM-24, DL-18): definition-time ON_HOLD/ON_ICE/ON_NOEXEC
   seeds the corresponding flag before the first event; no trace entry
   (definition state, not a transition). INACTIVE is the default anyway.
 - Boxes: SEM-10 (members start when box RUNNING + own condition; at most
   once per box run), SEM-11 LITERAL (DL-13: the box cannot complete until
-  every non-bypassed member has RUN to a terminal state -- a member whose
-  condition never fires, or whose run_window deferred it, keeps the box
-  RUNNING: the hung-box pattern is real behavior), SEM-12 (override
+  every member that is not ON_ICE has RUN -- or been bypassed by SEM-22 --
+  to a terminal state; a member whose condition never fires, or whose
+  run_window deferred it, keeps the box RUNNING: the hung-box pattern is
+  real behavior), SEM-12 (override
   gating: internal refs evaluated on the referenced member's transition;
   external/global refs evaluated only at member completion moments -- the
-  hung-RUNNING pattern), SEM-13 (TERMINATED boxes are sticky until the
+  hung-RUNNING pattern; "inside" is TRANSITIVE, as in derive._is_inside, so
+  every ancestor box evaluates its overrides on a descendant's transition,
+  not just the direct parent), SEM-13 (TERMINATED boxes are sticky until the
   next box start), SEM-14 (box_terminator member FAILURE -- not
   TERMINATED -- kills the box; job_terminator members die with the box),
   SEM-15 (a terminal member transition on a non-running, non-TERMINATED
@@ -109,8 +123,13 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   control flow. Relative offsets arm on the STARTJOB tick (must_start:
   alarm iff no new run began by tick+offset -- armed even when the start
   is abandoned or deferred, that is the alarm's point) and on the actual
-  start (must_complete). Absolute forms need the calendar the oracle does
-  not own; scripts exercise relative forms.
+  start (must_complete). N offsets against N start_times pair BY POSITION
+  -- the tick's local time of day names the slot. A SINGLE offset
+  broadcasts over every start time ([?] the dossier's strict count rule and
+  the vendor's own worked example disagree; open against a live instance),
+  and an instant that matches no start time keeps the first offset.
+  Absolute forms need the calendar the oracle does not own; scripts
+  exercise relative forms.
 - term_run_time (dossier ss5): control flow -- auto-TERMINATE when the run
   exceeds the limit, checked lazily as the clock advances.
 - n_retrys: Q4 resolved (DL-53) -- the trigger set is FAILURE-only application
@@ -144,7 +163,7 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, time as dtime, timedelta
+from datetime import UTC, datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
 from dsl41.canon import CanonError, canonical_bytes
@@ -319,6 +338,9 @@ class Oracle:
         #: given all three.
         self._pool = CapacityPool(catalog)
         self._in_wake = False
+        #: SEM-35 name -> zone, resolved once per name (the ladder walks
+        #: the whole zoneinfo database for a city default)
+        self._tz_cache: dict[str, tzinfo] = {}
 
     # ------------------------------------------------------------------ plumbing
 
@@ -465,6 +487,7 @@ class Oracle:
             box = job_ir.box.box_name
             if box is not None:
                 self._on_member_transition(box, job, old, new)
+                self._on_descendant_transition(job, new)
             if job_ir.job_type == "BOX" and new in TERMINAL:
                 # PENDING: Q3c -- a member's arm is scoped to the box run
                 # that armed it (DL-54 review MAJOR): an unconsumed arm dies
@@ -794,14 +817,60 @@ class Oracle:
         self.store.set_armed(job_ir.name, True)
         self._record(job_ir.name, "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32, DL-54/58)")
 
+    def _job_tz(self, job_ir: JobIR) -> tzinfo | None:
+        """SEM-35: the zone this job's time attributes are read in, resolved
+        through the runner's own ladder (zoneinfo, POSIX fixed offsets, the
+        DL-62 unique-city default). None means the engine clock IS the
+        comparison basis -- the case for every job without `timezone:`.
+
+        PENDING: E10 -- a run-level base zone (`--timezone`) is the
+        scheduler's default for jobs that declare none; the oracle owns no
+        run-level default, so those jobs compare on the engine clock."""
+        schedule = job_ir.schedule
+        name = schedule.timezone if schedule is not None else None
+        if name is None:
+            return None
+        if name not in self._tz_cache:
+            from dsl41.runner_scheduler import resolve_timezone
+
+            resolved = resolve_timezone(name)
+            if resolved is None:
+                raise OracleError(
+                    f"{job_ir.name}: timezone {name!r} is not resolvable (SEM-35: a zoneinfo"
+                    " name, a POSIX fixed offset, or a ujo_timezones entry supplied to the"
+                    " runner as --timezone-map)"
+                )
+            self._tz_cache[name] = resolved.tz
+        return self._tz_cache[name]
+
+    @staticmethod
+    def _local(when: datetime, tz: tzinfo | None) -> datetime:
+        """An engine instant as naive wall time in `tz`."""
+        if tz is None:
+            return when
+        return when.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+
+    @staticmethod
+    def _engine_time(local: datetime, tz: tzinfo | None) -> datetime:
+        """The inverse of _local. DST corners follow PEP 495 fold=0, the same
+        pin the scheduler's tick conversion uses (runner-design E10)."""
+        if tz is None:
+            return local
+        return local.replace(tzinfo=tz).astimezone(UTC).replace(tzinfo=None)
+
     def _run_window_permits(self, job_ir: JobIR, cause: str) -> bool:
-        """SEM-33 closer-edge rule; True == start may proceed now."""
+        """SEM-33 closer-edge rule; True == start may proceed now. The window
+        is read in the job's own timezone (SEM-35 re-bases every time
+        attribute of that job), so the comparison happens on local wall time
+        while the timer it queues goes back on the engine clock."""
         schedule = job_ir.schedule
         if schedule is None or schedule.run_window is None:
             return True
         assert self._now is not None
+        tz = self._job_tz(job_ir)
+        now_local = self._local(self._now, tz)
         lo, hi = schedule.run_window
-        now_t = self._now.time()
+        now_t = now_local.time()
         lo_t = _to_time(lo)
         hi_t = _to_time(hi)
         if lo_t <= hi_t:
@@ -810,8 +879,10 @@ class Oracle:
             inside = now_t >= lo_t or now_t <= hi_t
         if inside:
             return True
-        next_open = _next_occurrence(self._now, lo_t)
-        prev_close = _prev_occurrence(self._now, hi_t)
+        next_open = self._engine_time(_next_occurrence(now_local, lo_t), tz)
+        prev_close = self._engine_time(_prev_occurrence(now_local, hi_t), tz)
+        # both distances are measured on the ENGINE clock: a DST shift inside
+        # the gap makes the two wall-clock distances lie about elapsed time
         to_open = next_open - self._now
         since_close = self._now - prev_close
         if to_open <= since_close:  # [?] midpoint tie -> next opening
@@ -844,13 +915,50 @@ class Oracle:
             )
         return False
 
+    def _ancestor_boxes(self, job: str) -> list[str]:
+        """Containing boxes, innermost first (SEM-17). Lowering rejects
+        containment cycles; the seen-set keeps a hand-built IR finite."""
+        chain: list[str] = []
+        seen = {job}
+        job_ir = self.catalog.jobs.get(job)
+        box = job_ir.box.box_name if job_ir is not None else None
+        while box is not None and box not in seen:
+            chain.append(box)
+            seen.add(box)
+            box_ir = self.catalog.jobs.get(box)
+            box = box_ir.box.box_name if box_ir is not None else None
+        return chain
+
+    def _noexec_bypasses(self, job_ir: JobIR) -> bool:
+        """SEM-22: True when this start bypasses to SUCCESS instead of
+        running. A job bypasses on its own ON_NOEXEC flag, and a member also
+        bypasses while a box that contains it is ON_NOEXEC ("the bypass
+        overrides manual status changes to members while the box is
+        ON_NOEXEC"). A BOX never bypasses: an ON_NOEXEC box "goes RUNNING,
+        members are bypassed to SUCCESS as their conditions are met", so the
+        rule is applied once per box level and a member box walks its own
+        members too."""
+        if job_ir.job_type == "BOX":
+            return False
+        if self._runtime(job_ir.name).on_noexec:
+            return True
+        return any(self._runtime(box).on_noexec for box in self._ancestor_boxes(job_ir.name))
+
     def _start(self, job: str, cause: str) -> None:
         job_ir = self.catalog.jobs[job]
-        rt = self._runtime(job)
-        if rt.on_noexec:
+        if self._noexec_bypasses(job_ir):
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
             # A bypassed job never runs, so it acquires no resources (DL-50).
-            self.store.set_armed(job, False)  # Q3: the bypass IS the tick's run (DL-54)
+            # The bypass still COUNTS as this box run's start for the job: it
+            # joins the box's ran set, so the SEM-11 fold waits for every
+            # member's bypass and the SEM-10 once-per-run gate keeps a pair of
+            # mutually-referencing members from bypassing each other forever.
+            self.store.start_run(  # Q3: the bypass IS the tick's run (DL-54)
+                job,
+                cause=f"ON_NOEXEC bypass ({cause})",
+                box=job_ir.box.box_name,
+                is_box=False,
+            )
             self._set_status(job, "SUCCESS", cause=f"ON_NOEXEC bypass ({cause})")
             return
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
@@ -974,6 +1082,29 @@ class Oracle:
             # box's status (TERMINATED already returned above, SEM-13 sticky)
             self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
 
+    def _on_descendant_transition(self, member: str, new: str) -> None:
+        """SEM-12's "inside the box" is TRANSITIVE -- a grandchild is inside
+        every box above it, which is what derive._is_inside implements for
+        the static edge classification. So each ancestor ABOVE the direct
+        parent evaluates its own overrides on this transition too; without
+        it a box whose box_success names a grandchild stayed RUNNING for
+        ever while derive said the edge existed.
+
+        Only the SEM-12 override evaluation walks up. The default fold
+        (SEM-11) and the SEM-15 idle recompute read an ancestor's OWN
+        members, which a descendant transition does not move; they reach the
+        ancestor through the direct parent's own transition."""
+        for box in self._ancestor_boxes(member)[1:]:  # [0] is the direct parent
+            box_ir = self.catalog.jobs.get(box)
+            if box_ir is None:
+                return
+            if self._runtime(box).status != "RUNNING":
+                continue  # not evaluating: SEM-13 sticky, or already folded
+            if new in TERMINAL | {"RUNNING"} and self._apply_box_overrides(
+                box, box_ir, member, new
+            ):
+                return
+
     def _idle_box_recompute(self, box: str, box_ir: JobIR, cause: str) -> None:
         """Derived-status recompute for a non-running box (SEM-15): pure
         function of current member statuses -- ran_members does not apply
@@ -1029,15 +1160,20 @@ class Oracle:
 
     def _all_members_done(self, box: str) -> bool:
         """SEM-11, literal (DL-13): the box cannot complete until every
-        member has run (to a terminal state) or been bypassed (iced/noexec).
+        member has run (to a terminal state) or been bypassed (iced).
         A member whose condition never fires inside the run -- or whose
         run_window deferred it -- keeps the box RUNNING: the hung-box
-        pattern is real behavior, not a defect to smooth over."""
+        pattern is real behavior, not a defect to smooth over.
+
+        An ON_NOEXEC member is NOT skipped here: SEM-22 bypasses it to
+        SUCCESS "as [its] conditions are met", and that bypass joins the
+        ran set like any start, so the fold waits for it exactly as it
+        waits for a real run."""
         ran = self._runtime(box).ran_members
         for member in self._members(box):
             rt = self._runtime(member)
-            if rt.on_ice or rt.on_noexec:
-                continue  # bypassed members do not block completion
+            if rt.on_ice:
+                continue  # SEM-20: an iced member is out of the logic entirely
             if member not in ran:
                 return False  # not yet run this box execution (incl. held)
             if rt.status not in TERMINAL:
@@ -1094,6 +1230,37 @@ class Oracle:
 
     # ----------------------------------------------------- clocks, SLAs, timeouts
 
+    def _start_slot(self, job_ir: JobIR) -> int | None:
+        """SEM-34: which `start_times` entry the current instant is, read in
+        the job's own timezone. None when the job declares none, or when the
+        instant is not one of them -- an operator's sendevent, or a start a
+        condition edge released after the tick (SEM-32)."""
+        schedule = job_ir.schedule
+        if schedule is None or not schedule.start_times:
+            return None
+        assert self._now is not None
+        now_local = self._local(self._now, self._job_tz(job_ir))
+        for index, start in enumerate(schedule.start_times):
+            if (start.hour, start.minute) == (now_local.hour, now_local.minute):
+                return index
+        return None
+
+    def _sla_offset(self, job_ir: JobIR, offsets: list[int]) -> int:
+        """SEM-34: "+n minutes from each start time" under the strict count
+        match -- N offsets against N start_times pair BY POSITION, so the
+        second tick gets the second offset.
+
+        Two cases keep the first offset. A SINGLE offset is the dossier's
+        own [?] exception (it broadcasts over every start time; the vendor's
+        worked example and the strict rule disagree, open against a live
+        instance). An instant that matches no start time cannot be paired at
+        all, and the first offset is what the oracle used before the pairing
+        existed."""
+        if len(offsets) == 1:
+            return offsets[0]
+        slot = self._start_slot(job_ir)
+        return offsets[0] if slot is None else offsets[slot]
+
     def _arm_must_start(self, job: str) -> None:
         """SEM-34: MUST_START_ALARM if no new run has begun by tick+offset."""
         job_ir = self.catalog.jobs.get(job)
@@ -1103,7 +1270,7 @@ class Oracle:
         if spec is None or spec.kind != "relative" or not spec.offsets_min:
             return
         assert self._now is not None
-        deadline = self._now + timedelta(minutes=spec.offsets_min[0])
+        deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
         self._schedule_timer(
             deadline,
             Event(
@@ -1124,7 +1291,7 @@ class Oracle:
         if schedule is not None and schedule.must_complete is not None:
             spec = schedule.must_complete
             if spec.kind == "relative" and spec.offsets_min:
-                deadline = self._now + timedelta(minutes=spec.offsets_min[0])
+                deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
                 self._schedule_timer(
                     deadline,
                     Event(
