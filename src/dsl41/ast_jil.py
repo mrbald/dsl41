@@ -1,9 +1,9 @@
 """JIL statement-level AST: hand scanner + preserve/canonical renderers.
 
-Normative spec: docs/jil-statement-syntax.md (tokenization rules 1-9, fidelity
-tests F1-F4) and docs/ir-design.md ss2 (model sketches, loss policy). No
-interpretation happens at this layer: `condition` is a RawAttr like any other;
-expression parsing is lowering's job.
+Normative spec: docs/jil-statement-syntax.md (tokenization rules 0-11, 4b
+included, and fidelity tests F1-F4) and docs/ir-design.md ss2 (model sketches,
+loss policy). No interpretation happens at this layer: `condition` is a RawAttr
+like any other; expression parsing is lowering's job.
 
 Fidelity contract: `render(parse(text)) == text` byte-exact in preserve mode;
 canonical mode is a fixpoint. The ir-design ss2 sketch fields are the semantic
@@ -104,7 +104,11 @@ SUBCOMMANDS = frozenset(
 
 #: Rule 11 (DL-36): statements whose body may carry bare date rows (the
 #: autocal_asc standard-calendar export). Extended calendars and cycles are
-#: pure `key: value` and stay out.
+#: pure `key: value` and stay out. The scan loop tests rule 6 before this
+#: branch and needs no exclusion for it: no calendar-export attribute is in
+#: CONTINUATION_ATTRS, so a well-formed export never holds a continuation open
+#: over its date rows. Unknown keys stay attributes (rule 3), so a hand-made
+#: `run_calendar:` inside a calendar body does swallow the rows that follow.
 _DATE_BODY_SUBCOMMANDS = frozenset({"calendar"})
 
 #: Rule 3 guard (amended 2026-07-09, DL-18; rename_ added 2026-07-10, DL-27):
@@ -206,7 +210,7 @@ _INLINE_RE = re.compile(r"([ \t]+)([A-Za-z_][A-Za-z0-9_]*):")
 
 
 def parse(text: str, file: str = "<memory>") -> JilFile:
-    """Scan JIL text into a byte-faithful AST (rules 1-9 of the scanner spec)."""
+    """Scan JIL text into a byte-faithful AST (rules 0-11 of the scanner spec)."""
     return _Scanner(text, file).scan()
 
 
@@ -260,15 +264,46 @@ def _find_inline_pair(value: str) -> re.Match[str] | None:
     return None
 
 
-_CLOSED_BLOCK_RE = re.compile(r"/\*.*?\*/")
+#: Mask filler for `_mask_closed_blocks`. NOT a space: the fill must not be a
+#: key character, a quote, or whitespace, because rule 4b reads a pair only
+#: where the `key:` token is whitespace-preceded. A space fill invented that
+#: whitespace for a token glued to the closing `*/` (`command: a /* c */b: x`
+#: was refused as a second pair, against rule 4b's own wording).
+_MASK_FILL = "*"
 
 
 def _mask_closed_blocks(value: str) -> str:
-    """Blank out closed `/*...*/` spans (space-for-space, offsets preserved)
-    before the rule-4b pair scan: rule 5 keeps a closed inline block comment
+    """Mask closed `/*...*/` spans (char-for-char, offsets preserved)
+    before the rule-4/4b pair scan: rule 5 keeps a closed inline block comment
     with trailing text as opaque VALUE text, so a `key:` shape inside one is
-    comment prose, not a second attribute pair."""
-    return _CLOSED_BLOCK_RE.sub(lambda m: " " * (m.end() - m.start()), value)
+    comment prose, not a second attribute pair.
+
+    A span opens exactly where rule 5 opens a comment, and the walk is the one
+    `_split_trailing_comment` makes: the marker is unquoted and sits at the
+    value start or after whitespace. A quote-blind mask blanked the span of
+    `"/* " */ key: value` over the CLOSING quote, `_find_inline_pair` then read
+    the parity as odd, the rule-4b guard never fired, and the second pair folded
+    into `raw_value` -- the DL-30 silent-loss class the guard exists to stop
+    (DL-151). A quote inside a masked span toggles nothing, again as in
+    `_split_trailing_comment`: it is comment prose, not value text.
+    """
+    out = list(value)
+    in_q = False
+    i = 0
+    n = len(value)
+    while i < n:
+        ch = value[i]
+        if ch == '"':
+            in_q = not in_q
+        elif not in_q and value.startswith("/*", i) and (i == 0 or value[i - 1] in " \t"):
+            close = value.find("*/", i + 2)
+            if close == -1:
+                break  # never closes on this line: value text (rule 5)
+            out[i : close + 2] = [_MASK_FILL] * (close + 2 - i)
+            i = close + 2
+            continue
+        i += 1
+    return "".join(out)
 
 
 class _Scanner:
@@ -523,7 +558,14 @@ class _Scanner:
         inline_key = "job_type"
         inline_gap = ""
         inline_sep = " "
-        m = _find_inline_pair(value)
+        # Rule 4 runs the rule-4b detector, so it masks closed blocks the same
+        # way (DL-151): `insert_job: j /* see owner: bob */ tail` is opaque
+        # value text per rule 5, not an inline `owner` pair. The fill is
+        # char-for-char and never whitespace, so the offsets still index
+        # `value` and `m.group(1)` is real whitespace -- a space fill made
+        # `insert_job: j /* c */ job_type: c` render the comment as blanks.
+        masked = _mask_closed_blocks(value)
+        m = _find_inline_pair(masked)
         if m is not None:
             k2 = m.group(2)
             if k2.lower() != "job_type":
@@ -537,7 +579,11 @@ class _Scanner:
             tail = value[m.end() :]
             inline_sep = tail[: len(tail) - len(tail.lstrip(" \t"))]
             jt = tail[len(inline_sep) :]
-            if _find_inline_pair(jt) is not None:
+            # Reuse the line mask instead of re-masking `jt`: a fresh mask
+            # would re-anchor rule 5's "value start" to the inline value and
+            # open a span the line-level walk refuses, quietly swallowing the
+            # pair in `job_type:/* key: y */ z`.
+            if _find_inline_pair(masked[m.end() + len(inline_sep) :]) is not None:
                 raise JilParseError(
                     "multiple inline attributes on subcommand line", self.file, i + 1
                 )

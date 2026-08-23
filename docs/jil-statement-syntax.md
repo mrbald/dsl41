@@ -64,6 +64,23 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    second `key:`-shaped token on a subcommand line is a scanner error. The error is loud, and the
    scanner never silently folds the token into the subject. *(Amended 2026-07-03: this amendment
    narrowed the generic wording to match the `job_type_inline` field of the AST model.)*
+   *(Amended 2026-08-23, DL-151: the detector reads past closed block comments, on subcommand
+   and attribute lines alike. A `key:`-shaped token inside a closed `/*...*/` span is comment
+   prose, not a pair — rule 5 keeps that span as opaque value text. The span opens exactly
+   where rule 5 opens a comment: the `/*` is unquoted and sits at the value start or after
+   whitespace. A marker glued to the text before it opens nothing, so a pair inside it is a
+   real pair and gets the loud error, and a quote inside an opened span shadows nothing
+   (rule 7). Skipping a span invents no whitespace boundary either: a token glued to the
+   closing `*/` is still not whitespace-preceded, and stays value text, while a
+   whitespace-preceded pair after the `*/` is a real pair. [?] Whether the vendor binary
+   strips a comment BEFORE it splits pairs is not known, and it decides one input:
+   `command: a /* c */b: x` is one value here and would be two attributes to a stripping
+   engine. The scanner follows rule 4b's own wording, which reads the source line.
+   Before this amendment the subcommand line did not skip these spans at all, so
+   `insert_job: j /* see owner: bob */ tail` was refused as an inline `owner` pair. The
+   attribute line skipped them but did so quote-blind, so `description: "/* " */ key: value`
+   masked the closing quote, hid the real quote parity from the rule-4b guard, and folded the
+   second pair into the value — the DL-30 loss the guard exists to stop.)*
 4b. **Attribute lines carry ONE pair** *(added 2026-07-10, DL-30)*: the Broadcom syntax
    rules permit several `attribute: value` statements on one line (whitespace-separated)
    and require escapes (`\:`) or quotes for colons *inside* values. As a result, a second
@@ -72,7 +89,8 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    the value, that is silent loss that the DL-07 firewall cannot see.) Both cases get a
    loud scanner error, from the same detector as rule 4. Colons not in that shape (no
    leading whitespace, escaped, quoted, digit-led as in `/tmp/out:file.err` or
-   `02:00-04:00`) remain value text per rule 2/F4.
+   `02:00-04:00`) remain value text per rule 2/F4, and so does a pair shape that sits inside
+   a closed block comment (rule 4's 2026-08-23 amendment).
 5. **Comments**: JIL has `/* ... */` comments (they can span lines) and full-line `#`
    comments. A comment attaches to the nearest statement/attr that follows (leading) or to
    the same line (trailing — block comments only). Free comments at EOF are `floating`. The
@@ -159,7 +177,9 @@ entries keeps a descriptive name.
 - F3 fuzz: hypothesis-generated JIL-shaped text and raw character soups. Where parse
   succeeds, F1 holds; for the JIL-shaped half, F2 holds as well.
 - F4 lexical torture, as an inline case matrix: escaped and quoted colons, a `#` inside quotes,
-  a glob and an unclosed block marker in a value, a closed block kept inside a value, the
+  a glob and an unclosed block marker in a value, a closed block kept inside a value, a block
+  marker at the value start, a quoted block marker whose `*/` falls after the closing quote, a
+  closed block kept in a subcommand subject and after the inline `job_type`, the
   one-line `job_type` form with a trailing comment, and the layout corners (no space after the
   colon, empty value, trailing value spaces, indented attribute, empty subject, blank and
   whitespace-only lines, CRLF, no final newline, comment-only file, empty file). Every case is

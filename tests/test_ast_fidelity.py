@@ -268,11 +268,104 @@ def test_second_attr_pair_on_attribute_line_is_a_loud_error() -> None:
         # prose, not a pair (rule 5 opaque retention; adversarial-review
         # finding on DL-30).
         ("pair-inside-inline-comment", "command: run /* see key: x */ more"),
+        # The marker is taken at the value start too (rule 5, DL-151).
+        ("pair-inside-value-start-comment", "command:/* see key: x */ more"),
+        # A token glued to the closing `*/` is not whitespace-preceded, so it
+        # is not a pair shape; the mask must not invent that whitespace
+        # (rule 4b, DL-151).
+        ("token-glued-to-block-close", "command: a /* c */b: x"),
     ],
 )
 def test_rule_4b_guard_leaves_valid_colon_values_alone(label: str, line: str) -> None:
     jf = parse(f"insert_job: j\n{line}\n")
     assert len(jf.statements[0].attrs) == 1, label
+
+
+def test_rule_4b_guard_sees_through_a_quoted_block_marker() -> None:
+    """Rule 4b + rule 7 (DL-151): the closed-block mask is quote-aware. A `/*`
+    inside quotes opens no comment. The quote-blind mask blanked the span over
+    the CLOSING quote, the guard read the parity as odd, and the second pair
+    folded into raw_value -- the DL-30 silent-loss class."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse('insert_job: j\ndescription: "/* " */ key: value\n')
+
+
+def test_rule_4b_guard_fires_inside_a_glued_block_marker() -> None:
+    """Rule 5 opens a block only at the value start or after whitespace, so a
+    marker glued to the text before it is not a comment and the pair inside it
+    is a real pair (DL-151). The mask now opens spans where rule 5 does."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\ncommand: a/* key: x */b\n")
+
+
+def test_rule_4b_guard_fires_on_a_pair_after_a_closed_block() -> None:
+    """The mask hides only the span. A whitespace-preceded pair AFTER the
+    closing `*/` is a real second attribute and still errors."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\ncommand: a /* c */ b: x\n")
+
+
+def test_quoted_block_marker_without_a_second_pair_still_parses() -> None:
+    """The same mask must not invent a pair: with no `key:` after the quoted
+    marker the value stays verbatim and round-trips."""
+    text = 'insert_job: j\ndescription: "/* " */ plain tail\n'
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == '"/* " */ plain tail'
+    assert render(jf) == text
+
+
+def test_closed_block_on_a_subcommand_line_is_opaque_value_text() -> None:
+    """Rule 4 runs the rule-4b detector, so it masks closed blocks too
+    (DL-151): rule 5 keeps `/* see owner: bob */` with text after it as opaque
+    value text, and the scanner used to reject the line as an inline `owner`
+    pair."""
+    text = "insert_job: j /* see owner: bob */ tail\n"
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.subject == "j /* see owner: bob */ tail"
+    assert stmt.job_type_inline is None
+    assert render(jf) == text
+
+
+def test_closed_block_before_the_inline_job_type_keeps_its_bytes() -> None:
+    """The mask fill must not be whitespace: `m.group(1)` is rendered back as
+    the gap before the inline key, so a space fill put blanks where the comment
+    was and broke F1 (DL-151)."""
+    text = "insert_job: j /* c */ job_type: c\n"
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.subject == "j /* c */"
+    assert stmt.job_type_inline == "c"
+    assert render(jf) == text
+
+
+def test_block_marker_glued_to_the_inline_key_colon_is_not_a_comment() -> None:
+    """The tail check reads the line-level mask, not a fresh mask of the
+    inline value: rule 5 opens no span at `job_type:/*`, so `key: y` inside it
+    is a real second pair and still errors (DL-151)."""
+    with pytest.raises(JilParseError, match="multiple inline attributes"):
+        parse("insert_job: j job_type:/* key: y */ z\n")
+
+
+def test_closed_block_after_the_inline_job_type_is_opaque_value_text() -> None:
+    text = "insert_job: j   job_type: c /* see owner: bob */ tail\n"
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.subject == "j"
+    assert stmt.job_type_inline == "c /* see owner: bob */ tail"
+    assert render(jf) == text
+
+
+def test_block_marker_at_the_value_start_is_a_trailing_comment() -> None:
+    """Rule 5: the trailing marker is taken at the value start as well as after
+    whitespace, so `command:/* c */` is an empty value plus a comment."""
+    text = "insert_job: j\ncommand:/* c */\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == ""
+    assert [c.text for c in attr.comments] == ["/* c */"]
+    assert render(jf) == text
 
 
 def test_mid_line_hash_stays_in_value() -> None:
@@ -408,6 +501,11 @@ F4_CASES = [
     ("glob-not-comment", "insert_job: j\ncommand: ls -l /tmp/*\n"),
     ("unclosed-block-stays-in-value", "insert_job: j\ncommand: ls /tmp /*\n"),
     ("embedded-closed-block-in-value", "insert_job: j\ncommand: a /* closed */ b\n"),
+    ("block-marker-at-value-start", "insert_job: j\ncommand:/* c */\n"),
+    ("quoted-block-marker-in-value", 'insert_job: j\ndescription: "/* " */ plain tail\n'),
+    ("closed-block-in-subject", "insert_job: j /* see owner: bob */ tail\n"),
+    ("closed-block-before-inline-job-type", "insert_job: j /* c */ job_type: c\n"),
+    ("closed-block-after-inline-job-type", "insert_job: j   job_type: c /* x: 1 */ tail\n"),
     ("no-space-after-colon", "insert_job: j\ncommand:no_space\n"),
     ("empty-value", "insert_job: j\nempty_attr:\n"),
     ("trailing-spaces-in-value", "insert_job: j\ncommand: trailing spaces   \n"),
