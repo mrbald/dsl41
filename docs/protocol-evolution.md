@@ -97,6 +97,11 @@ unknown `rec` inside a version-matched segment is corruption, not an extension
 this reader is too old to see. The dispatch is three-way at one place: current,
 retired, unknown. Silently skipping an unrecognised kind would let a reader
 walk past evidence and report a complete replay.
+*(Amended by DL-158:)* the event alphabet inside an `input` record's `kind`
+field is a second strict discriminator under this same discipline: an event
+kind outside the reading build's alphabet refuses by name at replay, and the
+alphabet grows only as an entry-in-service — reader and writer in one
+release, §2's order.
 
 **`catalog_hash_version` outlives the row it is discriminated on.** It rides on
 the `segment`, on the seal, on the period manifest (`docs/period-model.md`

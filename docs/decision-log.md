@@ -8507,3 +8507,120 @@ relitigate an entry; append a new one.
   `test_a_candidate_missing_its_version_refuses_by_name` and
   `test_a_staged_manifest_missing_its_version_refuses_by_name`
   (tests/test_boundary.py).
+- DL-158 the operator disarm verb lands: DISARM drops the latch and
+  nothing else (2026-08-24; oracle + control plane + eight docs; pays
+  the first DL-151 owed item).
+  THE DEBT. DL-151 owed: "The operator disarm verb (period-model ss10.4
+  names one). A new wire verb is its own deliberate unit, not a debt
+  payment." This entry is that unit. Period-model ss10.4 pinned the
+  design already -- an armed latch crosses a release, and the honest
+  alternative to an implicit boundary drop is "an explicit journaled
+  disarm" -- so this is a build of frozen text, not a new ruling on
+  latches.
+  THE VERB. EventKind grows `DISARM`. One oracle branch, in the
+  out-of-band handler beside ON_HOLD: `set_armed(job, False)` plus the
+  trace marker. No status move, no wake, no timer touched, no fold --
+  each negative pinned by a fixture where the stray effect would
+  act (THE TESTS below). The
+  wire verb joins JOB_EVENT_VERBS, and that one membership buys the
+  whole ceremony -- framing, the mandatory ss0 expect on `job:<name>`,
+  journaling at admission, replay -- because the set maps 1:1 onto
+  EventKind and every tier reads the set, not a verb list of its own.
+  The access perimeter is per-cmd (`sendevent` = ops), so no policy row
+  moves.
+  THE NO-OP RULE. An unarmed target is accepted and journaled, the
+  OFF_HOLD shape: marker recorded, nothing else moves. Replay of the
+  no-op is deterministic, its decision carries an EMPTY revisions map,
+  and an exact request_id retry is answered from the original decision
+  -- so an audit reader tells a real drop from a no-op by the decision's
+  revisions, not by guessing (consult findings 6/7, adopted).
+  THE ANY-TIME RULE, sharpened. Legal at any time, not only pre-seal --
+  the pre-seal timing in ss10.4 is when it changes what C2 does, not
+  when it is admissible. What "applied" means is bounded: the verb
+  drops only the latch VISIBLE at application time. It does not inhibit
+  a later arm (no-op disarm then a tick ends armed -- pinned), and it
+  cancels no start already out of the latch: a QUE_WAIT attempt stays
+  queued and rank-intact, a run_window-deferred start still fires, a
+  must_start alarm still alarms (all pinned). The reverse race is the
+  ss0 rejection: an arm moves the revision, so a disarm composed
+  against the pre-arm revision is admitted and REJECTED (pinned at the
+  control tier). Across a boundary an old-baseline DISARM is refused
+  like every stale-baseline command; a newly composed C2 command may
+  drop a carried C1 latch, and the WAL says who did. PR-26 amended
+  accordingly: one held tick under C1 -> exactly one start after C2,
+  or none if an admitted DISARM dropped the latch in between.
+  THE MARKER. The operator event records `DISARM` -- the OOB
+  convention, every operator verb records its own kind name.
+  `SCHED_DISARM` stays the ENGINE's marker for scheduler-caused drops:
+  the Q3c box fold today, the reserved Q3d ON_ICE branch if it ever
+  flips. Reusing it would have made an operator drop and an engine drop
+  the same trace line. No new WAL record kind: markers are trace, the
+  WAL stores inputs and decisions, and the durable audit distinction is
+  already there -- source=control, the actor, and the decision's
+  revisions map (consult finding 5, adopted). Q3c itself is untouched:
+  the fold's behavior did not move, and a member disarmed by the
+  operator before the fold leaves the fold nothing to drop -- trace
+  shows DISARM and no SCHED_DISARM (pinned).
+  THE REVISION FINDING. `armed` is projected state (concurrency-model
+  ss3), so a real true->false drop moves the job's state_rev by exactly
+  one and an already-unarmed no-op moves nothing -- both pinned, and
+  the CM-03 property now samples DISARM too. `expect` therefore covers
+  the latch: it is a state_rev over every projected field and the
+  job's timers, which is what makes the disarm's precondition real.
+  THE COMPATIBILITY STATEMENT. Reader and writer ship in one release;
+  the WAL event alphabet grows; no state_machine_version bump --
+  existing inputs derive identical state on both builds, and only logs
+  the new build writes can carry the new kind (the BUMP-IT rule in
+  runner_ledger reads "different state from an IDENTICAL log", which
+  this is not). The sheet's claim that an old binary refuses at the
+  oracle's uninjectable-event wall was WRONG, verified on the tree: an
+  old binary meets the kind earlier, at `Attempt.event()`, and until
+  this entry that was a raw pydantic ValidationError. It is now a
+  controlled refusal naming the unknown kind and this build's alphabet
+  -- facts it observed, not a cause it cannot know: a wider-alphabet
+  writer and a corrupt record land there alike. Pinned by test. The
+  discipline is the WAL row's strict-kind rule applied at the event
+  alphabet, and protocol-evolution ss1 now SAYS so (this entry's own
+  amendment) rather than leaving the citation pointing at a row about
+  `rec` kinds alone. Deployment order follows protocol-evolution ss2 even inside
+  one release: readers first -- every engine, resume, audit and
+  journal-render binary upgrades before any engine accepts the verb;
+  rollback of an engine under a journal that carries a DISARM is the
+  real hazard and it refuses loudly by name. CLI skew is safe: a new
+  CLI against an old server gets `unknown verb`, refused at the door,
+  nothing journaled.
+  THE DOCS. control-protocol ss3 (verb row + semantics paragraph),
+  period-model ss10.4 + the PR-26 obligation row,
+  protocol-evolution ss1 (the event-alphabet sentence on the WAL row's
+  note), ir-design ss7's EventKind sketch, runner-design's sendevent
+  parity list, access-model's sendevent verb row, autosys-semantics
+  SEM-32's reset list (engine-side verb, vendor list unchanged), and
+  the deployment runbook's "no verb for it today" sentence, which is
+  no longer true. All marked (Amended by DL-158.)
+  Residue, recorded not fixed: control-protocol ss3's `CHANGE_STATUS`
+  table row was already orphaned from its table by the surrogate
+  paragraph before this entry (it renders as literal text, not a
+  row); this entry's paragraph sits below it and does not widen the
+  break further. Reflowing that table is its own hygiene edit.
+  THE TESTS. Oracle: the drop and the no-start edge after it, the
+  unarmed no-op, any-time on a RUNNING job, the operator-before-fold
+  Q3c interplay, timers-survive (must_start), deferred-start-survives,
+  QUE_WAIT-survives, the no-op-then-tick race
+  (tests/test_oracle.py, test_dl158_*). The three "does nothing else"
+  negatives are pinned NON-VACUOUSLY, in fixtures where the stray
+  effect would act: a stray referencer wake or start attempt would
+  re-run a COMPLETED job whose condition is still true, and a stray
+  waiter scan would cancel a queued member whose box has died --
+  mutations inserting each of the three into the branch all go red
+  (adversarial review findings 1-3, closed). Control: the round-trip
+  with no-expect refusal (nothing journaled), pre-arm-revision
+  rejection (journaled, applies nothing), the applied drop with its
+  moved revision, and the applied no-op whose decision -- response and
+  journal record both -- carries the EMPTY revisions map
+  (tests/test_runner_control.py). Journal: a WAL carrying a DISARM
+  replays to the identical trace and state; an unknown event kind
+  refuses by name at replay (tests/test_runner_journal.py). Boundary,
+  both sides of the seal: disarm under C1 -> seal -> OFF_HOLD in C2
+  starts nothing; latch carries -> C2-composed disarm -> OFF_HOLD
+  starts nothing (tests/test_boundary.py, the ss10.4 scenarios
+  against PR-26's one-start twin).

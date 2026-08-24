@@ -616,7 +616,15 @@ class Oracle:
                 # attempt was the tick's run and it just got killed.
                 self.store.set_armed(job, False)
                 self._set_status(job, "TERMINATED", cause="KILLJOB (dequeued from QUE_WAIT, DL-50)")
-        elif kind in ("ON_ICE", "OFF_ICE", "ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "OFF_NOEXEC"):
+        elif kind in (
+            "ON_ICE",
+            "OFF_ICE",
+            "ON_HOLD",
+            "OFF_HOLD",
+            "ON_NOEXEC",
+            "OFF_NOEXEC",
+            "DISARM",
+        ):
             self._handle_oob(kind, self._required_job(ev))
         else:
             raise OracleError(f"uninjectable event kind {kind!r}")
@@ -696,6 +704,17 @@ class Oracle:
         elif kind == "OFF_NOEXEC":
             self.store.set_flags(job, on_noexec=False)
             self._record(job, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
+        elif kind == "DISARM":
+            # period-model ss10.4 (DL-158): the explicit journaled disarm.
+            # The drop is the WHOLE effect: no status move, no wake, no
+            # timer. An unarmed target is an accepted, recorded no-op (the
+            # OFF_HOLD shape), and the verb is legal at any time, not only
+            # before a seal. The marker is the verb's own name -- the OOB
+            # convention above -- and deliberately NOT `SCHED_DISARM`, which
+            # stays the ENGINE's marker for scheduler-caused drops (the Q3c
+            # box fold), so an audit reader can tell the two apart.
+            self.store.set_armed(job, False)
+            self._record(job, "DISARM", "sendevent DISARM")
 
     # -------------------------------------------------------- condition evaluation
 

@@ -129,13 +129,26 @@ never enter the WAL.
 
 | verb | `payload` | notes |
 |---|---|---|
-| job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC` |
+| job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC`, `DISARM` *(DL-158)* |
 | `SET_GLOBAL` | `name` (a non-empty string), `value` (a string) | the empty string is a legal value: `v(G) = ""` is a legal condition, so an operator must be able to satisfy it |
 
 Every string a payload carries must be a **Unicode scalar string**: an
 unpaired surrogate is refused at the door, because one admitted would leave
 the estate unsealable (PR-10a, period-model §3.2).
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
+
+*(Amended by DL-158:)* `DISARM` is the explicit journaled disarm
+period-model §10.4 names. It clears the job's SEM-32 armed latch and does
+nothing else: no status move, no start, no wake, no timer touched. A target
+with no latch is an accepted, journaled no-op — the `OFF_HOLD` shape — and
+the verb is legal at any time, not only before a seal. It drops only the
+latch visible at application time: `applied` does not inhibit a later arm,
+and it cancels no start already out of the latch. The trace marker is
+`DISARM`; `SCHED_DISARM` stays the engine's own marker for scheduler-caused
+drops (the Q3c box fold). The durable audit distinction needs no new record
+kind: the WAL input carries `source=control` and the actor, and the
+decision's revisions map tells a real drop (one moved revision) from the
+no-op (an empty map).
 
 **`expect` is mandatory** (`docs/concurrency-model.md` §0). It names the
 addressed entity — `job:<name>` for a job verb, `global:<name>` for

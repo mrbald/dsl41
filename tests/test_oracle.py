@@ -3361,6 +3361,246 @@ def test_sem32_armed_survives_ice_off_ice_cycle_then_starts_on_fresh_edge() -> N
     ]
 
 
+# ------------------------- DL-158 operator DISARM (period-model ss10.4)
+
+
+_DISARM_JIL = (
+    "insert_job: dis158\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    "condition: s(gate158)\n\n"
+    "insert_job: gate158\njob_type: c\ncommand: y\nmachine: m1\n\n"
+    "insert_job: down158\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(dis158)\n"
+)
+
+
+def test_dl158_disarm_drops_the_latch_and_the_later_edge_does_not_start() -> None:
+    """period-model ss10.4 (DL-158): the operator DISARM clears the SEM-32
+    armed latch and does nothing else. The later condition edge meets the
+    schedule gate unarmed and produces NO start. The drop moves exactly one
+    revision (armed is projected state an expect can be composed against),
+    and a downstream referencer of the disarmed job sees nothing -- the
+    verb wakes nobody."""
+    o = oracle(_DISARM_JIL)
+    o.feed(ev("STARTJOB", 0, job="dis158"))  # tick, condition false -> arms
+    assert o.store.job["dis158"].armed
+    rev = o.store.revision("job:dis158")
+    o.feed(ev("DISARM", 1, job="dis158"))
+    assert not o.store.job["dis158"].armed
+    assert o.store.job["dis158"].status == "INACTIVE"  # no status move
+    assert transitions(o, "dis158") == ["SCHED_ARM", "DISARM"]
+    assert o.store.revision("job:dis158") == rev + 1  # the drop, exactly once
+    o.feed(ev("STATUS", 2, job="gate158", status="SUCCESS"))  # the condition edge
+    assert transitions(o, "dis158") == ["SCHED_ARM", "DISARM"]  # no start
+    assert o.store.job["dis158"].status == "INACTIVE"
+    assert transitions(o, "down158") == []  # referencer of dis158 never woke to anything
+
+
+def test_dl158_disarm_on_an_unarmed_job_is_an_accepted_recorded_no_op() -> None:
+    """DL-158: an unarmed target accepts the DISARM as a recorded no-op --
+    the OFF_HOLD shape. The trace carries the marker; the projection does
+    not change, so the revision does not move either."""
+    o = oracle(_DISARM_JIL)
+    o.feed(ev("DISARM", 0, job="dis158"))
+    assert transitions(o, "dis158") == ["DISARM"]  # recorded
+    assert not o.store.job["dis158"].armed
+    assert o.store.job["dis158"].status == "INACTIVE"
+    assert o.store.revision("job:dis158") == 0  # nothing changed, nothing moved
+
+
+def test_dl158_disarm_is_legal_at_any_time_a_running_job_just_keeps_running() -> None:
+    """DL-158: the verb is allowed at any time, not only pre-seal and not
+    only while INACTIVE. On a RUNNING job it records the marker, drops
+    nothing (a started job consumed its arm already), and the run completes
+    exactly as it would have."""
+    text = "insert_job: live158\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = oracle(text)
+    o.feed(ev("FORCE_STARTJOB", 0, job="live158"))
+    assert o.store.job["live158"].status == "RUNNING"
+    o.feed(ev("DISARM", 1, job="live158"))
+    assert o.store.job["live158"].status == "RUNNING"  # no status move
+    o.feed(ev("STATUS", 2, job="live158", status="SUCCESS"))
+    assert transitions(o, "live158") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "DISARM",
+        "RUNNING->SUCCESS",
+    ]
+
+
+def test_dl158_operator_disarm_before_the_fold_leaves_no_sched_disarm() -> None:
+    """DL-158 x Q3c: the box fold drops an unconsumed member arm under the
+    ENGINE's marker (SCHED_DISARM, the Q3c pin). An operator DISARM that
+    lands first leaves the fold nothing to drop: the trace shows the
+    operator marker and NO engine one, so an audit reader can attribute
+    the drop. The fold's own behavior is untouched
+    (test_sem32_member_arm_dies_with_its_box_run pins it)."""
+    text = (
+        "insert_job: nightly158\njob_type: b\nbox_success: s(anchor158)\n\n"
+        "insert_job: anchor158\njob_type: c\ncommand: a\nmachine: m1\nbox_name: nightly158\n\n"
+        "insert_job: late158\njob_type: c\ncommand: b\nmachine: m1\nbox_name: nightly158\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(feed158)\n\n"
+        "insert_job: feed158\njob_type: c\ncommand: f\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="nightly158"))  # box run 1
+    o.feed(ev("STARTJOB", 60, job="late158"))  # member tick, condition false -> arms
+    assert o.store.job["late158"].armed
+    o.feed(ev("DISARM", 90, job="late158"))  # the operator gets there first
+    assert not o.store.job["late158"].armed
+    o.feed(ev("STATUS", 120, job="anchor158", status="SUCCESS"))  # box_success folds the box
+    assert o.store.job["nightly158"].status == "SUCCESS"
+    assert transitions(o, "late158") == ["SCHED_ARM", "DISARM"]  # no SCHED_DISARM: nothing to drop
+
+
+def test_dl158_disarm_leaves_timers_alone_the_must_start_alarm_still_fires() -> None:
+    """DL-158: the drop touches no timer. A tick arms the SEM-34 must_start
+    deadline AND the SEM-32 latch; the DISARM drops the latch and the
+    deadline still fires its alarm on schedule -- disarming is not
+    unscheduling."""
+    text = (
+        "insert_job: ms158\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "must_start_times: +30\ncondition: s(gate_ms158)\n\n"
+        "insert_job: gate_ms158\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="ms158"))  # arms latch + must_start deadline
+    assert o.store.job["ms158"].armed
+    timers_before = list(o.store.timers())
+    o.feed(ev("DISARM", 5, job="ms158"))
+    assert list(o.store.timers()) == timers_before  # no timer mutated
+    o.feed(ev("STATUS", 40, job="gate_ms158", status="FAILURE"))  # clock passes tick+30
+    assert "MUST_START_ALARM" in transitions(o, "ms158")
+
+
+def test_dl158_disarm_does_not_cancel_a_run_window_deferred_start() -> None:
+    """DL-158: a deferred start is already out of the latch -- it rides a
+    RUN_WINDOW_DEFER timer, and the disarm drops only the latch visible at
+    application time. The deferred start still fires at window open."""
+    text = (
+        "insert_job: rw158\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        'run_window: "10:00-11:00"\n'
+        "condition: s(gate_rw158)\n\n"
+        "insert_job: gate_rw158\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: dummy_rw158\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 10, 5), kind="STARTJOB", payload={"job": "rw158"}))
+    assert transitions(o, "rw158") == ["SCHED_ARM"]
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 2, 9, 50),
+            kind="STATUS",
+            payload={"job": "gate_rw158", "status": "SUCCESS"},
+        )
+    )
+    assert transitions(o, "rw158") == ["SCHED_ARM", "RUN_WINDOW_DEFER"]
+    o.feed(Event(at=datetime(2026, 7, 2, 9, 51), kind="DISARM", payload={"job": "rw158"}))
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 2, 10, 0, 1),
+            kind="STATUS",
+            payload={"job": "dummy_rw158", "status": "SUCCESS"},
+        )
+    )
+    assert "INACTIVE->STARTING" in transitions(o, "rw158")  # the deferred start still landed
+
+
+def test_dl158_disarm_leaves_a_que_wait_job_queued() -> None:
+    """DL-158: no waiter wakeup and no dequeue. A DISARM on a QUE_WAIT job
+    records the marker, the rank survives, and the queued start still
+    happens when the holder releases."""
+    text = (
+        "insert_resource: R158\nres_type: R\namount: 1\n\n"
+        "insert_job: holder158\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (R158, QUANTITY=1)\n\n"
+        "insert_job: queued158\njob_type: c\ncommand: y\nmachine: m1\n"
+        "resources: (R158, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="holder158"))
+    o.feed(ev("STARTJOB", 1, job="queued158"))
+    assert o.store.job["queued158"].status == "QUE_WAIT"
+    rank = o.store.job["queued158"].waiter_seq
+    o.feed(ev("DISARM", 2, job="queued158"))
+    assert o.store.job["queued158"].status == "QUE_WAIT"  # still queued
+    assert o.store.job["queued158"].waiter_seq == rank  # same rank
+    o.feed(ev("STATUS", 3, job="holder158", status="SUCCESS"))  # release wakes the queue
+    assert o.store.job["queued158"].status == "RUNNING"
+
+
+def test_dl158_noop_disarm_then_a_tick_ends_armed_applied_is_not_inhibition() -> None:
+    """DL-158 race pin, deterministic by admission order: a no-op DISARM
+    applied at revision N followed by a scheduler tick ends ARMED --
+    `applied` means the latch visible then was dropped (there was none),
+    not that future arms are inhibited. The reverse order is the stale
+    expect rejection, pinned at the control tier."""
+    o = oracle(_DISARM_JIL)
+    o.feed(ev("DISARM", 0, job="dis158"))  # no-op: nothing latched yet
+    o.feed(ev("STARTJOB", 0, job="dis158"))  # the tick lands right after
+    assert o.store.job["dis158"].armed  # armed won: the disarm inhibited nothing
+    assert transitions(o, "dis158") == ["DISARM", "SCHED_ARM"]
+
+
+def test_dl158_disarm_wakes_no_referencer_and_starts_nothing() -> None:
+    """DL-158 vacuous-pin closure (review findings 1 and 2): both jobs are
+    COMPLETED on conditions that are still true, so a stray wake or a stray
+    start attempt in the DISARM branch would re-run one of them -- an
+    edge-triggered wake would restart the downstream (SUCCESS->STARTING),
+    and an OFF_HOLD-shaped start attempt would restart the disarmed job
+    itself. Neither may move."""
+    text = (
+        "insert_job: a158\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: b158\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(a158)\n"
+    )
+    done = ["INACTIVE->STARTING", "STARTING->RUNNING", "RUNNING->SUCCESS"]
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="a158"))
+    o.feed(ev("STATUS", 1, job="a158", status="SUCCESS"))  # wakes b158: it runs
+    o.feed(ev("STATUS", 2, job="b158", status="SUCCESS"))
+    assert transitions(o, "b158") == done
+    o.feed(ev("DISARM", 3, job="a158"))  # upstream: a stray wake would re-run b158
+    assert transitions(o, "a158") == [*done, "DISARM"]  # and a stray start, a158 itself
+    assert transitions(o, "b158") == done  # no wake rode the disarm
+    o.feed(ev("DISARM", 4, job="b158"))  # self: a stray start attempt would re-run b158
+    assert transitions(o, "b158") == [*done, "DISARM"]  # recorded, nothing started
+    assert o.store.job["a158"].status == "SUCCESS"
+    assert o.store.job["b158"].status == "SUCCESS"
+
+
+def test_dl158_disarm_wakes_no_waiter_where_a_wake_would_act() -> None:
+    """DL-158 vacuous-pin closure (review finding 3): after the box dies,
+    its queued member is CANCELLABLE at the very next wake scan (_readmit:
+    box no longer RUNNING), so a stray _wake_waiters() in the DISARM branch
+    would be observable here as a QUE_WAIT -> INACTIVE cancellation. The
+    disarm must leave the row queued; only the holder's release scans the
+    queue (the SEM-32 que-wait-and-box-death shape with the disarm inserted
+    into the window)."""
+    text = (
+        "insert_resource: POOL158\nres_type: R\namount: 1\n\n"
+        "insert_job: hog158\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (POOL158, QUANTITY=1)\n\n"
+        "insert_job: qbx158\njob_type: b\n\n"
+        "insert_job: qm158\njob_type: c\ncommand: x\nmachine: m1\nbox_name: qbx158\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "condition: s(qgate158)\nresources: (POOL158, QUANTITY=1)\n\n"
+        "insert_job: qgate158\njob_type: c\ncommand: g\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="hog158"))  # saturate the pool
+    o.feed(ev("STARTJOB", 1, job="qbx158"))  # box run 1
+    o.feed(ev("STARTJOB", 2, job="qm158"))  # its tick: condition false -> arms
+    o.feed(ev("STATUS", 3, job="qgate158", status="SUCCESS"))  # edge -> start -> QUE_WAIT
+    assert o.store.job["qm158"].status == "QUE_WAIT"
+    o.feed(ev("KILLJOB", 4, job="qbx158"))  # box dies; the member stays queued until a scan
+    assert o.store.job["qm158"].status == "QUE_WAIT"
+    o.feed(ev("DISARM", 5, job="qm158"))  # a stray wake scan would cancel it right here
+    assert o.store.job["qm158"].status == "QUE_WAIT"  # still queued: no scan rode the disarm
+    o.feed(ev("STATUS", 6, job="hog158", status="SUCCESS"))  # the real scan
+    assert o.store.job["qm158"].status == "INACTIVE"  # cancelled by the release, not the DISARM
+
 # ------------------------------------------- DL-54 adversarial-review fix pins
 
 

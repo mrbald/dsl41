@@ -385,6 +385,101 @@ def test_on_hold_off_hold_roundtrip_visible_in_status_flags(short_root: Path) ->
     asyncio.run(scenario())
 
 
+def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path) -> None:
+    """DL-158: the wire DISARM reaches the oracle branch through
+    JOB_EVENT_VERBS membership alone -- framing, the mandatory ss0 expect,
+    journaling and replay all come from the set. Pinned here: a request
+    with NO expect is refused and nothing is journaled; one composed
+    against the PRE-ARM revision is admitted and REJECTED (the arm moved
+    the revision), applying nothing; the well-composed one applies, drops
+    the latch, answers with the moved revision, and sits in the WAL with
+    source=control; a second DISARM on the now-unarmed job applies as the
+    journaled no-op whose decision carries an EMPTY revisions map -- the
+    audit discriminator both frozen docs name."""
+    now = RealClock().now()
+    far_tick = (now + timedelta(hours=2)).replace(second=0, microsecond=0)
+    text = (
+        "insert_job: arm_ctl\njob_type: c\ncommand: x\nmachine: m1\n"
+        f'date_conditions: 1\ndays_of_week: all\nstart_times: "{far_tick:%H:%M}"\n'
+        "condition: s(gate_ctl)\n\n"
+        "insert_job: gate_ctl\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+
+    async def scenario() -> None:
+        # the wired scheduler's own tick is hours away: the test injects the
+        # tick itself, so the run is deterministic
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, scheduler=Scheduler(lower_source(text), start=now)
+        )
+        try:
+            before = await _control_call(server.path, {"cmd": "status", "job": "arm_ctl"})
+            pre_arm_rev = before["jobs"]["arm_ctl"]["state_rev"]
+            ticked = await _sendevent(server.path, "STARTJOB", job="arm_ctl")  # false cond: arms
+            assert ticked["ok"] is True
+            status = await _control_call(server.path, {"cmd": "status", "job": "arm_ctl"})
+            assert status["jobs"]["arm_ctl"]["armed"] is True
+            armed_rev = status["jobs"]["arm_ctl"]["state_rev"]
+            assert armed_rev != pre_arm_rev  # the arm moved the revision
+
+            # no expect at all: refused at the door, nothing admitted
+            key = addressed_key("DISARM", {"job": "arm_ctl"})
+            bare = command(
+                "DISARM",
+                {"job": "arm_ctl"},
+                key=key,
+                revision=0,
+                baseline_id=status["baseline_id"],
+                epoch=int(status["epoch"]),
+            )
+            del bare["expect"]
+            refused = await _control_call(server.path, bare)
+            assert refused["ok"] is False and refused.get("refused") is True
+
+            # the pre-arm revision: admitted, rejected by the ss0 gate --
+            # the arm moved the revision out from under it -- applies nothing
+            stale = await _sendevent(server.path, "DISARM", job="arm_ctl", expect=pre_arm_rev)
+            assert stale["ok"] is False and stale["decision"] == "rejected"
+            still = await _control_call(server.path, {"cmd": "status", "job": "arm_ctl"})
+            assert still["jobs"]["arm_ctl"]["armed"] is True  # the latch survived
+
+            # the well-composed one: applied, latch dropped, revision moved
+            applied = await _sendevent(server.path, "DISARM", job="arm_ctl")
+            assert applied["ok"] is True and applied["decision"] == "applied"
+            assert applied["revisions"] == {"job:arm_ctl": armed_rev + 1}
+            after = await _control_call(server.path, {"cmd": "status", "job": "arm_ctl"})
+            assert after["jobs"]["arm_ctl"]["armed"] is False
+            assert after["jobs"]["arm_ctl"]["status"] == "INACTIVE"  # the drop is the whole effect
+
+            # the no-op on the unarmed job: applied, and its decision's
+            # revisions map is EMPTY -- the audit mark of the no-op
+            noop = await _sendevent(server.path, "DISARM", job="arm_ctl")
+            assert noop["ok"] is True and noop["decision"] == "applied"
+            assert noop["revisions"] == {}
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+    records = read_journal(short_root / "run" / "journal.jsonl")
+    disarms = [r for r in records if r.get("rec") == "input" and r.get("kind") == "DISARM"]
+    # exactly THREE admitted DISARM inputs: the rejected-by-precondition one
+    # (admission is the commit point; its decision is the rejection), the
+    # applied drop, and the applied no-op. The no-expect refusal left no
+    # record at all.
+    assert len(disarms) == 3
+    assert all(r.get("source") == "control" for r in disarms)
+    # the durable audit discriminator, read from the artifact itself: the
+    # decision records of the three admitted DISARMs are rejected/empty,
+    # applied/one-moved-revision, applied/empty -- in that order
+    decisions = {r["index"]: r for r in records if r.get("rec") == "decision"}
+    verdicts = [
+        (decisions[r["seq"]]["decision"], decisions[r["seq"]]["revisions"]) for r in disarms
+    ]
+    assert verdicts[0][0] == "rejected" and verdicts[0][1] == {}
+    assert verdicts[1][0] == "applied" and list(verdicts[1][1]) == ["job:arm_ctl"]
+    assert verdicts[2] == ("applied", {})
+
+
 # ------------------------------------------------------------------- 2. queries
 
 

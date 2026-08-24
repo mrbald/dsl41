@@ -1889,6 +1889,21 @@ transition with no admitted input. If unwanted, the honest alternative is an
 explicit journaled disarm **before** the seal. Obligation: one tick under C1
 while held → **exactly one** start after C2 opens (PR-26).
 
+*(Amended by DL-158:)* that disarm exists: the control plane's `DISARM` job
+verb (`control-protocol.md` §3). It clears the latch and does nothing else;
+an unarmed target is an accepted, journaled no-op; and it is legal at any
+time, not only before a seal — the pre-seal timing above is when it changes
+what C2 does, not when it is admissible. It drops only the latch visible at
+application time: `applied` does not inhibit a later arm, and it cancels no
+start already out of the latch — a QUE_WAIT attempt stays queued and a
+deferred run-window start still fires. Across the boundary an old-baseline
+`DISARM` is refused exactly as every stale-baseline command is; a newly
+composed C2 command may drop a carried C1 latch, and the WAL shows who did
+(the input's source and actor, and the decision's moved revisions — an
+empty revisions map is the audit mark of the no-op). PR-26 reads
+accordingly: one held tick under C1 → exactly one start after C2, or none
+if an admitted `DISARM` dropped the latch in between.
+
 ## 11. Resume, replay and recovery
 
 **Resume**, from the latest committed seal — or, in period 1 before any seal
@@ -2480,7 +2495,7 @@ whole.
 | --- | --- |
 | PR-25 | no tick due ≤ T lost; none admitted twice |
 | PR-25a | crash immediately after the opening `leader` record and before the missed-tick sweep: a tick between T and the leader's `at` is admitted or dropped-and-recorded, never silently consumed by `leader.at` |
-| PR-26 | one held tick under C1 → exactly one start after C2 |
+| PR-26 | one held tick under C1 → exactly one start after C2 — unless an admitted `DISARM` dropped the latch in between: then none *(Amended by DL-158)* |
 | PR-27 | **table-driven over every §8 gate**: non-empty input queue; open transaction; effect delivery in progress; a KILL ladder unresolved; an applied SPAWN with no `spawn.json` yet; unreconciled candidate; unreachable supervisor; restarted supervisor with empty `LIST`; pending outbox on a physical roll; indeterminate KILL — each refuses |
 | PR-28 | phase-1 readiness, one injected failure per check — unsupported format version, hash mismatch, profile mismatch, SM-version mismatch, preflight, `request_id` collision, R gate — each refuses while C1 is open and untouched; **two live seal clients** staging different C2s — the engine commits exactly the one its request's fingerprint names and the committed boundary opens |
 | PR-28a | phase-2 boundary validation, one injected failure per check — `first_index` mismatch, record/sidecar disagreement, a post-barrier live-closure change the phase-1 classifier did not see, `now ≠ T`, a load invariant — each refuses the commit while C1 stays open; **and a post-barrier latent A case appears in the committed seal's `classification`** — a seal carrying phase 1's map is refused by audit |

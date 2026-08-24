@@ -426,11 +426,14 @@ swapping files, not discovering problems.
    **survives**, deliberately: dropping it at the boundary would be an
    implicit transition with no admitted input. So the operator's
    `OFF_HOLD` in the new period produces exactly one start — that is the
-   whole point of the hold. An operator who does NOT want that start has
-   no verb for it today: `dsl41 sendevent` has no disarm, so plan the
-   window around the one start the `OFF_HOLD` will produce.
+   whole point of the hold.
    The old sentence stays true of the fresh-run-root cycle below, where
    the state is genuinely thrown away.)*
+   *(Amended by DL-158.* This entry's earlier "no verb for it today"
+   sentence is gone. An operator who does NOT want that start has the
+   verb for it: `dsl41 sendevent DISARM -J job` drops the latch and does
+   nothing else — send it before the `OFF_HOLD`, on either side of the
+   seal.)*
 2. **Drain**: let RUNNING work finish (`query status --brief -S $S`), or
    `KILLJOB` what the window cannot wait for — kill command jobs, not
    boxes (only `job_terminator` members die with a box).

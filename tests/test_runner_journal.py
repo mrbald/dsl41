@@ -37,6 +37,7 @@ from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_scheduler import Scheduler
 from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import (
     Journal,
@@ -469,13 +470,20 @@ def test_catalog_hash_differs_on_any_change() -> None:
 
 
 async def _run_virtual(
-    text: str, run_root: Path, script: list[Event], *, adapter: FakeAdapter, horizon: datetime
+    text: str,
+    run_root: Path,
+    script: list[Event],
+    *,
+    adapter: FakeAdapter,
+    horizon: datetime,
+    scheduler: Scheduler | None = None,
 ) -> Engine:
     engine = start_run(
         lower_source(text),
         run_root,
         clock=VirtualClock(start=T0),
         adapters={"CMD": adapter, "FW": adapter},
+        scheduler=scheduler,
     )
     for e in script:
         engine.inject(e)
@@ -541,6 +549,77 @@ def test_replay_reproduces_a_set_global_gated_trace(tmp_path: Path) -> None:
     assert [t.model_dump() for t in fresh.trace()] == [
         t.model_dump() for t in engine.oracle.trace()
     ]
+
+
+def test_replay_reproduces_a_disarm_trace_to_the_same_state(tmp_path: Path) -> None:
+    """DL-158: a journal carrying a DISARM replays to the same state. The
+    live run arms on a tick, the operator disarms, the later condition edge
+    starts nothing; a fresh Oracle fed the same WAL reaches the identical
+    trace and the identical unarmed, INACTIVE row."""
+    text = (
+        "insert_job: dis_r\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        "condition: s(gate_r)\n\n"
+        "insert_job: gate_r\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    adapter = FakeAdapter(default=None)
+    script = [
+        ev("STARTJOB", 0, job="dis_r"),  # condition false -> arms
+        ev("DISARM", 1, job="dis_r"),
+        ev("STATUS", 2, job="gate_r", status="SUCCESS"),  # edge meets no latch
+    ]
+
+    async def scenario() -> Engine:
+        # the wired scheduler's own 23:00 tick is far past the horizon: the
+        # script injects the tick itself, so the run is deterministic
+        return await _run_virtual(
+            text,
+            tmp_path / "run",
+            script,
+            adapter=adapter,
+            horizon=T0 + timedelta(minutes=10),
+            scheduler=Scheduler(lower_source(text), start=T0),
+        )
+
+    engine = asyncio.run(scenario())
+    assert engine.oracle.store.job["dis_r"].status == "INACTIVE"  # no start followed the edge
+    assert engine.oracle.store.job["dis_r"].armed is False
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    fresh = Oracle(lower_source(text))
+    replay_inputs(fresh, records)
+    assert [t.model_dump() for t in fresh.trace()] == [
+        t.model_dump() for t in engine.oracle.trace()
+    ]
+    assert fresh.store.job["dis_r"].armed is False
+    assert fresh.store.job["dis_r"].status == "INACTIVE"
+
+
+def test_replay_refuses_an_unknown_event_kind_by_name(tmp_path: Path) -> None:
+    """protocol-evolution ss1 (the WAL row) at the event alphabet, the wall
+    DL-158's compatibility statement names: an `input` record whose kind is
+    outside this build's alphabet refuses BY NAME at `Attempt.event()`,
+    never as a raw pydantic traceback -- this is what an old binary meets
+    when a newer writer's kind (DISARM then, anything later) sits in the
+    journal it replays."""
+    text = "insert_job: solo_uk\njob_type: c\ncommand: x\nmachine: m1\n"
+    adapter = FakeAdapter({("solo_uk", 1): (1.0, 0)})
+    script = [ev("STARTJOB", 0, job="solo_uk")]
+
+    async def scenario() -> Engine:
+        return await _run_virtual(
+            text, tmp_path / "run", script, adapter=adapter, horizon=T0 + timedelta(minutes=5)
+        )
+
+    asyncio.run(scenario())
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    doctored = [
+        {**r, "kind": "FUTURE_KIND"} if r.get("rec") == "input" and r.get("kind") else r
+        for r in records
+    ]
+    fresh = Oracle(lower_source(text))
+    with pytest.raises(EngineError, match="'FUTURE_KIND'.*alphabet does not include"):
+        replay_inputs(fresh, doctored)
 
 
 def test_replay_reproduces_source_tagged_causes_and_started_by(tmp_path: Path) -> None:

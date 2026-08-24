@@ -1128,6 +1128,140 @@ def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path
     _close(opened)
 
 
+def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -> None:
+    """ss10.4's other half (DL-158): the explicit journaled disarm BEFORE
+    the seal is the honest alternative to a boundary drop. Same run as the
+    PR-26 twin above -- held job, one tick latches -- but the operator sends
+    DISARM before sealing: the latch does NOT cross, C2's OFF_HOLD starts
+    NOTHING, and the new period's WAL carries no SPAWN for the job."""
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(SCHED_C1)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    clock = VirtualClock(start=T0)
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=_scheduler(SCHED_C1, T0),
+        staged=staged,
+    )
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}))
+        await engine.run_until_quiescent(T0)
+        await engine.run_until_quiescent(datetime(2026, 7, 1, 9, 30))  # the 09:00 tick
+        assert engine.oracle.store.runtime("a").armed is True  # latched, not started
+        disarm_at = datetime(2026, 7, 1, 9, 40)
+        engine.inject(Event(at=disarm_at, kind="DISARM", payload={"job": "a"}))
+        await engine.run_until_quiescent(disarm_at)
+
+    asyncio.run(under_c1())
+    assert engine.oracle.store.runtime("a").armed is False  # dropped before the seal
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
+    _close(engine)
+
+    catalog2, _ = _catalog(SCHED_C2)
+    opened = asyncio.run(
+        resume_run(
+            catalog2,
+            run_root,
+            clock=VirtualClock(start=boundary.seal.closed_at),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=_scheduler(SCHED_C2, boundary.seal.closed_at),
+        )
+    )
+    assert opened.oracle.store.runtime("a").armed is False  # nothing crossed
+
+    async def under_c2() -> None:
+        opened.inject(Event(at=boundary.seal.closed_at, kind="OFF_HOLD", payload={"job": "a"}))
+        await opened.run_until_quiescent(boundary.seal.closed_at)
+
+    asyncio.run(under_c2())
+    assert opened.oracle.store.runtime("a").run_number == 0  # no start: the drop held
+    starts = [
+        effect
+        for record in read_journal(wal_path(run_root, 2))
+        if record.get("rec") == "decision"
+        for effect in record["effects"]
+        if effect["kind"] == "SPAWN" and effect["job"] == "a"
+    ]
+    assert starts == []  # C2 produced no SPAWN for the disarmed job
+    _close(opened)
+
+
+def test_dl158_disarm_composed_in_c2_drops_the_carried_latch_no_start(tmp_path: Path) -> None:
+    """ss10.4's boundary case (DL-158): the latch crosses the seal, and a
+    NEWLY COMPOSED C2 command may drop it -- the disarm is legal on either
+    side of the seal. Same run as the pre-seal twin above, but the DISARM
+    is sent in the new period, after resume and before the OFF_HOLD: the
+    carried latch drops, the OFF_HOLD starts nothing."""
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(SCHED_C1)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    clock = VirtualClock(start=T0)
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=_scheduler(SCHED_C1, T0),
+        staged=staged,
+    )
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}))
+        await engine.run_until_quiescent(T0)
+        await engine.run_until_quiescent(datetime(2026, 7, 1, 9, 30))  # the 09:00 tick
+
+    asyncio.run(under_c1())
+    assert engine.oracle.store.runtime("a").armed is True  # latched, not started
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
+    _close(engine)
+
+    catalog2, _ = _catalog(SCHED_C2)
+    opened = asyncio.run(
+        resume_run(
+            catalog2,
+            run_root,
+            clock=VirtualClock(start=boundary.seal.closed_at),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=_scheduler(SCHED_C2, boundary.seal.closed_at),
+        )
+    )
+    assert opened.oracle.store.runtime("a").armed is True  # the latch crossed
+
+    async def under_c2() -> None:
+        at = boundary.seal.closed_at
+        opened.inject(Event(at=at, kind="DISARM", payload={"job": "a"}))  # C2-composed
+        await opened.run_until_quiescent(at)
+        assert opened.oracle.store.runtime("a").armed is False  # carried latch dropped
+        opened.inject(Event(at=at, kind="OFF_HOLD", payload={"job": "a"}))
+        await opened.run_until_quiescent(at)
+
+    asyncio.run(under_c2())
+    assert opened.oracle.store.runtime("a").run_number == 0  # no start: the drop held
+    starts = [
+        effect
+        for record in read_journal(wal_path(run_root, 2))
+        if record.get("rec") == "decision"
+        for effect in record["effects"]
+        if effect["kind"] == "SPAWN" and effect["job"] == "a"
+    ]
+    assert starts == []  # C2 produced no SPAWN for the disarmed job
+    _close(opened)
+
+
 # ------------------------------------------------- ss7 the crash matrix
 
 

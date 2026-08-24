@@ -843,7 +843,8 @@ frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
-  ON_NOEXEC/OFF_NOEXEC, SET_GLOBAL, CHANGE_STATUS (inject STATUS).
+  ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), SET_GLOBAL, CHANGE_STATUS
+  (inject STATUS).
 - **host** (S5a, DL-94) and **seal** (DL-133) are the other two mutations.
   `host` changes the execution-host routing table (§7's `host` record);
   `seal` ends a period. Both take the same admission order as sendevent.

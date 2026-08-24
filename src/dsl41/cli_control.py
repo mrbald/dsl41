@@ -95,7 +95,8 @@ def sendevent(
     event: str = typer.Argument(
         ...,
         help="STARTJOB|FORCE_STARTJOB|KILLJOB|ON_ICE|OFF_ICE|ON_HOLD|OFF_HOLD"
-        "|ON_NOEXEC|OFF_NOEXEC|SET_GLOBAL|CHANGE_STATUS",
+        "|ON_NOEXEC|OFF_NOEXEC|DISARM|SET_GLOBAL|CHANGE_STATUS"
+        " (DISARM clears the job's armed latch and does nothing else)",
     ),
     socket_path: Path = _SOCKET_OPT,
     job: str = typer.Option(None, "--job", "-J", help="Target job (job verbs, CHANGE_STATUS)."),

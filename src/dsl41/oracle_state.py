@@ -80,6 +80,7 @@ EventKind = Literal[
     "OFF_HOLD",
     "ON_NOEXEC",
     "OFF_NOEXEC",
+    "DISARM",
     "KILLJOB",
     "TIMER",
     "MUST_START_ALARM",

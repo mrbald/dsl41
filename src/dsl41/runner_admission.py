@@ -89,14 +89,14 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.period import CMD_GRACE_S
-from dsl41.oracle_state import Event, RuntimeState, TERMINAL
+from dsl41.oracle_state import Event, EventKind, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
@@ -122,6 +122,12 @@ COMPLETION_SOURCES: frozenset[str] = frozenset({"adapter", "reconcile"})
 #: because adding it after the clients migrate is a second wire break. S6
 #: allocates it for real.
 INERT_EPOCH = 0
+
+#: This build's event alphabet, for `Attempt.event`'s named refusal: an
+#: `input` record whose kind is outside it refuses by name -- the WAL row's
+#: strict-kind discipline applied at the event alphabet (protocol-evolution
+#: ss1 as amended by DL-158).
+_EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 
 
 def fingerprint(
@@ -360,6 +366,17 @@ class Attempt(BaseModel):
     def event(self) -> Event | None:
         if self.kind is None:
             return None
+        if self.kind not in _EVENT_KINDS:
+            # protocol-evolution ss1, the WAL row's discipline applied at the
+            # event alphabet (DL-158): an unknown kind refuses BY NAME, not as
+            # a raw validation traceback. The refusal states only what it
+            # observed -- a wider-alphabet writer and a corrupt record land
+            # here alike, and it cannot tell them apart.
+            raise EngineError(
+                f"input {self.index} carries event kind {self.kind!r}, which this"
+                " build's event alphabet does not include"
+                f" (kinds: {', '.join(sorted(_EVENT_KINDS))})"
+            )
         return Event(
             at=self.at,
             kind=self.kind,  # type: ignore[arg-type]

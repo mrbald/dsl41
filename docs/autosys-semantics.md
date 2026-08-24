@@ -357,7 +357,10 @@ and its consequence is that a stale tick can start the job on a condition edge a
 OFF_ICE, in tension with the reoccurrence rule — pin stands until the live discriminator
 runs (`# PENDING: Q3d`, oracle.py; protocol in the live-instance runbook). The ACTUAL start consumes the arm (a DL-50 QUE_WAIT
 enqueue keeps it latched, so a canceled queue attempt does not eat the tick, while KILLJOB
-on the queued job consumes it — the kill happened). An armed job re-blocked by run_window
+on the queued job consumes it — the kill happened). *(Amended by DL-158:)* the runner's
+operator `DISARM` verb (control-protocol §3) also drops an unconsumed arm, on demand — an
+engine-side control with no vendor sendevent counterpart; the vendor reset list quoted
+above is unchanged. An armed job re-blocked by run_window
 re-uses one pending defer timer per opening instant. Accepted consequence of
 latch-until-consumed: an armed run can land in a LATER run_window cycle than its tick
 (the SEM-33 closer-edge rule applies at the armed start's own moment).

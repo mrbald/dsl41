@@ -569,7 +569,8 @@ _WIDE_JOBS = ["wbox", "wm1", "wm2", "wsolo"]
 def test_cm03_every_projection_change_moves_exactly_one_revision(data: st.DataObject) -> None:
     """CM-03, with the generator widened past the STATUS / SET_GLOBAL focus
     the earlier bisimulation property had: the full status vocabulary, the six
-    out-of-band verbs, forced and scheduled starts, kills, and standalone time
+    out-of-band verbs plus the DL-158 disarm, forced and scheduled starts,
+    kills, and standalone time
     advances that fire real `term_run_time` and `must_start` timers -- over a
     catalog with a box, a contended resource and a global-gated member, so
     cascades, QUE_WAIT and box folds all occur.
@@ -598,6 +599,7 @@ def test_cm03_every_projection_change_moves_exactly_one_revision(data: st.DataOb
                     "OFF_HOLD",
                     "ON_NOEXEC",
                     "OFF_NOEXEC",
+                    "DISARM",
                     "ADVANCE",
                 ]
             )
