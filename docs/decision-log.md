@@ -8022,3 +8022,159 @@ relitigate an entry; append a new one.
   would have made a doc sentence false (the scanner's continuation
   branch, jil-statement-syntax rule 11). Nine commits carry the work;
   this entry is the tenth.
+- DL-152 the review after the perimeter: what the access work and two
+  conformance rounds left behind (2026-08-23/24; the DL-75
+  architecture review over the drift since arch-review/2026-08-22 --
+  12,407 lines in sixteen commits: the DL-146 access perimeter, the
+  DL-150 conformance round, the DL-151 debt series -- read-only under
+  the arch-review lens; the script's eighteen size notes stay
+  advisory).
+  THE STANDARD. The lens reads complexity the CODE added, not
+  complexity the domain forces: a duplicated concept, a parallel
+  model, a vocabulary re-encoded per layer, a flag matrix that wants
+  to be an enum. A branch the semantics demand is not a finding. Every
+  finding had to name its sites and the divergence between them, or it
+  was dropped.
+  ACTED, one batch: fourteen items briefed, twelve landed whole, one
+  in half, two measured and deferred below.
+  The item that carries the why: `canon.is_wire_int` is now the one
+  wire-integer predicate, replacing the hand-written
+  bool-is-not-an-int guard in six spellings over fourteen modules.
+  DL-151 is the argument -- four of its fixes were that guard MISSED,
+  one site at a time, which is what a rule with no home costs. The
+  three `int | float` checks stay: a different rule. One tombstone
+  site is stricter on paper, unreachable through its only ingress, and
+  pinned by hand at the schema because the ingress cannot deliver a
+  witness to it.
+  The rest, one line each: one spool version and one predicate in
+  `runner_procid`, the only module the Tier-0 wrapper and the Tier-1
+  supervisor may both import, the wrapper's and the supervisor's
+  copies deleted (the no-imports ground for a third copy was
+  contradicted by that tier's own imports); estate's roll gate
+  extracted, `check_roll_ready` having been a verbatim copy of
+  `roll_into_root`'s read half; the "no expect on a boundary" rule
+  spelled twice with DIVERGED predicates -- key-presence against
+  value-not-None -- unified in `_parse_expect`; one
+  `INITIAL_STATUS_CONTROL` table keyed by the `InitialStatus` literal
+  and total over it, with lint's skip set DERIVED from it instead of
+  hand-copied, so an unmapped status is loud; `socket_group` resolved
+  ONCE at `load_policy` onto the policy and an unknown group refused
+  by name at load, which is access-model ss4's own promise, with the
+  cli_run preflight probe deleted (the review also found the reload
+  gate comparing the NAME alone, so a host that RE-NUMBERED the group
+  between arming and a reload would have installed a policy naming a
+  gid nothing was chowned to; the gate now compares name and gid);
+  one named `_manifest_profile_drift` where the check was computed
+  twice in two wordings; `RuntimeProfile.with_deadman` for three
+  inline dumps; `_QUERY_VERBS` derived from the access tier map;
+  `T_KILL_S` deleted, with no production caller, and `grace_s` made
+  required where it was defaulted; the equiv `_UNSET` alias and
+  backend_uc's two lookback-token spellings deleted for
+  `Lookback.token`; and a test-only guard that partitions
+  `RuntimeProfile`'s fields into wired, declared and deliberately
+  inherited, so a new field cannot inherit in silence.
+  Thirteen corrections came out of reviewing the batch itself: two
+  tests for the two behavior changes above, five docstrings that
+  claimed more than the code did, three tests that compared a constant
+  with itself or recomputed the source's own comprehension, one bound
+  read from the engine instead of a hard-coded constant, one colliding
+  private name, one format nit, and one earlier edit re-verified as
+  present rather than lost.
+  TWO RULINGS.
+  Refusal ORDER is not wire contract. The unified expect check now
+  runs inside `parse_envelope`, after the envelope fields, so a seal
+  request wrong twice over -- a bad `v` AND a stray `expect` -- is
+  told about the version first. The wire SHAPE is the contract and
+  each refusal still names its own reason; which of two true refusals
+  a doubly-wrong request meets is promised to no one. The one order
+  that IS contract holds: the committed-seal retry route still runs
+  before both, so an idempotent retry is answered before any
+  strictness.
+  Lint may import the backend's status table. `lint` is phase 4 and
+  `backend_uc` is phase 9, so the import runs against DL-03's order.
+  RULED a deliberate exception: one table beats two tables kept in
+  step by hand, the table belongs on the side that owns the UC
+  vocabulary, and no cycle exists -- nothing in backend_uc's import
+  chain reaches lint. The exception is bounded to that one import and
+  the phase order stands everywhere else. It is named here so the next
+  review does not re-find it as drift.
+  DEFERRED, each its own slice, at the seam it opens: one start-gate
+  predicate on `DerivedEdge`, since lint spells it four ways across
+  L008/L009/L011/L020 and L009 and L020 partition the same set from
+  opposite ends; one channel and one report section for per-job
+  non-edge constructs, deleting the `_terminator_lines` /
+  `_per_job_exclusions` split and the acknowledged double-printing of
+  R-class edges; SEM-35 name resolution to a neutral home, because the
+  oracle reaches into the scheduler through a deferred import that
+  only HIDES the dependency -- and with it the scheduler-to-oracle
+  re-derivation family: the zone re-resolved from a copied alias map,
+  the conversion restated, and the start SLOT recovered by wall-clock
+  match when the tick could carry it, so an operator sendevent landing
+  on a start minute silently claims that slot's offset; the scanner's
+  one span pass returning the value with its quoted and comment spans,
+  which deletes the third tokenizer, the `*`-fill rule and the
+  re-anchoring hazard, with F1-F4 as the net that makes it affordable;
+  the blocking subscribe client moved back inside `runner_control`,
+  where the two-transports invariant lives and against which a third
+  client grew; `SealRequest` strict mode in place of the hand-written
+  seal strictness, four of whose six checks already exist in
+  `parse_envelope`; `_serve_run`'s two ownership-free ends lifted out,
+  preflight before the acquire and outcome classification after, with
+  the locked middle staying one function; `Lineage.target_period`
+  taking a fallback, because the resume target is decided twice,
+  predicted in cli_common and enacted in runner_startup; the
+  `_committed_seal` retry rule over its two evidence sources, one
+  prose source at minimum and one implementation if the storage shapes
+  allow; cli_estate split at its own section seam, boundary verbs from
+  estate-lifecycle verbs; supervisor credential ownership, the token
+  joining the incarnation inside the transport, which is the shape
+  DL-151 gave the incarnation; scheduler tick-dedup collapsed onto the
+  seal's admitted-through as the one source, retiring the inclusive
+  reset, the replayed-tick set and the opened-at mark as three
+  answers; the offline door order, where the opening proof and the
+  replay-version check run in opposite orders with opposite rationales
+  in runner_history and cli_run, and run twice on one path; and the
+  three-layer state-machine-version gate -- ledger absent means v1,
+  history absent means refuse, startup typed -- becoming one door with
+  a named lead-or-replay argument.
+  Two batch items join them, measured rather than assumed. The
+  rejected-attempts reader is NOT rebuilt on the typed decisions
+  index: the duplication is real, but the typed reader is STRICT where
+  the attempts reader is deliberately tolerant -- a record with no
+  timestamp raises where the walk passes it, a rejected decision with
+  no reason fails validation where the reader accepts it, and a
+  boolean index coerces to 1 where the reader drops it. Swapping turns
+  a documented fail-open posture on damaged logs into three new
+  refusal classes; that is a posture decision and it needs one. The
+  declared-grace accessor is NOT added to `JobAdapter`: the Protocol
+  is exactly `run`, widening it makes every adapter and test double
+  non-conforming, a file watcher has no TERM grace to declare, and the
+  two call sites ask different questions -- startup derives the period
+  PIN off the two real adapters, where a double must contribute
+  nothing, while the engine derives its own kill bound, where a double
+  may legitimately declare one. The dead constant went regardless.
+  DECLINED, so the next review does not re-find them. The SEM-34 row
+  shape, whether the parallel arrays become rows or are
+  broadcast-expanded at lowering: either form bakes in the
+  broadcast-versus-strict reading that is `[?]` open against a live
+  instance, so it waits for that `[?]`. The full wire-vocabulary dict
+  rewrite over the tier map, the dispatch ladder and the handlers: the
+  handlers are heterogeneous, and the source-regex completeness gate
+  plus the derived L-item is the right cost point. Splitting
+  `_resume_under_lock`: the step ladder's ORDER is the spec.
+  Collapsing `_on_member_transition` with `_on_descendant_transition`,
+  or the noexec walk with the ice walk: the split IS the semantics
+  (SEM-11/12/20/22).
+  LOAD-BEARING, confirmed rather than trimmed: citation density and
+  the PENDING markers; the boundary phase functions named after their
+  doc sections; per-kind receipt durability decided at the call site,
+  which is four distinct rules and not one; `Tier` as an IntEnum; the
+  Tier-0/Tier-1 dual-mode preambles; `_INVALID` kept distinct from
+  None; the four effect states; retention's per-family functions; and
+  `_seal_answer`'s one-shape identity. The finding is that these read
+  as duplication from a distance and are the disciplines working up
+  close.
+  3262 passed and 4 skipped; ruff, mypy and arch_check clean, the one
+  new size advisory sitting on the function the extraction already
+  SHRANK. The baseline is re-armed and the review is stamped
+  arch-review/2026-08-24.
