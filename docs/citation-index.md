@@ -72,7 +72,7 @@ not reach `tests/`; DL-151 finished it there — the eighteen it left
 unhyphenated (`Review M3`, `Review B1`) and compound (`review U6A-05`,
 `review U6AR3-04`), now state their reason instead of pointing at it. Two
 kinds of residue are left and neither is a citation: some test FUNCTION
-NAMES still carry the finding they were written for (`test_review_m1_*`,
+NAMES still carry the finding they were written for (`test_review_m2_*`,
 `test_m3_*`, `test_b1_*`), and severity-labelled pointers (`Review MAJOR
 2`, `Review BLOCKER`) remain in four other test files. An `M`-shaped
 citation in `src/` is always a mapping row.

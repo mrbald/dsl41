@@ -143,8 +143,9 @@ def test_ucs01_edge_condition_truth_table(
     """UCS-01/M06: an edge's condition is matched against the
     predecessor's terminal status at completion -- done matches all three,
     but UC separates Cancelled from Failed: a failure edge stays unmatched
-    on Cancelled (so M04's f() keeps its EXACT class), and the `cancelled`
-    condition carries the t() mapping."""
+    on Cancelled (SEM-02's f() reads FAILURE only, so an M04 edge must
+    never fire on a kill), and the `cancelled` condition carries the t()
+    mapping."""
     model = make_model(
         ["p", "c"],
         [UcEdge(src="p", dst="c", condition=edge_condition, mapping_row="TEST")],  # type: ignore[arg-type]
@@ -627,7 +628,8 @@ def test_lookback_qualified_notrunning_edge_is_excluded() -> None:
 def test_terminated_via_folds_to_a_cancelled_condition_edge() -> None:
     """M06: t() (TERMINATED) compiles to the `cancelled` edge
     condition -- UC separates Cancelled from Failed, so folding t() into
-    `failure` would make f() fire on kills and break M04's EXACT class."""
+    `failure` would make f() fire on kills, which SEM-02's f() never does
+    (M04)."""
     text = (
         "insert_job: t_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: t_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: t(t_prod)\n"
@@ -785,6 +787,64 @@ def test_pM01_staleness_latch_vs_within_run() -> None:
     # RUNNING in UC because STARTJOB(cons) restarts the whole shared instance
     assert job_outcomes(autosys_trace)["pm01_prod"] == ["RUNNING", "SUCCESS"]
     assert job_outcomes(uc_trace)["pm01_prod"] == ["RUNNING", "SUCCESS", "RUNNING"]
+
+
+def test_pM04_stale_failure_latch_in_one_box_vs_waiting_edge() -> None:
+    """P-M04 (stonebranch Part IV; the DL-153 ground). f() latches like s()
+    does, INSIDE one top-level box: same box == same cycle (DL-12), yet the
+    staleness exposure is identical to P-M01's, which is why every M04/M05
+    edge is A-class with the staleness assumption, never E. The shape needs
+    a producer that does not re-run in cycle two -- an ungated member
+    restarts at box start and clears its own latch first -- so pm04_m1 is
+    gated on an outside job whose s() goes false before run two. Run one:
+    m1 FAILS, m2's f(m1) fires, m2 succeeds. Run two (STARTJOB on the box):
+    AutoSys leaves m1 blocked (gate FAILURE, SEM-01) and re-starts m2 on
+    m1's STALE FAILURE; the twin's Failure edge sees no fresh m1 completion
+    and waits.
+
+    Side note (its OWN divergence, asserted separately): m1's s(gate) edge
+    spans workflows, so the twin excludes it (Task Monitor territory) and
+    m1 becomes a source task -- run two restarts m1 in UC while AutoSys
+    holds it blocked.
+    """
+    text = (
+        "insert_job: pm04_gate\njob_type: c\ncommand: g\nmachine: m1\n\n"
+        "insert_job: pm04_bx\njob_type: b\n\n"
+        "insert_job: pm04_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pm04_bx\n"
+        "condition: s(pm04_gate)\n\n"
+        "insert_job: pm04_m2\njob_type: c\ncommand: y\nmachine: m1\nbox_name: pm04_bx\n"
+        "condition: f(pm04_m1)\n"
+    )
+    script = [
+        ev("STARTJOB", 0, job="pm04_gate"),
+        ev("STATUS", 1, job="pm04_gate", status="SUCCESS"),
+        ev("STARTJOB", 2, job="pm04_bx"),
+        ev("STATUS", 3, job="pm04_m1", status="FAILURE"),
+        ev("STATUS", 4, job="pm04_m2", status="SUCCESS"),
+        ev("STARTJOB", 8, job="pm04_gate"),
+        ev("STATUS", 9, job="pm04_gate", status="FAILURE"),  # s(gate) now false
+        ev("STARTJOB", 10, job="pm04_bx"),  # run two
+    ]
+    autosys_trace, uc_trace = run_both(text, script)
+    assert transitions(autosys_trace, "pm04_m2") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+        "SUCCESS->STARTING",  # the stale-FAILURE latch re-fires at run two
+        "STARTING->RUNNING",
+    ]
+    assert transitions(uc_trace, "pm04_m2") == ["Waiting->Running", "Running->Success"]
+
+    divergence = first_divergence(autosys_trace, uc_trace, ["pm04_m2"])
+    assert divergence is not None
+    assert divergence.job == "pm04_m2"
+    assert divergence.autosys == ["RUNNING", "SUCCESS", "RUNNING"]
+    assert divergence.uc == ["RUNNING", "SUCCESS"]
+
+    # side note: run two restarts m1 in UC (source task, gate edge excluded)
+    # while AutoSys holds it blocked on the gate's FAILURE
+    assert job_outcomes(autosys_trace)["pm04_m1"] == ["RUNNING", "FAILURE"]
+    assert job_outcomes(uc_trace)["pm04_m1"] == ["RUNNING", "FAILURE", "RUNNING"]
 
 
 def test_pM07_mutex_overlap_queue_alignment_under_arm_and_wait() -> None:
@@ -1192,10 +1252,12 @@ def test_divergence_model_fields() -> None:
 # behavior so it cannot regress silently.
 
 
-def test_review_m1_f_edge_stays_exact_on_killed_producer_end_to_end() -> None:
-    """f(a) is an EXACT M04 row, so killing the producer leaves the
-    consumer unstarted in BOTH engines: a kill is not a failure, and the
-    failure edge must not fire on a Cancelled predecessor."""
+def test_f_edge_does_not_fire_on_a_killed_producer_end_to_end() -> None:
+    """An M04 f() edge fires only on FAILURE (SEM-02), so killing the
+    producer leaves the consumer unstarted in BOTH engines: a kill is not
+    a failure, and the failure edge must not fire on a Cancelled
+    predecessor. (The edge is A-class since DL-153; the compiled wire
+    edge is unchanged.)"""
     text = (
         "insert_job: k_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: k_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(k_prod)\n"

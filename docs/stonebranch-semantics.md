@@ -184,8 +184,8 @@ L012 (M07), L016 (M34), L018 (M24), L019 (M02), L020 (M19). The rule inventory i
 | M01 | `s(A)` within one stream, producer+consumer same schedule cycle (SEM-01) | edge A→X (Success) | **A** | Assumption: no reliance on cross-run staleness. Detector (DL-12): the same top-level box, or — when BOTH jobs are unboxed — one derived trigger cadence. Two identically scheduled boxes are two UC workflows, so a cadence collision alone is not one stream |
 | M02 | `s(A)` cross-stream / relying on latching (SEM-01) | Task Monitor task/trigger with Time Scope | **A/R** | A when the producer exists: Time Scope has no documented maximum (U5 resolved, DL-53), but it is launch-relative and retention-bound — the anchoring still differs from an indefinite latch. Flag each. R when the producer is not defined in the compilation set (DL-12): the atom is permanently false (SEM-06), latching cannot be assessed, and L001 carries the loud error |
 | M03 | any lookback-qualified local atom in `condition` — `s(A, hhhh.mm)` and the same shape on `f`/`d`/`t`/`n`/`e` (SEM-04) | Task Monitor with Time Scope ≈ window | **A** | Within `condition`, and for a producer the set defines, the lookback decides the row before the atom kind does. An undefined producer is M02 first; a lookback under a box override is M15 or M16 first. Window anchoring differs per case. Zero-lookback (Q2a, DL-54) anchors to the consumer's own last end — relational, NO fixed Time Scope expresses it. Flag every use |
-| M04 | `f(A)` | edge A→X (Failure) | **E** | within-run |
-| M05 | `d(A)` | edge A→X (Success/Failure) | **E** | within-run |
+| M04 | `f(A)` (SEM-01/02) | edge A→X (Failure); cross-stream: Task Monitor watching Failed, with Time Scope | **A** | The M01/M02 same-cycle detector (DL-12) picks the assumption, never the class — a stale FAILURE from a previous cycle satisfies f() in AutoSys (SEM-01) and no UC edge does, so f() is exactly as latched as s(). Same stream: the edge compiles with M01's staleness assumption. Cross-stream with a defined producer: Task Monitor; Time Scope anchoring differs from an indefinite latch (UCS-06); flag each. An undefined producer is M02-R first *(Amended by DL-153.)* |
+| M05 | `d(A)` (SEM-01/02) | edge A→X (Success/Failure); cross-stream: Task Monitor watching any completion, with Time Scope | **A** | Same split as M04: the detector picks between M01's staleness assumption (same stream) and the Task-Monitor one (cross-stream, defined producer) — the terminal-status latch outlives the run (SEM-01) either way. An undefined producer is M02-R first *(Amended by DL-153.)* |
 | M06 | `t(A)` | Failure-ish: UC Cancelled/Failed distinction | **A** | UC separates Cancelled from Failed. Decided (DL-16/DL-55): `t()` gets its own `cancelled` edge condition in the twin, and a `failure` edge does NOT fire on Cancelled. The base record schema has no Cancelled wire token, so such an edge quarantines its whole workflow at emission (`docs/uc-edge-schema.md`) |
 | M07 | `n(A)` mutual exclusion (SEM-02, R6) | Mutually Exclusive Tasks or Virtual Resource; `n(self)` → Instance Wait | **A** | NOT an edge. Detector (DL-12): a LOCAL UNQUALIFIED `n()` in `condition` becomes a mutex candidate PAIR. A lookback-qualified `n()` stays an edge (M03), and so does an `n()` under a box override or naming a cross-instance job — it is a completion predicate there, not a start gate. `n(self)` is a one-element group. DL-54 softened: under SEM-32 arm-and-wait a *scheduled* n() job queues until the peer completes — this converges with UC's ExclusiveWait (P-M07 now pins alignment at milestone level; the abandon reading it used to diverge under is retired, DL-58). Residual ordering divergence: in AutoSys, several armed jobs that wait on one peer wake in catalog order, but UC releases ExclusiveWait FIFO by arrival — flag when >1 waiter shares a peer |
 | M08 | `exitcode(A) op k` (SEM-02) | edge variable condition on exit-code variable, or task-level exit-code→status mapping | **A** | mechanism pinned (U4 resolved, DL-53): per-task "Exit Code Processing" field, default method Success Exitcode Range. The exit-code range value itself is required, with no documented default — record the configured range per task in the report |
@@ -227,8 +227,9 @@ L012 (M07), L016 (M34), L018 (M24), L019 (M02), L020 (M19). The rule inventory i
    loss. (i) The twin also excludes edge shapes it cannot hold: a `notrunning` edge (no UC
    condition reads "not running"), a global gate it cannot attach, an M15 member-to-box
    override (the box IS the workflow, never a task vertex, so the early exit needs explicit
-   Skip-path restructuring), and every edge that spans two workflows — including E-class
-   M04/M05 ones, which is Task Monitor territory. (ii) Record emission quarantines a WHOLE
+   Skip-path restructuring), and every edge that spans two workflows — including M04/M05
+   ones, which is Task Monitor territory (a cross-workflow f()/d() edge is cross-stream by
+   construction, DL-153). (ii) Record emission quarantines a WHOLE
    workflow for either of two causes: the base record schema cannot spell one of its edges —
    a `cancelled` condition, any variable condition — or two workflows serialize to one record
    name, compared the way UC addresses names, case folded (U3a;
@@ -309,10 +310,12 @@ them, so a reader sees which side skipped. This is a SEPARATE comparison from th
 validator's tier (c), which compares two AutoSys catalogs; the two share the event and trace
 models, not the entry point.
 
-The seed set is hand-written and non-exhaustive. It covers six rows — M01, M07, M09, M12, M19,
-M27 — with one or more scripts each: P-M01 (a same-cycle pair that nonetheless relies on
-cross-run staleness → traces MUST diverge; the test pins the divergent job and both outcome
-sequences), P-M07 (n() overlap — since DL-54 an ALIGNMENT pin under the arm-and-wait default;
+The seed set is hand-written and non-exhaustive. It covers seven rows — M01, M04, M07, M09,
+M12, M19, M27 — with one or more scripts each: P-M01 (a same-cycle pair that nonetheless
+relies on cross-run staleness → traces MUST diverge; the test pins the divergent job and both
+outcome sequences), P-M04 (the DL-153 ground: a same-box f() whose producer does not re-run in
+cycle two → traces MUST diverge — AutoSys re-starts the consumer on the stale FAILURE, the
+twin's Failure edge waits) *(Amended by DL-153.)*, P-M07 (n() overlap — since DL-54 an ALIGNMENT pin under the arm-and-wait default;
 the pre-DL-54 abandon reading it used to diverge under is retired with the switch, DL-58),
 P-M09 (SET_GLOBAL mid-run), P-M12 (the naive lowering only — one independent-branch script
 that diverges into an AND join, one common-ancestor diamond that converges; the restructure,

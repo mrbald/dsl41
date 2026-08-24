@@ -26,15 +26,19 @@ Decisions pinned here (each with a test):
   cannot carry the qualifier -- DL-12); n() under box_success/box_failure
   or with a cross-instance ref stays an edge (it is a completion predicate
   there, not a start gate).
-- Same-cycle detector (M01 vs M02): a job's trigger cadence is its own
-  schedule signature (trigger fields only -- run_window is a gate per SEM-33
-  and must_* are alarms per SEM-34, both excluded), else the nearest box
+- Same-cycle detector: a job's trigger cadence is its own schedule
+  signature (trigger fields only -- run_window is a gate per SEM-33 and
+  must_* are alarms per SEM-34, both excluded), else the nearest box
   ancestor's, else the unanimous cadence of its condition predecessors
   (fixpoint); FW jobs with no schedule are their own source cadence. Same
   cycle == same top-level box, or equal cadence with BOTH jobs unboxed
   (DL-12: two identically scheduled boxes are two UC workflows -- a
   signature collision is not a stream). Unknown-vs-anything -> NOT same
-  cycle (M02, conservative).
+  cycle (M02, conservative). The detector splits M01 from M02, and since
+  DL-153 it picks the M04/M05 assumption flavor the same way: f()/d()
+  latch like s() does, so a same-stream edge carries the staleness
+  assumption and a cross-stream one the Task-Monitor assumption -- never
+  a silent plain edge (UCS-13).
 - Box-override refs derive edges too (ir-design D1, resolved per its own
   "probably yes"): ref TRANSITIVELY inside the box (SEM-12 "inside") ->
   M15 assumed; non-member, global, or cross-instance ref -> M16 redesign
@@ -342,6 +346,19 @@ def _is_inside(tree: BoxTree, job: str, box: str) -> bool:
 
 # --------------------------------------------------------- edge classification (pass 3)
 
+#: The same-stream staleness assumption, shared by M01 and (since DL-153)
+#: the same-cycle halves of M04/M05: f()/d() latch exactly as s() does
+#: (SEM-01/02), so one wording covers all three rows.
+_BOX_STREAM_STALENESS = (
+    "producer and consumer are members of one top-level box, so one"
+    " box run is one cycle (neither job needs a cadence of its own);"
+    " assumes no cross-run staleness is relied upon (SEM-01/R1)"
+)
+_CADENCE_STREAM_STALENESS = (
+    "producer and consumer share one trigger cadence; assumes no"
+    " cross-run staleness is relied upon (SEM-01/R1)"
+)
+
 
 def _classify_condition_edge(
     ref: _RawRef,
@@ -394,30 +411,34 @@ def _classify_condition_edge(
     if via == "success":
         stream = _same_cycle(src, ref.dst, tree, cadence)
         if stream == "box":
-            return edge(
-                "assumed",
-                "M01",
-                "producer and consumer are members of one top-level box, so one"
-                " box run is one cycle (neither job needs a cadence of its own);"
-                " assumes no cross-run staleness is relied upon (SEM-01/R1)",
-            )
+            return edge("assumed", "M01", _BOX_STREAM_STALENESS)
         if stream == "cadence":
-            return edge(
-                "assumed",
-                "M01",
-                "producer and consumer share one trigger cadence; assumes no"
-                " cross-run staleness is relied upon (SEM-01/R1)",
-            )
+            return edge("assumed", "M01", _CADENCE_STREAM_STALENESS)
         return edge(
             "assumed",
             "M02",
             "cross-stream latching dependency: compiles to a Task Monitor;"
             " Time Scope bounds differ from an indefinite latch (UCS-06)",
         )
-    if via == "failure":
-        return edge("exact", "M04")
-    if via == "done":
-        return edge("exact", "M05")
+    if via in ("failure", "done"):
+        # f()/d() latch like s() does (SEM-01/02), so the class follows M01:
+        # every edge is A, and the detector picks the assumption flavor --
+        # a stale FAILURE from a previous cycle satisfies f() in AutoSys and
+        # no UC edge does (UCS-13, DL-153)
+        row = "M04" if via == "failure" else "M05"
+        stream = _same_cycle(src, ref.dst, tree, cadence)
+        if stream == "box":
+            return edge("assumed", row, _BOX_STREAM_STALENESS)
+        if stream == "cadence":
+            return edge("assumed", row, _CADENCE_STREAM_STALENESS)
+        watch = "Failed" if via == "failure" else "any completion"
+        return edge(
+            "assumed",
+            row,
+            "cross-stream latching dependency: compiles to a Task Monitor"
+            f" watching {watch} with Time Scope; Time Scope bounds differ from"
+            " an indefinite latch (UCS-06)",
+        )
     if via == "terminated":
         return edge(
             "assumed",

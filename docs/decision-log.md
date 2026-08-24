@@ -8178,3 +8178,55 @@ relitigate an entry; append a new one.
   new size advisory sitting on the function the extraction already
   SHRANK. The baseline is re-armed and the review is stamped
   arch-review/2026-08-24.
+- DL-153 f()/d() joins the latch discipline: every M04/M05 edge is
+  A-class and the same-cycle detector picks the assumption, never the
+  class (2026-08-24; derive classifier + stonebranch-semantics Part II;
+  pays the fourth DL-151 owed item; the class ruling was corrected once
+  in review, recorded below).
+  THE DEFECT. The classifier's f()/d() branch returned exact M04/M05
+  with no same-cycle check -- its actual scope: lookback forms had
+  already left as M03 and undefined producers as M02-R before it --
+  while the s() branch above it ran the detector and split M01 from
+  M02. An unboxed cross-cadence failure watcher therefore compiled to a
+  plain UC Failure edge with no report row. UCS-13 [V] forbids exactly
+  that: cross-run latching must compile to Task Monitors or be
+  re-expressed, never silently to plain edges.
+  THE SEMANTICS. f() and d() latch the way s() does. SEM-01 [V] makes
+  every status atom a latching state predicate and SEM-02 [V] lists f/d
+  among them: a producer's FAILURE from a previous cycle still
+  satisfies a consumer's f() today. UC evaluates a dependency only
+  inside one workflow run. The vendor page pins the scope (UC 7.4,
+  "Creating and Maintaining Workflows" -- the source list in
+  stonebranch-semantics.md): a dependency condition exists only on a
+  connection "between the predecessor and successor task" in a
+  workflow, and "the successor task will run if the condition that you
+  specify matches the condition of the predecessor task" -- matched at
+  that run's predecessor instance, with no cross-run form anywhere on
+  the page.
+  THE RULING, corrected once in review. The first cut kept the
+  same-stream half exact on the within-run reading. The review refuted
+  it with the repo's own oracles, in the shape where the producer does
+  not re-run: box members m1 and m2, m2 carrying f(m1), m1 gated so
+  cycle two does not restart it (an ungated m1 restarts at box start
+  and clears its own latch first). Run one leaves m1's FAILURE latched;
+  at run two's box start the AutoSys oracle re-starts m2 on the stale
+  FAILURE while the twin's Failure edge waits. Nothing resets member
+  statuses at box start -- SEM-10 promises only "at most once per box
+  run" -- so the staleness exposure is identical to s()'s and the class
+  follows M01. Every
+  M04/M05 edge is A. The same-cycle detector (DL-12) picks the
+  assumption flavor: same stream carries M01's staleness assumption,
+  one shared wording for all three rows; cross-stream with a defined
+  producer carries the Task-Monitor assumption -- M02's exact situation
+  with a defined producer, so A, not R: watching Failed (f) or any
+  completion (d) with Time Scope, bounds differing from an indefinite
+  latch (UCS-06). Undefined producers keep the M02-R early exit (DL-12,
+  SEM-06); nothing there moved. The E class leaves M04/M05 entirely,
+  and with it no classifier path emits an exact edge at all: E remains
+  a mapping-table class (M11, M13, M18, ...), not a per-edge verdict.
+  THE EFFECT. Every f()/d() edge now lands in the migration report's
+  Assumptions section, where the cross-cadence ones used to compile in
+  silence. The twin still compiles the same wire edges -- A-class edges
+  compile with their record, per Part II requirement 1 -- so no
+  workflow shape changed. The refuting probe is pinned as the P-M04
+  oracle pair (Part IV), so the ground cannot regress in silence.

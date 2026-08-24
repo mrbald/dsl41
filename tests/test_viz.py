@@ -87,9 +87,10 @@ def _assert_subgraphs_balance(mermaid: str) -> None:
 def test_golden_small_catalog() -> None:
     """Hand-checked render pinning the full output shape for one catalog:
     a box subgraph with an assumed M15 override edge (label THINNED away --
-    via==success, no lookback, not redesign), an exact M04 edge, and a
-    redesign M33 edge with its external pseudo-node (now a hexagon) plus
-    the redesign linkStyle line."""
+    via==success, no lookback, not redesign), an assumed M04 edge (DL-153:
+    no classifier path emits E, so the f edge dashes), and a redesign M33
+    edge with its external pseudo-node (now a hexagon) plus the redesign
+    linkStyle line."""
     text = (
         "insert_job: bx\njob_type: b\nbox_success: s(m1)\n\n"
         "insert_job: m1\njob_type: c\ncommand: a\nmachine: h\nbox_name: bx\n\n"
@@ -107,7 +108,7 @@ def test_golden_small_catalog() -> None:
         '    n3["tail"]\n'
         '    n4{{"remote^PRD"}}\n'
         "    n1 -.-> n0\n"  # M15 assumed, success, no lookback -> label thinned to nothing
-        '    n1 -->|"f"| n2\n'  # M04 exact, via=failure -> letter shown, no mapping row (not redesign)
+        '    n1 -.->|"f"| n2\n'  # M04 assumed (DL-153) -> letter shown, no mapping row (not redesign)
         '    n4 ==>|"s M33"| n3\n'  # redesign: via letter + mapping row always shown
         "    linkStyle 2 stroke:#b91c1c,stroke-width:2px\n"
         "    classDef external fill:#e0ecff,stroke:#1d4ed8,color:#111\n"
@@ -154,7 +155,8 @@ def test_arrow_styles_encode_edge_class() -> None:
     assert '-.->|"v"|' in mermaid  # assumed, via=global (letter shown: via != success)
     assert '==>|"s M33"|' in mermaid  # redesign, cross-instance
     assert '==>|"v M16"|' in mermaid  # redesign, box global gate
-    # exact arrows: none in the corpus graph today; golden test covers M04
+    # exact arrows: no classifier path emits E since DL-153; _ARROW keeps
+    # the mapping for the model-level class
 
 
 def test_success_edge_with_no_lookback_has_no_label() -> None:
@@ -179,8 +181,8 @@ def test_labels_carry_lookback_raw_tokens() -> None:
 
 def test_redesign_linkstyle_indices_when_not_the_first_link() -> None:
     """linkStyle counts ALL emitted link statements in emission order; craft
-    a catalog where an exact edge is emitted before a redesign edge so the
-    index is provably not just "the first line"."""
+    a catalog where a non-redesign edge is emitted before a redesign edge
+    so the index is provably not just "the first line"."""
     text = (
         "insert_job: prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: cons1\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(prod)\n\n"
@@ -188,7 +190,7 @@ def test_redesign_linkstyle_indices_when_not_the_first_link() -> None:
     )
     mermaid = to_mermaid(catalog_of(text))
     lines = mermaid.splitlines()
-    assert lines[lines.index('    n0 -->|"f"| n1')] is not None
+    assert lines[lines.index('    n0 -.->|"f"| n1')] is not None
     assert (
         "    linkStyle 1 stroke:#b91c1c,stroke-width:2px" in mermaid
     )  # redesign is link #1, not #0
@@ -675,10 +677,13 @@ def test_to_markdown_appendix_b_lists_non_exact_edges_with_untruncated_assumptio
     assert "early-exit completion override needs explicit Skip-path restructuring" in section
 
 
-def test_to_markdown_appendix_b_says_none_when_every_edge_is_exact() -> None:
+def test_to_markdown_appendix_b_says_none_when_no_edge_needs_annotation() -> None:
+    """Appendix B lists non-exact edges. Since DL-153 no classifier path
+    emits an E edge, so an edge-free catalog is the remaining "None"
+    witness (the emitter's exact-filter contract is unchanged)."""
     text = (
         "insert_job: prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
-        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(prod)\n"
+        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\n"
     )
     md = to_markdown(catalog_of(text), title="t")
     section = md.split("## Appendix B")[1].split("## Appendix C")[0]

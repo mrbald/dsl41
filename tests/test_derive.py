@@ -251,28 +251,110 @@ def test_m03_lookback_window_and_zero_forms() -> None:
     assert zero.assumption is not None and "Q2" in zero.assumption  # zero-lookback anchoring (Q2)
 
 
-def test_m04_failure_atom_is_exact_with_no_assumption() -> None:
+def test_m04_same_cadence_failure_atom_carries_the_staleness_assumption() -> None:
+    """DL-153: the class follows M01, so a same-stream f() is A with M01's
+    staleness assumption (a stale FAILURE from a previous cycle satisfies
+    f(), P-M04). The producer is scheduled and the consumer inherits its
+    cadence as its sole condition predecessor, so the cadence flavor
+    applies."""
     text = (
-        "insert_job: prod_m04\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: prod_m04\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
         "insert_job: cons_m04\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(prod_m04)\n"
     )
     edge = _only_edge(text)
     assert edge.via == "failure"
-    assert edge.cls == "exact"
+    assert edge.cls == "assumed"
     assert edge.mapping_row == "M04"
-    assert edge.assumption is None
+    assert edge.assumption is not None
+    assert "share one trigger cadence" in edge.assumption
+    assert "cross-run staleness" in edge.assumption
 
 
-def test_m05_done_atom_is_exact_with_no_assumption() -> None:
+def test_m04_same_box_failure_atom_carries_the_box_staleness_assumption() -> None:
+    """DL-153: the box half of the same-cycle detector (DL-12) picks the
+    box flavor of the staleness assumption -- one box run is one cycle, no
+    cadence needed, and the latch still outlives the run (P-M04)."""
     text = (
-        "insert_job: prod_m05\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: bx_m04\njob_type: b\n\n"
+        "insert_job: bm_prod\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx_m04\n\n"
+        "insert_job: bm_cons\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx_m04\n"
+        "condition: f(bm_prod)\n"
+    )
+    edge = _only_edge(text)
+    assert edge.cls == "assumed"
+    assert edge.mapping_row == "M04"
+    assert edge.assumption is not None
+    assert "one top-level box" in edge.assumption
+    assert "cross-run staleness" in edge.assumption
+
+
+def test_m04_cross_stream_failure_atom_is_assumed() -> None:
+    """DL-153: a cross-cadence f() is a latched-FAILURE watcher (SEM-01/02).
+    UC evaluates edges within the workflow instance only (UCS-13), so the
+    edge arrives A with the Task-Monitor assumption recorded -- never a
+    silent plain Failure edge."""
+    text = (
+        "insert_job: prod_m04x\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
+        "insert_job: cons_m04x\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "11:00"\n'
+        "condition: f(prod_m04x)\n"
+    )
+    edge = _only_edge(text)
+    assert edge.via == "failure"
+    assert edge.cls == "assumed"
+    assert edge.mapping_row == "M04"
+    assert edge.assumption is not None
+    assert "Task Monitor" in edge.assumption and "Failed" in edge.assumption
+    assert "UCS-06" in edge.assumption
+
+
+def test_m04_undefined_producer_stays_m02_redesign() -> None:
+    """DL-153 leaves the M02-R early exit alone: f() on an undefined
+    producer refuses before the discriminator runs (DL-12, SEM-06)."""
+    text = (
+        "insert_job: cons_m04_undef\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: f(ghost_m04)\n"
+    )
+    edge = _only_edge(text)
+    assert edge.cls == "redesign"
+    assert edge.mapping_row == "M02"
+
+
+def test_m05_same_cadence_done_atom_carries_the_staleness_assumption() -> None:
+    """DL-153: same split as M04 -- a same-stream d() is A with M01's
+    staleness assumption (cadence inherited, as in the M04 test above)."""
+    text = (
+        "insert_job: prod_m05\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
         "insert_job: cons_m05\njob_type: c\ncommand: y\nmachine: m1\ncondition: d(prod_m05)\n"
     )
     edge = _only_edge(text)
     assert edge.via == "done"
-    assert edge.cls == "exact"
+    assert edge.cls == "assumed"
     assert edge.mapping_row == "M05"
-    assert edge.assumption is None
+    assert edge.assumption is not None
+    assert "share one trigger cadence" in edge.assumption
+    assert "cross-run staleness" in edge.assumption
+
+
+def test_m05_cross_stream_done_atom_is_assumed() -> None:
+    """DL-153: cross-cadence d() watches any completion, latched (SEM-01/02);
+    same A split as M04."""
+    text = (
+        "insert_job: prod_m05x\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
+        "insert_job: cons_m05x\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "11:00"\n'
+        "condition: d(prod_m05x)\n"
+    )
+    edge = _only_edge(text)
+    assert edge.via == "done"
+    assert edge.cls == "assumed"
+    assert edge.mapping_row == "M05"
+    assert edge.assumption is not None
+    assert "Task Monitor" in edge.assumption and "any completion" in edge.assumption
 
 
 def test_m06_terminated_atom_is_assumed() -> None:
@@ -634,8 +716,9 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     `condition:` at all, so they add none): the two fan-out+OR-join groups
     in fold_t003_or_join.jil are 10 same-cadence success edges (+10 M01);
     fold_t004_typed_links.jil's uniform f-chain, uniform d-fan-out, and
-    mixed s/f/f/d chain add 4 exact M04 (failure) edges, 3 exact M05 (done)
-    edges, and 1 more same-cadence M01 success edge; names_colon_join.jil
+    mixed s/f/f/d chain add 4 M04 (failure) edges and 3 M05 (done) edges
+    (A-class with the cadence staleness flavor since DL-153 -- each chain
+    shares one inherited cadence), and 1 more same-cadence M01 success edge; names_colon_join.jil
     (DL-39) adds 1 M01 success edge between colon-named jobs.
     l020_iced_consumer.jil (DL-151) adds 3 M02 edges: its four jobs are all
     unscheduled and unboxed, so every s() latch there is cross-stream."""

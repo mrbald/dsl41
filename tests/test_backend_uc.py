@@ -702,18 +702,53 @@ def test_report_quarantine_section_absent_when_nothing_quarantines() -> None:
     assert "- UC base serialization (U3a): 1 of 1 workflows emit; 0 quarantined" in report
 
 
-def test_report_exact_edges_stay_out_of_the_findings_sections() -> None:
-    """E rows compile silently (Part II requirement 1): an exact edge shows
-    up in the totals but produces no report item."""
+def test_report_same_cycle_failure_edge_carries_the_staleness_assumption() -> None:
+    """DL-153: no classifier path emits an E edge any more, so even a
+    same-cycle f() lands in Assumptions -- with M01's staleness flavor,
+    not the Task-Monitor one. The pair shares one cadence (j inherits
+    p's as its sole condition predecessor)."""
     catalog = lower_source(
-        "insert_job: p\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: p\njob_type: c\ncommand: a\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
         "insert_job: j\njob_type: c\ncommand: b\nmachine: m1\ncondition: f(p)\n"
     )
     report = render_migration_report(catalog)
-    assert "derived edges: 1 (exact 1, assumed 0, refused 0)" in report
+    assert "derived edges: 1 (exact 0, assumed 1, refused 0)" in report
+    assumed_section = report.split("## Assumptions")[1].split("## ")[0]
+    assert "**M04** `p`" in assumed_section
+    assert "cross-run staleness" in assumed_section
+    assert "Task Monitor" not in assumed_section
     assert "## Refused constructs" not in report
-    assert "## Assumptions" not in report
-    assert "**M04**" not in report
+
+
+def test_report_cross_stream_failure_edge_lands_in_assumptions() -> None:
+    """DL-153: an unboxed cross-cadence f() used to compile to a plain
+    Failure edge with no report row (the UCS-13 breach DL-151 recorded).
+    It is A-class now: one Assumptions row, printed once, and the edge
+    still compiles into the workflow record."""
+    catalog = lower_source(
+        "insert_job: p_xf\njob_type: c\ncommand: a\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
+        "insert_job: watch_xf\njob_type: c\ncommand: b\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        "condition: f(p_xf)\n"
+    )
+    report = render_migration_report(catalog)
+    assert "derived edges: 1 (exact 0, assumed 1, refused 0)" in report
+    assumed_section = report.split("## Assumptions")[1].split("## ")[0]
+    assert "**M04** `p_xf`" in assumed_section
+    assert "cross-stream latching dependency" in assumed_section
+    assert "Task Monitor" in assumed_section
+    # no double-print: the one bold M04 row is the Assumptions row, and the
+    # single-workflow fixture leaves no exclusion ledger for the edge to
+    # re-enter under its spans-workflows wording
+    assert report.count("**M04**") == 1
+    assert "## Twin exclusions" not in report
+    assert "## Refused constructs" not in report
+    # the edge still compiles (A-class compiles with its record)
+    bundle = compile_to_uc(catalog)
+    (record,) = bundle.records
+    assert {e["condition"]["value"] for e in record["workflowEdges"]} == {"Failure"}
 
 
 # --------------------------------------------------------------------------- CLI
