@@ -739,6 +739,22 @@ def render_canonical(jf: JilFile) -> str:
         lines: list[str] = []
         _emit_canonical_comments(lines, stmt.comments)
         subject = stmt.subject.rstrip()
+        has_trailing = any(c.attachment == "trailing" for c in stmt.comments)
+        if stmt.job_type_inline is not None and not has_trailing:
+            # The inline `job_type` pair was split off the subject at parse
+            # time (rule 4), so a closed block comment that sat between the
+            # subject and `job_type:` rides inside `stmt.subject` verbatim,
+            # not as a separate trailing Comment. Once `job_type` moves to
+            # its own attr line below, that comment is line-final here -- a
+            # second parse re-extracts it as a real trailing comment and
+            # normalizes its gap to one space (`_canonical_trailing`). A
+            # verbatim dump of `subject` keeps the original gap, so the
+            # fixpoint breaks (F2, DL-159). Re-split here the same way the
+            # second parse would, so the first canonical pass already
+            # matches it.
+            value, _gap, ctext, _post = _split_trailing_comment(stmt.subject)
+            if ctext:
+                subject = f"{value} {ctext}"
         header = f"{stmt.subcommand}: {subject}" if subject else f"{stmt.subcommand}:"
         lines.append(header + _canonical_trailing(stmt.comments))
         attrs = list(stmt.attrs)

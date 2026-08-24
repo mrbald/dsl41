@@ -8624,3 +8624,68 @@ relitigate an entry; append a new one.
   starts nothing; latch carries -> C2-composed disarm -> OFF_HOLD
   starts nothing (tests/test_boundary.py, the ss10.4 scenarios
   against PR-26's one-start twin).
+- DL-159 the F2 fixpoint for the split-off inline pair lands: the
+  canonical renderer re-splits the subject, the parser does not change
+  (2026-08-24; ast_jil.py + test_ast_fidelity.py; pays one of DL-151's
+  three pre-existing scanner defects).
+  THE DEBT. DL-151 recorded it and stopped: "F2 is not a fixpoint for
+  an inline pair with a more-than-one-space gap before a closed block:
+  splitting the pair turns the block into a TRAILING comment and the
+  canonical renderer normalizes its gap, which is a normative F2
+  violation."
+  THE REPRO, before the fix. `insert_job: j    /* c */ job_type:
+  cmd\n` canonicalizes to `c1 = "insert_job: j    /* c */\njob_type:
+  cmd\n"` -- the four-space gap survives, because `render_canonical`
+  dumped `stmt.subject` almost verbatim. Parsing `c1` again is not the
+  same walk: with `job_type` already on its own line, the embedded
+  `/* c */` is now line-final, so the parser extracts it as a real
+  trailing Comment (rule 5), and `_canonical_trailing` always emits
+  exactly one space before a trailing comment. `c2 =
+  render_canonical(parse(c1))` comes back as `"insert_job: j /* c
+  */\njob_type: cmd\n"` -- one space, not four. `c1 != c2`.
+  THE GROUND for a render-side-only fix. Rule 5 in
+  jil-statement-syntax.md needs no change. The parser is correct both
+  times: on the first parse the inline-pair split point sits right
+  after the closed block, so the block rides inside `subject` as
+  ordinary subject text (not yet line-final, because `job_type:` still
+  follows on the same source line); on the second parse, with
+  `job_type` moved to its own attribute line, the same block genuinely
+  IS line-final and rule 5 is right to read it as a trailing comment.
+  Two different inputs, two correct parses. The bug was that
+  `render_canonical` never asked what its OWN output would parse into
+  next.
+  THE FIX. In `render_canonical` (src/dsl41/ast_jil.py): when
+  `stmt.job_type_inline` is set and the statement carries no separate
+  trailing Comment already, run `_split_trailing_comment` on
+  `stmt.subject` before emitting the header. A line-final closed block
+  found there renders as `value + " " + comment_text`, the same shape
+  `_canonical_trailing` would produce on the next parse, so the first
+  canonical pass already lands on the fixpoint. `_split_trailing_comment`
+  walks past a closed block that has value text after it (opaque, not
+  line-final) to find the one that IS line-final, so a subject with two
+  closed blocks re-splits on the second one and still lands on the same
+  fixpoint. The already-trailing-comment case (comment placed AFTER the
+  `job_type` value, not embedded in the subject) is untouched: no
+  embedded marker there, `_split_trailing_comment` returns no comment
+  text, and the guard on "no separate trailing Comment" is redundant
+  with it but kept for the reader.
+  THE FUZZ EXTENSION. The F3 subject alphabet (`jil_source` in
+  tests/test_ast_fidelity.py) never put a closed block in the subject
+  and used a fixed multi-space gap before `job_type`, so it could not
+  find this shape on its own. It now draws an optional `/* c */` before
+  an optional `job_type:` pair, each side of a gap hypothesis draws
+  from one, two or four spaces (`_SUBJECT_GAP`), so a wide gap is in
+  the generator's reach.
+  THE TESTS, mutation-checked (revert the fix, the new cases fail; a
+  targeted re-edit restored it, no `git restore`).
+  `closed-block-before-inline-job-type-wide-gap` pins the DL-151 repro
+  itself; `multiblock-subject-before-inline-job-type` pins the two-block
+  variant that exercises the walk-past-opaque-blocks path. The existing
+  single-space case and the trailing-after-job_type case were verified
+  as fixpoints on both sides of the fix, per DL-151's own observation
+  that the one-space shape hides the bug by construction. Full F1/F2
+  suites and the whole corpus stay green, unchanged.
+  THE DISCHARGE. One of DL-151's three pre-existing scanner defects is
+  paid. The other two -- the rule-4/4b detector skipping continuation
+  lines, and a multi-line trailing block comment folding its body into
+  attributes -- stay open for the slices named after this one.

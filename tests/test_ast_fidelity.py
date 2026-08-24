@@ -438,6 +438,11 @@ _IDENT = st.from_regex(r"[a-z][a-z0-9_]{0,7}", fullmatch=True)
 _ATTR_KEY = _IDENT.filter(lambda k: k not in SUBCOMMANDS)
 _VALUE = st.text(st.characters(min_codepoint=32, max_codepoint=126), max_size=24)
 _LAYOUT_LINE = st.sampled_from(["", "  ", "# lead comment", "/* lead */", "\t/* x */"])
+#: DL-159: gap widths between a subject and a closed block comment, or between
+#: that comment and the inline `job_type` key. A single-space gap hides the
+#: F2 bug (the buggy verbatim dump and the normalized re-parse agree by
+#: accident), so the generator must be able to draw a wider one.
+_SUBJECT_GAP = st.sampled_from([" ", "  ", "    "])
 
 
 @st.composite
@@ -449,7 +454,12 @@ def jil_source(draw: st.DrawFn) -> str:
             lines.append(draw(_LAYOUT_LINE))
         header = f"insert_job: {draw(_IDENT)}"
         if draw(st.booleans()):
-            header += "   job_type: c"
+            # DL-159: a closed block comment split off with the inline
+            # job_type pair -- the subject alphabet must cover this shape,
+            # not just a plain subject.
+            header += f"{draw(_SUBJECT_GAP)}/* c */"
+        if draw(st.booleans()):
+            header += f"{draw(_SUBJECT_GAP)}job_type: c"
         lines.append(header)
         for _ in range(draw(st.integers(min_value=0, max_value=4))):
             lines.append(f"{draw(_ATTR_KEY)}: {draw(_VALUE)}")
@@ -505,7 +515,22 @@ F4_CASES = [
     ("quoted-block-marker-in-value", 'insert_job: j\ndescription: "/* " */ plain tail\n'),
     ("closed-block-in-subject", "insert_job: j /* see owner: bob */ tail\n"),
     ("closed-block-before-inline-job-type", "insert_job: j /* c */ job_type: c\n"),
+    # DL-159: a wider gap before the split-off comment exposes the F2 breach
+    # the single-space case above hides by accident (the verbatim first-pass
+    # subject dump and the normalized second-pass trailing comment agree
+    # only when the original gap already happens to be one space).
+    (
+        "closed-block-before-inline-job-type-wide-gap",
+        "insert_job: j    /* c */ job_type: cmd\n",
+    ),
     ("closed-block-after-inline-job-type", "insert_job: j   job_type: c /* x: 1 */ tail\n"),
+    # DL-159: two closed blocks in the subject, the second split off with
+    # job_type -- the fix re-splits on the whole subject, not just a single
+    # marker, so this multi-block shape must land on the same fixpoint.
+    (
+        "multiblock-subject-before-inline-job-type",
+        "insert_job: j /* c1 */ x    /* c2 */ job_type: cmd\n",
+    ),
     ("no-space-after-colon", "insert_job: j\ncommand:no_space\n"),
     ("empty-value", "insert_job: j\nempty_attr:\n"),
     ("trailing-spaces-in-value", "insert_job: j\ncommand: trailing spaces   \n"),
