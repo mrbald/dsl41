@@ -7,9 +7,10 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
 
 - Scheduler (ss5): the calendar the oracle deliberately lacks. Per
   date_conditions job it computes the next occurrence from days_of_week +
-  start_times/start_mins (absent days_of_week = every day; per-job
-  timezone, else the run-level base zone, else UTC -- both defaults
-  PENDING: E10 -- with names resolved per SEM-35: zoneinfo, then the
+  start_times/start_mins (absent days_of_week = every day, PENDING: E10;
+  per-job timezone, else the run-level base zone, else UTC -- the
+  base-zone default is the vendor's own rule since DL-155 -- with names
+  resolved per SEM-35: zoneinfo, then the
   --timezone-map ujo_timezones listing, then the DL-62 unique-city
   default), or -- run_calendar with neither -- from the
   calendar rows' own times (E11 resolved, DL-58), and hands the engine
@@ -282,10 +283,14 @@ class Scheduler:
     offsets), so rehearse under the virtual clock exercises real calendar
     arithmetic (ss5).
 
-    Pinned interpretation defaults (PENDING: E10): absent days_of_week means
-    every day; jobs without `timezone` read their times in `default_tz`
-    (run-level --timezone), defaulting to UTC -- vendor uses the server's
-    zone. DST corners follow PEP 495 fold=0: a fall-back ambiguous time is
+    Pinned interpretation defaults (PENDING: E10 -- the open halves are
+    absent days_of_week and the DST fold): absent days_of_week means every
+    day. Jobs without `timezone` read their times in `default_tz`
+    (run-level --timezone), defaulting to UTC; that half is cited since
+    DL-155 -- no-timezone start events are "scheduled based on the time
+    zone under which the scheduler is running" (TechDocs 12.0.01, timezone
+    attribute), so a migrated estate sets the server's zone explicitly.
+    DST corners follow PEP 495 fold=0: a fall-back ambiguous time is
     its first occurrence, a spring-forward nonexistent time maps past the
     gap. Schedule blocks with neither start_times nor start_mins trigger
     nothing (run_window/SLA are gates/alarms, not triggers).

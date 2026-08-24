@@ -50,8 +50,9 @@ PROPERTIES = typer.Option(
 TIMEZONE_OPT = typer.Option(
     None,
     "--timezone",
-    help="Base zone for schedules without a per-job timezone (PENDING: E10;"
-    " default UTC -- vendor uses the server's zone).",
+    help="Base zone for schedules without a per-job timezone (DL-155: the vendor"
+    " schedules these in the scheduler's own zone; default UTC, so a migrated"
+    " estate sets the server's zone explicitly).",
 )
 
 TIMEZONE_MAP_OPT = typer.Option(

@@ -64,9 +64,10 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   read in the job's own `timezone` (SEM-35 re-bases every time attribute of
   that job), so the comparison runs on local wall time and the queued timer
   goes back on the engine clock; the name resolves through the runner's
-  ladder. A job with no `timezone:` compares on the engine clock -- the
-  run-level base zone is the scheduler's default, not the oracle's
-  (PENDING: E10).
+  ladder. A job with no `timezone:` compares in the constructor's
+  `default_tz`, else on the engine clock -- the vendor's own rule since
+  DL-155 ("scheduled based on the time zone under which the scheduler is
+  running"), with the engine clock playing the scheduler's zone.
 - Lookback (SEM-04): window -> status_at >= now - window. zero -> satisfied
   iff the predecessor's own last end (last_end_at) is at-or-after the
   EVALUATING job's last end (Q2a RESOLVED by citation, DL-54 -- "examines
@@ -291,6 +292,7 @@ class Oracle:
         *,
         carried: CarriedRows | None = None,
         tz_aliases: Mapping[str, str] | None = None,
+        default_tz: str | None = None,
     ) -> None:
         self.catalog = catalog
         self.store = RuntimeState()
@@ -362,6 +364,16 @@ class Oracle:
         #: an oracle that resolved without it refused a map-only name at the
         #: first start although preflight had passed (DL-151).
         self._tz_aliases: dict[str, str] | None = None if tz_aliases is None else dict(tz_aliases)
+        #: E10's no-timezone half, closed by citation (DL-155): the vendor
+        #: schedules a job that declares no `timezone:` "based on the time
+        #: zone under which the scheduler is running". `default_tz` IS that
+        #: zone for a directly built oracle; None keeps the engine clock as
+        #: the basis -- the same rule with the simulation's own frame as the
+        #: scheduler's zone. The name resolves lazily in _job_tz through the
+        #: SAME ladder and alias table as a job's own `timezone:` (DL-151).
+        #: The runner passes nothing here: `--timezone` stays on the
+        #: scheduler.
+        self._default_tz: str | None = default_tz
 
     # ------------------------------------------------------------------ plumbing
 
@@ -841,14 +853,16 @@ class Oracle:
     def _job_tz(self, job_ir: JobIR) -> tzinfo | None:
         """SEM-35: the zone this job's time attributes are read in, resolved
         through the runner's own ladder (zoneinfo, POSIX fixed offsets, the
-        DL-62 unique-city default). None means the engine clock IS the
-        comparison basis -- the case for every job without `timezone:`.
-
-        PENDING: E10 -- a run-level base zone (`--timezone`) is the
-        scheduler's default for jobs that declare none; the oracle owns no
-        run-level default, so those jobs compare on the engine clock."""
+        DL-62 unique-city default). A job that declares no `timezone:` reads
+        the constructor's `default_tz`, resolved through the same ladder and
+        alias table (DL-151/DL-155). None means the engine clock IS the
+        comparison basis -- the vendor's scheduler-zone rule (TechDocs
+        12.0.01, timezone attribute) with the simulation's frame as the
+        scheduler's zone."""
         schedule = job_ir.schedule
         name = schedule.timezone if schedule is not None else None
+        if name is None:
+            name = self._default_tz
         if name is None:
             return None
         if name not in self._tz_cache:

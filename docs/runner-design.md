@@ -1064,12 +1064,22 @@ code. None is guess-resolved.
   if the loop starts seconds later. Vendor behavior for an
   event-processor outage that spans a start_times tick is unverified [?].
   A live instance decides fire-late vs skip. Opened by 11c (DL-45).
-- **E10** — schedule interpretation defaults [?]: absent `days_of_week`
-  = every day. Jobs without a per-job `timezone` read their times in the
-  run-level `--timezone` base zone, with UTC as the default. The vendor
-  uses the AutoSys server's zone, which a migrated estate must set
-  explicitly. DST corners are pinned to PEP 495 fold=0 (ambiguous = first
+- **E10** — schedule interpretation defaults, split by DL-155: the
+  no-timezone clock half is [V], the rest stays [?]. The cited half:
+  jobs without a per-job `timezone` read their times in the run-level
+  `--timezone` base zone, with UTC as the default. The vendor uses the
+  AutoSys server's zone, which a migrated estate must set explicitly —
+  "The start event for jobs with time-based starting conditions that do
+  not specify a time zone is scheduled based on the time zone under
+  which the scheduler is running" (TechDocs 12.0.01, timezone attribute
+  page). The oracle exposes the same rule as a `default_tz` constructor
+  knob; with none set, the engine clock plays the scheduler's zone, so
+  the pre-split pin was the vendor rule expressed in the simulation's
+  frame. Two halves stay open [?], each behind its `# PENDING: E10`
+  marker in `runner_scheduler.py`: absent `days_of_week` = every day,
+  and DST corners pinned to PEP 495 fold=0 (ambiguous = first
   occurrence, nonexistent maps past the gap). Opened by 11c (DL-45).
+  *(Amended by DL-155.)*
 - **E11** — RESOLVED 2026-07-30 (DL-58, citation sweep, opened by DL-56):
   `run_calendar` with neither `start_times` nor `start_mins` is a valid
   vendor shape. The job fires at the calendar row's own time-of-day

@@ -8333,3 +8333,43 @@ relitigate an entry; append a new one.
   vector (PR-08) is re-pinned because every JobRuntime row now
   serializes the new field -- the vector reddening on a model change
   is its designed behavior.
+- DL-155 the E10 timezone half closes by citation: a job without a
+  timezone runs on the scheduler's own clock, which the oracle's engine
+  clock already was (2026-08-24; oracle constructor + runner-design ss15
+  + scheduler/CLI comments; pays the eighth DL-151 owed item).
+  THE CITATION. TechDocs 12.0.01, timezone attribute page (the JIL
+  reference pages in the dossier's source list; the runbook's source
+  catalog carries the row). The deciding sentence, verbatim: "The start
+  event for jobs with time-based starting conditions that do not specify
+  a time zone is scheduled based on the time zone under which the
+  scheduler is running."
+  THE SPLIT. E10 held three halves under one marker: the no-timezone
+  clock, absent days_of_week = every day, and the PEP 495 fold=0 DST
+  pins. The first is now [V]. The other two stay [?] and keep their
+  `# PENDING: E10` markers where they live -- the days_of_week default
+  in runner_scheduler.py's module and Scheduler docstrings and in its
+  pinned test, the DST fold in the Scheduler docstring. The markers
+  that guarded only the timezone half are gone (DL-06 protocol: a
+  resolution deletes its marker): oracle.py's module docstring and
+  _job_tz, and the `--timezone` CLI help.
+  CORRECT BY CONSTRUCTION. The oracle's engine clock plays the
+  scheduler-clock role, so comparing a no-timezone job's time attributes
+  on the engine clock IS the vendor rule expressed in the simulation's
+  frame; no pinned comparison moved. The runner was already aligned the
+  same way: its scheduler computes ticks in the run-level `--timezone`
+  base zone, exactly the "time zone under which the scheduler is
+  running". test_sem33_window_without_a_timezone_stays_on_the_engine_
+  clock pins the unchanged default.
+  THE KNOB, for the one real gap. A mixed catalog simulated directly --
+  some jobs with `timezone:`, some without -- had no way to place the
+  scheduler's zone anywhere but UTC. The Oracle constructor grows
+  `default_tz: str | None = None`; _job_tz falls back to it before the
+  engine-clock default, resolving the name through the SAME SEM-35
+  ladder and alias table as a job's own `timezone:` -- a second
+  resolution path would reopen the DL-151 divergence class -- and an
+  unresolvable name refuses with the same named OracleError. None is
+  the default and reproduces the prior behavior byte for byte. Nothing
+  else is wired: the runner keeps `--timezone` on the scheduler and
+  passes no default here, so engine behavior is untouched and the new
+  tests exercise the knob on the oracle-direct path only, skipping the
+  engine param by name.

@@ -37,7 +37,7 @@ Ground rules (constitutional, see CLAUDE.md):
   deletes its switch/marker). Q6 is dossier-only and carries no code
   marker.
 
-## 1. Source catalog (verified in DL-58/DL-62/DL-154; re-fetch before relying on one)
+## 1. Source catalog (verified in DL-58/DL-62/DL-154/DL-155; re-fetch before relying on one)
 
 Fetch technique: get TechDocs and KB pages with a raw `curl` that has a
 browser User-Agent (`-A "Mozilla/5.0 ..."`). Then strip the HTML. A
@@ -73,6 +73,7 @@ URL patterns:
 | TechDocs 12.1 timezone attribute | SEM-35 name resolution: ujo_timezones entry / OS name / POSIX value; not case-sensitive; OS matched first, table read up to five times (DL-62) |
 | TechDocs 12.1 autotimezone command | ujo_timezones entry types (Zone/Alias/City), `-l/-q/-a/-c/-t/-d` verbs, POSIX TZ west-positive offset syntax (DL-62) |
 | TechDocs 12.1 run_window attribute | SEM-33 box skip: "the job's status changes to INACTIVE. The box job can still run to completion."; the Box1 worked example, both closer-edge outcomes (DL-154) |
+| TechDocs 12.0.01 timezone attribute | E10 no-timezone clock: start events "scheduled based on the time zone under which the scheduler is running" (DL-155) |
 
 A second-opinion pass helps: hand a brief that contains the pins and
 the leans to an independent reviewer. Before you move any pin, RE-FETCH

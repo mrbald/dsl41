@@ -78,13 +78,24 @@ def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload=payload)
 
 
-def oracle(jil_text: str) -> Oracle | EngineHarness:
+def oracle(
+    jil_text: str,
+    *,
+    default_tz: str | None = None,
+    tz_aliases: dict[str, str] | None = None,
+) -> Oracle | EngineHarness:
     catalog = lower_source(jil_text)
     if _ENGINE_PATH:
+        if default_tz is not None or tz_aliases is not None:
+            pytest.skip(
+                "default_tz/tz_aliases are Oracle-construction knobs (DL-155): the"
+                " engine's oracle takes no run-level default -- the runner keeps"
+                " --timezone on the scheduler -- so only the direct path holds them"
+            )
         harness = EngineHarness(catalog)
         _HARNESSES.append(harness)
         return harness
-    return Oracle(catalog)
+    return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases)
 
 
 def transitions(o: Oracle | EngineHarness, job: str) -> list[str]:
@@ -2189,6 +2200,56 @@ def test_sem33_window_without_a_timezone_stays_on_the_engine_clock() -> None:
     outside = oracle(text)
     outside.feed(Event(at=datetime(2026, 7, 1, 13, 0), kind="STARTJOB", payload={"job": "rw_utc"}))
     assert transitions(outside, "rw_utc") == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_no_timezone_job_reads_run_window_in_default_tz() -> None:
+    """T33c (SEM-33 x SEM-35, DL-155): a job that declares no `timezone:`
+    reads its run_window in the constructor's `default_tz` -- the vendor's
+    "time zone under which the scheduler is running" (TechDocs 12.0.01,
+    timezone attribute). Mixed catalog, Tokyo default: 00:30 UTC is 09:30
+    Tokyo, INSIDE "08:00-10:00" for the bare job, where the engine clock
+    (the default_tz=None basis, pinned by the control test above) would
+    defer it -- 7.5h to the next opening against 14.5h since the previous
+    close. The NY job is untouched: its own `timezone:` outranks the
+    default -- 13:00 UTC is 09:00 New York, inside, although it is 22:00
+    Tokyo."""
+    text = (
+        "insert_job: rw_bare\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "08:00-10:00"\n\n'
+        "insert_job: rw_ny\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "08:00-10:00"\ntimezone: America/New_York\n'
+    )
+    o = oracle(text, default_tz="Asia/Tokyo")
+    o.feed(Event(at=datetime(2026, 7, 1, 0, 30), kind="STARTJOB", payload={"job": "rw_bare"}))
+    assert transitions(o, "rw_bare") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(Event(at=datetime(2026, 7, 1, 13, 0), kind="STARTJOB", payload={"job": "rw_ny"}))
+    assert transitions(o, "rw_ny") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem35_default_tz_resolves_through_the_alias_map_like_a_job_timezone() -> None:
+    """DL-155 x DL-151: `default_tz` walks the same SEM-35 ladder as a
+    job's own `timezone:` -- a ujo_timezones alias resolves through the
+    supplied map, and an unresolvable name refuses with the same named
+    OracleError a job's own bad zone raises. A second resolution path
+    would reopen the DL-151 divergence class."""
+    text = (
+        "insert_job: rw_alias\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+        'run_window: "08:00-10:00"\n'
+    )
+    aliased = oracle(text, default_tz="tokyo", tz_aliases={"tokyo": "Asia/Tokyo"})
+    aliased.feed(
+        Event(at=datetime(2026, 7, 1, 0, 30), kind="STARTJOB", payload={"job": "rw_alias"})
+    )
+    assert transitions(aliased, "rw_alias") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+    broken = oracle(text, default_tz="Notaplace/Nowhere")
+    with pytest.raises(OracleError, match="not resolvable"):
+        broken.feed(
+            Event(at=datetime(2026, 7, 1, 0, 30), kind="STARTJOB", payload={"job": "rw_alias"})
+        )
 
 
 def test_sem33_deferred_start_timer_is_the_engine_instant_of_the_local_opening() -> None:
