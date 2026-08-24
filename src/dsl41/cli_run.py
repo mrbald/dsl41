@@ -298,16 +298,17 @@ def _observed_profile(
     manifest has to say 60 too: a profile that recorded the request would
     pin a number the estate does not have, which is what `_running_deadman`
     refuses to do for the routing table for the same reason (DL-126)."""
-    from dsl41.period import RuntimeProfile, runtime_hash, to_us
+    from dsl41.period import runtime_hash, to_us
 
     if staged is None:
         return None
     observed = None if running_deadman is None else to_us(running_deadman)
     if observed == staged.runtime_profile.deadman_us:
         return staged
-    profile = RuntimeProfile.model_validate(
-        {**staged.runtime_profile.model_dump(), "deadman_us": observed}
-    )
+    # the staged manifest carries BOTH the profile and its hash, so a
+    # re-pinned deadman has to move the hash with it -- the two wiring sites
+    # below take the profile alone and hash nothing
+    profile = staged.runtime_profile.with_deadman(observed)
     return staged.model_copy(
         update={"runtime_profile": profile, "runtime_hash": runtime_hash(profile)}
     )
@@ -325,7 +326,6 @@ def _resume_profile_error(
     manifest predates DL-130 and has no pin to hold. The deadman compares
     at its OBSERVED value, for the reason `_observed_profile` gives."""
     from dsl41.period import (
-        RuntimeProfile,
         disagreements,
         read_period_manifest,
         runtime_hash,
@@ -345,9 +345,7 @@ def _resume_profile_error(
     if manifest is None:
         return None
     observed_deadman = None if running_deadman is None else to_us(running_deadman)
-    observed = RuntimeProfile.model_validate(
-        {**profile.model_dump(), "deadman_us": observed_deadman}
-    )
+    observed = profile.with_deadman(observed_deadman)
     if runtime_hash(observed) == manifest.runtime_hash:
         return None
     pinned = manifest.runtime_profile
@@ -414,7 +412,7 @@ async def _serve_run(
     from datetime import UTC, datetime
 
     from dsl41.boundary import stage_period
-    from dsl41.period import RuntimeProfile, to_us
+    from dsl41.period import to_us
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
@@ -440,25 +438,15 @@ async def _serve_run(
     if access_map is not None:
         # the access-model ss4 refusal must write NOTHING (the check_roll_ready
         # precedent above): the same load_policy that arming runs later is
-        # called here read-only, before the root is claimed or the WAL opened
-        import grp as grp_mod
-
+        # called here read-only, before the root is claimed or the WAL opened.
+        # `socket_group` resolution is the loader's own (DL-152), so an
+        # unknown group refuses here too, and in the loader's words
         from dsl41.runner_access import AccessError, load_policy
 
         try:
-            preflight_policy = load_policy(access_map, generation=1)
-            if preflight_policy.socket_group is not None:
-                # an unresolvable group would otherwise fail only at arming,
-                # AFTER the root is claimed and the WAL opened
-                grp_mod.getgrnam(preflight_policy.socket_group)
+            load_policy(access_map, generation=1)
         except AccessError as exc:
             return refuse(exc)
-        except KeyError:
-            return refuse(
-                EngineError(
-                    f"access map {access_map}: socket_group is not a group this host knows"
-                )
-            )
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -557,9 +545,7 @@ async def _serve_run(
             wiring = await wire_from_profile(
                 run_root,
                 catalog,
-                RuntimeProfile.model_validate(
-                    {**profile.model_dump(), "deadman_us": pinned_deadman_us}
-                ),
+                profile.with_deadman(pinned_deadman_us),
                 start=datetime.now(UTC).replace(tzinfo=None),
             )
         except EngineError as exc:

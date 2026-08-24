@@ -425,12 +425,14 @@ def equivalent_tier_a(
 
 _STATUSES = ("NEVER_RAN", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
 
-#: "this global has no value" as a value OUTSIDE the string domain. A string
-#: sentinel shared the domain with real literals: a JIL global whose literal
-#: is exactly the sentinel text read as unset, so `v(G) = <that text>` came
-#: back unsatisfiable and L006 called it a contradiction (DL-151). None
-#: cannot collide -- JIL carries text, never null.
-_UNSET: None = None
+# "this global has no value" is spelled `None` -- a value OUTSIDE the string
+# domain. The alphabet writes it out (`_alphabet`); the evaluator gets it
+# from `dict.get`, whose default already IS None, so an absent global and an
+# unset one answer alike. A string sentinel shared the domain with real
+# literals: a JIL global whose literal is exactly the sentinel text read as
+# unset, so `v(G) = <that text>` came back unsatisfiable and L006 called it a
+# contradiction (DL-151). None cannot collide -- JIL carries text, never null.
+
 #: How the unset state is SPELLED in a counterexample. Display only.
 _UNSET_LABEL = "<unset>"
 
@@ -502,7 +504,7 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
             if literal.lstrip("-").isdigit():
                 value = int(literal)
                 points.update(str(p) for p in (value - 1, value + 1))
-        globals_[name] = [*sorted(points), _UNSET]  # None sorts nowhere: append it
+        globals_[name] = [*sorted(points), None]  # None sorts nowhere: append it
     return _Alphabet(jobs=jobs, globals_=globals_)
 
 
@@ -572,7 +574,7 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
     if isinstance(cond, Paren):
         return _eval_cond(cond.inner, state, alphabet)
     if isinstance(cond, GlobalAtom):
-        actual = state.globals_.get(cond.name, _UNSET)
+        actual = state.globals_.get(cond.name)
         if actual is None:  # unset: no comparison holds (never a literal)
             return False
         return compare_value(actual, cond.op, cond.value)

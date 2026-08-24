@@ -52,7 +52,6 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.oracle_state import HostRuntime, HostState, RuntimeState
-from dsl41.period import CMD_GRACE_S
 
 #: The id of the executor an engine runs on its own machine. One engine per
 #: run root owns exactly one local executor (control-protocol ss2's socket
@@ -109,10 +108,6 @@ def kill_allowance(grace_s: float) -> float:
     unchanged."""
     return 2.0 * grace_s + KILL_MARGIN_S
 
-
-#: The bound over the ss2.1 default grace, for a caller with no period in
-#: hand (an in-memory harness). A real engine passes the grace it runs.
-T_KILL_S = kill_allowance(CMD_GRACE_S)
 
 #: ss8's `T_skew`, which covers monotonic-clock DRIFT between hosts, not
 #: clock synchronization -- the standard lease argument, which depends only
@@ -205,7 +200,7 @@ def host_rejection_reason(
     cmd: HostCommand,
     at: datetime,
     *,
-    grace_s: float = CMD_GRACE_S,
+    grace_s: float,
     actor: str | None = None,
 ) -> str | None:
     """ss8's preconditions: why this command must not apply, or None.
@@ -217,8 +212,11 @@ def host_rejection_reason(
     and would leave the log holding a verdict replay could not reproduce.
 
     `grace_s` is the command grace the PERIOD runs, which is what the kill
-    half of the bound is made of; `actor` is the attempt's `claimed_actor`,
-    which force needs and the other verbs do not. Both are the input's own
+    half of the bound is made of, and it is REQUIRED (DL-152): a default
+    here was the ss2.1 number, so a caller that forgot to pass the period's
+    grace got a bound for a different estate and nothing said so. `actor` is
+    the attempt's `claimed_actor`, which force needs and the other verbs do
+    not. Both are the input's own
     facts -- journaled with it -- so replay reaches this verdict from the
     same values."""
     row = store.host(cmd.host_id)

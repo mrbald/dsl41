@@ -100,7 +100,7 @@ def spawn_wrapper(
     invariant."""
     lifeline_r, lifeline_w = os.pipe()
     spec = {
-        "version": runner_wrapper.SPEC_VERSION,
+        "version": runner_wrapper.SPOOL_VERSION,
         "run_id": "test-run",
         "job": run_dir.name.rsplit(".", 1)[0],
         "run_number": int(run_dir.name.rsplit(".", 1)[1]),
@@ -284,7 +284,7 @@ def test_wrapper_records_under_pythonsafepath(tmp_path: Path, monkeypatch) -> No
 def test_importing_the_engine_leaves_sys_path_untouched() -> None:
     """DL-72: the wrapper and the supervisor prepend their own directory to
     reach runner_procid by top-level name, but the engine imports BOTH of them
-    as ordinary package modules (for __file__ and SPEC_VERSION). A library must
+    as ordinary package modules (for __file__). A library must
     not leave its package directory on the importing process's sys.path -- there
     it would shadow top-level names (ir, cli, viz, ...) for the whole process.
     The guard therefore adds only what is missing and takes it back off."""
@@ -353,7 +353,7 @@ def test_wrapper_graceful_sigterm_reaches_command_on_parent_loss(tmp_path: Path)
         "time.sleep(60)\n"
     )
     spec = {
-        "version": runner_wrapper.SPEC_VERSION,
+        "version": runner_wrapper.SPOOL_VERSION,
         "run_id": "test-run",
         "job": "j1",
         "run_number": 1,
@@ -412,7 +412,7 @@ def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
     specs = [
         json.dumps(
             {
-                "version": runner_wrapper.SPEC_VERSION,
+                "version": runner_wrapper.SPOOL_VERSION,
                 "run_id": f"test-{d.name}",
                 "job": d.name.split(".")[0],
                 "run_number": 1,

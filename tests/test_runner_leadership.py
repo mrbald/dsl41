@@ -74,7 +74,7 @@ from dsl41.runner_adapters import (
     SupervisorClient,
 )
 from dsl41.runner_clock import RealClock
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, T_KILL_S, HostCommand, skew_allowance
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, kill_allowance, skew_allowance
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import LOCK_NAME
 from dsl41.runner_startup import resume_run, start_run
@@ -540,18 +540,23 @@ def _evict_bound(engine) -> float:
     Asserting the identity rather than a number is the point: `deadman_s`
     came back off a live supervisor and `last_contact` was stamped by a real
     lease exchange, so a hard-coded 121.0 would pin the constants and not
-    the arithmetic. One `at` for both sides, because two `now()` calls a
-    line apart are two different instants and the refusal names tenths."""
+    the arithmetic. The grace comes off the ENGINE for the same reason --
+    `apply_attempt` is called with `engine.cmd_grace_s`, so an engine wired
+    with a non-default grace must move this bound, and the module constant
+    would have hidden that. One `at` for both sides, because two `now()`
+    calls a line apart are two different instants and the refusal names
+    tenths."""
     from dsl41.runner_hosts import host_rejection_reason
 
     at = engine.clock.now()
+    grace_s = engine.cmd_grace_s
     store = engine.oracle.store
     row = store.host(LOCAL_EXECUTOR_ID)
     gated = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID)
-    reason = host_rejection_reason(store, gated, at)
+    reason = host_rejection_reason(store, gated, at, grace_s=grace_s)
     assert reason is not None
     assert row.last_contact is not None and row.deadman_s is not None
-    bound = row.deadman_s + T_KILL_S
+    bound = row.deadman_s + kill_allowance(grace_s)
     bound += skew_allowance(bound)  # ss8: skew covers the WHOLE wait, not the deadman
     waited = (at - row.last_contact).total_seconds()
     assert f"was in contact {waited:.1f}s ago" in reason
@@ -560,7 +565,7 @@ def _evict_bound(engine) -> float:
     # CM-11's other half, against the same produced preconditions: the wait is
     # skippable, and only by saying so
     forced = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID, force=True)
-    assert host_rejection_reason(store, forced, at, actor="alice@ops") is None
+    assert host_rejection_reason(store, forced, at, actor="alice@ops", grace_s=grace_s) is None
     return bound - waited
 
 

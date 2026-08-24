@@ -101,7 +101,7 @@ from typing import Any, get_args
 from pydantic import ValidationError
 
 from dsl41.boundary import SealRequest
-from dsl41.canon import is_scalar_json, is_scalar_string
+from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.oracle_state import Event, EventKind, HostRuntime, JobRuntime, JobStatus
@@ -271,17 +271,16 @@ class ControlServer:
         finally:
             os.umask(old_umask)
         os.chmod(self.path, 0o600)  # belt: some platforms ignore umask on bind
-        if self.access is not None and self.access.policy.socket_group is not None:
-            # access-model ss8: group reachability is deliberate -- resolve
-            # the named group and widen the socket, or refuse to serve
-            import grp
-
-            group = self.access.policy.socket_group
+        policy = None if self.access is None else self.access.policy
+        if policy is not None and policy.socket_gid is not None:
+            # access-model ss8: group reachability is deliberate -- widen the
+            # socket to the group the policy named, or refuse to serve. The
+            # gid was resolved once, by the loader (DL-152)
+            group = policy.socket_group
             try:
-                gid = grp.getgrnam(group).gr_gid
-                os.chown(self.path, -1, gid)
+                os.chown(self.path, -1, policy.socket_gid)
                 os.chmod(self.path, 0o660)
-            except (KeyError, OSError) as exc:
+            except OSError as exc:
                 raise EngineError(
                     f"cannot arm control socket for group {group!r}: {exc}"
                 ) from exc
@@ -604,20 +603,10 @@ class ControlServer:
         answered = self._committed_seal(parsed)
         if answered is not None:
             return answered
-        if "expect" in request:
-            # ss3: a boundary addresses no row, so an `expect` that ARRIVES is
-            # refused -- and the key is what arrives. `"expect": null` read as
-            # "no expect" made the one command with no precondition the door
-            # every other command could slip through (DL-151). It sits behind
-            # the retry route above, which answers a committed seal whatever
-            # else rides beside it
-            return {
-                "ok": False,
-                "refused": True,
-                "error": "expect is not allowed on a command that addresses no row:"
-                " a boundary is not a row mutation (period-model ss2.2)",
-            }
         try:
+            # `parse_envelope` refuses an `expect` that ARRIVES on a boundary
+            # (ss3), by key. It sits behind the retry route above, which
+            # answers a committed seal whatever else rides beside it
             parse_envelope(request, addressed=None, baseline_id=self.engine.baseline_id)
         except EnvelopeError as exc:
             return {"ok": False, "error": str(exc), "refused": True}
@@ -947,7 +936,7 @@ class ControlServer:
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)
-        if not isinstance(since, int) or isinstance(since, bool):
+        if not is_wire_int(since):
             return {"ok": False, "error": "since must be an integer trace seq"}
         entries = self.engine.oracle.trace()
         return {
@@ -1149,7 +1138,7 @@ class ControlServer:
             await self._send(writer, {"ok": False, "error": "this run has no journal"})
             return
         since = request.get("since")
-        if since is not None and (not isinstance(since, int) or isinstance(since, bool)):
+        if since is not None and not is_wire_int(since):
             await self._send(writer, {"ok": False, "error": "since must be an integer seq"})
             return
         queue = journal.subscribe()
@@ -1239,7 +1228,7 @@ def _seal_wire_error(request: Mapping[str, Any]) -> str | None:
     if not isinstance(force, bool):
         return f"force_seal must be true or false, got {force!r}"
     epoch = request.get("epoch")
-    if not isinstance(epoch, int) or isinstance(epoch, bool):
+    if not is_wire_int(epoch):
         return f"epoch must be an integer, got {epoch!r}"
     for name in ("baseline_id", "request_id", "stage_digest"):
         value = request.get(name)

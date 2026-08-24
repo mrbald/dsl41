@@ -73,6 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
@@ -872,13 +873,7 @@ def check_segment_adjacency(
         )
     opens_at = opening.get("first_index")
     closes = seal_record.get("closes_at_index")
-    if (
-        isinstance(opens_at, int)
-        and isinstance(closes, int)
-        and not isinstance(opens_at, bool)
-        and not isinstance(closes, bool)
-        and opens_at != closes + 1
-    ):
+    if is_wire_int(opens_at) and is_wire_int(closes) and opens_at != closes + 1:
         raise EngineError(
             f"{where}: segment {opening.get('period_id')!r} starts its index"
             f" range at {opens_at} and the seal before it closes at {closes} -- the"
@@ -947,7 +942,7 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
         first = _first_index(opening)
         for record in records:
             seq = record.get("seq")
-            if isinstance(seq, int) and not isinstance(seq, bool) and seq < first:
+            if is_wire_int(seq) and seq < first:
                 # I2: a segment allocates from its own first_index upward.
                 # A forged low seq would make the containment test below
                 # claim this segment holds an old cursor, and every older
@@ -991,7 +986,7 @@ def _first_index(opening: Mapping[str, Any]) -> int:
     `read_journal` returns carries `first_index` as an int >= 1, checked by
     `check_segment_record`. It was the `header`'s answer until DL-138."""
     first = opening.get("first_index")
-    return first if isinstance(first, int) and not isinstance(first, bool) else 1
+    return first if is_wire_int(first) else 1
 
 
 def baseline_id(records: list[dict[str, Any]]) -> str:
@@ -1214,7 +1209,7 @@ def replay_inputs(
     # carries `first_index` >= 1 -- but this function is public and harnesses
     # hand it record lists the reader never validated.
     first = records[0].get("first_index")
-    base = int(first) - 1 if isinstance(first, int) and not isinstance(first, bool) else 0
+    base = int(first) - 1 if is_wire_int(first) else 0
     replay = Replay(
         decisions=decisions,
         outbox=read_outbox(records, outbox),

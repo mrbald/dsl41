@@ -71,6 +71,7 @@ from dsl41.canon import (
     decode,
     digest as digest_over,
     is_canonical_file,
+    is_wire_int,
     with_digest,
 )
 from dsl41.classify import Baseline, carried_from_oracle, classify
@@ -323,7 +324,7 @@ class Attestation(BaseModel):
             "state_machine_version",
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int):
+            if not is_wire_int(value):
                 raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
         if not is_hash_address(self.seal_digest):
             raise ValueError(f"seal_digest {self.seal_digest!r}: not a sha256 address")

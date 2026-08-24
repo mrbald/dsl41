@@ -1530,6 +1530,12 @@ def test_a_seal_request_names_an_expect_on_nothing(tmp_path: Path) -> None:
     assert envelope.expect == {}
     with pytest.raises(EnvelopeError, match="addresses no row"):
         parse_envelope({**request, "expect": {"job:a": 1}}, addressed=None, baseline_id="b")
+    # the KEY is what arrives: a null `expect` is an expect (DL-151). The
+    # control server asked this by key and the envelope by value, so a
+    # `"expect": null` that the server answered first was refused and one
+    # that reached any other envelope reader was not
+    with pytest.raises(EnvelopeError, match="addresses no row"):
+        parse_envelope({**request, "expect": None}, addressed=None, baseline_id="b")
 
 
 def test_pr30e_a_committed_seals_exact_retry_is_answered_from_the_new_period(

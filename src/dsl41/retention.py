@@ -98,6 +98,7 @@ from dsl41.boundary import (
     check_record_names_sidecar,
     check_seal_record,
 )
+from dsl41.canon import is_wire_int
 from dsl41.runner_procid import fsync_dir
 from dsl41.runner_effects import RUN_ID_RE
 from dsl41.period import (
@@ -993,7 +994,7 @@ def _opening_period(run_root: Path, current: int) -> int | None:
     opening = read_journal(wal_path(run_root, current))[0].get("opens_from_seal")
     if isinstance(opening, Mapping):
         period_id = opening.get("period_id")
-        if isinstance(period_id, int) and not isinstance(period_id, bool):
+        if is_wire_int(period_id):
             return period_id
     return None
 
@@ -1573,8 +1574,7 @@ def _spawn_periods(
                 malformed = (
                     not isinstance(job, str)
                     or not job
-                    or isinstance(run_number, bool)
-                    or not isinstance(run_number, int)
+                    or not is_wire_int(run_number)
                     or run_number < 1
                     or not (
                         run_id is None or (isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id))
@@ -1699,8 +1699,7 @@ def _index_run(path: Path) -> tuple[str, int, str] | None:
     run_id = payload.get("run_id")
     if (
         isinstance(job, str)
-        and isinstance(run_number, int)
-        and not isinstance(run_number, bool)
+        and is_wire_int(run_number)
         and isinstance(run_id, str)
     ):
         return (job, run_number, run_id)

@@ -104,39 +104,11 @@ def roll_into_root(
     The caller holds `leader.lock` on `new_root` already, because starting
     a supervisor or staging bytes into a root is an act on an estate this
     process may turn out not to lead."""
-    anchor = EstateAnchor(anchor_dir)
     # read BEFORE the lock: the claim below is a compare-and-swap that
     # re-reads under it and refuses a head that moved, so this read only
     # has to be good enough to compute a claim_id -- and the sentinel must
     # be durable before that claim exists at all (PR-01a)
-    stored = anchor.read()
-    if stored is None:
-        raise EngineError(
-            f"{anchor.path}: this lineage has no anchor -- a physical roll opens the"
-            " successor of a seal, and there is no lineage here to succeed"
-            " (period-model ss1.3)"
-        )
-    closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
-    seal = read_seal(closing_root, period_id)
-    if seal.digest != seal_digest:
-        raise EngineError(
-            f"{seal_path(closing_root, period_id)}: digest {seal.digest} but the"
-            f" head says {seal_digest} -- the closing root does not hold the seal"
-            " this lineage closed with (period-model ss11)"
-        )
-    if seal.executions:
-        # ss8's mode table: a physical roll while jobs are live is REFUSED.
-        # The supervisor is one per run root and a new-root engine cannot
-        # reach the old root's work; the bridge that lifts this is a
-        # non-goal (ss12)
-        live = ", ".join(f"{entry.job}.{entry.run_number}" for entry in seal.executions)
-        raise EngineError(
-            f"seal {seal.digest} carries live execution(s) ({live}): a physical roll"
-            " needs every execution terminal, because the supervisor is one per run"
-            " root and a new-root engine cannot reach the old root's work"
-            " (period-model ss8)"
-        )
-    verify_attestation(closing_root, period_id)
+    anchor, closing_root, seal = _roll_source_or_refuse(anchor_dir, new_root)
     opening = seal.next_period
     manifest = read_period_manifest(closing_root, opening.period_id)
     if manifest is None:
@@ -193,6 +165,47 @@ def roll_into_root(
         anchor.release()
     period.journal.detach()  # the descriptor, not the term: the resume opens its own
     return Rolled(seal=seal, closing_root=closing_root, opened=period.opened)
+
+
+def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnchor, Path, Seal]:
+    """The READ-ONLY half of a physical roll: the lineage anchor, the root
+    that holds the closing seal, and the seal itself -- read and checked,
+    or a refusal naming what is wrong.
+
+    `check_roll_ready` is exactly this pass and nothing else -- it exists so
+    a refusal writes nothing, not even the target directory -- and
+    `roll_into_root` runs it again authoritatively under the locks. Two
+    copies of it meant two wordings of one refusal (DL-152)."""
+    anchor = EstateAnchor(anchor_dir)
+    stored = anchor.read()
+    if stored is None:
+        raise EngineError(
+            f"{anchor.path}: this lineage has no anchor -- a physical roll opens the"
+            " successor of a seal, and there is no lineage here to succeed"
+            " (period-model ss1.3)"
+        )
+    closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
+    seal = read_seal(closing_root, period_id)
+    if seal.digest != seal_digest:
+        raise EngineError(
+            f"{seal_path(closing_root, period_id)}: digest {seal.digest} but the"
+            f" head says {seal_digest} -- the closing root does not hold the seal"
+            " this lineage closed with (period-model ss11)"
+        )
+    if seal.executions:
+        # ss8's mode table: a physical roll while jobs are live is REFUSED.
+        # The supervisor is one per run root and a new-root engine cannot
+        # reach the old root's work; the bridge that lifts this is a
+        # non-goal (ss12)
+        live = ", ".join(f"{entry.job}.{entry.run_number}" for entry in seal.executions)
+        raise EngineError(
+            f"seal {seal.digest} carries live execution(s) ({live}): a physical roll"
+            " needs every execution terminal, because the supervisor is one per run"
+            " root and a new-root engine cannot reach the old root's work"
+            " (period-model ss8)"
+        )
+    verify_attestation(closing_root, period_id)
+    return anchor, closing_root, seal
 
 
 def _roll_source(stored: Anchor, anchor: EstateAnchor, new_root: Path) -> tuple[Path, int, str]:
@@ -309,31 +322,7 @@ def check_roll_ready(new_root: Path, anchor_dir: Path) -> None:
     never revoked, and a head that moves between this read and the locked
     one is refused there."""
     check_roll_target(new_root, anchor_dir)
-    anchor = EstateAnchor(anchor_dir)
-    stored = anchor.read()
-    if stored is None:
-        raise EngineError(
-            f"{anchor.path}: this lineage has no anchor -- a physical roll opens the"
-            " successor of a seal, and there is no lineage here to succeed"
-            " (period-model ss1.3)"
-        )
-    closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
-    seal = read_seal(closing_root, period_id)
-    if seal.digest != seal_digest:
-        raise EngineError(
-            f"{seal_path(closing_root, period_id)}: digest {seal.digest} but the"
-            f" head says {seal_digest} -- the closing root does not hold the seal"
-            " this lineage closed with (period-model ss11)"
-        )
-    if seal.executions:
-        live = ", ".join(f"{entry.job}.{entry.run_number}" for entry in seal.executions)
-        raise EngineError(
-            f"seal {seal.digest} carries live execution(s) ({live}): a physical roll"
-            " needs every execution terminal, because the supervisor is one per run"
-            " root and a new-root engine cannot reach the old root's work"
-            " (period-model ss8)"
-        )
-    verify_attestation(closing_root, period_id)
+    _roll_source_or_refuse(anchor_dir, new_root)
 
 
 def check_roll_target(new_root: Path, anchor_dir: Path) -> None:

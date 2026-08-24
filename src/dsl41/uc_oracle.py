@@ -40,12 +40,14 @@ Interpreter decisions (each with a test; recorded as DL-16):
   Cancelled) or an exit_code judged against max_exit_success (M31/U4
   default: same boundary as AutoSys). The last exit code is published as
   pseudo-variable "exit:<task>" for M08 var-condition edges.
-- ON_ICE marks a task Skip-at-start (M19): when it would otherwise start
-  (instance launch or edges satisfied) it goes Skipped and the skip
-  cascades. OFF_ICE unmarks. ON_HOLD holds an eligible task (Held blocks
-  the instance from completing, M20); OFF_HOLD starts it if its edges were
-  already satisfied. KILLJOB -> Cancelled (the UCS-11 Force Finish/Cancel
-  command; the mapping table has no KILLJOB row -- M23 is CHANGE_STATUS,
+- Definition-time status maps to a UC control through ONE table,
+  `backend_uc.INITIAL_STATUS_CONTROL` (M19/M20/M21) -- this prose does not
+  restate which status is which. ON_ICE marks a task Skip-at-start: when it
+  would otherwise start (instance launch or edges satisfied) it goes Skipped
+  and the skip cascades. OFF_ICE unmarks. ON_HOLD holds an eligible task
+  (Held blocks the instance from completing); OFF_HOLD starts it if its
+  edges were already satisfied. KILLJOB -> Cancelled (the UCS-11 Force
+  Finish/Cancel command; the mapping table has no KILLJOB row -- M23 is CHANGE_STATUS,
   whose Force Finish deliberately does NOT stop the process). FORCE_STARTJOB
   starts the task inside the open instance regardless of edges (M22: forced
   runs feed no latches -- there are none).

@@ -30,6 +30,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
+from dsl41.canon import is_wire_int
 from dsl41.runner_procid import fsync_dir
 from dsl41.runner_supervisor import peer_uid
 
@@ -87,6 +88,11 @@ class Policy:
     bindings: dict[str, Tier]
     unmapped: Tier | None  # None = deny
     socket_group: str | None
+    #: `socket_group` resolved against this host, at LOAD (DL-152). One
+    #: resolution, one refusal: the group was looked up three times -- CLI
+    #: preflight, arming, socket bind -- and an unknown group was a
+    #: different sentence at each. None exactly when `socket_group` is.
+    socket_gid: int | None
     generation: int
     digest: str
 
@@ -119,6 +125,26 @@ def _subject_valid(subject: str) -> bool:
 _MAP_BYTES_CEILING = 1 << 20
 
 
+def _resolve_socket_group(path: Path, socket_group: str | None) -> int | None:
+    """The map's `socket_group` as a gid, or None when it names none.
+
+    Resolved ONCE, at load (DL-152). The two appliers -- the arming grant
+    on the run root and the control socket's bind -- take the gid, and a
+    group this host does not know is a load refusal like every other
+    unusable field. It was looked up three times before (CLI preflight,
+    arming, bind) and each said something different about the same
+    failure; the preflight existed only so that failure arrived before the
+    run root was claimed."""
+    if socket_group is None:
+        return None
+    try:
+        return grp.getgrnam(socket_group).gr_gid
+    except KeyError:
+        raise AccessError(
+            f"access map {path}: socket_group {socket_group!r} is not a group this host knows"
+        ) from None
+
+
 def load_policy(path: Path, *, generation: int) -> Policy:
     """Load and validate the strict-TOML role map (access-model ss4).
 
@@ -126,8 +152,9 @@ def load_policy(path: Path, *, generation: int) -> Policy:
     other-writable file or one owned by someone else, a descriptor I/O
     failure mid-read, a file over the 1 MiB ceiling, an unknown key, an
     unknown tier, a duplicate subject, a wildcard, a subject without a
-    realm. Refusal is `AccessError` — the caller turns it into a startup
-    refusal or a kept-old-policy reload receipt (ss7)."""
+    realm, and a `socket_group` this host does not know. Refusal is
+    `AccessError` — the caller turns it into a startup refusal or a
+    kept-old-policy reload receipt (ss7)."""
     try:
         parent = os.lstat(path.parent)
     except OSError as exc:
@@ -199,7 +226,7 @@ def load_policy(path: Path, *, generation: int) -> Policy:
     if unknown:
         raise AccessError(f"access map {path}: unknown keys {sorted(unknown)}")
     version = table.get("format_version")
-    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+    if not is_wire_int(version) or version != 1:
         # bool and 1.0 both compare == 1; strict TOML means strict TYPES
         raise AccessError(f"access map {path}: format_version must be the integer 1")
     unmapped_raw = table.get("unmapped", "deny")
@@ -228,10 +255,15 @@ def load_policy(path: Path, *, generation: int) -> Policy:
             raise AccessError(f"access map {path}: duplicate subject {subject!r}")
         bindings[subject] = _TIER_BY_NAME[tier_name]
 
+    # LAST, after the map itself is whole: this is the only check that
+    # leaves the file and asks the HOST, so a syntactically broken map is
+    # refused on its own terms and never costs an NSS lookup (DL-152)
+    socket_gid = _resolve_socket_group(path, socket_group)
     return Policy(
         bindings=bindings,
         unmapped=None if unmapped_raw == "deny" else Tier.READ,
         socket_group=socket_group,
+        socket_gid=socket_gid,
         generation=generation,
         digest="sha256:" + hashlib.sha256(raw).hexdigest(),
     )
@@ -345,7 +377,7 @@ class PerimeterJournal:
             seq = record.get("access_seq")
             # bool is an int in Python and `true` is not a sequence number;
             # neither is a non-positive one -- the series starts at 1 (DL-151)
-            if isinstance(seq, int) and not isinstance(seq, bool) and seq > 0:
+            if is_wire_int(seq) and seq > 0:
                 return seq
         return 0
 
@@ -436,7 +468,7 @@ class AccessControl:
             # ss7: a policy change that cannot be receipted does not happen --
             # at startup that means refusing to serve at all
             raise AccessError(f"cannot sync the arming receipt to {journal.path}")
-        if policy.socket_group is not None:
+        if policy.socket_gid is not None:
             # access-model ss8: the run root is 0700, so the socket alone is
             # unreachable -- grant execute-only traversal to the socket group
             # here, at arming. The 0700 root was the fence for its children
@@ -444,13 +476,13 @@ class AccessControl:
             # direct child to owner-only first; later artifacts land inside
             # those directories. Log visibility for a group is an explicit
             # operator grant afterwards (ss9), never the perimeter's act.
+            # The gid was resolved by the loader (DL-152); this applies it.
             try:
                 for child in run_root.iterdir():
                     os.chmod(child, 0o700 if child.is_dir() else 0o600)
-                gid = grp.getgrnam(policy.socket_group).gr_gid
-                os.chown(run_root, -1, gid)
+                os.chown(run_root, -1, policy.socket_gid)
                 os.chmod(run_root, 0o710)
-            except (KeyError, OSError) as exc:
+            except OSError as exc:
                 raise AccessError(
                     f"cannot open the run root to group {policy.socket_group!r}: {exc}"
                 ) from exc
@@ -514,15 +546,23 @@ class AccessControl:
                 error=str(exc),
             )
             return
-        if fresh.socket_group != self.policy.socket_group:
+        if (fresh.socket_group, fresh.socket_gid) != (
+            self.policy.socket_group,
+            self.policy.socket_gid,
+        ):
             # ss8: the group and the modes are applied at arming; a reload
             # that named a different group would change the map and not the
-            # kernel -- refuse it whole rather than half-apply it
+            # kernel -- refuse it whole rather than half-apply it. The GID
+            # is part of "the group" (DL-152): the name resolves at load, so
+            # a host that re-numbered the group between arming and a reload
+            # would otherwise leave a policy naming a gid nothing was
+            # chowned to
             self.journal.write(
                 "policy_reload_failed",
                 sync=True,
                 generation=self.policy.generation,
-                error="socket_group is fixed at arming; restart the engine to change it",
+                error="socket_group is fixed at arming, name and gid alike;"
+                " restart the engine to change it",
             )
             return
         if not self.journal.write(

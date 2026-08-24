@@ -29,8 +29,41 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
+
+#: the `version` the Tier-0 wrapper stamps on `spawn.json` and `status.json`
+#: (docs/supervisor-protocol.md ss3). ONE integer, held here because this is
+#: the one module all three readers may import: the wrapper writes it, the
+#: supervisor and the engine each check it (DL-152). It used to be a literal
+#: in the wrapper and a hand-kept copy in the supervisor, on the reading that
+#: the stdlib-only tier imports nothing at all -- the same reading DL-72
+#: already corrected for the durability helpers.
+SPOOL_VERSION: Final[int] = 1
+
+
+def spool_version_supported(doc: Mapping[str, Any]) -> bool:
+    """The `Wrapper-owned spool files` row of docs/protocol-evolution.md,
+    asked once (DL-152).
+
+    The row is tolerant on fields and STRICT on versions: a version this
+    binary does not implement must stop the reader, because the field exists
+    to say the meaning changed. `true` and `1.0` are not the integer 1.
+
+    An ABSENT `version` passes. The matrix has no column for a missing
+    version and no document rules one, so refusing here would pick a side by
+    guess; the split is recorded in the round's ledger instead.
+
+    The type check is spelled out rather than borrowed from `canon.is_wire_int`:
+    this module imports nothing from dsl41, which is what lets the Tier-0
+    wrapper import it (DL-42/DL-72).
+    """
+    if "version" not in doc:
+        return True
+    version = doc["version"]
+    return isinstance(version, int) and not isinstance(version, bool) and version == SPOOL_VERSION
+
 
 # ------------------------------------------------------------------ durability
 

@@ -232,6 +232,37 @@ def test_access_verb_table_completeness_gate() -> None:
     assert required_tier(None) is None
 
 
+def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
+    """`cli_control._QUERY_VERBS` is DERIVED from the tier map (DL-152).
+
+    It was a hand-written list of the READ half of `REQUIRED_TIER`, so a
+    read verb added to the gate reached the gate, the help and the query
+    surface at three different times. `hosts` is the one READ verb this
+    surface does not forward -- `dsl41 control host list` owns it -- and
+    that exclusion is the only thing the CLI still states."""
+    from dsl41.cli_control import _QUERY_ELSEWHERE, _QUERY_VERBS
+    from dsl41.runner_access import Tier
+
+    # spelled out, not recomputed: a test that re-runs the source's own
+    # comprehension passes for any tier map, including a wrong one
+    assert _QUERY_VERBS == (
+        "status",
+        "trace",
+        "explain",
+        "spec",
+        "deps",
+        "timers",
+        "plan",
+        "global",
+        "globals",
+        "subscribe",
+    )
+    read_verbs = {verb for verb, tier in REQUIRED_TIER.items() if tier is Tier.READ}
+    assert read_verbs == set(_QUERY_VERBS) | _QUERY_ELSEWHERE
+    assert _QUERY_ELSEWHERE <= read_verbs, "an excluded verb must still BE a read verb"
+    assert "hosts" not in _QUERY_VERBS
+
+
 # ----------------------------------------------------------- the live gate
 
 
@@ -821,16 +852,38 @@ def test_access_arm_refuses_when_the_receipt_cannot_land(tmp_path: Path) -> None
         os.chmod(run_root, 0o700)
 
 
-def test_access_arm_refuses_an_unknown_socket_group(tmp_path: Path) -> None:
-    """ss8: a socket_group the host does not know refuses arming."""
+def test_access_an_unknown_socket_group_is_one_load_refusal(tmp_path: Path) -> None:
+    """ss4/ss8: `socket_group` is resolved ONCE, by the loader (DL-152).
+
+    Three sites looked the group up -- the CLI preflight, arming, and the
+    control socket's bind -- so an unknown group was a different sentence
+    at each and the preflight existed only to make one of them arrive
+    early. The loader refuses it like any other unusable field, and every
+    reader of a loaded policy takes the resolved gid."""
     map_path = _write_map(
         tmp_path / "roles.toml",
         'format_version = 1\nsocket_group = "dsl41-no-such-group-zz"\n',
     )
+    with pytest.raises(AccessError, match="is not a group this host knows"):
+        load_policy(map_path, generation=1)
     run_root = tmp_path / "run"
     run_root.mkdir()
-    with pytest.raises(AccessError, match="cannot open the run root"):
+    # arming LOADS, so it refuses in the loader's words
+    with pytest.raises(AccessError, match="is not a group this host knows"):
         AccessControl.arm(map_path, run_root)
+
+
+def test_access_a_known_socket_group_resolves_onto_the_policy(tmp_path: Path) -> None:
+    """The resolved gid rides on `Policy`, and is None exactly when
+    `socket_group` is (DL-152)."""
+    own = grp.getgrgid(os.getgid())
+    named = load_policy(
+        _write_map(tmp_path / "g.toml", f'format_version = 1\nsocket_group = "{own.gr_name}"\n'),
+        generation=1,
+    )
+    assert named.socket_group == own.gr_name and named.socket_gid == own.gr_gid
+    bare = load_policy(_write_map(tmp_path / "b.toml", "format_version = 1\n"), generation=1)
+    assert bare.socket_group is None and bare.socket_gid is None
 
 
 class _RaisingWriter:
@@ -1033,6 +1086,37 @@ def test_access_reload_refuses_a_socket_group_change(tmp_path: Path) -> None:
     assert access.policy.socket_group is None
     failures = [r for r in _receipts(run_root) if r["rec"] == "policy_reload_failed"]
     assert "fixed at arming" in failures[0]["error"]
+
+
+def test_access_reload_refuses_a_group_that_kept_its_name_and_changed_its_gid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss8/DL-152: the gate compares the NAME and the GID. The chown at
+    arming used a number; a host that re-numbered the group between arming
+    and a reload would otherwise install a policy naming a gid nothing was
+    chowned to, and the map would say a grant the kernel does not hold."""
+    if MY_GROUP is None:  # pragma: no cover -- gid missing from /etc/group
+        pytest.skip("no group name for this gid")
+    map_path = _write_map(
+        tmp_path / "roles.toml",
+        f'format_version = 1\nunmapped = "deny"\nsocket_group = "{MY_GROUP}"\n',
+    )
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    access = AccessControl.arm(map_path, run_root)
+    armed_gid = access.policy.socket_gid
+    assert armed_gid == os.getgid()
+
+    import dsl41.runner_access as ra
+
+    renumbered = grp.struct_group((MY_GROUP, "", armed_gid + 1, []))
+    monkeypatch.setattr(ra.grp, "getgrnam", lambda name: renumbered)
+    access.reload()
+
+    assert access.policy.generation == 1  # the old policy stands
+    assert access.policy.socket_gid == armed_gid
+    failures = [r for r in _receipts(run_root) if r["rec"] == "policy_reload_failed"]
+    assert "name and gid alike" in failures[0]["error"]
 
 
 def test_access_peer_principal_getsockopt_failure_is_a_refusal(

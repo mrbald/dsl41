@@ -5,12 +5,13 @@ user's constraints and two independent sketches, then two adversarial
 rounds to convergence. A post-build conformance round (2026-08-22) was
 folded by DL-147; a second round (2026-08-22..23) by DL-148; the code
 follow-ups and three amended passages by DL-149; the §6 code follow-ups
-and their two amended passages by DL-151. Once frozen, each change
-to a frozen item requires a decision-log entry, the same rule as
-`docs/control-protocol.md`. This document retires the RBAC non-goal of
-`docs/runner-design.md` §1 and §12 and closes the authorization half of
-control-protocol §7 gap 2. The authentication half closes only for local
-peers; the web session keeps a named seam (§9).
+and their two amended passages by DL-151; the one-resolution
+`socket_group` follow-up and its four amended passages by DL-152. Once
+frozen, each change to a frozen item requires a decision-log entry, the
+same rule as `docs/control-protocol.md`. This document retires the RBAC
+non-goal of `docs/runner-design.md` §1 and §12 and closes the
+authorization half of control-protocol §7 gap 2. The authentication half
+closes only for local peers; the web session keeps a named seam (§9).
 
 ## 0. The problem
 
@@ -147,10 +148,13 @@ Resolution, in order:
 
 Validation refuses: duplicate subjects, unknown fields, unknown tiers,
 wildcards, a subject without a realm, a map over the loader's 1 MiB
-ceiling (DL-149). The loader opens the file without
-following symlinks (and non-blocking: a FIFO refuses instead of parking
-startup) and checks four predicates — the parent before the open, the
-file on the opened descriptor:
+ceiling (DL-149), and a `socket_group` this host does not know — the
+loader resolves the named group to a gid and carries it on the loaded
+policy, so the group is looked up exactly once and an unusable one
+refuses like any other unusable field *(Amended by DL-152.)*. The
+loader opens the file without following symlinks (and non-blocking: a
+FIFO refuses instead of parking startup) and checks four predicates —
+the parent before the open, the file on the opened descriptor:
 
 - the file is a regular file owned by the engine's own effective uid —
   any other owner is refused, root included: the map speaks for this
@@ -178,9 +182,10 @@ refusal (DL-149), so no loader failure escapes without attempting
 one. A configured path
 never silently falls back to owner-wide authority. The preflight
 refusal writes nothing: the same loader that arming runs is called
-read-only first, and `socket_group` is resolved against the host, both
-before the run root is claimed or the WAL opened. Arming re-validates
-after the root is claimed; a failure there — re-validation, journal
+read-only first — `socket_group` resolution is part of that load —
+before the run root is claimed or the WAL opened *(Amended by
+DL-152.)*. Arming re-validates after the root is claimed; a failure
+there — re-validation, journal
 recovery, the arming receipt's sync, the group grant — still refuses,
 but the claimed root and its WAL already exist by then. The receipt
 trail differs by failure: a re-validation failure writes no receipt;
@@ -370,11 +375,13 @@ effort); reload does not raise. Startup with a configured but
 invalid map, or one whose arming receipt cannot be synced, refuses
 (§4).
 
-`socket_group` is fixed at arming: a reload that names a different
-group is refused whole (`policy_reload_failed`) — the kernel side of the
-grant cannot follow a map edit, and a half-applied change is worse than
-a restart. When the `policy_loaded` write reports failure, the failure
-receipt — itself best effort — names the `orphaned_generation`: the
+`socket_group` is fixed at arming — the name AND the gid it resolved
+to *(Amended by DL-152.)*: a reload that names a different group, or
+whose group has been re-numbered under this engine, is refused whole
+(`policy_reload_failed`) — the kernel side of the grant cannot follow
+a map edit, and a half-applied change is worse than a restart. When
+the `policy_loaded` write reports failure, the failure receipt —
+itself best effort — names the `orphaned_generation`: the
 line may have landed complete before its fsync or close failed, and
 whether a line is void is decided by seq adjacency (§6), never by
 scanning for the generation. A later successful reload may reuse the number; its line
@@ -405,9 +412,10 @@ deliberately. Arming has two modes, chosen by the map:
   and policy layer for the owner's own connections, and a staging step
   before a group grant.
 - **Armed, group-open** (`socket_group` named): run root `0710`, group
-  = `socket_group` — execute-only traversal, no listing. `control.sock`
-  becomes `0660`, owner unchanged (the run-root owner), group
-  `socket_group`. The `0700` root was the fence for its children
+  = `socket_group`, resolved to its gid by the loader (§4) and applied
+  here *(Amended by DL-152.)* — execute-only traversal, no listing.
+  `control.sock` becomes `0660`, owner unchanged (the run-root owner),
+  group `socket_group`. The `0700` root was the fence for its children
   (`logs/` and `runs/` are born under the process umask, `0755` by
   default), so
   opening it first **tightens every direct child to owner-only** (dirs

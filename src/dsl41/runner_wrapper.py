@@ -98,9 +98,9 @@ from typing import TYPE_CHECKING, Any
 # plain top-level import resolves either way (importing dsl41.runner_procid
 # would drag the package __init__, and with it third-party imports, in).
 # Prepend only when it is missing and take it back off again: this file is ALSO
-# imported as an ordinary package module (the engine reads __file__ and
-# SPEC_VERSION off it), and a library must not leave its own package directory
-# on the importing process's sys.path -- there it would shadow top-level names
+# imported as an ordinary package module (the engine reads __file__ off it),
+# and a library must not leave its own package directory on the importing
+# process's sys.path -- there it would shadow top-level names
 # (ir, cli, viz, ...) for the whole process. sys.path ends exactly as CPython
 # handed it to us, in both invocation modes.
 #
@@ -116,6 +116,7 @@ if _PROCID_DIR_ADDED:
     sys.path.insert(0, _PROCID_DIR)
 if TYPE_CHECKING:
     from dsl41.runner_procid import (
+        SPOOL_VERSION,
         current_boot_id,
         durable_write_json,
         killpg_quiet,
@@ -124,6 +125,7 @@ if TYPE_CHECKING:
     )
 else:
     from runner_procid import (  # noqa: E402
+        SPOOL_VERSION,
         current_boot_id,
         durable_write_json,
         killpg_quiet,
@@ -133,8 +135,6 @@ else:
 
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
-
-SPEC_VERSION = 1
 
 #: how a spawn or a durable record write is allowed to fail (DL-151). OSError
 #: is the expected half. ValueError is the half that got away: an embedded
@@ -243,7 +243,7 @@ def main() -> int:
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
     os.close(devnull)
-    if spec.get("version") != SPEC_VERSION:
+    if spec.get("version") != SPOOL_VERSION:
         print(f"runner_wrapper: unsupported spec version {spec.get('version')!r}", file=sys.stderr)
         return 2
 
@@ -308,7 +308,7 @@ def main() -> int:
             durable_write_json(
                 os.path.join(run_dir, "status.json"),
                 {
-                    "version": SPEC_VERSION,
+                    "version": SPOOL_VERSION,
                     **identity,
                     "outcome": "spawn_failed",
                     "error": str(exc),
@@ -322,7 +322,7 @@ def main() -> int:
 
     _test_pause("post_spawn_pre_record")
     spawn_record = {
-        "version": SPEC_VERSION,
+        "version": SPOOL_VERSION,
         **identity,
         "wrapper_pid": os.getpid(),
         "wrapper_start_time": proc_start_token(os.getpid()),
@@ -346,7 +346,7 @@ def main() -> int:
             durable_write_json(
                 os.path.join(run_dir, "status.json"),
                 {
-                    "version": SPEC_VERSION,
+                    "version": SPOOL_VERSION,
                     **identity,
                     "outcome": "terminated",
                     "cause": f"spawn record write failed ({exc}); killed",
@@ -388,7 +388,7 @@ def main() -> int:
     try:
         durable_write_json(
             os.path.join(run_dir, "status.json"),
-            {"version": SPEC_VERSION, **identity, **status, "ended_at": utc_now_iso()},
+            {"version": SPOOL_VERSION, **identity, **status, "ended_at": utc_now_iso()},
         )
     except _IO_FAILURE as exc:
         print(f"runner_wrapper: status.json write failed: {exc}", file=sys.stderr)

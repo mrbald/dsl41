@@ -88,6 +88,16 @@ class Lookback(BaseModel):
     minutes: int | None  # for kind=window; parsed from hhhh.mm / hhhh\:mm
     raw: str  # original token, for round-trip + Q2 auditing
 
+    @property
+    def token(self) -> str:
+        """How this lookback NAMES itself: the source token when one was
+        parsed, the kind when it was not. Canonicalization drops `raw`
+        (equiv), so a reader that REPORTS the lookback needs a fallback;
+        the report writers share this one (DL-152). `dsl._lookback_token`
+        does not use it -- it renders a JIL-VALID token, so its fallback
+        must be a number the scanner accepts, not a kind name."""
+        return self.raw or self.kind
+
 
 class JobRef(BaseModel):
     name: str

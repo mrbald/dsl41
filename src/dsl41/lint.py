@@ -77,6 +77,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from dsl41.ast_jil import SourceSpan
+from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
 from dsl41.derive import DerivedGraph, derive_graph
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, _unquote
@@ -877,15 +878,15 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
-#: SEM-24 definition-time statuses that translate to a UC Skip: ON_ICE is
-#: M19 (Skip task), ON_NOEXEC is M21 (path-level Skip). ON_HOLD is M20 Hold
-#: -- it blocks downstream on BOTH sides, so it is not this rule's business.
-_SKIP_TRANSLATED = ("ON_ICE", "ON_NOEXEC")
-
-
 def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     """Iced consumer (M19; Part II requirement 3's last detector): EVERY
     immediate predecessor of the job translates to a UC Skip.
+
+    Which statuses those are is NOT listed here: `backend_uc`'s
+    `INITIAL_STATUS_CONTROL` says what UC does with each definition-time
+    status, and `SKIP_TRANSLATED` is the "skip" half of that one table
+    (DL-152). ON_HOLD is M20 Hold -- it blocks downstream on BOTH sides, so
+    it is not this rule's business.
 
     This is where the two engines part. In AutoSys an iced producer
     satisfies every atom that names it (SEM-05/SEM-20), so the consumer
@@ -905,7 +906,7 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
         predecessors.setdefault(edge.dst, []).append(edge.src)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
-        if job.sem.initial_status in _SKIP_TRANSLATED:
+        if job.sem.initial_status in SKIP_TRANSLATED:
             continue  # skipped on BOTH sides: no cascade divergence to flag
         sources = sorted(set(predecessors.get(name, [])))
         if not sources:
@@ -913,7 +914,7 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
         iced = [
             src
             for src in sources
-            if src in catalog.jobs and catalog.jobs[src].sem.initial_status in _SKIP_TRANSLATED
+            if src in catalog.jobs and catalog.jobs[src].sem.initial_status in SKIP_TRANSLATED
         ]
         if len(iced) != len(sources):
             continue

@@ -2529,7 +2529,7 @@ relitigate an entry; append a new one.
   python runner_wrapper.py` dies at import). That guard is conditional and
   self-undoing — prepend only what is missing, remove it again once the
   import is done — because those two files are ALSO imported as ordinary
-  package modules: the engine reads __file__ and SPEC_VERSION off them, so
+  package modules: the engine reads __file__ off them to spawn by path, so
   an unconditional `sys.path.insert(0, ...)` would leave src/dsl41 at the
   front of sys.path in every `dsl41 run` / `supervise` / TUI process
   (twice, ahead of the stdlib and of cwd) and shadow top-level names — ir,

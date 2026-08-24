@@ -27,7 +27,7 @@ import json
 import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, TypeGuard
 
 #: One shared version over every artifact ss3.2 governs (PR-08d). A
 #: canonicalization change moves the bytes of all of them together, so one
@@ -62,6 +62,22 @@ def is_scalar_string(s: str) -> bool:
     would make the estate unsealable, so every ingress refuses it (PR-10a).
     """
     return not any(0xD800 <= ord(ch) <= 0xDFFF for ch in s)
+
+
+def is_wire_int(value: object) -> TypeGuard[int]:
+    """True when `value` is an integer on the wire, and not a bool.
+
+    `bool` is a subclass of `int`, so `isinstance(v, int)` alone admits
+    `true` where a number was promised. Every ingress in this repo asks the
+    same question, so it is asked once here (DL-152).
+
+    A `TypeGuard`, so a reader that has asked gets a narrowed `int` the way
+    a bare `isinstance` gave it one. `TypeGuard` narrows the TRUE arm only
+    (`TypeIs` needs 3.13 and this package builds on 3.12): a site that goes
+    on to USE the number must read it inside the true arm, because an early
+    `if not is_wire_int(v): refuse` leaves the value unnarrowed below.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def is_scalar_json(value: object) -> bool:
@@ -123,7 +139,7 @@ def check_artifact_version(value: object) -> None:
     if not isinstance(value, Mapping) or "artifact_format_version" not in value:
         return
     version = value["artifact_format_version"]
-    if isinstance(version, bool) or not isinstance(version, int):
+    if not is_wire_int(version):
         raise CanonError(f"artifact_format_version {version!r} is not an integer")
     if version != ARTIFACT_FORMAT_VERSION:
         raise CanonError(

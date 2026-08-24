@@ -72,6 +72,7 @@ from dsl41.runner_effects import Effect, EffectOutcome
 from dsl41.period import (
     GENESIS_PERIOD_ID,
     GENESIS_SEGMENT_NO,
+    Manifest,
     RuntimeProfile,
     Sentinel,
     StagedManifest,
@@ -247,9 +248,9 @@ async def wire_from_profile(
     and the offline sealer all come through here, so a window that moves in
     the profile moves in the components. It does NOT make the profile agree
     with the period's pin -- `run` passes the profile the LAUNCHER built and
-    `_profile_drift` in `resume_run` is still what holds it to the pin;
-    what this removes is a second construction of the same components whose
-    values merely happened to agree."""
+    `_manifest_profile_drift` on the resume ladder is still what holds it to
+    the pin; what this removes is a second construction of the same
+    components whose values merely happened to agree."""
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
     deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
@@ -372,6 +373,30 @@ def _profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]
     return sorted(
         name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields)
     )
+
+
+def _manifest_profile_drift(
+    manifest: Manifest,
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
+    deadman_s: float | None,
+    declared: RuntimeProfile | None,
+) -> list[str]:
+    """Which profile fields this wiring moves off `manifest`'s pin -- the
+    ONE runtime gate against an installed manifest (DL-152).
+
+    Two sites ran it: the resume ladder and the commit-a-staged-boundary
+    path. They were the same derive-then-compare with two wordings, so a
+    change to what the engine reads back had to be made twice. The refusals
+    stay separate -- each names why ITS period may not move -- because that
+    sentence is what tells an operator which launch to fix.
+
+    The staged-manifest gate in `start_run` is deliberately NOT this: it
+    compares against a manifest that is not installed yet."""
+    derived = _derive_runtime_profile(
+        scheduler, adapters, deadman_s, base=manifest.runtime_profile, declared=declared
+    )
+    return _profile_drift(derived, manifest.runtime_profile)
 
 
 def start_run(
@@ -742,10 +767,7 @@ async def _resume_under_lock(
     # inherit the pin unless the launcher DECLARED them (`declared`), so a
     # process that says nothing about its machine identity is held to the
     # rest and one that does is held to all of it.
-    derived = _derive_runtime_profile(
-        scheduler, adapters, deadman_s, base=manifest.runtime_profile, declared=declared
-    )
-    drift = _profile_drift(derived, manifest.runtime_profile)
+    drift = _manifest_profile_drift(manifest, scheduler, adapters, deadman_s, declared)
     if drift:
         raise EngineError(
             f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
@@ -958,12 +980,7 @@ def _open_from_seal(
             " boundary's own artifacts are reachable from the lineage head and may"
             " never be pruned (period-model ss12)"
         )
-    drift = _profile_drift(
-        _derive_runtime_profile(
-            scheduler, adapters or {}, deadman_s, base=manifest.runtime_profile, declared=declared
-        ),
-        manifest.runtime_profile,
-    )
+    drift = _manifest_profile_drift(manifest, scheduler, adapters or {}, deadman_s, declared)
     if drift:
         raise EngineError(
             f"runtime-profile mismatch on {', '.join(drift)}: period"

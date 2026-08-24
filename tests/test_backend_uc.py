@@ -964,6 +964,25 @@ def test_compile_twin_ledgers_each_initial_status_under_its_own_row() -> None:
     assert noexec.startswith("M21 noexecj:") and "Skip" in noexec
 
 
+def test_every_initial_status_names_a_uc_control() -> None:
+    """`INITIAL_STATUS_CONTROL` is TOTAL over `ir.InitialStatus`, and the
+    lint rule's skip set is DERIVED from it (DL-152).
+
+    Two tables encoded the same fact -- the backend's cutover rows and
+    L020's hand-written pair -- so a new definition-time status could be
+    added to the Literal, trip a KeyError mid-compile, and silently miss the
+    cascade rule. One table, checked here for completeness."""
+    from typing import get_args
+
+    from dsl41.backend_uc import INITIAL_STATUS_CONTROL, SKIP_TRANSLATED
+    from dsl41.ir import InitialStatus
+
+    assert set(INITIAL_STATUS_CONTROL) == set(get_args(InitialStatus))
+    assert SKIP_TRANSLATED == frozenset({"ON_ICE", "ON_NOEXEC"})
+    assert INITIAL_STATUS_CONTROL["INACTIVE"].control == "none"
+    assert INITIAL_STATUS_CONTROL["ON_HOLD"].control == "hold"
+
+
 def test_report_renders_the_bundle_exclusion_ledger_and_apply_notes() -> None:
     """DL-151: the report rendered neither `bundle.excluded` nor
     `bundle.notes`, so a reader of the markdown could not see what the twin

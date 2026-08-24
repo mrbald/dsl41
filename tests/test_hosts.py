@@ -56,7 +56,6 @@ from dsl41.runner_control import ControlServer, outcome_of, read_for, revision_i
 from dsl41.period import CMD_GRACE_S
 from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
-    T_KILL_S,
     HostCommand,
     apply_host_command,
     kill_allowance,
@@ -222,10 +221,12 @@ def test_cm11_a_host_with_no_deadman_can_never_be_evicted() -> None:
     reroutable except by force. No wait can substitute: nothing bounds when
     the wrappers die, so no elapsed time means anything."""
     long_gone = _table(h=_quarantined(last_contact=T0 - timedelta(days=365)))
-    reason = host_rejection_reason(long_gone, _cmd("evict", "h"), T0)
+    reason = host_rejection_reason(long_gone, _cmd("evict", "h"), T0, grace_s=CMD_GRACE_S)
     assert reason is not None and "runs no deadman" in reason
     # a year of silence does not help, which is the point of the test
-    assert host_rejection_reason(long_gone, _cmd("evict", "h"), T0 + timedelta(days=365))
+    assert host_rejection_reason(
+        long_gone, _cmd("evict", "h"), T0 + timedelta(days=365), grace_s=CMD_GRACE_S
+    )
 
 
 def test_cm11_eviction_is_refused_before_the_bound_and_permitted_after() -> None:
@@ -233,15 +234,23 @@ def test_cm11_eviction_is_refused_before_the_bound_and_permitted_after() -> None
     takes to kill every wrapper, plus drift -- and the refusal reports the
     REMAINING wait, so the operator waits rather than guesses."""
     deadman = 60.0
-    bound = deadman + T_KILL_S
+    bound = deadman + kill_allowance(CMD_GRACE_S)
     bound += skew_allowance(bound)
     store = _table(h=_quarantined(deadman_s=deadman, last_contact=T0))
     cmd = _cmd("evict", "h")
 
-    early = host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound - 10))
+    early = host_rejection_reason(
+        store, cmd, T0 + timedelta(seconds=bound - 10), grace_s=CMD_GRACE_S
+    )
     assert early is not None and "wait 10.0s more" in early
-    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound)) is not None
-    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 0.5)) is None
+    assert (
+        host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound), grace_s=CMD_GRACE_S)
+        is not None
+    )
+    assert (
+        host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 0.5), grace_s=CMD_GRACE_S)
+        is None
+    )
 
 
 def test_cm11_an_unattributed_force_is_refused() -> None:
@@ -259,10 +268,13 @@ def test_cm11_an_unattributed_force_is_refused() -> None:
     at = T0 + timedelta(seconds=1)  # every gated precondition unmet
 
     for actor in (None, "", "   "):
-        reason = host_rejection_reason(store, forced, at, actor=actor)
+        reason = host_rejection_reason(store, forced, at, actor=actor, grace_s=CMD_GRACE_S)
         assert reason is not None and "claimed_actor" in reason
     # the gated verbs are unaffected: they assert nothing about who asked
-    assert host_rejection_reason(store, _cmd("drain", "h"), at, actor=None) is None
+    assert (
+        host_rejection_reason(store, _cmd("drain", "h"), at, actor=None, grace_s=CMD_GRACE_S)
+        is None
+    )
 
 
 def test_cm11_the_kill_half_of_the_bound_follows_the_periods_grace() -> None:
@@ -279,17 +291,19 @@ def test_cm11_the_kill_half_of_the_bound_follows_the_periods_grace() -> None:
     store = _table(h=_quarantined(deadman_s=deadman, last_contact=T0))
     cmd = _cmd("evict", "h")
 
-    assert kill_allowance(CMD_GRACE_S) == T_KILL_S  # the default estate is unmoved
+    assert kill_allowance(CMD_GRACE_S) == 30.0  # the default estate is unmoved
     long_grace = 60.0
     bound = deadman + kill_allowance(long_grace)
     bound += skew_allowance(bound)
     # the moment the OLD fixed bound would have permitted the eviction
-    old_bound = deadman + T_KILL_S
+    old_bound = deadman + kill_allowance(CMD_GRACE_S)
     old_bound += skew_allowance(old_bound)
     late = T0 + timedelta(seconds=old_bound + 1)
     reason = host_rejection_reason(store, cmd, late, grace_s=long_grace)
     assert reason is not None and f"kill {kill_allowance(long_grace):.1f}s" in reason
-    assert host_rejection_reason(store, cmd, late) is None  # ...at the default grace
+    assert (
+        host_rejection_reason(store, cmd, late, grace_s=CMD_GRACE_S) is None
+    )  # ...at the default grace
     assert (
         host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 0.5), grace_s=long_grace)
         is None
@@ -306,7 +320,9 @@ def test_cm11_eviction_needs_the_leaders_own_record_of_unreachability() -> None:
     states apart."""
     for state, marker in (("active", "is active"), ("passive", "is passive")):
         store = _table(h=HostRuntime(state=state, deadman_s=60.0, last_contact=T0))  # type: ignore[arg-type]
-        reason = host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(days=1))
+        reason = host_rejection_reason(
+            store, _cmd("evict", "h"), T0 + timedelta(days=1), grace_s=CMD_GRACE_S
+        )
         assert reason is not None and marker in reason and "precondition 1" in reason
 
 
@@ -322,7 +338,7 @@ def test_cm11_force_skips_the_preconditions_and_is_recorded_with_its_principal()
     would suggest the eviction rested on who asked."""
     store = _table(h=HostRuntime(state="active"))
     forced = _cmd("evict", "h", force=True)
-    assert host_rejection_reason(store, forced, T0, actor="alice@ops") is None
+    assert host_rejection_reason(store, forced, T0, actor="alice@ops", grace_s=CMD_GRACE_S) is None
 
     store.begin_input()
     store.evict_host("h", forced_by="alice@ops")
@@ -344,9 +360,9 @@ def test_an_evicted_host_is_not_evicted_again_and_not_activated_back() -> None:
     store.evict_host("h", forced_by=None)
     store.commit_input()
 
-    again = host_rejection_reason(store, _cmd("evict", "h", force=True), T0)
+    again = host_rejection_reason(store, _cmd("evict", "h", force=True), T0, grace_s=CMD_GRACE_S)
     assert again is not None and "already evicted, at generation 1" in again
-    back = host_rejection_reason(store, _cmd("activate", "h"), T0)
+    back = host_rejection_reason(store, _cmd("activate", "h"), T0, grace_s=CMD_GRACE_S)
     assert back is not None and "self-fencing" in back
 
 
@@ -357,7 +373,7 @@ def test_a_quarantined_host_refuses_an_operator_state_change() -> None:
     the lie expensive."""
     store = _table(h=_quarantined())
     for verb in ("activate", "drain"):
-        reason = host_rejection_reason(store, _cmd(verb, "h"), T0)
+        reason = host_rejection_reason(store, _cmd(verb, "h"), T0, grace_s=CMD_GRACE_S)
         assert reason is not None and "quarantined" in reason
 
 
@@ -366,7 +382,7 @@ def test_addressing_a_host_that_is_not_in_the_table_is_a_rejection() -> None:
     belongs where `expect`'s does. A host joins the table by registering,
     never by being addressed -- otherwise a typo would create one."""
     store = _table(h=HostRuntime())
-    reason = host_rejection_reason(store, _cmd("drain", "typo"), T0)
+    reason = host_rejection_reason(store, _cmd("drain", "typo"), T0, grace_s=CMD_GRACE_S)
     assert reason is not None and "no host 'typo' in the routing table" in reason
 
 
@@ -902,16 +918,24 @@ def test_cm11_a_real_deadman_and_a_real_contact_make_the_bound_computable() -> N
     store.commit_input()
 
     cmd = _cmd("evict")
-    bound = 60.0 + T_KILL_S
+    bound = 60.0 + kill_allowance(CMD_GRACE_S)
     bound += skew_allowance(bound)
-    early = host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound - 30))
+    early = host_rejection_reason(
+        store, cmd, T0 + timedelta(seconds=bound - 30), grace_s=CMD_GRACE_S
+    )
     assert early is not None and "wait 30.0s more" in early and "deadman 60.0s" in early
-    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is None
+    assert (
+        host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1), grace_s=CMD_GRACE_S)
+        is None
+    )
 
     # and a later contact pushes the bound out again -- the safe direction,
     # which is why refreshing it needs no input
     store.touch_host(LOCAL_EXECUTOR_ID, T0 + timedelta(seconds=bound))
-    assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is not None
+    assert (
+        host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1), grace_s=CMD_GRACE_S)
+        is not None
+    )
 
 
 # ------------------------------------------- 7. quarantine, and what it unlocks
@@ -1009,12 +1033,19 @@ def test_cm11_the_whole_eviction_bound_end_to_end() -> None:
         assert row is not None and row.state == "quarantined"
 
         cmd = _cmd("evict")
-        bound = 60.0 + T_KILL_S
+        bound = 60.0 + kill_allowance(CMD_GRACE_S)
         bound += skew_allowance(bound)
         store = engine.oracle.store
-        early = host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound - 5))
+        early = host_rejection_reason(
+            store, cmd, T0 + timedelta(seconds=bound - 5), grace_s=CMD_GRACE_S
+        )
         assert early is not None and "wait 5.0s more" in early
-        assert host_rejection_reason(store, cmd, T0 + timedelta(seconds=bound + 1)) is None
+        assert (
+            host_rejection_reason(
+                store, cmd, T0 + timedelta(seconds=bound + 1), grace_s=CMD_GRACE_S
+            )
+            is None
+        )
 
     asyncio.run(scenario())
 
@@ -1035,7 +1066,7 @@ def test_cm12_reaching_an_evicted_host_again_does_not_un_evict_it() -> None:
     store.commit_input()
 
     for verb in ("quarantine", "reinstate"):
-        reason = host_rejection_reason(store, _cmd(verb, "h"), T0)
+        reason = host_rejection_reason(store, _cmd(verb, "h"), T0, grace_s=CMD_GRACE_S)
         assert reason is not None
         assert "does not un-evict it" in reason and "self-fences" in reason
     row = store.host("h")
@@ -1121,7 +1152,9 @@ def test_cm11_a_host_that_has_never_been_in_contact_cannot_be_evicted() -> None:
     -- a relay that registers and dies before its first lease exchange -- and
     it is the one row where the arithmetic below has nothing to subtract."""
     store = _table(h=HostRuntime(state="quarantined", deadman_s=30.0, last_contact=None))
-    reason = host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(hours=1))
+    reason = host_rejection_reason(
+        store, _cmd("evict", "h"), T0 + timedelta(hours=1), grace_s=CMD_GRACE_S
+    )
     assert reason is not None
     assert "never been in contact" in reason
     assert "the ss8 bound has no" in reason
@@ -1139,7 +1172,7 @@ def test_cm11_a_permitted_eviction_moves_the_row_and_bumps_the_generation() -> N
     )
     before = store.host("h")
     assert before is not None and before.generation == 0
-    assert host_rejection_reason(store, _cmd("evict", "h"), T0) is None
+    assert host_rejection_reason(store, _cmd("evict", "h"), T0, grace_s=CMD_GRACE_S) is None
 
     store.begin_input()
     apply_host_command(store, _cmd("evict", "h"), actor="alice@host")
@@ -1190,9 +1223,16 @@ def test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it
     store = _table(h=HostRuntime(deadman_s=60.0, last_contact=T0))
     forced = _cmd("evict", "h", force=True)
     # every gated precondition unmet -- active, and in contact one second ago
-    assert host_rejection_reason(store, _cmd("evict", "h"), T0 + timedelta(seconds=1)) is not None
     assert (
-        host_rejection_reason(store, forced, T0 + timedelta(seconds=1), actor="alice@ops-laptop")
+        host_rejection_reason(
+            store, _cmd("evict", "h"), T0 + timedelta(seconds=1), grace_s=CMD_GRACE_S
+        )
+        is not None
+    )
+    assert (
+        host_rejection_reason(
+            store, forced, T0 + timedelta(seconds=1), actor="alice@ops-laptop", grace_s=CMD_GRACE_S
+        )
         is None
     )
 

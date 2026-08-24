@@ -77,6 +77,7 @@ from dsl41.canon import (
     digest as digest_over,
     hash_over,
     is_canonical_file,
+    is_wire_int,
     with_digest,
 )
 from dsl41.ir import CatalogIR
@@ -249,7 +250,7 @@ def catalog_hash_for(record: Mapping[str, Any], catalog: CatalogIR) -> str:
     refuses -- `int()` coercion would let a record that cannot say which
     recipe it means pick one anyway."""
     version = record.get("catalog_hash_version")
-    if isinstance(version, bool) or not isinstance(version, int):
+    if not is_wire_int(version):
         raise EngineError(
             f"segment carries catalog_hash_version {version!r}: not an integer (period-model ss2.1)"
         )
@@ -343,6 +344,17 @@ class RuntimeProfile(BaseModel):
     reconcile_settle_us: Annotated[int, Field(ge=0)] = 5_000_000
     spawn_window_us: Annotated[int, Field(ge=0)] = 5_000_000
     retry_horizon_us: Annotated[int, Field(gt=0)] = 60_000_000
+
+    def with_deadman(self, deadman_us: "int | None") -> "RuntimeProfile":
+        """This profile with `deadman_us` re-pinned, re-validated.
+
+        The deadman is the ONE field a launch may not decide alone: an
+        already-running supervisor keeps its own interval, so the profile
+        that is hashed and pinned must carry the OBSERVED number, not the
+        requested one (DL-126). Three call sites did that by spreading
+        `model_dump()`, and only one of them remembered that a changed
+        profile needs a re-hashed `runtime_hash` beside it (DL-152)."""
+        return RuntimeProfile.model_validate({**self.model_dump(), "deadman_us": deadman_us})
 
 
 def runtime_hash(profile: RuntimeProfile) -> str:
@@ -664,7 +676,7 @@ class ArchiveReceipt(BaseModel):
     def _artifact_invariants(self) -> "ArchiveReceipt":
         for name in ("artifact_format_version", "period_id", "chain_through_period"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int):
+            if not is_wire_int(value):
                 raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
         for name in ("seal_digest", "attestation_digest"):
             if not is_hash_address(getattr(self, name)):
@@ -1534,7 +1546,7 @@ def _opens_from_seal_ok(value: object) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == {"period_id", "digest"}
-        and _int(value["period_id"])
+        and is_wire_int(value["period_id"])
         and _is_hash(value["digest"])
     )
 
@@ -1543,26 +1555,25 @@ def _opens_from_seal_ok(value: object) -> bool:
 #: `true` must never pass for `1` -- JSON accepts it and `true == 1` in
 #: Python, so a lax reader would let a malformed identity record through
 #: every gate that compares by value.
-_int = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
 _str = lambda v: isinstance(v, str)  # noqa: E731
 _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
-    "segment_no": _int,
+    "segment_no": is_wire_int,
     "estate_id": _str,
-    "period_id": _int,
+    "period_id": is_wire_int,
     "baseline_id": _str,
     "catalog_hash": _is_hash,
     # TYPE only here -- which recipes are readable is the D4 dispatcher's
     # question and `check_segment_record` asks it below. The check is
     # int-first, because JSON loads `2.0` as a float that COMPARES equal to 2
-    "catalog_hash_version": _int,
+    "catalog_hash_version": is_wire_int,
     "source_bundle_hash": _is_hash,
     "runtime_hash": _is_hash,
-    "state_machine_version": _int,
+    "state_machine_version": is_wire_int,
     "clock_domain": _str,
     # >= 1: index 1 is the first index there ever is, and a forged 0 would
     # make the backfill's positional containment stop at this segment and
     # hide every older one (I2)
-    "first_index": lambda v: _int(v) and v >= 1,
+    "first_index": lambda v: is_wire_int(v) and v >= 1,
     "opens_from_seal": lambda v: v is None or _opens_from_seal_ok(v),
     "reclaimed": lambda v: v is None or isinstance(v, dict),
     "trust_unaudited": lambda v: v is None or isinstance(v, dict),
@@ -1597,7 +1608,7 @@ def check_segment_version(record: Mapping[str, Any]) -> None:
     if "catalog_hash_version" not in record:
         raise EngineError("segment record missing catalog_hash_version (period-model ss2.1)")
     version = record["catalog_hash_version"]
-    if not _int(version):
+    if not is_wire_int(version):
         raise EngineError(
             f"segment record: catalog_hash_version is {version!r} (period-model ss2.1)"
         )

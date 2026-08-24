@@ -53,14 +53,14 @@ Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
 from __future__ import annotations
 
 from collections import Counter
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
 from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
 from dsl41.equiv import catalog_hash
-from dsl41.ir import CatalogIR, tool_version
+from dsl41.ir import CatalogIR, InitialStatus, tool_version
 
 
 class CompilePlan(BaseModel):
@@ -111,8 +111,7 @@ _U_QUESTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 def _edge_line(edge: DerivedEdge) -> str:
     lookback = ""
     if edge.lookback is not None:
-        token = edge.lookback.raw or edge.lookback.kind
-        lookback = f", lookback {token}"
+        lookback = f", lookback {edge.lookback.token}"
     where = ""
     if edge.source_atom is not None:
         where = f" — `{edge.source_atom.file}:{edge.source_atom.line_start}`"
@@ -409,14 +408,45 @@ class UcModel(BaseModel):
     excluded: list[str] = []  # human-readable ledger of everything NOT compiled
 
 
-#: SEM-24 definition-time status -> (mapping row, the UC control it maps to
-#: at cutover). Each status has its OWN row: ON_HOLD is M20 Hold, ON_ICE is
-#: M19 Skip, ON_NOEXEC is M21 path-level Skip. INACTIVE never reaches here.
-_INITIAL_STATUS_ROWS: dict[str, tuple[str, str]] = {
-    "ON_HOLD": ("M20", "map via UC Hold on Start at cutover"),
-    "ON_ICE": ("M19", "map via UC Skip at cutover; L020 flags the all-skipped cascade"),
-    "ON_NOEXEC": ("M21", "map via UC Skip (path-level) at cutover; the M19 caveat applies"),
+#: Which UC control a SEM-24 definition-time status maps to at cutover.
+#: "none" is the implicit default, which reaches no control at all.
+UcInitialControl = Literal["none", "skip", "hold"]
+
+
+class InitialStatusRow(NamedTuple):
+    """One row of `INITIAL_STATUS_CONTROL`."""
+
+    mapping_row: str  # "" for the default, which no mapping row governs
+    control: UcInitialControl
+    cutover: str  # how the migration report words the manual step
+
+
+#: SEM-24 definition-time status -> the UC control it maps to at cutover.
+#: Each status has its OWN row: ON_HOLD is M20 Hold, ON_ICE is M19 Skip,
+#: ON_NOEXEC is M21 path-level Skip.
+#:
+#: TOTAL over `ir.InitialStatus`, and the ONE place the fact is written
+#: (DL-152): the twin's exclusions read it, `lint.rule_l020` derives its
+#: skip set from `control` rather than hand-listing two statuses, and
+#: `uc_oracle`'s module prose points here instead of restating it. A new
+#: `InitialStatus` member with no row here fails
+#: `test_every_initial_status_names_a_uc_control`, where it used to be a
+#: KeyError in the middle of a compile.
+INITIAL_STATUS_CONTROL: dict[InitialStatus, InitialStatusRow] = {
+    "INACTIVE": InitialStatusRow("", "none", ""),
+    "ON_HOLD": InitialStatusRow("M20", "hold", "map via UC Hold on Start at cutover"),
+    "ON_ICE": InitialStatusRow(
+        "M19", "skip", "map via UC Skip at cutover; L020 flags the all-skipped cascade"
+    ),
+    "ON_NOEXEC": InitialStatusRow(
+        "M21", "skip", "map via UC Skip (path-level) at cutover; the M19 caveat applies"
+    ),
 }
+
+#: the statuses UC turns into a Skip -- what L020's cascade rule keys on
+SKIP_TRANSLATED: frozenset[str] = frozenset(
+    status for status, row in INITIAL_STATUS_CONTROL.items() if row.control == "skip"
+)
 
 
 _VIA_TO_UC: dict[str, UcEdgeCondition] = {
@@ -427,14 +457,15 @@ _VIA_TO_UC: dict[str, UcEdgeCondition] = {
 }
 
 
-def _lookback_token(edge: DerivedEdge) -> str | None:
+def _edge_lookback_token(edge: DerivedEdge) -> str | None:
     """The lookback token an edge carries, for the twin's provenance field.
     Every compiled edge sets it, exitcode edges included: those quarantine
     their workflow today, but the day U3b unfreezes the rich forms an unset
-    field would be a silent window loss."""
-    if edge.lookback is None:
-        return None
-    return edge.lookback.raw or edge.lookback.kind
+    field would be a silent window loss.
+
+    Named for the EDGE: `dsl._lookback_token` is a different rule over a
+    different type -- it renders a JIL-valid token and never answers None."""
+    return None if edge.lookback is None else edge.lookback.token
 
 
 def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcModel:
@@ -510,7 +541,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                         value=str(edge.atom.value),
                     ),
                     mapping_row=edge.mapping_row,
-                    lookback=_lookback_token(edge),
+                    lookback=_edge_lookback_token(edge),
                 )
             )
             continue
@@ -520,7 +551,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 dst=edge.dst,
                 condition=_VIA_TO_UC[edge.via],
                 mapping_row=edge.mapping_row,
-                lookback=_lookback_token(edge),
+                lookback=_edge_lookback_token(edge),
             )
         )
     # attach global gates to the consumer's edges; anything that cannot be
@@ -659,15 +690,15 @@ def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
     SEM-24/DL-18 definition-time state: recorded, never silently dropped --
     the AutoSys-vs-twin comparator diverging on such catalogs is the correct
     polarity. Each status keeps its OWN row and its own cutover control
-    (_INITIAL_STATUS_ROWS). M34 resources ride here too (DL-21)."""
+    (INITIAL_STATUS_CONTROL). M34 resources ride here too (DL-21)."""
     out: list[str] = []
     for name, job in catalog.jobs.items():
         initial = job.sem.initial_status
-        if initial is not None and initial != "INACTIVE":
-            row, cutover = _INITIAL_STATUS_ROWS[initial]
+        row = None if initial is None else INITIAL_STATUS_CONTROL[initial]
+        if row is not None and row.control != "none":
             out.append(
-                f"{row} {name}: definition-time status {initial} not modeled in the"
-                f" twin v1 ({cutover}; SEM-24)"
+                f"{row.mapping_row} {name}: definition-time status {initial} not modeled in the"
+                f" twin v1 ({row.cutover}; SEM-24)"
             )
         if job.resources:
             groups = ", ".join(

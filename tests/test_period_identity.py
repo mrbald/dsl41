@@ -411,6 +411,52 @@ def test_pr15_runtime_hash_moves_for_every_field(field: str) -> None:
     assert runtime_hash(changed) != runtime_hash(base)
 
 
+#: Fields `_derive_runtime_profile` deliberately leaves to the pin, with no
+#: wired object and no launcher declaration behind them. Today that is the
+#: retry horizon: nothing the engine wires reports it, and the launcher does
+#: not declare it, so it inherits unconditionally. Listed rather than
+#: computed, so widening this set is a decision somebody wrote down.
+_INHERITED_FIELDS: frozenset[str] = frozenset({"retry_horizon_us"})
+
+
+def test_every_profile_field_is_wired_declared_or_deliberately_inherited() -> None:
+    """`_derive_runtime_profile`'s partition is exhaustive over the model
+    and its three groups do not overlap (DL-152).
+
+    The derived profile is what the runtime gate compares against the pin,
+    so a field nobody placed inherits the pin FOR EVER and can never
+    disagree with it -- which is exactly the silent-open defect the
+    `declared` half of that function was added to close. `classify`'s field
+    map has had this guard since PR-37a; this one had none, so a new field
+    would have joined the inherit group by omission.
+
+    The wired group is read off the function's own source, so a ladder rung
+    that is deleted fails here rather than passing as "inherited"."""
+    import inspect
+    import re
+
+    from dsl41 import runner_startup
+
+    source = inspect.getsource(runner_startup._derive_runtime_profile)
+    wired = set(re.findall(r'values\["(\w+)"\]\s*=', source))
+    declared = set(runner_startup._UNWIRED_FIELDS)
+    groups = (wired, declared, set(_INHERITED_FIELDS))
+    placed = [name for group in groups for name in group]
+    assert len(placed) == len(set(placed)), f"a field is in two groups: {sorted(placed)}"
+    assert set(placed) == set(RuntimeProfile.model_fields), (
+        "every RuntimeProfile field must be wired, declared or listed as inherited:"
+        f" unplaced {sorted(set(RuntimeProfile.model_fields) - set(placed))},"
+        f" unknown {sorted(set(placed) - set(RuntimeProfile.model_fields))}"
+    )
+    # and the inherit group is a real behavior, not a list: a base whose
+    # horizon is non-default comes back out of the function unchanged, with
+    # nothing wired and nothing declared able to move it
+    odd = RuntimeProfile(retry_horizon_us=123_456_789)
+    derived = runner_startup._derive_runtime_profile(None, {}, None, odd, RuntimeProfile())
+    for name in _INHERITED_FIELDS:
+        assert getattr(derived, name) == getattr(odd, name), name
+
+
 def test_the_profile_is_frozen_and_forbids_extras() -> None:
     profile = RuntimeProfile()
     with pytest.raises(Exception):

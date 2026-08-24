@@ -71,6 +71,7 @@ from dsl41.canon import (
     canonical_bytes,
     decode,
     hash_over,
+    is_wire_int,
 )
 from dsl41.classify import Baseline, CarriedState, Classification, classify
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
@@ -1928,18 +1929,16 @@ def carried_outbox(opened: OpenedRuntime | None, *, at: datetime) -> Outbox:
 #: answerable at all.
 _SEAL_SCHEMA: Final[dict[str, Any]] = {
     "estate_id": lambda v: isinstance(v, str) and bool(v),
-    "period_id": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 1,
-    "closes_at_index": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
+    "period_id": lambda v: is_wire_int(v) and v >= 1,
+    "closes_at_index": lambda v: is_wire_int(v) and v >= 0,
     "at": lambda v: isinstance(v, str),
     "digest": is_hash_address,
-    "next_period_id": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 2,
+    "next_period_id": lambda v: is_wire_int(v) and v >= 2,
     "next_baseline_id": is_hash_address,
     # the CURRENT recipe, not merely a readable one: the `seal` record is a
     # closed artifact and holds to its sidecar's rule, which is why this is
     # not `period.check_catalog_hash_version` (D4, DL-138)
-    "catalog_hash_version": lambda v: (
-        isinstance(v, int) and not isinstance(v, bool) and v == CATALOG_HASH_VERSION
-    ),
+    "catalog_hash_version": lambda v: is_wire_int(v) and v == CATALOG_HASH_VERSION,
     "source": lambda v: v == "request",
     "request_id": lambda v: isinstance(v, str) and bool(v),
     "request_fingerprint": lambda v: isinstance(v, str) and bool(v),

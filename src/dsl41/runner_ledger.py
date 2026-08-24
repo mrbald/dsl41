@@ -47,6 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
 from dsl41.period import catalog_hash_for
 from dsl41.runner_procid import mkdir_durable
@@ -296,7 +297,7 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     # has always extended, and `runner_history.check_replay_version` states
     # why the replay half is deliberately stricter.
     pinned = opening.get("state_machine_version", _ASSUMED_VERSION)
-    if not isinstance(pinned, int) or isinstance(pinned, bool) or pinned != STATE_MACHINE_VERSION:
+    if not is_wire_int(pinned) or pinned != STATE_MACHINE_VERSION:
         raise EngineError(
             f"state-machine version mismatch: this journal is v{pinned}, this build"
             f" derives v{STATE_MACHINE_VERSION}; a leader must derive identical"

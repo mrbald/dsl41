@@ -53,9 +53,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
-from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode, is_scalar_json
+from dsl41.canon import (
+    ARTIFACT_FORMAT_VERSION,
+    CanonError,
+    canonical_bytes,
+    decode,
+    is_scalar_json,
+    is_wire_int,
+)
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.runner_procid import fsync_dir
+from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_ledger import Proof
 
@@ -249,29 +256,6 @@ def load_json(path: Path) -> dict[str, Any] | None:
     return loaded
 
 
-def spool_version_supported(doc: Mapping[str, Any]) -> bool:
-    """The spool row's version gate, engine-side (DL-151).
-
-    `spawn.json` and `status.json` carry their own `version`. One that this
-    binary does not implement must stop the reader: the field exists to say
-    the meaning changed. `true` and `1.0` are not the integer 1.
-
-    An ABSENT `version` passes. docs/protocol-evolution.md's matrix has a
-    column for an unknown FIELD and one for an unsupported VERSION and none
-    for a MISSING one, and no document rules it, so refusing here would pick
-    a side by guess. The supervisor keeps its own copy of this rule
-    (`runner_supervisor._spool_version_supported`); that tier imports nothing
-    from the engine (DL-42)."""
-    if "version" not in doc:
-        return True
-    version = doc["version"]
-    return (
-        isinstance(version, int)
-        and not isinstance(version, bool)
-        and (version == _wrapper.SPEC_VERSION)
-    )
-
-
 def _naive_utc(iso: str) -> datetime:
     """Wrapper timestamps (aware UTC ISO) -> the engine's naive-UTC basis."""
     parsed = datetime.fromisoformat(iso)
@@ -377,7 +361,7 @@ def _build_run_spec(
     (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
-        "version": _wrapper.SPEC_VERSION,
+        "version": SPOOL_VERSION,
         # the decision's mint when there is one (PR-36a); the local fallback
         # covers only the effect-less and pre-DL-118 paths (AdapterContext).
         # `is None`, never falsy: an empty-string id (which the journal
@@ -687,7 +671,7 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
                 f" but the start line named {run_id!r}"
             )
         size = record.get("size")
-        if not (size is None or (isinstance(size, int) and not isinstance(size, bool))):
+        if not (size is None or is_wire_int(size)):
             raise EngineError(f"{path}: line {position} size {size!r}")
         qualifying = record.get("qualifying")
         if not isinstance(qualifying, bool):

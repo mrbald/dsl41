@@ -94,7 +94,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
-from dsl41.canon import is_scalar_string
+from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.period import CMD_GRACE_S
 from dsl41.oracle_state import Event, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
@@ -257,7 +257,7 @@ def parse_envelope(
             " retried safely, because nothing could recognise the retry"
         )
     epoch = request.get("epoch")
-    if not isinstance(epoch, int) or isinstance(epoch, bool):
+    if not is_wire_int(epoch):
         # required, not defaulted, though it is inert on one host. ss6 ships
         # it in v2 precisely so clients CARRY it -- a field that may be
         # omitted is a field nobody sends, and S6 would then be the second
@@ -277,20 +277,29 @@ def parse_envelope(
             raise EnvelopeError(f"{name} carries an unpaired surrogate (PR-10a)")
     return Envelope(
         request_id=request_id,
-        expect=_parse_expect(request.get("expect"), addressed=addressed),
+        expect=_parse_expect(request, addressed=addressed),
         epoch=epoch,
         claimed_actor=actor,
     )
 
 
-def _parse_expect(expect: Any, *, addressed: str | None) -> dict[str, int]:
+def _parse_expect(request: Mapping[str, Any], *, addressed: str | None) -> dict[str, int]:
+    """ss3's precondition, read off the REQUEST rather than off a value.
+
+    A command that addresses no row takes no `expect`, and the KEY is what
+    arrives: `"expect": null` read as "no expect" made the one command with
+    no precondition the door every other command could slip through
+    (DL-151). Asking `"expect" in request` is the one place that rule is
+    written -- the control server used to write it a second time, by key,
+    while this half still tested the value."""
     if addressed is None:
-        if expect is not None:
+        if "expect" in request:
             raise EnvelopeError(
                 "expect is not allowed on a command that addresses no row:"
                 " a boundary is not a row mutation (period-model ss2.2)"
             )
         return {}
+    expect = request.get("expect")
     if expect is None:
         raise EnvelopeError(
             f'expect is required: name the revision you read, as {{"{addressed}": N}}'
@@ -305,7 +314,7 @@ def _parse_expect(expect: Any, *, addressed: str | None) -> dict[str, int]:
             " a precondition names the addressed entity and nothing else"
         )
     revision = expect[addressed]
-    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+    if not is_wire_int(revision) or revision < 0:
         raise EnvelopeError(f"expect[{addressed!r}] must be a revision (a non-negative integer)")
     return {addressed: revision}
 

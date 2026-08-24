@@ -18,6 +18,7 @@ from pathlib import Path
 import typer
 
 from dsl41.cli_common import command_outcome, import_tui_or_exit_2, read_header_of, refuse
+from dsl41.runner_access import REQUIRED_TIER, Tier
 
 
 # ------------------------------------------------------------ the control plane
@@ -301,22 +302,24 @@ def _brief_flags(row: dict[str, object]) -> str:
     return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
 
 
-#: the read verbs this surface forwards, and the two scriptable predicates
-#: it answers itself. Module-level so the argument's HELP is derived from
-#: them (DL-145): the hand-typed help string it replaced was a second
-#: spelling of this set, and a verb added to the gate below reached the
-#: gate and not the help.
-_QUERY_VERBS: tuple[str, ...] = (
-    "status",
-    "trace",
-    "explain",
-    "spec",
-    "deps",
-    "timers",
-    "plan",
-    "global",
-    "globals",
-    "subscribe",
+#: a READ verb this surface does NOT forward: `dsl41 control host list`
+#: owns `hosts`, so the query surface would answer it a second time.
+_QUERY_ELSEWHERE: frozenset[str] = frozenset({"hosts"})
+
+#: the read verbs this surface forwards. Module-level so the argument's
+#: HELP is derived from them (DL-145): the hand-typed help string it
+#: replaced was a second spelling of this set, and a verb added to the gate
+#: below reached the gate and not the help.
+#:
+#: DERIVED from the tier map (DL-152). `runner_access.REQUIRED_TIER` is the
+#: closed table of verb -> tier, so which verbs are READ is already written
+#: there; a hand-kept copy here drifted the moment a verb was added to one
+#: and not the other. The only thing this file still states is the verb it
+#: deliberately does not forward.
+_QUERY_VERBS: tuple[str, ...] = tuple(
+    verb
+    for verb, tier in REQUIRED_TIER.items()
+    if tier is Tier.READ and verb not in _QUERY_ELSEWHERE
 )
 _QUERY_PREDICATES: dict[str, tuple[str, ...]] = {
     "is-success": ("SUCCESS",),

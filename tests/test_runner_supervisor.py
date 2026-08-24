@@ -1169,6 +1169,36 @@ def test_dl151_a_bool_is_not_the_version_and_not_a_fencing_token(short_root: Pat
         teardown_supervisor(short_root, proc)
 
 
+def test_dl152_a_tombstone_version_is_the_integer_and_nothing_that_equals_it(
+    tmp_path: Path,
+) -> None:
+    """`True == 1` and `1.0 == 1`, so the tombstone schemas ask the wire-int
+    rule, not `==` alone. Two doors close on each: `canon.decode` refuses the
+    float literal (no floats on the wire) and the bool version
+    (`check_artifact_version`), and the schema refuses either one that reached
+    it any other way. The schema half is the one pinned here by hand -- the
+    ingress cannot deliver a witness to it."""
+    check = runner_supervisor._VERSIONED["artifact_format_version"]
+    assert check(canon.ARTIFACT_FORMAT_VERSION) is True
+    assert check(True) is False
+    assert check(float(canon.ARTIFACT_FORMAT_VERSION)) is False
+
+    # the outer door, on real files: neither literal reaches the schema, and
+    # a record that cannot be read is PRESENT-BUT-UNREADABLE, never absent
+    path = tmp_path / "receipt.json"
+    for literal in (b"1.0", b"true"):
+        path.write_bytes(
+            b'{"artifact_format_version": '
+            + literal
+            + b', "run_id": "r", "spec_fingerprint": "f", "received_at": "t"}'
+        )
+        with pytest.raises(canon.CanonError):
+            canon.decode(path.read_bytes())
+        assert (
+            runner_supervisor._load_tombstone(str(path), "receipt") is runner_supervisor._INVALID
+        ), literal
+
+
 def test_dl151_a_short_write_never_publishes_a_truncated_record(
     tmp_path: Path, monkeypatch
 ) -> None:

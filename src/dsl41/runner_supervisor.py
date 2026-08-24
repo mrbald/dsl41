@@ -116,13 +116,14 @@ _PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
 if _PROCID_DIR_ADDED:
     sys.path.insert(0, _PROCID_DIR)
 if TYPE_CHECKING:
-    from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, is_wire_int
     from dsl41.canon import decode as canon_decode
     from dsl41.runner_procid import (
         current_boot_id,
         durable_write,
         durable_write_json,
         killpg_quiet,
+        spool_version_supported,
         utc_now_iso,
         verify_alive,
     )
@@ -131,6 +132,7 @@ else:
         ARTIFACT_FORMAT_VERSION,
         CanonError,
         canonical_bytes,
+        is_wire_int,
     )
     from canon import decode as canon_decode  # noqa: E402
     from runner_procid import (  # noqa: E402
@@ -138,6 +140,7 @@ else:
         durable_write,
         durable_write_json,
         killpg_quiet,
+        spool_version_supported,
         utc_now_iso,
         verify_alive,
     )
@@ -146,12 +149,6 @@ if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
 
 PROTOCOL_VERSION = 1
-
-#: the `version` the wrapper stamps on `spawn.json` and `status.json` (ss3).
-#: The same integer as `runner_wrapper.SPEC_VERSION`, held separately because
-#: this tier runs the wrapper by file path and imports nothing from it: two
-#: copies of one number, and a change to either is a protocol change.
-SPOOL_VERSION = 1
 
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
 #: relative to THIS file so the supervisor never imports dsl41 to find it.
@@ -176,14 +173,14 @@ _INDEX_DIR = ".by_run_id"
 _LIST_COMPLETED_WINDOW = 256
 
 
-def _is_wire_int(value: object, expected: int) -> bool:
+def _is_wire_int_equal(value: object, expected: int) -> bool:
     """Integer identity on the wire, which Python's `==` is not (DL-151).
 
     `True == 1` and `1.0 == 1`, so a bare comparison let a JSON `true` or
     `1.0` stand in for protocol version 1 or fencing token 1. A version and
     a fencing token are integers, and nothing else may pass as one: the
     token is the fence that keeps a superseded controller out."""
-    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+    return is_wire_int(value) and value == expected
 
 
 # ------------------------------------------------------- ss11a tombstone files
@@ -567,7 +564,7 @@ class Supervisor:
         except (json.JSONDecodeError, ValueError):
             self._send(conn, {"ok": False, "error": "malformed_json"})
             return
-        if not _is_wire_int(req.get("v"), PROTOCOL_VERSION):
+        if not _is_wire_int_equal(req.get("v"), PROTOCOL_VERSION):
             self._send(conn, {"ok": False, "error": "unsupported_version"})
             return
         cmd = req.get("cmd")
@@ -651,7 +648,7 @@ class Supervisor:
         if (
             not self._lease_active()
             or self.lease is None
-            or not _is_wire_int(req.get("token"), self.lease.token)
+            or not _is_wire_int_equal(req.get("token"), self.lease.token)
         ):
             return {"ok": False, "error": "stale_token"}
         return None
@@ -686,7 +683,7 @@ class Supervisor:
         # accept (ss1); a same-uid process is already inside the trust
         # boundary and can signal the engine directly.
         if self._lease_active() and self.lease is not None and self.lease.conn is not None:
-            incumbent = req.get("incarnation") == self.incarnation and _is_wire_int(
+            incumbent = req.get("incarnation") == self.incarnation and _is_wire_int_equal(
                 req.get("token"), self.lease.token
             )
             if not incumbent:
@@ -773,8 +770,7 @@ class Supervisor:
             or os.sep in job
             or "\x00" in job
             or job in (".", "..")
-            or isinstance(run_number, bool)
-            or not isinstance(run_number, int)
+            or not is_wire_int(run_number)
         ):
             return {"ok": False, "error": "bad_spec", "detail": "spec.job / spec.run_number"}
         # NUL is checked HERE, ahead of the two realpath calls below, because
@@ -1316,10 +1312,10 @@ def _fsync_dir(path: str) -> None:
 #: so one such spec made the whole shutdown unbounded -- a supervisor that
 #: never exits and a run root that can never be rerouted.
 _SPEC_SCHEMA: dict[str, Any] = {
-    "version": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "version": is_wire_int,
     "run_id": lambda v: isinstance(v, str),
     "job": lambda v: isinstance(v, str),
-    "run_number": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "run_number": is_wire_int,
     "command": lambda v: isinstance(v, str),
     "run_dir": lambda v: isinstance(v, str),
     "stdout_path": lambda v: isinstance(v, str),
@@ -1331,7 +1327,7 @@ _SPEC_SCHEMA: dict[str, Any] = {
         and math.isfinite(v)
         and float(v) >= 0.0
     ),
-    "lifeline_fd": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "lifeline_fd": is_wire_int,
 }
 
 #: lifeline_fd is the supervisor's to fill; a retry may carry a stale one
@@ -1380,7 +1376,7 @@ def _duplicate_from(
         return None
     pid = doc.get(pid_key)
     spawned_at = doc.get(at_key)
-    if isinstance(pid, bool) or not isinstance(pid, int) or not isinstance(spawned_at, str):
+    if not is_wire_int(pid) or not isinstance(spawned_at, str):
         return None
     return {
         "ok": True,
@@ -1402,24 +1398,6 @@ _INVALID: dict[str, Any] = {"__invalid__": True}
 _UNREADABLE = "__unreadable__"
 
 
-def _spool_version_supported(doc: dict[str, Any]) -> bool:
-    """The `Wrapper-owned spool files` row of docs/protocol-evolution.md,
-    asked once (DL-151).
-
-    `spawn.json` and `status.json` carry their own `version`, and the row is
-    tolerant on fields and STRICT on versions: a version this binary does not
-    implement must stop the reader, because the field exists to say the
-    meaning changed. `true` and `1.0` are not the integer 1 (the same
-    bool-as-int hole `_is_wire_int` closes on the socket).
-
-    An ABSENT `version` passes. The matrix has no column for a missing
-    version and no document rules one, so refusing here would pick a side by
-    guess; the split is recorded in the round's ledger instead."""
-    if "version" not in doc:
-        return True
-    return _is_wire_int(doc["version"], SPOOL_VERSION)
-
-
 def _load_json(path: str) -> dict[str, Any] | None:
     """A wrapper-written spool record: plain JSON. ABSENT means exactly
     ENOENT -- an EACCES or EIO is a file that EXISTS and cannot be read,
@@ -1438,7 +1416,7 @@ def _load_json(path: str) -> dict[str, Any] | None:
         return _INVALID
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _INVALID
-    if not isinstance(loaded, dict) or not _spool_version_supported(loaded):
+    if not isinstance(loaded, dict) or not spool_version_supported(loaded):
         return _INVALID
     return loaded
 
@@ -1450,16 +1428,14 @@ def _load_json(path: str) -> dict[str, Any] | None:
 #: implement but passes an ABSENT one (whether a version is required is the
 #: reader's call -- canon.check_artifact_version), and this reader requires
 #: it: an unversioned record is unsupported evidence.
-_VERSIONED = {
-    "artifact_format_version": lambda v: v == ARTIFACT_FORMAT_VERSION and not isinstance(v, bool)
-}
+_VERSIONED = {"artifact_format_version": lambda v: is_wire_int(v) and v == ARTIFACT_FORMAT_VERSION}
 
 _TOMBSTONE_SCHEMAS: dict[str, dict[str, Any]] = {
     "index": {
         **_VERSIONED,
         "run_id": lambda v: isinstance(v, str),
         "job": lambda v: isinstance(v, str),
-        "run_number": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "run_number": is_wire_int,
     },
     "receipt": {
         **_VERSIONED,
@@ -1470,7 +1446,7 @@ _TOMBSTONE_SCHEMAS: dict[str, dict[str, Any]] = {
     "reply": {
         **_VERSIONED,
         "run_id": lambda v: isinstance(v, str),
-        "wrapper_pid": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "wrapper_pid": is_wire_int,
         "spawned_at": lambda v: isinstance(v, str),
     },
 }

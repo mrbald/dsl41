@@ -117,6 +117,7 @@ from pydantic import BaseModel, ConfigDict
 
 from dsl41.ast_jil import JilParseError, parse
 from dsl41.boundary import read_seal
+from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
@@ -385,7 +386,7 @@ def _attempt_index(record: Mapping[str, Any]) -> int | None:
     already refused by `decision_effects` when it carries effects."""
     key = "index" if record.get("rec") == "decision" else "seq"
     value = record.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return value if is_wire_int(value) else None
 
 
 def _rejected_attempts(records: list[dict[str, Any]]) -> set[int]:
@@ -804,7 +805,7 @@ def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None
     journal `read_journal` has refused unconditionally since DL-138, so the
     two gates cannot disagree about a file on disk."""
     pinned = opening.get("state_machine_version")
-    if isinstance(pinned, int) and not isinstance(pinned, bool) and pinned == STATE_MACHINE_VERSION:
+    if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
         return
     named = f"{where}: " if where else ""
     raise RunHistoryError(
