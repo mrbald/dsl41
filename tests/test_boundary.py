@@ -318,6 +318,45 @@ def test_pr08d_a_sentinel_this_binary_cannot_read_refuses_by_name(tmp_path: Path
         assert read_sentinel(other) is None
 
 
+def test_pr08d_a_sentinel_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
+    """DL-157: protocol-evolution's closed-artifact row rules absence the
+    same as an unimplemented version now -- a retained sentinel with no
+    `artifact_format_version` key is corruption, not a v1 this reader is
+    free to assume. The present-and-unsupported case is
+    `test_pr08d_a_sentinel_this_binary_cannot_read_refuses_by_name`, above,
+    unchanged by this fix."""
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+    from dsl41.period import read_sentinel, sentinel_path
+
+    missing = tmp_path / "missing-version"
+    missing.mkdir()
+    sentinel_path(missing).write_bytes(
+        json.dumps(
+            {"rec": "period_root", "estate_id": "e", "see": "wal/"}, sort_keys=True
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="missing artifact_format_version"):
+        read_sentinel(missing)
+
+    present = tmp_path / "present-version"
+    present.mkdir()
+    sentinel_path(present).write_bytes(
+        json.dumps(
+            {
+                "rec": "period_root",
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "estate_id": "e",
+                "see": "wal/",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    sentinel = read_sentinel(present)
+    assert sentinel is not None and sentinel.estate_id == "e"
+
+
 def test_a_used_root_refuses_genesis_and_says_what_to_do(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     _close(_genesis(run_root))
@@ -404,6 +443,47 @@ def test_pr02_the_claim_is_the_identity_not_the_process(tmp_path: Path) -> None:
     anchor.release()
 
 
+def test_a_claim_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
+    """DL-157: the claim file is a closed artifact too (protocol-evolution's
+    matrix), so an absent `artifact_format_version` refuses by name exactly
+    as an unimplemented one does -- and still refuses an unimplemented one,
+    unchanged."""
+    from dsl41.boundary import CLAIMS_DIR
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+
+    anchor_dir = tmp_path / "anchor"
+    anchor = EstateAnchor(anchor_dir)
+    claims_dir = anchor_dir / CLAIMS_DIR
+    claims_dir.mkdir(parents=True)
+    body = {
+        "claim_id": "c1",
+        "estate_id": "e1",
+        "prev_seal_digest": "sha256:" + "a" * 64,
+        "next_period": 2,
+        "target_root": str(tmp_path / "r"),
+        "claimed_at": "2026-08-24T00:00:00.000000",
+        "diag": {},
+    }
+
+    def _write(name: str, doc: dict[str, Any]) -> None:
+        (claims_dir / f"{name}.json").write_bytes(json.dumps(doc, sort_keys=True).encode() + b"\n")
+
+    _write("missing-version", body)
+    with pytest.raises(EngineError, match="missing artifact_format_version"):
+        anchor.read_claim("missing-version")
+
+    _write("present-version", {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION})
+    claim = anchor.read_claim("present-version")
+    assert claim is not None and claim.claim_id == "c1"
+
+    _write(
+        "unsupported-version", {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1}
+    )
+    with pytest.raises(EngineError, match="not a claim this binary can read") as unsup:
+        anchor.read_claim("unsupported-version")
+    assert "missing artifact_format_version" not in str(unsup.value)
+
+
 def test_pr05_an_estate_id_mismatch_refuses(tmp_path: Path) -> None:
     anchor = EstateAnchor(tmp_path / "anchor")
     anchor.acquire()
@@ -449,6 +529,50 @@ def test_the_adopting_head_refuses_before_parse_and_names_the_dialect(tmp_path: 
     with pytest.raises(EngineError, match="not an anchor this binary can read") as generic:
         unknown.read()
     assert "DL-138" not in str(generic.value)
+
+
+def test_an_anchor_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
+    """DL-157: the anchor is a closed artifact too (protocol-evolution's
+    matrix), so an absent `artifact_format_version` refuses by name exactly
+    as an unimplemented one does -- and still refuses an unimplemented one,
+    unchanged."""
+    from dsl41.boundary import ANCHOR_NAME
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+
+    body = {
+        "estate_id": "e",
+        "head": {"state": "open", "period_id": 1, "root": str(tmp_path / "r")},
+        "periods": {},
+    }
+
+    missing = EstateAnchor(tmp_path / "missing-version")
+    missing.dir.mkdir()
+    (missing.dir / ANCHOR_NAME).write_bytes(json.dumps(body, sort_keys=True).encode() + b"\n")
+    with pytest.raises(EngineError, match="missing artifact_format_version"):
+        missing.read()
+
+    present = EstateAnchor(tmp_path / "present-version")
+    present.dir.mkdir()
+    (present.dir / ANCHOR_NAME).write_bytes(
+        json.dumps(
+            {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION}, sort_keys=True
+        ).encode()
+        + b"\n"
+    )
+    anchor = present.read()
+    assert anchor is not None and anchor.estate_id == "e"
+
+    unsupported = EstateAnchor(tmp_path / "unsupported-version")
+    unsupported.dir.mkdir()
+    (unsupported.dir / ANCHOR_NAME).write_bytes(
+        json.dumps(
+            {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1}, sort_keys=True
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="not an anchor this binary can read") as unsup:
+        unsupported.read()
+    assert "missing artifact_format_version" not in str(unsup.value)
 
 
 def test_pr04_a_network_filesystem_anchor_is_refused(tmp_path: Path, monkeypatch) -> None:
@@ -1437,6 +1561,85 @@ def test_the_staging_directory_is_where_the_digest_says(tmp_path: Path) -> None:
     ]
     candidate = read_candidate(directory)
     assert candidate is not None and candidate.next_period == staged
+
+
+def test_a_candidate_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
+    """DL-157: the candidate is a closed artifact too (protocol-evolution's
+    matrix), so an absent `artifact_format_version` refuses by name exactly
+    as an unimplemented one does -- and still refuses an unimplemented one,
+    unchanged. `next_period`'s own `artifact_format_version` is a different
+    field on a different model and is untouched by this fix."""
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+    from dsl41.period import CANDIDATE_NAME, CATALOG_HASH_VERSION
+
+    directory = tmp_path / "staging"
+    directory.mkdir()
+    next_period = {
+        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+        "catalog_hash": "sha256:" + "1" * 64,
+        "catalog_hash_version": CATALOG_HASH_VERSION,
+        "source_bundle_hash": "sha256:" + "2" * 64,
+        "runtime_hash": "sha256:" + "3" * 64,
+        "state_machine_version": STATE_MACHINE_VERSION,
+    }
+    body = {"stage_digest": "sha256:" + "4" * 64, "next_period": next_period}
+
+    def _write(doc: dict[str, Any]) -> None:
+        (directory / CANDIDATE_NAME).write_bytes(json.dumps(doc, sort_keys=True).encode() + b"\n")
+
+    _write(body)
+    with pytest.raises(EngineError, match="missing artifact_format_version"):
+        read_candidate(directory)
+
+    _write({**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION})
+    candidate = read_candidate(directory)
+    assert candidate is not None and candidate.stage_digest == body["stage_digest"]
+
+    _write({**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1})
+    with pytest.raises(EngineError, match="not a Candidate this binary can read") as unsup:
+        read_candidate(directory)
+    assert "missing artifact_format_version" not in str(unsup.value)
+
+
+def test_a_staged_manifest_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
+    """DL-157: `staged_manifest.json` shares the closed-artifact row with
+    the other four, and was found to share their bug too, during this
+    slice's own verification -- an absent `artifact_format_version`
+    refuses by name exactly as an unimplemented one does, and still
+    refuses an unimplemented one, unchanged."""
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+    from dsl41.boundary import read_staged_manifest
+    from dsl41.period import CATALOG_HASH_VERSION, STAGED_MANIFEST_NAME, runtime_hash
+
+    directory = tmp_path / "staging2"
+    directory.mkdir()
+    profile = RuntimeProfile()
+    body = {
+        "catalog_hash": "sha256:" + "1" * 64,
+        "catalog_hash_version": CATALOG_HASH_VERSION,
+        "source_bundle_hash": "sha256:" + "2" * 64,
+        "runtime_profile": profile.model_dump(mode="json"),
+        "runtime_hash": runtime_hash(profile),
+        "state_machine_version": STATE_MACHINE_VERSION,
+    }
+
+    def _write_staged(doc: dict[str, Any]) -> None:
+        (directory / STAGED_MANIFEST_NAME).write_bytes(
+            json.dumps(doc, sort_keys=True).encode() + b"\n"
+        )
+
+    _write_staged(body)
+    with pytest.raises(EngineError, match="missing artifact_format_version"):
+        read_staged_manifest(directory)
+
+    _write_staged({**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION})
+    manifest = read_staged_manifest(directory)
+    assert manifest is not None and manifest.catalog_hash == body["catalog_hash"]
+
+    _write_staged({**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1})
+    with pytest.raises(EngineError, match="not a StagedManifest this binary can read") as unsup:
+        read_staged_manifest(directory)
+    assert "missing artifact_format_version" not in str(unsup.value)
 
 
 # ------------------------------------------- ss2.2 the `seal` control verb

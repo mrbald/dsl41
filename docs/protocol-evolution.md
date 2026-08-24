@@ -5,8 +5,9 @@ every versioned protocol and every durable artifact in the runner is held to.
 It answers four questions: what each protocol tolerates, how long an instance
 of it can still arrive, how a new dialect enters service, and what must be true
 before an old one is retired. *(Amended by DL-150, a conformance round against
-the shipped readers, and by DL-151, which paid the code debts that round
-recorded; every amendment below carries its own marker.)*
+the shipped readers, by DL-151, which paid the code debts that round
+recorded, and by DL-157, which ruled the one column DL-150 found the matrix
+without; every amendment below carries its own marker.)*
 
 It invents no rule for any protocol. Each tolerance rule lives in the document
 that defines it — `docs/control-protocol.md` §2, `docs/supervisor-protocol.md`
@@ -49,19 +50,19 @@ reader treats identically share a row. Two artifacts in one directory that a
 reader treats differently are two rows. The row is what a dispatcher test is
 written against.
 
-| protocol / artifact set | discriminator | unknown FIELDS | unsupported VERSIONS | lifetime | retirement precondition |
-| --- | --- | --- | --- | --- | --- |
-| **WAL journal records** — `docs/period-model.md` §2, `docs/runner-design.md` §7 | the record's `rec` kind, plus the `catalog_hash_version` and `state_machine_version` of the `segment` that opens the file. Those two ride on closed artifacts as well, and their own gates are wider than this row's — see the two notes below | as each record's own schema declares; this contract does not change any of them. The **kind** is dispatched strictly: a current kind proceeds, a retired kind refuses by name, an unknown kind refuses by name | refused | the retention lifetime of the root that holds the segment | no retained segment holds one |
-| **Closed estate artifacts** — the seal sidecar, the attestation, the period manifest, `staged_manifest.json`, `candidate.json`, `anchor.json`, the claim file, the sentinel (`docs/period-model.md` §3.2), and the archive receipt `seals/<period>.archive.json` (§12a, DL-144) | `artifact_format_version` | refused. §3.2 puts every typed field on the wire, so an unknown field is corruption and not an extension | refused, naming the version (PR-08d) | the retention lifetime of the estate; period-model §12's floor keeps several of them for the life of the lineage, and §12a's three — the archive receipt, the attestation and the seal sidecar of an archived period — may never be pruned by any class | no retained instance |
-| **Tolerant estate files** — `sources.json` (`docs/period-model.md` §1.1), and every `watch.jsonl` line written by the FW adapter (§3.5) | `artifact_format_version` | ignored — the reader takes the fields it needs; §3.2's canonical form binds the writer, not the reader | refused, naming the version (PR-08d) | `sources.json` as durable as its catalog bundle; a watch line as durable as the run spool that holds it | no retained instance |
-| **Tolerant supervisor artifacts** — `receipt.json`, `reply.json`, the `run_id` index entry (`docs/supervisor-protocol.md` §3) | `artifact_format_version` | ignored — the section's own forward-compatibility rule | refused | as durable as the spool; the `run_id` index is additionally held by the retention floor while its SPAWN can still be replayed | no retained instance |
-| **Wrapper-owned spool files** — `spawn.json` and `status.json`, and those two only (`docs/supervisor-protocol.md` §3) | their own `version` field | ignored | refused | as durable as the run directory | no retained spool holds one |
-| **Wrapper input spec** — the one JSON object on the wrapper's stdin (`docs/supervisor-protocol.md` §2) | its own `version` field | **refused**, unlike the two spool files the same wrapper writes: §2 is frozen and the whole object is fingerprinted, so a key the schema does not pin is a key whose type is not pinned either, and the fingerprint is injective only over pinned types | refused **by the wrapper, after the fork**. The supervisor's gate pins the types; the version is the wrapper's own check. An absent or unimplemented `version` exits 2 without a spawn record; a spec that is not readable JSON exits 1, before the version is reached | the fork it is passed to; the wrapper repoints stdin at `/dev/null` after the read | none beyond the door |
-| **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146/DL-147) | the record's `rec` kind; no per-record version field | ignored — evolution is additive; an incompatible change takes a NEW kind name, the WAL's move | not applicable by construction: no engine dispatches this journal (seq recovery reads only `access_seq`, the rest is audit), so an unknown kind is skipped, not refused | as durable as its run root; pruned only whole-root — an in-place truncation would restart `access_seq` and forge duplicate keys | no retained root holds one |
-| **Access role map** — the `--access-map` file (`docs/access-model.md` §4) | `format_version` | refused — the map is a closed table, and a key the loader does not pin is a key whose meaning it cannot check | refused, naming the integer this loader implements | the operator's own file. It lives outside the estate: it is policy, not evidence, and a reload replaces it whole | no operator's map still names it |
-| **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused, and the refusal does not close the connection | the request that carries it. The version is per request, not per connection, so one connection may carry several and a refusal ends none of them. `subscribe` is the exception: its request opens a stream that owns the connection until hangup (§5), so its instance lasts as long as the connection does | none beyond the door: nothing durable holds the dialect |
-| **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5) | ignored | refused as `unsupported_version`, and the refusal does not close the connection | the request that carries it, as the control socket | as the control socket |
-| **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | the estate | not retired — **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
+| protocol / artifact set | discriminator | unknown FIELDS | unsupported VERSIONS | absent VERSION (DL-157) | lifetime | retirement precondition |
+| --- | --- | --- | --- | --- | --- | --- |
+| **WAL journal records** — `docs/period-model.md` §2, `docs/runner-design.md` §7 | the record's `rec` kind, plus the `catalog_hash_version` and `state_machine_version` of the `segment` that opens the file. Those two ride on closed artifacts as well, and their own gates are wider than this row's — see the two notes below | as each record's own schema declares; this contract does not change any of them. The **kind** is dispatched strictly: a current kind proceeds, a retired kind refuses by name, an unknown kind refuses by name | refused | not applicable — the row's own discriminator is a kind, not a version | the retention lifetime of the root that holds the segment | no retained segment holds one |
+| **Closed estate artifacts** — the seal sidecar, the attestation, the period manifest, `staged_manifest.json`, `candidate.json`, `anchor.json`, the claim file, the sentinel (`docs/period-model.md` §3.2), and the archive receipt `seals/<period>.archive.json` (§12a, DL-144) | `artifact_format_version` | refused. §3.2 puts every typed field on the wire, so an unknown field is corruption and not an extension | refused, naming the version (PR-08d) | refused, naming it absent, uniformly across every member | the retention lifetime of the estate; period-model §12's floor keeps several of them for the life of the lineage, and §12a's three — the archive receipt, the attestation and the seal sidecar of an archived period — may never be pruned by any class | no retained instance |
+| **Tolerant estate files** — `sources.json` (`docs/period-model.md` §1.1), and every `watch.jsonl` line written by the FW adapter (§3.5) | `artifact_format_version` | ignored — the reader takes the fields it needs; §3.2's canonical form binds the writer, not the reader | refused, naming the version (PR-08d) | refused, the same as an unsupported one | `sources.json` as durable as its catalog bundle; a watch line as durable as the run spool that holds it | no retained instance |
+| **Tolerant supervisor artifacts** — `receipt.json`, `reply.json`, the `run_id` index entry (`docs/supervisor-protocol.md` §3) | `artifact_format_version` | ignored — the section's own forward-compatibility rule | refused | refused — the evidence schema requires the field | as durable as the spool; the `run_id` index is additionally held by the retention floor while its SPAWN can still be replayed | no retained instance |
+| **Wrapper-owned spool files** — `spawn.json` and `status.json`, and those two only (`docs/supervisor-protocol.md` §3) | their own `version` field | ignored | refused | passed — the runner_procid shape | as durable as the run directory | no retained spool holds one |
+| **Wrapper input spec** — the one JSON object on the wrapper's stdin (`docs/supervisor-protocol.md` §2) | its own `version` field | **refused**, unlike the two spool files the same wrapper writes: §2 is frozen and the whole object is fingerprinted, so a key the schema does not pin is a key whose type is not pinned either, and the fingerprint is injective only over pinned types | refused **by the wrapper, after the fork**. The supervisor's gate pins the types; the version is the wrapper's own check. An absent or unimplemented `version` exits 2 without a spawn record; a spec that is not readable JSON exits 1, before the version is reached | refused, after the fork, the same as unimplemented | the fork it is passed to; the wrapper repoints stdin at `/dev/null` after the read | none beyond the door |
+| **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146/DL-147) | the record's `rec` kind; no per-record version field | ignored — evolution is additive; an incompatible change takes a NEW kind name, the WAL's move | not applicable by construction: no engine dispatches this journal (seq recovery reads only `access_seq`, the rest is audit), so an unknown kind is skipped, not refused | not applicable — no version field at all | as durable as its run root; pruned only whole-root — an in-place truncation would restart `access_seq` and forge duplicate keys | no retained root holds one |
+| **Access role map** — the `--access-map` file (`docs/access-model.md` §4) | `format_version` | refused — the map is a closed table, and a key the loader does not pin is a key whose meaning it cannot check | refused, naming the integer this loader implements | refused, the same as unsupported | the operator's own file. It lives outside the estate: it is policy, not evidence, and a reload replaces it whole | no operator's map still names it |
+| **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused, and the refusal does not close the connection | refused, the same as unsupported | the request that carries it. The version is per request, not per connection, so one connection may carry several and a refusal ends none of them. `subscribe` is the exception: its request opens a stream that owns the connection until hangup (§5), so its instance lasts as long as the connection does | none beyond the door: nothing durable holds the dialect |
+| **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5) | ignored | refused as `unsupported_version`, and the refusal does not close the connection | refused, the same as unsupported | the request that carries it, as the control socket | as the control socket |
+| **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | refused by construction — no carrier defaults it | the estate | not retired — **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
 
 *(Amended by DL-150.* Two rows added — the **wrapper input spec** and the
 **access role map**, both versioned surfaces the matrix did not cover. The
@@ -69,6 +70,24 @@ archive receipt joined the closed row. Both socket rows' lifetime was corrected
 from the connection to the request. The carriers and gates of
 `catalog_hash_version` and `state_machine_version` were widened to the closed
 artifacts that also hold them.*)*
+
+*(Amended by DL-157.)* One column added: **absent VERSION** — the question
+DL-150 found the matrix asking nothing about. The ruling is per class, not
+per row. A row already strict on an unknown field is strict on a missing
+version too: the closed-artifact row's own logic — §3.2 puts every typed
+field on the wire, so an unknown field is corruption — applies to an absent
+field the same way, because no retained instance omits one. A row already
+tolerant of an unknown field stays tolerant of a missing version, and today
+that is one row: the wrapper-owned spool files, the shape
+`runner_procid.spool_version_supported` already had before this entry. This
+discharges DL-150's open item whole: the closed class is ruled and the
+tolerant class is ruled too, so no half of the missing-version question is
+still open. `staged_manifest.json` was found, during this same entry's own
+verification, silently defaulting an absent field the same way the other
+four had -- the fifth reader on the closed row, not a fourth exception to
+it -- and DL-157 fixed it in the same pass rather than shipping the row
+with a named outlier in it. The closed row now refuses absence uniformly,
+with nothing left latent.
 
 ### Notes on the rows
 
@@ -97,6 +116,20 @@ an unknown field is corruption: nothing legitimate can produce one. The
 tolerant estate files share the writer-side canonical form, but their readers
 take the fields they need — a writer rule is not a reader refusal.
 
+*(Amended by DL-157.)* The same logic rules an absent field, not only an
+unrecognised one: §3.2's canonical form has no optional
+`artifact_format_version`, so a retained instance missing the key is not a
+narrower dialect this binary declines to read — it is not this artifact.
+Sentinel, Anchor, Claim, Candidate and `staged_manifest.json` now require
+the key before validating the rest of the document, in the sentinel
+reader's own style (`period.py`'s `read_sentinel`, `boundary.py`'s
+`EstateAnchor.read`, `EstateAnchor.read_claim`, `read_candidate` and
+`read_staged_manifest`); the seal sidecar and the attestation already
+refused an absent version by construction — the seal through its digest,
+the attestation through its own explicit check. `staged_manifest.json`
+was the fifth instance of the same gap, found while this entry was being
+verified rather than named ahead of it, and fixed in the same pass.
+
 **The two spool rows are tolerant on fields and strict on versions.** These files
 are written by the supervisor and the wrapper, which may be a different build
 from the engine that reads them. A field added by a newer writer must not stop
@@ -111,11 +144,18 @@ outcome and lands the run on `exit_status_unobservable` rather than letting
 a record whose meaning changed decide a verdict; the supervisor reads it as
 PRESENT AND UNREADABLE, never as absence, because in its §11a table absence
 authorizes a spawn. `true` and `1.0` are not the integer 1 on either side.
-An **absent** `version` is refused by neither, and that is this contract
-declining to rule rather than ruling: the columns above cover an unknown
-FIELD and an unsupported VERSION and not a MISSING one, so a rule invented
-here would settle by guess the open question DL-150 recorded and left
-open.
+An **absent** `version` is refused by neither.
+
+*(Amended by DL-157.)* That used to be this contract declining to rule
+rather than ruling — the columns covered an unknown FIELD and an unsupported
+VERSION and not a MISSING one, and a rule invented here would have settled
+the open question DL-150 recorded by guess. It is ruled now, by class, not
+by inventing a reason for this one row: `spawn.json` and `status.json` are
+the **tolerant** case, the shape the general rule takes for a row already
+tolerant of an unknown field — an absent `version` passes here for the same
+reason an unknown field does, and this is the one row in the whole matrix
+where that is true, because it is the one row whose version-shaped
+discriminator is not `artifact_format_version`.
 
 **The wrapper input spec is strict on fields, beside a spool it writes
 tolerantly, and the fingerprint is why.** A spool file is read for the fields a

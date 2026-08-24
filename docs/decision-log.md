@@ -8439,3 +8439,71 @@ relitigate an entry; append a new one.
   the function note at 138 lines, and `cli_run.py:runs` at 129 -- the
   fold gained a discipline, not a new concept, and the advisory firing
   on real growth is its designed behavior.
+- DL-157 the absent-version question closes: closed artifacts and
+  evidence refuse it by name, the wrapper spool passes it, and the
+  matrix now says so (2026-08-24; protocol-evolution.md + period.py +
+  boundary.py; pays the third DL-151 owed item).
+  THE QUESTION. DL-150 found the matrix silent on one column: "the
+  matrix has no column for an ABSENT version and the shipped readers
+  split both ways; no document rules it." DL-151 named the code cost of
+  leaving it open: "`artifact_format_version` absent-field defaults on
+  Sentinel, Anchor, Claim and Candidate. Blocked on the absent-version
+  discriminator, which no document rules (DL-150's open item); the
+  spool readers took the same shape, refusing only what is present and
+  unsupported."
+  THE RULING, per class, not per row. A row already strict on an
+  unknown field is strict on a missing version too. The ground is the
+  closed-artifact row's own logic, applied symmetrically: ss3.2 puts
+  every typed field on the wire, so an unknown field is corruption; an
+  absent field is the same corruption, because no retained instance
+  omits one -- nothing legitimate produces a sentinel, an anchor, a
+  claim or a candidate without the field the writer always stamps. A
+  row already tolerant of an unknown field stays tolerant of a missing
+  version, and today that is one row: the wrapper-owned spool files,
+  the shape `runner_procid.spool_version_supported` already had. The
+  evidence readers were not blocked on this ruling: `sources.json`,
+  `watch.jsonl` and the supervisor's `receipt.json` / `reply.json` /
+  run_id-index tombstones already refused an absent version before this
+  entry, and the supervisor's own evidence reader
+  (`runner_supervisor.py`'s `_VERSIONED`) had already chosen
+  refuse-absent on its own, ahead of any document ruling it.
+  THE FIVE READERS. `period.py`'s `read_sentinel`, and `boundary.py`'s
+  `EstateAnchor.read`, `EstateAnchor.read_claim`, `read_candidate` and
+  `read_staged_manifest` (through `_read_artifact`'s new `require`
+  parameter) now check the key is present on the raw payload before
+  `model_validate` runs, in `read_sentinel`'s own refusal style: named,
+  by field, before the model gets a chance to default it. Construction
+  defaults are untouched -- every writer still stamps
+  `artifact_format_version` -- so no canonical form and no digest
+  moved. `staged_manifest.json` was not one of DL-151's four: this
+  entry's own verification found it sharing the same closed row and
+  the identical bug shape, and fixed it in the same pass rather than
+  shipping the ruling over a row with one member still exempt.
+  THE SELF-CONSISTENCY CHECK, kept. `check_manifest_self_consistent`
+  also compares `artifact_format_version` against what this binary
+  writes (period.py, "this binary writes"), and on the
+  `read_staged_manifest` path that comparison is now provably
+  unreachable -- `require` and `canon.decode`'s own version gate
+  already guarantee the field is present and correct by the time it
+  runs. The function is shared, not deleted: `stage_next_period`
+  (boundary.py) calls it over a `StagedManifest` built in memory by its
+  caller, a value `_read_artifact` never touches, so the same
+  comparison is still the only guard on that path. Deleting a shared
+  check because one of its callers no longer needs it would have
+  silently dropped the guard for the others; the dead half is dead on
+  one path and not the function, so it stays.
+  THE DISCHARGE. DL-150's open item closes whole: the matrix has the
+  column now, and it rules both halves -- refused for the closed and
+  evidence case, passed for the tolerant one. DL-151's third owed item
+  is paid for Sentinel, Anchor, Claim and Candidate, and
+  `staged_manifest.json` closes with them: the closed-artifact row now
+  refuses an absent version uniformly, with no member left latent.
+  THE TESTS, each mutation-checked: a fixture per record type, missing
+  the field, refuses by name; carrying the current version, reads;
+  carrying an unsupported version, refuses exactly as before this entry.
+  `test_pr08d_a_sentinel_missing_its_version_refuses_by_name`,
+  `test_an_anchor_missing_its_version_refuses_by_name`,
+  `test_a_claim_missing_its_version_refuses_by_name`,
+  `test_a_candidate_missing_its_version_refuses_by_name` and
+  `test_a_staged_manifest_missing_its_version_refuses_by_name`
+  (tests/test_boundary.py).
