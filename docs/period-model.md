@@ -962,7 +962,8 @@ record is.
   "request_fingerprint": "…",
   "forced_gate": null,
   "state": {
-    "jobs":    {"<name>": { …JobRuntime, incl. reservations, waiter_seq… }},
+    "jobs":    {"<name>": { …JobRuntime, incl. reservations, waiter_seq,
+                            ran_members, start_period, window_skipped_members… }},
     "globals": {"<name>": { …GlobalRuntime… }},
     "hosts":   {"<id>":   { …HostRuntime, no last_contact, deadman_us: null… }},
     "routes":  {"<role>": {"executor_id": "…", "state_rev": 3}},

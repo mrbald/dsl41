@@ -8230,3 +8230,106 @@ relitigate an entry; append a new one.
   compile with their record, per Part II requirement 1 -- so no
   workflow shape changed. The refuting probe is pinned as the P-M04
   oracle pair (Part IV), so the ground cannot regress in silence.
+- DL-154 the run_window skip inside a live box is a bypass: the member
+  goes INACTIVE, casts no vote, and the box runs the completion door
+  (2026-08-24; oracle + oracle_state + seal message +
+  autosys-semantics SEM-11/SEM-33; pays the fifth DL-151 owed item;
+  the completion door and both estate-wide consequences were added in
+  review, recorded below).
+  THE DEFECT. A member whose start attempt landed closer to the
+  previous window close recorded RUN_WINDOW_SKIP and stayed INACTIVE,
+  and `_all_members_done` never counted it, so the box hung RUNNING
+  forever. That was the deliberate DL-13 reading, recorded in SEM-33
+  as an open [?] tension against the vendor's "so the box can
+  complete" half. The far-edge branch -- defer via a queued STARTJOB,
+  box RUNNING overnight -- was already modeled right.
+  THE CITATION. TechDocs 12.1, run_window attribute page (the JIL
+  reference pages in the dossier's source list). The two deciding
+  sentences, verbatim: "the job's status changes to INACTIVE. The box
+  job can still run to completion." And the Box1 worked example:
+  "JobA becomes INACTIVE so that the box can complete that day." The
+  [?] tension in SEM-33 closes [V] for those two facts; the modeled
+  bookkeeping below is [C] -- the quotes pin the verdict and the
+  completion, not the mechanism.
+  THE RULING. The skip is a bypass of the ON_ICE shape, not the
+  ON_NOEXEC one: the member goes INACTIVE and stays OUT of the box's
+  ran set, so it casts no vote in the SEM-11 fold -- "INACTIVE so
+  that the box can complete" describes a member the fold passes over,
+  not a run. ON_NOEXEC stays the opposite by DL-151's own ruling:
+  that bypass IS the tick's run, joins ran and votes SUCCESS. The
+  skip resolution is a COMPLETION MOMENT and runs the FULL completion
+  door -- `_apply_box_overrides` first, external and global refs
+  included (the first cut ran only the default fold, so a box_success
+  satisfied at the skip was never evaluated and the box hung with its
+  override met; refuted in review by probe); the default fold runs
+  only if no override fired, and a specified-but-unmet override still
+  hangs the box -- that hang is the composition of two pinned rules,
+  the vendor's INACTIVE verdict and SEM-12's third bullet, and it is
+  pinned by its own test. The fold votes over ran members only
+  (verified before relying on it), so `_fold_box_default` did not
+  move. A box whose EVERY member skips completes SUCCESS through the
+  existing empty-vote default fold -- pinned, not invented. SEM-11's
+  literal pin is otherwise untouched: a member whose condition never
+  fires inside the run still hangs the box, and the run_window DEFER
+  still keeps the box RUNNING.
+  TWO CONSEQUENCES LARGER THAN THE FOLD, on the record because the
+  INACTIVE write is vendor-pinned ("the job's status changes to
+  INACTIVE") and both follow from it. One: the write CLEARS a stale
+  latch from a previous run -- box_failure: f(member) that decided
+  run one as FAILURE reads false after run two's skip, so run two
+  folds SUCCESS where the pre-DL-154 tree said FAILURE. A verdict
+  flip, defensible under the vendor sentence, and DL-153 ruled the
+  stale-latch ground the same day -- so the flip is stated here and
+  pinned by trace test rather than left implicit. Two: the write
+  un-latches every downstream s()/f()/d() atom on the member,
+  estate-wide -- a consumer holding the member's run-one SUCCESS
+  inside an AND that completes later never starts. Also
+  vendor-consistent (SEM-01 atoms read current status; INACTIVE
+  satisfies none), also pinned by trace test.
+  THE CORNERS, each decided and pinned. The vendor anchors INACTIVE
+  at box start; a condition edge landing on the skip branch MID-RUN
+  bypasses identically as the documented default -- the closer-edge
+  rule applies at the attempt's own moment. A FORCE_STARTJOB lands on
+  the same skip path -- force does not override run_window (SEM-23)
+  -- and bypasses identically. The skip does not consume the member's
+  armed latch (only a real start does, Q3/DL-54); the unconsumed arm
+  then dies with the box run at the fold, the Q3c scope pin,
+  unchanged. The skip itself queues no timer, but it is NOT the
+  tick's run, so a must_start deadline armed by the member's own tick
+  still alarms at SEM-34's "armed even when the start is abandoned"
+  pin; only the ON_NOEXEC bypass suppresses that alarm, because only
+  it counts as a run. A member that already ran this execution keeps
+  its result: a forced re-attempt's skip marks nothing and un-runs
+  nothing. Standalone jobs and members of non-RUNNING boxes keep the
+  plain skip.
+  THE STATE, and what it does to old seals. The marks live beside the
+  set they mirror: `window_skipped_members` on the box's JobRuntime
+  row, written only through the owner (`record_window_skip`), reset
+  with `ran_members` when the box next starts, voided for a member
+  that later starts in-window. A seal written BEFORE this entry
+  REFUSES at the canonical re-hash: its digest verifies over its own
+  document, the model fills the new field's default, and the
+  re-serialization no longer matches the stamped digest -- verified
+  by probe against both ingresses. That is the closed-artifact
+  posture (protocol-evolution's closed row), and the precedent
+  DL-120 and DL-132 set when they added JobRuntime fields: golden
+  vector re-pinned, no version bump, no compatibility tests kept.
+  The estate posture is pre-production new-estate-per-semantics-
+  change (DL-124: a transition may not change
+  `state_machine_version`; an SM bump stays a new estate). No
+  migration mechanism is invented -- protocol-evolution ss4 says
+  migration is not this contract's mechanism -- and the re-hash
+  refusal message now names both possible causes, corrupt bytes or a
+  seal written by a build with a different record shape.
+  One adjacency, recorded not fixed: an ON_ICE landing on the last
+  outstanding member of a RUNNING box re-runs the completion check
+  only in the QUE_WAIT sub-case (iced-while-queued lands INACTIVE
+  through a real transition, DL-50); an ice on a never-started member
+  leaves the fold waiting for the next member transition. The skip
+  bypass recomputes at once on both routes. The ice gap predates this
+  entry and stays as found.
+  Accepted cost, on the record: oracle.py grows past the DL-152
+  baseline and re-trips the DL-75 size advisory; the seal golden
+  vector (PR-08) is re-pinned because every JobRuntime row now
+  serializes the new field -- the vector reddening on a model change
+  is its designed behavior.

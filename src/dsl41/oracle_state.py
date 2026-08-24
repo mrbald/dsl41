@@ -165,6 +165,12 @@ class JobRuntime(BaseModel):
     #: current execution. Only a BOX row ever carries entries; it was the loose
     #: `_box_ran` map until DL-86 moved it onto the entity it describes.
     ran_members: frozenset[str] = frozenset()
+    #: SEM-33/DL-154: the members whose run_window verdict in THIS box
+    #: execution was the INACTIVE skip. The SEM-11 fold completes past them
+    #: while they stay out of `ran_members` (they cast no vote); a later
+    #: in-window start joins `ran_members` and voids the mark. Only a BOX
+    #: row ever carries entries; reset beside `ran_members` on box start.
+    window_skipped_members: frozenset[str] = frozenset()
     #: DL-120: the capacity vector THIS run acquired, non-empty only while
     #: STARTING or RUNNING. It is a per-run fact with exactly `run_number`'s
     #: lifetime, so it belongs on the row rather than in a map beside it --
@@ -651,7 +657,16 @@ class RuntimeState:
             # Reset BEFORE the caller's RUNNING transition: that transition's
             # own re-evaluation may already start members, and they must land
             # in the fresh per-run set (SEM-10 at-most-once bookkeeping).
-            self._replace(job, ran_members=frozenset())
+            # The skip marks are per-execution too (SEM-33/DL-154).
+            self._replace(job, ran_members=frozenset(), window_skipped_members=frozenset())
+
+    def record_window_skip(self, box: str, member: str) -> None:
+        """SEM-33/DL-154: mark `member` bypassed for this box execution --
+        its run_window verdict was the INACTIVE skip, so the SEM-11 fold
+        completes past it. `start_run` on the box resets the marks."""
+        self._replace(
+            box, window_skipped_members=self.runtime(box).window_skipped_members | {member}
+        )
 
     def set_flags(
         self,

@@ -867,6 +867,8 @@ class Seal(BaseModel):
             raise EngineError(
                 f"seal artifact: digest {stamped} over a document whose canonical form"
                 f" hashes to {seal.digest} -- the bytes are not in ss3.2 canonical form"
+                " (corrupt bytes, or a seal written by a build with a different record"
+                " shape -- DL-154)"
             )
         return seal
 

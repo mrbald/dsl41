@@ -55,7 +55,11 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - run_window (SEM-33): a start attempt outside the window applies the
   closer-edge rule -- nearer the next opening: schedule a TIMER STARTJOB at
   window open (box context stays RUNNING overnight); nearer the previous
-  end: no run this cycle (INACTIVE stays). Exact midpoint: next opening
+  end: no run this cycle (INACTIVE stays). Inside a live box run the skip
+  is a bypass (DL-154): the member goes INACTIVE, stays out of the ran
+  set, and the SEM-11 fold completes past it -- "the job's status changes
+  to INACTIVE. The box job can still run to completion" (TechDocs 12.1,
+  run_window page). Exact midpoint: next opening
   ([?] undocumented; pinned here, revisit with live access). The window is
   read in the job's own `timezone` (SEM-35 re-bases every time attribute of
   that job), so the comparison runs on local wall time and the queued timer
@@ -98,10 +102,11 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   (definition state, not a transition). INACTIVE is the default anyway.
 - Boxes: SEM-10 (members start when box RUNNING + own condition; at most
   once per box run), SEM-11 LITERAL (DL-13: the box cannot complete until
-  every member that is not ON_ICE has RUN -- or been bypassed by SEM-22 --
-  to a terminal state; a member whose condition never fires, or whose
-  run_window deferred it, keeps the box RUNNING: the hung-box pattern is
-  real behavior), SEM-12 (override
+  every member that is not ON_ICE has RUN to a terminal state, been
+  bypassed to SUCCESS by SEM-22, or been window-skipped to INACTIVE
+  inside the run (SEM-33/DL-154); a member whose condition never fires,
+  or whose run_window deferred it, keeps the box RUNNING: the hung-box
+  pattern is real behavior), SEM-12 (override
   gating: internal refs evaluated on the referenced member's transition;
   external/global refs evaluated only at member completion moments -- the
   hung-RUNNING pattern; "inside" is TRANSITIVE, as in derive._is_inside, so
@@ -929,7 +934,47 @@ class Oracle:
                 "RUN_WINDOW_SKIP",
                 f"outside run_window; closer to previous close -- not run ({cause})",
             )
+            self._window_skip_bypass(job_ir)
         return False
+
+    def _window_skip_bypass(self, job_ir: JobIR) -> None:
+        """SEM-33/DL-154: a run_window skip during a live box run is a
+        bypass, the ON_ICE shape. TechDocs 12.1, run_window page: "the
+        job's status changes to INACTIVE. The box job can still run to
+        completion." The member goes INACTIVE, stays OUT of the ran set
+        (it casts no vote in the SEM-11 fold), and the box runs through
+        the FULL completion door at once -- the skip resolution is a
+        completion moment, so a satisfied override fires first and the
+        default fold runs only if none did; a specified-but-unmet
+        override still hangs the box (SEM-12's own rule, composed with
+        the vendor's INACTIVE verdict). A mid-run condition edge -- or a
+        FORCE_STARTJOB, which does not override run_window (SEM-23) --
+        that lands on the skip branch bypasses identically: the
+        closer-edge rule applies at the attempt's own moment. Standalone
+        jobs and members of non-RUNNING boxes keep the plain skip
+        (INACTIVE stays, no transition); a member that already ran this
+        execution keeps its real result -- a forced re-attempt's skip
+        must not un-run it."""
+        box = job_ir.box.box_name
+        if box is None:
+            return
+        box_rt = self._runtime(box)
+        if box_rt.status != "RUNNING" or job_ir.name in box_rt.ran_members:
+            return
+        self.store.record_window_skip(box, job_ir.name)
+        cause = f"run_window skip bypasses inside box {box!r} (SEM-33, DL-154)"
+        if self._runtime(job_ir.name).status != "INACTIVE":
+            # the transition runs the completion door itself: the mark is
+            # already visible, so _on_member_transition treats this edge
+            # as the member's resolution moment
+            self._set_status(job_ir.name, "INACTIVE", cause=cause)
+            return
+        # already INACTIVE: no transition to ride -- run the same door here
+        box_ir = self.catalog.jobs[box]
+        if self._apply_box_overrides(box, box_ir, job_ir.name, "INACTIVE", completion_moment=True):
+            return
+        if self._all_members_done(box):
+            self._fold_box_default(box, box_ir)
 
     def _ancestor_boxes(self, job: str) -> list[str]:
         """Containing boxes, innermost first (SEM-17). Lowering rejects
@@ -1087,9 +1132,17 @@ class Oracle:
                 return
         if box_rt.status == "TERMINATED":
             return  # SEM-13: sticky until the next box start
-        # SEM-12 gating: overrides are evaluated on member transitions
-        if box_rt.status == "RUNNING" and new in TERMINAL | {"RUNNING"}:
-            if self._apply_box_overrides(box, box_ir, member, new):
+        # SEM-12 gating: overrides are evaluated on member transitions. A
+        # window-skip's INACTIVE verdict resolves the member (DL-154), so
+        # that transition is a completion moment: the full completion door
+        # runs -- overrides first, the default fold only if none fired.
+        skip_resolved = (
+            new == "INACTIVE"
+            and member in box_rt.window_skipped_members
+            and member not in box_rt.ran_members
+        )
+        if box_rt.status == "RUNNING" and (new in TERMINAL | {"RUNNING"} or skip_resolved):
+            if self._apply_box_overrides(box, box_ir, member, new, completion_moment=skip_resolved):
                 return
         if box_rt.status == "RUNNING" and self._all_members_done(box):
             self._fold_box_default(box, box_ir)
@@ -1149,9 +1202,16 @@ class Oracle:
         if not suppressed and self._runtime(box).status != derived:
             self._set_status(box, derived, cause=f"idle-box recompute (SEM-15): {cause}")
 
-    def _apply_box_overrides(self, box: str, box_ir: JobIR, member: str, new: str) -> bool:
-        """Returns True if an override fired and set the box status."""
-        member_completed = new in TERMINAL
+    def _apply_box_overrides(
+        self, box: str, box_ir: JobIR, member: str, new: str, *, completion_moment: bool = False
+    ) -> bool:
+        """Returns True if an override fired and set the box status.
+
+        `completion_moment=True` (DL-154): a window-skip's INACTIVE verdict
+        RESOLVES the member without a terminal status, so the caller names
+        the moment a completion moment for SEM-12's external/global-ref
+        gate; the atoms still read the real INACTIVE status."""
+        member_completed = completion_moment or new in TERMINAL
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
@@ -1176,20 +1236,28 @@ class Oracle:
 
     def _all_members_done(self, box: str) -> bool:
         """SEM-11, literal (DL-13): the box cannot complete until every
-        member has run (to a terminal state) or been bypassed (iced).
-        A member whose condition never fires inside the run -- or whose
-        run_window deferred it -- keeps the box RUNNING: the hung-box
-        pattern is real behavior, not a defect to smooth over.
+        member has run (to a terminal state) or been bypassed (iced, or
+        window-skipped -- DL-154). A member whose condition never fires
+        inside the run -- or whose run_window deferred it -- keeps the box
+        RUNNING: the hung-box pattern is real behavior, not a defect to
+        smooth over.
 
         An ON_NOEXEC member is NOT skipped here: SEM-22 bypasses it to
         SUCCESS "as [its] conditions are met", and that bypass joins the
         ran set like any start, so the fold waits for it exactly as it
         waits for a real run."""
-        ran = self._runtime(box).ran_members
+        box_rt = self._runtime(box)
+        ran = box_rt.ran_members
+        skipped = box_rt.window_skipped_members
         for member in self._members(box):
             rt = self._runtime(member)
             if rt.on_ice:
                 continue  # SEM-20: an iced member is out of the logic entirely
+            if member in skipped and member not in ran:
+                # SEM-33/DL-154: run_window skip this execution -- an explicit
+                # INACTIVE verdict, "the box job can still run to completion";
+                # a later in-window start joins ran and voids the mark
+                continue
             if member not in ran:
                 return False  # not yet run this box execution (incl. held)
             if rt.status not in TERMINAL:

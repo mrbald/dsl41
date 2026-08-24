@@ -175,6 +175,11 @@ The box stays RUNNING while any member is running. The box cannot complete befor
 run (or are bypassed). Default: box SUCCESS if and only if all members ended SUCCESS. Box
 FAILURE if at least one member failed (evaluated after all members complete). A member that
 ended TERMINATED counts as failed for this fold — SEM-14 kills land here.
+One carve-out to the literal fold (DL-13): a run_window skip inside a live box run is an
+explicit INACTIVE verdict — the member leaves the run and casts no vote in the fold **[C]**
+(mechanism tier; SEM-33's vendor quotes pin the verdict and the completion, not the
+bookkeeping). A member whose condition never fires inside the run still hangs the box;
+DL-13's pin is otherwise untouched. *(Amended by DL-154.)*
 
 ### SEM-12 · box_success / box_failure override — with evaluation gating **[V]**
 `box_success: <condition expr>` (same predicate language). Subtle, verified semantics:
@@ -374,11 +379,21 @@ Box interaction (verified example): member with run_window + start time inside a
 after the window → member INACTIVE so the box can complete, or STARTJOB queued for the next
 window. The queued STARTJOB keeps the box RUNNING overnight. The closer edge decides which
 outcome occurs.
-**[?]** Open tension: that "so the box can complete" half is in conflict with SEM-11 as DL-13
-pinned it (a member that never ran keeps the box RUNNING). The oracle follows the DL-13 pin on
-both edges — a skipped member is left INACTIVE and never enters the box's ran set, so the box
-stays RUNNING rather than folding. Which rule wins needs one live box test; do not read either
-sentence as settled.
+**[V]** The "so the box can complete" half is settled by citation (TechDocs 12.1, run_window
+attribute page): "the job's status changes to INACTIVE. The box job can still run to
+completion." — and the page's Box1 worked example, "JobA becomes INACTIVE so that the box can
+complete that day." The modeled mechanism is **[C]** — the quotes pin the INACTIVE verdict
+and the box completing, not the bookkeeping: the skip inside a live box run is a bypass, the
+ON_ICE shape; the member goes INACTIVE, stays out of the box's ran set (it casts no vote in
+the SEM-11 fold), and the skip resolution is a completion moment — the box runs the full
+completion door, so a satisfied box_success/box_failure fires there and the default fold runs
+only if none did, while a specified-but-unmet override still hangs the box (SEM-12's own rule
+composed with the INACTIVE verdict). The vendor anchors INACTIVE at box start; a condition
+edge — or a FORCE_STARTJOB, which does not override run_window (SEM-23) — that lands on the
+skip branch mid-run bypasses identically as the documented default: the closer-edge rule
+applies at the attempt's own moment. SEM-11's literal fold carries the matching carve-out; a
+member whose condition never fires still hangs the box (DL-13).
+*(Amended by DL-154.)*
 
 ### SEM-34 · must_start_times / must_complete_times are alarms only **[V]**
 They emit MUST_START_ALARM / MUST_COMPLETE_ALARM. They do not affect control flow. Absolute or
@@ -748,7 +763,8 @@ T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfie
 (SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
 tick arms, edge starts, start consumes — cited, abandon switch deleted (SEM-32,
-DL-54/DL-58: `test_sem32_*`) · T33a/b run_window closer-edge both sides + box variant,
+DL-54/DL-58: `test_sem32_*`) · T33a/b run_window closer-edge both sides + box variants
+(incl. the DL-154 skip bypass and the SEM-11 carve-out contrast),
 T33c the window read in the job's timezone (SEM-33, with SEM-35) · T34a/b must_* emit alarms
 only, T34c each start_time arms its own relative offset (SEM-34).
 
