@@ -133,3 +133,11 @@ exclude_also = [
     # "unreachable" is a claim and the comment is where it is made.
     "raise AssertionError",
 ]
+
+[tool.pyright]
+# Navigation only: mypy is this repo's type gate. Off keeps go-to-def,
+# references and hover working while silencing pyright diagnostics
+# (syntax errors still report). venv wiring so symbols resolve.
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "off"
