@@ -212,9 +212,11 @@ gates. A multi-slice plan sheet carries an allocation column.
 
 Subagents run every command in the foreground and never end a turn
 waiting on a background command -- the completion wake-up is unreliable
-and the agent parks until poked. A foreground call holds ten minutes;
-the full suite takes three. Work longer than ten minutes is polled in
-chunked foreground calls.
+and the agent parks until poked. Pass an explicit timeout on any
+suite-length command (pytest needs timeout 300000 ms or more): the
+120-second default auto-backgrounds the call, which recreates the
+parked-agent trap. Work longer than ten minutes is polled in chunked
+foreground calls.
 
 Keep the main session's context lean: agent detail stays in files, not in
 reports. A reviewer writes its full findings to a scratchpad file and
