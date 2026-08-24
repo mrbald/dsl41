@@ -202,6 +202,16 @@ def test_calendar_date_rows_allowed_without_attrs() -> None:
     assert render(jf) == text
 
 
+def test_date_row_with_key_shaped_tail_still_carries_verbatim() -> None:
+    """Rule 11 does not validate the row shape, so the rule-4b continuation
+    guard (DL-160) stays out of date rows. autocal refuses the row loudly at
+    consumption (tests/test_autocal.py)."""
+    text = "calendar: hols\n01/01/2026 owner: bob\n"
+    jf = parse(text)
+    assert jf.statements[0].date_lines == ["01/01/2026 owner: bob"]
+    assert render(jf) == text
+
+
 def test_attribute_after_date_rows_is_a_loud_error() -> None:
     """Rule 11 (DL-36): the export format puts attributes before the date
     list; re-rendering an interleaved shape would silently reorder it."""
@@ -303,6 +313,42 @@ def test_rule_4b_guard_fires_on_a_pair_after_a_closed_block() -> None:
     closing `*/` is a real second attribute and still errors."""
     with pytest.raises(JilParseError, match="rule 4b"):
         parse("insert_job: j\ncommand: a /* c */ b: x\n")
+
+
+def test_rule_4b_guard_covers_continuation_lines() -> None:
+    """Rule 4b covers the joined value (DL-160): a bare `key:` token on a
+    rule-6 continuation line folded silently into raw_value -- the DL-30
+    loss class."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\nstart_times: 10:00,\n 11:00 owner: bob\n")
+
+
+def test_rule_4b_continuation_guard_closes_the_run_calendar_lane() -> None:
+    """The one fold that reached the backend with no downstream check: a
+    run_calendar continuation in a calendar-free set. L018 stays quiet when
+    the set defines no calendars, so the folded pair was invisible end to
+    end (DL-160)."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\nrun_calendar: cal\n plus owner: bob\n")
+
+
+def test_rule_4b_continuation_seeds_quote_state_from_the_joined_value() -> None:
+    """A quote opened on the attribute line is still open on the continuation
+    line (DL-160): a pair lookalike inside it is quoted value text, and the
+    joined value round-trips -- the tests/corpus/continuation_multiline.jil
+    shape."""
+    text = 'insert_job: j\nstart_times: "08:00,\n09:00 note: x"\n'
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == '"08:00,\n09:00 note: x"'
+    assert render(jf) == text
+
+
+def test_rule_4b_continuation_pair_after_the_closing_quote_fires() -> None:
+    """The seeded parity flips back when the spanning quote closes: a
+    whitespace-preceded pair after the close is a real pair (DL-160)."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse('insert_job: j\nstart_times: "08:00,\n09:00" owner: bob\n')
 
 
 def test_quoted_block_marker_without_a_second_pair_still_parses() -> None:

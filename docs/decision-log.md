@@ -8689,3 +8689,53 @@ relitigate an entry; append a new one.
   paid. The other two -- the rule-4/4b detector skipping continuation
   lines, and a multi-line trailing block comment folding its body into
   attributes -- stay open for the slices named after this one.
+- DL-160 the rule-4/4b detector covers continuation lines: the guard
+  runs on the joined value with seeded quote state, date rows stay
+  exempt (2026-08-24; ast_jil.py + jil-statement-syntax.md rule 4b +
+  test_ast_fidelity.py + test_autocal.py; pays the second of DL-151's
+  three pre-existing scanner defects).
+  THE DEBT. DL-151 recorded that the rule-6 continuation branch appends
+  a line verbatim with no pair scan, so a bare `key:` token on a
+  continuation line folds silently into raw_value -- the DL-30 loss
+  class the rule-4b guard exists to stop.
+  THE REPRO, before the fix. `insert_job: j\nstart_times: 10:00,\n
+  11:00 owner: bob\n` parsed to one attribute:
+  `('start_times', '10:00,\n 11:00 owner: bob')`. No error, no report
+  row, nothing for the DL-07 firewall to see. One lane carried the fold
+  all the way to the backend: a run_calendar continuation in a
+  calendar-free set. L018 fires only when the compilation set defines
+  at least one calendar or cycle, so `run_calendar: cal\n plus owner:
+  bob` lowered to the garbage calendar name and linted clean --
+  reproduced end to end (parse, lower_source, lint_catalog: zero
+  violations) before the fix.
+  THE SCOPE SENTENCE. Rule 4b now reads: the detector covers the
+  JOINED value, rule-6 continuation lines included. One amendment
+  sentence in jil-statement-syntax.md rule 4b carries it.
+  THE SEEDING RULE. Each continuation line runs the same
+  mask-then-scan walk as an attribute line, with the quote parity
+  seeded from the value accumulated so far and carried line to line. A
+  quote opened on the attribute line and closed on the continuation
+  (the tests/corpus/continuation_multiline.jil shape) is one quoted
+  span, not a bare pair; a whitespace-preceded pair AFTER the closing
+  quote is a real pair and errors. The parity counts quotes on the
+  masked line, so a quote inside a closed block comment toggles
+  nothing, exactly as on a single line (DL-151).
+  THE DATE-ROW EXEMPTION. Rule 11 date rows stay out of the guard.
+  The ground is rule 11's own sentence: the scanner does not validate
+  the row shape; it carries a date row verbatim. A key-shaped tail on
+  a row is autocal's to refuse, and it does, loudly, at consumption
+  (`unparseable date row`). Both halves are pinned by tests that
+  change neither. The exemption follows the DL-151 comment-and-no-guard
+  precedent: the comment above _DATE_BODY_SUBCOMMANDS records it, no
+  code guard exists.
+  THE TESTS, mutation-checked (guard disabled, the continuation cases
+  silently fold again; a targeted re-edit restored the guard, no `git
+  restore`). The sheet repro, the run_calendar lane, the seeded-quote
+  round-trip, the pair-after-the-close error, and the date-row
+  verbatim carry are pinned in test_ast_fidelity.py; the consumption
+  refusal in test_autocal.py. The whole corpus stays byte-identical
+  (F1), continuation_multiline.jil included.
+  THE DISCHARGE. The second of DL-151's three pre-existing scanner
+  defects is paid. The last -- a multi-line trailing block comment
+  folding its body into attributes -- stays open for the slice named
+  after this one.

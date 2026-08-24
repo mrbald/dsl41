@@ -91,6 +91,11 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    leading whitespace, escaped, quoted, digit-led as in `/tmp/out:file.err` or
    `02:00-04:00`) remain value text per rule 2/F4, and so does a pair shape that sits inside
    a closed block comment (rule 4's 2026-08-23 amendment).
+   *(Amended 2026-08-24, DL-160: the detector covers the JOINED value — each rule-6
+   continuation line is scanned with the quote parity seeded from the value accumulated so
+   far, so a quote opened on the attribute line and closed on a continuation line is one
+   quoted span, not a bare pair, while rule 11 date rows stay exempt because rule 11's own
+   "the scanner does not validate the row shape" sentence governs there.)*
 5. **Comments**: JIL has `/* ... */` comments (they can span lines) and full-line `#`
    comments. A comment attaches to the nearest statement/attr that follows (leading) or to
    the same line (trailing — block comments only). Free comments at EOF are `floating`. The

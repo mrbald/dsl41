@@ -486,6 +486,14 @@ def test_standard_days_parses_rows_and_refuses_garbage() -> None:
         standard_days(_std("s", "not-a-date"))
 
 
+def test_key_shaped_date_row_tail_refuses_at_consumption() -> None:
+    """The scanner carries a malformed date row verbatim (rule 11; DL-160
+    keeps it exempt from the continuation guard). The loud refusal lives
+    here, at consumption."""
+    with pytest.raises(CalendarRuleError, match="unparseable date row"):
+        standard_days(_std("s", "01/01/2026 owner: bob"))
+
+
 # ------------------------------------------- Q9 export format (DL-60)
 # Format facts taken from one observed autocal_asc export sample [F]
 # (2026-07-30; every name and date below is synthetic): the

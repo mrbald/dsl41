@@ -109,6 +109,9 @@ SUBCOMMANDS = frozenset(
 #: CONTINUATION_ATTRS, so a well-formed export never holds a continuation open
 #: over its date rows. Unknown keys stay attributes (rule 3), so a hand-made
 #: `run_calendar:` inside a calendar body does swallow the rows that follow.
+#: The rule-4b continuation guard (DL-160) does not reach date rows either:
+#: rule 11 carries a row verbatim and does not validate its shape; a
+#: key-shaped tail on a row is autocal's to refuse at consumption.
 _DATE_BODY_SUBCOMMANDS = frozenset({"calendar"})
 
 #: Rule 3 guard (amended 2026-07-09, DL-18; rename_ added 2026-07-10, DL-27):
@@ -256,10 +259,15 @@ def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
     return body, "", "", ""
 
 
-def _find_inline_pair(value: str) -> re.Match[str] | None:
-    """First quote-unshadowed `key:` pair after whitespace (one-line form)."""
+def _find_inline_pair(value: str, *, in_quote: bool = False) -> re.Match[str] | None:
+    """First quote-unshadowed `key:` pair after whitespace (one-line form).
+
+    `in_quote` seeds the parity walk for a rule-6 continuation line: a quote
+    opened earlier in the joined value still shadows here (rule 4b, DL-160).
+    """
+    parity = 1 if in_quote else 0
     for m in _INLINE_RE.finditer(value):
-        if value.count('"', 0, m.start()) % 2 == 0:
+        if (parity + value.count('"', 0, m.start())) % 2 == 0:
             return m
     return None
 
@@ -272,7 +280,7 @@ def _find_inline_pair(value: str) -> re.Match[str] | None:
 _MASK_FILL = "*"
 
 
-def _mask_closed_blocks(value: str) -> str:
+def _mask_closed_blocks(value: str, *, in_quote: bool = False) -> str:
     """Mask closed `/*...*/` spans (char-for-char, offsets preserved)
     before the rule-4/4b pair scan: rule 5 keeps a closed inline block comment
     with trailing text as opaque VALUE text, so a `key:` shape inside one is
@@ -286,9 +294,11 @@ def _mask_closed_blocks(value: str) -> str:
     into `raw_value` -- the DL-30 silent-loss class the guard exists to stop
     (DL-151). A quote inside a masked span toggles nothing, again as in
     `_split_trailing_comment`: it is comment prose, not value text.
+    `in_quote` seeds the walk for a rule-6 continuation line whose joined
+    value holds an open quote (rule 4b, DL-160).
     """
     out = list(value)
-    in_q = False
+    in_q = in_quote
     i = 0
     n = len(value)
     while i < n:
@@ -367,6 +377,7 @@ class _Scanner:
         pend_b: list[str] = []  # blank lines since the last comment/element
         cur: JilStatement | None = None
         cont: RawAttr | None = None  # open continuation target (rule 6)
+        cont_quote = False  # quote parity at the end of cont's joined value
         i = 0
         while i < len(self.lines):
             line = self.lines[i]
@@ -441,7 +452,8 @@ class _Scanner:
                             self.file,
                             i + 1,
                         )
-                    if (pair := _find_inline_pair(_mask_closed_blocks(value))) is not None:
+                    masked = _mask_closed_blocks(value)
+                    if (pair := _find_inline_pair(masked)) is not None:
                         # Rule 4b (DL-30): JIL permits several `attr: value`
                         # statements on one line; swallowing the second pair
                         # into the first value would be silent loss the
@@ -471,10 +483,31 @@ class _Scanner:
                     cur.attrs.append(attr)
                     self._extend_span(cur.span, i)
                     cont = attr if key.lower() in CONTINUATION_ATTRS else None
+                    cont_quote = masked.count('"') % 2 == 1
                 i += 1
                 continue
             if cont is not None and not pend_c and not pend_b:
-                # Rule 6: non-key-shaped line continues the open list-valued attr.
+                # Rule 6: non-key-shaped line continues the open list-valued
+                # attr. Rule 4b covers the joined value (DL-160), with the
+                # quote parity seeded from the lines above: a quote opened on
+                # the attribute line and closed here is one quoted span, not a
+                # bare pair. A hit is the DL-30 loss class -- a run_calendar
+                # continuation in a calendar-free set reached the backend with
+                # no downstream check at all. Rule 11 date rows stay out: rule
+                # 11 does not validate the row shape (the DL-36 comment above
+                # _DATE_BODY_SUBCOMMANDS).
+                masked = _mask_closed_blocks(line, in_quote=cont_quote)
+                if (pair := _find_inline_pair(masked, in_quote=cont_quote)) is not None:
+                    raise JilParseError(
+                        f"continuation of {cont.key!r} carries a {pair.group(2)!r}:-shaped"
+                        " pair; JIL allows multiple attribute statements per line, so"
+                        " folding it into the joined value would be silent loss -- split"
+                        " the line, or escape the colon as \\: (or quote the value) if"
+                        " it is value text (rule 4b, DL-160)",
+                        self.file,
+                        i + 1,
+                    )
+                cont_quote ^= masked.count('"') % 2 == 1
                 cont.raw_value += "\n" + line
                 self._extend_span(cont.span, i)
                 assert cur is not None
