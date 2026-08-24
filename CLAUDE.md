@@ -188,6 +188,24 @@ tests, duplicate records, orphaned tests from bad inserts, clock-domain
 mixups, and flaky timing assertions -- these are recurring defect classes in
 this codebase.
 
+## Agent allocation
+
+Before any delegation, choose three things explicitly -- model tier,
+review-or-none, context mode. Never default to inherit.
+- Model tier follows judgment density: count the decisions the brief does
+  not force. Fully-forced work drops a tier; semantic interpretation or
+  house-voice writing stays top-tier.
+- Adversarial review follows verification asymmetry: review what is cheap
+  to get wrong and expensive to notice (semantics, frozen contracts). Skip
+  what self-verifies (goldens, round-trips, renames) -- the gate is the
+  review there.
+- Context follows need: reviewers start fresh (independence beats
+  context); rework resumes the implementing agent; full-context forks only
+  when unwritten session rulings would cost more to write down.
+The implementing agent runs the gates and reports; the main session reads
+the diff against the spec and rules on disagreements -- it does not re-run
+gates. A multi-slice plan sheet carries an allocation column.
+
 ## Engineering core (hats)
 
 This project uses the shared **hats engineering core**. Before substantive
