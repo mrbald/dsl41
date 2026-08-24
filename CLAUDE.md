@@ -5,11 +5,15 @@ is finished and normative; it lives in `docs/`. Do not re-derive it — read it.
 
 ## Writing style
 
-Write in plain, short English. No "claudisms": no marketing adjectives, no
-"comprehensive/robust/seamless", no rhetorical flourishes, no emoji, no
-restating the question. Prefer ASD-STE100 simplified-English style for all
-docs, specs, commit messages and chat replies. One idea per sentence. If a
-sentence can be shorter, make it shorter.
+Write in plain, short English.
+One idea per sentence.
+If a sentence can be shorter, make it shorter.
+No "claudisms": no marketing adjectives,
+no "comprehensive/robust/seamless",
+no rhetorical flourishes,
+no emoji,
+no restating the question.
+Applies to all docs, specs, commit messages and chat replies.
 
 ## Public repo hygiene
 
