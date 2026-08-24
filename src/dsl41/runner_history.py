@@ -102,7 +102,12 @@ Five decisions, each with its reason here; the decision itself is
    `started_by`, no `job_hash`, bare-default exit-code verdicts, and -- the
    one that misleads rather than omits -- a run closed by KILLJOB or
    term_run_time reading as RUNNING, since decision 2's trace is exactly
-   what is unavailable.
+   what is unavailable. A completion the ss4 crash window left undecided
+   is refused rather than taken on the same ground (DL-156): with no
+   catalog there is no gate to re-run, so the row's status stands on what
+   the records do decide and `undecided` says the newest completion did
+   not. The full-fidelity path replays the gate and takes its recovered
+   verdicts instead.
 """
 
 from __future__ import annotations
@@ -136,6 +141,7 @@ from dsl41.period import (
     SEGMENT_FIELDS,
 )
 from dsl41.runner_adapters import load_json
+from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
 from dsl41.runner_journal import decision_effects, read_journal, replay_inputs
@@ -185,6 +191,17 @@ class RunRow(BaseModel):
     #: a term_run_time closed reads as RUNNING. It rides on the row rather than
     #: on a warning line so a JSON or CSV consumer cannot miss it.
     fidelity: Literal["full", "records_only"] = "full"
+    #: the ss4 crash window, on the row (DL-156): the NEWEST completion the
+    #: records hold for this run was admitted and its decision record was
+    #: never written, and with no catalog there is no gate to re-run, so
+    #: that completion did not decide the row -- the status stands on what
+    #: the records do decide, an earlier durable verdict or the
+    #: pre-completion RUNNING. A decided row with a later undecided
+    #: completion keeps its status and still carries the flag: over-warning
+    #: in the safe direction. Only ever True at `records_only` fidelity: a
+    #: full-fidelity read replays the gate and takes its recovered verdict
+    #: instead.
+    undecided: bool = False
 
 
 @dataclass(frozen=True)
@@ -379,11 +396,15 @@ def _attempt_index(record: Mapping[str, Any]) -> int | None:
     applies, spelled here because these two fields are compared to each
     other.
 
-    None FAILS OPEN at the one call site that matters: a `decision` whose
-    `index` is `"3"` or `true` drops out of the rejected set and its
-    completion decides the row again. That is the module's degrade posture
-    (decision 5) and not a second authority -- a malformed decision is
-    already refused by `decision_effects` when it carries effects."""
+    None FAILS OPEN on the input side: a STATUS input whose `seq` is
+    malformed drops out of both checks below and its completion decides the
+    row, the module's degrade posture (decision 5) and not a second
+    authority -- a malformed decision is already refused by
+    `decision_effects` when it carries effects. On the DECISION side a
+    malformed `index` names no attempt and lands in neither set: the
+    rejected-set miss still fails open, and at records-only fidelity the
+    decided-set miss reads as the crash window, so the completion is
+    refused rather than taken (`_decided_attempts`, DL-156)."""
     key = "index" if record.get("rec") == "decision" else "seq"
     value = record.get(key)
     return value if is_wire_int(value) else None
@@ -397,13 +418,16 @@ def _rejected_attempts(records: list[dict[str, Any]]) -> set[int]:
     same record would report history the engine refused to make.
 
     Only an EXPLICIT `rejected` is here. An attempt with no decision at all
-    -- the ss4 crash window -- is absent, because the records do not say
-    what became of it: `replay_inputs` re-decides such an attempt through
-    the gate (`apply_attempt` with `decided=None`), and a fold reading
-    records alone cannot run that gate. So a completion whose decision
-    record was lost, and which a replay would reject, still decides its
-    row. That residue is the crash-window half of this defect and is
-    recorded rather than guessed at."""
+    -- the ss4 crash window -- is absent, because the records alone do not
+    say what became of it. Since DL-156 that window is closed by the fold's
+    own authority rather than recorded as residue: `replay_inputs`
+    re-decides such an attempt through the gate (`apply_attempt` with
+    `decided=None`) and reports the verdict in `Replay.recovered`, and the
+    full-fidelity fold unions the recovered REJECTIONS in beside this set
+    (`_leaf_rows`) -- the same verdict a resume derives from the same
+    records. A fold reading records alone still cannot run the gate, and
+    refuses to let such a completion decide its row instead
+    (`RunRow.undecided`)."""
     rejected: set[int] = set()
     for record in records:
         if record.get("rec") != "decision" or record.get("decision") != "rejected":
@@ -414,6 +438,26 @@ def _rejected_attempts(records: list[dict[str, Any]]) -> set[int]:
     return rejected
 
 
+def _decided_attempts(records: list[dict[str, Any]]) -> set[int]:
+    """The attempt indices ANY durable `decision` answered, applied and
+    rejected alike.
+
+    The complement -- an input whose `seq` is in no decision -- is the ss4
+    crash window: admission is durable, the verdict is not, and the absence
+    of a decision is exactly how replay recognises the window
+    (`Journal.decision`). At records-only fidelity there is no gate to
+    re-run over that absence, so `_leaf_rows` refuses to let such a
+    completion decide its row (DL-156)."""
+    decided: set[int] = set()
+    for record in records:
+        if record.get("rec") != "decision":
+            continue
+        index = _attempt_index(record)
+        if index is not None:
+            decided.add(index)
+    return decided
+
+
 def _leaf_rows(
     records: list[dict[str, Any]],
     catalog: CatalogIR | None,
@@ -422,6 +466,7 @@ def _leaf_rows(
     trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
     fingerprints: Mapping[str, str],
     fidelity: Literal["full", "records_only"],
+    recovered: Sequence[ApplyResult],
 ) -> list[RunRow]:
     """Every CMD/FW job's run rows, from `dispatch` + `input(kind=STATUS)`
     records (decision 1), with the trace as fallback for a close that never
@@ -431,10 +476,17 @@ def _leaf_rows(
     order: list[tuple[str, int]] = []
     last_run_number: dict[str, int] = {}
     completion_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    undecided_keys: set[tuple[str, int]] = set()
     executor_by_key: dict[tuple[str, int], str] = {}
     # BEFORE the walk: a decision is a later record than the attempt it
-    # answers, so one pass would store a completion it cannot yet judge
-    rejected = _rejected_attempts(records)
+    # answers, so one pass would store a completion it cannot yet judge.
+    # The recovered verdicts are the gate's own re-run over the crash
+    # window (DL-156), and only the REJECTIONS join the skip set: a
+    # recovered application decides its row exactly as a durable one does
+    rejected = _rejected_attempts(records) | {
+        result.index for result in recovered if result.decision == "rejected"
+    }
+    decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
 
     for record in records:
         rec = record.get("rec")
@@ -446,10 +498,12 @@ def _leaf_rows(
             dispatch_by_key[key] = record
             last_run_number[d_job] = d_run
         elif rec == "input" and record.get("kind") == "STATUS":
-            if _attempt_index(record) in rejected:
-                # the ss4 gate REJECTED this one and the oracle never saw it,
-                # so neither does the row: taking it let a late `exit 0` the
-                # engine refused overwrite the real FAILURE
+            index = _attempt_index(record)
+            if index in rejected:
+                # the ss4 gate REJECTED this one -- durably, or on the
+                # replay's own re-run (DL-156) -- and the oracle never saw
+                # it, so neither does the row: taking it let a late `exit 0`
+                # the engine refused overwrite the real FAILURE
                 continue
             payload = record.get("payload") or {}
             c_job = payload.get("job")
@@ -463,6 +517,15 @@ def _leaf_rows(
                 c_run = last_run_number.get(c_job)
                 if c_run is None:
                     continue
+            if fidelity == "records_only" and index is not None and index not in decided:
+                # the ss4 crash window, met with no gate to re-run: the
+                # records do not say what became of this completion, and the
+                # fold REFUSES to decide -- the row's status stands on what
+                # the records do decide, and `undecided` marks a run whose
+                # newest completion they do not (DL-156)
+                undecided_keys.add((c_job, c_run))
+                continue
+            undecided_keys.discard((c_job, c_run))
             completion_by_key[(c_job, c_run)] = {
                 "payload": payload,
                 "at": record["at"],
@@ -529,6 +592,7 @@ def _leaf_rows(
                 clock_source=clock_source,  # type: ignore[arg-type]
                 job_hash=fingerprints.get(job),
                 fidelity=fidelity,
+                undecided=key in undecided_keys,
             )
         )
     return rows
@@ -541,6 +605,7 @@ def fold_run_rows(
     trace: Sequence[TraceEntry] = (),
     spool: Mapping[tuple[str, int], SpoolRead] | None = None,
     carried: Mapping[str, int] | None = None,
+    recovered: Sequence[ApplyResult] = (),
 ) -> list[RunRow]:
     """The pure fold (DL-113): a function of already-parsed journal records
     plus, optionally, a catalog (box_name/job_type/SEM-09) and a replayed
@@ -559,9 +624,28 @@ def fold_run_rows(
     `carried` is job -> the run number this period OPENED with, so a run
     that crosses a boundary keeps one identity (I2). Absent -- period 1, or
     a caller with no seal to read it from -- the fold numbers from 1, which
-    is what it always did."""
+    is what it always did.
+
+    `recovered` is the ss4 gate's own re-run over the crash window
+    (DL-156): the verdicts `replay_trace` recovers for attempts whose
+    decision record was never written. A caller that replayed owes them
+    alongside `trace` (`read_run_root` supplies both); only the recovered
+    REJECTIONS join the skip set, so a recovered application still decides
+    its row. Without a catalog there is no replay to have recovered from --
+    handing verdicts anyway refuses loudly below -- and an undecided
+    completion does not decide its row: the status stands on what the
+    records do decide, and the row carries `undecided`."""
     if not records or not is_opening(records[0]):
         raise RunHistoryError("run history requires a journal starting with a segment record")
+    if catalog is None and recovered:
+        # DL-156's grant is asymmetric and enforced: recovered verdicts are
+        # the gate's re-run UNDER a catalog, and a records-only fold holds
+        # no gate to have run -- consuming them here would be exactly the
+        # authority the records-only half refuses to exercise
+        raise RunHistoryError(
+            "recovered verdicts with no catalog: a records-only fold cannot consume"
+            " the gate's re-run -- it refuses to decide instead (DL-156)"
+        )
     catalog_hash = str(records[0]["catalog_hash"])
     trace_windows = _trace_windows_by_job(trace, carried)
     fingerprints = {} if catalog is None else job_fingerprints(catalog)
@@ -571,7 +655,14 @@ def fold_run_rows(
         rows.extend(_box_rows(trace, catalog, catalog_hash, fingerprints, trace_windows))
     rows.extend(
         _leaf_rows(
-            records, catalog, catalog_hash, spool or {}, trace_windows, fingerprints, fidelity
+            records,
+            catalog,
+            catalog_hash,
+            spool or {},
+            trace_windows,
+            fingerprints,
+            fidelity,
+            recovered,
         )
     )
     return rows
@@ -824,16 +915,31 @@ def _period_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfi
     return None if manifest is None else manifest.runtime_profile
 
 
+@dataclass(frozen=True)
+class SegmentReplay:
+    """What one segment's offline replay yields (DL-156): the trace
+    decision 2 needs, and the verdicts the ss4 gate RE-DERIVED for attempts
+    whose decision record was never written -- `Replay.recovered`, carried
+    through instead of thrown away. The verdicts are the engine's own gate
+    over the engine's own records, deterministic, behind
+    `check_replay_version`; a resume derives the identical ones from the
+    same log. Taking them is no new fold authority."""
+
+    trace: list[TraceEntry]
+    recovered: list[ApplyResult]
+
+
 def replay_trace(
     run_root: Path,
     records: list[dict[str, Any]],
     catalog: CatalogIR,
     carried: "CarriedRows | None" = None,
-) -> list[TraceEntry]:
+) -> SegmentReplay:
     """The trace decision 2 needs, reconstructed exactly as `audit` does:
     an Oracle seeded with the rows this period OPENED with, this engine's
     own executor seeded (S6a routing reads it, `cli.py`'s `journal` command
-    docstring explains why), then `replay_inputs`.
+    docstring explains why), then `replay_inputs` -- whose recovered
+    crash-window verdicts ride back beside the trace (DL-156).
 
     A foreign `state_machine_version` refuses here before anything is
     replayed (`check_replay_version`): this build derives its own
@@ -857,10 +963,10 @@ def replay_trace(
     )
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:
-        replay_inputs(oracle, records)
+        replay = replay_inputs(oracle, records)
     except OracleError as exc:
         raise RunHistoryError(f"{run_root}: replay failed ({exc})") from exc
-    return oracle.trace()
+    return SegmentReplay(trace=oracle.trace(), recovered=replay.recovered)
 
 
 def read_run_root(run_root: Path) -> list[RunRow]:
@@ -981,8 +1087,15 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
         # `records_only` rather than the whole root being refused
         return fold_run_rows(records, spool=spool, carried=carried)
     catalog = load_catalog_from_manifest(run_root, period_id)
-    trace = replay_trace(run_root, records, catalog, opened)
-    return fold_run_rows(records, catalog=catalog, trace=trace, spool=spool, carried=carried)
+    replayed = replay_trace(run_root, records, catalog, opened)
+    return fold_run_rows(
+        records,
+        catalog=catalog,
+        trace=replayed.trace,
+        spool=spool,
+        carried=carried,
+        recovered=replayed.recovered,
+    )
 
 
 def prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:

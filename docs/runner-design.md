@@ -538,10 +538,20 @@ the spool, offline, with nothing appended to the journal (DL-113).
 writes it. A completion that gate REJECTED never reached the oracle, so the
 fold skips it too. Read without the verdict, a late `exit 0` decided the row
 over the real FAILURE — the offline half of what the gate exists to prevent.
-The **crash window is not covered**: an attempt whose `decision` record was
-never written is re-decided through the gate on replay, and a fold reading
-records alone cannot run that gate, so such a completion still decides its
-row. Only an explicit `rejected` is skipped.
+
+*(Amended by DL-156.)* The **crash window closes to the fold's own
+authority**: an attempt whose `decision` record was never written is
+re-decided through the §4 gate on replay, and the full-fidelity fold takes
+those recovered verdicts (`Replay.recovered`, returned by `replay_trace`)
+instead of throwing them away — a recovered rejection is skipped exactly as
+a durable one, and a recovered application still decides the row. This
+exercises no new authority: the same gate, the same records, deterministic,
+version-gated (`check_replay_version`), and a resume derives the identical
+verdict from the same log. A fold reading records alone cannot run the gate
+and REFUSES to decide instead: the row's status stands on what the records
+do decide — an earlier durable verdict, or the pre-completion RUNNING — and
+it carries `undecided`, so the operator is told the newest completion did
+not decide it. Only an explicit or recovered `rejected` is skipped.
 
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence — external events plus time observations (oracle

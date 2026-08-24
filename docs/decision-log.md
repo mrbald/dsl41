@@ -8373,3 +8373,69 @@ relitigate an entry; append a new one.
   passes no default here, so engine behavior is untouched and the new
   tests exercise the knob on the oracle-direct path only, skipping the
   engine param by name.
+- DL-156 the crash window closes to the fold's own authority: replay's
+  recovered verdicts are read, and records alone refuse to decide
+  (2026-08-24; runner_history + cli_run + runner-design ss7; pays the
+  second DL-151 owed item).
+  THE DEFECT. The offline fold skipped only EXPLICITLY rejected
+  attempts. A completion whose decision record was lost -- the ss4
+  crash window: admission durable, verdict not -- still decided its
+  row, so `dsl41 runs` could show SUCCESS for a killed run whose late
+  `exit 0` the engine would have refused. DL-151 recorded the residue
+  and named what blocked it: closing it seemed to give the fold
+  authority over an undecided attempt, which the design had not
+  granted.
+  THE RULING, in two halves, and neither half grants anything. The
+  full-fidelity half exercises NO new authority: `replay_inputs`
+  already re-decides an undecided attempt through the ss4 gate itself
+  (`apply_attempt` with `decided=None`) and stores the verdicts in
+  `Replay.recovered` -- the engine's own gate, deterministic over the
+  same records, version-gated by `check_replay_version`; a resume
+  derives the identical verdict from the identical log, into its own
+  decision index. The fold was already RUNNING that gate to build its
+  trace and throwing the verdicts away. Now `replay_trace` returns
+  them beside the trace (`SegmentReplay`, the Replay-shaped field
+  threading, not a wider tuple) and the fold unions the recovered
+  REJECTIONS into the skip set. Rejections only: a recovered
+  application decides its row exactly as a durable one does, pinned by
+  its own test -- a blanket skip would be new authority in the other
+  direction. The records-only half REFUSES to decide, which exercises
+  none either: with no catalog there is no gate to re-run, so an
+  undecided completion does not set the row's status -- the status
+  stands on what the records do decide, an earlier durable verdict or
+  the pre-completion RUNNING -- and the row carries `undecided: bool`
+  beside `fidelity`, on the row itself so a JSON or CSV consumer
+  cannot miss it, with the same loud stderr sentence the fidelity
+  degrade already gets in `dsl41 runs`. The flag reads the NEWEST
+  completion: a decided run whose later completion is undecided keeps
+  its decided status and still carries the flag, over-warning in the
+  safe direction, pinned by its own test. The grant is enforced at the
+  door too: a records-only fold handed recovered verdicts refuses by
+  name rather than consuming a gate it never ran.
+  THE SEAL QUESTION, asked before the field landed (the DL-154
+  lesson). RunRow is a projection and nothing else: built fresh per
+  fold, rendered by `dsl41 runs`, never persisted, never hashed, in no
+  seal or sidecar. The new field changes no artifact bytes and no old
+  root refuses.
+  THE FIXTURES, honestly. The pure-fold tests built journals whose
+  STATUS inputs carried no decision records at all -- logs depicting
+  the crash window without meaning to, green only because the fold
+  could not see the window. `Journal.decision` writes a decision for
+  EVERY admitted input, so those fixtures now carry the no-effect
+  applied decision an intact log holds, and their assertions did not
+  move. A decision whose own index is malformed names no attempt and
+  lands in neither set: at records-only fidelity its completion reads
+  as undecided -- the refusal posture -- while the rejected-set miss
+  keeps failing open as before.
+  THE EFFECT. The killed-run repro now reads TERMINATED at full
+  fidelity and RUNNING with `undecided` from records alone; SUCCESS is
+  no longer reachable from a lost verdict in either fidelity. Four
+  tests pin the closure: the recovered rejection, the records-only
+  refusal, the recovered application still deciding, and the intact
+  log never flagging; two more pin the perimeter, the enforced grant
+  and the decided-then-undecided corner.
+  Accepted cost, on the record: runner_history.py crosses the DL-75
+  size advisory (1249 lines over the 1200 note), `_leaf_rows` crosses
+  the function note at 138 lines, and `cli_run.py:runs` at 129 -- the
+  fold gained a discipline, not a new concept, and the advisory firing
+  on real growth is its designed behavior.

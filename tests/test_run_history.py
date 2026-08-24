@@ -36,6 +36,7 @@ from dsl41.cli import app
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle_state import Event, TraceEntry
 from dsl41.runner_adapters import LocalCommandAdapter
+from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_history import (
     RunHistoryError,
@@ -170,6 +171,26 @@ def _spawn_decision(
     }
 
 
+def _applied(index: int) -> dict[str, Any]:
+    """The no-effect applied decision that answers attempt `index`.
+    `Journal.decision` writes one for EVERY admitted input -- the absence
+    of a decision is how replay recognises the crash window -- and since
+    DL-156 the records-only fold reads the absence the same way, so a
+    fixture depicting an intact log carries one per input. `revisions`
+    stays empty although a real applied STATUS moves one: the fold never
+    reads the field."""
+    return {
+        "rec": "decision",
+        "index": index,
+        "request_id": f"r{index}",
+        "decision": "applied",
+        "reason": None,
+        "revisions": {},
+        "legacy_batch": False,
+        "effects": [],
+    }
+
+
 def _drop(job: str, at: datetime = T0) -> dict[str, Any]:
     return {
         "rec": "drop",
@@ -190,6 +211,7 @@ def test_folding_the_same_records_twice_gives_the_same_rows() -> None:
         _header(),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(1, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
+        _applied(1),
     ]
     first = fold_run_rows(records)
     second = fold_run_rows(list(records))  # a fresh list of the same dicts
@@ -272,6 +294,7 @@ def test_reconcile_completion_with_no_true_ended_at_stays_incomplete() -> None:
             status="FAILURE",
             cause="exit_status_unobservable",
         ),
+        _applied(1),
     ]
     [row] = fold_run_rows(records)
     assert row.status == "FAILURE"
@@ -295,6 +318,7 @@ def test_reconcile_completion_with_a_true_ended_at_gets_its_real_duration() -> N
             exit_code=0,
             ended_at=T0 + timedelta(minutes=5),
         ),
+        _applied(1),
     ]
     [row] = fold_run_rows(records)
     assert row.status == "SUCCESS"
@@ -436,6 +460,7 @@ def test_exit_code_status_without_a_catalog_uses_the_bare_sem09_default() -> Non
         _header(),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(1, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=2),
+        _applied(1),
     ]
     [row] = fold_run_rows(records)  # no catalog: max_exit_success=0 default
     assert row.status == "FAILURE"
@@ -461,6 +486,7 @@ def test_executor_id_comes_from_the_spawn_effect_in_the_decision() -> None:
         _spawn_decision(1, T0, job="j1", run_number=1, executor_id="local"),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
+        _applied(2),
     ]
     [row] = fold_run_rows(records)
     assert row.executor_id == "local"
@@ -531,6 +557,7 @@ def test_a_well_formed_decision_still_folds_its_row_and_binds_its_run_id() -> No
         _spawn_decision(1, T0, job="j1", run_number=1, executor_id="local"),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
+        _applied(2),
     ]
     [row] = fold_run_rows(records)
     assert (row.job, row.run_number, row.status, row.executor_id) == ("j1", 1, "SUCCESS", "local")
@@ -595,6 +622,7 @@ def test_a_run_numberless_change_status_overwrites_the_currently_open_run() -> N
             source="control",
             status="SUCCESS",
         ),
+        _applied(1),
     ]
     [row] = fold_run_rows(records)
     assert row.run_number == 1
@@ -655,6 +683,7 @@ def test_spool_preferred_over_journal_when_both_files_are_present(tmp_path: Path
         _header(),
         _dispatch("j1", 1, run_dir=str(run_dir), started_at=T0),  # journal says T0
         _status_input(1, T0 + timedelta(seconds=20), job="j1", run_number=1, exit_code=0),
+        _applied(1),
     ]
     spool_read = read_spool(run_dir, "j1", 1)
     assert spool_read is not None  # a None here would pass the test for the wrong reason
@@ -671,6 +700,7 @@ def test_pruned_spool_falls_back_to_the_journal_clock_entirely(tmp_path: Path) -
         _header(),
         _dispatch("j1", 1, run_dir=str(tmp_path / "runs" / "j1.1"), started_at=T0),
         _status_input(1, T0 + timedelta(seconds=20), job="j1", run_number=1, exit_code=0),
+        _applied(1),
     ]
     [row] = fold_run_rows(records, spool={})  # nothing read: pruned
     assert row.clock_source == "journal"
@@ -691,6 +721,7 @@ def test_a_partially_pruned_spool_never_mixes_clocks(tmp_path: Path) -> None:
         _header(),
         _dispatch("j1", 1, run_dir=str(run_dir), started_at=T0),
         _status_input(1, T0 + timedelta(seconds=20), job="j1", run_number=1, exit_code=0),
+        _applied(1),
     ]
     spool_read = read_spool(run_dir, "j1", 1)
     assert spool_read is not None  # a None here would pass the test for the wrong reason
@@ -1014,6 +1045,8 @@ def test_cli_runs_json_and_csv_carry_catalog_hash_on_every_row(tmp_path: Path) -
     header, row, *_ = as_csv.output.splitlines()
     assert header.split(",")[0] == "job"
     assert row.split(",")[0] == "j1"
+    assert header.split(",")[-1] == "undecided"
+    assert row.split(",")[-1] == "false"  # csv spells bools as json does (DL-156)
 
 
 def test_cli_runs_since_filters_out_earlier_runs(tmp_path: Path) -> None:
@@ -1102,6 +1135,181 @@ def test_a_completion_the_gate_applied_still_decides_the_row(tmp_path: Path) -> 
     assert row.exit_code == 0
 
 
+# ------------------------------------------ 4a. the ss4 crash window (DL-156)
+
+
+async def _killed_run_then_late_completion(run_root: Path) -> None:
+    """The DL-156 crash-window estate, up to the crash itself: KILLJOB
+    terminates a real run mid-flight (the test_runner_adapters.py KILLJOB
+    scenario, staged for full fidelity like `_run_real_and_manifest`), then
+    the wrapper's late `exit 0` STATUS is admitted and REJECTED by the ss4
+    stale gate. `_lose_the_decision_for` below supplies the crash: the
+    admitted input stays durable, the verdict does not."""
+    jil = parse("insert_job: j1\njob_type: c\ncommand: sleep 2\nmachine: m1\n", file="estate.jil")
+    catalog = lower_catalog([jil], permit_unknown=False)
+    clock = RealClock()
+    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+        staged=staged,
+    )
+    now = clock.now()
+    engine.inject(Event(at=now, kind="STARTJOB", payload={"job": "j1"}))
+    engine.inject(Event(at=now + timedelta(seconds=0.15), kind="KILLJOB", payload={"job": "j1"}))
+    await engine.run_until_quiescent(datetime.max)
+    engine.inject(
+        Event(
+            at=clock.now(),
+            kind="STATUS",
+            payload={"job": "j1", "run_number": 1, "exit_code": 0},
+        ),
+        source="adapter",
+    )
+    await engine.run_until_quiescent(datetime.max)
+    await engine.shutdown()
+    assert engine.journal is not None
+    engine.journal.close()
+
+
+def _lose_the_decision_for(run_root: Path, source: str) -> None:
+    """Delete the decision that answered the one STATUS input from
+    `source` -- the crash the window is named for: the absence of a
+    decision is exactly how replay recognises it (`Journal.decision`), so
+    nothing else in the segment moves."""
+    records = read_journal(wal_path(run_root, 1))
+    [seq] = [
+        r["seq"]
+        for r in records
+        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == source
+    ]
+    wal = wal_path(run_root, 1)
+    lines = wal.read_text().splitlines()
+    kept = [
+        line
+        for line in lines
+        if not (json.loads(line).get("rec") == "decision" and json.loads(line).get("index") == seq)
+    ]
+    assert len(kept) == len(lines) - 1  # exactly one verdict lost
+    wal.write_text("\n".join(kept) + "\n")
+
+
+def test_a_lost_rejection_is_recovered_by_the_replayed_gate_and_still_skipped(
+    tmp_path: Path,
+) -> None:
+    """DL-156, the full-fidelity half. The killed run's late `exit 0` was
+    admitted and its rejection was never written; replay re-decides it
+    through the same gate (`Replay.recovered`) and the fold takes that
+    verdict instead of throwing it away. No new authority is exercised: the
+    engine's own gate, deterministic over the engine's own records. Before
+    DL-156 this exact root read SUCCESS 0 for a killed run."""
+    run_root = tmp_path / "run"
+    asyncio.run(_killed_run_then_late_completion(run_root))
+    assert ("rejected", "job already terminal") in _verdicts(run_root)
+    _lose_the_decision_for(run_root, "adapter")
+    assert ("rejected", "job already terminal") not in _verdicts(run_root)  # the crash is real
+
+    [row] = read_run_root(run_root)
+    assert row.status == "TERMINATED"  # the pre-completion truth, not SUCCESS
+    assert row.exit_code is None
+    assert row.undecided is False  # the replayed gate DID decide it
+
+
+def test_records_only_refuses_to_let_an_undecided_completion_decide(tmp_path: Path) -> None:
+    """DL-156, the records-only half, over the SAME records: with no
+    catalog there is no gate to re-run, and refusing to decide exercises no
+    authority either. The row keeps its pre-completion status -- RUNNING,
+    the documented records-only KILLJOB degrade -- and carries the flag."""
+    run_root = tmp_path / "run"
+    asyncio.run(_killed_run_then_late_completion(run_root))
+    _lose_the_decision_for(run_root, "adapter")
+
+    records = read_journal(wal_path(run_root, 1))
+    [row] = fold_run_rows(records)
+    assert row.fidelity == "records_only"
+    assert row.undecided is True
+    assert row.status == "RUNNING"  # NOT the undecided completion's SUCCESS
+    assert row.exit_code is None
+
+
+def test_a_recovered_application_still_decides_the_row(tmp_path: Path) -> None:
+    """The union is of REJECTIONS only. A control CHANGE_STATUS is never
+    stale-gated (SEM-01 parity), so the gate's re-run over the crash window
+    ADMITS it and the completion decides the row exactly as a durable
+    application would -- a blanket skip of every recovered verdict would
+    fail here. Records alone still refuse the same completion."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_then_late_completion(run_root, "control"))
+    _lose_the_decision_for(run_root, "control")
+
+    [row] = read_run_root(run_root)
+    assert row.status == "SUCCESS"
+    assert row.exit_code == 0
+    assert row.undecided is False
+
+    records = read_journal(wal_path(run_root, 1))
+    [records_only] = fold_run_rows(records)
+    assert records_only.status == "FAILURE"  # the pre-completion truth
+    assert records_only.exit_code == 1
+    assert records_only.undecided is True
+
+
+def test_a_decided_completion_never_marks_its_row_undecided(tmp_path: Path) -> None:
+    """The default: every completion in an intact log has its durable
+    verdict and nothing sets the flag, full and records-only fidelity
+    alike -- and the explicitly rejected late `exit 0` is still skipped in
+    both, exactly as before DL-156."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_then_late_completion(run_root, "adapter"))
+
+    [row] = read_run_root(run_root)
+    assert (row.status, row.exit_code, row.undecided) == ("FAILURE", 1, False)
+
+    records = read_journal(wal_path(run_root, 1))
+    [records_only] = fold_run_rows(records)
+    assert (records_only.status, records_only.exit_code) == ("FAILURE", 1)
+    assert records_only.undecided is False
+
+
+def test_a_records_only_fold_refuses_recovered_verdicts() -> None:
+    """DL-156's grant, enforced at the door: the recovered verdicts are
+    the gate's re-run UNDER a catalog, and a records-only fold holds no
+    gate to have run -- consuming them would be exactly the authority the
+    records-only half refuses to exercise. Refuse-don't-degrade is the
+    module's posture, so handing them anyway refuses by name."""
+    records = [
+        _header(),
+        _dispatch("j1", 1, run_dir=None, started_at=T0),
+        _status_input(1, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
+    ]
+    verdict = ApplyResult(
+        index=1, request_id="r1", decision="rejected", reason="job already terminal"
+    )
+    with pytest.raises(RunHistoryError, match="records-only fold cannot consume"):
+        fold_run_rows(records, recovered=[verdict])
+
+
+def test_a_decided_row_with_a_later_undecided_completion_keeps_status_and_flags() -> None:
+    """DL-156's chosen corner semantics, pinned so the shape is a choice
+    and not an accident: a decided completion followed by an undecided one
+    for the same run keeps the decided STATUS -- the verdict the records do
+    hold -- and still carries the flag, because the newest completion is
+    one the records do not decide. Over-warning in the safe direction."""
+    records = [
+        _header(),
+        _dispatch("j1", 1, run_dir=None, started_at=T0),
+        _status_input(1, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=1),
+        _applied(1),
+        _status_input(2, T0 + timedelta(minutes=2), job="j1", run_number=1, exit_code=0),
+    ]
+    [row] = fold_run_rows(records)
+    assert row.status == "FAILURE"  # the durable verdict stands
+    assert row.exit_code == 1
+    assert row.undecided is True  # and the newest completion is named undecided
+
+
 # ---------------------------------------- 5. the replay version gate
 
 
@@ -1120,7 +1328,9 @@ def test_replay_refuses_a_segment_naming_a_foreign_state_machine_version(
 
 
 def test_replay_accepts_the_state_machine_version_this_build_derives(tmp_path: Path) -> None:
-    assert replay_trace(tmp_path, [_header()], lower_source(_SOLO_JIL)) == []
+    replayed = replay_trace(tmp_path, [_header()], lower_source(_SOLO_JIL))
+    assert replayed.trace == []
+    assert replayed.recovered == []
 
 
 def test_dsl41_journal_refuses_a_foreign_state_machine_version(tmp_path: Path) -> None:

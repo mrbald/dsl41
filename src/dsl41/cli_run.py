@@ -1577,6 +1577,19 @@ def runs(
             err=True,
         )
 
+    if any(row.undecided for row in rows):
+        # Same posture as the fidelity warning above (DL-156): the flag
+        # rides on every row, and the stderr sentence is emitted for every
+        # format, exactly as the fidelity warning is.
+        typer.echo(
+            "warning: some rows are undecided: their newest completion was admitted"
+            " and its decision record was never written (the crash window), so the"
+            " records do not decide it -- each such row's status stands on what the"
+            " records do decide; a full-fidelity read (stored inputs present)"
+            " replays the gate and decides them",
+            err=True,
+        )
+
     if output_format is RunsFormat.json:
         import json as json_mod
 
@@ -1590,12 +1603,23 @@ def runs(
         from dsl41.runner_history import RunRow as _RunRow
 
         fields = list(_RunRow.model_fields.keys())
+
+        def cell(value: object) -> object:
+            # csv and json agree on spelling: `--format json` prints
+            # true/false, and csv.writer would print Python True/False --
+            # `undecided` is the first bool column, so it sets the precedent
+            if value is None:
+                return ""
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return value
+
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
         writer.writerow(fields)
         for row in rows:
             dump = row.model_dump(mode="json")
-            writer.writerow(["" if dump[f] is None else dump[f] for f in fields])
+            writer.writerow([cell(dump[f]) for f in fields])
         typer.echo(buf.getvalue(), nl=False)
     else:
         for line in _runs_table(rows):
