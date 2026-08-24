@@ -206,6 +206,14 @@ The implementing agent runs the gates and reports; the main session reads
 the diff against the spec and rules on disagreements -- it does not re-run
 gates. A multi-slice plan sheet carries an allocation column.
 
+Keep the main session's context lean: agent detail stays in files, not in
+reports. A reviewer writes its full findings to a scratchpad file and
+reports back only a ranked verdict table plus blocker detail. The rework
+brief points the implementer at that file and adds rulings on the
+blockers; it does not restate findings. Mechanical agents get a report
+length cap in the brief. Skill loads are the expensive context items --
+budget for them, not for diff reads.
+
 ## Engineering core (hats)
 
 This project uses the shared **hats engineering core**. Before substantive
