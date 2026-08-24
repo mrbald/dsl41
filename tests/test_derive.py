@@ -1043,8 +1043,8 @@ def test_lint_catalog_report_order_is_irf_rules_block_then_graph_rules_block() -
 
 # ------------------------------------------------ 12. review-driven regressions
 
-# Behaviors fixed after the phase-5 adversarial review; each test pins the
-# corrected behavior so it cannot regress silently.
+# Behaviors fixed below; each test pins the corrected behavior so it cannot
+# regress silently.
 
 
 def test_transitive_box_member_override_is_m15_not_m16() -> None:

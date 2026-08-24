@@ -1606,7 +1606,7 @@ def test_pilot_t_opens_the_live_triggers_view_and_operator_verbs_do_not_fire(
 
 
 def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Path) -> None:
-    """Review MAJOR: the 2s re-query must not clear() the table -- a clear
+    """The 2s re-query must not clear() the table -- a clear
     resets the row cursor and scroll to 0, so the operator could never read
     past the first screenful of an estate-scale trigger list. Steady-state
     refreshes update cells in place; a membership change rebuilds but puts

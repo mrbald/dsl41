@@ -1399,7 +1399,7 @@ def test_deps_serves_box_containment_alongside_condition_edges(short_root: Path)
 def test_change_status_on_declared_xinst_ghost_satisfies_a_cross_instance_atom(
     short_root: Path,
 ) -> None:
-    """DL-65 review MAJOR: "JOB^INST" with INST a declared insert_xinst is a
+    """DL-65: "JOB^INST" with INST a declared insert_xinst is a
     legal CHANGE_STATUS target (SEM-07) -- the store pseudo-entity is created
     on demand and the dependent's cross-instance atom fires. An undeclared
     instance suffix stays refused."""

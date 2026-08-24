@@ -145,9 +145,10 @@ def test_dl50_unsized_resource_is_unmodelled_oracle_direct() -> None:
 
 
 def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
-    """Direct check of the review BLOCKER: after a self-retriggering holder
-    finally stops, the renewable bucket must be back to 0 and, at every step,
-    `used` must equal the units the rows actually reserve (no strand)."""
+    """Direct check of the self-retriggering-holder fix (DL-50): after a
+    self-retriggering holder finally stops, the renewable bucket must be back
+    to 0 and, at every step, `used` must equal the units the rows actually
+    reserve (no strand)."""
     text = (
         "insert_resource: R\nres_type: R\namount: 2\n\n"
         "insert_job: sl\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -168,7 +169,7 @@ def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
 
 
 def test_dl50_duplicate_resource_refs_coalesce_no_overcommit() -> None:
-    """Review MINOR: a job listing one resource twice must coalesce to a summed
+    """A job listing one resource twice must coalesce to a summed
     demand so the acquire matches the admission test -- used=2, never 4."""
     text = (
         "insert_resource: DUP\nres_type: R\namount: 2\n\n"

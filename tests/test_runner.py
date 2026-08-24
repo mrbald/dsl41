@@ -796,12 +796,12 @@ def test_hypothesis_engine_bisimulation_startjob_and_term_run_time(script: list[
 
 # -------------------------------------------- 5. review-driven regressions (DL-43)
 
-# Engine defects confirmed by the phase-11a adversarial review; each test
-# pins the corrected behavior so it cannot regress silently.
+# Engine defects fixed below; each test pins the corrected behavior so it
+# cannot regress silently.
 
 
 def test_zero_delay_cycle_raises_engine_error_instead_of_livelocking() -> None:
-    """Review CONFIRMED: a condition cycle over instant completions (the
+    """A condition cycle over instant completions (the
     AutoSys tight-loop pattern, L010, compressed to zero duration) generated
     unbounded work at one frozen virtual instant -- run_until_quiescent never
     returned. The engine now refuses with EngineError after a catalog-scaled
@@ -827,7 +827,7 @@ def test_zero_delay_cycle_raises_engine_error_instead_of_livelocking() -> None:
 
 
 def test_injected_status_starting_launches_no_ghost_run() -> None:
-    """Review CONFIRMED: an injected CHANGE_STATUS-parity STATUS STARTING
+    """An injected CHANGE_STATUS-parity STATUS STARTING
     overwrite re-emits STARTING without a run_number bump and used to spawn
     a real adapter task whose completion rewrote the job to SUCCESS -- a run
     the semantics core never decided to start. Vendor parity: sendevent
@@ -860,7 +860,7 @@ def test_injected_status_starting_launches_no_ghost_run() -> None:
 
 
 def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> None:
-    """Review CONFIRMED: lowering accepts a negative term_run_time, arming a
+    """Lowering accepts a negative term_run_time, arming a
     timer already in the past; oracle-direct tolerates it (feed back-dates
     the firing) but the engine crashed calling advance() backwards. The
     frontier rule now clamps: the past-due timer fires once time moves past
@@ -886,7 +886,7 @@ def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> N
 
 
 def test_zero_delta_deadline_stays_lazy_like_the_oracle() -> None:
-    """Review CONFIRMED: a term_run_time of 0 arms a timer due exactly at
+    """A term_run_time of 0 arms a timer due exactly at
     the arming instant; the oracle's lazy discipline keeps it armed until
     the next feed, but the engine fired it eagerly at the same horizon --
     observably divergent store state at the same script point. The frontier
@@ -925,7 +925,7 @@ class _TeardownBugAdapter:
 
 
 def test_cancellation_teardown_exceptions_are_not_swallowed() -> None:
-    """Review CONFIRMED: shutdown() gathered cancelled tasks with
+    """shutdown() gathered cancelled tasks with
     return_exceptions=True and dropped anything they died with; the
     dispatch-cancel path popped the task from tracking entirely. Both paths
     now re-raise a non-CancelledError loudly (shutdown inspects the gather

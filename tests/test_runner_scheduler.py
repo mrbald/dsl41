@@ -1348,7 +1348,7 @@ def test_preflight_resources_honored_when_sized_is_clean(monkeypatch) -> None:
 
 
 def test_preflight_resources_refuses_duplicate_and_unsatisfiable(monkeypatch) -> None:
-    """DL-50 (adversarial review): preflight refuses a resource requested twice
+    """DL-50: preflight refuses a resource requested twice
     (ambiguous demand, would over-commit the bucket) and a QUANTITY that exceeds
     the resource's amount (statically unsatisfiable -- would hang forever)."""
     monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")

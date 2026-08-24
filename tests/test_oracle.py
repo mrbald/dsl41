@@ -1600,8 +1600,7 @@ def test_sem33_box_variant_sole_deferred_member_keeps_box_running_until_it_compl
 
 
 def test_sem33_box_variant_two_members_deferred_member_keeps_box_open() -> None:
-    """Regression pin for the phase-7 review BLOCKER (originally a strict
-    xfail): with a normal member plus a run_window-DEFERRED member, the
+    """With a normal member plus a run_window-DEFERRED member, the
     normal member's completion must NOT fold the box -- SEM-11's literal
     gate (DL-13) keeps it RUNNING until the deferred member has run. The
     deferred member's queued timer then fires at window-open into a
@@ -2657,12 +2656,12 @@ def test_hypothesis_oracle_determinism_legality_and_monotonicity(script: list[Ev
 
 # ---------------------------------------------- 22. review-driven regressions (DL-13)
 
-# Behaviors fixed after the phase-7 adversarial review; each test pins the
-# corrected reading so it cannot regress silently.
+# Behaviors fixed below; each test pins the corrected reading so it cannot
+# regress silently.
 
 
 def test_completed_consumer_reruns_on_each_fresh_producer_success() -> None:
-    """Review MAJOR: edge-triggered re-evaluation (DL-13) -- every new
+    """Edge-triggered re-evaluation (DL-13) -- every new
     satisfaction of the condition re-launches a completed consumer (dossier
     ss0 re-evaluates on each relevant event; SEM-01)."""
     text = (
@@ -2698,7 +2697,7 @@ def test_unrelated_events_do_not_wake_consumers() -> None:
 
 
 def test_hung_box_member_with_false_condition_blocks_completion() -> None:
-    """Review BLOCKER (SEM-11 literal, DL-13): a member whose condition is
+    """SEM-11 literal (DL-13): a member whose condition is
     false when its sibling completes has neither run nor been bypassed, so
     the box stays RUNNING -- the real hung-box pattern. The condition
     becoming true later (external producer) still starts it, and only then
@@ -2722,7 +2721,7 @@ def test_hung_box_member_with_false_condition_blocks_completion() -> None:
 
 
 def test_scheduled_member_waits_for_its_own_tick_l013_double_gate() -> None:
-    """Review MAJOR (SEM-31/L013, DL-13): a date_conditions member of a
+    """SEM-31/L013 (DL-13): a date_conditions member of a
     RUNNING box starts only on its own schedule tick, not with the box."""
     text = (
         "insert_job: dg_box\njob_type: b\n\n"
@@ -2740,7 +2739,7 @@ def test_scheduled_member_waits_for_its_own_tick_l013_double_gate() -> None:
 
 
 def test_must_start_alarm_fires_when_no_run_began_by_deadline() -> None:
-    """Review MINOR (SEM-34): must_start_times arms on the STARTJOB tick;
+    """SEM-34: must_start_times arms on the STARTJOB tick;
     the alarm fires iff no new run began by tick+offset -- here the tick
     only ARMED the job (false condition, Q3/DL-54), no run began, which is
     exactly the alarm's point -- and never affects control flow."""
@@ -2772,7 +2771,7 @@ def test_must_start_alarm_quiet_when_the_run_began_in_time() -> None:
 
 
 def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
-    """Review MINOR (DL-13): atoms read the real in-flight status of an
+    """DL-13: atoms read the real in-flight status of an
     iced-but-RUNNING job; the satisfied-by-ice reading applies only once
     the run completes."""
     text = (
@@ -2789,7 +2788,7 @@ def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
 
 
 def test_sem15_idle_box_recompute_derives_status_from_member_changes() -> None:
-    """Review MINOR (SEM-15 [C]): terminal member transitions on a
+    """SEM-15 [C]: terminal member transitions on a
     non-running box re-derive its status once all members are terminal --
     a completed box flips when a member is CHANGE_STATUSed, and a
     never-started box derives a status when its members are forced."""
@@ -2823,7 +2822,7 @@ def test_sem13_sticky_terminated_survives_idle_recompute() -> None:
 
 
 def test_trace_returns_copies_not_aliases() -> None:
-    """Review NIT: mutating a returned TraceEntry must not corrupt the
+    """Mutating a returned TraceEntry must not corrupt the
     oracle's internal trace."""
     o = oracle("insert_job: tc_j\njob_type: c\ncommand: x\nmachine: m1\n")
     o.feed(ev("FORCE_STARTJOB", 0, job="tc_j"))
@@ -3025,7 +3024,7 @@ def test_dl50_killing_a_holder_releases_its_units() -> None:
 
 
 def test_dl50_self_retriggering_holder_does_not_leak_its_semaphore() -> None:
-    """Adversarial-review BLOCKER: a resource holder that re-triggers itself
+    """A resource holder that re-triggers itself
     inside its own completion cascade (the L010 tight-loop) must release run N
     BEFORE run N+1 re-acquires, or a unit is stranded forever. `sl` self-loops
     via `condition: s(sl)`; after it finally FAILs (breaking s(sl)) the pool is
@@ -3046,7 +3045,7 @@ def test_dl50_self_retriggering_holder_does_not_leak_its_semaphore() -> None:
 
 
 def test_dl50_killing_a_queued_job_removes_it_and_it_never_runs() -> None:
-    """Adversarial-review MAJOR: KILLJOB on a QUE_WAIT (standalone) job must
+    """KILLJOB on a QUE_WAIT (standalone) job must
     dequeue and TERMINATE it -- not be silently ignored and then admitted on
     the next release, running despite the operator's kill."""
     text = (
@@ -3064,7 +3063,7 @@ def test_dl50_killing_a_queued_job_removes_it_and_it_never_runs() -> None:
 
 
 def test_dl50_icing_a_queued_job_dequeues_it_immediately() -> None:
-    """Adversarial-review NIT: ON_ICE on a QUE_WAIT job settles it to INACTIVE
+    """ON_ICE on a QUE_WAIT job settles it to INACTIVE
     now (an iced job never runs), not lingering QUE_WAIT until a later release."""
     text = (
         "insert_resource: I\nres_type: R\namount: 1\n\n"
@@ -3601,11 +3600,11 @@ def test_dl158_disarm_wakes_no_waiter_where_a_wake_would_act() -> None:
     o.feed(ev("STATUS", 6, job="hog158", status="SUCCESS"))  # the real scan
     assert o.store.job["qm158"].status == "INACTIVE"  # cancelled by the release, not the DISARM
 
-# ------------------------------------------- DL-54 adversarial-review fix pins
+# ------------------------------------------- DL-54 fix pins
 
 
 def test_sem32_member_arm_dies_with_its_box_run() -> None:
-    """DL-54 review MAJOR: a member's arm is scoped to the box run that armed
+    """DL-54: a member's arm is scoped to the box run that armed
     it. Armed in run 1 (tick with false condition), the box completes via
     box_success with the member unrun -> SCHED_DISARM; the condition edge
     while the box is down cannot start it, and -- the actual defect -- the
@@ -3641,7 +3640,7 @@ def test_sem32_member_arm_dies_with_its_box_run() -> None:
 
 
 def test_sem32_held_member_of_idle_box_does_not_arm() -> None:
-    """DL-54 review MAJOR: the hold gate precedes the box gate, so _arm must
+    """DL-54: the hold gate precedes the box gate, so _arm must
     re-check box state -- a HELD member of a NOT-running box gets no arm from
     its tick, and off-hold inside a later box run cannot start it from that
     dead tick."""
@@ -3685,7 +3684,7 @@ def test_sem32_held_member_of_running_box_arms_and_off_hold_starts() -> None:
 
 
 def test_sem32_que_wait_enqueue_keeps_arm_and_box_death_disarms() -> None:
-    """DL-54 review MINOR: the ACTUAL start consumes the arm, not the QUE_WAIT
+    """DL-54: the ACTUAL start consumes the arm, not the QUE_WAIT
     enqueue -- and when the box run dies with the member still queued, the
     queue attempt is cancelled AND the arm dies with the box run (zero runs
     from the tick, arm accounted for by SCHED_DISARM, nothing latched)."""
@@ -3716,7 +3715,7 @@ def test_sem32_que_wait_enqueue_keeps_arm_and_box_death_disarms() -> None:
 
 
 def test_sem04_zero_lookback_n_atom_ignores_non_end_transitions() -> None:
-    """DL-54 review MINOR: BOTH sides of the Q2a citation are END times. An
+    """DL-54: BOTH sides of the Q2a citation are END times. An
     n(p, 0) predecessor bounced to INACTIVE by an injected status has not
     "run since" anything -- its last_end_at is unchanged -- so the consumer
     must not restart; a real completed run afterwards does refresh it."""
@@ -3738,7 +3737,7 @@ def test_sem04_zero_lookback_n_atom_ignores_non_end_transitions() -> None:
 
 
 def test_sem33_armed_repeat_edges_queue_one_defer_timer() -> None:
-    """DL-54 review MINOR: an armed job whose condition keeps re-latching
+    """DL-54: an armed job whose condition keeps re-latching
     outside the run_window records ONE defer (one pending timer per opening
     instant), not one per edge, and starts exactly once at window open."""
     text = (

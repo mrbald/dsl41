@@ -1005,12 +1005,12 @@ def test_cli_equiv_lowering_refusal_in_against_exits_2(tmp_path: Path) -> None:
 
 # ---------------------------------------------- 9. review-driven regressions (DL-14a)
 
-# Soundness fixes from the phase-8 adversarial review; each test pins the
-# corrected behavior so it cannot regress silently.
+# Soundness fixes below; each test pins the corrected behavior so it cannot
+# regress silently.
 
 
 def test_string_global_ordering_comparisons_are_sound() -> None:
-    """Review BLOCKER: the old OTHER token made every ordered string
+    """The old OTHER token made every ordered string
     comparison vacuously false -- v(G) < "m" and v(G) > "m" (opposites!)
     were declared equivalent. String cutpoints ("", lit+NUL) now represent
     the below/between/above regions."""
@@ -1037,7 +1037,7 @@ def test_string_global_ordering_tier_c_parity() -> None:
 
 
 def test_iced_state_distinguishes_contradictions_on_different_jobs() -> None:
-    """Review MAJOR: without the ice dimension, s(x)&f(x) and s(y)&f(y)
+    """Without the ice dimension, s(x)&f(x) and s(y)&f(y)
     were both 'unsatisfiable' hence equivalent -- but icing x (SEM-05 makes
     every atom true) starts one consumer and not the other."""
     result = conds_equivalent(parse_condition("s(x) & f(x)"), parse_condition("s(y) & f(y)"))
@@ -1100,7 +1100,7 @@ def test_zero_lookback_freshness_bit_separates_zero_from_plain() -> None:
 
 
 def test_too_large_is_inconclusive_not_divergent() -> None:
-    """Review MINOR: ss6 says too-large defers to tier c; it must not fail
+    """ss6 says too-large defers to tier c; it must not fail
     tier b. Identical too-large conditions -> equivalent=True with the
     condition listed as deferred."""
     big = " & ".join(f"s(big{i}, 01.00) | s(big{i}, 02.00) | s(big{i}, 03.00)" for i in range(5))
@@ -1113,7 +1113,7 @@ def test_too_large_is_inconclusive_not_divergent() -> None:
 
 
 def test_equiv_scripts_cover_oob_kinds_and_referenced_globals() -> None:
-    """Review MINOR: the generator now emits out-of-band kinds and sets
+    """The generator now emits out-of-band kinds and sets
     globals that are only referenced (never declared), with literal and
     off-literal values."""
     catalog = lower_source(

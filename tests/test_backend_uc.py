@@ -240,7 +240,7 @@ def test_compile_to_uc_is_deterministic_and_pins_provenance() -> None:
 def test_compile_to_uc_notes_carry_apply_worklist_and_excluded_ledger() -> None:
     """The bundle is self-describing: referenced-task worklist, verbatim-name
     assumption, and the twin lowering's exclusion ledger VERBATIM (a count
-    was not enough -- review MINOR 3) all travel IN the artifact (DL-55)."""
+    was not enough) all travel IN the artifact (DL-55)."""
     catalog = _corpus_catalog()
     bundle = compile_to_uc(catalog)
     assert any(note.startswith("referenced tasks must exist") for note in bundle.notes)
@@ -250,7 +250,7 @@ def test_compile_to_uc_notes_carry_apply_worklist_and_excluded_ledger() -> None:
 
 
 def test_compile_to_uc_notes_name_mutex_groups_and_exit_code_tasks() -> None:
-    """Review MAJOR 2: a mutex-only catalog must not produce a clean-looking
+    """A mutex-only catalog must not produce a clean-looking
     bundle -- M07 groups and M31 exit-code boundaries the records cannot
     carry are named in the notes (no silent loss, DL-04)."""
     catalog = lower_source(
@@ -266,7 +266,7 @@ def test_compile_to_uc_notes_name_mutex_groups_and_exit_code_tasks() -> None:
 
 
 def test_compile_to_uc_notes_list_synthesized_workflow_names() -> None:
-    """Review MINOR 5: component workflows get invented wf_* names; the
+    """Component workflows get invented wf_* names; the
     bundle says which record names are NOT estate names, and the verbatim
     claim is scoped to task names."""
     catalog = lower_source(
@@ -287,7 +287,7 @@ def test_compile_to_uc_notes_list_synthesized_workflow_names() -> None:
 
 
 def test_compile_to_uc_quarantines_duplicate_record_names() -> None:
-    """Review MINOR 6: a box literally named wf_x plus a standalone job x
+    """A box literally named wf_x plus a standalone job x
     both serialize to record name 'wf_x' -- an upsert wrapper would silently
     clobber, so every collision party quarantines."""
     catalog = lower_source(

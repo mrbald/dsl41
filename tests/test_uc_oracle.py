@@ -1248,8 +1248,8 @@ def test_divergence_model_fields() -> None:
 
 # ============================================ 6. review-driven regressions (DL-16a)
 
-# Fixes from the UC-twin adversarial review; each test pins the corrected
-# behavior so it cannot regress silently.
+# UC-twin fixes below; each test pins the corrected behavior so it cannot
+# regress silently.
 
 
 def test_f_edge_does_not_fire_on_a_killed_producer_end_to_end() -> None:

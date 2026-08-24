@@ -406,8 +406,8 @@ def test_machine_rejects_duplicate_type() -> None:
 
 
 def test_machine_duplicate_attr_is_case_insensitive() -> None:
-    # review MAJOR: NODE_NAME + node_name must not both survive (silent last-
-    # wins loss + a resolver false-accept path). Keys lower-fold for the guard.
+    # NODE_NAME + node_name must not both survive (silent last-wins loss + a
+    # resolver false-accept path). Keys lower-fold for the guard.
     with pytest.raises(LoweringError):
         lower_source("insert_machine: m\ntype: a\nNODE_NAME: h1\nnode_name: h2\n")
 
@@ -983,8 +983,8 @@ def test_max_exit_success_is_carried_through() -> None:
 
 # ------------------------------------------------- 13. review-driven regressions
 
-# Behaviors fixed after the phase-3 adversarial review; each test pins the
-# corrected behavior so it cannot regress silently.
+# Behaviors fixed below; each test pins the corrected behavior so it cannot
+# regress silently.
 
 
 def test_quoted_box_name_resolves() -> None:

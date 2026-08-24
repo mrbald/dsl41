@@ -265,8 +265,8 @@ def test_second_attr_pair_on_attribute_line_is_a_loud_error() -> None:
         # Digit-led tokens are not key-shaped.
         ("bare-time-list", "run_window: 02:00-04:00"),
         # A key: shape inside a retained closed block comment is comment
-        # prose, not a pair (rule 5 opaque retention; adversarial-review
-        # finding on DL-30).
+        # prose, not a pair (rule 5 opaque retention) -- the DL-30 loss
+        # class, pinned here so a detector change cannot reopen it.
         ("pair-inside-inline-comment", "command: run /* see key: x */ more"),
         # The marker is taken at the value start too (rule 5, DL-151).
         ("pair-inside-value-start-comment", "command:/* see key: x */ more"),
