@@ -10048,3 +10048,62 @@ relitigate an entry; append a new one.
   clean; `mypy src` clean; `scripts/arch_check.py` exits 0, five advisory
   size notes, all pre-existing baseline overages this slice did not
   widen at the function level.
+- DL-171 the resume target is the lineage's own answer: `Lineage` refuses
+  its own illegal combination, and its two callers stop half-checking it
+  by hand (2026-08-26; boundary.py + cli_common.py + runner_startup.py +
+  test_boundary.py; pays the DL-152 deferred slice "`Lineage.target_period`
+  taking a fallback, because the resume target is decided twice"; no
+  adversarial review this slice, the suite is the gate).
+  THE DUPLICATION. `cli_common.resume_target_period` predicted the resume
+  target with `if lineage.opens_next and lineage.seal is not None: return
+  lineage.seal.next_period.period_id`, else `active_period(run_root)`.
+  `runner_startup._resume_under_lock` enacted it with `if
+  lineage.opens_next: assert anchor is not None and lineage.seal is not
+  None` before opening from the seal. Both restate one fact
+  `boundary.select_seal` already holds by construction: `opens_next` is
+  True only on the committed-seal branch, and that branch always reads a
+  seal first. The invariant was spelled twice and owned by neither.
+  THE RULING. `Lineage` is a frozen dataclass; it now enforces its own
+  invariant in `__post_init__`, raising `AssertionError("opens_next
+  requires seal (Lineage invariant, DL-171)")` if `opens_next` is True and
+  `seal` is `None` -- a combination no caller of `select_seal` can produce,
+  and now none can construct by hand either. `Lineage` gains
+  `target_period(fallback: int) -> int`: the seal's `next_period.period_id`
+  when `opens_next`, else `fallback` -- period-model ss11 step 5's answer,
+  spelled once. `resume_target_period` calls it:
+  `lineage.target_period(active_period(run_root))` when `lineage_of`
+  returns one, `active_period(run_root)` when it does not (DL-169's
+  `lineage_of` is unchanged). `_resume_under_lock`'s assert drops its
+  `lineage.seal is not None` half -- structural now -- and keeps `assert
+  anchor is not None`, a fact about that caller's own wiring (no sentinel,
+  no anchor) that `Lineage` knows nothing of. `target_period` itself keeps
+  one `assert self.seal is not None` under `opens_next`, for mypy's
+  narrowing of `Seal | None` to `Seal`, not as a second check of a business
+  invariant `Lineage` already owns; `_resume_under_lock` keeps the same
+  assert for the same reason, ahead of passing `lineage.seal` to
+  `_open_from_seal`.
+  THE TESTS. Three, all in `test_boundary.py`'s new DL-171 section.
+  `test_dl171_a_lineage_that_opens_next_without_a_seal_is_unconstructable`
+  builds `Lineage(seal=None, opens_next=True)` directly and asserts
+  `AssertionError`, matched on the invariant text.
+  `test_dl171_target_period_reads_the_seals_next_period_when_opens_next`
+  seals a real boundary, reads the committed `Lineage` back through
+  `select_seal`, and asserts `target_period(999)` returns the seal's own
+  `next_period.period_id`, not the fallback.
+  `test_dl171_target_period_falls_back_when_it_does_not_open_next` builds
+  the legal `Lineage(seal=None, opens_next=False)` and asserts
+  `target_period(7) == 7`. No existing test constructed the illegal
+  combination, so none needed editing.
+  THE GATE. 3435 passed, 6 skipped, 2 xfailed; `ruff check src tests`
+  clean; `mypy src` clean; `scripts/arch_check.py` exits 0, seven advisory
+  size notes. Two were newly surfaced by this slice, not pre-existing:
+  `runner_startup.py` and `_resume_under_lock` were sitting exactly at
+  baseline before this diff and crossed it by four lines each, the
+  `anchor`/`seal` comment and the second assert `_resume_under_lock`
+  keeps. `boundary.py`'s overage was already open from prior slices and
+  grew by 18 more lines for `__post_init__` and `target_period`. A
+  `coverage run -m pytest -q` + `coverage report` pass (not one of this
+  slice's four listed gates, run anyway since `runner_startup.py` sits in
+  the 100%-branch-coverage scope) found `runner_startup.py` still at
+  100%; the one gap reported, `runner_access.py:485-486`, is a file this
+  slice never touched and is pre-existing, outside this entry's scope.

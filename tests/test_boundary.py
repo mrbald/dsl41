@@ -35,6 +35,7 @@ from dsl41.boundary import (
     ClosedHead,
     CommittedBoundary,
     EstateAnchor,
+    Lineage,
     OpenHead,
     PeriodSealed,
     SealRequest,
@@ -2057,6 +2058,45 @@ def test_dl170_a_seal_request_refuses_a_coerced_wire_type_directly(tmp_path: Pat
     assert error["loc"] == ("epoch",)
     assert error["type"] == "int_type"
     _close(engine)
+
+
+# ------------------------------------- DL-171: target_period is structural
+
+
+def test_dl171_a_lineage_that_opens_next_without_a_seal_is_unconstructable() -> None:
+    """DL-171: `select_seal` sets `opens_next=True` only on the branch that
+    reads a seal first (`boundary.py`), so `opens_next` without a `seal` to
+    open is a `Lineage` no caller of `select_seal` can build. The
+    combination `cli_common.resume_target_period` and `runner_startup` each
+    used to guard against by hand is now refused at construction, in
+    `Lineage.__post_init__`."""
+    with pytest.raises(AssertionError, match="opens_next requires seal"):
+        Lineage(seal=None, opens_next=True)
+
+
+def test_dl171_target_period_reads_the_seals_next_period_when_opens_next(
+    tmp_path: Path,
+) -> None:
+    """`Lineage.target_period` (period-model ss11 step 5): the seal's own
+    `next_period.period_id` when `opens_next`, regardless of the
+    `fallback` passed in -- the half of `resume_target_period` and
+    `runner_startup`'s duplicated guard that now lives in one place."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    asyncio.run(_seal(engine, _request(engine, staged)))
+    _close(engine)
+    lineage = select_seal(run_root, read_journal(active_wal(run_root)))
+    assert lineage.opens_next is True
+    assert lineage.seal is not None
+    assert lineage.target_period(999) == lineage.seal.next_period.period_id
+
+
+def test_dl171_target_period_falls_back_when_it_does_not_open_next() -> None:
+    """The other half: no committed boundary to open, so `target_period`
+    hands back exactly the `fallback` it was given, untouched."""
+    lineage = Lineage(seal=None, opens_next=False)
+    assert lineage.target_period(7) == 7
 
 
 # ------------------------------------------- ss2.2 the `seal` control verb

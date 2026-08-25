@@ -2641,6 +2641,24 @@ class Lineage:
     #: boundary is done and the opening is not
     opens_next: bool
 
+    def __post_init__(self) -> None:
+        if self.opens_next and self.seal is None:
+            # select_seal only sets opens_next True on the committed-seal
+            # branch (below), which always reads a seal first -- opens_next
+            # without a seal to open is a Lineage no caller of select_seal
+            # can construct (DL-171)
+            raise AssertionError("opens_next requires seal (Lineage invariant, DL-171)")
+
+    def target_period(self, fallback: int) -> int:
+        """period-model ss11 step 5: the period a resume of this root opens
+        into -- the newest segment's period (`fallback`, the caller's to
+        compute), unless this root holds a COMMITTED boundary no engine has
+        opened yet, in which case it is the seal's next period."""
+        if self.opens_next:
+            assert self.seal is not None  # structural: __post_init__ above
+            return self.seal.next_period.period_id
+        return fallback
+
 
 def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage:
     """ss11 step 3: select the seal BY LINEAGE, from what this root holds.

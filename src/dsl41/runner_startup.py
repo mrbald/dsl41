@@ -714,7 +714,11 @@ async def _resume_under_lock(
     opened_period: OpenedPeriod | None = None
     journal: Journal | None = None
     if lineage.opens_next:
-        assert anchor is not None and lineage.seal is not None
+        # anchor is None only with no sentinel, a caller-wiring fact the
+        # seal knows nothing of. seal is not None is structural now
+        # (`Lineage.__post_init__`, DL-171); asserted only for mypy's sake.
+        assert anchor is not None
+        assert lineage.seal is not None
         opened_period = _open_from_seal(
             run_root,
             anchor,

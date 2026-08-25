@@ -354,10 +354,12 @@ def resume_target_period(run_root: Path) -> int:
 
     A root this cannot read falls back to the active period -- these are
     composition questions, and a damaged lineage is the resume's own refusal
-    to make, in its own words (`lineage_of`'s `None`, DL-169)."""
+    to make, in its own words (`lineage_of`'s `None`, DL-169). The
+    opens_next-vs-seal half of the answer is `Lineage.target_period`'s own
+    (DL-171): it is the one place that invariant is spelled."""
     lineage = lineage_of(run_root)
-    if lineage is not None and lineage.opens_next and lineage.seal is not None:
-        return lineage.seal.next_period.period_id
+    if lineage is not None:
+        return lineage.target_period(active_period(run_root))
     return active_period(run_root)
 
 
