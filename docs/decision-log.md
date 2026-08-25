@@ -9087,3 +9087,101 @@ relitigate an entry; append a new one.
   unambiguous local time, and `alias_table` reads `{}` as absent and
   hands back a private copy, with the end-to-end switch between the
   city default and the map. Each mutation-checked.
+- DL-164 per-job non-edge constructs get one channel and one report
+  section: M17 joins the bundle ledger, and R-class edges and redesign
+  flags stop double-printing in Twin exclusions (2026-08-25; backend_uc.py
+  + test_backend_uc.py; pays the second DL-152 deferred slice).
+  THE FINDING, as DL-152 left it: "one channel and one report section for
+  per-job non-edge constructs, deleting the `_terminator_lines` /
+  `_per_job_exclusions` split and the acknowledged double-printing of
+  R-class edges."
+  THE GAP. `_terminator_lines` rendered M17
+  (box_terminator/job_terminator, SEM-14) into the markdown report and
+  nowhere else; `_per_job_exclusions` put M19/M20/M21 (definition-time
+  status) and M34 (resources) into `UcModel.excluded`, which ships IN the
+  `dsl41 uc` bundle. So a bundle consumer applying records for a
+  terminator-bearing catalog was never told the catalog had terminators
+  -- a silent-loss gap (DL-04), not a formatting difference. And two
+  things printed twice: R-class edges once as "Refused constructs" (the
+  rich `_edge_line` form, from `plan.refused`) and again inside "Twin
+  exclusions" (the ledger's plain wording); redesign flags the same way.
+  The report's own preamble admitted the R-class half.
+  THE RULING. `_terminator_lines` is deleted. M17 joins
+  `_per_job_exclusions`, so it lands in `UcModel.excluded` for the first
+  time -- the intended consequence. `UcModel.excluded` keeps its type
+  (`list[str]`) and its order: uc-edge-schema.md (U3a, frozen) says "the
+  bundle's `excluded` ledger carries the twin's list verbatim, in the
+  same file as the records", so this is not a schema slice. Every
+  pre-existing line keeps its exact wording; the only content change is
+  the new M17 lines, appended where `_per_job_exclusions` already
+  appends.
+  The report gets a construction-time tag instead of a text parse. A new
+  `ExclusionKind` (`refused_edge` / `redesign_flag` / `per_job` /
+  `other`) is assigned at the SAME call site that builds each `excluded`
+  string, through one `_exclude(text, kind)` closure inside
+  `compile_twin` that appends to two parallel lists so they cannot drift
+  apart. The tag rides a new `UcModel.excluded_kinds` field, never on
+  `UcBundle` -- the bundle file still carries `excluded` alone, so U3a
+  stays frozen. Four sections now: Refused constructs (rich form,
+  unchanged) and Redesign flags (unchanged); a new "Per-job non-edge
+  constructs" section reading the `per_job`-tagged entries, with a
+  preamble stating they travel in the bundle because a record cannot
+  carry them, and keeping the old M17-only section's A/R-per-case note;
+  and Twin exclusions, now filtered to the `other` tag -- the
+  cross-workflow and serializer exclusions nothing else covers, with the
+  no-longer-true double-print sentence removed from its preamble.
+  `used_rows.add("M17")` survives but no longer reads
+  `_terminator_lines`'s output; it reads the catalog directly (the same
+  `job.box.box_terminator or job.box.job_terminator` predicate
+  `_per_job_exclusions` uses), so the two cannot drift apart. No other
+  per-job row joins `used_rows` as a side effect of the merge.
+  THE PROOF. `UcModel.excluded` dumped for the whole lowerable corpus,
+  before and after, diffs to exactly one added line: `M17 sink_boxed:
+  box_terminator, job_terminator not modeled in the twin v1 (...)`. Every
+  pre-existing line keeps its position and its wording.
+  THE TESTS, each mutation-checked (source broken, test reddened,
+  restored). `test_compile_twin_puts_m17_terminators_in_the_exclusion_ledger`
+  pins the closed gap: M17 lands in `compile_twin(...).excluded` and
+  travels into `compile_to_uc(...).excluded` verbatim.
+  `test_report_r_class_edges_no_longer_double_print_in_twin_exclusions`
+  and `test_report_redesign_flags_no_longer_double_print_in_twin_exclusions`
+  pin that the ledger's plain wording no longer appears anywhere in the
+  report, over the whole corpus, while the rich section form still
+  appears exactly once per edge or flag.
+  `test_report_used_rows_keeps_m17_registered_without_leaking_siblings`
+  probes `used_rows` -- invisible to the rendered report on its own,
+  since no `_U_QUESTIONS` row keys M17 today -- by monkeypatching a
+  temporary question onto each per-job row and reading which ones the
+  report lists: M17 in, M19/M20/M21/M34 out, on both a terminator-bearing
+  and a terminator-free catalog.
+  `test_report_gives_per_job_constructs_their_own_section` replaces the
+  old M17-only report test, and
+  `test_report_renders_the_bundle_exclusion_ledger_and_apply_notes`
+  (DL-151) widens to a fixture carrying both an `other`-tagged and a
+  `per_job`-tagged entry, so both headings are exercised.
+  THE GATE. 3387 passed, 6 skipped; ruff check and ruff format clean on
+  the touched files; `uv run mypy src` (the CI invocation) clean;
+  `scripts/arch_check.py` exits 0 (advisory notes only -- `compile_twin`
+  and `render_migration_report` both cross the script's per-function
+  line/branch thresholds, part of the accumulated drift a review is
+  already due for, not a new blocker from this slice). Standalone `mypy
+  tests/test_backend_uc.py` carries 19 pre-existing errors in this file,
+  identical before and after this change; CI does not run mypy over
+  tests.
+  MAIN-SESSION AMENDMENT, on the diff read. Two lists in step are an
+  invariant nothing was holding: `excluded` and `excluded_kinds` are one
+  table written twice, and `compile_twin`'s `_exclude` closure is the only
+  writer that keeps them in step. A `UcModel` built any other way -- the
+  model is public and `uc_oracle`'s tests construct one directly -- could
+  carry a ledger line with no kind, and the report's two paired reads would
+  then raise a bare `ValueError` out of `zip(..., strict=True)` at render
+  time, far from the mistake. A model validator now refuses the mismatch at
+  construction, which is where a WRONG value is refused everywhere else in
+  this tree. `test_uc_model_refuses_a_ledger_line_with_no_kind` pins both
+  directions plus the empty default, mutation-checked.
+  ONE BRIEF ITEM WAS WRONG, recorded because the implementer was right to
+  push back. The brief named "M34 and M25" as rows that must not reach
+  `used_rows`. M25 is `start_mins` -> Cron trigger, an E-class row with
+  nothing to do with per-job exclusions (stonebranch-semantics M25). The
+  real per-job set is M19/M20/M21 (definition-time status) and M34
+  (resources), which is what the test pins.

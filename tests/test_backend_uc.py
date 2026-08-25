@@ -11,13 +11,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from dsl41.ast_jil import parse_file
 from dsl41.backend_uc import (
     _U_QUESTIONS,
+    UcModel,
     classify_edges,
     compile_to_uc,
     compile_twin,
@@ -1021,15 +1024,22 @@ def test_every_initial_status_names_a_uc_control() -> None:
 def test_report_renders_the_bundle_exclusion_ledger_and_apply_notes() -> None:
     """DL-151: the report rendered neither `bundle.excluded` nor
     `bundle.notes`, so a reader of the markdown could not see what the twin
-    dropped or what a record cannot carry."""
+    dropped or what a record cannot carry.
+
+    DL-164 splits `bundle.excluded` across two report sections -- Twin
+    exclusions (`other`-kind entries) and Per-job non-edge constructs
+    (`per_job`-kind entries) -- so every ledger entry must appear under ONE
+    of the two, not necessarily under the old single heading."""
     catalog = lower_source(
         "insert_job: iced\njob_type: c\ncommand: a\nmachine: m1\nstatus: ON_ICE\n\n"
-        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(iced)\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(iced)\n\n"
+        "insert_job: watcher\njob_type: c\ncommand: c\nmachine: m1\ncondition: n(iced, 1.00)\n"
     )
     graph = derive_graph(catalog)
     bundle = compile_to_uc(catalog, graph)
     report = render_migration_report(catalog, graph)
     assert "## Twin exclusions (recorded, never compiled)" in report
+    assert "## Per-job non-edge constructs (recorded in the bundle ledger)" in report
     assert "## Apply notes (what a workflow record cannot carry)" in report
     for entry in bundle.excluded:
         assert f"- {entry}" in report
@@ -1037,10 +1047,10 @@ def test_report_renders_the_bundle_exclusion_ledger_and_apply_notes() -> None:
         assert f"- {note}" in report
 
 
-def test_report_gives_m17_terminators_their_own_entry() -> None:
-    """DL-151: M17 (box_terminator/job_terminator, SEM-14) had no derive,
-    lint or report path at all -- a catalog full of terminators produced a
-    clean report. It is a named construct, class A/R per case."""
+def test_report_gives_per_job_constructs_their_own_section() -> None:
+    """DL-151 gave M17 (box_terminator/job_terminator, SEM-14) a report-only
+    section; DL-164 replaces it with the merged per-job section that reads
+    from the SAME ledger the bundle ships (one channel)."""
     catalog = lower_source(
         "insert_job: nightly\njob_type: b\n\n"
         "insert_job: killer\njob_type: c\ncommand: a\nmachine: m1\n"
@@ -1049,11 +1059,120 @@ def test_report_gives_m17_terminators_their_own_entry() -> None:
         "box_name: nightly\njob_terminator: y\n"
     )
     report = render_migration_report(catalog)
-    assert "## Terminators (M17 — box_terminator / job_terminator)" in report
-    assert "**M17** `killer`: box_terminator (SEM-14)" in report
-    assert "**M17** `victim`: job_terminator (SEM-14)" in report
+    assert "## Per-job non-edge constructs (recorded in the bundle ledger)" in report
+    assert "M17 killer: box_terminator not modeled in the twin v1" in report
+    assert "M17 victim: job_terminator not modeled in the twin v1" in report
+    bundle = compile_to_uc(catalog)
+    assert any(e.startswith("M17 killer:") for e in bundle.excluded)
+    assert any(e.startswith("M17 victim:") for e in bundle.excluded)
     quiet = lower_source("insert_job: solo\njob_type: c\ncommand: a\nmachine: m1\n")
-    assert "## Terminators" not in render_migration_report(quiet)
+    assert "## Per-job non-edge constructs" not in render_migration_report(quiet)
+
+
+def test_compile_twin_puts_m17_terminators_in_the_exclusion_ledger() -> None:
+    """DL-164 (finding DL-152): M17 used to be report-only via
+    `_terminator_lines`, so a `dsl41 uc` consumer never learned a catalog
+    had terminators -- a silent-loss gap (DL-04), not a formatting nit. M17
+    is now in `_per_job_exclusions`, so it ships IN the bundle."""
+    catalog = lower_source(
+        "insert_job: nightly\njob_type: b\n\n"
+        "insert_job: killer\njob_type: c\ncommand: a\nmachine: m1\n"
+        "box_name: nightly\nbox_terminator: y\n"
+    )
+    (entry,) = [e for e in compile_twin(catalog).excluded if "killer" in e]
+    assert entry.startswith("M17 killer:")
+    assert "box_terminator" in entry and "SEM-14" in entry
+    bundle = compile_to_uc(catalog)
+    assert entry in bundle.excluded  # travels with the records (DL-55)
+
+
+def test_uc_model_refuses_a_ledger_line_with_no_kind() -> None:
+    """DL-164: `excluded` and `excluded_kinds` are one table written twice.
+    A twin built with a ledger line and no kind for it is refused at
+    construction, where the report's paired read would otherwise raise a
+    bare `ValueError` from `zip(..., strict=True)` much later."""
+    with pytest.raises(ValidationError):
+        UcModel(excluded=["M17 killer: something"])
+    with pytest.raises(ValidationError):
+        UcModel(excluded_kinds=["per_job"])
+    # the honest pairing, and the empty default, both stand
+    UcModel(excluded=["M17 killer: something"], excluded_kinds=["per_job"])
+    UcModel()
+
+
+def test_report_r_class_edges_no_longer_double_print_in_twin_exclusions() -> None:
+    """DL-164 (finding DL-152): an R-class edge used to print once in
+    Refused constructs (the rich `_edge_line` form) and again in Twin
+    exclusions (the ledger's plain 'Mxx edge a -> b (R-class)' wording).
+    The plain form must not appear anywhere in the report any more; the
+    rich form still does, once per edge."""
+    catalog = _corpus_catalog()
+    graph = derive_graph(catalog)
+    report = render_migration_report(catalog, graph)
+    plan = classify_edges(graph)
+    assert plan.refused  # corpus has R rows
+    for edge in plan.refused:
+        rich = f"`{edge.src}` →({edge.via}"
+        assert report.count(rich) == 1
+        plain = f"{edge.mapping_row} edge {edge.src} -> {edge.dst} (R-class)"
+        assert plain not in report
+
+
+def test_report_redesign_flags_no_longer_double_print_in_twin_exclusions() -> None:
+    """Same defect as the R-class one, second construct: DL-152 named only
+    the R-class double-print, but redesign flags had the identical bug --
+    once under their own heading, again in Twin exclusions."""
+    catalog = _corpus_catalog()
+    graph = derive_graph(catalog)
+    report = render_migration_report(catalog, graph)
+    assert graph.redesign_flags  # corpus has M27 flags
+    for flag in graph.redesign_flags:
+        rich = f"**{flag.mapping_row}** `{flag.job}`"
+        assert report.count(rich) == 1
+        plain = f"{flag.mapping_row} {flag.job}: {flag.reason}"
+        assert plain not in report
+
+
+def test_report_used_rows_keeps_m17_registered_without_leaking_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DL-164 point 6: `used_rows` must keep registering M17 by whatever
+    replaces `_terminator_lines`, and must NOT pick up M19/M20/M21/M34 as a
+    side effect of merging into `_per_job_exclusions`. `used_rows` is a
+    local variable with no other observable effect (no `_U_QUESTIONS` row
+    depends on M17 today), so probe it with a temporary question wired to
+    each row and read which ones the report lists."""
+    import dsl41.backend_uc as backend_uc
+
+    probe = (
+        ("PROBE17", ("M17",), "probe"),
+        ("PROBE19", ("M19",), "probe"),
+        ("PROBE20", ("M20",), "probe"),
+        ("PROBE21", ("M21",), "probe"),
+        ("PROBE34", ("M34",), "probe"),
+    )
+    monkeypatch.setattr(backend_uc, "_U_QUESTIONS", probe)
+    catalog = lower_source(
+        "insert_job: nightly\njob_type: b\n\n"
+        "insert_job: killer\njob_type: c\ncommand: a\nmachine: m1\n"
+        "box_name: nightly\nbox_terminator: y\n\n"
+        "insert_job: held\njob_type: c\ncommand: b\nmachine: m1\nstatus: ON_HOLD\n\n"
+        "insert_job: iced\njob_type: c\ncommand: c\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: noexec\njob_type: c\ncommand: d\nmachine: m1\nstatus: ON_NOEXEC\n\n"
+        "insert_job: resourced\njob_type: c\ncommand: e\nmachine: m1\n"
+        "resources: (lock1, QUANTITY=1)\n"
+    )
+    report = render_migration_report(catalog)
+    assert "**PROBE17**" in report
+    assert "**PROBE19**" not in report
+    assert "**PROBE20**" not in report
+    assert "**PROBE21**" not in report
+    assert "**PROBE34**" not in report
+    # a catalog with NO terminator must not register M17 either
+    no_term = lower_source(
+        "insert_job: held\njob_type: c\ncommand: b\nmachine: m1\nstatus: ON_HOLD\n"
+    )
+    assert "**PROBE17**" not in render_migration_report(no_term)
 
 
 def test_compile_twin_or_note_states_the_naive_single_successor_join() -> None:

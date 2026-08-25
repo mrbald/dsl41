@@ -48,6 +48,14 @@ Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
 - Report generation never fails on R rows -- the report IS the loud error
   channel; the `dsl41 report` CLI always exits 0 on a generated report
   (the linter is the gate; documented in the command help).
+- Per-job non-edge constructs (M17 terminators, M19/M20/M21 definition-time
+  status, M34 resources) have ONE channel: `_per_job_exclusions` feeds
+  `UcModel.excluded`, which ships in the `dsl41 uc` bundle. The report
+  renders the same ledger; it does not keep a report-only copy (DL-164,
+  paying the second DL-152 deferred slice). Each ledger entry carries a
+  construction-time kind tag (`ExclusionKind`, on `UcModel.excluded_kinds`,
+  never on `UcBundle`) so the report can show a construct in exactly one
+  section without parsing ledger text.
 """
 
 from __future__ import annotations
@@ -55,7 +63,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Literal, NamedTuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
@@ -121,64 +129,29 @@ def _edge_line(edge: DerivedEdge) -> str:
     return line
 
 
-def _terminator_lines(catalog: CatalogIR) -> list[str]:
-    """The M17 report section (SEM-14 box_terminator/job_terminator), or []
-    when the catalog declares none.
+def _bundle_ledger_lines(other_exclusions: list[str], notes: list[str]) -> list[str]:
+    """The bundle's remaining ledger content, rendered into the report:
+    what the twin lowering recorded that no other section already shows,
+    and what a workflow record cannot carry. Both travel IN the bundle
+    (DL-55).
 
-    M17 is a NAMED CONSTRUCT, not an edge: no derived edge carries it, so
-    without this section a catalog full of terminators produced a clean
-    report. The row is A/R per case and states no discriminator, so the
-    report names the construct and leaves the class to a human."""
+    `other_exclusions` excludes the three kinds the report renders under
+    their own heading -- R-class edges (`refused_edge`), redesign flags
+    (`redesign_flag`), and per-job non-edge constructs (`per_job`) -- so
+    nothing here prints twice (DL-164)."""
     lines: list[str] = []
-    for name, job in catalog.jobs.items():
-        flags = ", ".join(
-            flag
-            for flag, on in (
-                ("box_terminator", job.box.box_terminator),
-                ("job_terminator", job.box.job_terminator),
-            )
-            if on
-        )
-        if not flags:
-            continue
-        where = ""
-        if job.span is not None:
-            where = f" — `{job.span.file}:{job.span.line_start}`"
-        lines.append(f"- **M17** `{name}`: {flags} (SEM-14){where}")
-    if not lines:
-        return []
-    return [
-        "",
-        "## Terminators (M17 — box_terminator / job_terminator)",
-        "",
-        "Not an edge and not a record field. UC has no automatic"
-        " kill-siblings-on-my-failure link: emulate with task-level failure"
-        " handling plus workflow Cancel actions. The M17 row is **A/R** per"
-        " case and names no discriminator, so each one is a human decision.",
-        "",
-        *lines,
-    ]
-
-
-def _bundle_ledger_lines(bundle: UcBundle) -> list[str]:
-    """The bundle's own two ledgers, rendered into the report: what the twin
-    lowering recorded instead of compiling, and what a workflow record
-    cannot carry. Both travel IN the bundle (DL-55); the report used to show
-    neither, so a reader of the markdown alone could not see them."""
-    lines: list[str] = []
-    if bundle.excluded:
+    if other_exclusions:
         lines += [
             "",
             "## Twin exclusions (recorded, never compiled)",
             "",
             "The twin lowering's own ledger, verbatim -- every construct it"
-            " recorded instead of compiling (no silent loss, DL-04). The"
-            " `dsl41 uc` bundle carries the same list, which is why the R-class"
-            " edges above appear here a second time, in the bundle's wording.",
+            " recorded instead of compiling (no silent loss, DL-04) that is"
+            " not already shown above under its own heading.",
             "",
-            *[f"- {item}" for item in bundle.excluded],
+            *[f"- {item}" for item in other_exclusions],
         ]
-    if bundle.notes:
+    if notes:
         lines += [
             "",
             "## Apply notes (what a workflow record cannot carry)",
@@ -186,7 +159,7 @@ def _bundle_ledger_lines(bundle: UcBundle) -> list[str]:
             "These travel in the `dsl41 uc` bundle beside the records, so the"
             " records cannot be applied without them (DL-55).",
             "",
-            *[f"- {note}" for note in bundle.notes],
+            *[f"- {note}" for note in notes],
         ]
     return lines
 
@@ -222,6 +195,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
     if calendars:
         used_rows.add("M24")
 
+    twin = compile_twin(catalog, graph)
     bundle = compile_to_uc(catalog, graph)
     lines: list[str] = [
         "# Migration report",
@@ -282,10 +256,27 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
             branches = "; ".join("{" + ", ".join(branch) + "}" for branch in shape.branches)
             lines.append(f"- `{shape.job}`.{shape.attr} ({shape.kind}) branches: {branches}")
             lines.append(f"  - {shape.lowering}")
-    terminator_lines = _terminator_lines(catalog)
-    if terminator_lines:
+    per_job_exclusions = [
+        text
+        for text, kind in zip(twin.excluded, twin.excluded_kinds, strict=True)
+        if kind == "per_job"
+    ]
+    if any(job.box.box_terminator or job.box.job_terminator for job in catalog.jobs.values()):
         used_rows.add("M17")
-        lines += terminator_lines
+    if per_job_exclusions:
+        lines += [
+            "",
+            "## Per-job non-edge constructs (recorded in the bundle ledger)",
+            "",
+            "Definition-time status (M19/M20/M21, SEM-24), resource"
+            " requirements (M34, DL-21), and terminators (M17, SEM-14) are"
+            " per-job, not edges. A workflow record has no field for any of"
+            " them, so they travel in the `dsl41 uc` bundle's exclusion"
+            " ledger instead, verbatim (DL-164). The M17 row is A/R per"
+            " case with no discriminator, so each line is a human decision.",
+            "",
+        ]
+        lines += [f"- {entry}" for entry in per_job_exclusions]
     if graph.external_boundary:
         lines += ["", "## External boundary (M33 — cross-instance producers)", ""]
         for ref in graph.external_boundary:
@@ -320,7 +311,12 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         for workflow in bundle.quarantined:
             lines.append(f"- `{workflow.name}`")
             lines += [f"  - {reason}" for reason in workflow.reasons]
-    lines += _bundle_ledger_lines(bundle)
+    other_exclusions = [
+        text
+        for text, kind in zip(twin.excluded, twin.excluded_kinds, strict=True)
+        if kind == "other"
+    ]
+    lines += _bundle_ledger_lines(other_exclusions, bundle.notes)
     open_questions = [
         (question, dep_rows, why)
         for question, dep_rows, why in _U_QUESTIONS
@@ -395,6 +391,15 @@ class UcWorkflow(BaseModel):
     aliases: list[str] = []
 
 
+#: Report-only classification of one `UcModel.excluded` entry, tagged at
+#: construction time in `compile_twin` (DL-164). The report reads the tag
+#: instead of parsing ledger text, so a construct prints in exactly one
+#: section: `refused_edge` and `redesign_flag` already have their own rich
+#: section (Refused constructs, Redesign flags); `per_job` gets the new
+#: per-job section; `other` is everything Twin exclusions still shows.
+ExclusionKind = Literal["refused_edge", "redesign_flag", "per_job", "other"]
+
+
 class UcModel(BaseModel):
     """One catalog compiled to UC shapes (E/A rows only)."""
 
@@ -406,6 +411,22 @@ class UcModel(BaseModel):
     success_codes: dict[str, list[tuple[int, int]]] = {}
     fail_codes: dict[str, list[tuple[int, int]]] = {}
     excluded: list[str] = []  # human-readable ledger of everything NOT compiled
+    #: `excluded[i]`'s kind, same length and order as `excluded` (DL-164).
+    #: Internal to the report; `UcBundle.excluded` copies `excluded` alone
+    #: -- the bundle file never carries this field (U3a stays frozen).
+    excluded_kinds: list[ExclusionKind] = []
+
+    @model_validator(mode="after")
+    def _kinds_cover_the_ledger(self) -> "UcModel":
+        """The two lists are one table written twice, so a twin that carries
+        a ledger line with no kind is refused HERE rather than at the report,
+        where the paired read would raise a bare `ValueError` from `zip`."""
+        if len(self.excluded_kinds) != len(self.excluded):
+            raise ValueError(
+                f"excluded_kinds has {len(self.excluded_kinds)} entries and excluded has"
+                f" {len(self.excluded)}: every ledger line carries its own kind (DL-164)"
+            )
+        return self
 
 
 #: Which UC control a SEM-24 definition-time status maps to at cutover.
@@ -504,12 +525,21 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
     """
     if graph is None:
         graph = derive_graph(catalog)
-    excluded: list[str] = []
+    excluded_texts: list[str] = []
+    excluded_kinds: list[ExclusionKind] = []
+
+    def _exclude(text: str, kind: ExclusionKind) -> None:
+        """Append one ledger entry with its report-rendering kind, in one
+        place, so `excluded_texts` and `excluded_kinds` never drift apart
+        (DL-164)."""
+        excluded_texts.append(text)
+        excluded_kinds.append(kind)
+
     compiled: list[UcEdge] = []
     global_gates: dict[str, list[UcVarCondition]] = {}  # consumer -> var conds
     for edge in graph.edges:
         if edge.cls == "redesign":
-            excluded.append(f"{edge.mapping_row} edge {edge.src} -> {edge.dst} (R-class)")
+            _exclude(f"{edge.mapping_row} edge {edge.src} -> {edge.dst} (R-class)", "refused_edge")
             continue
         if edge.via == "global":
             # via=="global" iff the edge's atom IS the GlobalAtom (derive's
@@ -521,9 +551,10 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             )
             continue
         if edge.via == "notrunning":
-            excluded.append(
+            _exclude(
                 f"{edge.mapping_row} edge {edge.src} -> {edge.dst}"
-                " (notrunning has no UC edge condition)"
+                " (notrunning has no UC edge condition)",
+                "other",
             )
             continue
         if edge.via == "exitcode":
@@ -560,10 +591,11 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
         edges_in = [e for e in compiled if e.dst == consumer]
         if not edges_in:
             for condition in conditions:
-                excluded.append(
+                _exclude(
                     f"M09 global gate ${condition.name} -> {consumer}"
                     " (consumer has no compiled predecessor edge; async global"
-                    " gates need a redesign, UCS-01)"
+                    " gates need a redesign, UCS-01)",
+                    "other",
                 )
             continue
         primary = conditions[0]
@@ -576,32 +608,36 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             else:
                 ungated += 1  # slot already taken (M08 exitcode var-cond)
         if not attached:
-            excluded.append(
+            _exclude(
                 f"M09 global gate ${primary.name} -> {consumer} (every predecessor"
                 " edge already carries an M08 var_condition; one var_condition per"
-                " edge v1 -- gate needs a redesign)"
+                " edge v1 -- gate needs a redesign)",
+                "other",
             )
         elif ungated:
-            excluded.append(
+            _exclude(
                 f"M09 global gate ${primary.name} -> {consumer} not on every path"
                 f" ({ungated} edge(s) already carry M08 var_conditions; the >=1-"
-                "satisfied join can bypass the gate, UCS-02)"
+                "satisfied join can bypass the gate, UCS-02)",
+                "other",
             )
         for extra in conditions[1:]:
-            excluded.append(
+            _exclude(
                 f"M09 extra global gate ${extra.name} -> {consumer} (one"
-                " var_condition per edge v1; recorded, not compiled)"
+                " var_condition per edge v1; recorded, not compiled)",
+                "other",
             )
     for flag in graph.redesign_flags:
-        excluded.append(f"{flag.mapping_row} {flag.job}: {flag.reason}")
+        _exclude(f"{flag.mapping_row} {flag.job}: {flag.reason}", "redesign_flag")
     if graph.or_shapes:
-        excluded.append(
+        _exclude(
             "M12 OR shapes present: the NAIVE lowering ships -- every branch"
             " attaches to ONE successor, and UC joins conjunctively over"
             " non-skipped incoming edges (UCS-02/03), so independent branches"
             " read as an AND. It reproduces `|` only for common-ancestor"
             " diamonds. The restructure / Task-Monitor / duplicate-successor"
-            " lowerings are U1-gated and NOT emitted"
+            " lowerings are U1-gated and NOT emitted",
+            "other",
         )
     # workflows: boxes first (nested flatten to top), then edge components
     workflows: list[UcWorkflow] = []
@@ -650,18 +686,21 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             # the box IS the workflow, never a task vertex, so a member ->
             # box override edge has no wire form. It is M15 restructuring,
             # not the cross-workflow Task Monitor case below.
-            excluded.append(
+            _exclude(
                 f"M15 edge {e.src} -> {e.dst}: box completion override on a"
                 " transitive member; the box is the workflow itself, not a task"
                 " vertex, so the early exit needs explicit Skip-path"
-                " restructuring at cutover (SEM-12/UCS-04)"
+                " restructuring at cutover (SEM-12/UCS-04)",
+                "other",
             )
             continue
-        excluded.append(
+        _exclude(
             f"{e.mapping_row} edge {e.src} -> {e.dst} spans workflows"
-            " (Task Monitor territory, M02/M03; not modeled v1)"
+            " (Task Monitor territory, M02/M03; not modeled v1)",
+            "other",
         )
-    excluded += _per_job_exclusions(catalog)
+    for text in _per_job_exclusions(catalog):
+        _exclude(text, "per_job")
     return UcModel(
         workflows=workflows,
         mutex_groups=[list(g) for g in graph.mutex_groups],
@@ -680,7 +719,8 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             for name, job in catalog.jobs.items()
             if job.sem.fail_codes is not None
         },
-        excluded=excluded,
+        excluded=excluded_texts,
+        excluded_kinds=excluded_kinds,
     )
 
 
@@ -690,7 +730,11 @@ def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
     SEM-24/DL-18 definition-time state: recorded, never silently dropped --
     the AutoSys-vs-twin comparator diverging on such catalogs is the correct
     polarity. Each status keeps its OWN row and its own cutover control
-    (INITIAL_STATUS_CONTROL). M34 resources ride here too (DL-21)."""
+    (INITIAL_STATUS_CONTROL). M34 resources ride here too (DL-21), and so
+    does M17 (box_terminator/job_terminator, SEM-14) since DL-164: it used
+    to be a report-only section (`_terminator_lines`, deleted) that never
+    reached the `dsl41 uc` bundle, so a bundle consumer had no way to learn
+    a catalog carried terminators. One channel now: this ledger."""
     out: list[str] = []
     for name, job in catalog.jobs.items():
         initial = job.sem.initial_status
@@ -708,6 +752,20 @@ def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
             out.append(
                 f"M34 {name}: resource requirements ({groups}) not modeled in the"
                 " twin v1 (map to UC Virtual Resources, UCS-09; DL-21)"
+            )
+        flags = ", ".join(
+            flag
+            for flag, on in (
+                ("box_terminator", job.box.box_terminator),
+                ("job_terminator", job.box.job_terminator),
+            )
+            if on
+        )
+        if flags:
+            out.append(
+                f"M17 {name}: {flags} not modeled in the twin v1 (no UC"
+                " kill-siblings-on-failure link; emulate with task-level failure"
+                " handling plus workflow Cancel actions; A/R per case, SEM-14)"
             )
     return out
 
