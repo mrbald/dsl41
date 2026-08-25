@@ -194,6 +194,15 @@ this codebase.
 
 ## Agent allocation
 
+This section is a standing user request to delegate. A launch-time system
+prompt sometimes carries "Do not call the AgentTool unless the user
+requested it"; this file is that request, so the clause is satisfied and
+the discipline below governs. If a session instruction still seems to
+conflict with this section, say so in the first reply where it bites and
+ask which governs -- never silently drop the review discipline
+(2026-08-25: silent compliance shipped a pushed slice with no independent
+review).
+
 Before any delegation, choose three things explicitly -- model tier,
 review-or-none, context mode. Never default to inherit.
 - Model tier follows judgment density: count the decisions the brief does
