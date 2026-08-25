@@ -268,7 +268,8 @@ def seal(
 
 
 def _committed_boundary(run_root: Path, request_id: "str | None") -> "Seal | None":
-    """The committed boundary `--request-id` names, if this root holds one.
+    """The committed boundary `--request-id` names, if this root's LINEAGE
+    holds one (period-model ss2.2, DL-169).
 
     ss2.2 promises that an exact retry of a committed boundary is answered
     from the next period, and the engine keys that answer on the request
@@ -278,23 +279,45 @@ def _committed_boundary(run_root: Path, request_id: "str | None") -> "Seal | Non
     is refused as a collision: the promised route was unreachable from this
     CLI until DL-151. The seal is where the boundary-time envelope survives.
 
-    Exactly one seal back, like the engine's own route (PR-30e). A root this
-    cannot read offers no retry and the ordinary path answers -- the CLI is
-    composing a request here, not auditing a lineage."""
+    Proved by `cli_common.lineage_of` (`boundary.select_seal`), never by
+    which sidecar FILES happen to exist. `period.sealed_periods` lists every
+    file under `seals/`, "whether or not it also holds the segment that
+    re-derives it" (its own docstring) -- so its newest entry can be an
+    ORPHAN, a sidecar a crash wrote between that write and the `seal`
+    record's WAL append. ss2.2 is explicit that "an orphan sidecar is
+    ignored by rule" and "only a committed seal is ever deduplicated": a
+    glob answered a retry from exactly the evidence the rule refuses, and a
+    retry aimed at an orphan read back "already closed" for a period that
+    never closed (DL-169). `select_seal` is the same lineage proof the live
+    route's engine carries in `EstateHome.prior_seal_record`
+    (`ControlServer._committed_seal`) -- either the `seal` record branch, or
+    the `opens_from_seal` digest-link branch that keeps a rolled root
+    answerable once its predecessor WAL is lawfully pruned (PR-02a/PR-30e).
+
+    Called fresh here rather than threading an engine's `prior_seal_record`
+    through: `_offline_seal` has just resumed one and could pass it along,
+    but review found that path strictly weaker -- it skips `select_seal`'s
+    own digest re-verification, and it turns a MISSING sidecar's ss11
+    refusal into a silent `None`, which would let a second boundary be
+    driven against one that is durably committed but briefly unreadable.
+    `_live_seal` has no resume to draw from at all, so one shared fresh
+    read here -- rather than two designs, one per caller -- is also the
+    simpler shape (DL-169).
+
+    `_live_seal`'s call reads a WAL a live engine may be appending to right
+    now, which the glob never did. Safe by the same rule `read_journal`
+    already states for a crash: the WAL is append-only, so a read racing a
+    write can only ever tear the LAST line, and a torn final line is
+    dropped, not raised (`runner_journal.read_journal`)."""
     if request_id is None:
         return None
-    from dsl41.boundary import read_seal
-    from dsl41.period import sealed_periods
-    from dsl41.runner_clock import EngineError
+    from dsl41.cli_common import lineage_of
 
-    try:
-        periods = sealed_periods(run_root)
-        if not periods:
-            return None
-        seal = read_seal(run_root, periods[-1])
-    except (OSError, ValueError, KeyError, EngineError):
+    lineage = lineage_of(run_root)
+    if lineage is None:
         return None
-    return seal if seal.boundary_request.request_id == request_id else None
+    seal = lineage.seal
+    return seal if seal is not None and seal.boundary_request.request_id == request_id else None
 
 
 def _live_seal(

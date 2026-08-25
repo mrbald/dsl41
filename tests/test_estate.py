@@ -1628,3 +1628,147 @@ def test_pr30c_the_same_request_id_under_another_envelope_is_a_collision(
     assert collision.exit_code == 2
     assert "different envelope" in collision.output
     assert sealed_periods(run_root) == [1]
+
+
+# --------------------------------- ss2.2 the retry route answers by LINEAGE,
+# --------------------------------- never by which sidecar file exists (DL-169)
+
+
+def _staged_manifest_of(run_root: Path, jil: Path) -> tuple[CatalogIR, Any]:
+    """The parse -> lower -> bundle -> stage chain `_orphaned_root` needs
+    twice (C1, then C2), factored so it carries one copy instead of two.
+    Returns the catalog alongside the staged manifest: `start_run` needs
+    both and a caller re-parsing to get the catalog back would just be this
+    function's own first two lines, inlined a second time."""
+    parsed = [parse(jil.read_text(), file=str(jil))]
+    catalog = lower_catalog(parsed)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(
+            run_root, [SourceFile(path=str(jil), text=render_preserve(parsed[0]))]
+        ),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    return catalog, staged
+
+
+def _orphaned_root(run_root: Path, c1: Path, c2: Path, request_id: str, actor: str) -> None:
+    """A period-1 root staged like `_native_root` builds one (parse, lower,
+    bundle, stage, `start_run`), except the FIRST seal attempt crashes right
+    after the sidecar write and before the `seal` record append
+    (`Engine.crash_point`, `boundary.commit_boundary`'s `after_sidecar`
+    stage) -- ss3's crash window, real and not forged. The sidecar this
+    leaves on disk is the one `close_runtime` actually wrote; the WAL never
+    gets the `seal` record that would name it, and C1 stays open (DL-169).
+
+    Never reaches quiescence and never calls `shutdown` -- the crash IS the
+    exit, and `submit_seal`'s own future carries the refusal `_native_root`
+    has no equivalent of."""
+    from dsl41.boundary import SealRequest, stage_next_period
+
+    catalog, staged = _staged_manifest_of(run_root, c1)
+    started = start_run(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters={"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()},
+        staged=staged,
+    )
+
+    def crash(name: str) -> None:
+        if name == "after_sidecar":
+            raise EngineError(f"crash at {name}")
+
+    started.crash_point = crash  # type: ignore[method-assign]
+    _, next_manifest = _staged_manifest_of(run_root, c2)
+    next_staged = stage_next_period(run_root, staged_manifest=next_manifest)
+    request = SealRequest(
+        baseline_id=started.baseline_id,
+        epoch=started.epoch,
+        request_id=request_id,
+        next_period=next_staged,
+        stage_digest=next_staged.stage_digest,
+        force_seal=False,
+        claimed_actor=actor,
+    )
+
+    async def scenario() -> None:
+        future = started.submit_seal(request)
+        await started.run_until_quiescent(started.clock.now())
+        assert future.done()
+        with pytest.raises(EngineError):
+            future.result()
+
+    asyncio.run(scenario())
+    assert started.journal is not None
+    started.journal.close()
+
+
+def test_dl169_an_orphan_retry_drives_a_fresh_boundary_not_already_closed(
+    tmp_path: Path,
+) -> None:
+    """ss2.2: an orphan sidecar -- the crash window between the sidecar
+    write and the `seal` record append -- names nothing until the record
+    lands, and only a committed seal is ever deduplicated. Globbing
+    `seals/` for the newest FILE (`period.sealed_periods`) reads exactly the
+    evidence the rule says to ignore: a retry under the crashed attempt's
+    own request_id matched the orphan and answered "already closed" for a
+    period that never closed. `_committed_boundary` now answers from
+    `boundary.select_seal`'s lineage instead, which finds nothing committed
+    here and lets the retry drive a fresh boundary (DL-169)."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _orphaned_root(run_root, c1, c2, "r-orphan", "tester@ci")
+
+    # the crash is real: a genuine sidecar sits on disk, unclaimed by any
+    # `seal` record, and C1 is still open
+    assert seal_path(run_root, 1).exists()
+    assert sealed_periods(run_root) == [1]
+    assert read_journal(wal_path(run_root, 1))[-1]["rec"] != "seal"
+    assert isinstance(_head(run_root), OpenHead)
+
+    retried = _seal_next(run_root, c2, "--request-id", "r-orphan", "--claimed-actor", "tester@ci")
+    assert retried.exit_code == 0, retried.output
+    assert "already closed" not in retried.output
+
+    seal = read_seal(run_root, 1)
+    assert seal.boundary_request.request_id == "r-orphan"
+    records = read_journal(wal_path(run_root, 1))
+    assert records[-1]["rec"] == "seal" and records[-1]["digest"] == seal.digest
+    head = _head(run_root)
+    assert isinstance(head, ClosedHead) and head.seal_digest == seal.digest
+
+
+def test_dl169_a_rolled_roots_retry_still_answers_from_the_imported_sidecar(
+    tmp_path: Path,
+) -> None:
+    """ss11 step 3's other branch: a rolled root never holds the
+    predecessor's WAL or `seal` record, so `select_seal` proves the imported
+    sidecar by its successor's `opens_from_seal` digest link instead. This
+    is the case the glob got right BY ACCIDENT -- root B holds exactly one
+    sidecar and it happens to be the legitimately imported one -- and the
+    fix must not lose it (PR-02a/PR-30e)."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    root_a = tmp_path / "a"
+    _native_root(root_a, c1)
+    assert (
+        _seal_next(root_a, c2, "--request-id", "r-roll", "--claimed-actor", "tester@ci").exit_code
+        == 0
+    )
+    assert _invoke("audit", "--run-root", str(root_a)).exit_code == 0
+    anchor_dir = default_anchor_dir(root_a)
+    root_b = tmp_path / "b"
+    _roll(root_b, anchor_dir, c2)
+    assert wal_path(root_b, 2).exists()
+    assert not wal_path(root_b, 1).exists()  # the predecessor WAL, genuinely absent
+    assert sealed_periods(root_b) == [1]  # the imported copy is what stands in for it
+
+    retried = _seal_next(
+        root_b, c2, "--request-id", "r-roll", "--claimed-actor", "tester@ci",
+        "--estate-anchor", str(anchor_dir),
+    )
+    assert retried.exit_code == 0, retried.output
+    assert "already closed" in retried.output and "period 1" in retried.output
+    assert "This root is at period 2" in retried.output
+    assert sealed_periods(root_b) == [1]  # no second boundary

@@ -9788,3 +9788,121 @@ relitigate an entry; append a new one.
   json.JSONDecodeError` and every reader's `except (CanonError,
   ValidationError)` -- the same defect class DL-151 closed for
   `UnicodeDecodeError`, unrelated to this entry's diff, pre-dating it.
+- DL-169 the offline seal retry answers from lineage, not from a glob
+  (2026-08-25; cli_estate.py + cli_common.py + docs/period-model.md +
+  test_estate.py; pays DL-152's `_committed_seal` retry-rule slice,
+  upgraded from a deferred doc-and-implementation pairing to a live code
+  defect).
+  THE DEFECT, verified before this slice started. ss3's three writes at a
+  boundary are the sidecar, the `seal` record's WAL append, and the anchor
+  CAS, in that order. A crash between the first two leaves an ORPHAN: a
+  real sidecar, no record naming it. ss2.2 is explicit that "an orphan
+  sidecar is ignored by rule" and "only a committed seal is ever
+  deduplicated". `runner_control._committed_seal`, the live route, reads
+  `estate.prior_seal_record`, a projection of whatever `select_seal` last
+  proved by lineage -- committed by construction. `cli_estate.
+  _committed_boundary`, the offline route, did not: it globbed
+  `period.sealed_periods(run_root)[-1]`, the newest FILE under `seals/`,
+  which `sealed_periods`'s own docstring says is listed "whether or not it
+  also holds the segment that re-derives it" -- and `read_seal` parsed it
+  with no lineage check at all. A retry of the crashed attempt's own
+  request_id matched the orphan, and `_answer_from_committed` answered exit
+  0: "already closed", a period at N+1, and nothing to re-drive -- three
+  false claims, while C1 sat open forever. The mismatched-fingerprint arm
+  had the same wrong evidence.
+  THE FIX. One evidence rule for both CLI routes: a retry is answered only
+  from a seal `boundary.select_seal` proves committed by lineage -- the
+  `seal`-record branch, or the `opens_from_seal` digest-link branch that
+  keeps a rolled root answerable once its predecessor WAL is lawfully
+  pruned (PR-02a/PR-30e). `_committed_boundary` calls `select_seal` fresh,
+  every time, through a new shared helper, `cli_common.lineage_of`, rather
+  than re-deriving the same three-line read `resume_target_period` already
+  carried the DL-149 reasoning for -- one copy instead of two that had
+  already drifted (DL-72). `_live_seal` moves off the glob the same way;
+  it never resumed anything and always selected fresh. Orphan self-healing
+  is unchanged: a fresh attempt re-drives the boundary and overwrites the
+  orphan sidecar at the same path.
+  THE HANDLE CHOICE, revised after review. The first cut of this slice
+  threaded `_offline_seal`'s own resumed `Engine.estate.prior_seal_record`
+  through an optional parameter, to avoid a second `select_seal` call after
+  `resume_run`'s own. Adversarial review found that path was not an
+  optimization: it is strictly WEAKER evidence. It skips `select_seal`'s
+  own digest re-verification against the naming record; it checks
+  `request_id` on the projected dict but never re-checks
+  `boundary_request.request_id` on the `Seal` object the function returns;
+  and it turns a MISSING sidecar's ss11 refusal ("the boundary is
+  unrecoverable, and there is nothing honest to degrade to") into a silent
+  `None`, which would let `_drive_boundary` open a SECOND boundary against
+  one that is durably committed but became briefly unreadable. It also
+  bought nothing: `resume_run` always leaves `estate_wal(run_root)` pointed
+  at the segment whose own `select_seal` answer is exactly the one the
+  resume already computed (three exhaustive cases -- opened from a seal,
+  already open from an earlier one, or no seal at all -- checked by
+  disabling the branch and running the whole file: unchanged). The reuse
+  parameter and branch are gone; `_committed_boundary` is four lines and
+  one call.
+  THE TESTS. `test_dl169_an_orphan_retry_drives_a_fresh_boundary_not_already_closed`
+  builds a genuine orphan with `Engine.crash_point` at `after_sidecar`
+  (`boundary.commit_boundary`'s own crash-matrix seam, not a forged
+  sidecar) -- a real attempt that writes the durable sidecar and dies
+  before the WAL append -- then retries under the same request_id and
+  asserts the period actually closes, not "already closed".
+  `test_dl169_a_rolled_roots_retry_still_answers_from_the_imported_sidecar`
+  is the case the glob got right by accident: a rolled root (`estate.
+  roll_into_root`) holds the imported sidecar and a successor segment
+  naming it by `opens_from_seal` digest, genuinely no predecessor WAL
+  (asserted, not merely claimed, on review), and the retry still answers
+  from it.
+  `test_pr30e_the_cli_retry_of_a_committed_boundary_closes_no_second_period`
+  already pinned the committed-retry case and
+  `test_pr30c_the_same_request_id_under_another_envelope_is_a_collision`
+  already pinned the collision arm over a committed seal, offline -- both
+  pass unmodified and neither needed a new test.
+  Mutation-checked twice, once per handle design: `_committed_boundary`
+  reverted to the old glob (`git show HEAD:src/dsl41/cli_estate.py`)
+  reddens exactly the orphan test, on the false "already closed" message
+  the finding describes; the rolled-root test stays green under the glob,
+  confirming it is the accidental-agreement case and not a new hole. Both
+  runs restored the tree byte-identical afterward.
+  THE DOC. period-model.md ss2.2 gets one sentence, beside the live
+  route's own description: `dsl41 seal`, live or offline, composes its
+  request against the same rule from a fresh `select_seal` read, never
+  from which sidecar file exists under `seals/` (DL-169).
+  THE GATE. 3431 passed, 6 skipped, 2 xfailed; `ruff check src tests`
+  clean; `mypy src` clean; `scripts/arch_check.py` exits 0, four advisory
+  size notes, all pre-existing baseline overages this slice did not widen
+  at the function level.
+  THE REVIEW, and what it changed. Opus, fresh context, two blockers, two
+  majors, three minors, two nits, verdict SHIP WITH FIXES -- all acted.
+  Blocker: the brief handed the reviewer only two files; the doc hunk in
+  period-model.md was the normative half of the slice and was missing from
+  it, caught before it could be reviewed blind. Blocker: this entry did
+  not exist yet when the review ran (a sequencing gap, not a doc gap --
+  DL-110's gate is for content, not ordering; noted so a future brief
+  writes the entry before or asks the reviewer to check for it). Major:
+  the `prior_seal_record` reuse branch, above. Major: the fresh-select
+  three lines duplicated `resume_target_period`'s exactly, DL-72's
+  drift-is-the-bug case caught inside one PR rather than across two;
+  folded into `lineage_of`. Minor: the docstring called write 2 "the
+  `seal` record's CAS", collapsing it with write 3 in a file whose whole
+  subject is telling three writes apart -- reworded to "the `seal`
+  record's WAL append". Minor: the offline evidence-reuse docstring
+  claimed it saved walking the WAL "a second time"; the WAL had already
+  been walked twice by that point (`resume_target_period`, then
+  `_resume_under_lock`) -- moot once the branch it described was deleted.
+  Minor: the rolled-root test asserted `sealed_periods(root_b) == [1]`
+  under a comment claiming no predecessor WAL, a claim the assertion did
+  not check -- `assert not wal_path(root_b, 1).exists()` added. Declined:
+  a live-path test for an engine resumed over an orphan sidecar (the live
+  analogue of this defect, newly reachable now that `_live_seal` reads the
+  WAL instead of a sidecar) needs a crash hook inside a real subprocess
+  engine, which no test in this suite has a way to install -- recorded
+  here as a known gap rather than built or silently dropped. Declined:
+  collapsing `_orphaned_root`'s remaining overlap with `_native_root`
+  further than the `_staged_manifest_of` extraction already done, for the
+  same reason the review itself called the rest "cosmetic".
+  Also folded in without a separate finding: `_live_seal`'s
+  `_committed_boundary` call now reads a WAL a live engine may be
+  appending to, which the glob never did -- noted in the docstring as safe
+  by `read_journal`'s own append-only/torn-tail rule, the same one that
+  already covers a crash mid-append.

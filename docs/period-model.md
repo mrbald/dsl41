@@ -786,7 +786,10 @@ of period N+1 keeps the `seal` record it opened from and checks an incoming
 `seal` request's `(request_id, fingerprint)` against it **before** the
 current-baseline check; a match is answered from that record. The lookup
 reaches exactly one seal back: a retry of an older seal is refused as a stale
-baseline, which is a liveness loss and not a safety one (PR-30e). **An
+baseline, which is a liveness loss and not a safety one (PR-30e). The `dsl41
+seal` CLI, live or offline, composes its own request against the same rule
+from a fresh `boundary.select_seal` read of the root's lineage, never from
+which sidecar FILE happens to exist under `seals/` (DL-169). **An
 uncommitted seal request is unseen.** The `seal` record is the boundary's
 commit, and only a *committed* seal is consulted by the retry route; the sidecar
 also carries the request identity in `boundary_request` — because a physical

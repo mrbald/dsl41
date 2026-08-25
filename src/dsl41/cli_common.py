@@ -27,7 +27,7 @@ from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:
-    from dsl41.boundary import EstateWalk
+    from dsl41.boundary import EstateWalk, Lineage
 
 
 # ------------------------------------------------- the shared options
@@ -308,6 +308,35 @@ def active_period(run_root: Path) -> int:
         return GENESIS_PERIOD_ID
 
 
+def lineage_of(run_root: Path) -> "Lineage | None":
+    """ss11 step 3's answer for this root's CURRENT active segment --
+    `boundary.select_seal` over `estate_wal(run_root)` -- or `None` when the
+    root cannot be read.
+
+    Shared by every CLI reader that needs the one question `select_seal`
+    answers: which seal, if any, this root's lineage proves committed right
+    now. `resume_target_period` asks it to find which period a resume opens
+    into; `cli_estate._committed_boundary` asks it to find which seal, if
+    any, a `--request-id` retry may match. Two copies of this read had
+    already drifted -- one carried the DL-149 reasoning below and the other
+    did not -- before this function existed to hold it once (DL-169).
+
+    `None` on any read failure, not `EngineError` alone: `select_seal` reads
+    its period numbers with a bare `int()`, so a hand-built record can raise
+    `ValueError` or `KeyError` here, and a caller that let anything but a
+    refusal escape turned a damaged lineage into an exit-1 traceback (the
+    DL-149 rule)."""
+    from dsl41.boundary import select_seal
+    from dsl41.period import estate_wal
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_journal import read_journal
+
+    try:
+        return select_seal(run_root, read_journal(estate_wal(run_root)))
+    except (OSError, ValueError, KeyError, EngineError):
+        return None
+
+
 def resume_target_period(run_root: Path) -> int:
     """The period a resume of this root OPENS INTO (period-model ss11 step 5).
 
@@ -325,21 +354,9 @@ def resume_target_period(run_root: Path) -> int:
 
     A root this cannot read falls back to the active period -- these are
     composition questions, and a damaged lineage is the resume's own refusal
-    to make, in its own words. The net is the loader's whole failure
-    surface, not `EngineError` alone: `select_seal` reads its period numbers
-    with a bare `int()`, so a hand-built record can raise `ValueError` or
-    `KeyError` here, and the callers turn anything but a refusal into an
-    exit-1 traceback (the DL-149 rule)."""
-    from dsl41.boundary import select_seal
-    from dsl41.period import estate_wal
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_journal import read_journal
-
-    try:
-        lineage = select_seal(run_root, read_journal(estate_wal(run_root)))
-    except (OSError, ValueError, KeyError, EngineError):
-        return active_period(run_root)
-    if lineage.opens_next and lineage.seal is not None:
+    to make, in its own words (`lineage_of`'s `None`, DL-169)."""
+    lineage = lineage_of(run_root)
+    if lineage is not None and lineage.opens_next and lineage.seal is not None:
         return lineage.seal.next_period.period_id
     return active_period(run_root)
 
