@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from dsl41.ast_jil import parse_file
@@ -42,6 +41,12 @@ def _corpus_catalog() -> CatalogIR:
     return lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
 
 
+def _excluded_texts(model: UcModel) -> list[str]:
+    """Ledger text alone, in order -- `excluded`/`excluded_kinds` collapsed
+    into `excluded_entries` (DL-164)."""
+    return [e.text for e in model.excluded_entries]
+
+
 # ------------------------------------------------------------- edge classification
 
 
@@ -55,14 +60,14 @@ def test_compile_twin_records_definition_time_status_in_exclusion_ledger() -> No
         "status: ON_HOLD\ncondition: s(seedx)\n"
     )
     model = compile_twin(catalog)
-    (entry,) = [e for e in model.excluded if "heldx" in e]
+    (entry,) = [e for e in _excluded_texts(model) if "heldx" in e]
     assert entry.startswith("M20 heldx:")
     assert "ON_HOLD" in entry
     # INACTIVE is the implicit default: not ledger-worthy
     inactive = lower_source(
         "insert_job: quietx\njob_type: c\ncommand: x\nmachine: m1\nstatus: INACTIVE\n"
     )
-    assert not [e for e in compile_twin(inactive).excluded if "quietx" in e]
+    assert not [e for e in _excluded_texts(compile_twin(inactive)) if "quietx" in e]
 
 
 def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> None:
@@ -72,7 +77,7 @@ def test_compile_twin_records_resource_requirements_in_exclusion_ledger() -> Non
         "insert_job: resx\njob_type: c\ncommand: x\nmachine: m1\n"
         "resources: (lock1, QUANTITY=2, FREE=A) and (pool1, QUANTITY=1)\n"
     )
-    (entry,) = [e for e in compile_twin(catalog).excluded if "resx" in e]
+    (entry,) = [e for e in _excluded_texts(compile_twin(catalog)) if "resx" in e]
     assert entry.startswith("M34 resx:")
     assert "lock1 x2 FREE=A" in entry and "pool1 x1" in entry
 
@@ -248,7 +253,7 @@ def test_compile_to_uc_notes_carry_apply_worklist_and_excluded_ledger() -> None:
     bundle = compile_to_uc(catalog)
     assert any(note.startswith("referenced tasks must exist") for note in bundle.notes)
     assert any("names pass through verbatim" in note for note in bundle.notes)
-    assert bundle.excluded == compile_twin(catalog).excluded
+    assert bundle.excluded == _excluded_texts(compile_twin(catalog))
     assert bundle.excluded  # the corpus has R rows/resources: ledger non-empty
 
 
@@ -339,7 +344,7 @@ def test_compile_to_uc_excluded_ledger_empty_when_twin_excludes_nothing() -> Non
         "insert_job: extract\njob_type: c\ncommand: a\nmachine: m1\n\n"
         "insert_job: load\njob_type: c\ncommand: b\nmachine: m1\ncondition: s(extract)\n"
     )
-    assert compile_twin(catalog).excluded == []
+    assert compile_twin(catalog).excluded_entries == []
     bundle = compile_to_uc(catalog)
     assert any(note.startswith("referenced tasks must exist") for note in bundle.notes)
     assert any("names pass through verbatim" in note for note in bundle.notes)
@@ -978,7 +983,7 @@ def test_compile_twin_ledgers_member_to_box_edge_as_m15_restructuring() -> None:
         "insert_job: step1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nightly\n"
     )
     model = compile_twin(catalog)
-    (entry,) = [e for e in model.excluded if e.startswith("M15 edge")]
+    (entry,) = [e for e in _excluded_texts(model) if e.startswith("M15 edge")]
     assert "step1 -> nightly" in entry
     assert "Skip-path restructuring" in entry
     assert "spans workflows" not in entry
@@ -993,7 +998,7 @@ def test_compile_twin_ledgers_each_initial_status_under_its_own_row() -> None:
         "insert_job: icedj\njob_type: c\ncommand: b\nmachine: m1\nstatus: ON_ICE\n\n"
         "insert_job: noexecj\njob_type: c\ncommand: c\nmachine: m1\nstatus: ON_NOEXEC\n"
     )
-    ledger = compile_twin(catalog).excluded
+    ledger = _excluded_texts(compile_twin(catalog))
     (held,) = [e for e in ledger if "heldj" in e]
     (iced,) = [e for e in ledger if "icedj" in e]
     (noexec,) = [e for e in ledger if "noexecj" in e]
@@ -1079,25 +1084,11 @@ def test_compile_twin_puts_m17_terminators_in_the_exclusion_ledger() -> None:
         "insert_job: killer\njob_type: c\ncommand: a\nmachine: m1\n"
         "box_name: nightly\nbox_terminator: y\n"
     )
-    (entry,) = [e for e in compile_twin(catalog).excluded if "killer" in e]
+    (entry,) = [e for e in _excluded_texts(compile_twin(catalog)) if "killer" in e]
     assert entry.startswith("M17 killer:")
     assert "box_terminator" in entry and "SEM-14" in entry
     bundle = compile_to_uc(catalog)
     assert entry in bundle.excluded  # travels with the records (DL-55)
-
-
-def test_uc_model_refuses_a_ledger_line_with_no_kind() -> None:
-    """DL-164: `excluded` and `excluded_kinds` are one table written twice.
-    A twin built with a ledger line and no kind for it is refused at
-    construction, where the report's paired read would otherwise raise a
-    bare `ValueError` from `zip(..., strict=True)` much later."""
-    with pytest.raises(ValidationError):
-        UcModel(excluded=["M17 killer: something"])
-    with pytest.raises(ValidationError):
-        UcModel(excluded_kinds=["per_job"])
-    # the honest pairing, and the empty default, both stand
-    UcModel(excluded=["M17 killer: something"], excluded_kinds=["per_job"])
-    UcModel()
 
 
 def test_report_r_class_edges_no_longer_double_print_in_twin_exclusions() -> None:
@@ -1184,7 +1175,7 @@ def test_compile_twin_or_note_states_the_naive_single_successor_join() -> None:
         "insert_job: b1\njob_type: c\ncommand: b\nmachine: m1\n\n"
         "insert_job: c1\njob_type: c\ncommand: c\nmachine: m1\ncondition: s(a1) | s(b1)\n"
     )
-    (note,) = [e for e in compile_twin(catalog).excluded if e.startswith("M12 OR shapes")]
+    (note,) = [e for e in _excluded_texts(compile_twin(catalog)) if e.startswith("M12 OR shapes")]
     assert "every branch" in note and "ONE successor" in note
     assert "U1-gated and NOT emitted" in note
     assert "duplicate-successor join semantics apply" not in note

@@ -9177,8 +9177,10 @@ relitigate an entry; append a new one.
   then raise a bare `ValueError` out of `zip(..., strict=True)` at render
   time, far from the mistake. A model validator now refuses the mismatch at
   construction, which is where a WRONG value is refused everywhere else in
-  this tree. `test_uc_model_refuses_a_ledger_line_with_no_kind` pins both
-  directions plus the empty default, mutation-checked.
+  this tree. test_uc_model_refuses_a_ledger_line_with_no_kind pins both
+  directions plus the empty default, mutation-checked (that test and the
+  validator it pinned were deleted when the two lists became one
+  `ExclusionEntry` list, DL-167).
   ONE BRIEF ITEM WAS WRONG, recorded because the implementer was right to
   push back. The brief named "M34 and M25" as rows that must not reach
   `used_rows`. M25 is `start_mins` -> Cron trigger, an E-class row with

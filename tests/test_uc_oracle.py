@@ -101,6 +101,12 @@ def make_model(
     )
 
 
+def _excluded_texts(model: UcModel) -> list[str]:
+    """Ledger text alone, in order -- `excluded`/`excluded_kinds` collapsed
+    into `excluded_entries` (DL-164)."""
+    return [e.text for e in model.excluded_entries]
+
+
 # ===================================================== 1. UCS unit tests: the twin alone
 
 
@@ -595,7 +601,7 @@ def test_r_classified_edge_is_excluded_and_ledgered() -> None:
     design decision, not a translation)."""
     text = "insert_job: cons_r\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod^PRD)\n"
     model = compile_twin(lower_source(text))
-    assert model.excluded == ["M33 edge prod^PRD -> cons_r (R-class)"]
+    assert _excluded_texts(model) == ["M33 edge prod^PRD -> cons_r (R-class)"]
     assert all(not wf.edges for wf in model.workflows)
 
 
@@ -607,7 +613,7 @@ def test_run_window_job_is_excluded_with_an_m27_ledger_entry() -> None:
         'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\nrun_window: "02:00-04:00"\n'
     )
     model = compile_twin(lower_source(text))
-    assert any(e.startswith("M27 rw_job:") for e in model.excluded)
+    assert any(e.startswith("M27 rw_job:") for e in _excluded_texts(model))
     (wf,) = model.workflows
     assert wf.tasks == ["rw_job"]
 
@@ -621,7 +627,9 @@ def test_lookback_qualified_notrunning_edge_is_excluded() -> None:
         "insert_job: nr_cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(nr_prod, 01.00)\n"
     )
     model = compile_twin(lower_source(text))
-    assert model.excluded == ["M03 edge nr_prod -> nr_cons (notrunning has no UC edge condition)"]
+    assert _excluded_texts(model) == [
+        "M03 edge nr_prod -> nr_cons (notrunning has no UC edge condition)"
+    ]
     assert all(not wf.edges for wf in model.workflows)
 
 
@@ -670,7 +678,7 @@ def test_global_atom_attaches_var_condition_to_the_predecessor_edge() -> None:
     (edge,) = wf.edges
     assert (edge.src, edge.dst, edge.condition) == ("g_prod", "g_cons", "success")
     assert edge.var_condition == UcVarCondition(name="GATE", op="=", value="go")
-    assert model.excluded == []
+    assert model.excluded_entries == []
 
 
 def test_global_gate_with_no_predecessor_edge_is_excluded() -> None:
@@ -679,7 +687,7 @@ def test_global_gate_with_no_predecessor_edge_is_excluded() -> None:
     (UCS-01)."""
     text = "insert_job: g_cons2\njob_type: c\ncommand: y\nmachine: m1\ncondition: v(GATE2) = go\n"
     model = compile_twin(lower_source(text))
-    assert model.excluded == [
+    assert _excluded_texts(model) == [
         "M09 global gate $GATE2 -> g_cons2 (consumer has no compiled predecessor edge;"
         " async global gates need a redesign, UCS-01)"
     ]
@@ -704,7 +712,7 @@ def test_or_shape_presence_adds_a_u1_gated_ledger_note() -> None:
         "insert_job: or_cons\njob_type: c\ncommand: c\nmachine: m1\ncondition: s(or_p1) | s(or_p2)\n"
     )
     model = compile_twin(lower_source(text))
-    assert model.excluded == [
+    assert _excluded_texts(model) == [
         "M12 OR shapes present: the NAIVE lowering ships -- every branch"
         " attaches to ONE successor, and UC joins conjunctively over"
         " non-skipped incoming edges (UCS-02/03), so independent branches"
@@ -725,7 +733,7 @@ def test_cross_workflow_edge_member_to_outside_task_is_excluded() -> None:
         "insert_job: outside_job\njob_type: c\ncommand: y\nmachine: m1\ncondition: f(member_in)\n"
     )
     model = compile_twin(lower_source(text))
-    assert model.excluded == [
+    assert _excluded_texts(model) == [
         "M04 edge member_in -> outside_job spans workflows"
         " (Task Monitor territory, M02/M03; not modeled v1)"
     ]
@@ -934,7 +942,9 @@ def test_pM12_independent_or_first_branch_fires_vs_and_join() -> None:
         ("pm12i_a", "pm12i_cons"),
         ("pm12i_b", "pm12i_cons"),
     }  # naive lowering: BOTH OR branches became edges into the consumer
-    assert any("M12 OR shapes present" in e and "U1-gated" in e for e in model.excluded)
+    assert any(
+        "M12 OR shapes present" in e and "U1-gated" in e for e in _excluded_texts(model)
+    )
 
     script = [ev("STARTJOB", 0, job="pm12i_a"), ev("STATUS", 1, job="pm12i_a", status="SUCCESS")]
     autosys_trace, uc_trace = run_both(text, script)
@@ -1316,7 +1326,7 @@ def test_review_m3_gate_on_exitcode_only_consumer_lands_in_the_ledger() -> None:
     (edge,) = wf.edges
     assert edge.var_condition is not None
     assert edge.var_condition.name == "exit:g_prod"  # M08 kept its slot
-    assert any("M09 global gate $GATE -> g_cons" in entry for entry in model.excluded)
+    assert any("M09 global gate $GATE -> g_cons" in entry for entry in _excluded_texts(model))
 
 
 def test_review_m3_gate_not_on_every_path_is_recorded() -> None:
@@ -1333,7 +1343,7 @@ def test_review_m3_gate_not_on_every_path_is_recorded() -> None:
     (wf,) = model.workflows
     gated = [e for e in wf.edges if e.var_condition and e.var_condition.name == "GATE"]
     assert len(gated) == 1  # attached to the status edge
-    assert any("not on every path" in entry for entry in model.excluded)
+    assert any("not on every path" in entry for entry in _excluded_texts(model))
 
 
 def test_review_e1_force_first_event_converges_with_autosys() -> None:

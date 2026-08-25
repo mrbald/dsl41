@@ -50,10 +50,10 @@ Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
   (the linter is the gate; documented in the command help).
 - Per-job non-edge constructs (M17 terminators, M19/M20/M21 definition-time
   status, M34 resources) have ONE channel: `_per_job_exclusions` feeds
-  `UcModel.excluded`, which ships in the `dsl41 uc` bundle. The report
-  renders the same ledger; it does not keep a report-only copy (DL-164,
-  paying the second DL-152 deferred slice). Each ledger entry carries a
-  construction-time kind tag (`ExclusionKind`, on `UcModel.excluded_kinds`,
+  `UcModel.excluded_entries`, whose text ships in the `dsl41 uc` bundle. The
+  report renders the same ledger; it does not keep a report-only copy
+  (DL-164, paying the second DL-152 deferred slice). Each entry carries a
+  construction-time kind tag (`ExclusionKind`, part of `ExclusionEntry`,
   never on `UcBundle`) so the report can show a construct in exactly one
   section without parsing ledger text.
 """
@@ -63,7 +63,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Literal, NamedTuple
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
@@ -201,7 +201,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         used_rows.add("M24")
 
     twin = compile_twin(catalog, graph)
-    bundle = compile_to_uc(catalog, graph)
+    bundle = compile_to_uc(catalog, graph, twin)
     lines: list[str] = [
         "# Migration report",
         "",
@@ -261,11 +261,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
             branches = "; ".join("{" + ", ".join(branch) + "}" for branch in shape.branches)
             lines.append(f"- `{shape.job}`.{shape.attr} ({shape.kind}) branches: {branches}")
             lines.append(f"  - {shape.lowering}")
-    per_job_exclusions = [
-        text
-        for text, kind in zip(twin.excluded, twin.excluded_kinds, strict=True)
-        if kind == "per_job"
-    ]
+    per_job_exclusions = [entry.text for entry in twin.excluded_entries if entry.kind == "per_job"]
     if any(_has_terminators(job) for job in catalog.jobs.values()):
         used_rows.add("M17")
     if per_job_exclusions:
@@ -316,11 +312,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         for workflow in bundle.quarantined:
             lines.append(f"- `{workflow.name}`")
             lines += [f"  - {reason}" for reason in workflow.reasons]
-    other_exclusions = [
-        text
-        for text, kind in zip(twin.excluded, twin.excluded_kinds, strict=True)
-        if kind == "other"
-    ]
+    other_exclusions = [entry.text for entry in twin.excluded_entries if entry.kind == "other"]
     lines += _bundle_ledger_lines(other_exclusions, bundle.notes)
     open_questions = [
         (question, dep_rows, why)
@@ -396,7 +388,7 @@ class UcWorkflow(BaseModel):
     aliases: list[str] = []
 
 
-#: Report-only classification of one `UcModel.excluded` entry, tagged at
+#: Report-only classification of one `ExclusionEntry`, tagged at
 #: construction time in `compile_twin` (DL-164). The report reads the tag
 #: instead of parsing ledger text, so a construct prints in exactly one
 #: section: `refused_edge` and `redesign_flag` already have their own rich
@@ -405,8 +397,30 @@ class UcWorkflow(BaseModel):
 ExclusionKind = Literal["refused_edge", "redesign_flag", "per_job", "other"]
 
 
+class ExclusionEntry(BaseModel):
+    """One ledger line: the human-readable text and its report-rendering
+    kind, together -- text and kind used to be two same-length lists with a
+    validator holding them in step (DL-164); one entry per line removes the
+    invariant instead of guarding it.
+
+    `extra="forbid"` is the DL-82 typo guard (oracle_state.py:142): a
+    keyword typo now raises at construction instead of being ignored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    kind: ExclusionKind
+
+
 class UcModel(BaseModel):
-    """One catalog compiled to UC shapes (E/A rows only)."""
+    """One catalog compiled to UC shapes (E/A rows only).
+
+    `extra="forbid"` is the DL-82 typo guard (oracle_state.py:142): a
+    keyword typo now raises at construction instead of being ignored -- the
+    residual guarantee `_kinds_cover_the_ledger` used to provide alongside
+    the invariant it held (DL-164), now that the invariant itself is gone."""
+
+    model_config = ConfigDict(extra="forbid")
 
     workflows: list[UcWorkflow] = []
     mutex_groups: list[list[str]] = []  # UCS-09 Mutually Exclusive Tasks
@@ -415,23 +429,10 @@ class UcModel(BaseModel):
     #: assumption (U4); verdict shared via ir.exit_is_success.
     success_codes: dict[str, list[tuple[int, int]]] = {}
     fail_codes: dict[str, list[tuple[int, int]]] = {}
-    excluded: list[str] = []  # human-readable ledger of everything NOT compiled
-    #: `excluded[i]`'s kind, same length and order as `excluded` (DL-164).
-    #: Internal to the report; `UcBundle.excluded` copies `excluded` alone
-    #: -- the bundle file never carries this field (U3a stays frozen).
-    excluded_kinds: list[ExclusionKind] = []
-
-    @model_validator(mode="after")
-    def _kinds_cover_the_ledger(self) -> "UcModel":
-        """The two lists are one table written twice, so a twin that carries
-        a ledger line with no kind is refused HERE rather than at the report,
-        where the paired read would raise a bare `ValueError` from `zip`."""
-        if len(self.excluded_kinds) != len(self.excluded):
-            raise ValueError(
-                f"excluded_kinds has {len(self.excluded_kinds)} entries and excluded has"
-                f" {len(self.excluded)}: every ledger line carries its own kind (DL-164)"
-            )
-        return self
+    #: Ledger of everything NOT compiled, one entry per construct (DL-164).
+    #: `UcBundle.excluded` copies each entry's `text` alone -- the bundle
+    #: file never carries `kind` (U3a stays frozen).
+    excluded_entries: list[ExclusionEntry] = []
 
 
 #: Which UC control a SEM-24 definition-time status maps to at cutover.
@@ -499,7 +500,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
 
     Lowering choices (DL-16, each with a test):
     - R-classified edges and redesign flags are EXCLUDED and recorded in
-      `excluded` -- the twin interprets what the backend would compile, and
+      `excluded_entries` -- the twin interprets what the backend would compile, and
       the backend refuses R rows (Part II requirement 1). run_window (M27)
       is likewise absent from the model: the P-M27 pair shows the
       divergence that absence causes.
@@ -515,7 +516,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
       diamonds (skip drops the untaken branch); for independent branches it
       is an AND -- exactly the divergence P-M12 exists to document. The
       restructure / Task-Monitor / duplicate-successor lowerings are
-      U1-gated per-case decisions (recorded in `excluded` as a note when an
+      U1-gated per-case decisions (recorded in `excluded_entries` as a note when an
       or_shape is present).
     - exitcode atoms (M08) become var-condition edges on the producer edge
       reading the twin's per-task last-exit-code pseudo-variable
@@ -530,15 +531,11 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
     """
     if graph is None:
         graph = derive_graph(catalog)
-    excluded_texts: list[str] = []
-    excluded_kinds: list[ExclusionKind] = []
+    excluded_entries: list[ExclusionEntry] = []
 
     def _exclude(text: str, kind: ExclusionKind) -> None:
-        """Append one ledger entry with its report-rendering kind, in one
-        place, so `excluded_texts` and `excluded_kinds` never drift apart
-        (DL-164)."""
-        excluded_texts.append(text)
-        excluded_kinds.append(kind)
+        """Append one ledger entry: text and kind together (DL-164)."""
+        excluded_entries.append(ExclusionEntry(text=text, kind=kind))
 
     compiled: list[UcEdge] = []
     global_gates: dict[str, list[UcVarCondition]] = {}  # consumer -> var conds
@@ -724,8 +721,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             for name, job in catalog.jobs.items()
             if job.sem.fail_codes is not None
         },
-        excluded=excluded_texts,
-        excluded_kinds=excluded_kinds,
+        excluded_entries=excluded_entries,
     )
 
 
@@ -972,17 +968,28 @@ def _lookback_notes(workflows: list[UcWorkflow]) -> list[str]:
     return notes
 
 
-def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBundle:
+def compile_to_uc(
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
+    twin: UcModel | None = None,
+) -> UcBundle:
     """Serialize the twin model to the U3a base record bundle (DL-55).
 
     Deterministic for identical input -- no timestamps (callers stamp their
     own). A workflow is quarantined WHOLE for either cause -- an edge the
     base schema cannot express, or a record name that collides with another
     workflow's -- with a reason per cause; everything else becomes one
-    CREATE-ONLY taskWorkflow record per docs/uc-edge-schema.md."""
-    if graph is None:
-        graph = derive_graph(catalog)
-    twin = compile_twin(catalog, graph)
+    CREATE-ONLY taskWorkflow record per docs/uc-edge-schema.md.
+
+    `twin` lets a caller that already holds a `UcModel` (the report path)
+    pass it down instead of triggering a second `compile_twin` over the same
+    catalog -- one twin per report run. It is trusted, not re-checked against
+    `catalog`: a mismatched pair is the caller's bug (this file's usual
+    caller-trust style), not something this function verifies."""
+    if twin is None:
+        if graph is None:
+            graph = derive_graph(catalog)
+        twin = compile_twin(catalog, graph)
     emitted: list[UcWorkflow] = []
     quarantined: list[QuarantinedWorkflow] = []
     for workflow in twin.workflows:
@@ -1073,6 +1080,6 @@ def compile_to_uc(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcBu
         tool_version=tool_version(),
         records=records,
         quarantined=quarantined,
-        excluded=list(twin.excluded),
+        excluded=[e.text for e in twin.excluded_entries],
         notes=notes,
     )
