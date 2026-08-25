@@ -2,8 +2,10 @@
 # bisimulation gate included), ruff check, mypy, and the DL-75 architecture
 # gate (scripts/arch_check.py), plus a second job that runs the emitted explore
 # page in three browser engines (DL-77). No `ruff format --check`:
-# three pre-phase-11 files never adopted formatter output, so the formatter
-# is local discipline for touched files only until a repo-wide format lands.
+# 41 of 113 files carry pre-formatter spelling (measured 2026-08-25; the old
+# "three pre-phase-11 files" count was stale), so the formatter is local
+# discipline for touched files only. Turning this gate on means a one-commit
+# repo-wide format -- a release boundary is the cheap moment for it.
 # README's "tests" brick badges this workflow.
 #
 # The python matrix is deliberate, not ceremony: the v0.2.0 release hang was a
