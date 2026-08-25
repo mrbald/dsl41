@@ -970,6 +970,144 @@ def test_dl137_unknown_fields_are_ignored_in_both_directions(short_root: Path) -
         teardown_supervisor(short_root, proc)
 
 
+# --------------------------------------- DL-173: the token joins incarnation
+
+
+def test_dl173_every_mutating_verbs_wire_request_carries_the_current_token(
+    short_root: Path,
+) -> None:
+    """DL-173: the eight hand-spelled `"token": self.token` sites (ACQUIRE's
+    three call sites, RENEW, SPAWN, SIGNAL, SHUTDOWN, RELEASE) collapsed into
+    one stamp in `_request`, beside `incarnation` (DL-80's existing spot).
+    Driven against a fake supervisor that records every request line -- the
+    `test_cancelled_request_poisons_and_reconnects` harness -- rather than
+    the real subprocess, because the point is the WIRE shape `_request`
+    writes, not any handler's reaction to it."""
+
+    async def scenario() -> tuple[list[dict], int, int]:
+        seen: list[dict] = []
+        next_token = 1
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            nonlocal next_token
+            try:
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    req = json.loads(line)
+                    seen.append(req)
+                    if req.get("cmd") == "ACQUIRE":
+                        resp = {
+                            "ok": True,
+                            "token": next_token,
+                            "incarnation": "inc-1",
+                            "expires_at": "t",
+                        }
+                        next_token += 1
+                    elif req.get("cmd") == "PING":
+                        resp = {
+                            "ok": True,
+                            "version": 1,
+                            "incarnation": "inc-1",
+                            "deadman_s": None,
+                        }
+                    else:
+                        resp = {"ok": True}
+                    writer.write(json.dumps(resp).encode("utf-8") + b"\n")
+                    await writer.drain()
+            except OSError:
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
+        client = SupervisorClient(short_root)
+        await client.ensure_running()
+        tok1 = await client.acquire()
+        tok2 = await client.acquire()  # re-ACQUIRE: presents tok1 to prove incumbency
+        # RENEW has no public non-loop method; this is the exact shape
+        # `_renew_loop` sends (~:1390).
+        await client._request({"cmd": "RENEW", "ttl_s": 60})
+        await client.spawn({})
+        await client.signal("run-x", "TERM")
+        await client.shutdown()
+        await client.release()
+        await client.close()
+        server.close()
+        await server.wait_closed()
+        return seen, tok1, tok2
+
+    seen, tok1, tok2 = asyncio.run(scenario())
+    by_cmd: dict[str, list[dict]] = {}
+    for req in seen:
+        by_cmd.setdefault(req["cmd"], []).append(req)
+    acquires = by_cmd["ACQUIRE"]
+    assert acquires[0]["token"] is None  # first-ever: nothing to prove incumbency with
+    assert acquires[1]["token"] == tok1  # DL-79: re-ACQUIRE presents the current token
+    for cmd in ("RENEW", "SPAWN", "SIGNAL", "SHUTDOWN", "RELEASE"):
+        assert [r["token"] for r in by_cmd[cmd]] == [tok2], cmd
+
+
+def test_dl173_ping_carries_token_and_incarnation_and_is_still_answered(
+    short_root: Path,
+) -> None:
+    """PING is a read-only verb: `docs/supervisor-protocol.md` ss5 lists it
+    as taking no fields of its own, and `_h_ping` never looks at `_req`.
+    DL-173's universal `_request` stamp puts `token` on it anyway, exactly as
+    `incarnation` already did (DL-80, unchanged by this slice) -- within
+    contract because ss5's own forward-compatibility rule ("the supervisor
+    ignores unknown fields") is a REQUEST-side rule, not a per-verb one."""
+
+    async def scenario() -> tuple[dict, dict]:
+        seen: list[dict] = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    req = json.loads(line)
+                    seen.append(req)
+                    if req.get("cmd") == "ACQUIRE":
+                        resp = {
+                            "ok": True,
+                            "token": 7,
+                            "incarnation": "inc-x",
+                            "expires_at": "t",
+                        }
+                    else:
+                        resp = {
+                            "ok": True,
+                            "version": 1,
+                            "incarnation": "inc-x",
+                            "deadman_s": None,
+                        }
+                    writer.write(json.dumps(resp).encode("utf-8") + b"\n")
+                    await writer.drain()
+            except OSError:
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
+        client = SupervisorClient(short_root)
+        await client.ensure_running()
+        await client.acquire()
+        ping_resp = await client._request({"cmd": "PING"})
+        await client.close()
+        server.close()
+        await server.wait_closed()
+        pings = [r for r in seen if r["cmd"] == "PING"]
+        return ping_resp, pings[-1]
+
+    ping_resp, wire = asyncio.run(scenario())
+    assert ping_resp["ok"] is True  # still answered despite the extra fields
+    assert wire["token"] == 7  # DL-173: not just incarnation any more
+    assert wire["incarnation"] == "inc-x"  # DL-80, unchanged
+
+
 # ------------------------------------------------ DL-151: the refusals owed
 
 

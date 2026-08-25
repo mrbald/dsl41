@@ -1109,6 +1109,15 @@ class SupervisorClient:
         # a crash comes from the holder's connection dying, not from a
         # matching label (supervisor _h_acquire).
         self.controller_id = f"engine:{run_root.resolve()}#{uuid.uuid4().hex[:8]}"
+        #: DL-79: presented on re-ACQUIRE to prove incumbency (a free lease
+        #: needs none; the reply then teaches a fresh one -- see `acquire`,
+        #: `reconnect` and `_renew_loop`). DL-173: that presentation used to
+        #: be hand-spelled at each of those three ACQUIRE call sites plus
+        #: RENEW/SPAWN/SIGNAL/SHUTDOWN/RELEASE -- eight copies of the same
+        #: field. It is now folded into `_request`'s universal stamp below,
+        #: beside `incarnation`, for the same reason DL-80 gave that one: a
+        #: fencing credential that a new verb can forget to carry is not a
+        #: credential.
         self.token: int | None = None
         #: DL-80: the supervisor incarnation our token belongs to. _request
         #: pairs it with EVERY request rather than each mutating verb naming
@@ -1226,7 +1235,6 @@ class SupervisorClient:
                             "cmd": "ACQUIRE",
                             "controller_id": self.controller_id,
                             "ttl_s": self._TTL_S,
-                            "token": self.token,  # DL-79: prove incumbency
                         },
                         _connect=False,
                     )
@@ -1249,7 +1257,14 @@ class SupervisorClient:
             try:
                 self._writer.write(
                     json.dumps(
-                        {**obj, "v": 1, "incarnation": self.incarnation},
+                        # DL-173: `token` joins `incarnation` here -- one
+                        # credential object, stamped in one place, on EVERY
+                        # request including the read-only ones (PING/LIST).
+                        # supervisor-protocol.md ss5 makes this wire-safe:
+                        # "the supervisor ignores unknown fields" is a
+                        # request-side rule, not a per-verb one, and a
+                        # read-only handler already never inspects `_req`.
+                        {**obj, "v": 1, "incarnation": self.incarnation, "token": self.token},
                         sort_keys=True,
                     ).encode("utf-8")
                     + b"\n"
@@ -1338,7 +1353,6 @@ class SupervisorClient:
                 "cmd": "ACQUIRE",
                 "controller_id": self.controller_id,
                 "ttl_s": ttl,
-                "token": self.token,
             }
         )
         if not resp.get("ok"):
@@ -1376,9 +1390,7 @@ class SupervisorClient:
             while True:
                 await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else 1.0)
                 try:
-                    resp = await self._request(
-                        {"cmd": "RENEW", "token": self.token, "ttl_s": ttl_s}
-                    )
+                    resp = await self._request({"cmd": "RENEW", "ttl_s": ttl_s})
                     if not resp.get("ok"):
                         if resp.get("error") == "wrong_incarnation":
                             # DL-80: the supervisor restarted under us. Our token
@@ -1395,7 +1407,6 @@ class SupervisorClient:
                                 "cmd": "ACQUIRE",
                                 "controller_id": self.controller_id,
                                 "ttl_s": ttl_s,
-                                "token": self.token,  # DL-79
                             }
                         )
                         if resp.get("ok"):
@@ -1425,7 +1436,7 @@ class SupervisorClient:
             pass
 
     async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
-        resp = await self._request({"cmd": "SPAWN", "token": self.token, "spec": spec})
+        resp = await self._request({"cmd": "SPAWN", "spec": spec})
         if not resp.get("ok"):
             # ss11a gave SPAWN refusals of its own -- collision, in_progress,
             # indeterminate -- and an operator reading the job's cause must
@@ -1437,9 +1448,7 @@ class SupervisorClient:
         return resp
 
     async def signal(self, run_id: str, sig: str) -> dict[str, Any]:
-        return await self._request(
-            {"cmd": "SIGNAL", "token": self.token, "run_id": run_id, "sig": sig}
-        )
+        return await self._request({"cmd": "SIGNAL", "run_id": run_id, "sig": sig})
 
     async def list_runs(self) -> dict[str, Any]:
         resp = await self._request({"cmd": "LIST"})
@@ -1448,12 +1457,12 @@ class SupervisorClient:
         return resp
 
     async def shutdown(self) -> dict[str, Any]:
-        return await self._request({"cmd": "SHUTDOWN", "token": self.token})
+        return await self._request({"cmd": "SHUTDOWN"})
 
     async def release(self) -> None:
         if self.token is not None:
             with contextlib.suppress(SupervisorUnavailable):
-                await self._request({"cmd": "RELEASE", "token": self.token})
+                await self._request({"cmd": "RELEASE"})
 
     async def close(self) -> None:
         self._closed = True  # no lazy reconnect may resurrect a closing client

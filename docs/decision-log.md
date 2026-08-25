@@ -10167,3 +10167,126 @@ relitigate an entry; append a new one.
   grew by 69 more net lines for `_subscribe_refusal` and `subscribe_lines`;
   `cli_control.py` shrank by 38 net lines with `_stream_subscribe` cut to
   presentation.
+- DL-173 the credential is one object, stamped in one place
+  (2026-08-26; runner_adapters.py + test_runner_supervisor.py; pays the
+  DL-152 deferred slice "supervisor credential ownership: the token joins
+  the incarnation inside the transport"; Sonnet implements, fresh-context
+  Opus adversarial review over the uncommitted diff).
+  THE CORRECTED PREMISE. DL-152's own owed-list line names only the shape --
+  "the token joining the incarnation inside the transport" -- with no
+  ACQUIRE exception in its text. The exception claim ("ACQUIRE is the
+  exception -- it carries no token") came from this slice's own brief,
+  restating an earlier planning pass; it is corrected here, not DL-152's
+  logged words. That claim is wrong, verified against
+  `acquire`/`reconnect`/`_renew_loop`: all three ACQUIRE call sites PRESENT
+  the current token first (DL-79's proof of incumbency on a re-acquire) and
+  only then LEARN a fresh one off the reply (`self.token =
+  int(resp["token"])`). ACQUIRE needed no carve-out from stamping; the
+  learning is reply-side and this slice does not touch it.
+  THE FACT CHECKED (step 1 of the brief). `docs/supervisor-protocol.md`
+  ss5 states the rule directly: "The supervisor ignores unknown fields
+  (forward compatibility)," and ss2's own "unknown key is refused" note
+  cross-references it -- "this is the one place in the protocol where an
+  unknown field refuses rather than being ignored: ss5's forward-
+  compatibility rule covers the fields of a REQUEST, not the keys inside
+  spec." This is protocol TEXT, not an accident of today's parser. The
+  parser agrees: `_dispatch` (runner_supervisor.py:557) only ever reads
+  `v` and `cmd` off the raw request before handing the whole dict to a
+  handler, and `_h_ping` (:594) takes `_req` and never looks at it.
+  Existing precedent already relies on this: `_request` has stamped
+  `incarnation` on EVERY request, PING included, since DL-80, with no
+  protocol-doc amendment -- the read-only verbs already carry a field they
+  do not read.
+  THE SHAPE FORCED. Tolerance confirmed by the doc's own words: option 2.
+  `token` joins `incarnation` in `_request`'s one stamp
+  (runner_adapters.py:~1267), and the eight hand-spelled
+  `"token": self.token` sites are deleted -- ACQUIRE's three call sites
+  (`reconnect`, `acquire`, `_renew_loop`), RENEW, SPAWN, SIGNAL, SHUTDOWN,
+  RELEASE. PING now carries `token` on the wire (null until the first
+  ACQUIRE, the current int after), which is within contract for the
+  reason above, not a wire widening -- no protocol-doc amendment needed,
+  since ss5 already names the general rule and DL-80 already set the
+  precedent for a second field. The DL-79 "prove incumbency" comment
+  survives, moved from each ACQUIRE call site to the `self.token` field
+  comment in `__init__`, next to DL-80's matching comment on
+  `self.incarnation`. Reply-side token learning
+  (`acquire`/`reconnect`/`_renew_loop`'s `self.token = int(resp["token"])`)
+  is untouched.
+  A SECONDARY EFFECT, caught by review, not the point of this slice. The
+  eight deleted sites used to read `self.token` into a dict literal at the
+  CALL site, before `_request` was even entered -- always before any
+  `await`. The new stamp reads `self.token` inside `_request`, which for a
+  `_connect=True` call (the default; every deleted site but the two
+  `reconnect()`-internal ACQUIREs used it) happens AFTER `await
+  self._ensure_connected()`, which can itself run `reconnect()` and mint a
+  fresh token. Old code could therefore send a STALE token on the very
+  call whose own reconnect just replaced it, risking a spurious
+  `stale_token` refusal on a connection that had just healed; the new code
+  reads `self.token` after the reconnect completes, so it sends the fresh
+  one instead. That is one-directional: it can only turn a spurious
+  refusal into a success, never the reverse, because the token is read
+  later and under the same lock the write happens under. This is a
+  genuine improvement, not a value-preserving refactor as the shape-
+  collapse framing above implies; it has no dedicated test in this slice
+  (a reconnect-mid-call race is timing-sensitive to construct without
+  flakiness, the exact hazard this codebase's CLAUDE.md warns against) and
+  is recorded here as residue rather than silently claimed as covered.
+  SCOPE BOUNDARY: `SupervisorConn`. The blocking one-shot transport
+  (`runner_adapters.py:920`, used once, by `dsl41 supervise shutdown` in
+  cli_control.py) still hand-spells `"token": acq["token"]}` at its one
+  mutating call site. It is deliberately out of this slice: unlike
+  `SupervisorClient`, it holds no persistent `self.token` field to stamp
+  from -- its ACQUIRE and its one mutating verb happen in the same
+  ten-line function, and the brief's eight-site count (verified exact)
+  named `SupervisorClient` only. The asymmetry is real and the same
+  "collapse to one spelling" shape would apply (learn `token` off ACQUIRE
+  the way `_learn_incarnation` already does, stamp it in `send()`); it is
+  left as an owed residual for a future slice rather than folded in here
+  unbriefed.
+  THE TESTS.
+  `test_dl173_every_mutating_verbs_wire_request_carries_the_current_token`
+  drives a fake `asyncio.start_unix_server` supervisor (the
+  `test_cancelled_request_poisons_and_reconnects` harness) through two
+  ACQUIREs, a RENEW, SPAWN, SIGNAL, SHUTDOWN and RELEASE, and asserts the
+  first ACQUIRE's wire request carries `token: null` (nothing to prove
+  incumbency with yet), the second carries the first ACQUIRE's minted
+  token (DL-79), and every other verb carries the token the second
+  ACQUIRE minted.
+  `test_dl173_ping_carries_token_and_incarnation_and_is_still_answered`
+  pins the PING-specific tolerance: after one ACQUIRE, a PING's wire
+  request carries both `token` and `incarnation`, and the fake supervisor
+  still answers `{"ok": true, ...}` -- the point the brief's option-2
+  branch required as a pinned test. Existing tests pass unmodified: no
+  test hand-asserted the eight-hand-stamp request shape this slice
+  changed.
+  MUTATION CHECK. The stamp was removed from `_request` alone (the eight
+  call sites left deleted); both new tests reddened with `KeyError:
+  'token'`; the stamp was restored and both went green again.
+  THE GATE. 3439 passed, 6 skipped, 2 xfailed (was 3437 before this
+  slice's two new tests); `ruff check src tests` clean; `mypy src` clean;
+  `scripts/arch_check.py` exits 0 but reports "architecture review due"
+  (eight advisory notes, all pre-existing overages this slice did not
+  newly cross except the size of the change itself: `runner_adapters.py`
+  grew from 1844 to 1853 lines, comments documenting where the credential
+  now stamps and why, already over baseline before this slice).
+  REVIEW. Fresh-context Opus adversarial review ran over the uncommitted
+  diff (independently re-verified the supervisor-protocol.md citation and
+  the `_dispatch`/`_h_ping` reading above, and confirmed no request
+  fingerprinting or logging anywhere treats the wider PING/LIST payload
+  as data). No blockers. Three MAJOR findings, all folded into this entry
+  above rather than left in a session scratchpad: the timing-of-the-read
+  question (A SECONDARY EFFECT paragraph -- confirmed a real, one-
+  directional improvement, this entry's first draft had wrongly called it
+  value-preserving), the `SupervisorConn` residual (SCOPE BOUNDARY
+  paragraph), and this REVIEW paragraph itself, which the first draft
+  wrote before the review had returned -- caught, corrected. Two MINORs
+  fixed: `scenario`'s return-type annotation in
+  `test_dl173_every_mutating_verbs_wire_request_carries_the_current_token`
+  said `list[dict]` for a 3-tuple return (test-only, invisible to `mypy
+  src`, fixed to `tuple[list[dict], int, int]`); the DL-152 misattribution
+  above (THE CORRECTED PREMISE). Two MINORs left as noted, not fixed: the
+  `_renew_loop` `wrong_incarnation` reset-then-reacquire path is correct
+  by inspection and pre-existing, not newly introduced by this slice, and
+  gains no new test here. Full findings:
+  scratchpad/s12-review.md (session-local; this paragraph is the durable
+  record).
