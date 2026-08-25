@@ -145,6 +145,29 @@ class DerivedEdge(BaseModel):
             raise ValueError("exact edge must not carry an assumption")
         return self
 
+    @property
+    def is_start_gate(self) -> bool:
+        """True when this edge names a producer JOB that gates the consumer's
+        START -- the one partition four readers were spelling by hand (DL-162).
+
+        Two kinds of edge are not start gates. A box-override edge (M15/M16,
+        from `box_success`/`box_failure`) is a COMPLETION predicate on a box,
+        evaluated to fold a box that is already running (SEM-12); it orders
+        nothing. A global edge (via=="global") names no job at all -- derive
+        keeps globals as pseudo-nodes outside `nodes` (module docstring), so
+        an edge from one has no producer to reason about.
+
+        What it does NOT decide is whether the producer is a job THIS catalog
+        defines: an undefined producer (M02-R) and a cross-instance one (M33)
+        are start gates that name a job the caller cannot look up. A reader
+        that needs a local producer says so, with `src in catalog.jobs`
+        beside this (`_local_condition_adjacency`, L009, L020).
+
+        L011 is deliberately wider and does not read this: it asks whether a
+        job has ANY wiring, for which a box override and a global gate both
+        count. L008 is deliberately narrower: it tests the single row M16."""
+        return self.via != "global" and self.mapping_row not in ("M15", "M16")
+
 
 class OrShape(BaseModel):
     """M12 classifier output for one Or node (UCS-03 lowering patterns).
@@ -694,9 +717,7 @@ def _local_condition_adjacency(
     preds: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     succs: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     for e in edges:
-        if e.mapping_row in ("M15", "M16"):
-            continue  # box-override edges
-        if e.via == "global" or e.src not in catalog.jobs:
+        if not e.is_start_gate or e.src not in catalog.jobs:
             continue
         preds[e.dst].add(e.src)
         succs[e.src].add(e.dst)

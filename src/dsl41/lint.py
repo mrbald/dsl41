@@ -38,10 +38,14 @@ Decisions pinned here (each with a test):
   JobIR.passthrough, which is exactly where this rule looks.
 
 Phase-5 graph-rule readings (each with a test):
+- What counts as a start gate is `DerivedEdge.is_start_gate`, in derive, and
+  no rule here restates it (DL-162: L009 and L020 were partitioning the same
+  set from opposite ends). L008 and L011 deliberately ask other questions --
+  one row, and any wiring at all -- and each says so.
 - L008 fires on M16-classified box-override edges (non-member, global, or
   cross-instance refs -- derive's own SEM-12 detection); M15 (member ref)
   is the legitimate early-exit shape and stays quiet.
-- L009 "unqualified s() feeding a scheduled consumer": an M01/M02 success
+- L009 "unqualified s() feeding a scheduled consumer": a start-gate success
   edge with no lookback whose consumer has date_conditions scheduling. The
   stale-latch reading (SEM-01/R1): the consumer's time trigger can fire on a
   latch left over from a previous producer run. Producer-side scheduling is
@@ -64,8 +68,8 @@ Phase-5 graph-rule readings (each with a test):
 - L020 iced consumer (M19, the last Part II requirement-3 detector): every
   immediate predecessor translates to a UC Skip, so AutoSys runs the
   consumer (SEM-05/SEM-20) while UC cascades the skip (UCS-02). One live
-  predecessor converges, so the rule needs ALL of them; box-override edges
-  and global gates are not start gates and do not count.
+  predecessor converges, so the rule needs ALL of them; predecessors are
+  the `is_start_gate` edges above.
 """
 
 from __future__ import annotations
@@ -664,7 +668,12 @@ def rule_l007(catalog: CatalogIR) -> list[Violation]:
 def rule_l008(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     """box_success/box_failure references a non-member (SEM-12 gating): if all
     members complete before the external condition is true, the box hangs
-    RUNNING. Fires on exactly derive's M16 box-override edges."""
+    RUNNING. Fires on exactly derive's M16 box-override edges.
+
+    Deliberately narrower than the complement of `DerivedEdge.is_start_gate`
+    (DL-162): that set also holds M15 member refs, which are the legitimate
+    early-exit shape, and the M09 global gates a `condition` derives, which
+    start-gate a job rather than fold a box. This rule tests the one row."""
     out: list[Violation] = []
     for edge in graph.edges:
         if edge.mapping_row != "M16":
@@ -701,8 +710,9 @@ def rule_l009(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     for edge in graph.edges:
         if edge.via != "success" or edge.lookback is not None:
             continue
-        if edge.mapping_row not in ("M01", "M02"):
-            continue  # box-override edges have their own rule (L008)
+        if not edge.is_start_gate:
+            continue  # a box override folds a box, it does not start one (L008
+            # owns the M16 half); via=="success" already excludes globals
         if edge.src not in catalog.jobs:
             continue  # undefined producer: L001's error; a staleness warn
             # about a job that never ran would contradict it
@@ -749,7 +759,13 @@ def rule_l010(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
 def rule_l011(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     """Dangling job (hygiene): no schedule, no derived wiring (edges in or
     out, incl. global/mutex participation), no box membership either way,
-    and not an FW source. Only reachable by manual sendevent."""
+    and not an FW source. Only reachable by manual sendevent.
+
+    Deliberately wider than `DerivedEdge.is_start_gate` (DL-162), and the
+    one reader of the four that must not use it: a job gated on a global,
+    or named by a `box_success`, is wired -- something in this catalog
+    reaches it, which is the whole question here. Only the SRC side skips
+    globals, because a global is a pseudo-node and never a dangling job."""
     wired: set[str] = set()
     for edge in graph.edges:
         wired.add(edge.dst)
@@ -894,14 +910,14 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     itself, and the skip cascades on (UCS-02). One live predecessor is
     enough to converge, which is why the rule needs ALL of them.
 
-    Predecessors are start-gate producers only: box-override edges (M15/M16)
-    are completion predicates on a box, not start gates, and a global gate
-    (via="global") names no job at all. An undefined or cross-instance
-    producer cannot be iced in this catalog, so it keeps the rule quiet --
-    the conservative direction."""
+    Predecessors are `DerivedEdge.is_start_gate` edges, the predicate this
+    rule and L009 used to spell from opposite ends (DL-162). An undefined or
+    cross-instance producer IS a start gate and cannot be iced in this
+    catalog, so the `catalog.jobs` lookup below keeps the rule quiet on one
+    -- the conservative direction."""
     predecessors: dict[str, list[str]] = {}
     for edge in graph.edges:
-        if edge.via == "global" or edge.mapping_row in ("M15", "M16"):
+        if not edge.is_start_gate:
             continue
         predecessors.setdefault(edge.dst, []).append(edge.src)
     out: list[Violation] = []

@@ -268,6 +268,13 @@ class DerivedEdge(BaseModel):
                                           #   permitted on "redesign" as context
     source_atom: SourceSpan | None        # provenance: the owning attribute's span
 
+    @property
+    def is_start_gate(self) -> bool:      # names a producer JOB that gates dst's START:
+        ...                               #   not a box override (M15/M16 fold a box) and
+                                          #   not a global (names no job). Says nothing
+                                          #   about whether the catalog defines that job
+                                          #   -- readers add `src in catalog.jobs` (DL-162)
+
 class DerivedGraph(BaseModel):
     nodes: list[str]
     edges: list[DerivedEdge]

@@ -1130,6 +1130,105 @@ def test_l008_message_names_the_global_variable_correctly() -> None:
     assert "not one of its members" not in by_detail["ABORT_FLAG"].message
 
 
+#: Every row a catalog can put on an edge, in one lowerable source: M01 (same
+#: cadence s), M02 (cross-stream s), M02-R (undefined producer), M03
+#: (lookback), M08 (exit code), M09 (global in a condition), M15 (box_success
+#: member ref), M16 (box_success non-member), M16 (box_success global) and
+#: M33 (cross-instance ref). `is_start_gate` is asserted over all ten.
+_EVERY_ROW = (
+    "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+    "insert_job: sg_prod\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
+    "insert_job: sg_same\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    "condition: s(sg_prod)\n\n"
+    "insert_job: sg_cross\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+    "condition: s(sg_prod) & s(sg_ghost) & s(sg_prod, 30) & e(sg_prod) = 0"
+    " & v(SG_FLAG) = 1 & s(sg_remote^PRD)\n\n"
+    "insert_job: sg_box\njob_type: b\nbox_success: s(sg_member)\n"
+    "box_failure: s(sg_prod) | v(SG_ABORT) = 1\n\n"
+    "insert_job: sg_member\njob_type: c\ncommand: x\nmachine: m1\nbox_name: sg_box\n"
+)
+
+
+def test_is_start_gate_splits_the_derived_row_vocabulary() -> None:
+    """The one start-gate predicate (DL-152), over every row a catalog reaches.
+
+    A box override (M15/M16) is a completion predicate on a box, not an
+    ordering, and a global (via="global") names no job -- neither gates a
+    start. Everything else does, INCLUDING an undefined producer (M02-R) and
+    a cross-instance one (M33): those name a job this catalog cannot look up,
+    which is a separate question every reader asks separately."""
+    graph = _graph(_EVERY_ROW)
+    gates = {(e.src, e.dst, e.mapping_row): e.is_start_gate for e in graph.edges}
+    assert len(gates) == len(graph.edges)  # no two edges collapse onto one key
+    assert gates == {
+        ("sg_prod", "sg_same", "M01"): True,
+        ("sg_prod", "sg_cross", "M02"): True,
+        ("sg_ghost", "sg_cross", "M02"): True,  # undefined producer, redesign
+        ("sg_prod", "sg_cross", "M03"): True,  # lookback-qualified
+        ("sg_prod", "sg_cross", "M08"): True,  # exit code
+        ("SG_FLAG", "sg_cross", "M09"): False,  # global: names no job
+        ("sg_remote^PRD", "sg_cross", "M33"): True,  # cross-instance
+        ("sg_member", "sg_box", "M15"): False,  # box override, member ref
+        ("sg_prod", "sg_box", "M16"): False,  # box override, non-member
+        ("SG_ABORT", "sg_box", "M16"): False,  # box override on a global
+    }
+
+
+def test_l009_quiet_on_every_success_edge_that_is_not_a_start_gate() -> None:
+    """The DL-152 swap is behavior-neutral, and this is why: within
+    {via==success, no lookback, src in catalog.jobs} the only rows reachable
+    are M01 and M02, so reading `is_start_gate` where L009 used to test that
+    pair changes nothing. The rows it has to keep out are box overrides on a
+    SCHEDULED box (M15/M16) -- a completion predicate, never a stale start
+    gate -- and they are kept out here.
+
+    The reachability half is asserted mechanically over the whole corpus
+    rather than left as prose: a new row landing in that slice would make the
+    swap a widening, and this is what says so."""
+    text = (
+        "insert_job: sg2_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: sg2_box\njob_type: b\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "box_success: s(sg2_member)\nbox_failure: s(sg2_prod)\n\n"
+        "insert_job: sg2_member\njob_type: c\ncommand: x\nmachine: m1\nbox_name: sg2_box\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    assert {e.mapping_row for e in graph.edges} == {"M15", "M16"}
+    assert rule_l009(catalog, graph) == []
+
+    corpus = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    slice_rows = {
+        edge.mapping_row
+        for edge in derive_graph(corpus).edges
+        if edge.via == "success"
+        and edge.lookback is None
+        and edge.src in corpus.jobs
+        and edge.is_start_gate
+    }
+    assert slice_rows <= {"M01", "M02"}
+
+
+def test_l020_reads_a_global_gate_as_no_predecessor_at_all() -> None:
+    """The global half of `is_start_gate`, which no fixture held before
+    (DL-152). A consumer gated on one iced job AND a global still has exactly
+    one JOB predecessor, and it is iced -- so the M19 divergence is real and
+    the rule fires. A global gate cannot rescue it: UC cascades the skip from
+    the task edge whatever the variable says."""
+    text = (
+        "insert_job: sg3_icy\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: sg3_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(sg3_icy) & v(SG3_FLAG) = 1\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    assert violation.jobs == ["sg3_cons"]
+    assert violation.detail == "sg3_icy"  # the global is not listed as a predecessor
+
+
 def test_or_shapes_cover_box_overrides() -> None:
     text = (
         "insert_job: or_box\njob_type: b\nbox_success: s(om1) | s(om2)\n\n"

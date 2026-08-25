@@ -8865,3 +8865,63 @@ relitigate an entry; append a new one.
   folding its body into attributes" open for the slice named after it.
   This entry pays it. The last of DL-151's three pre-existing scanner
   defects is closed; DL-151's owed scanner list is fully paid.
+- DL-162 the start gate gets one name: four readers stop spelling the
+  same partition and L011 says why it must not (2026-08-25; derive +
+  lint + ir-design ss5; pays the first DL-152 deferred slice).
+  THE FINDING, as DL-152 left it: "one start-gate predicate on
+  `DerivedEdge`, since lint spells it four ways across
+  L008/L009/L011/L020 and L009 and L020 partition the same set from
+  opposite ends." A fifth site was in derive itself
+  (`_local_condition_adjacency`, which every structural pass reads).
+  THE RULING, and it is that there are TWO questions here, not one.
+  "Does this edge name a producer JOB that gates the consumer's START?"
+  is `DerivedEdge.is_start_gate`: not a box override (M15/M16 fold a box
+  that is already running, SEM-12 -- they order nothing) and not a
+  global (via=="global" names no job; derive keeps globals as
+  pseudo-nodes outside `nodes`). L009, L020 and
+  `_local_condition_adjacency` all ask exactly that and now read it.
+  "Does this job have ANY wiring?" is L011's question and is
+  deliberately WIDER: a job gated on a global, or named by a
+  `box_success`, is reached by something in this catalog, which is the
+  whole of what L011 asks. Folding L011 into the predicate would have
+  turned a hygiene rule into a start-gate rule and made dangling jobs
+  out of gated ones. L008 is deliberately NARROWER: it tests the single
+  row M16, and the complement of `is_start_gate` also holds M15 member
+  refs (the legitimate early-exit shape) and the M09 global gates a
+  `condition` derives (which start-gate a job rather than fold a box).
+  Both rules now say so at their own docstring, so the next review does
+  not re-find them as drift.
+  WHAT THE PREDICATE DOES NOT DECIDE, stated because it is the trap: an
+  undefined producer (M02-R) and a cross-instance one (M33) ARE start
+  gates. They name a job this catalog cannot look up, which is a
+  separate question, and every reader that needs a local producer keeps
+  its own `src in catalog.jobs` beside the predicate.
+  THE ONE SWAP THAT COULD HAVE MOVED BEHAVIOR. L009 tested
+  `mapping_row in ("M01","M02")`, which is the box-override exclusion
+  written as a row pair. Reading `is_start_gate` there is neutral, and
+  provably: within {via=="success", no lookback, `src in catalog.jobs`}
+  the only rows derive can reach ARE M01 and M02 -- box overrides and
+  cross-instance refs are excluded by the predicate and by the catalog
+  lookup respectively, and `_classify_condition_edge`'s success branch
+  returns nothing else. The argument is not left as prose: a corpus-wide
+  assertion pins the slice's row set at a subset of {M01, M02}, so a new
+  row landing there reddens rather than silently widening L009.
+  L020's predicate and derive's were byte-identical to the new one and
+  moved with no behavior question at all.
+  THE GATE. Every lint rule's firing set and the whole derived graph --
+  edges, chains, parallel groups, cycles, mutex groups -- dumped over
+  each corpus file and over the corpus as one catalog, before and after:
+  identical. 3377 passed, 6 skipped; ruff, mypy and arch_check clean,
+  with no new size note.
+  THE TESTS, each mutation-checked against a predicate missing one half.
+  `test_is_start_gate_splits_the_derived_row_vocabulary` derives all ten
+  reachable rows from one source and asserts the split over every edge
+  (with a length check, so two edges cannot collapse onto one key and
+  hide);
+  `test_l009_quiet_on_every_success_edge_that_is_not_a_start_gate` pins
+  the swap's neutrality from both ends -- box overrides on a SCHEDULED
+  box stay quiet, and the corpus row-set assertion above; and
+  `test_l020_reads_a_global_gate_as_no_predecessor_at_all` holds the
+  global half, which no fixture held before: a consumer gated on one
+  iced job AND a global has exactly one job predecessor, it is iced, and
+  the M19 divergence is real.
