@@ -218,9 +218,24 @@ class SealRequest(BaseModel):
     an id its caller minted. `adopt` was the other and went with the
     estate-adoption path (DL-138); the field stays because audit DERIVES it
     and compares, and a derivation over a one-value domain is still the
-    check that catches a rewritten record."""
+    check that catches a rewritten record.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    `strict=True` (DL-170): `bool` is `int`'s subclass, so a lax `epoch=True`
+    would coerce to `1` and let a retry match a committed seal under a type
+    the original request never carried (DL-151). `runner_control._seal_wire_error`
+    already refuses that on the live socket, with pinned wire prose this
+    config cannot reproduce -- so the hand-written gate stays as the
+    message layer for every field but one (its own docstring says which,
+    and why). `cli_estate.py`'s offline retry route builds a `SealRequest`
+    directly, past that gate entirely; every argument it passes is already
+    statically typed today, so this is defence in depth for that site, not
+    the closing of a live hole -- but a future caller need not stay that
+    disciplined for the model to still refuse it. `next_period` needs no
+    help from this flag: `StagedNextPeriod` carries its own `strict=True`
+    (DL-168), because a nested model validates under ITS OWN config
+    regardless of what the outer one sets."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     baseline_id: str
     epoch: int

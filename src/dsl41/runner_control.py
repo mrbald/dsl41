@@ -589,6 +589,16 @@ class ControlServer:
         itself: a transition is a restart, not a reload (DL-65)."""
         if (wire := _seal_wire_error(request)) is not None:
             return {"ok": False, "error": f"malformed seal request: {wire}", "refused": True}
+        # left key-by-key on purpose (DL-170): `_seal_wire_error` above
+        # already proves every REQUIRED field present and every field
+        # wire-typed except `next_period` (validated below, on its own
+        # strict config, DL-168) -- `force_seal` and `claimed_actor` are
+        # typed only when present, but absence there is legal (both are
+        # defaulted), so `strict=True` on `SealRequest` has nothing left
+        # to catch here. Collapsing this into one `model_validate` over a
+        # filtered dict would trade that for a diff whose only pinned
+        # coverage is the "malformed seal request" prefix, not the shape
+        # of what follows it.
         try:
             parsed = SealRequest(
                 baseline_id=request["baseline_id"],
@@ -1220,11 +1230,34 @@ class ControlServer:
 def _seal_wire_error(request: Mapping[str, Any]) -> str | None:
     """What is wrong with a `seal` request's WIRE TYPES, or None.
 
-    Read, never coerced. `bool("false")` is True and force is an
-    AUTHORIZATION (ss3), so a mistyped flag has to refuse rather than force
-    a boundary. The rest of the envelope is read the same way for one
-    reason: `str()` and `int()` would let a retry match a committed seal
-    under types the original never carried (DL-151)."""
+    `SealRequest` is `strict=True` now (DL-170), and for `baseline_id`,
+    `epoch`, `request_id` and `stage_digest` the model refuses a coerced
+    value independently, at construction, whatever calls it. `claimed_actor`
+    is the one exception: the construct block below builds it as
+    `request.get("claimed_actor") or ""`, and that `or` launders a falsy
+    non-string -- JSON `0`, `false`, `[]` -- into a legal `""` before the
+    model ever sees the original value, so for THIS field the check here is
+    not duplicate work even in principle.
+
+    For the rest, this function survives anyway, as the message layer in
+    front of a model that already refuses independently. `boundary.
+    SealRequest`'s docstring carries the DL-151 argument for why coercion
+    is refused at all; the reason this copy of the check stays is
+    different and lives here: `pydantic.ValidationError`'s prose cannot
+    reproduce the pinned wire refusals below ("force_seal must be true or
+    false", "epoch must be an integer").
+
+    `parse_envelope` (`runner_admission.py`) already checks `baseline_id`,
+    `request_id`, `epoch` and `claimed_actor` by the same predicates, but
+    it cannot run first here: `_seal`'s retry route answers a committed
+    boundary by FINGERPRINT ahead of `parse_envelope`, on purpose
+    (PR-30a/PR-30e, this method's own docstring), so those four fields must
+    already be well-typed before that fingerprint is taken. `force_seal`
+    and `stage_digest` have no other check at all.
+
+    Read, never coerced, same as before: `bool("false")` is True and force
+    is an AUTHORIZATION (ss3), so a mistyped flag has to refuse rather
+    than force a boundary."""
     force = request.get("force_seal", False)
     if not isinstance(force, bool):
         return f"force_seal must be true or false, got {force!r}"

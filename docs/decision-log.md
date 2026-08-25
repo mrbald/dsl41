@@ -9906,3 +9906,145 @@ relitigate an entry; append a new one.
   appending to, which the glob never did -- noted in the docstring as safe
   by `read_journal`'s own append-only/torn-tail rule, the same one that
   already covers a crash mid-append.
+- DL-170 SealRequest turns strict; the wire gate keeps its voice, for a
+  reason DL-152's own wording never gave it
+  (2026-08-26; boundary.py + runner_control.py + docs/protocol-evolution.md
+  + test_boundary.py; pays the DL-152 deferred slice, corrected).
+  THE FINDING, as DL-152 left it: "`SealRequest` strict mode in place of
+  the hand-written seal strictness, four of whose six checks already
+  exist in `parse_envelope`."
+  THE CORRECTION. "In place of" is the wrong preposition, not a wrong
+  idea -- the same shape of error DL-166 recorded for a different pair
+  of mechanisms: two things answering one question, but only one of
+  them owns a pinned surface. `SealRequest` (`boundary.py:209`)
+  was `frozen=True, extra="forbid"` but never `strict=True`, and in lax
+  mode `epoch=True` coerces to `1` -- the exact hole `_seal_wire_error`
+  (`runner_control.py:1230`) exists to close, because a coerced value
+  could let a retry match a committed seal under a type the original
+  request never carried (DL-151). `_seal_wire_error`'s refusal texts are
+  pinned: `test_a_seal_reads_its_force_flag_and_never_coerces_it`
+  (`tests/test_runner_control.py`) asserts "force_seal must be true or
+  false" and "epoch must be an integer" verbatim. Pydantic's
+  `ValidationError` prose cannot reproduce them, so deleting the
+  hand-written function in favor of the model config -- what "in place
+  of" reads as -- would have reddened a pinned test for no functional
+  gain.
+  THE RULING. `SealRequest` gained `strict=True`
+  (`boundary.py:238`), and its docstring carries the DL-151 argument for
+  why: the MODEL now refuses a coerced field on EVERY construction site,
+  not only the one behind `_seal_wire_error`. That matters concretely --
+  `cli_estate.py`'s offline seal retry route builds a `SealRequest`
+  directly (`cli_estate.py:501`), past the wire gate entirely. Every
+  argument it passes is already statically typed today (verified, not
+  assumed: `force_seal: bool`, `actor: str`, `staged` a `StagedNextPeriod`
+  instance, `epoch`/`baseline_id` off `engine` or a digest-verified
+  `Seal`), so `strict=True` is defence in depth there rather than the
+  closing of a live hole -- but a future caller need not stay that
+  disciplined for the model to still refuse it. `_seal_wire_error`
+  SURVIVES, its docstring rewritten to say what it now is: the message
+  layer in front of a model that already enforces the same rule for
+  `baseline_id`, `epoch`, `request_id` and `stage_digest`, independently.
+  `claimed_actor` is the one exception, found by review (below):
+  `runner_control.py:610` builds it as `request.get("claimed_actor") or
+  ""`, and that `or` launders a falsy non-string -- JSON `0`, `false`,
+  `[]` -- into a legal `""` before the model ever sees the original
+  value. For that one field `_seal_wire_error` is not a second copy of a
+  model check; it is the only check there is. The DL-151 argument for why
+  coercion is refused at all lives once, on `SealRequest`'s own
+  docstring; `_seal_wire_error`'s docstring points there instead of
+  repeating it.
+  `StagedNextPeriod` needed none of this: DL-168 already put
+  `strict=True` on that model directly, and a nested model validates
+  under its OWN config regardless of what `SealRequest` sets -- so this
+  entry's `strict=True` protects the six OUTER fields and DL-168 already
+  protects `next_period`. `docs/protocol-evolution.md` §1's DL-168
+  paragraph named `StagedNextPeriod` as the wire's copy of a staged
+  identity; a new DL-170 paragraph there now names `SealRequest` as the
+  wire's copy of the envelope around it, on the same row, with the
+  `claimed_actor` exception stated in the same place a reader would look
+  for it.
+  All six current construction sites were read and pass typed values,
+  not coerced ones -- one more than the brief's five:
+  `runner_control.py:603`, `cli_estate.py:501`, `tests/test_boundary.py`'s
+  `_request` helper, `tests/test_nightbank_boundary.py`'s `_seal_request`
+  helper and its one direct construction, and a sixth the survey turned
+  up, `tests/test_estate.py:1686`, unchanged by this entry.
+  THE SECOND HALF OF THE FINDING, closed. DL-152's "four of whose six
+  checks already exist in `parse_envelope`" is true, verified against
+  `runner_admission.parse_envelope`: it already checks `baseline_id`
+  (by equality against the run's own, which no wrong-typed value can
+  satisfy), `request_id` (str, non-empty), `epoch` (`is_wire_int`) and
+  `claimed_actor` (str-or-None) -- the same four predicates
+  `_seal_wire_error` also runs. The duplication survives on ORDERING, not
+  oversight: `_seal`'s retry route answers a committed boundary by
+  FINGERPRINT (`_committed_seal`, `runner_control.py`) ahead of
+  `parse_envelope`, on purpose (PR-30a/PR-30e, `_seal`'s own docstring) --
+  a legitimate retry of the boundary that closed C1 carries C1's
+  baseline while the current header has already moved to C2, and
+  `parse_envelope` refuses a foreign `baseline_id` before it ever reads
+  `request_id`. So the four shared fields must be proven well-typed
+  BEFORE that fingerprint is taken, which is before `parse_envelope` ever
+  runs for a `seal`. Only `force_seal` and `stage_digest` have no other
+  check at all. DL-152's item is answered in full now, not only on its
+  "in place of" half.
+  THE JUDGMENT CALL. The construct block in `runner_control.py`'s `_seal`
+  (`:592`) stayed key-by-key rather than collapsing into one
+  `SealRequest.model_validate(...)` over a filtered dict:
+  `_seal_wire_error` already proves every REQUIRED field present and
+  every field but `next_period` wire-typed before that block runs (
+  `force_seal` and `claimed_actor` are typed only when present, but
+  absence there is legal -- both are defaulted), so a collapsed call
+  would have nothing left to additionally catch, and the diff risk of
+  restating six field reads as a dict-and-filter operation bought
+  nothing.
+  THE TESTS. One new test,
+  `test_dl170_a_seal_request_refuses_a_coerced_wire_type_directly`
+  (`tests/test_boundary.py`, its own `DL-170: SealRequest itself is
+  strict too` section beside the `ss2.2` control-verb tests), constructs
+  a `SealRequest` with `epoch=True` through the file's existing
+  `_request` helper and asserts `pydantic.ValidationError`, then reads
+  `errors()[0]` to pin the field (`epoch`) and the reason (`int_type`) --
+  not only that SOME `ValidationError` was raised, the same
+  discrimination `test_dl168_a_seal_reads_its_next_period_strict_too`
+  pins for the nested model. Mutation-checked: `strict=True` dropped from
+  `SealRequest.model_config` reddens exactly that one test (DID NOT
+  RAISE) across `test_boundary.py`, `test_runner_control.py`,
+  `test_estate.py` and `test_nightbank_boundary.py`; restored, tree
+  byte-identical after. No test in this suite passes a coercible wrong
+  type to `SealRequest` and relies on lax acceptance -- every override
+  kwarg found across the four files' `SealRequest`/`_request`/
+  `_seal_request` call sites (`force_seal=True`, `epoch=engine.epoch +
+  5`, `request_id="r-2"`, `stage_digest=other.stage_digest`, etc.) is
+  already the field's own declared type.
+  THE REVIEW, and what it changed. Opus, fresh context, wire-refusal
+  semantics lens, two majors, three minors and four nits, verdict SHIP WITH
+  FIXES -- all acted. Major: `_seal_wire_error`'s docstring claimed the
+  model enforces its rule "independently, on every construction site,
+  wire or not" -- false for `claimed_actor` at the exact call site the
+  sentence describes, for the `or ""` reason above, and the claim argued
+  for the deletion the docstring exists to prevent; corrected in both
+  docstrings, and the "four of six" half of DL-152's finding folded in
+  above rather than left unanswered. Major: no doc had landed --
+  `docs/protocol-evolution.md` §1 now carries the DL-170 paragraph
+  alongside DL-168's, and this entry did not exist yet when the review
+  ran, the same sequencing gap DL-169's review noted (a review can only
+  read what exists at review time; recorded so a future brief either
+  writes the entry first or asks the reviewer to check for it). Minor:
+  the new test's `pytest.raises(ValidationError)` did not discriminate
+  which field or rule failed -- fixed via `errors()[0]`, above. Minor:
+  the test was inserted in the fixtures section, above every banner --
+  moved to its own section beside the DL-168 strictness tests. Minor:
+  the construct-block comment said `_seal_wire_error` proves every field
+  "present," which is false for the two defaulted fields -- reworded.
+  Nit: `boundary.py`'s docstring implied the offline route had a live
+  hole this entry closes, when every argument there is already
+  statically typed -- reworded to "defence in depth." Nit: a backticked
+  identifier was split across a line wrap -- reflowed onto one line.
+  Declined: the fourth nit, that `except (..., ValueError,
+  ValidationError)` names a redundant term (`ValidationError` subclasses
+  `ValueError`) -- true, pre-existing, and untouched by this diff; the
+  reviewer's own note on it says the same.
+  THE GATE. 3432 passed, 6 skipped, 2 xfailed; `ruff check src tests`
+  clean; `mypy src` clean; `scripts/arch_check.py` exits 0, five advisory
+  size notes, all pre-existing baseline overages this slice did not
+  widen at the function level.

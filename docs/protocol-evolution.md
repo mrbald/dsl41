@@ -161,6 +161,22 @@ same status as an open item on this row: `EstateAnchor.read`'s
 coerce (`tests/test_boundary.py`'s two `xfail` cases are the citable
 record).
 
+*(Amended by DL-170.)* `SealRequest` -- the wire's own copy of the seal
+ENVELOPE that carries `next_period`, validated at the same `_seal` --
+gained `strict=True` too, for the six fields DL-168's paragraph did not
+reach: `baseline_id`, `epoch`, `request_id`, `stage_digest`,
+`force_seal`, `claimed_actor`. `runner_control._seal_wire_error` still
+runs first on the live socket and still owns the pinned refusal PROSE
+this row's strictness rule does not promise -- a `ValidationError`
+speaks pydantic's vocabulary, not the operator's. The model's
+`strict=True` is the belt that reaches `cli_estate.py`'s offline retry
+route too, which builds a `SealRequest` directly and sits behind no wire
+gate at all. One field is not fully covered by either belt alone:
+`claimed_actor=request.get("claimed_actor") or ""` launders a falsy
+non-string into a legal empty string before the model ever sees it, so
+for that one field `_seal_wire_error` is the only check there is, not a
+second copy of one.
+
 **The two spool rows are tolerant on fields and strict on versions.** These files
 are written by the supervisor and the wrapper, which may be a different build
 from the engine that reads them. A field added by a newer writer must not stop

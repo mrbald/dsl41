@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from dsl41.ast_jil import parse, render_preserve
 from dsl41.boundary import (
@@ -2027,6 +2028,35 @@ def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
     )
     with pytest.raises(EngineError, match="next_period"):
         anchor.read_claim("c1")
+
+
+# ------------------------------- DL-170: SealRequest itself is strict too
+
+
+def test_dl170_a_seal_request_refuses_a_coerced_wire_type_directly(tmp_path: Path) -> None:
+    """DL-170: `SealRequest` gained `strict=True` in its own config, so the
+    MODEL refuses a coerced wire type on construction, independent of
+    whatever a caller's wire gate does or does not check ahead of it.
+    `bool` is `int`'s subclass; under the old lax config `epoch=True`
+    would have coerced to `1` silently, which is the exact hole DL-151
+    named for a retry that could then match a committed seal under a type
+    the original request never carried.
+
+    A review finding on this entry, one commit before it: `pytest.raises
+    (ValidationError)` alone does not say WHICH field or WHICH rule
+    refused -- `test_dl168_a_seal_reads_its_next_period_strict_too` made
+    the same correction for the nested model's own test. `errors()[0]`
+    pins both: the offending field is `epoch`, and the reason is strict
+    mode's own `int_type`, not `min_length` or a missing key."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    with pytest.raises(ValidationError) as excinfo:
+        _request(engine, staged, epoch=True)
+    error = excinfo.value.errors()[0]
+    assert error["loc"] == ("epoch",)
+    assert error["type"] == "int_type"
+    _close(engine)
 
 
 # ------------------------------------------- ss2.2 the `seal` control verb
