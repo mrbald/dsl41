@@ -530,6 +530,33 @@ def test_trailing_opener_on_the_statement_header() -> None:
     assert render_canonical(parse(canonical)) == canonical
 
 
+def test_trailing_block_opener_carries_the_fact_on_the_model() -> None:
+    """The rule-5 opener fact lives on `Comment.trailing_block` (arch-review
+    F4): the scanner stamps it at scan time, so a renderer never has to
+    re-sniff `"\\n" in c.text` to tell a multi-line trailing comment from a
+    closed one. Checked directly on the model, not just via round-trip
+    bytes, and on both places the scanner can stamp it: the attribute line
+    and a continuation line."""
+    header_text = "insert_job: j /* c1 */ job_type: cmd /* c2\nowner: comment text\n*/\n"
+    jf = parse(header_text)
+    (stmt,) = jf.statements
+    tc = next(c for c in stmt.comments if c.attachment == "trailing")
+    assert tc.trailing_block is True
+
+    cont_text = "insert_job: j\nstart_times: 10:00,\n11:00 /* note\nowner: bob\n*/\n"
+    jf2 = parse(cont_text)
+    (attr,) = jf2.statements[0].attrs
+    (tc2,) = attr.comments
+    assert tc2.trailing_block is True
+
+    inline_text = "insert_job: j\ncommand: echo hi /* c */\n"
+    jf3 = parse(inline_text)
+    (attr3,) = jf3.statements[0].attrs
+    (tc3,) = attr3.comments
+    assert tc3.attachment == "trailing"
+    assert tc3.trailing_block is False
+
+
 def test_trailing_opener_on_a_continuation_line_gates_the_4b_detector() -> None:
     """Rule 6 amended (DL-161): a continuation line can open a block comment,
     with the quote state seeded from the joined value. The body is comment,

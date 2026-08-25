@@ -169,6 +169,12 @@ class Comment(BaseModel):
     text: str  # raw, including '/*...*/' or '#...' marker; '\n'-joined if multiline
     span: SourceSpan
     attachment: Literal["leading", "trailing", "floating"]
+    # True when this is the rule-5 opener that carries a value's multi-line
+    # trailing comment (DL-161): the scanner knows this at scan time
+    # (`_scan_block_comment` + the `attachment = "trailing"` stamp), so the
+    # fact is carried here instead of re-derived from `"\n" in text` -- only
+    # meaningful when attachment == "trailing".
+    trailing_block: bool = False
     # layout trivia (preserve-mode fidelity only)
     pre_blank_lines: list[str] = []  # verbatim blank/ws-only lines before the comment
     indent: str = ""  # ws before the marker: line indent, or the gap after a value
@@ -485,6 +491,7 @@ class _Scanner:
                     # comment` error at the opener line.
                     tc, k = self._scan_block_comment(i, gap, ctext, [])
                     tc.attachment = "trailing"
+                    tc.trailing_block = True
                     trailing: Comment | None = tc
                 else:
                     trailing = (
@@ -604,6 +611,7 @@ class _Scanner:
                 if copen:
                     tc, k = self._scan_block_comment(i, cgap, ctext, [])
                     tc.attachment = "trailing"
+                    tc.trailing_block = True
                     cont.comments.append(tc)
                     cont.raw_value += "\n" + cvalue
                     self._extend_span(cont.span, k)
@@ -750,6 +758,23 @@ def render(jf: JilFile, mode: Literal["preserve", "canonical"] = "preserve") -> 
     return render_preserve(jf) if mode == "preserve" else render_canonical(jf)
 
 
+def _trailing_pair(comments: list[Comment]) -> tuple[Comment | None, Comment | None]:
+    """The rule-5 trailing pair riding one value: (inline rider, block
+    rider). A closed (single-line) trailing comment rides the first value
+    line; a multi-line trailing comment (rule 5 opener, DL-161) rides the
+    last. Read straight off `Comment.trailing_block`, which the scanner
+    stamped at scan time -- not re-derived from `"\\n" in c.text` (F4)."""
+    inline_tc: Comment | None = None
+    block_tc: Comment | None = None
+    for c in comments:
+        if c.attachment == "trailing":
+            if c.trailing_block:
+                block_tc = c
+            elif inline_tc is None:
+                inline_tc = c
+    return inline_tc, block_tc
+
+
 def render_preserve(jf: JilFile) -> str:
     """Byte-exact reconstruction of the source (F1: render(parse(x)) == x)."""
     out: list[str] = []
@@ -769,14 +794,7 @@ def render_preserve(jf: JilFile) -> str:
         # on the continuation line that opened it. Its body lines are emitted
         # as their own `out` entries so the `nl.join` below never sees an
         # embedded '\n' (CRLF fidelity).
-        inline_tc: Comment | None = None
-        block_tc: Comment | None = None
-        for c in comments:
-            if c.attachment == "trailing":
-                if "\n" in c.text:
-                    block_tc = c
-                elif inline_tc is None:
-                    inline_tc = c
+        inline_tc, block_tc = _trailing_pair(comments)
         if inline_tc is not None:
             first = first + inline_tc.indent + inline_tc.text + inline_tc.post
         lines = [first, *rest]
@@ -946,14 +964,7 @@ def _canonical_with_trailing(first: str, rest: list[str], comments: list[Comment
     comment rides the first value line; a multi-line trailing comment (rule 5
     opener, DL-161) rides the last, its body lines emitted as their own lines
     -- the same placement the preserve renderer uses."""
-    inline_tc: Comment | None = None
-    block_tc: Comment | None = None
-    for c in comments:
-        if c.attachment == "trailing":
-            if "\n" in c.text:
-                block_tc = c
-            elif inline_tc is None:
-                inline_tc = c
+    inline_tc, block_tc = _trailing_pair(comments)
     if inline_tc is not None:
         first = f"{first} {inline_tc.text.rstrip()}"
     lines = [first, *rest]
