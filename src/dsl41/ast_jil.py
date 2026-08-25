@@ -18,13 +18,23 @@ jil-statement-syntax.md (each pinned by a fixture or unit test):
 - One-line form (rule 4): only `job_type` is accepted as the inline key; any
   other second `key:` pair on a subcommand line is a loud error, never silently
   folded into the subject.
-- Trailing block comments: the leftmost whitespace-preceded, unquoted `/*`
-  whose first following `*/` ends the line starts the comment. A `/*` that
-  never closes on the line (e.g. a shell glob after a space) stays in the
-  value; a closed `/*...*/` with value text after it is kept in the value as
-  opaque text.
+- Trailing block comments: the leftmost whitespace-preceded (or value-start),
+  unquoted `/*` starts the comment. If its first following `*/` ends the line,
+  the comment is closed on the line. If NO `*/` follows on the line, the
+  marker OPENS a block comment that spans lines (rule 5, DL-161: /*-comment
+  formats open closure-independently; the whitespace-preceded predicate is
+  dsl41's retained glob boundary, not part of that analogy). The body lines
+  are consumed atomically -- they never reach the scan loop -- and a comment
+  still open at EOF is a loud `unterminated block comment` error at the
+  opener line. A wrongly terminated comment is NOT loud: a stray later `*/`
+  silently captures the lines up to it; quoting is the only complete escape,
+  and quoted markers stay value text (rule 7). A closed `/*...*/` with value
+  text after it is kept in the value as opaque text, and a marker glued to
+  the text before it opens nothing. A rule-6 continuation line can open a
+  comment too (seeded quote state); the comment closes the continuation.
 - A full-line block comment must close at end of line; non-whitespace content
-  after `*/` on the closing line is an error.
+  after `*/` on the closing line is an error. The same close rule governs a
+  multi-line trailing comment.
 - Subcommand-shaped unknown keys (rule 3, amended 2026-07-09 / DL-18): an
   attribute-position key matching (insert|update|delete|override)_* that is
   not a recognized subcommand is a loud error, never an attribute -- a missed
@@ -223,8 +233,8 @@ def parse_file(path: str | Path) -> JilFile:
     return parse(p.read_bytes().decode("utf-8"), file=str(p))
 
 
-def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
-    """Split a value body into (value, gap, comment_text, post).
+def _split_trailing_comment(body: str, *, in_quote: bool = False) -> tuple[str, str, str, str, bool]:
+    """Split a value body into (value, gap, comment_text, post, open).
 
     comment_text == "" means no trailing comment. Only `/* ... */` block
     comments can trail a value; a mid-line `#` is VALUE text (amended
@@ -235,8 +245,21 @@ def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
     are recognized only outside double quotes and only at the value start
     or after whitespace (rule 5 + the block-comment decisions in the module
     docstring).
+
+    A marker whose first `*/` ends the line is a closed trailing comment
+    (open=False; post holds the run after `*/`). A marker with NO `*/` after
+    it on the line OPENS a multi-line comment (rule 5, DL-161): comment_text
+    holds the opener tail and open=True -- the caller consumes the body lines
+    and the close atomically, so no body line ever reaches the scan loop. A
+    closed `/*...*/` with value text after it stays in the value as opaque
+    text, and a quoted or glued marker opens nothing. `in_quote` seeds the
+    quote walk for a rule-6 continuation line (DL-160 seeding, DL-161): a
+    quote opened on an earlier line of the joined value still shadows here.
+    This one quote-aware walk hands the caller both the open state and the
+    pre-opener value prefix, so the rule-4/4b mask only ever sees value
+    bytes, never an open comment tail.
     """
-    in_q = False
+    in_q = in_quote
     i = 0
     n = len(body)
     while i < n:
@@ -245,18 +268,30 @@ def _split_trailing_comment(body: str) -> tuple[str, str, str, str]:
             in_q = not in_q
         elif not in_q and body.startswith("/*", i) and (i == 0 or body[i - 1] in " \t"):
             close = body.find("*/", i + 2)
+            value_ws = body[:i]
+            value = value_ws.rstrip(" \t")
+            gap = value_ws[len(value) :]
             if close == -1:
-                i += 1  # never closes on this line (e.g. a glob): stays in the value
-                continue
+                # Rule 5 (DL-161, majority rule): no `*/` on the line -- the
+                # marker opens a block comment that spans lines. Before this
+                # amendment the marker stayed value text and the body lines
+                # scanned as attributes: silent corruption.
+                return value, gap, body[i:], "", True
             after = body[close + 2 :]
             if after.strip() == "":
-                value_ws = body[:i]
-                value = value_ws.rstrip(" \t")
-                return value, value_ws[len(value) :], body[i : close + 2], after
+                return value, gap, body[i : close + 2], after, False
             i = close + 2  # closed block with value text after it: opaque, keep scanning
             continue
         i += 1
-    return body, "", "", ""
+    return body, "", "", "", False
+
+
+def value_opens_comment(value: str) -> bool:
+    """True when the bare spelling of `value` would OPEN a rule-5 block
+    comment (a whitespace-preceded or value-start unquoted `/*` with no `*/`
+    after it on the line, DL-161). JIL-emitting paths call this to re-escape:
+    such a value must be quoted or it swallows the lines that follow it."""
+    return _split_trailing_comment(value)[4]
 
 
 def _find_inline_pair(value: str, *, in_quote: bool = False) -> re.Match[str] | None:
@@ -308,7 +343,12 @@ def _mask_closed_blocks(value: str, *, in_quote: bool = False) -> str:
         elif not in_q and value.startswith("/*", i) and (i == 0 or value[i - 1] in " \t"):
             close = value.find("*/", i + 2)
             if close == -1:
-                break  # never closes on this line: value text (rule 5)
+                # Reachable only on a rule-6 continuation line: an attribute
+                # or subcommand value cannot keep an unclosed whitespace-
+                # preceded marker (rule 5 opens a comment there, DL-161), but
+                # rule 6 carries a continuation line verbatim, where the
+                # marker stays value text.
+                break
             out[i : close + 2] = [_MASK_FILL] * (close + 2 - i)
             i = close + 2
             continue
@@ -415,19 +455,36 @@ class _Scanner:
                 key = m.group(0)
                 rest = body[m.end() + 1 :]
                 sep = rest[: len(rest) - len(rest.lstrip(" \t"))]
-                value, gap, ctext, cpost = _split_trailing_comment(rest[len(sep) :])
+                value, gap, ctext, cpost, copen = _split_trailing_comment(rest[len(sep) :])
                 span = self._span(i, i)
-                trailing = (
-                    Comment(text=ctext, span=span, attachment="trailing", indent=gap, post=cpost)
-                    if ctext
-                    else None
-                )
+                k = i
+                if copen:
+                    # Rule 5 (DL-161): the trailing marker opens a multi-line
+                    # comment. Its body lines are consumed HERE, by the same
+                    # walk a full-line comment uses, so the scan loop never
+                    # sees them: the rule-6 continuation branch and its
+                    # seeded 4b detector (DL-160) run only on true value
+                    # lines. Open at EOF is the loud `unterminated block
+                    # comment` error at the opener line.
+                    tc, k = self._scan_block_comment(i, gap, ctext, [])
+                    tc.attachment = "trailing"
+                    trailing: Comment | None = tc
+                else:
+                    trailing = (
+                        Comment(
+                            text=ctext, span=span, attachment="trailing", indent=gap, post=cpost
+                        )
+                        if ctext
+                        else None
+                    )
                 comments, blanks, pend_c, pend_b = pend_c, pend_b, [], []
                 if key.lower() in SUBCOMMANDS:
                     cur = self._make_statement(
                         key, value, indent, sep, span, comments, blanks, trailing, i
                     )
                     stmts.append(cur)
+                    if k > i:
+                        self._extend_span(cur.span, k)
                     cont = None
                 else:
                     if _SUBCOMMAND_SHAPE_RE.fullmatch(key):
@@ -481,10 +538,18 @@ class _Scanner:
                         sep=sep,
                     )
                     cur.attrs.append(attr)
-                    self._extend_span(cur.span, i)
-                    cont = attr if key.lower() in CONTINUATION_ATTRS else None
+                    if k > i:
+                        # The attr owns its multi-line trailing comment's
+                        # source lines (DL-161).
+                        self._extend_span(attr.span, k)
+                    self._extend_span(cur.span, k)
+                    # A multi-line trailing comment CLOSES the continuation
+                    # (rule 6: a comment line closes it; the body lines are
+                    # comment lines). A closed single-line trailing comment
+                    # leaves it armed, as before (DL-161).
+                    cont = attr if key.lower() in CONTINUATION_ATTRS and not copen else None
                     cont_quote = masked.count('"') % 2 == 1
-                i += 1
+                i = k + 1
                 continue
             if cont is not None and not pend_c and not pend_b:
                 # Rule 6: non-key-shaped line continues the open list-valued
@@ -496,7 +561,18 @@ class _Scanner:
                 # no downstream check at all. Rule 11 date rows stay out: rule
                 # 11 does not validate the row shape (the DL-36 comment above
                 # _DATE_BODY_SUBCOMMANDS).
-                masked = _mask_closed_blocks(line, in_quote=cont_quote)
+                # Rule 6 amended (DL-161): the line CAN open a block comment,
+                # with the same seeded quote state -- otherwise the rule-5
+                # opener would leave the continuation door open to the same
+                # silent corruption. Only the pre-opener prefix is value: the
+                # 4b detector reads it alone, the comment body is consumed
+                # atomically, and the comment closes the continuation (rule
+                # 6: a comment line closes it).
+                cvalue, cgap, ctext, _cp, copen = _split_trailing_comment(
+                    line, in_quote=cont_quote
+                )
+                scan_text = cvalue + cgap if copen else line
+                masked = _mask_closed_blocks(scan_text, in_quote=cont_quote)
                 if (pair := _find_inline_pair(masked, in_quote=cont_quote)) is not None:
                     raise JilParseError(
                         f"continuation of {cont.key!r} carries a {pair.group(2)!r}:-shaped"
@@ -507,10 +583,20 @@ class _Scanner:
                         self.file,
                         i + 1,
                     )
+                assert cur is not None
+                if copen:
+                    tc, k = self._scan_block_comment(i, cgap, ctext, [])
+                    tc.attachment = "trailing"
+                    cont.comments.append(tc)
+                    cont.raw_value += "\n" + cvalue
+                    self._extend_span(cont.span, k)
+                    self._extend_span(cur.span, k)
+                    cont = None
+                    i = k + 1
+                    continue
                 cont_quote ^= masked.count('"') % 2 == 1
                 cont.raw_value += "\n" + line
                 self._extend_span(cont.span, i)
-                assert cur is not None
                 self._extend_span(cur.span, i)
                 i += 1
                 continue
@@ -658,11 +744,31 @@ def render_preserve(jf: JilFile) -> str:
         parts[-1] = parts[-1] + c.post
         out.extend(parts)
 
-    def trailing_suffix(comments: list[Comment]) -> str:
+    def emit_with_trailing(first: str, rest: list[str], comments: list[Comment]) -> None:
+        # A closed (single-line) trailing comment rides its own line: the
+        # first value line. A multi-line trailing comment (rule 5 opener,
+        # DL-161) rides the LAST value line -- it either opened on the
+        # attribute line (then the continuation closed, so first == last) or
+        # on the continuation line that opened it. Its body lines are emitted
+        # as their own `out` entries so the `nl.join` below never sees an
+        # embedded '\n' (CRLF fidelity).
+        inline_tc: Comment | None = None
+        block_tc: Comment | None = None
         for c in comments:
             if c.attachment == "trailing":
-                return c.indent + c.text + c.post
-        return ""
+                if "\n" in c.text:
+                    block_tc = c
+                elif inline_tc is None:
+                    inline_tc = c
+        if inline_tc is not None:
+            first = first + inline_tc.indent + inline_tc.text + inline_tc.post
+        lines = [first, *rest]
+        if block_tc is not None:
+            parts = block_tc.text.split("\n")
+            parts[0] = lines[-1] + block_tc.indent + parts[0]
+            parts[-1] = parts[-1] + block_tc.post
+            lines = lines[:-1] + parts
+        out.extend(lines)
 
     for stmt in jf.statements:
         for c in stmt.comments:
@@ -673,15 +779,14 @@ def render_preserve(jf: JilFile) -> str:
         if stmt.job_type_inline is not None:
             header += stmt.inline_gap + stmt.inline_key + ":" + stmt.inline_sep
             header += stmt.job_type_inline
-        out.append(header + trailing_suffix(stmt.comments))
+        emit_with_trailing(header, [], stmt.comments)
         for a in stmt.attrs:
             for c in a.comments:
                 if c.attachment != "trailing":
                     emit_full_line(c)
             out.extend(a.pre_blank_lines)
             vlines = a.raw_value.split("\n")
-            out.append(a.indent + a.key + ":" + a.sep + vlines[0] + trailing_suffix(a.comments))
-            out.extend(vlines[1:])
+            emit_with_trailing(a.indent + a.key + ":" + a.sep + vlines[0], vlines[1:], a.comments)
         out.extend(stmt.date_lines)
     for c in jf.trailing_comments:
         emit_full_line(c)
@@ -785,11 +890,14 @@ def render_canonical(jf: JilFile) -> str:
             # fixpoint breaks (F2, DL-159). Re-split here the same way the
             # second parse would, so the first canonical pass already
             # matches it.
-            value, _gap, ctext, _post = _split_trailing_comment(stmt.subject)
-            if ctext:
+            value, _gap, ctext, _post, copen = _split_trailing_comment(stmt.subject)
+            if ctext and not copen:
+                # A parsed subject can no longer hold an OPEN marker (rule 5
+                # takes it as a comment opener at scan time, DL-161); the
+                # guard keeps a hand-built AST verbatim.
                 subject = f"{value} {ctext}"
         header = f"{stmt.subcommand}: {subject}" if subject else f"{stmt.subcommand}:"
-        lines.append(header + _canonical_trailing(stmt.comments))
+        lines.extend(_canonical_with_trailing(header, [], stmt.comments))
         attrs = list(stmt.attrs)
         if stmt.job_type_inline is not None:
             attrs.insert(
@@ -799,8 +907,7 @@ def render_canonical(jf: JilFile) -> str:
             _emit_canonical_comments(lines, a.comments)
             vlines = [ln.rstrip() for ln in a.raw_value.split("\n")]
             first = f"{a.key}: {vlines[0]}" if vlines[0] else f"{a.key}:"
-            lines.append(first + _canonical_trailing(a.comments))
-            lines.extend(vlines[1:])
+            lines.extend(_canonical_with_trailing(first, vlines[1:], a.comments))
         lines.extend(ln.strip() for ln in stmt.date_lines)
         blocks.append("\n".join(lines))
     if jf.trailing_comments:
@@ -816,11 +923,28 @@ def _emit_canonical_comments(lines: list[str], comments: list[Comment]) -> None:
             lines.extend(ln.rstrip() for ln in c.text.split("\n"))
 
 
-def _canonical_trailing(comments: list[Comment]) -> str:
+def _canonical_with_trailing(first: str, rest: list[str], comments: list[Comment]) -> list[str]:
+    """The value lines plus their trailing comments: the gap normalizes to
+    one space and every comment line is right-stripped. A closed trailing
+    comment rides the first value line; a multi-line trailing comment (rule 5
+    opener, DL-161) rides the last, its body lines emitted as their own lines
+    -- the same placement the preserve renderer uses."""
+    inline_tc: Comment | None = None
+    block_tc: Comment | None = None
     for c in comments:
         if c.attachment == "trailing":
-            return " " + c.text.rstrip()
-    return ""
+            if "\n" in c.text:
+                block_tc = c
+            elif inline_tc is None:
+                inline_tc = c
+    if inline_tc is not None:
+        first = f"{first} {inline_tc.text.rstrip()}"
+    lines = [first, *rest]
+    if block_tc is not None:
+        parts = [ln.rstrip() for ln in block_tc.text.split("\n")]
+        parts[0] = f"{lines[-1]} {parts[0]}"
+        lines = lines[:-1] + parts
+    return lines
 
 
 def _canonical_sort(attrs: list[RawAttr]) -> list[RawAttr]:

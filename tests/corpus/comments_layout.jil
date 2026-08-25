@@ -4,6 +4,8 @@
 insert_job: commented   job_type: c /* header trailing */
 # attr leading comment
 command: echo hi /* attr trailing */
-machine: m1
+machine: m1 /* trailing opener (rule 5, DL-161)
+   body line kept as comment
+   closes here */
 
 /* floating comment at EOF */

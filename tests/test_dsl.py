@@ -244,6 +244,90 @@ def test_builder_refuses_non_key_shaped_attrs() -> None:
         c.job("a", command="x", machine="m1", **{"bad key": "v"})
 
 
+def test_builder_quotes_a_value_that_would_open_a_comment() -> None:
+    """Rule 5 (DL-161): a bare ` /*` value would open a block comment in the
+    generated JIL and swallow the lines after it. The builder emits the
+    quoted spelling (the documented escape) and the typed lane unquotes it
+    back at lowering -- the every-JIL-emitting-path-re-escapes principle."""
+    c = CatalogBuilder()
+    c.job("a", command="x", machine="m1", std_err_file="/tmp/log /*glob")
+    assert 'std_err_file: "/tmp/log /*glob"' in c.to_jil()
+    job = c.build().jobs["a"]
+    assert job.exec_ is not None
+    assert job.exec_.std_err_file == "/tmp/log /*glob"
+
+
+def test_builder_refuses_an_unquotable_comment_opening_value() -> None:
+    """A value that both opens a comment and embeds a quote has no bare JIL
+    spelling; verbatim lanes (passthrough=) get the loud refusal instead of
+    a silent quote-wrap (DL-161)."""
+    c = CatalogBuilder()
+    with pytest.raises(DslError, match="rule-5 block comment"):
+        c.job("a", command="x", machine="m1", std_err_file='say "hi" /*open')
+    c2 = CatalogBuilder()
+    with pytest.raises(DslError, match="rule-5 block comment"):
+        c2.job("b", command="x", machine="m1", passthrough={"note": "tail /*open"})
+
+
+def test_builder_auto_quotes_only_the_lanes_lowering_unquotes() -> None:
+    """DL-161 review B2: the auto-quote is exact only where ir._unquote
+    strips it back (UNQUOTING_JOB_ATTRS). On any other lane the quotes would
+    survive into the stored value, so the builder refuses by name instead of
+    silently rewriting -- `description` routes to verbatim annotations."""
+    c = CatalogBuilder()
+    with pytest.raises(DslError, match="description.*rule-5 block comment"):
+        c.job("a", command="x", machine="m1", description="tail /*open")
+
+
+def test_builder_list_values_run_the_full_value_gate() -> None:
+    """DL-161 review B1: the list/tuple lane returned the join before every
+    gate. A list item could inject a line (control chars) or open a comment,
+    fully silently. Joined first, the string runs the same gate as a
+    scalar."""
+    c = CatalogBuilder()
+    with pytest.raises(DslError, match="control"):
+        c.job("m", command="x", machine="m1", start_times=["10:00\nowner: bob"])
+    c2 = CatalogBuilder()
+    with pytest.raises(DslError, match="rule-5 block comment"):
+        c2.job("n", command="x", machine="m1", frobnicate=["a /*open"])
+
+
+def test_builder_list_comment_opener_is_never_silent_end_to_end() -> None:
+    """The review's exact silent-loss probe: a days_of_week item opening a
+    comment plus a later value ending in `*/` used to swallow BOTH
+    attributes into a comment in the generated JIL. Now the in-set lane
+    emits the quoted spelling, nothing is swallowed, and the bad day token
+    refuses loudly at lowering."""
+    from dsl41.ir import LoweringError
+
+    c = CatalogBuilder()
+    c.job(
+        "j",
+        command="x",
+        machine="m1",
+        date_conditions=1,
+        days_of_week=["mo /*open"],
+        description="tail */",
+    )
+    jil = c.to_jil()
+    assert 'days_of_week: "mo /*open"' in jil
+    assert "description: tail */" in jil  # not swallowed
+    with pytest.raises(LoweringError, match="unknown day token"):
+        c.build()
+
+
+def test_calendar_date_rows_skip_the_comment_gate_but_not_the_ctrl_gate() -> None:
+    """DL-161 review M1: rule 11 says a date row is not value position, so a
+    bare `/*` in a row opens nothing and must not be refused; a newline in a
+    row is still line injection and stays refused."""
+    c = CatalogBuilder()
+    c.calendar("hols", dates=["01/01/2026 /*note"])
+    assert "01/01/2026 /*note" in c.to_jil()
+    c2 = CatalogBuilder()
+    with pytest.raises(DslError, match="control"):
+        c2.calendar("h2", dates=["01/01/2026\nowner: bob"])
+
+
 def test_builder_goes_through_the_real_pipeline() -> None:
     """DL-17: the builder generates JIL and lowers it through the tested
     pipeline -- unknown attributes hit the DL-07 firewall exactly like any

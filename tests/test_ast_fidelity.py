@@ -447,6 +447,168 @@ def test_quoted_markers_stay_in_value() -> None:
     assert attr.comments == []
 
 
+# ---------------------------- rule 5 opener: multi-line trailing comments (DL-161)
+
+
+def test_trailing_opener_spans_lines_as_comment() -> None:
+    """Rule 5 (DL-161): a whitespace-preceded `/*` with no `*/` on its line
+    OPENS a block comment. Structural, not just F1: before the amendment the
+    marker stayed value text and the body lines scanned as ATTRIBUTES --
+    `owner` below silently became an attribute of j. F1 alone cannot prove
+    the classification: both ASTs render the same bytes."""
+    text = "insert_job: j\ncommand: echo hi /* watch\nowner: prose about bob\nend: */\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs  # owner/end are NOT attributes
+    assert attr.key == "command"
+    assert attr.raw_value == "echo hi"
+    (tc,) = attr.comments
+    assert tc.attachment == "trailing"
+    assert tc.text == "/* watch\nowner: prose about bob\nend: */"
+    assert tc.span.line_start == 2 and tc.span.line_end == 4
+    assert attr.span.line_end == 4 and jf.statements[0].span.line_end == 4
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_trailing_opener_round_trips_crlf() -> None:
+    """The renderers emit the comment body line-wise: `Comment.text` stores
+    '\\n', so a suffix-string emit would render the body LF inside a CRLF
+    file and break F1."""
+    text = "insert_job: j\r\ncommand: a /* w\r\nkey: in body\r\nb */\r\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == "a"
+    assert attr.comments[0].text == "/* w\nkey: in body\nb */"
+    assert render(jf) == text
+
+
+def test_trailing_opener_unterminated_at_eof_is_loud() -> None:
+    """A comment still open at EOF refuses with the OPENER's line (rule 5,
+    DL-161). Before the amendment this input parsed silently with the
+    marker left in the value."""
+    with pytest.raises(JilParseError, match="unterminated block comment") as exc:
+        parse("insert_job: j\ncommand: ls /tmp /*\n", file="f.jil")
+    assert exc.value.line == 2
+    assert str(exc.value).startswith("f.jil:2:")
+
+
+def test_trailing_opener_close_line_tail_is_loud() -> None:
+    """The multi-line close rule is the full-line one: non-whitespace after
+    `*/` on the closing line is an error."""
+    with pytest.raises(JilParseError, match="content after"):
+        parse("insert_job: j\ncommand: a /* w\nb */ tail\n")
+
+
+def test_quoted_marker_is_the_glob_escape() -> None:
+    """Rule 5 (DL-161): quoting is the ONLY complete escape for a
+    whitespace-preceded `/*` value -- the quoted marker opens nothing
+    (rule 7). Unquoted, this exact value now opens a comment
+    (torture_colon.jil pins the quoted spelling corpus-wide)."""
+    text = 'insert_job: j\nstd_err_file: "/tmp/log /*unclosed-glob-lookalike"\n'
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == '"/tmp/log /*unclosed-glob-lookalike"'
+    assert attr.comments == []
+    assert render(jf) == text
+
+
+def test_trailing_opener_on_the_statement_header() -> None:
+    """The opener runs on subcommand lines too, and the inline job_type
+    relocation still reaches an F2 fixpoint with the multi-line comment on
+    the header (the design-consult pin)."""
+    text = "insert_job: j /* c1 */ job_type: cmd /* c2\nowner: comment text\n*/\n"
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.subject == "j /* c1 */"
+    assert stmt.job_type_inline == "cmd"
+    assert stmt.attrs == []  # `owner:` in the body is comment prose
+    tc = next(c for c in stmt.comments if c.attachment == "trailing")
+    assert tc.text == "/* c2\nowner: comment text\n*/"
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_trailing_opener_on_a_continuation_line_gates_the_4b_detector() -> None:
+    """Rule 6 amended (DL-161): a continuation line can open a block comment,
+    with the quote state seeded from the joined value. The body is comment,
+    so the DL-160 detector does not fire on `owner:` there and the body does
+    not fold into raw_value -- only the pre-opener prefix is value."""
+    text = "insert_job: j\nstart_times: 10:00,\n11:00 /* note\nowner: bob\n*/\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == "10:00,\n11:00"
+    (tc,) = attr.comments
+    assert tc.attachment == "trailing" and tc.text == "/* note\nowner: bob\n*/"
+    assert render(jf) == text
+
+
+def test_rule_4b_fires_on_the_value_prefix_of_a_continuation_opener() -> None:
+    """Only the comment body is exempt: a bare pair in the pre-opener value
+    prefix of the opening continuation line is still the DL-160 error."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_job: j\nstart_times: 10:00,\n11:00 owner: bob /* note\nbody */\n")
+
+
+def test_multiline_trailing_comment_closes_the_continuation() -> None:
+    """Rule 6: a comment line closes the open continuation, and the body
+    lines of a multi-line trailing comment are comment lines. The line
+    after the closer is an error, not a resumed continuation."""
+    with pytest.raises(JilParseError, match="unrecognized line"):
+        parse("insert_job: j\nstart_times: 10:00, /* note\nbody */\n11:00\n")
+
+
+def test_singleline_trailing_comment_leaves_the_continuation_open() -> None:
+    """The other half of the rule above: a trailing comment that closes on
+    its own line is not a comment LINE, so the continuation stays armed --
+    pre-DL-161 behavior, now pinned."""
+    text = "insert_job: j\nstart_times: 10:00, /* c */\n11:00\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == "10:00,\n11:00"
+    assert render(jf) == text
+
+
+def test_quoted_marker_on_a_continuation_line_opens_nothing() -> None:
+    """The opener walk shares rule 4b's seeded quote state (DL-160): inside
+    a quote opened on an earlier line, the marker is value text."""
+    text = 'insert_job: j\nstart_times: "08:00, /* x\n09:00"\n'
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == '"08:00, /* x\n09:00"'
+    assert render(jf) == text
+
+
+def test_closed_trailing_plus_continuation_opener_both_render() -> None:
+    """One attr can carry both trailing shapes: a closed comment on the
+    attribute line (continuation stays open) and a multi-line comment opened
+    on a continuation line (which closes it). The closed one rides the first
+    value line, the multi-line one the last."""
+    text = "insert_job: j\nstart_times: 1, /* c */\n2 /* open\nbody */\n"
+    jf = parse(text)
+    (attr,) = jf.statements[0].attrs
+    assert attr.raw_value == "1,\n2"
+    assert [c.text for c in attr.comments] == ["/* c */", "/* open\nbody */"]
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_calendar_date_body_survives_a_header_trailing_opener() -> None:
+    """Rule 11 (DL-161): the atomic scan consumes the comment body with its
+    statement line, so a multi-line trailing comment on `calendar:` is
+    header trivia, not a comment line between rows -- the date body still
+    opens contiguously after it."""
+    text = "calendar: hols /* note\nbody */\n01/01/2026 00:00\n"
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.date_lines == ["01/01/2026 00:00"]
+    tc = next(c for c in stmt.comments if c.attachment == "trailing")
+    assert tc.text == "/* note\nbody */"
+    assert render(jf) == text
+
+
 def test_continuation_lines_merge_into_value() -> None:
     text = 'insert_job: j\nstart_times: "08:00,\n09:00"\ncommand: echo hi\n'
     jf = parse(text)
@@ -512,6 +674,12 @@ def jil_source(draw: st.DrawFn) -> str:
         if draw(st.booleans()):
             lines.append("start_mins: 0, 15,")
             lines.append("30, 45")
+        if draw(st.booleans()):
+            # DL-161: a trailing opener whose comment closes on a later line;
+            # the key-shaped body line must stay comment prose.
+            lines.append(f"{draw(_ATTR_KEY)}: v /* {draw(_IDENT)}")
+            lines.append(f"{draw(_IDENT)}: body")
+            lines.append("*/")
     text = nl.join(lines)
     if draw(st.booleans()):
         text += nl
@@ -555,7 +723,23 @@ F4_CASES = [
     ("quoted-and-escaped-colons", 'insert_job: j\ncommand: echo "a : b" and \\: bare\n'),
     ("hash-inside-quotes", 'insert_job: j\ndescription: "hash # inside quotes"\n'),
     ("glob-not-comment", "insert_job: j\ncommand: ls -l /tmp/*\n"),
-    ("unclosed-block-stays-in-value", "insert_job: j\ncommand: ls /tmp /*\n"),
+    # DL-161: the unclosed marker OPENS a multi-line comment now; the
+    # unclosed-at-EOF spelling moved to the error cases below. These pin the
+    # valid closing shapes -- LF, CRLF, and opened on a continuation line.
+    (
+        "trailing-opener-multiline",
+        "insert_job: j\ncommand: echo hi /* watch\nowner: body prose\nend: */\n",
+    ),
+    (
+        "trailing-opener-multiline-crlf",
+        "insert_job: j\r\ncommand: a /* w\r\nkey: in body\r\nb */\r\n",
+    ),
+    (
+        "trailing-opener-on-continuation-line",
+        "insert_job: j\nstart_times: 1,\n2 /* note\nkey: body\n*/\n",
+    ),
+    ("trailing-opener-blank-body-line", "insert_job: j\ncommand: a /* w\n\nb */\n"),
+    ("quoted-unclosed-marker-glob-escape", 'insert_job: j\nstd_err_file: "/tmp/log /*glob"\n'),
     ("embedded-closed-block-in-value", "insert_job: j\ncommand: a /* closed */ b\n"),
     ("block-marker-at-value-start", "insert_job: j\ncommand:/* c */\n"),
     ("quoted-block-marker-in-value", 'insert_job: j\ndescription: "/* " */ plain tail\n'),
@@ -615,6 +799,14 @@ ERROR_CASES = [
     ("unterminated-block-comment", "insert_job: j\n/* never closed\n"),
     ("content-after-block-close", "insert_job: j\n/* closed */ command: x\n"),
     ("continuation-without-list-attr", "insert_job: j\ncommand: echo\n0, 15, 30\n"),
+    # DL-161: the rule-5 opener's refusal shapes. The first parsed silently
+    # before the amendment (marker stayed in the value).
+    ("trailing-opener-unterminated-at-eof", "insert_job: j\ncommand: ls /tmp /*\n"),
+    ("trailing-opener-close-line-tail", "insert_job: j\ncommand: a /* w\nb */ tail\n"),
+    (
+        "continuation-after-multiline-trailing-comment",
+        "insert_job: j\nstart_times: 1, /* c\nb */\n2\n",
+    ),
 ]
 
 

@@ -102,13 +102,33 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    scanner preserves the text. `Comment.text` holds the marker and its body, with `\n` between
    lines. The indent, the blank lines before the comment, and the run after the closing `*/` ride
    in separate layout fields, which is what keeps preserve-mode rendering byte-exact.
-   Disambiguation from values (pinned by F4 fixtures, amended 2026-07-03): a trailing block
-   comment starts at the leftmost unquoted `/*` that is at the value start or preceded by
-   whitespace, and whose next `*/` ends the line. A `/*` that never closes on the line (for
-   example, a shell glob after a space) is value text. A closed `/*...*/` with value text
-   after it stays in the value as opaque text. A full-line block comment must close at the
-   end of its last line. Non-whitespace content after `*/` is a scanner error, and so is a
-   block comment that never closes.
+   Disambiguation from values (pinned by F4 fixtures; amended 2026-07-03 and 2026-08-24,
+   DL-161): a trailing block comment starts at the leftmost unquoted `/*` that is at the
+   value start or preceded by whitespace. If its first `*/` ends the line, the comment is
+   closed on the line. If NO `*/` follows on the line, the marker OPENS a block comment that
+   spans lines. The scanner consumes the body lines atomically with the opening line, so no
+   body line ever reaches the other line rules. A comment still open at EOF is a loud
+   `unterminated block comment` error that names the opener line. This follows the
+   `/*`-comment formats (C, C++, Java, JavaScript, Go, Rust, SQL, CSS, HCL, PHP, proto):
+   all of them open a comment closure-independently outside string literals; none decides
+   by whether `*/` follows. CSS is in that list for the opening rule only: its tokenizer
+   consumes to EOF and records a parse error — it recovers rather than refuses, so it does
+   not support the loud-EOF half. The whitespace-preceded predicate is dsl41's own retained
+   boundary for glued glob values (`/tmp/*` opens nothing) — it is NOT part of that
+   majority; C-family lexers open without it. Formats that protect unquoted globs do so by
+   not having block comments at all. The opener also runs at the value START, so a bare
+   root glob such as `command: /*.sh` has no bare spelling any more — it must be quoted.
+   Quoting is the only complete escape: a quoted `/*`
+   opens nothing (rule 7), so a whitespace-preceded or value-start glob-shaped value must
+   be quoted.
+   Known hazard, stated plainly: a stray later `*/` silently captures the lines up to it.
+   An unterminated comment is loud; a wrongly terminated one is not. A closed `/*...*/`
+   with value text after it stays in the value as opaque text. A full-line block comment
+   must close at the end of its last line; the same close rule governs a multi-line
+   trailing comment. Non-whitespace content after `*/` on the closing line is a scanner
+   error. [?] The live `jil` binary has not adjudicated the multi-line trailing form; the
+   runbook carries the probe (the DL-59 pattern: a documented deterministic default, not a
+   guess-resolution).
    *(Amended 2026-07-10, DL-31: `#` starts a comment only as the first non-whitespace
    character of the line. The Broadcom syntax rules put `#` comments "in the first
    column" and list `#` among valid name/value characters. As a result, a mid-line
@@ -128,6 +148,15 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
    open continuation is a scanner error, unless rule 11 makes it a date row. [?] Make sure that
    the exact continuation trigger set matches real `autorep -q` output. Then encode the findings
    as synthetic corpus fixtures.
+   *(Amended 2026-08-24, DL-161: a continuation line CAN open a block comment. The rule-5
+   opener runs on it with the quote state seeded from the joined value (the DL-160 walk), so
+   a marker inside a quote opened on an earlier line stays value text. Only the pre-opener
+   prefix is value — the rule-4b detector reads it alone — and the body lines are consumed
+   with the comment. The comment closes the open continuation (this rule's own comment-closes
+   sentence: the body lines are comment lines), so the line after the closer is a scanner
+   error, not a resumed continuation. A trailing comment that CLOSES on its own line is
+   different in both places: on the attribute line it leaves the continuation open, and on a
+   continuation line it stays in the verbatim carry — no comment is extracted there.)*
 7. **Quoted values**: the scanner preserves `"..."` verbatim, and this includes the internal
    spaces/colons. The quotes are part of raw_value at the AST level (semantic unquoting
    happens at lowering). Quote handling is lexical: every `"` toggles the shadow, a backslash
@@ -164,6 +193,11 @@ gets a fidelity test (AST contract, `ir-design.md` §2).
     argument). These verbs deliberately stay OUT of the rule-3 guard-verb inventory note. The
     guard covers `(insert|update|delete|override|rename)_*` shapes only, and calendar exports
     have no update/delete verbs (re-import with `-F` overwrites).
+    *(Amended 2026-08-24, DL-161: a date row is NOT value position — the rule-5 opener does
+    not run on it; the row stays verbatim, the same exemption rule 4b's date-row carve-out
+    uses (DL-160). A multi-line trailing comment on the `calendar:` line or on one of its
+    attributes does not break date-body contiguity: the atomic scan consumes the body lines
+    with their statement line, so they are trailing trivia, not comment lines between rows.)*
 
 ## Corpus policy
 
@@ -182,12 +216,16 @@ entries keeps a descriptive name.
 - F3 fuzz: hypothesis-generated JIL-shaped text and raw character soups. Where parse
   succeeds, F1 holds; for the JIL-shaped half, F2 holds as well.
 - F4 lexical torture, as an inline case matrix: escaped and quoted colons, a `#` inside quotes,
-  a glob and an unclosed block marker in a value, a closed block kept inside a value, a block
+  a glued glob in a value, a trailing opener whose comment closes on a later line (LF, CRLF,
+  and opened on a continuation line — DL-161), a quoted unclosed marker (the glob escape), a
+  closed block kept inside a value, a block
   marker at the value start, a quoted block marker whose `*/` falls after the closing quote, a
   closed block kept in a subcommand subject and after the inline `job_type`, the
   one-line `job_type` form with a trailing comment, and the layout corners (no space after the
   colon, empty value, trailing value spaces, indented attribute, empty subject, blank and
   whitespace-only lines, CRLF, no final newline, comment-only file, empty file). Every case is
-  checked for both F1 and F2. Key-shaped lookalikes inside a value sit in the rule-4b guard
+  checked for both F1 and F2. The unclosed-at-EOF marker moved from the value cases to an
+  exact error assertion (message plus opener line) by DL-161. Key-shaped lookalikes inside a
+  value sit in the rule-4b guard
   matrix. `/tmp/out:file.err` also rides in the corpus torture fixture, where F1 and F2 cover
   it.

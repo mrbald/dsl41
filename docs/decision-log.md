@@ -8739,3 +8739,129 @@ relitigate an entry; append a new one.
   defects is paid. The last -- a multi-line trailing block comment
   folding its body into attributes -- stays open for the slice named
   after this one.
+- DL-161 rule 5 follows the majority: a whitespace-preceded line-final
+  `/*` opens a multi-line comment, unterminated at EOF is loud, quoting
+  is the glob escape (2026-08-24, user decision; ast_jil.py +
+  jil-statement-syntax.md rules 5/6/11 + torture_colon.jil +
+  comments_layout.jil + test_ast_fidelity.py + test_ir.py +
+  live-instance-runbook.md; pays the last of DL-151's three
+  pre-existing scanner defects).
+  THE DEBT. Rule 5 read a `/*` that never closes on its line as value
+  text. The body lines then scanned as ordinary lines.
+  THE REPRO, before the fix. `insert_job: j\ncommand: echo hi /*
+  watch\nowner: prose about bob\nend: */\n` parsed to THREE attributes:
+  command `echo hi /* watch`, owner `prose about bob`, end `*/`. It
+  also round-tripped byte-identically, so F1 proved nothing: the
+  corrupted AST and the intended one render the same bytes. `owner`
+  reached IR as a real attribute -- fully silent corruption.
+  THE GROUND. Survey of the `/*`-comment formats (C, C++, Java,
+  JavaScript, Go, Rust, SQL, CSS, HCL, PHP, proto): every one opens a
+  comment at `/*` outside string literals, closure-independently --
+  none decides by whether `*/` follows. Unterminated at EOF is a loud
+  parse error in the compiled family; CSS is the exception that
+  RECOVERS (consumes to EOF, records a parse error), so CSS does not
+  support the loud-refusal half and is not cited for it. Formats that
+  protect unquoted globs do so by not having block comments at all.
+  The whitespace-preceded predicate is dsl41's own retained boundary
+  for glued glob values (`/tmp/*` opens nothing) -- it is NOT part of
+  the majority analogy; C-family lexers open without it.
+  THE RULE. A whitespace-preceded (or value-start) unquoted `/*` in
+  value position that does not close on its own line OPENS a block
+  comment spanning lines. A comment still open at EOF is the loud
+  `unterminated block comment` error naming the opener line. Quoted
+  `/*` stays value text (rule 7): quoting is the only complete escape.
+  THE HAZARD, stated honestly. A stray later `*/` silently captures
+  the lines up to it. An unterminated comment is loud; a wrongly
+  terminated one is not. No opener predicate removes this while
+  keeping C-style comments; the spec says so in rule 5.
+  THE ATOMIC SCAN (the DL-160 interaction). The opener consumes its
+  body lines and the close inside the attribute/subcommand branch, by
+  the same walk a full-line comment uses -- no body line ever reaches
+  the scan loop, so the open-comment state outranks every line rule
+  (blank, `#`, key recognition, rule 6, rule 11) structurally, with no
+  flag. The DL-160 seeded 4b detector therefore runs only on true
+  value lines. One quote-aware walk returns both the open state and
+  the pre-opener value prefix, so the rule-4b mask never sees an open
+  comment tail.
+  THE CONTINUATION HALF. A rule-6 continuation line CAN open a comment,
+  with the quote parity seeded from the joined value (DL-160); only the
+  pre-opener prefix is value and only it feeds the 4b detector. The
+  multi-line comment CLOSES the open continuation -- rule 6's own
+  comment-closes sentence; the body lines are comment lines -- so the
+  line after the closer is a scanner error, not a resumed
+  continuation. A trailing comment closed on its own line changes
+  nothing: it leaves the continuation open on the attribute line and
+  stays in the verbatim carry on a continuation line. Rule 11 date
+  rows are not value position and stay verbatim (the DL-160
+  exemption); a multi-line trailing comment on a `calendar:` line does
+  not break date-body contiguity, because the atomic scan makes it
+  header trivia, not a comment line between rows.
+  THE RENDERERS. Comment body lines are emitted line-wise (CRLF
+  fidelity; Comment.text stores `\n`). A closed trailing comment rides
+  the first value line; a multi-line one rides the LAST -- the only
+  line it can open on -- and both can sit on one attribute. Canonical
+  applies its whitespace policy per comment line and reaches the F2
+  fixpoint, the inline job_type relocation under a header opener
+  included. Comment, attribute, and statement spans extend through the
+  closing line.
+  THE CORPUS SURGERY. torture_colon.jil's glob-lookalike value is
+  quoted in place -- the quoted spelling pins the escape hatch, and
+  test_ir pins that lowering unquotes it back to the bare path.
+  comments_layout.jil gains the closing multi-line shape.
+  test_glob_is_not_a_comment stays untouched: its glued `/tmp/*` pins
+  the retained boundary. The unclosed-at-EOF input moved from the F4
+  value cases to an exact error assertion (message + opener line); the
+  refusal fixtures live inline, never under tests/corpus (F1 parses
+  every file there).
+  THE TESTS, mutation-checked three ways: opener reverted to value
+  text -- the structural multi-line test fails; EOF error bypassed --
+  the refusal fixture parses and its test fails; body lines forced
+  back through the scan loop -- the owner-stays-comment assertion
+  fails. F1/F2 hold corpus-wide, the fuzz generator draws the closing
+  shape, and the structural assertions carry the classification F1
+  cannot see.
+  THE EMITTING PATHS. The rule cuts both ways: the DSL builder
+  generates JIL, and a bare value carrying an opener shape would
+  swallow the lines after it in the generated text -- the corpus
+  roundtrip caught exactly this on the newly quoted std_err_file, and
+  the review caught the same hole again on the list/tuple lane, which
+  returned its join before every gate (a list item could open a
+  comment or inject a whole line via a control character -- the second
+  hole was pre-existing). Both are closed the same way: list values
+  join FIRST and the joined string runs the one scalar gate
+  (test_builder_list_values_run_the_full_value_gate,
+  test_builder_list_comment_opener_is_never_silent_end_to_end). Per
+  the rule-2 principle (every JIL-emitting path re-escapes), the
+  builder auto-quotes ONLY the lanes lowering funnels through
+  ir._unquote -- the UNQUOTING_JOB_ATTRS set, exported by ir.py next
+  to the function so no emitter re-derives it -- because exactly there
+  the quote is stripped back and the round trip is exact. Every other
+  lane (passthrough=, annotations, globals, calendar attrs, unknown
+  kwargs) refuses loudly by name: a verbatim lane cannot quote on the
+  caller's behalf without changing the stored bytes
+  (test_builder_auto_quotes_only_the_lanes_lowering_unquotes). One
+  honest corner: an in-set attr that SEM-30 dead config or box-inert
+  routing sends to passthrough keeps the quoted spelling -- which is
+  the only JIL surface that value has; a hand-written estate file
+  would carry the same bytes. Calendar DATE ROWS take the
+  control-character gate only: rule 11 says a row is not value
+  position, so a `/*` there opens nothing and refusing it would
+  contradict this entry's own rule-11 amendment
+  (test_calendar_date_rows_skip_the_comment_gate_but_not_the_ctrl_gate).
+  ast_jil exports the one detector (value_opens_comment) so no
+  emitter re-implements the walk.
+  THE LOST SPELLING, named. The opener runs at the value start too, so
+  a bare root glob (`command: /*.sh`) has no bare JIL spelling under
+  this rule; it must be quoted. The spec says so in rule 5.
+  THE SIZE COST, accepted. _Scanner.scan grows 149 -> 218 lines and
+  arch_check notes it (advisory, the DL-154 precedent): the atomic
+  opener consumption lives inline in the two branches whose state it
+  must gate, and splitting it out would hide the cont/cont_quote
+  coupling the gate exists to protect.
+  THE RESIDUE. The vendor [?] stays in rule 5; the live jil-binary
+  probe is in the runbook (the DL-59 pattern: a documented
+  deterministic default, not a guess-resolution).
+  THE DISCHARGE. DL-160 left "a multi-line trailing block comment
+  folding its body into attributes" open for the slice named after it.
+  This entry pays it. The last of DL-151's three pre-existing scanner
+  defects is closed; DL-151's owed scanner list is fully paid.

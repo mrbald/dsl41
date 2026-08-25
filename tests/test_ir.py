@@ -339,6 +339,17 @@ def test_continuation_multiline_targeted() -> None:
     assert job.schedule.must_start == SlaSpec(kind="relative", offsets_min=[2, 2, 2, 2])
 
 
+def test_quoted_glob_lookalike_std_err_file_lowers_unquoted() -> None:
+    """Rule 5 (DL-161): quoting is the escape for a whitespace-preceded
+    `/*`-lookalike value -- unquoted it would open a block comment. Rule 7
+    semantic unquoting happens at lowering, so the typed lane carries the
+    bare path, not the quotes."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "torture_colon.jil")])
+    job = catalog.jobs["glob_shell"]
+    assert job.exec_ is not None
+    assert job.exec_.std_err_file == "/tmp/log /*unclosed-glob-lookalike"
+
+
 def test_sem10_box_basic_targeted() -> None:
     catalog = lower_catalog([parse_file(CORPUS_DIR / "sem10_box_basic.jil")])
     assert catalog.jobs["job_a"].box.box_name == "box_a"

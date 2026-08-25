@@ -70,6 +70,7 @@ import keyword
 import re
 from collections.abc import Collection, Sequence
 
+from dsl41.ast_jil import value_opens_comment
 from dsl41.conditions import (
     STATUS_LETTER,
     And,
@@ -83,7 +84,15 @@ from dsl41.conditions import (
     escape_job_name,
 )
 from dsl41.derive import DerivedGraph, derive_graph
-from dsl41.ir import CatalogIR, JobIR, ScheduleBlock, SlaSpec, Time, lower_source
+from dsl41.ir import (
+    CatalogIR,
+    JobIR,
+    ScheduleBlock,
+    SlaSpec,
+    Time,
+    UNQUOTING_JOB_ATTRS,
+    lower_source,
+)
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 #: The scanner's rule-1 attribute-line shape (key prefix + unescaped colon);
@@ -177,9 +186,28 @@ def cond_to_source(cond: Cond) -> str:
 # ------------------------------------------------------------------------- builder
 
 
-def _check_value(kind: str, value: str) -> str:
+def _check_ctrl(kind: str, value: str) -> str:
+    """Line-injection gate alone: calendar DATE ROWS take this and not the
+    comment gate below -- rule 11 says a date row is not value position, so
+    a `/*` there opens nothing (DL-161)."""
     if _CTRL_RE.search(value):
         raise DslError(f"{kind} value {value!r} carries newline/control characters")
+    return value
+
+
+def _check_value(kind: str, value: str) -> str:
+    _check_ctrl(kind, value)
+    if value_opens_comment(value):
+        # Rule 5 (DL-161): rendered bare, this value OPENS a block comment
+        # and swallows the lines after it. Every JIL-emitting path
+        # re-escapes (the rule-2 principle). _render_value auto-quotes the
+        # UNQUOTING_JOB_ATTRS lanes before this gate; every other lane is
+        # verbatim, where a quote-wrap would change the stored bytes, so the
+        # only safe answer is this refusal.
+        raise DslError(
+            f"{kind} value {value!r} would open a rule-5 block comment when"
+            " rendered as JIL; quote the value or drop the bare '/*' (DL-161)"
+        )
     return value
 
 
@@ -302,7 +330,7 @@ class CatalogBuilder:
         attributes first, then bare date rows."""
         lines = self._calendar_lines("calendar", name, attrs)
         for row in dates:
-            row = _check_value("calendar date row", row).strip()
+            row = _check_ctrl("calendar date row", row).strip()
             if not row or _ATTR_LINE_RE.match(row):
                 raise DslError(f"calendar date row {row!r} would re-parse as an attribute line")
             lines.append(row)
@@ -572,9 +600,30 @@ class CatalogBuilder:
     def _render_value(self, key: str, value: object) -> str:
         if isinstance(value, bool):
             return "1" if value else "0"
-        if isinstance(value, (list, tuple)):
-            return ", ".join(str(item) for item in value)
-        return _check_value(key, str(value))
+        # Join FIRST: the joined string is what lands on the JIL line, so it
+        # runs the same gate as a scalar -- the early return here let a list
+        # item open a comment or inject a line, fully silently (DL-161).
+        rendered = (
+            ", ".join(str(item) for item in value)
+            if isinstance(value, (list, tuple))
+            else str(value)
+        )
+        if (
+            value_opens_comment(rendered)
+            and '"' not in rendered
+            and key.lower() in UNQUOTING_JOB_ATTRS
+        ):
+            # Rule 5 (DL-161): bare, this value would open a block comment;
+            # quoting is the documented escape, and EXACTLY the
+            # UNQUOTING_JOB_ATTRS lanes strip it back at lowering (rule 7),
+            # so the round trip is exact -- the corpus witness is
+            # torture_colon's std_err_file glob lookalike. Any other lane is
+            # verbatim: a quote-wrap there would silently change the stored
+            # value, so it falls through to _check_value's loud refusal, and
+            # so does a value that embeds a quote (cannot be wrapped). The
+            # wrapped form still runs _check_value (control characters).
+            return _check_value(key, f'"{rendered}"')
+        return _check_value(key, rendered)
 
     def to_jil(self) -> str:
         return "\n".join(self._statements)

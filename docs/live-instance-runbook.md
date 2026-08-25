@@ -375,6 +375,30 @@ status decides. Record e8b either way for the DL-41a notes. Capture the
 agent/scheduler log lines around the kill (`autosyslog -J dsl41_e8` if
 available).
 
+### Rule 5 — does the vendor open a multi-line trailing comment (DL-161)
+
+dsl41 follows the `/*`-format majority: a whitespace-preceded `/*` with
+no `*/` on its line opens a comment that spans lines
+(jil-statement-syntax.md rule 5, still [?] against the live binary).
+The vendor's answer is one insert away:
+
+```sh
+jil <<'EOF'
+insert_job: dsl41_r5   job_type: c
+machine: localhost
+command: echo hi /* watch
+owner: prose about bob
+end: */
+EOF
+autorep -q -J dsl41_r5
+```
+
+Reading: if the readback shows `command: echo hi` and NO owner
+attribute, the vendor opened the comment — retire rule 5's [?] and lift
+DL-161's default to [V]. If `owner` landed as an attribute, or the
+insert refused, record the vendor behavior as a SEM amendment and
+revisit DL-161. Delete the job afterwards (`delete_job: dsl41_r5`).
+
 ### Optional read-only archaeology (no writes at all)
 
 - `autorep -q -J ALL` — the estate JIL dump. Inspect it only. Never

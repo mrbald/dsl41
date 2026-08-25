@@ -723,6 +723,41 @@ def _split_list(value: str) -> list[str]:
     return [t for t in (part.strip() for part in _unquote(value).split(",")) if t]
 
 
+#: insert_job attributes whose values lowering funnels through `_unquote`
+#: (directly, or via `_split_list`). The DSL builder auto-quotes ONLY these
+#: lanes when a value's bare spelling would open a rule-5 block comment
+#: (DL-161): the quote is stripped right back here, so the round trip is
+#: exact. Every other lane stores bytes verbatim and refuses instead --
+#: quoting there would silently change the stored value. Keep in sync with
+#: the `_unquote`/`_split_list` call sites in this module.
+UNQUOTING_JOB_ATTRS = frozenset(
+    {
+        "machine",
+        "owner",
+        "profile",
+        "std_out_file",
+        "std_err_file",
+        "command",
+        "std_in_file",
+        "envvars",
+        "watch_file",
+        "box_name",
+        "status",
+        "run_calendar",
+        "exclude_calendar",
+        "timezone",
+        "run_window",
+        "success_codes",
+        "fail_codes",
+        "days_of_week",
+        "start_times",
+        "start_mins",
+        "must_start_times",
+        "must_complete_times",
+    }
+)
+
+
 def find_var_sites(attr: str, value: str) -> list[VarSite]:
     """Index `$$NAME` / `$${NAME}` sites in one stored attribute value (SEM-08)."""
     sites: list[VarSite] = []
