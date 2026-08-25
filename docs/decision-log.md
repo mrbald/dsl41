@@ -10107,3 +10107,63 @@ relitigate an entry; append a new one.
   the 100%-branch-coverage scope) found `runner_startup.py` still at
   100%; the one gap reported, `runner_access.py:485-486`, is a file this
   slice never touched and is pre-existing, outside this entry's scope.
+- DL-172 the third client folds in beside the other two: presentation stays
+  in the CLI, DL-78's line re-held
+  (2026-08-26; runner_control.py + cli_control.py + test_runner_control.py;
+  pays the DL-152 deferred slice "the blocking subscribe client moves back
+  into `runner_control`"; no adversarial review this slice, behavior is
+  pinned by the existing tests, which pass unmodified).
+  THE PREMISE. `runner_control` already owned two clients for the ss10
+  socket, `ControlClient` (async) and `roundtrip` (blocking, one-shot,
+  typer-free on DL-78's rule that exit-code mapping is the CLI's job).
+  `cli_control` carried a third, hand-rolled: `_stream_subscribe` opened
+  its own AF_UNIX socket, imported `versioned` and `LINE_LIMIT` across the
+  module boundary, and mixed the protocol rules -- the stamped version, the
+  bounded read, the DL-151 rule that a refusal ack KEEPS the connection
+  open, the over-limit line refusal -- with typer presentation.
+  `_subscribe_refusal` was protocol too: what counts as an ack.
+  THE RULING. The protocol half moved to `runner_control.py` as
+  `subscribe_lines(socket_path, request) -> Iterator[str]` (:1647), a
+  blocking GENERATOR beside `roundtrip`: send the versioned request, read
+  and check the ack, yield the ack line then each record line, refuse an
+  unterminated over-limit line. `_subscribe_refusal` (:1624) moved with it,
+  private -- reading the ack IS opening the subscription, not a step
+  another caller needs separately. Both docstrings carry the DL-151
+  argument, restated for a function rather than a CLI verb: a caller that
+  does not read the ack believes it is streaming and waits forever for
+  records that can never come. `cli_control._stream_subscribe` (:331)
+  shrank to presentation: iterate the generator, `typer.echo` each line,
+  map exceptions to exit codes, swallow `KeyboardInterrupt`.
+  THE EXCEPTION SURFACE. `subscribe_lines` lets `OSError` propagate for a
+  transport failure and raises `ControlClientError` for a protocol
+  refusal, rather than wrapping everything the way `roundtrip` does --
+  because the CLI already reads exactly that distinction on the OTHER
+  client: `_control_roundtrip` catches `ControlClientError` and calls
+  `refuse(exc)` with no prefix, while `_stream_subscribe`'s own OSError
+  branch calls `refuse(exc, prefix=f"control socket {socket_path}")`, so
+  reusing the same two-way split lets the CLI keep both messages verbatim
+  by matching on type instead of re-deriving which failure is which from
+  text.
+  THE TESTS. The existing
+  `test_cli_subscribe_exits_nonzero_on_a_refused_ack_instead_of_blocking`
+  (subprocess, end to end) needed no change and stayed green, proving the
+  CLI-visible behavior is unmoved. Two new tests exercise
+  `subscribe_lines` itself, the gap the brief named: neither the
+  refusal-keeps-the-connection-open read nor the over-limit refusal had a
+  test at the client level before this slice.
+  `test_dl172_subscribe_lines_reads_a_refusal_ack_without_blocking_on_the_open_connection`
+  points it at `_RawServer` (the same fixture the CLI test uses, which
+  answers once and holds the connection open) and asserts that reading the
+  ack line raises `ControlClientError` immediately, not on some later
+  read.
+  `test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit` shrinks
+  `LINE_LIMIT` to 64, reads a good ack, then asserts the next read raises
+  `ControlClientError` with "over the 64-byte limit" for an unterminated
+  100-byte record line.
+  THE GATE. 3437 passed, 6 skipped, 2 xfailed; `ruff check src tests`
+  clean; `mypy src` clean; `scripts/arch_check.py` exits 0, seven advisory
+  size notes, all pre-existing overages this slice did not newly cross.
+  `runner_control.py`'s overage was already open from prior slices and
+  grew by 69 more net lines for `_subscribe_refusal` and `subscribe_lines`;
+  `cli_control.py` shrank by 38 net lines with `_stream_subscribe` cut to
+  presentation.

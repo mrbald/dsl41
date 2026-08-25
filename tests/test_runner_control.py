@@ -2567,3 +2567,55 @@ def test_cli_subscribe_exits_nonzero_on_a_refused_ack_instead_of_blocking(
     assert done.returncode == 2
     assert "this run has no journal" in done.stderr
     assert done.stdout == ""
+
+
+# ------------------------------------ subscribe_lines is a client too (DL-172)
+#
+# `_stream_subscribe`'s protocol half moved into `subscribe_lines`, beside
+# `roundtrip`. The CLI-level refusal test above already proves the ss2/
+# DL-151 promise end to end through a real subprocess; these two prove it
+# at the function itself, the way `test_a_subscribe_ack_that_cannot_be_read_
+# leaves_as_a_client_error` already does for `ControlClient.subscribe`.
+
+
+def test_dl172_subscribe_lines_reads_a_refusal_ack_without_blocking_on_the_open_connection(
+    short_root: Path,
+) -> None:
+    """A refusal does not close the connection (ss2), so reading the ack at
+    all must raise -- not the first read after it -- or a caller would
+    believe it is streaming and then wait forever for records that can
+    never come (DL-151)."""
+    from dsl41.runner_control import ControlClientError, subscribe_lines
+
+    path = short_root / "dl172-refuse.sock"
+    server = _RawServer(path, b'{"error": "this run has no journal", "ok": false}\n')
+    try:
+        with pytest.raises(ControlClientError) as caught:
+            next(subscribe_lines(path, {"cmd": "subscribe"}))
+        assert "this run has no journal" in str(caught.value)
+    finally:
+        server.close()
+
+
+def test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss6's bounded read applies to every line, not only the ack: a record
+    line that runs past LINE_LIMIT unterminated is unreadable and the
+    stream cannot resync past it, so it raises rather than yielding a
+    truncated line (DL-151)."""
+    import dsl41.runner_control as control_mod
+    from dsl41.runner_control import ControlClientError, subscribe_lines
+
+    monkeypatch.setattr(control_mod, "LINE_LIMIT", 64)
+    path = short_root / "dl172-overlimit.sock"
+    ack = b'{"ok": true, "subscribed": true}\n'
+    server = _RawServer(path, ack + b"z" * 100)
+    try:
+        lines = subscribe_lines(path, {"cmd": "subscribe"})
+        assert next(lines) == '{"ok": true, "subscribed": true}'
+        with pytest.raises(ControlClientError) as caught:
+            next(lines)
+        assert "over the 64-byte limit" in str(caught.value)
+    finally:
+        server.close()

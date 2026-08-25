@@ -94,7 +94,7 @@ import socket as socket_mod
 import time
 import uuid
 
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, get_args
 
@@ -1619,3 +1619,72 @@ def roundtrip(
             f"control socket {socket_path}: response is not a JSON object", delivered=True
         )
     return response
+
+
+def _subscribe_refusal(ack: bytes) -> str | None:
+    """Why `subscribe` did not start, or None when the first line is an ack
+    that says it did.
+
+    The server answers a refusal -- no journal, a wrong version, a DL-146
+    perimeter denial -- on the same connection and KEEPS IT OPEN. A caller
+    that does not read this line believes it is streaming, and then waits
+    forever for records that can never come (DL-151)."""
+    if not ack:
+        return "engine hung up before the subscribe ack"
+    if not ack.endswith(b"\n"):
+        return "the subscribe ack did not end within the read limit"
+    try:
+        parsed = json.loads(ack)
+    except (ValueError, RecursionError) as exc:
+        return f"unreadable subscribe ack: {exc}"
+    if not isinstance(parsed, dict):
+        return "subscribe ack is not a JSON object"
+    if not parsed.get("ok"):
+        return str(parsed.get("error", "subscribe refused"))
+    return None
+
+
+def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]:
+    """`subscribe`, blocking: the ack line, then journal records, until the
+    engine hangs up or the caller stops iterating.
+
+    A third transport for one protocol (DL-172), beside `ControlClient` and
+    `roundtrip`: its own AF_UNIX connection, held open for the life of the
+    subscription (ss10), read under the same stamped version and bounded
+    read as the other two (control-protocol ss6).
+
+    Raises OSError for a transport failure -- unreachable socket, a dead
+    connection -- and lets it propagate uncaught, the same rule `roundtrip`
+    breaks by wrapping it; a caller wanting `refuse(exc, prefix=...)`'s
+    naming of the socket (DL-78) still can, because OSError is exactly what
+    that mapping expects. Raises `ControlClientError` for a PROTOCOL
+    refusal instead -- the ack said no, or a record line ran past
+    LINE_LIMIT unterminated -- carrying the engine's own words, already
+    complete, with no prefix to add. Two exception types on purpose: a
+    caller cannot tell "the socket was gone" from "the engine said no" by
+    parsing text, and DL-92's lesson is that a client should never have to.
+
+    An unversioned subscribe is refused, and (DL-151) a refusal does NOT
+    close the connection: a caller that stops after the ack without
+    checking it would print nothing wrong and then wait forever for records
+    that can never come. `_subscribe_refusal` is that check, private
+    because no other caller needs it -- reading the ack IS opening the
+    subscription, not a step before it."""
+    conn = socket_mod.socket(socket_mod.AF_UNIX)
+    try:
+        conn.connect(str(socket_path))
+        conn.sendall(json.dumps(versioned(request)).encode("utf-8") + b"\n")
+        with conn.makefile("rb") as stream:
+            ack = stream.readline(LINE_LIMIT + 1)
+            if (why := _subscribe_refusal(ack)) is not None:
+                raise ControlClientError(why)
+            yield ack.decode("utf-8", "replace").rstrip("\n")
+            while line := stream.readline(LINE_LIMIT + 1):
+                # an unterminated line comes back AT the limit, and yielding
+                # it would resync nothing -- the stream is unreadable from
+                # here (DL-151)
+                if not line.endswith(b"\n"):
+                    raise ControlClientError(f"record line over the {LINE_LIMIT}-byte limit")
+                yield line.decode("utf-8", "replace").rstrip("\n")
+    finally:
+        conn.close()
