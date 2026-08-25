@@ -83,7 +83,7 @@ from pydantic import BaseModel
 from dsl41.ast_jil import SourceSpan
 from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
-from dsl41.derive import DerivedGraph, derive_graph
+from dsl41.derive import DerivedGraph, derive_graph, local_producer
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, _unquote
 
 Severity = Literal["error", "warn", "info"]
@@ -671,9 +671,12 @@ def rule_l008(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     RUNNING. Fires on exactly derive's M16 box-override edges.
 
     Deliberately narrower than the complement of `DerivedEdge.is_start_gate`
-    (DL-162): that set also holds M15 member refs, which are the legitimate
-    early-exit shape, and the M09 global gates a `condition` derives, which
-    start-gate a job rather than fold a box. This rule tests the one row."""
+    (DL-162). That complement holds two more things this rule must stay off:
+    M15 member refs, which are the legitimate early-exit shape, and every
+    GLOBAL edge -- the M09 gates a `condition` derives as well as the M16
+    gate a box override derives. A global is outside the predicate because it
+    names no job to reason about, which is not a claim about whether it
+    delays a start. This rule tests the one row (DL-162a)."""
     out: list[Violation] = []
     for edge in graph.edges:
         if edge.mapping_row != "M16":
@@ -713,9 +716,12 @@ def rule_l009(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
         if not edge.is_start_gate:
             continue  # a box override folds a box, it does not start one (L008
             # owns the M16 half); via=="success" already excludes globals
-        if edge.src not in catalog.jobs:
-            continue  # undefined producer: L001's error; a staleness warn
-            # about a job that never ran would contradict it
+        src = local_producer(edge, catalog)
+        if src is None:
+            continue  # undefined producer: L001's error, and a staleness warn
+            # about a job that never ran would contradict it. Cross-instance:
+            # derive placed that producer on another instance (M33), so this
+            # catalog cannot say whether its latch is stale (DL-162a)
         consumer = catalog.jobs.get(edge.dst)
         if consumer is None or consumer.schedule is None:
             continue
@@ -724,14 +730,14 @@ def rule_l009(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
                 code="L009",
                 severity="warn",
                 message=(
-                    f"scheduled job {edge.dst!r} depends on unqualified s({edge.src})"
+                    f"scheduled job {edge.dst!r} depends on unqualified s({src})"
                     f" (SEM-01: the latch is indefinite -- a success from a previous"
                     f" cycle satisfies it; qualify with a lookback or confirm staleness"
                     f" is intended)"
                 ),
                 jobs=[edge.dst],
                 span=edge.source_atom,
-                detail=edge.src,
+                detail=src,
             )
         )
     return out
@@ -913,24 +919,30 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     Predecessors are `DerivedEdge.is_start_gate` edges, the predicate this
     rule and L009 used to spell from opposite ends (DL-162). An undefined or
     cross-instance producer IS a start gate and cannot be iced in this
-    catalog, so the `catalog.jobs` lookup below keeps the rule quiet on one
-    -- the conservative direction."""
-    predecessors: dict[str, list[str]] = {}
+    catalog, so it counts as a source with no ICE and keeps the rule quiet
+    -- the conservative direction. Which producer this catalog defines is
+    `local_producer`'s answer, not `src in catalog.jobs`: for a
+    cross-instance edge `src` is the composite `name^INST` and the lookup
+    would say yes to a catalog job that merely spells its own name that way
+    (DL-162a)."""
+    predecessors: dict[str, dict[str, str | None]] = {}
     for edge in graph.edges:
         if not edge.is_start_gate:
             continue
-        predecessors.setdefault(edge.dst, []).append(edge.src)
+        predecessors.setdefault(edge.dst, {})[edge.src] = local_producer(edge, catalog)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         if job.sem.initial_status in SKIP_TRANSLATED:
             continue  # skipped on BOTH sides: no cascade divergence to flag
-        sources = sorted(set(predecessors.get(name, [])))
+        gates = predecessors.get(name, {})
+        sources = sorted(gates)
         if not sources:
             continue
         iced = [
             src
             for src in sources
-            if src in catalog.jobs and catalog.jobs[src].sem.initial_status in SKIP_TRANSLATED
+            if (local := gates[src]) is not None
+            and catalog.jobs[local].sem.initial_status in SKIP_TRANSLATED
         ]
         if len(iced) != len(sources):
             continue

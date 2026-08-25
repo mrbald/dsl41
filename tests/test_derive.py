@@ -34,7 +34,13 @@ from pydantic import ValidationError
 
 from dsl41.ast_jil import parse_file
 from dsl41.conditions import GlobalAtom, JobRef, StatusAtom
-from dsl41.derive import DerivedEdge, DerivedGraph, _ancestor_sets, derive_graph
+from dsl41.derive import (
+    DerivedEdge,
+    DerivedGraph,
+    _ancestor_sets,
+    derive_graph,
+    local_producer,
+)
 from dsl41.ir import CatalogIR, lower_catalog, lower_source
 from dsl41.lint import (
     GRAPH_RULES,
@@ -1132,9 +1138,11 @@ def test_l008_message_names_the_global_variable_correctly() -> None:
 
 #: Every row a catalog can put on an edge, in one lowerable source: M01 (same
 #: cadence s), M02 (cross-stream s), M02-R (undefined producer), M03
-#: (lookback), M08 (exit code), M09 (global in a condition), M15 (box_success
-#: member ref), M16 (box_success non-member), M16 (box_success global) and
-#: M33 (cross-instance ref). `is_start_gate` is asserted over all ten.
+#: (lookback), M04 (f), M05 (d), M06 (t), M08 (exit code), M09 (global in a
+#: condition), M15 (box_success member ref), M16 (box_success non-member),
+#: M16 (box_success global) and M33 (cross-instance ref). `is_start_gate` is
+#: asserted over all eleven rows -- the first cut claimed "all ten" and had
+#: no f/d/t atom in it at all (DL-162a).
 _EVERY_ROW = (
     "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
     "insert_job: sg_prod\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -1145,7 +1153,7 @@ _EVERY_ROW = (
     "insert_job: sg_cross\njob_type: c\ncommand: x\nmachine: m1\n"
     'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
     "condition: s(sg_prod) & s(sg_ghost) & s(sg_prod, 30) & e(sg_prod) = 0"
-    " & v(SG_FLAG) = 1 & s(sg_remote^PRD)\n\n"
+    " & v(SG_FLAG) = 1 & s(sg_remote^PRD) & f(sg_prod) & d(sg_prod) & t(sg_prod)\n\n"
     "insert_job: sg_box\njob_type: b\nbox_success: s(sg_member)\n"
     "box_failure: s(sg_prod) | v(SG_ABORT) = 1\n\n"
     "insert_job: sg_member\njob_type: c\ncommand: x\nmachine: m1\nbox_name: sg_box\n"
@@ -1153,7 +1161,7 @@ _EVERY_ROW = (
 
 
 def test_is_start_gate_splits_the_derived_row_vocabulary() -> None:
-    """The one start-gate predicate (DL-152), over every row a catalog reaches.
+    """The one start-gate predicate (DL-162), over every row a catalog reaches.
 
     A box override (M15/M16) is a completion predicate on a box, not an
     ordering, and a global (via="global") names no job -- neither gates a
@@ -1168,6 +1176,9 @@ def test_is_start_gate_splits_the_derived_row_vocabulary() -> None:
         ("sg_prod", "sg_cross", "M02"): True,
         ("sg_ghost", "sg_cross", "M02"): True,  # undefined producer, redesign
         ("sg_prod", "sg_cross", "M03"): True,  # lookback-qualified
+        ("sg_prod", "sg_cross", "M04"): True,  # f(), cross-stream
+        ("sg_prod", "sg_cross", "M05"): True,  # d(), cross-stream
+        ("sg_prod", "sg_cross", "M06"): True,  # t()
         ("sg_prod", "sg_cross", "M08"): True,  # exit code
         ("SG_FLAG", "sg_cross", "M09"): False,  # global: names no job
         ("sg_remote^PRD", "sg_cross", "M33"): True,  # cross-instance
@@ -1178,16 +1189,19 @@ def test_is_start_gate_splits_the_derived_row_vocabulary() -> None:
 
 
 def test_l009_quiet_on_every_success_edge_that_is_not_a_start_gate() -> None:
-    """The DL-152 swap is behavior-neutral, and this is why: within
-    {via==success, no lookback, src in catalog.jobs} the only rows reachable
-    are M01 and M02, so reading `is_start_gate` where L009 used to test that
-    pair changes nothing. The rows it has to keep out are box overrides on a
-    SCHEDULED box (M15/M16) -- a completion predicate, never a stale start
-    gate -- and they are kept out here.
+    """The DL-152 swap is behavior-neutral, and this states the property
+    correctly: within {via==success, no lookback, LOCAL producer this catalog
+    defines}, `is_start_gate` and the old `mapping_row in (M01, M02)` test
+    agree edge for edge. The rows the predicate has to keep out are box
+    overrides on a SCHEDULED box (M15/M16) -- a completion predicate, never a
+    stale start gate -- and they are kept out here.
 
-    The reachability half is asserted mechanically over the whole corpus
-    rather than left as prose: a new row landing in that slice would make the
-    swap a widening, and this is what says so."""
+    The first cut asserted something weaker and circular -- that only M01/M02
+    are REACHABLE in that slice -- which is false twice over: M15/M16 reach it
+    (a `box_success: s(member)` on a scheduled box), and an M33 edge reaches
+    it whenever a catalog job's own name collides with the `name^INST`
+    spelling. The second one was a live false positive; `local_producer` is
+    the fix and this is the assertion that would have caught it (DL-162a)."""
     text = (
         "insert_job: sg2_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: sg2_box\njob_type: b\n"
@@ -1201,20 +1215,48 @@ def test_l009_quiet_on_every_success_edge_that_is_not_a_start_gate() -> None:
     assert rule_l009(catalog, graph) == []
 
     corpus = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    slice_rows = {
-        edge.mapping_row
-        for edge in derive_graph(corpus).edges
-        if edge.via == "success"
-        and edge.lookback is None
-        and edge.src in corpus.jobs
-        and edge.is_start_gate
-    }
-    assert slice_rows <= {"M01", "M02"}
+    checked = 0
+    for edge in derive_graph(corpus).edges:
+        if edge.via != "success" or edge.lookback is not None:
+            continue
+        if local_producer(edge, corpus) is None:
+            continue
+        checked += 1
+        assert edge.is_start_gate == (edge.mapping_row in ("M01", "M02")), edge
+    assert checked  # an empty slice would make the loop above vacuous
+
+
+def test_a_job_named_like_a_cross_instance_ref_is_not_its_producer() -> None:
+    """DL-162a, found by adversarial review of DL-162. A cross-instance edge's
+    `src` is the composite display form `name^INST`, and lowering constrains
+    job-name characters nowhere -- so a catalog holding its own job called
+    `foo^PRD` made `src in catalog.jobs` answer yes about a producer derive
+    had just placed on ANOTHER instance.
+
+    L009 fired a stale-latch warning about a job it also reports as external,
+    and L020 would have counted it as an ICEable predecessor. `local_producer`
+    reads `instance` off the atom, which is the fact, so both stay quiet."""
+    text = (
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        "insert_job: foo^PRD\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: caret_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "condition: s(foo^PRD)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    (edge,) = graph.edges
+    assert edge.mapping_row == "M33" and edge.src == "foo^PRD"
+    assert edge.is_start_gate  # it DOES gate the start; it just names no local job
+    assert edge.src in catalog.jobs  # the collision itself, still present
+    assert local_producer(edge, catalog) is None  # and no longer believed
+    assert rule_l009(catalog, graph) == []
+    assert rule_l020(catalog, graph) == []
 
 
 def test_l020_reads_a_global_gate_as_no_predecessor_at_all() -> None:
     """The global half of `is_start_gate`, which no fixture held before
-    (DL-152). A consumer gated on one iced job AND a global still has exactly
+    (DL-162). A consumer gated on one iced job AND a global still has exactly
     one JOB predecessor, and it is iced -- so the M19 divergence is real and
     the rule fires. A global gate cannot rescue it: UC cascades the skip from
     the task edge whatever the variable says."""

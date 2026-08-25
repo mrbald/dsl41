@@ -160,13 +160,34 @@ class DerivedEdge(BaseModel):
         What it does NOT decide is whether the producer is a job THIS catalog
         defines: an undefined producer (M02-R) and a cross-instance one (M33)
         are start gates that name a job the caller cannot look up. A reader
-        that needs a local producer says so, with `src in catalog.jobs`
-        beside this (`_local_condition_adjacency`, L009, L020).
+        that needs a local producer asks `local_producer` below -- NOT
+        `src in catalog.jobs`, which is unsound (DL-162a).
 
         L011 is deliberately wider and does not read this: it asks whether a
         job has ANY wiring, for which a box override and a global gate both
         count. L008 is deliberately narrower: it tests the single row M16."""
         return self.via != "global" and self.mapping_row not in ("M15", "M16")
+
+
+def local_producer(edge: DerivedEdge, catalog: CatalogIR) -> str | None:
+    """The catalog job this edge's producer names, or None when there is no
+    such job -- the sound spelling of "the producer is defined HERE".
+
+    Read off the ATOM, never off `src`. For a cross-instance ref `src` is the
+    composite display form `name^INST`, and `src in catalog.jobs` answers a
+    different question than it looks like: a catalog whose own job is named
+    `foo^PRD` (lowering constrains job-name characters nowhere) collides with
+    the M33 edge for `s(foo^PRD)` and the lookup says yes about a producer
+    derive has just placed on another instance. The atom carries `instance`,
+    which is the fact (DL-162a).
+
+    None for a global (no job), for a cross-instance producer, and for a job
+    the catalog does not define -- three different reasons, one answer,
+    because every caller wants the same thing: a name it can look up."""
+    atom = edge.atom
+    if isinstance(atom, GlobalAtom) or atom.job.instance is not None:
+        return None
+    return atom.job.name if atom.job.name in catalog.jobs else None
 
 
 class OrShape(BaseModel):
@@ -717,10 +738,13 @@ def _local_condition_adjacency(
     preds: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     succs: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     for e in edges:
-        if not e.is_start_gate or e.src not in catalog.jobs:
+        if not e.is_start_gate:
             continue
-        preds[e.dst].add(e.src)
-        succs[e.src].add(e.dst)
+        src = local_producer(e, catalog)
+        if src is None:
+            continue
+        preds[e.dst].add(src)
+        succs[src].add(e.dst)
     return preds, succs
 
 
