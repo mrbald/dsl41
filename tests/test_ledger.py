@@ -56,6 +56,7 @@ from dsl41.runner_ledger import (
     STATE_MACHINE_VERSION,
     LeaderLock,
     check_leader_eligibility,
+    check_state_machine_version,
     next_epoch,
 )
 
@@ -408,6 +409,62 @@ def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
     for wrong in (True, 1.0, "1", None):
         with pytest.raises(EngineError, match="state-machine version mismatch"):
             check_leader_eligibility({**record, "state_machine_version": wrong}, catalog=catalog)
+
+
+def test_state_machine_version_modes_split_on_absent_and_agree_when_present() -> None:
+    """DL-165: `check_state_machine_version` is the one door behind both
+    `check_leader_eligibility` (mode="lead") and `runner_history`'s
+    `check_replay_version` (mode="replay"). An ABSENT field is the one
+    case the two modes must disagree on -- that split is the reason two
+    modes exist. Every PRESENT value, right or wrong, both modes must
+    agree on, because `read_journal` has refused an unversioned record
+    outright since DL-138 and no on-disk log can reach one gate and not
+    the other."""
+    check_state_machine_version({}, mode="lead")  # absent: the pre-S6a courtesy
+    with pytest.raises(EngineError, match="state_machine_version None"):
+        check_state_machine_version({}, mode="replay")  # absent: deliberately stricter
+
+    right = {"state_machine_version": STATE_MACHINE_VERSION}
+    check_state_machine_version(right, mode="lead")
+    check_state_machine_version(right, mode="replay")
+    for wrong in (True, 1.0, "1", None, STATE_MACHINE_VERSION + 1):
+        opening = {"state_machine_version": wrong}
+        with pytest.raises(EngineError):
+            check_state_machine_version(opening, mode="lead")
+        with pytest.raises(EngineError):
+            check_state_machine_version(opening, mode="replay")
+
+
+def test_state_machine_version_messages_are_pinned_whole() -> None:
+    """DL-165 review: before this test the two refusal messages were pinned
+    only by the substring "state-machine version mismatch", and the replay
+    message and its `where` prefix by nothing at all -- so the wording
+    could drift, or the prefix vanish, with the suite green. Both texts are
+    contracts (quoted in period-model ss2.1 and concurrency-model ss7), so
+    both are pinned whole here."""
+    with pytest.raises(EngineError) as lead:
+        check_state_machine_version({"state_machine_version": 999}, mode="lead")
+    assert str(lead.value) == (
+        "state-machine version mismatch: this journal is v999, this build derives"
+        f" v{STATE_MACHINE_VERSION}; a leader must derive identical revisions from"
+        " identical inputs (concurrency-model ss7) -- re-baseline explicitly with a"
+        " fresh run"
+    )
+
+    tail = (
+        f" and this build derives v{STATE_MACHINE_VERSION} -- one executable implements"
+        " one state machine, so this build can neither lead nor replay this log"
+        " (period-model ss2.1)"
+    )
+    with pytest.raises(EngineError) as bare:
+        check_state_machine_version({"state_machine_version": 999}, mode="replay")
+    assert str(bare.value) == "this segment names state_machine_version 999" + tail
+
+    # the `where` prefix is the only thing that says WHICH root refused, and
+    # `dsl41 runs` reads several in one command
+    with pytest.raises(EngineError) as named:
+        check_state_machine_version({"state_machine_version": 999}, mode="replay", where="/roots/a")
+    assert str(named.value) == "/roots/a: this segment names state_machine_version 999" + tail
 
 
 def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:

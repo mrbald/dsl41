@@ -9185,3 +9185,126 @@ relitigate an entry; append a new one.
   nothing to do with per-job exclusions (stonebranch-semantics M25). The
   real per-job set is M19/M20/M21 (definition-time status) and M34
   (resources), which is what the test pins.
+- DL-165 the lead and replay state-machine-version gates become one door
+  with a mode argument, and the absent-field split between them stays
+  (2026-08-25; runner_ledger.py + runner_history.py + test_ledger.py;
+  pays DL-152's fourteenth deferred slice, the last on that list,
+  narrowed).
+  THE FINDING, as DL-152 left it: "the three-layer state-machine-version
+  gate -- ledger absent means v1, history absent means refuse, startup
+  typed -- becoming one door with a named lead-or-replay argument."
+  THE CORRECTION, made before this slice started. "Three layers" was
+  wrong. There are SIX sites comparing a state-machine version, in two
+  families that are not one problem. Group A is two untyped wire readers
+  off a journal record, both behind `canon.is_wire_int`:
+  `runner_ledger.check_leader_eligibility` (LEAD, absent reads v1) and
+  `runner_history.check_replay_version` (REPLAY, absent refuses). Group B
+  is four sites comparing an already-typed `int` field -- `runner_startup.py`,
+  `attest.py`, `boundary.py`, `seal.py` -- with no absent case and no wire
+  ambiguity left to ask about. Three read a validated Pydantic field, where
+  `model_validate` has already erased the distinction `is_wire_int` exists to
+  draw; `boundary.py:1755` compares such a field against `StagedContext`'s,
+  which is a plain frozen-dataclass attribute and never saw the wire at all. Group B's
+  three remedies also differ genuinely ("re-baseline", "install and
+  audit", "the PERIOD's version, not the build's") and flattening them
+  into one door's message would make two of them wrong. This slice is
+  Group A only; Group B needs strictness at the model boundary instead,
+  a different mechanism, and stays open as S5b.
+  THE DOOR. `runner_ledger.check_state_machine_version(opening, *, mode,
+  where="")`, `mode: Literal["lead", "replay"]`. One line carries the
+  whole split: `opening.get("state_machine_version", _ASSUMED_VERSION if
+  mode == "lead" else None)` -- lead's absent-reads-v1 courtesy and
+  replay's absent-refuses policy as one expression, not two branches
+  copied apart and free to drift. `check_leader_eligibility` keeps its
+  catalog-hash half untouched and now calls the door for the version half
+  only. `check_replay_version` becomes a thin wrapper.
+  THE CYCLE the recommended home ran into, and how it resolved.
+  `runner_history` already imports `STATE_MACHINE_VERSION` from
+  `runner_ledger`, so the door lives in `runner_ledger` to avoid a new
+  edge for that half. But the two policies raised different exception
+  types -- `EngineError` for lead, `RunHistoryError` for replay, and
+  `RunHistoryError` is DEFINED in `runner_history` -- so a door that
+  raised `RunHistoryError` itself would need `runner_ledger` to import
+  from `runner_history`, closing the cycle the other way. The door raises
+  `EngineError` in both modes; `check_replay_version` catches it and
+  re-raises `RunHistoryError(str(exc))`, the same catch-and-translate
+  shape `_period_manifest_or_refuse` already uses in this file. `str(exc)`
+  on a single-argument exception IS the message, so this changes which
+  layer attaches the exception TYPE, not the message or the policy.
+  The translation is load-bearing: removing it leaves exactly one test
+  red, on the type, with the message and its single `{run_root}: ` prefix
+  intact. Neither call site in `runner_history` wraps the gate, so nothing
+  re-prefixes the message either way -- the type is the whole difference.
+  The `except EngineError` is tight around one call that raises only for a
+  version mismatch today; a future non-version `EngineError` behind that
+  door would be retyped with it.
+  THE MESSAGES stay byte-identical, character for character, proven by
+  capturing all seven refusal paths on both trees and diffing: text,
+  exception type and the `where` prefix all identical.
+  The existing tests did NOT prove that -- they match the substring
+  "state-machine version mismatch" only, and the replay message and its
+  `where` prefix were pinned by nothing at all. Both texts are contracts
+  quoted in period-model ss2.1 and concurrency-model ss7, so
+  `test_state_machine_version_messages_are_pinned_whole` now pins both
+  whole, prefix included. Mutation-checked: blanking `named`, and
+  rewording one word of the lead message, each reddens it.
+  THE DOCSTRINGS. The shared reasoning moved onto the door: the pre-S6a
+  courtesy, and the "`read_journal` has refused an unversioned record
+  unconditionally since DL-138" argument that proves the two gates can
+  never disagree about a file on disk. `check_leader_eligibility` and
+  `check_replay_version` keep their own callsite and call-order
+  documentation and point to the door for the why.
+  THE TESTS. Every pre-existing test in `tests/test_ledger.py` and
+  `tests/test_run_history.py` passes UNMODIFIED, both policies pinned
+  exactly as before; the ledger file gains new tests but changes none.
+  One new test,
+  `test_state_machine_version_modes_split_on_absent_and_agree_when_present`,
+  calls the door directly in both modes: absent disagrees (lead passes,
+  replay refuses on `state_machine_version None`), every present value --
+  right, wrong, malformed, or an explicit `None` -- both modes agree on.
+  Mutation-checked both ways, with the real counts rather than the tidy
+  ones this entry first claimed: collapsing lead's default to `None`
+  reddens THREE tests (this one,
+  `test_the_pinned_state_machine_version_is_read_as_an_exact_integer` and
+  `test_eligibility_compares_the_hash_recipe_the_log_itself_names`, the
+  last two because the courtesy is what lets their fixtures omit the
+  field); collapsing replay's default to `_ASSUMED_VERSION` reddens this
+  one alone. Both restored.
+  THE GATE. 3389 passed, 6 skipped (the 3388/6 baseline plus this test);
+  ruff check and ruff format clean on the touched files; `uv run mypy
+  src` clean; `scripts/arch_check.py` exits 0, advisory only --
+  `runner_history.py`'s over-1200-lines note predates this slice (1249
+  lines at HEAD) and this slice nets it DOWN to 1236, not a new finding.
+  THE REVIEW, and what it changed. Ten findings, no blockers. Both
+  headline attacks failed: the import-cycle argument above is TRUE
+  (`from dsl41.runner_history import RunHistoryError` in `runner_ledger`
+  raises ImportError in BOTH import orders, because `RunHistoryError` is
+  defined three lines after that file's own `runner_ledger` import), and
+  the lead branch's rewrite from `if not is_wire_int(p) or p != V: raise`
+  into `if is_wire_int(p) and p == V: return` is equivalent for every
+  JSON-reachable value. Four findings changed the tree:
+  * The move DELETED rather than relocated the sentence naming what the
+    replay gate is FOR -- "a foreign log replays in silence and the trace
+    narrates transitions THIS build's semantics invented ... it reaches
+    `dsl41 runs` and `read_run_root` as ordinary rows". Restored. A gate
+    that keeps its mechanism and loses its purpose is how the next reader
+    concludes it is redundant.
+  * "Three doors call it, which is every offline reader of a segment" was
+    already inaccurate before this slice and is now corrected: on the
+    ordinary path `replay_trace` is called BY `_read_segment`, so the gate
+    runs twice NESTED, not at three parallel doors. Both calls stand --
+    `replay_trace` is callable alone and pins that refusal in its own
+    tests, and `_read_segment`'s call covers the two DEGRADED paths that
+    return before `replay_trace` is reached.
+  * `where` was accepted and silently dropped in lead mode, with mypy
+    content. Two `@overload` signatures now make `mode="lead",
+    where=...` a type error, verified against a probe.
+  * The mutation claim was wrong, corrected above with the measured
+    counts.
+  ONE REVIEW CLAIM WAS ITSELF WRONG and did not reach the tree. The review
+  argued the exception translation was needed because an `EngineError`
+  would otherwise hit `_read_segment`'s handler and gain a second
+  `{run_root}: ` prefix. Neither call site in `runner_history` is inside
+  that try -- the handler wraps `check_manifest_against_segment` alone --
+  and dropping the translation shows one red test on the TYPE with a
+  single-prefixed message. The docstring states the verified reason.

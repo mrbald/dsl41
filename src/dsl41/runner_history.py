@@ -145,7 +145,7 @@ from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
 from dsl41.runner_journal import decision_effects, read_journal, replay_inputs
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_ledger import check_state_machine_version
 
 
 class RunHistoryError(Exception):
@@ -866,45 +866,44 @@ def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None
     """period-model ss2.1's other half: a build may replay only a log its
     own state machine wrote.
 
-    One executable implements exactly one `STATE_MACHINE_VERSION` and
-    refuses any other, so "a v2 binary cannot lead **or replay** C1".
-    `runner_ledger.check_leader_eligibility` is the LEAD half and runs on
-    resume only; this is the REPLAY half. Without it a foreign log replays
-    in silence and the trace narrates transitions THIS build's semantics
-    invented, which is worse than a refusal: it reaches `dsl41 runs` and
-    `read_run_root` as ordinary rows.
+    Without it a foreign log replays in silence and the trace narrates
+    transitions THIS build's semantics invented, which is worse than a
+    refusal: it reaches `dsl41 runs` and `read_run_root` as ordinary rows.
 
-    Three doors call it, which is every offline reader of a segment:
-    `replay_trace` below, `_read_segment` (so the two DEGRADED paths that
-    fold records with no replay refuse as well -- a foreign version is a
-    WRONG fact, and decision 5 degrades only on a missing one), and the
-    `dsl41 journal` lineage walk, where it sits beside the other opening
-    checks so the refusal lands before a crossing is proved and announced.
-    In `_read_segment` it runs AFTER `prove_opening`: identity before
-    semantics, so a root that cannot prove its own opening is told that.
+    A thin wrapper over `runner_ledger.check_state_machine_version`,
+    mode="replay" -- see there for why an absent field refuses here and
+    does not at the lead half (`check_leader_eligibility`), and why the
+    two gates can never disagree about a file on disk. The wrapper's own
+    job is the exception type: the door raises `EngineError`, the type
+    every other gate in this ledger raises, and history's own doors answer
+    `RunHistoryError` (docstring above), so this is where one becomes the
+    other. The message crosses unchanged -- `str(exc)` is exactly the text
+    the door built. The translation is the whole point of the wrapper:
+    drop it and every caller here meets an `EngineError` where this
+    module's contract promises a `RunHistoryError`. Neither call site in
+    this file wraps the gate, so nothing re-prefixes the message either
+    way -- what changes is the type alone.
+
+    TWO entry points reach it, and on the ordinary path one nests inside
+    the other. `_read_segment` calls it directly -- so the two DEGRADED
+    paths that fold records with no replay refuse as well, a foreign
+    version being a WRONG fact where decision 5 degrades only on a missing
+    one -- and then calls `replay_trace`, which asks again at its own
+    entry because it is callable on its own and pins that refusal in its
+    own tests. Neither call is removable. The `dsl41 journal` lineage walk
+    is the third CALLER but not a third door: it calls this function too,
+    beside the other opening checks, so the refusal lands before a
+    crossing is proved and announced. In `_read_segment` it runs AFTER
+    `prove_opening`: identity before semantics, so a root that cannot
+    prove its own opening is told that.
 
     No well-formed log can trip it while one version exists. A TAMPERED
     segment can, and that is the gate it is today; the version gate is what
-    it becomes when a second version exists.
-
-    The version is read EXACTLY, and an absent field refuses.
-    `period.check_segment_record` already requires it with its type on
-    every record `read_journal` returns, so an opening without one is
-    hand-built and names no semantics at all -- history does not guess.
-    This is DELIBERATELY stricter than the lead half, which reads an absent
-    field as version 1 on the pre-S6a courtesy: that courtesy describes a
-    journal `read_journal` has refused unconditionally since DL-138, so the
-    two gates cannot disagree about a file on disk."""
-    pinned = opening.get("state_machine_version")
-    if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
-        return
-    named = f"{where}: " if where else ""
-    raise RunHistoryError(
-        f"{named}this segment names state_machine_version {pinned!r} and this build"
-        f" derives v{STATE_MACHINE_VERSION} -- one executable implements one state"
-        " machine, so this build can neither lead nor replay this log"
-        " (period-model ss2.1)"
-    )
+    it becomes when a second version exists."""
+    try:
+        check_state_machine_version(opening, mode="replay", where=where)
+    except EngineError as exc:
+        raise RunHistoryError(str(exc)) from exc
 
 
 def _period_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfile | None":

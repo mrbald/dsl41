@@ -43,9 +43,10 @@ import json
 import os
 import socket
 
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, overload
 
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
@@ -275,6 +276,69 @@ def next_epoch(records: list[dict[str, Any]]) -> int:
     return max(terms, default=0) + 1
 
 
+@overload
+def check_state_machine_version(opening: Mapping[str, Any], *, mode: Literal["lead"]) -> None: ...
+
+
+@overload
+def check_state_machine_version(
+    opening: Mapping[str, Any], *, mode: Literal["replay"], where: str = ""
+) -> None: ...
+
+
+def check_state_machine_version(
+    opening: Mapping[str, Any], *, mode: Literal["lead", "replay"], where: str = ""
+) -> None:
+    """period-model ss2.1 / concurrency-model ss7: one executable implements
+    exactly one `STATE_MACHINE_VERSION`, so a foreign build can neither
+    LEAD nor REPLAY a log it did not derive. `mode` names which half is
+    asking, because the two halves read an ABSENT field differently ON
+    PURPOSE (DL-165) -- that split is the reason this argument exists at
+    all, and it does not collapse to one policy here.
+
+    `mode="lead"` (`check_leader_eligibility`, resume only): an absent
+    field reads as v1, the pre-S6a courtesy -- a journal with no
+    `state_machine_version` was written by the build that defined version
+    1, so that is what it pinned.
+
+    `mode="replay"` (`check_replay_version`, every offline reader): an
+    absent field REFUSES. `period.check_segment_record` has required the
+    field, typed, on every record `read_journal` returns since DL-138, so
+    an opening with none is hand-built and names no semantics at all --
+    history does not guess. This is deliberately stricter than the lead
+    half, and the two gates cannot disagree about a file on disk: the
+    courtesy above describes a journal `read_journal` has refused
+    unconditionally since DL-138, so no on-disk log can reach the lead
+    gate reading absent-as-v1 while the replay gate would refuse it.
+
+    Read EXACTLY in both modes: `True == 1` and `1.0 == 1` in Python, so a
+    bare comparison would let a JSON `true` stand in for version 1 and a
+    tampered segment lead or replay a build that does not implement its
+    semantics (DL-151). `is_wire_int` narrows to a real `int`, never
+    `bool`.
+
+    `where` names the segment in the replay message. The lead half never
+    had one, and the overloads above make passing it in lead mode a type
+    error rather than a value that is silently dropped."""
+    pinned = opening.get("state_machine_version", _ASSUMED_VERSION if mode == "lead" else None)
+    if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
+        return
+    if mode == "lead":
+        raise EngineError(
+            f"state-machine version mismatch: this journal is v{pinned}, this build"
+            f" derives v{STATE_MACHINE_VERSION}; a leader must derive identical"
+            " revisions from identical inputs (concurrency-model ss7) -- re-baseline"
+            " explicitly with a fresh run"
+        )
+    named = f"{where}: " if where else ""
+    raise EngineError(
+        f"{named}this segment names state_machine_version {pinned!r} and this build"
+        f" derives v{STATE_MACHINE_VERSION} -- one executable implements one state"
+        " machine, so this build can neither lead nor replay this log"
+        " (period-model ss2.1)"
+    )
+
+
 def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> None:
     """ss7: eligibility requires an exact match on the log's two opening
     pins. Both checks live here rather than one here and one at the resume
@@ -284,23 +348,14 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     The catalog hash is recomputed under the recipe the log's own `segment`
     names (period-model ss1.1), never under the one this build happens to
     write: comparing across recipes is how a gate refuses an estate that
-    did not change, which is the outage DL-100 named."""
+    did not change, which is the outage DL-100 named.
+
+    The version half is `check_state_machine_version`, mode="lead" --
+    see there for why an absent field is read as v1 and the replay half is
+    not."""
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"
             " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
         )
-    # read EXACTLY: `True == 1` and `1.0 == 1` in Python, so a bare
-    # comparison let a JSON `true` stand in for version 1 and a tampered
-    # segment lead a build that does not implement its semantics (DL-151).
-    # An ABSENT field still reads as v1 -- the pre-S6a courtesy this gate
-    # has always extended, and `runner_history.check_replay_version` states
-    # why the replay half is deliberately stricter.
-    pinned = opening.get("state_machine_version", _ASSUMED_VERSION)
-    if not is_wire_int(pinned) or pinned != STATE_MACHINE_VERSION:
-        raise EngineError(
-            f"state-machine version mismatch: this journal is v{pinned}, this build"
-            f" derives v{STATE_MACHINE_VERSION}; a leader must derive identical"
-            " revisions from identical inputs (concurrency-model ss7) -- re-baseline"
-            " explicitly with a fresh run"
-        )
+    check_state_machine_version(opening, mode="lead")
