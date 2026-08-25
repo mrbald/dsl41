@@ -320,23 +320,6 @@ def _raise_if_failed(task: asyncio.Task[None]) -> None:
             raise exc  # adapter bug: fail loudly, never guess
 
 
-def _oracle_aliases(scheduler: "Scheduler | None") -> dict[str, str] | None:
-    """The SEM-35 alias table the ORACLE resolves `timezone:` through: the
-    scheduler's own, so the two halves of one engine read a job's zone the
-    same way (DL-62).
-
-    The oracle used to resolve without it. Two consequences, both silent
-    until a job started: a name only the `--timezone-map` table can resolve
-    raised `OracleError` at the first start although preflight and the
-    scheduler had accepted the estate, and a city name the table
-    deliberately re-points still resolved through the ladder's unique-city
-    default (DL-151).
-
-    Empty reads as absent, by `timezones.alias_table`: the rule belongs to
-    the ladder, and the period's own pin carries `{}` for both."""
-    return alias_table(scheduler.tz_aliases if scheduler is not None else None)
-
-
 class Engine:
     """ss4 single-writer engine loop over one Oracle. 11a surface: inject()
     external events + run_until_quiescent(horizon). The WAL journal slots in
@@ -369,7 +352,14 @@ class Engine:
         fence: Fence | None = None,
         carried: CarriedRows | None = None,
     ) -> None:
-        self.oracle = Oracle(catalog, carried=carried, tz_aliases=_oracle_aliases(scheduler))
+        # SEM-35 alias table the oracle resolves `timezone:` through: the
+        # scheduler's own, so the two halves of one engine read a job's zone
+        # the same way (DL-62). Empty reads as absent (timezones.alias_table).
+        self.oracle = Oracle(
+            catalog,
+            carried=carried,
+            tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
+        )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no

@@ -78,6 +78,7 @@ from dsl41.canon import (
     hash_over,
     is_canonical_file,
     is_wire_int,
+    require_artifact_version,
     with_digest,
 )
 from dsl41.ir import CatalogIR
@@ -994,16 +995,10 @@ def read_sentinel(run_root: Path) -> Sentinel | None:
         return None  # not canonical JSON: whatever it is, it is not a sentinel
     if not isinstance(payload, dict) or payload.get("rec") != "period_root":
         return None  # a first line that is not `period_root` is not a sentinel
-    if "artifact_format_version" not in payload:
-        # protocol-evolution's closed-artifact row, symmetrically: §3.2 puts
-        # every typed field on the wire, so an ABSENT one is corruption too,
-        # not a v1 this reader is free to assume (DL-157)
-        raise EngineError(
-            f"{path}: not a sentinel this binary can read (missing artifact_format_version)"
-        )
     try:
+        require_artifact_version(payload)  # DL-157
         return Sentinel.model_validate(payload)
-    except ValidationError as exc:
+    except (CanonError, ValidationError) as exc:
         raise EngineError(f"{path}: not a sentinel this binary can read ({exc})") from exc
 
 

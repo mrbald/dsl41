@@ -72,6 +72,7 @@ from dsl41.canon import (
     decode,
     hash_over,
     is_wire_int,
+    require_artifact_version,
 )
 from dsl41.classify import Baseline, CarriedState, Classification, classify
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
@@ -552,14 +553,7 @@ class EstateAnchor:
             payload = decode(raw)
             if not isinstance(payload, dict):
                 raise EngineError(f"{self.path}: not a JSON object")
-            if "artifact_format_version" not in payload:
-                # protocol-evolution's closed-artifact row, symmetrically: an
-                # absent typed field is corruption too, not a v1 this reader
-                # is free to assume (DL-157)
-                raise EngineError(
-                    f"{self.path}: not an anchor this binary can read"
-                    " (missing artifact_format_version)"
-                )
+            require_artifact_version(payload)  # DL-157
             _check_head_state(self.path, payload)
             return Anchor.model_validate(payload)
         except (CanonError, ValidationError) as exc:
@@ -590,13 +584,7 @@ class EstateAnchor:
             payload = decode(raw)
             if not isinstance(payload, dict):
                 raise EngineError(f"{path}: not a JSON object")
-            if "artifact_format_version" not in payload:
-                # protocol-evolution's closed-artifact row, symmetrically: an
-                # absent typed field is corruption too, not a v1 this reader
-                # is free to assume (DL-157)
-                raise EngineError(
-                    f"{path}: not a claim this binary can read (missing artifact_format_version)"
-                )
+            require_artifact_version(payload)  # DL-157
             return Claim.model_validate(payload)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{path}: not a claim this binary can read ({exc})") from exc
@@ -1508,28 +1496,23 @@ def staged_bytes_for(
 
 
 def read_candidate(directory: Path) -> Candidate | None:
-    return _read_artifact(
-        directory / CANDIDATE_NAME, Candidate, require=("artifact_format_version",)
-    )
+    return _read_artifact(directory / CANDIDATE_NAME, Candidate)
 
 
 def read_staged_manifest(directory: Path) -> StagedManifest | None:
-    manifest = _read_artifact(
-        directory / STAGED_MANIFEST_NAME, StagedManifest, require=("artifact_format_version",)
-    )
+    manifest = _read_artifact(directory / STAGED_MANIFEST_NAME, StagedManifest)
     if manifest is not None:
         check_manifest_self_consistent(manifest, str(directory / STAGED_MANIFEST_NAME))
     return manifest
 
 
-def _read_artifact(path: Path, model: type[Any], *, require: tuple[str, ...] = ()) -> Any:
+def _read_artifact(path: Path, model: type[Any]) -> Any:
     """Read and validate one closed artifact, or None when this path holds
-    none. `require` names fields that must be PRESENT on the raw payload
-    before `model_validate` runs -- a field with a construction default
-    (`artifact_format_version`) would otherwise take that default silently
-    on an artifact that never carried it (DL-157). Writers still stamp the
-    default; only the read side asks the wire to prove the field, in the
-    sentinel reader's own style."""
+    none. A field with a construction default (`artifact_format_version`)
+    would otherwise take that default silently on an artifact that never
+    carried it (DL-157), so the read side asks the wire to prove the field
+    before `model_validate` runs. Writers still stamp the default; only the
+    read side checks."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -1540,12 +1523,7 @@ def _read_artifact(path: Path, model: type[Any], *, require: tuple[str, ...] = (
         payload = decode(raw)
         if not isinstance(payload, dict):
             raise EngineError(f"{path}: not a JSON object")
-        missing = [name for name in require if name not in payload]
-        if missing:
-            raise EngineError(
-                f"{path}: not a {model.__name__} this binary can read"
-                f" (missing {', '.join(missing)})"
-            )
+        require_artifact_version(payload)
         return model.model_validate(payload)
     except (CanonError, ValidationError) as exc:
         raise EngineError(f"{path}: not a {model.__name__} this binary can read ({exc})") from exc

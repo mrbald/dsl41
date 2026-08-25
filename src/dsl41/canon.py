@@ -147,6 +147,25 @@ def check_artifact_version(value: object) -> None:
         )
 
 
+def require_artifact_version(payload: Mapping[str, Any]) -> None:
+    """Refuse a payload with no `artifact_format_version` key (DL-157): an
+    absent typed field is corruption, not a v1 the reader is free to assume.
+    Raises a bare `CanonError("missing artifact_format_version")` -- the
+    caller's own `except (CanonError, ValidationError)` wrapping (every
+    DL-157 reader already has one, for the present-but-unsupported case
+    `decode` raises) supplies the path and the noun, so this stays in step
+    with that wrapping instead of duplicating it, and stays stdlib-only
+    (canon.py is read inside the supervisor tier, DL-42 item 3 / spec ss1 --
+    it cannot import EngineError).
+
+    Opposite policy from `check_artifact_version` above, which lets an
+    absent key PASS -- that function checks a version that IS there; this
+    one checks that a version key IS there at all, for the closed-artifact
+    readers DL-157 covers, so the two do not merge."""
+    if "artifact_format_version" not in payload:
+        raise CanonError("missing artifact_format_version")
+
+
 def is_canonical_file(data: bytes | str, canonical: bytes) -> bool:
     """ss3.2's ONE-BYTE-FORM rule, asked once (DL-137).
 

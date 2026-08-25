@@ -68,7 +68,7 @@ from pydantic import BaseModel, model_validator
 from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
 from dsl41.equiv import catalog_hash
-from dsl41.ir import CatalogIR, InitialStatus, tool_version
+from dsl41.ir import CatalogIR, InitialStatus, JobIR, tool_version
 
 
 class CompilePlan(BaseModel):
@@ -162,6 +162,11 @@ def _bundle_ledger_lines(other_exclusions: list[str], notes: list[str]) -> list[
             *[f"- {note}" for note in notes],
         ]
     return lines
+
+
+def _has_terminators(job: JobIR) -> bool:
+    """M17 (SEM-14): the box- or job-terminator flag is set on this job."""
+    return job.box.box_terminator or job.box.job_terminator
 
 
 def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
@@ -261,7 +266,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         for text, kind in zip(twin.excluded, twin.excluded_kinds, strict=True)
         if kind == "per_job"
     ]
-    if any(job.box.box_terminator or job.box.job_terminator for job in catalog.jobs.values()):
+    if any(_has_terminators(job) for job in catalog.jobs.values()):
         used_rows.add("M17")
     if per_job_exclusions:
         lines += [
@@ -753,15 +758,15 @@ def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
                 f"M34 {name}: resource requirements ({groups}) not modeled in the"
                 " twin v1 (map to UC Virtual Resources, UCS-09; DL-21)"
             )
-        flags = ", ".join(
-            flag
-            for flag, on in (
-                ("box_terminator", job.box.box_terminator),
-                ("job_terminator", job.box.job_terminator),
+        if _has_terminators(job):
+            flags = ", ".join(
+                flag
+                for flag, on in (
+                    ("box_terminator", job.box.box_terminator),
+                    ("job_terminator", job.box.job_terminator),
+                )
+                if on
             )
-            if on
-        )
-        if flags:
             out.append(
                 f"M17 {name}: {flags} not modeled in the twin v1 (no UC"
                 " kill-siblings-on-failure link; emulate with task-level failure"

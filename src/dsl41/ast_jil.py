@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
@@ -233,7 +233,24 @@ def parse_file(path: str | Path) -> JilFile:
     return parse(p.read_bytes().decode("utf-8"), file=str(p))
 
 
-def _split_trailing_comment(body: str, *, in_quote: bool = False) -> tuple[str, str, str, str, bool]:
+class _TrailingSplit(NamedTuple):
+    """One value body split at its rule-5 trailing comment (or not split at
+    all -- `comment_text == ""` means no trailing comment)."""
+
+    #: value text before the comment (or the whole body, if none)
+    value: str
+    #: whitespace between `value` and the comment opener
+    gap: str
+    #: the comment's own text, opener through close (or opener tail if open)
+    comment_text: str
+    #: text after a CLOSED comment's `*/`; "" when the comment is open
+    post: str
+    #: True when the comment has no `*/` on this line and opens a
+    #: multi-line block comment (rule 5, DL-161)
+    opens_comment: bool
+
+
+def _split_trailing_comment(body: str, *, in_quote: bool = False) -> _TrailingSplit:
     """Split a value body into (value, gap, comment_text, post, open).
 
     comment_text == "" means no trailing comment. Only `/* ... */` block
@@ -276,14 +293,14 @@ def _split_trailing_comment(body: str, *, in_quote: bool = False) -> tuple[str, 
                 # marker opens a block comment that spans lines. Before this
                 # amendment the marker stayed value text and the body lines
                 # scanned as attributes: silent corruption.
-                return value, gap, body[i:], "", True
+                return _TrailingSplit(value, gap, body[i:], "", True)
             after = body[close + 2 :]
             if after.strip() == "":
-                return value, gap, body[i : close + 2], after, False
+                return _TrailingSplit(value, gap, body[i : close + 2], after, False)
             i = close + 2  # closed block with value text after it: opaque, keep scanning
             continue
         i += 1
-    return body, "", "", "", False
+    return _TrailingSplit(body, "", "", "", False)
 
 
 def value_opens_comment(value: str) -> bool:
@@ -291,7 +308,7 @@ def value_opens_comment(value: str) -> bool:
     comment (a whitespace-preceded or value-start unquoted `/*` with no `*/`
     after it on the line, DL-161). JIL-emitting paths call this to re-escape:
     such a value must be quoted or it swallows the lines that follow it."""
-    return _split_trailing_comment(value)[4]
+    return _split_trailing_comment(value).opens_comment
 
 
 def _find_inline_pair(value: str, *, in_quote: bool = False) -> re.Match[str] | None:

@@ -90,7 +90,7 @@ from dsl41.ir import (
     ScheduleBlock,
     SlaSpec,
     Time,
-    UNQUOTING_JOB_ATTRS,
+    UNQUOTED_AT_LOWERING,
     lower_source,
 )
 
@@ -201,7 +201,7 @@ def _check_value(kind: str, value: str) -> str:
         # Rule 5 (DL-161): rendered bare, this value OPENS a block comment
         # and swallows the lines after it. Every JIL-emitting path
         # re-escapes (the rule-2 principle). _render_value auto-quotes the
-        # UNQUOTING_JOB_ATTRS lanes before this gate; every other lane is
+        # UNQUOTED_AT_LOWERING lanes before this gate; every other lane is
         # verbatim, where a quote-wrap would change the stored bytes, so the
         # only safe answer is this refusal.
         raise DslError(
@@ -284,7 +284,7 @@ class CatalogBuilder:
         _check_name("machine", name)
         lines = [f"insert_machine: {name}"]
         if type is not None:
-            lines.append(f"type: {_check_value('machine type', type)}")
+            lines.append(f"type: {self._render_value('type', type)}")
         for key, value in attrs.items():
             if not _KEY_RE.match(key):
                 raise DslError(f"machine attribute key {key!r} is not JIL-key-shaped")
@@ -307,7 +307,7 @@ class CatalogBuilder:
         _check_name("resource", name)
         lines = [f"insert_resource: {name}"]
         if res_type is not None:
-            lines.append(f"res_type: {_check_value('res_type', res_type)}")
+            lines.append(f"res_type: {self._render_value('res_type', res_type)}")
         for key, value in attrs.items():
             if not _KEY_RE.match(key):
                 raise DslError(f"resource attribute key {key!r} is not JIL-key-shaped")
@@ -317,7 +317,7 @@ class CatalogBuilder:
 
     def xinst(self, name: str, /, *, xtype: str, **attrs: str) -> CatalogBuilder:
         _check_name("external instance", name)
-        lines = [f"insert_xinst: {name}", f"xtype: {_check_value('xtype', xtype)}"]
+        lines = [f"insert_xinst: {name}", f"xtype: {self._render_value('xtype', xtype)}"]
         for key, value in attrs.items():
             if not _KEY_RE.match(key):
                 raise DslError(f"xinst attribute key {key!r} is not JIL-key-shaped")
@@ -611,17 +611,20 @@ class CatalogBuilder:
         if (
             value_opens_comment(rendered)
             and '"' not in rendered
-            and key.lower() in UNQUOTING_JOB_ATTRS
+            and key.lower() in UNQUOTED_AT_LOWERING
         ):
             # Rule 5 (DL-161): bare, this value would open a block comment;
             # quoting is the documented escape, and EXACTLY the
-            # UNQUOTING_JOB_ATTRS lanes strip it back at lowering (rule 7),
+            # UNQUOTED_AT_LOWERING lanes strip it back at lowering (rule 7),
             # so the round trip is exact -- the corpus witness is
             # torture_colon's std_err_file glob lookalike. Any other lane is
             # verbatim: a quote-wrap there would silently change the stored
             # value, so it falls through to _check_value's loud refusal, and
             # so does a value that embeds a quote (cannot be wrapped). The
-            # wrapped form still runs _check_value (control characters).
+            # wrapped form still runs _check_value (control characters). Not
+            # job-only: `type`/`res_type`/`xtype` are real `_unquote` lanes
+            # for machine/resource/xinst too, so `machine()`, `resource()`
+            # and `xinst()` call this same method for those three keys.
             return _check_value(key, f'"{rendered}"')
         return _check_value(key, rendered)
 

@@ -27,6 +27,7 @@ from dsl41.equiv import (
     equivalent_tier_c,
 )
 from dsl41.ir import (
+    UNQUOTED_AT_LOWERING,
     CatalogIR,
     ExecSpec,
     FwSpec,
@@ -34,6 +35,7 @@ from dsl41.ir import (
     ScheduleBlock,
     Semantics,
     Time,
+    _unquote,
     lower_catalog,
     lower_source,
 )
@@ -271,12 +273,118 @@ def test_builder_refuses_an_unquotable_comment_opening_value() -> None:
 
 def test_builder_auto_quotes_only_the_lanes_lowering_unquotes() -> None:
     """DL-161 review B2: the auto-quote is exact only where ir._unquote
-    strips it back (UNQUOTING_JOB_ATTRS). On any other lane the quotes would
+    strips it back (UNQUOTED_AT_LOWERING). On any other lane the quotes would
     survive into the stored value, so the builder refuses by name instead of
     silently rewriting -- `description` routes to verbatim annotations."""
     c = CatalogBuilder()
     with pytest.raises(DslError, match="description.*rule-5 block comment"):
         c.job("a", command="x", machine="m1", description="tail /*open")
+
+
+def test_unquoted_at_lowering_membership_is_pinned() -> None:
+    """The 25-name union, spelled out independently of ir.py's own
+    `_BOX_INERT_ATTRS | TIME_CLUSTER | frozenset({...})` expression -- a name
+    silently dropped from (or added to) UNQUOTED_AT_LOWERING reddens HERE.
+    The parametrized test below only ever iterates whatever the set
+    currently holds, so a drop would just shrink its case list instead of
+    failing one, which is why this pin exists beside it."""
+    assert UNQUOTED_AT_LOWERING == frozenset(
+        {
+            # _BOX_INERT_ATTRS (7): exec-cluster, inert on a BOX
+            "machine",
+            "owner",
+            "profile",
+            "std_out_file",
+            "std_err_file",
+            "std_in_file",
+            "envvars",
+            # TIME_CLUSTER (9): SEM-30, honored only under date_conditions
+            "days_of_week",
+            "run_calendar",
+            "exclude_calendar",
+            "start_times",
+            "start_mins",
+            "run_window",
+            "timezone",
+            "must_start_times",
+            "must_complete_times",
+            # no other named cluster (6 job attrs + 3 non-job builder attrs)
+            "watch_file",
+            "box_name",
+            "status",
+            "success_codes",
+            "fail_codes",
+            "command",
+            "type",
+            "res_type",
+            "xtype",
+        }
+    )
+
+
+@pytest.mark.parametrize("name", sorted(UNQUOTED_AT_LOWERING))
+def test_unquoted_at_lowering_is_exactly_the_real_unquote_lanes(name: str) -> None:
+    """UNQUOTED_AT_LOWERING is the sync guarantee the old hand-copied
+    "keep in sync" comment asked a human for. For every name in the set: the
+    builder auto-quotes a comment-opening bare value (DL-161), and
+    ir._unquote -- the exact function lowering funnels the value through --
+    strips the quote back to the original, byte for byte.
+
+    render (to_jil) -> parse (ast_jil.parse) -> lower (ir._unquote on the
+    parsed raw value) -> compare. Deliberately NOT a full c.build(): several
+    members (days_of_week, start_times/start_mins, run_window,
+    must_start/complete_times, status, success/fail_codes) have their OWN
+    strict typed grammar past `_unquote` (Time, int, a fixed status
+    vocabulary, exit-code ranges) that no comment-opening string can also
+    satisfy -- that is a fact about those types, not about this set.
+    `type`/`res_type`/`xtype` are real `_unquote` lanes too, for
+    insert_machine/insert_resource/insert_xinst rather than insert_job, so
+    they build through their own statement kind."""
+    opener = "tail /*open"
+    c = CatalogBuilder()
+    if name == "type":
+        c.machine("m", type=opener)
+    elif name == "res_type":
+        c.resource("r", res_type=opener)
+    elif name == "xtype":
+        c.xinst("x", xtype=opener)
+    else:
+        c.job("j", job_type="c", **{name: opener})
+    jil = c.to_jil()
+    assert f'{name}: "{opener}"' in jil
+    stmt = parse(jil).statements[0]
+    (raw,) = [a.raw_value for a in stmt.attrs if a.key == name]
+    assert _unquote(raw) == opener
+
+
+def test_builder_machine_type_quotes_a_comment_opening_value() -> None:
+    """`type` is a real `_unquote` lane for insert_machine (ir.py's
+    `_lower_machine`, `machine_type = _unquote(attr.raw_value)`), so
+    `machine()` auto-quotes it the same way `job()` auto-quotes its lanes,
+    instead of refusing a value the quoted spelling would round-trip
+    exactly."""
+    c = CatalogBuilder()
+    c.machine("m1", type="/tmp/pool /*glob")
+    assert 'type: "/tmp/pool /*glob"' in c.to_jil()
+    assert c.build().machines["m1"].machine_type == "/tmp/pool /*glob"
+
+
+def test_builder_resource_res_type_quotes_a_comment_opening_value() -> None:
+    """`res_type` is a real `_unquote` lane for insert_resource
+    (`_lower_resource`), so `resource()` auto-quotes it too."""
+    c = CatalogBuilder()
+    c.resource("r1", res_type="/tmp/pool /*glob")
+    assert 'res_type: "/tmp/pool /*glob"' in c.to_jil()
+    assert c.build().resources["r1"].res_type == "/tmp/pool /*glob"
+
+
+def test_builder_xinst_xtype_quotes_a_comment_opening_value() -> None:
+    """`xtype` is a real `_unquote` lane for insert_xinst
+    (`_lower_xinst`), so `xinst()` auto-quotes it too."""
+    c = CatalogBuilder()
+    c.xinst("x1", xtype="/tmp/pool /*glob")
+    assert 'xtype: "/tmp/pool /*glob"' in c.to_jil()
+    assert c.build().external_instances["x1"].xtype == "/tmp/pool /*glob"
 
 
 def test_builder_list_values_run_the_full_value_gate() -> None:
