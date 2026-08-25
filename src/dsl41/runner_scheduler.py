@@ -284,20 +284,19 @@ class Scheduler:
             return tuple(sorted((t.hour, t.minute) for t in sched.start_times))
         return tuple(sorted((h, m) for h in range(24) for m in sched.start_mins or []))
 
-    def reset(self, start: datetime, *, inclusive: bool = True) -> None:
-        """Re-anchor every job's next tick at or (inclusive=False) strictly
-        after `start`. Resume anchors at the journal's scheduler frontier and
-        uses the INCLUSIVE form, dedupping against the ticks the journal
-        already holds: a crash between same-instant siblings leaves one of
-        them unjournaled, and an exclusive re-anchor would drop it with no
-        record (period-model ss6: the cutoff barrier). The exclusive form is for
-        the one case that cannot hold such a sibling -- a period opened from
-        a seal whose frontier IS the opening instant, where the closing
-        segment already admitted every tick due at or before it.
+    def reset(self, start: datetime) -> None:
+        """Re-anchor every job's next tick at or after `start`. A tick exactly
+        at `start` counts, and construction and resume both take that one
+        form: a crash between same-instant siblings leaves one of them
+        unjournaled, and an exclusive re-anchor would drop it with no record
+        (period-model ss6: the cutoff barrier). A tick the engine has already
+        admitted is skipped by the RESUME sweep, which knows both what this
+        segment journaled and what the previous segment's cutoff owned --
+        the scheduler is not asked to encode either (DL-166).
         Jobs whose calendar is already exhausted get no entry (DL-56)."""
         self._next = {}
         for job, plan in self._plans.items():
-            occ = self._occurrence(plan, start, inclusive=inclusive)
+            occ = self._occurrence(plan, start, inclusive=True)
             if occ is not None:
                 self._next[job] = occ
 

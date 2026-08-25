@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import socket as socket_mod
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,7 +30,7 @@ from dsl41.runner import Engine
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
-from dsl41.runner_journal import read_journal
+from dsl41.runner_journal import read_journal, scheduler_frontier
 from dsl41.runner_preflight import (
     _local_identity,
     and_success_skeleton,
@@ -116,10 +117,11 @@ def test_absent_days_of_week_defaults_to_every_day() -> None:
     assert sched.next_occurrence() == datetime(2026, 7, 4, 8, 0)
 
 
-def test_first_tick_inclusive_by_default_exclusive_via_reset() -> None:
-    """(ss5 Scheduler.reset docstring): construction anchors inclusively (a
-    tick exactly at `start` counts); reset(..., inclusive=False) -- resume's
-    tool -- skips it and finds the next one."""
+def test_first_tick_counts_at_the_anchor_and_consuming_it_advances() -> None:
+    """(ss5, the `Scheduler.reset` and `pop_due` docstrings -- one half
+    each): the anchor counts a tick exactly at `start`, and `pop_due` then
+    advances strictly past the tick it consumed, so the same instant is
+    never handed out twice (DL-166)."""
     text = (
         "insert_job: incl_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
@@ -127,12 +129,11 @@ def test_first_tick_inclusive_by_default_exclusive_via_reset() -> None:
     catalog = lower_source(text)
     tick = datetime(2026, 7, 1, 8, 0)
 
-    inclusive = Scheduler(catalog, start=tick)
-    assert inclusive.next_occurrence() == tick
+    sched = Scheduler(catalog, start=tick)
+    assert sched.next_occurrence() == tick
 
-    exclusive = Scheduler(catalog, start=tick)
-    exclusive.reset(tick, inclusive=False)
-    assert exclusive.next_occurrence() == datetime(2026, 7, 2, 8, 0)
+    assert [event.at for event in sched.pop_due(tick)] == [tick]
+    assert sched.next_occurrence() == datetime(2026, 7, 2, 8, 0)
 
 
 # ------------------------------------------------------------------- 2. timezone
@@ -854,6 +855,87 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     drop_records = [r for r in records if r.get("rec") == "drop"]
     assert len(drop_records) == 4
     assert all(r["kind"] == "STARTJOB" for r in drop_records)
+
+
+def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
+    tmp_path: Path,
+) -> None:
+    """(ss5/ss7, DL-45): resume re-anchors INCLUSIVE of the scheduler
+    frontier, and that is what saves a same-instant sibling.
+
+    Two jobs tick at one instant. The crash lands between their two `input`
+    appends, so the frontier IS the tick and the journal holds only the
+    first of the pair. An exclusive re-anchor would never derive the second,
+    and it would vanish with no record at all. The inclusive anchor derives
+    both: the journaled one is skipped, the lost one is dropped AND
+    journaled -- never fired late, never silently forgotten (DL-166)."""
+    from dsl41.period import estate_wal
+
+    text = (
+        "insert_job: sib_a\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
+        "insert_job: sib_b\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    catalog = lower_source(text)
+    start = datetime(2026, 7, 1, 7, 0)
+    tick = datetime(2026, 7, 1, 8, 0)
+    run_root = tmp_path / "run"
+
+    async def phase1() -> None:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        await engine.run_until_quiescent(tick)  # both siblings tick at 08:00
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(phase1())
+    wal = estate_wal(run_root)
+
+    # the crash: sib_b's `input` append never landed. Truncating at that line
+    # is the real shape -- a contiguous prefix, no forged record.
+    lines = wal.read_text().splitlines(keepends=True)
+    cut = next(
+        index
+        for index, line in enumerate(lines)
+        if json.loads(line).get("rec") == "input"
+        and json.loads(line)["payload"].get("job") == "sib_b"
+    )
+    wal.write_text("".join(lines[:cut]))
+    assert scheduler_frontier(read_journal(wal)) == tick  # the frontier IS the tick
+
+    async def phase2() -> Engine:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=tick),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        assert engine.journal is not None
+        engine.journal.close()
+        return engine
+
+    engine = asyncio.run(phase2())
+    assert [(ev.at, ev.payload["job"]) for ev, _ in engine.drops] == [(tick, "sib_b")]
+    assert all("missed" in reason for _, reason in engine.drops)
+
+    after = read_journal(wal)
+    drops = [(r["at"], r["payload"]["job"]) for r in after if r.get("rec") == "drop"]
+    assert drops == [(tick.isoformat(), "sib_b")]
+    # the surviving sibling is neither re-admitted nor dropped a second time
+    admitted = [
+        (r["at"], r["payload"]["job"])
+        for r in after
+        if r.get("rec") == "input" and r.get("source") == "scheduler"
+    ]
+    assert admitted == [(tick.isoformat(), "sib_a")]
 
 
 # ------------------------------------------------------------------ 6. preflight

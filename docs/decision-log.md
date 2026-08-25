@@ -9308,3 +9308,199 @@ relitigate an entry; append a new one.
   that try -- the handler wraps `check_manifest_against_segment` alone --
   and dropping the translation shows one red test on the TYPE with a
   single-prefixed message. The docstring states the verified reason.
+- DL-166 the resume tick sweep gets ONE dedup rule, and the seal cannot be
+  its only source (2026-08-25; runner_startup.py + runner_scheduler.py +
+  test_boundary.py + test_runner_scheduler.py + test_autocal_breadth.py;
+  pays DL-152's scheduler-tick-dedup slice, corrected).
+  THE FINDING, as DL-152 left it: "scheduler tick-dedup collapsed onto the
+  seal's admitted-through as the one source, retiring the inclusive reset,
+  the replayed-tick set and the opened-at mark as three answers."
+  THE CORRECTION, made before this slice started. Half of that is not
+  implementable, and the wording is what is wrong, not the work. The seal
+  cannot be the one source: it is written BEFORE the segment exists, so it
+  cannot know which ticks THIS segment admitted. `scheduler_admitted_through`
+  is proved equal to `closed_at` (`seal._check_cutoff`) and to the snapshot
+  instant (`boundary`'s cutoff check); call it T, and all it says is "C1
+  admitted every tick due at or before T". On a crash-resume mid-period the
+  frontier is a tick instant in (T, frontier], admitted by this segment and
+  journaled, and the re-anchor derives the tick at exactly the frontier
+  again. A rule "admitted iff `at <= T`" classifies it as NOT admitted and
+  journals a `drop` saying the engine missed a tick it in fact ran -- a
+  durable false record on every crash that lands just after a tick. So
+  `replayed_ticks` stays.
+  WHAT DID COLLAPSE. There were two mechanisms answering one question ("has
+  this tick already been admitted?"), not three answers. One was an
+  anchoring POLICY -- `inclusive=not opened_at_t` -- covering the tick C1
+  admitted at T, in the PREVIOUS segment. The other was a membership SET,
+  `replayed_ticks`, covering the ticks THIS segment admitted.
+  `scheduler.reset(inclusive=...)` was not a third answer; it was where the
+  policy was applied. Fusing the two into one boolean is what made
+  `opened_at_t` hard to read: a one-line expression under a seven-line
+  comment, phrased as a fact about this segment's frontier ("frontier == the
+  opening instant") in order to express a fact about the previous segment's
+  cutoff.
+  THE RULING. The anchor is ALWAYS inclusive, and one named predicate at the
+  skip site asks the one question with two clauses: a re-derived tick is
+  skipped if `(job, at)` is in `replayed_ticks`, OR if `admitted_through` is
+  set and `tick.at <= admitted_through`. `opened_at_t` is gone. The seven-line
+  comment did not evaporate -- its content is now the prose for the two
+  clauses, stated where the decision is made, and it still cites ss6 step 9
+  and DL-45.
+  THE SOURCE for `admitted_through` is the OPENING's own instant, not
+  `lineage.seal`, which is in scope here and is what DL-152's wording pointed
+  at. The opening record's `at` IS T by construction and by proof: the
+  boundary writes the opening with `started_at=seal.closed_at` and stamps
+  `opens_from_seal`, `seal._check_cutoff` pins `scheduler_admitted_through ==
+  closed_at`, and the boundary's own check re-pins `now ==
+  scheduler_admitted_through == T` before the record is written. Reading the
+  seal here would be a SECOND authority for a number the opening this segment
+  is bound to already proves -- the rule `runner_startup` states in its own
+  words a hundred lines above, where the period_id fallback was deleted for
+  the same reason (DL-138).
+  THE RETIRED PARAMETER. `Scheduler.reset`'s `inclusive` keyword is gone.
+  After the collapse its only callers were `Scheduler.__init__` and the
+  resume site, both taking the default, and its docstring paragraph
+  documented a resume policy that no longer exists. `_occurrence` KEEPS its
+  own `inclusive` argument: `pop_due` passes `inclusive=False` to advance
+  past a tick it just consumed, which is a different and internal concern and
+  was not touched.
+  THE PROOF that the collapse is behavior-neutral. Three cases exhaust the
+  site, and each was re-derived from the source before the change. Genesis or
+  a period-1 resume (`opens_from_seal is None`): `admitted_through` is None,
+  `opened_at_t` was False, the reset was already inclusive -- identical.
+  Opened from a seal with frontier == T: the old code never derived the tick
+  at T; the new code derives it and skips it on `at <= admitted_through`
+  without journaling, and `_next` lands on the same next occurrence because
+  `pop_due` advances with `_occurrence(..., inclusive=False)` -- and the tick
+  at T is always popped rather than left pending, because `sweep_upto =
+  max(now, frontier) >= T`. Opened from a seal with frontier > T
+  (crash-resume mid-period): the anchor is at the frontier either way, so
+  nothing at or before T is ever derived and the second clause is inert.
+  There is no fourth case: `scheduler_frontier` always includes
+  `opening_at(records[0])` in its stamps, so frontier >= T always.
+  THE DOCS, corrected by the review. This entry first said "ss6 step 9's
+  guarantee" and quoted "C1 owns every tick <= T, C2 owns every tick after
+  it". That quote is NOT step 9. It is period-model ss6's carried-evidence
+  paragraph, and in this exact wording it is `boundary.py`'s cutoff-check
+  message. Step 9's own words are "open the next segment with `first_index =
+  closes_at_index + 1`, `at = T`, and its scheduler strictly after T" -- and
+  those words describe the anchor this slice deleted, so an implementer
+  reading them today would write the old code back. The guarantee survives
+  and was measured to survive; the mechanism moved from the anchor to the
+  skip. Step 9 is therefore AMENDED, in period-model's own convention for
+  this ("*(amended by DL-NNN: ...)*"), to say that it states a guarantee and
+  not a mechanism, that the anchor is inclusive of T on DL-45's argument, and
+  that the sweep is what skips a tick the cutoff already admitted.
+  `ops-model.md` G7 is amended too. Its conclusion is untouched and still
+  right -- the answer is the barrier and its `scheduler_admitted_through: T`
+  watermark, because no clock can supply the second dedup source -- but it
+  quoted the resume comment verbatim ("the ticks the journal actually holds")
+  and named `last_at` as the anchor, and neither string is in the code now.
+  Both were updated to the mechanism that exists. ss6's own opening
+  paragraph carried the same stale `last_at` anchor name as G7 did, one
+  section above the step it introduces, so it is amended with them: a
+  period-model that describes the deleted mechanism two paragraphs before
+  step 9's amendment says the mechanism survived.
+  THE TESTS. The four behavior tests that are this slice's net pass with
+  every assertion UNMODIFIED: `test_pr25_the_next_period_starts_its_scheduler_strictly_after_t`
+  (the seal-opened path, whose docstring alone was later rewritten -- see
+  the review paragraph), `test_resume_virtual_scheduler_ticks_never_refire`,
+  `test_resume_real_domain_missed_ticks_are_dropped_and_journaled` (the
+  genesis path, exactly 4 drops), and the crash driver behind
+  tests/test_runner_lifecycle.py.
+  Two tests pinned the retired parameter and were rewritten rather than
+  deleted, each keeping its own subject and re-expressed through the
+  surviving API (`Scheduler(catalog, start=tick)`, then `pop_due(tick)` and
+  `next_occurrence()`). The plain days_of_week one in
+  tests/test_runner_scheduler.py is now
+  `test_first_tick_counts_at_the_anchor_and_consuming_it_advances`; its
+  extended-run_calendar twin in tests/test_autocal_breadth.py is now
+  `test_scheduler_anchor_and_advance_with_an_extended_calendar`, the same
+  contract over an EOMWORK calendar, July 31 to August 31 2026. Each was
+  renamed to what it now pins and each docstring's quote of the `reset`
+  docstring was updated. Both still pin a real contract: the anchor counts a
+  tick exactly at `start`, and consuming that tick advances strictly past it.
+  One test is new, on the case that had no direct test -- the clause DL-152
+  proposed to delete. `test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop`
+  seals at T, resumes, lets C2 admit and journal the 09:00 tick an hour after
+  T, closes, and resumes again. The frontier is now 09:00, strictly after T,
+  so the cutoff clause is inert and the journal's own record is the only
+  thing that skips the re-derived tick. No `drop` record, and `drops == []`.
+  A SECOND test is new, added on the review's finding that the inclusive
+  anchor -- the property this entry's prose leans on hardest, asserted twice
+  in the rewritten comment and once in `reset`'s docstring -- was pinned by
+  NOTHING. The reviewer mutated the resume site alone to
+  `scheduler.reset(frontier + timedelta(microseconds=1))`, which excludes
+  exactly the frontier, and the whole suite stayed green.
+  `test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten`
+  builds DL-45's own case and nothing weaker: two jobs ticking at one instant,
+  a real run that journals both `input` records, then the file truncated at
+  the second one -- a contiguous prefix, no forged record, which is what a
+  crash between the two appends leaves. On resume the frontier IS the tick and
+  the journal holds only the first sibling. The test asserts the second is
+  dropped AND journaled, and that the first is neither re-admitted nor dropped.
+  THE MUTATIONS, run over the whole suite, with the real counts. Dropping the
+  `replayed_ticks` clause reddens TWO tests: the new one above and
+  `test_resume_virtual_scheduler_ticks_never_refire`. Dropping the
+  `admitted_through` clause reddens ONE:
+  `test_pr25_the_next_period_starts_its_scheduler_strictly_after_t`. The two
+  rewrites were mutation-checked on their own subject too: anchoring `reset`
+  exclusively reddens THREE (both rewrites and
+  `test_cli_rehearse_scheduled_estate_deterministic_start_hours`), and making
+  `pop_due` leave a consumed tick pending reddens 38, both rewrites among
+  them. The review's own mutation -- the resume site anchoring one microsecond
+  past the frontier -- now reddens exactly ONE test, the new DL-45 one, where
+  before it reddened none. All five mutations restored.
+  FOUND, NOT FIXED -- a duplicate `drop` at a drop-set frontier. This entry
+  argues at length that a false `drop` record is the thing to avoid, and a
+  live path producing exactly that sits ten lines from the code described
+  above, so it is recorded here rather than passed over. The mechanism:
+  `replayed_ticks` filters on scheduler `input`/STARTJOB records only, while
+  `scheduler_frontier` counts `drop` and `advance` records as well
+  (`runner_journal.py`, PR-25a). So when the frontier is set by a `drop`, the
+  next resume re-anchors inclusively at that instant, re-derives the tick that
+  was already dropped, finds it in neither clause, and drops and journals it
+  again -- once per resume. Reproduced twice, by the review on a seal-opened
+  segment resumed four times, and independently here on a genesis root: a job
+  ticking 10:00 and 11:00, resumed at 10:30 and again at 12:00, leaves the
+  journal holding the 10:00 drop TWICE. It reproduces byte-identically at
+  HEAD; the old `opened_at_t` was False in this shape too, so nothing about
+  this slice introduced or worsened it. Deferred rather than folded in for one
+  reason: this slice's whole asset is a measured behavior-neutrality result
+  over five resume scenarios, and adding the dropped ticks to `replayed_ticks`
+  -- which looks like the fix, and is two lines -- CHANGES durable output and
+  would invalidate that measurement. It is its own slice, with its own before
+  and after.
+  THE GATE. 3392 passed, 6 skipped (the 3390/6 baseline plus two new tests);
+  `uv run ruff check src tests` clean; `uv run mypy src` clean;
+  `scripts/arch_check.py` exits 0, advisory only -- `_resume_under_lock` grows
+  from 249 to 256 lines against the baseline, which is comment prose replacing
+  a deleted comment, not new branching. `ruff format --check` is not a CI gate
+  (see the workflow header) and would reformat 40 of the repo's 114 files, the
+  same 40 with this slice stashed as with it applied -- that three of the five
+  files this slice touches are among them is a coincidence of count, not the
+  header's "three pre-phase-11 files". Every hunk it would change is
+  pre-existing and none is in this slice's lines; `runner_scheduler.py` and
+  `test_runner_scheduler.py`, the two files this slice edits most, are
+  format-clean. `coverage report` fails locally at 99% on two
+  `runner_access.py` lines; the same two miss at HEAD with this slice stashed,
+  so it is a pre-existing platform gap, not this change.
+  THE REVIEW, and what else it changed. No blockers; behavior neutrality was
+  MEASURED, not argued -- a differential probe over five resume scenarios
+  (a plan exhausted exactly at T, a tick at T plus a dropped window, a
+  schedule new in C2 ticking at T, one segment resumed four times, and a
+  virtual resume with `now` before the frontier) fingerprinted `engine.drops`,
+  every `drop` and scheduler `input` record, the frontier and `Scheduler._next`
+  after the sweep, and diffed identical against HEAD. All four mutation counts
+  above reproduced exactly. Three smaller fixes reached the tree. The plain
+  rewritten test cited `reset`'s docstring for a two-part claim whose second
+  half is `pop_due`'s contract; it now cites one docstring per half. The new
+  seal-opened test guarded `drop` but not re-admission, and now re-reads the
+  scheduler-input count after the second resume -- the sweep cannot re-admit
+  today, so this guards the "fires twice" half rather than a live hole.
+  The seal-opened net test
+  `test_pr25_the_next_period_starts_its_scheduler_strictly_after_t` had a
+  docstring describing an inclusive re-anchor as the thing that must not
+  happen, which is now exactly what the code does; its prose was
+  rewritten to the guarantee it verifies, and NOT one assertion or line of its
+  body was touched -- it is a must-pass-unmodified net test.

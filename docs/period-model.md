@@ -1394,9 +1394,12 @@ between an operator and a crash.
 ## 6. The cutoff barrier
 
 `Scheduler._next` cannot be re-derived at a boundary: resume re-anchors
-**inclusive** of `last_at` and dedups against the ticks the journal holds, and a
-seal cuts that evidence away. Reset exclusive of the cutoff and an unconsumed
-tick vanishes; inclusive and a consumed one fires twice.
+**inclusive** of the scheduler frontier and dedups against the ticks the
+journal holds, and a seal cuts that evidence away. Anchor exclusive of the
+cutoff and an unconsumed tick vanishes; anchor inclusive with nothing else to
+dedup against and a consumed one fires twice. Since DL-166 the anchor is
+unconditionally inclusive and the sweep carries both dedup sources: the ticks
+this segment journaled, and the cutoff the seal records.
 
 1. the **operator** holds the runbook's set — every scheduled top-level job
    or box with a future tick (`deployment-runbook.md` §6 step 1) — with
@@ -1416,7 +1419,13 @@ tick vanishes; inclusive and a consumed one fires twice.
 7. re-check §8 — if steps 4–5 started work despite the holds, **refuse**;
 8. write the sidecar, then append the `seal` record at T;
 9. open the next segment with `first_index = closes_at_index + 1`, `at = T`,
-   and its scheduler strictly after T.
+   and its scheduler strictly after T *(amended by DL-166: a statement of
+   guarantee, not of mechanism. The resume anchor is INCLUSIVE of T — an
+   exclusive one loses a same-instant sibling the crash left unjournaled,
+   DL-45 — and the missed-tick sweep skips every re-derived tick the cutoff
+   already admitted. No tick at or before T is fired or dropped by C2, which
+   is what this clause is for; the exclusive anchor it once described is
+   gone)*.
 
 **There are no boundary holds.** The code has one hold bit, `on_hold`, and
 `ON_HOLD`/`OFF_HOLD` set it; a tick arms only because it is set. Drafts 20–21

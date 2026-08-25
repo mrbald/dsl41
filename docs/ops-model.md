@@ -1355,13 +1355,17 @@ operator meets by surprise.
 
 **G7 — the scheduler cutoff cannot be re-derived.** §8b.1 first called
 `Scheduler._next` "derived from catalog + clock". It is not, at a boundary.
-`runner_startup.py` re-anchors **inclusive** of `last_at` and dedups against
-`replayed_ticks` — "the ticks the journal actually holds" — and its own comment
-says an exclusive re-anchor would lose a sibling silently, with no drop record.
-A seal cuts exactly that evidence away, so the clock cannot say which
-same-instant ticks were already consumed. Reset exclusive of T and an
-unconsumed tick vanishes; reset inclusive and a consumed one fires twice. The
-answer is §8a.2's barrier and its `scheduler_admitted_through: T` watermark.
+`runner_startup.py` re-anchors **inclusive** of the scheduler frontier and
+dedups against `replayed_ticks` — "the ticks THIS segment's journal holds" —
+and its own comment says an exclusive re-anchor would lose a same-instant
+sibling silently, with no drop record (DL-45). A seal cuts exactly that
+evidence away, so the clock cannot say which same-instant ticks were already
+consumed. Anchor exclusive of T and an unconsumed tick vanishes; anchor
+inclusive with nothing else to dedup against and a consumed one fires twice.
+Since DL-166 the anchor is unconditionally inclusive and the missed-tick sweep
+carries both dedup sources, but the second source is not something the clock
+can supply: the answer is still §8a.2's barrier and its
+`scheduler_admitted_through: T` watermark.
 
 **G8 — `last_contact` must not cross the seal.** §8b.1 first said host rows
 "serialize as themselves". That inverts DL-95: `last_contact` is deliberately

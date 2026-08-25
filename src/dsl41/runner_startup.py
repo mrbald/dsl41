@@ -865,13 +865,7 @@ async def _resume_under_lock(
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
     if scheduler is not None:
-        # re-anchor INCLUSIVE of last_at and dedup against the ticks the
-        # journal actually holds: with several jobs scheduled at one instant,
-        # a crash between the siblings' input appends leaves last_at == tick
-        # with a sibling unjournaled -- an exclusive re-anchor would lose it
-        # silently, with no drop record (DL-45). Journaled ticks
-        # were fed by replay and are skipped; the rest of the due window is
-        # dropped AND journaled, never fired late.
+        # the ticks THIS segment's journal holds: replay already fed them
         replayed_ticks = {
             (record["payload"].get("job"), record["at"])
             for record in records
@@ -879,21 +873,34 @@ async def _resume_under_lock(
             and record.get("source") == "scheduler"
             and record.get("kind") == "STARTJOB"
         }
+        # the PREVIOUS segment's cutoff T, read off the OPENING rather than
+        # off `lineage.seal`: the boundary writes the opening with
+        # `started_at=seal.closed_at`, and `closed_at ==
+        # scheduler_admitted_through == T` is proved at the seal and
+        # re-proved at the boundary. The seal would be a second authority
+        # for a number the opening already carries (DL-138's rule).
+        admitted_through = (
+            opening_at(opening) if opening.get("opens_from_seal") is not None else None
+        )
         frontier = scheduler_frontier(records)
-        # ss6 step 9: a period opened from a seal starts its scheduler
-        # STRICTLY AFTER T. C1's cutoff admitted every tick due at or
-        # before T -- that is what `scheduler_admitted_through` records --
-        # so an inclusive re-anchor at T would re-derive the tick C1 just
-        # ran and journal a `drop` saying the engine missed it. The
-        # inclusive anchor is for the OTHER case it was written for: a
-        # crash between same-instant siblings' appends, where the frontier
-        # is a tick this segment actually holds.
-        opened_at_t = opening.get("opens_from_seal") is not None and frontier == opening_at(opening)
-        scheduler.reset(frontier, inclusive=not opened_at_t)
+        # ALWAYS inclusive of the frontier: with several jobs scheduled at
+        # one instant, a crash between the siblings' input appends leaves
+        # the frontier AT the tick with a sibling unjournaled, and an
+        # exclusive anchor would lose it silently, with no record (DL-45).
+        scheduler.reset(frontier)
         sweep_upto = max(clock.now(), frontier)  # virtual resume: now < the frontier
         for tick_ev in scheduler.pop_due(sweep_upto):
-            if (tick_ev.job(), tick_ev.at.isoformat()) in replayed_ticks:
-                continue  # replay already fed this tick
+            # one question, two sources, either enough: this segment
+            # journaled the tick, or C1's cutoff owned it (ss6 step 9 -- C1
+            # admitted every tick due at or before T). The second clause is
+            # what keeps the inclusive anchor at T from journaling a `drop`
+            # for the tick C1 just ran, a durable false record (DL-166).
+            # What neither claims is dropped AND journaled, never fired late.
+            already_admitted = (tick_ev.job(), tick_ev.at.isoformat()) in replayed_ticks or (
+                admitted_through is not None and tick_ev.at <= admitted_through
+            )
+            if already_admitted:
+                continue
             reason = "scheduler tick missed while the engine was down; not fired late"
             engine.drops.append((tick_ev, reason))  # PENDING: E9
             journal.drop(tick_ev, reason)

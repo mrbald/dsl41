@@ -2543,13 +2543,15 @@ def test_pr50_run_history_reads_the_estate_after_a_boundary(tmp_path: Path) -> N
 
 
 def test_pr25_the_next_period_starts_its_scheduler_strictly_after_t(tmp_path: Path) -> None:
-    """ss6 step 9: the opening segment's scheduler runs STRICTLY after T.
+    """period-model ss6: C1 owns every tick at or before T, C2 owns every
+    tick after it, so the opening segment drops none of C1's.
 
     C1's cutoff admitted and ran every tick due at or before T -- that is
-    what `scheduler_admitted_through` records -- so an inclusive re-anchor
-    at T would re-derive the tick C1 just ran and journal a `drop` saying
-    the engine had missed it. A durable false record, and one that moves
-    the ss6 frontier and reads to an operator as a lost tick."""
+    what `scheduler_admitted_through` records. Resume anchors INCLUSIVELY at
+    T and does re-derive the tick C1 just ran; the sweep's cutoff clause is
+    what stops it becoming a `drop` saying the engine had missed it
+    (DL-166). That record would be durably false, and it would move the ss6
+    frontier and read to an operator as a lost tick."""
     run_root = tmp_path / "run"
     catalog, sources = _catalog(SCHED_C1)
     staged_manifest = stage_manifest(
@@ -2595,6 +2597,92 @@ def test_pr25_the_next_period_starts_its_scheduler_strictly_after_t(tmp_path: Pa
     drops = [r for r in read_journal(wal_path(run_root, 2)) if r.get("rec") == "drop"]
     assert drops == []  # C1 owned that tick; C2 never missed it
     assert opened.drops == []
+
+
+def test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop(
+    tmp_path: Path,
+) -> None:
+    """The resume sweep's OTHER dedup clause (DL-166): a tick this segment
+    admitted itself, strictly after T.
+
+    The period opens from a seal at T, runs on, journals the 09:00 tick, and
+    the process dies. Resume re-anchors at the frontier -- 09:00, strictly
+    after T -- so the inclusive anchor re-derives that tick. Here the cutoff
+    clause is inert (09:00 > T) and the journal's own record is what skips
+    it; a `drop` would say the engine missed a tick it in fact ran."""
+    from dsl41.runner_journal import scheduler_frontier
+
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(SCHED_C1)
+    staged_manifest = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=_scheduler(SCHED_C1, T0),
+        staged=staged_manifest,
+    )
+    # sealed at T0, an hour BEFORE the 09:00 tick: C1 admitted none of it
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
+    _close(engine)
+    assert boundary.seal.scheduler_admitted_through == T0
+
+    catalog2, _ = _catalog(SCHED_C2)
+    tick = datetime(2026, 7, 1, 9, 0)
+    opened = asyncio.run(
+        resume_run(
+            catalog2,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=_scheduler(SCHED_C2, T0),
+        )
+    )
+
+    async def under_c2() -> None:
+        await opened.run_until_quiescent(tick)  # C2 admits the tick and journals it
+        opened.inject(
+            Event(at=tick, kind="STATUS", payload={"job": "a", "status": "SUCCESS", "exit_code": 0})
+        )
+        await opened.run_until_quiescent(tick)
+
+    asyncio.run(under_c2())
+    _close(opened)  # the crash, one tick past the opening
+    admitted = [
+        record
+        for record in read_journal(wal_path(run_root, 2))
+        if record.get("rec") == "input" and record.get("source") == "scheduler"
+    ]
+    assert [record["at"] for record in admitted] == [tick.isoformat()]
+    assert scheduler_frontier(read_journal(wal_path(run_root, 2))) == tick  # > T
+
+    again = asyncio.run(
+        resume_run(
+            catalog2,
+            run_root,
+            clock=VirtualClock(start=tick),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=_scheduler(SCHED_C2, T0),
+        )
+    )
+    _close(again)
+    assert again.drops == []
+    drops = [r for r in read_journal(wal_path(run_root, 2)) if r.get("rec") == "drop"]
+    assert drops == []
+    # nor re-admitted: the sweep only ever drops today, so this is the guard
+    # on the other half of the risk -- one tick, fired once
+    still = [
+        record
+        for record in read_journal(wal_path(run_root, 2))
+        if record.get("rec") == "input" and record.get("source") == "scheduler"
+    ]
+    assert [record["at"] for record in still] == [tick.isoformat()]
 
 
 @pytest.mark.parametrize("damage", ["empty", "torn"])

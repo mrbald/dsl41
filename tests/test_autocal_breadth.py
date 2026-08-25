@@ -441,13 +441,12 @@ def test_scheduler_extended_run_and_extended_exclude() -> None:
     ]
 
 
-def test_scheduler_reset_inclusive_semantics_with_an_extended_calendar() -> None:
-    """The construction-is-inclusive / reset(inclusive=False)-is-exclusive
-    contract (already pinned for plain days_of_week schedules in
-    test_runner_scheduler.py) holds identically for an extended
-    run_calendar: EOMWORK's July 31 2026 tick (a Friday, the last workday)
-    counts at construction; resetting exclusive at that exact instant skips
-    to August's, the 31st (a Monday, August's last workday)."""
+def test_scheduler_anchor_and_advance_with_an_extended_calendar() -> None:
+    """The anchor-counts-the-tick / consuming-it-advances contract (already
+    pinned for plain days_of_week schedules in test_runner_scheduler.py)
+    holds identically for an extended run_calendar: EOMWORK's July 31 2026
+    tick (a Friday, the last workday) counts at the anchor; consuming it
+    advances to August's, the 31st (a Monday, August's last workday)."""
     text = (
         "extended_calendar: eow\nworkday: mo,tu,we,th,fr\ncondition: EOMWORK\n\n"
         "insert_job: ext_incl\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -455,11 +454,10 @@ def test_scheduler_reset_inclusive_semantics_with_an_extended_calendar() -> None
     )
     catalog = lower_source(text)
     tick = datetime(2026, 7, 31, 8, 0)
-    inclusive = Scheduler(catalog, start=tick)
-    assert inclusive.next_occurrence() == tick
-    exclusive = Scheduler(catalog, start=tick)
-    exclusive.reset(tick, inclusive=False)
-    assert exclusive.next_occurrence() == datetime(2026, 8, 31, 8, 0)
+    sched = Scheduler(catalog, start=tick)
+    assert sched.next_occurrence() == tick
+    assert [event.at for event in sched.pop_due(tick)] == [tick]
+    assert sched.next_occurrence() == datetime(2026, 8, 31, 8, 0)
 
 
 def test_scheduler_cycle_bound_extended_run_calendar_goes_dormant_mid_run() -> None:
