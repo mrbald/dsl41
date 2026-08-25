@@ -51,7 +51,7 @@ from dsl41.boundary import (
 )
 from dsl41.ir import CatalogIR, lower_catalog
 from dsl41.oracle_state import Event
-from dsl41.attest import audit_period
+from dsl41.attest import Attestation, audit_period
 from dsl41.period import (
     RETRY_HORIZON_S,
     RuntimeProfile,
@@ -1774,6 +1774,259 @@ def test_a_staged_manifest_missing_its_version_refuses_by_name(tmp_path: Path) -
     with pytest.raises(EngineError, match="not a StagedManifest this binary can read") as unsup:
         read_staged_manifest(directory)
     assert "missing artifact_format_version" not in str(unsup.value)
+
+
+# ---------------------------------- DL-168: read strict from bytes, everywhere
+
+
+def _dl168_sentinel_case(tmp_path: Path) -> None:
+    """Caught by `canon.decode`'s own gate, ahead of any model -- the
+    sentinel's only int field is `artifact_format_version` itself."""
+    from dsl41.period import sentinel_path
+
+    root = tmp_path / "sentinel"
+    root.mkdir()
+    sentinel_path(root).write_bytes(
+        json.dumps(
+            {
+                "rec": "period_root",
+                "artifact_format_version": True,
+                "estate_id": "e",
+                "see": "wal/",
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="artifact_format_version"):
+        read_sentinel(root)
+
+
+def _dl168_staged_manifest_case(tmp_path: Path) -> None:
+    """`_read_artifact`'s `model_validate_json(raw, strict=True)` -- this
+    entry's own fix, from a real staging directory."""
+    from dsl41.boundary import read_staged_manifest
+    from dsl41.period import STAGED_MANIFEST_NAME
+
+    run_root = tmp_path / "run"
+    _close(_genesis(run_root))
+    staged = _stage(run_root, C2_JIL)
+    directory = staging_dir(run_root, staged.stage_digest)
+    path = directory / STAGED_MANIFEST_NAME
+    payload = json.loads(path.read_bytes())
+    payload["state_machine_version"] = True
+    path.write_bytes(json.dumps(payload, sort_keys=True).encode() + b"\n")
+    with pytest.raises(EngineError, match="state_machine_version"):
+        read_staged_manifest(directory)
+
+
+def _dl168_candidate_case(tmp_path: Path) -> None:
+    """The same fix, on the NESTED field: `next_period.
+    state_machine_version` proves the call-time `strict=True` cascades
+    into it, which `Candidate`'s own `strict=True` config alone would not
+    (protocol-evolution.md's DL-168 caveat -- that belt covers only
+    `Candidate`'s own top-level fields)."""
+    from dsl41.period import CANDIDATE_NAME
+
+    run_root = tmp_path / "run"
+    _close(_genesis(run_root))
+    staged = _stage(run_root, C2_JIL)
+    directory = staging_dir(run_root, staged.stage_digest)
+    path = directory / CANDIDATE_NAME
+    payload = json.loads(path.read_bytes())
+    payload["next_period"]["state_machine_version"] = True
+    path.write_bytes(json.dumps(payload, sort_keys=True).encode() + b"\n")
+    with pytest.raises(EngineError, match="state_machine_version"):
+        read_candidate(directory)
+
+
+def _dl168_manifest_case(tmp_path: Path) -> None:
+    """The pre-existing precedent this entry followed:
+    `read_period_manifest`'s own `model_validate_json(raw, strict=True)`."""
+    from dsl41.ir import lower_source
+    from dsl41.period import genesis_manifest, write_period_manifest
+
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
+    path = write_period_manifest(tmp_path, manifest)
+    payload = json.loads(path.read_bytes())
+    payload["catalog_hash_version"] = True
+    path.write_bytes(json.dumps(payload, sort_keys=True).encode() + b"\n")
+    with pytest.raises(EngineError, match="catalog_hash_version"):
+        read_period_manifest(tmp_path)
+
+
+def _dl168_attestation_case(tmp_path: Path) -> None:
+    """The pre-existing `strict=True` model config: refuses at
+    `model_validate`, ahead of the digest comparison (`attest.py`'s
+    `from_bytes` validates the shape before it compares digests)."""
+    from dsl41.canon import canonical_bytes
+
+    attestation = Attestation(
+        seal_digest="sha256:" + "1" * 64,
+        period_id=1,
+        chain_through_period=1,
+        prev_attestation_digest=None,
+        state_machine_version=STATE_MACHINE_VERSION,
+        dsl41_version="1.2.3",
+        audited_at="2026-08-25T00:00:00.000000",
+    )
+    payload = json.loads(attestation.to_bytes())
+    payload["chain_through_period"] = True
+    with pytest.raises(EngineError, match="valid integer"):
+        Attestation.from_bytes(canonical_bytes(payload), where="laundered")
+
+
+def _dl168_archive_receipt_case(tmp_path: Path) -> None:
+    """The same pre-existing mechanism, on `ArchiveReceipt`."""
+    from dsl41.canon import canonical_bytes
+    from dsl41.period import ArchiveReceipt, archivable_names
+
+    wal, _candidate_name, _staged_name = archivable_names(1)
+    receipt = ArchiveReceipt(
+        estate_id="e",
+        period_id=1,
+        seal_digest="sha256:" + "2" * 64,
+        attestation_digest="sha256:" + "3" * 64,
+        chain_through_period=1,
+        retention_class="floor",
+        archived=(wal,),
+        archived_at="2026-08-25T00:00:00.000000",
+        dsl41_version="1.2.3",
+    )
+    payload = json.loads(receipt.to_bytes())
+    payload["chain_through_period"] = True
+    with pytest.raises(EngineError, match="valid integer"):
+        ArchiveReceipt.from_bytes(canonical_bytes(payload), where="laundered")
+
+
+def _dl168_seal_sidecar_case(tmp_path: Path) -> None:
+    """A fourth, independent mechanism: the self-describing digest is
+    recomputed over the RAW payload before a model is even built
+    (`seal.py`'s `from_payload`), so it refuses a laundered field with no
+    field strictness required at all.
+
+    The fixture MUST be written in ss3.2 canonical bytes, not
+    `json.dumps`'s default (non-canonical) separators: non-canonical bytes
+    refuse on the canonical-form gate regardless of whether `epoch` was
+    laundered, which would prove nothing about this mechanism (a review
+    finding on the first draft of this case)."""
+    from dsl41.canon import canonical_bytes
+    from dsl41.seal import Seal
+    from test_seal_artifact import GOLDEN_BYTES
+
+    payload = json.loads(GOLDEN_BYTES)
+    payload["epoch"] = True
+    with pytest.raises(EngineError, match="but the document hashes to"):
+        Seal.from_bytes(canonical_bytes(payload))
+
+
+_DL168_CASES = [
+    pytest.param(_dl168_sentinel_case, id="sentinel"),
+    pytest.param(_dl168_staged_manifest_case, id="staged_manifest"),
+    pytest.param(_dl168_candidate_case, id="candidate"),
+    pytest.param(_dl168_manifest_case, id="manifest"),
+    pytest.param(_dl168_attestation_case, id="attestation"),
+    pytest.param(_dl168_archive_receipt_case, id="archive_receipt"),
+    pytest.param(_dl168_seal_sidecar_case, id="seal_sidecar"),
+]
+
+
+@pytest.mark.parametrize("case", _DL168_CASES)
+def test_dl168_every_closed_artifact_reader_refuses_a_laundered_int_field(
+    case: Any, tmp_path: Path
+) -> None:
+    """DL-168: a payload that launders one int field -- `true` where an
+    int belongs -- refuses at every closed-artifact reader in scope, read
+    from a valid artifact each case builds itself. One case per reader
+    (genuinely parametrized: a regression in one case does not hide the
+    other six, unlike this test's first draft, which ran all seven
+    sequentially in one function and was wrongly called "parametrized" in
+    the DL entry -- a review finding, corrected there and here).
+
+    Anchor and claim are deliberately NOT here: both still launder (see
+    the two `xfail` cases below) and are out of DL-168's scope by the
+    brief's own ruling -- reported, not fixed."""
+    case(tmp_path)
+
+
+@pytest.mark.xfail(strict=True, reason="DL-168: EstateAnchor.read() is lax -- reported, not fixed")
+def test_dl168_an_anchor_still_launders_a_nested_int_field(tmp_path: Path) -> None:
+    """DL-168's ruling covers `_read_artifact` (staged manifest, candidate)
+    and `StagedNextPeriod`. `EstateAnchor.read()` was out of that scope and
+    was not touched: it still calls `Anchor.model_validate(payload)` lax,
+    and `head.period_id` (`Field(ge=1)`) accepts a laundered `true` --
+    coerced to `1`, which satisfies the floor, so nothing downstream
+    notices. Verified against the real class before this test was written
+    (CLAUDE.md: fidelity is tested, not asserted). This `xfail` is the
+    citable record of the finding; it should start passing, and then be
+    promoted to a real assertion, the day Anchor gets the same fix.
+
+    `match="period_id"` (a review finding): a bare `pytest.raises(
+    EngineError)` would XPASS -- and read as "Anchor got fixed" -- on ANY
+    future `EngineError` `.read()` happens to raise, laundering-related or
+    not. Matching the field name pins the xfail to the actual mechanism a
+    real fix would refuse through."""
+    from dsl41.boundary import ANCHOR_NAME
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+
+    anchor_dir = tmp_path / "anchor"
+    anchor_dir.mkdir()
+    (anchor_dir / ANCHOR_NAME).write_bytes(
+        json.dumps(
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "estate_id": "e",
+                "head": {"state": "open", "period_id": True, "root": str(tmp_path / "r")},
+                "periods": {},
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="period_id"):
+        EstateAnchor(anchor_dir).read()
+
+
+@pytest.mark.xfail(
+    strict=True, reason="DL-168: EstateAnchor.read_claim() is lax -- reported, not fixed"
+)
+def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
+    """The mirror finding on `read_claim`. `next_period` (`Field(ge=2)`) is
+    Claim's only int field, and its floor happens to catch a `true`
+    coercion by accident (`True` coerces to `1`, and `1 < 2` refuses on the
+    bound regardless of strictness) -- so `true` does not discriminate
+    here. A numeric string does: `"3"` coerces to `3` under a lax reader,
+    `3 >= 2` passes the bound, and nothing refuses it. `read_claim` still
+    calls `Claim.model_validate(payload)` lax, same as `EstateAnchor.read()`
+    above. `match="next_period"` for the same reason as the anchor case."""
+    from dsl41.boundary import CLAIMS_DIR
+    from dsl41.canon import ARTIFACT_FORMAT_VERSION
+
+    anchor_dir = tmp_path / "anchor"
+    anchor = EstateAnchor(anchor_dir)
+    claims_dir = anchor_dir / CLAIMS_DIR
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "c1.json").write_bytes(
+        json.dumps(
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "claim_id": "c1",
+                "estate_id": "e1",
+                "prev_seal_digest": "sha256:" + "a" * 64,
+                "next_period": "3",
+                "target_root": str(anchor_dir / "r"),
+                "claimed_at": "2026-08-24T00:00:00.000000",
+                "diag": {},
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    with pytest.raises(EngineError, match="next_period"):
+        anchor.read_claim("c1")
 
 
 # ------------------------------------------- ss2.2 the `seal` control verb

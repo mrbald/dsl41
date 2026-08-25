@@ -135,6 +135,32 @@ the attestation through its own explicit check. `staged_manifest.json`
 was the fifth instance of the same gap, found while this entry was being
 verified rather than named ahead of it, and fixed in the same pass.
 
+*(Amended by DL-168.)* A third gate, beside unknown and absent: a field
+of the WRONG TYPE is refused too, never coerced. **A closed artifact or
+staged identity is validated strict in the JSON sense from its bytes; a
+wire ingress of one is validated strict from its payload** — `true` never
+becomes `1`, and a numeric string never becomes the int it spells.
+`boundary._read_artifact` (`read_candidate`, `read_staged_manifest`) reads
+`model_validate_json(raw, strict=True)`, the period manifest's own
+mechanism (§1, the note above this one); `StagedManifest` and `Candidate`
+also carry `strict=True` in their own model config, belt beside that
+brace, for a future caller that builds either from a lax `model_validate`
+directly. That belt is TOP-LEVEL only: `StagedManifest.runtime_profile`
+is a nested `RuntimeProfile` field, and pydantic validates a nested-model
+field under ITS OWN config regardless of the outer model's `strict=True`
+(only a call-time override, as `_read_artifact` uses, cascades into it) —
+`Candidate.next_period` is the one exception, because `StagedNextPeriod`
+carries `strict=True` of its own. `StagedNextPeriod` — the wire's own copy
+of a staged identity,
+validated at `runner_control.py`'s `_seal` — gained the same `strict=True`;
+every field there is a scalar, so the config alone closes the wire
+ingress, with no call-time override to remember. Anchor and claim were
+found still lax by this entry's own verification and are UNFIXED,
+same status as an open item on this row: `EstateAnchor.read`'s
+`head.period_id` and `EstateAnchor.read_claim`'s `next_period` both still
+coerce (`tests/test_boundary.py`'s two `xfail` cases are the citable
+record).
+
 **The two spool rows are tolerant on fields and strict on versions.** These files
 are written by the supervisor and the wrapper, which may be a different build
 from the engine that reads them. A field added by a newer writer must not stop

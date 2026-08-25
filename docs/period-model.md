@@ -1119,6 +1119,9 @@ nothing.
   a defaulted key all carry the real artifact's digest. Each one passes every
   later check. This rule is what separates the artifact from its look-alikes,
   and each reader names its own artifact when it refuses.
+- **A typed field is read as the type it was written, never coerced into
+  it.** `docs/protocol-evolution.md` §1's closed-artifact row states the
+  rule and the per-reader mechanism (DL-168).
 
 **A golden vector ships with the spec** — one document exercising control
 characters, `/`, non-ASCII, nulls, defaults, empty and non-empty nested

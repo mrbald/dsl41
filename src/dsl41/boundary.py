@@ -555,6 +555,11 @@ class EstateAnchor:
                 raise EngineError(f"{self.path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
             _check_head_state(self.path, payload)
+            # DL-168: still LAX -- unlike `_read_artifact`, this does not read
+            # `raw` strict-in-the-JSON-sense, so a laundered `head.period_id`
+            # (`true` clearing its `ge=1` floor) is not refused. Reported, not
+            # fixed (out of that entry's scope); see
+            # test_dl168_an_anchor_still_launders_a_nested_int_field.
             return Anchor.model_validate(payload)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{self.path}: not an anchor this binary can read ({exc})") from exc
@@ -585,6 +590,10 @@ class EstateAnchor:
             if not isinstance(payload, dict):
                 raise EngineError(f"{path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
+            # DL-168: still LAX, same gap as `EstateAnchor.read` above -- a
+            # laundered `next_period` (a numeric string clearing its `ge=2`
+            # floor) is not refused. Reported, not fixed; see
+            # test_dl168_a_claim_still_launders_its_int_field.
             return Claim.model_validate(payload)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{path}: not a claim this binary can read ({exc})") from exc
@@ -1385,9 +1394,15 @@ class Candidate(BaseModel):
     It exists because the rename to `periods/N+1/` DROPS the digest from
     the path, and a staged-manifest byte comparison cannot stand in for it:
     the candidate identity also binds the request's staged fields one by
-    one, and a later retry must be told WHICH differed."""
+    one, and a later retry must be told WHICH differed.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    `strict=True` (DL-168): a future ingress that builds this model from a
+    lax `model_validate` still gets the wire's own types on `stage_digest`
+    and `artifact_format_version` -- the belt beside `_read_artifact`'s
+    braces, not a substitute for them (nested `next_period` validates under
+    `StagedNextPeriod`'s own config, which is why that model is strict too)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     stage_digest: str
@@ -1511,8 +1526,24 @@ def _read_artifact(path: Path, model: type[Any]) -> Any:
     none. A field with a construction default (`artifact_format_version`)
     would otherwise take that default silently on an artifact that never
     carried it (DL-157), so the read side asks the wire to prove the field
-    before `model_validate` runs. Writers still stamp the default; only the
-    read side checks."""
+    before construction runs. Writers still stamp the default; only the
+    read side checks.
+
+    Construction itself parses `raw` a second time, strict in the JSON
+    sense (DL-168) -- `model_validate(payload)` on the already-decoded dict
+    would coerce a wire `true` into `1` on any int field, and the digest
+    computed afterward hashes the coerced value, so nothing catches it. The
+    double parse is cheap and has `read_period_manifest`'s
+    `Manifest.model_validate_json(raw, strict=True)` as precedent; a
+    call-time `strict=True` cascades into every nested field the way a
+    model's own `strict=True` config does not.
+
+    `decode(raw)` running FIRST is load-bearing, not incidental ordering:
+    pydantic's own JSON parser accepts a duplicate object key (last value
+    wins) where `decode` refuses one (PR-12), so `require_artifact_version`
+    above always inspects the SAME payload `model_validate_json` goes on to
+    validate. Dropping the first parse as "redundant now that pydantic
+    parses too" would reopen PR-12 silently."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -1524,7 +1555,7 @@ def _read_artifact(path: Path, model: type[Any]) -> Any:
         if not isinstance(payload, dict):
             raise EngineError(f"{path}: not a JSON object")
         require_artifact_version(payload)
-        return model.model_validate(payload)
+        return model.model_validate_json(raw, strict=True)
     except (CanonError, ValidationError) as exc:
         raise EngineError(f"{path}: not a {model.__name__} this binary can read ({exc})") from exc
 

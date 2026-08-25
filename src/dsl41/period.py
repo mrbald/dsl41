@@ -426,9 +426,16 @@ def runtime_profile_from_cli(
 class StagedManifest(BaseModel):
     """ss2.1: what the LAUNCHER pins about a period -- nothing the engine
     owns. The seal path stages one of these for the period it proposes;
-    genesis builds one and installs it in the same breath."""
+    genesis builds one and installs it in the same breath.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    `strict=True` (DL-168): a future ingress that builds this model from a
+    lax `model_validate` still gets the wire's own types on every top-level
+    field -- the belt beside `_read_artifact`'s `model_validate_json(raw,
+    strict=True)`, not a substitute for it (the nested `runtime_profile`
+    validates under `RuntimeProfile`'s own config either way, which is why
+    `commit` below passes the instance rather than a dump of it)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     catalog_hash: str
@@ -449,9 +456,15 @@ class StagedManifest(BaseModel):
     ) -> Manifest:
         """The engine's half (ss2.1): the staged fields plus the five it
         alone can know. `first_index` is attempt output and `baseline_id`
-        is minted at the opening, so neither can be staged."""
+        is minted at the opening, so neither can be staged.
+
+        `dict(self)`, not `model_dump()` (DL-168): the dump turns
+        `runtime_profile` into a plain dict, and a caller that later relies
+        on this site never being fed anything but a validated instance is
+        one refactor away from being wrong. `dict(self)` is the shallow,
+        field-name-to-value iteration -- it keeps the nested instance."""
         return Manifest(
-            **self.model_dump(),
+            **dict(self),
             period_id=period_id,
             baseline_id=baseline_id,
             clock_domain=clock_domain,

@@ -2410,6 +2410,50 @@ def test_a_seal_reads_its_force_flag_and_never_coerces_it(short_root: Path) -> N
     asyncio.run(scenario())
 
 
+def test_dl168_a_seal_reads_its_next_period_strict_too(short_root: Path) -> None:
+    """DL-168: `_seal_wire_error` above checks the envelope's own wire
+    types and never looks inside `next_period` -- that dict reaches
+    `StagedNextPeriod.model_validate(...)` unchecked. Before this entry
+    that call was lax, so a laundered `state_machine_version: true` would
+    have validated, passed `runner_startup`'s `staged.state_machine_version
+    != STATE_MACHINE_VERSION` gate by `True == 1`, and entered the pin as
+    if the wire had sent the real version (the brief's own premise,
+    verbatim). `StagedNextPeriod` gained `strict=True`, and every one of
+    its fields is int or str, so the model's own config closes this ingress
+    with no call-time override needed.
+
+    Three assertions, not one (a review finding): "malformed seal request"
+    alone does not discriminate this refusal from `_seal_wire_error`'s
+    envelope-typo branch above, which shares the same prefix. "valid
+    integer" and the field name together pin it to the actual mechanism."""
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
+    from dsl41.seal import StagedNextPeriod
+
+    text = "insert_job: seal_dl168\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            staged = StagedNextPeriod(
+                catalog_hash="sha256:" + "0" * 64,
+                source_bundle_hash="sha256:" + "1" * 64,
+                runtime_hash="sha256:" + "2" * 64,
+                state_machine_version=STATE_MACHINE_VERSION,
+            )
+            laundered = {**staged.model_dump(mode="json"), "state_machine_version": True}
+            answer = await _control_call(
+                server.path, _seal_wire(engine, next_period=laundered)
+            )
+            assert answer["refused"] is True
+            assert "malformed seal request" in answer["error"]
+            assert "valid integer" in answer["error"]
+            assert "state_machine_version" in answer["error"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_an_expect_that_arrives_on_a_seal_is_refused_by_the_key(short_root: Path) -> None:
     """ss3: a boundary addresses no row, so an `expect` that ARRIVES is
     refused -- and the KEY is what arrives. `"expect": null` read as "no

@@ -9603,3 +9603,188 @@ relitigate an entry; append a new one.
   stayed in the review file and out of the sources -- twice, once per
   batch that tried.
   Tagged arch-review/2026-08-25; baseline re-armed the same day.
+- DL-168 a closed artifact is read strict in the JSON sense from its own
+  bytes, and a staged identity strict from its wire payload, at every
+  reader DL-157's row names (2026-08-25; boundary.py + period.py +
+  seal.py + test_boundary.py + test_runner_control.py +
+  docs/protocol-evolution.md + docs/period-model.md; pays the S5b slice
+  found while briefing S5, DL-165).
+  THE FINDING, as DL-165 left it and this slice verified further.
+  DL-165's Group B is four SITES comparing an already-typed int field
+  (`runner_startup.py`, `attest.py`, `boundary.py`, `seal.py`) and none
+  of them needed to change -- the strictness DL-165 called for belongs at
+  the MODEL BOUNDARY feeding them, not at the comparison. Two boundaries
+  already had it: `attest.py`'s `Attestation` and `period.py`'s
+  `ArchiveReceipt` carry `strict=True` in their own model config, and
+  `read_period_manifest` reads `Manifest.model_validate_json(raw,
+  strict=True)` at the call site. Two did not: `boundary._read_artifact`
+  -- the one reader behind both `read_candidate` and
+  `read_staged_manifest` -- called plain `model.model_validate(payload)`,
+  lax; and `runner_control.py`'s `_seal` validated a seal request's
+  `next_period` via `StagedNextPeriod.model_validate(...)`, also lax.
+  Confirmed against the real classes before any fix, not assumed: a
+  laundered `state_machine_version: true` read through `_read_artifact`
+  coerces to `1` and reaches `runner_startup.py`'s `staged.
+  state_machine_version != STATE_MACHINE_VERSION` gate silently passing
+  it (`True == 1`), and `hash_over(self.model_dump())` digests the
+  post-coercion value, so nothing downstream ever sees the mismatch.
+  THE RULE, stated once: a closed artifact or staged identity is
+  validated strict in the JSON sense from its bytes; a wire ingress of
+  one is validated strict from its payload. Written in
+  `docs/protocol-evolution.md` §1, beside DL-157's absent-version note on
+  the same row -- a third gate, after unknown and absent; pointed to, not
+  restated, from `docs/period-model.md` §3.2.
+  THE MECHANISM, per model. `_read_artifact` now reads
+  `model.model_validate_json(raw, strict=True)`, the period manifest's
+  own precedent, with the existing `decode(raw)` + dict check +
+  `require_artifact_version(payload)` gate kept exactly where it was --
+  they still run first, and the double parse is what closes
+  `read_candidate` and `read_staged_manifest` at once. A call-time
+  `strict=True` reaches every nested field too (a candidate's
+  `next_period.state_machine_version`, proven by the new test below).
+  `StagedManifest` and `Candidate` also gained `strict=True` in their own
+  model config -- the belt beside that brace, for a caller that builds
+  either from a lax `model_validate` directly instead of through the
+  reader. `StagedNextPeriod` gained `strict=True` too, and there the
+  config alone is the whole fix: every field is int or str, no nested
+  model to fall through to a laxer config of its own, and
+  `runner_control.py`'s `_seal` calls `StagedNextPeriod.model_validate(...)`
+  with no call-time override at all -- the model's own config is what the
+  wire ingress reads under.
+  THE TRAP THAT WAS REAL, checked rather than assumed. A nested-model
+  field validates under ITS OWN config, not the outer model's, unless the
+  caller passes a call-time `strict=True`. Verified directly against
+  pydantic 2.13.4 (this repo's pinned version) with a two-model repro
+  before touching any source: `Outer(inner={"x": True}, y=3)` under
+  `Outer.model_config=ConfigDict(strict=True)` accepts the dict for
+  `inner` AND coerces `Inner.x` silently, while `Outer.model_validate(
+  {...}, strict=True)` -- the call-time form -- refuses both. This is
+  exactly why a planned `SealRequest.strict=True` slice, on its own,
+  could not have closed the wire hole: `SealRequest.next_period` is a
+  nested `StagedNextPeriod` field, and making `SealRequest` itself strict
+  leaves that field validating under `StagedNextPeriod`'s OWN config,
+  unchanged. The fix has to land on `StagedNextPeriod`, which this entry
+  does, independent of whatever `SealRequest` does or does not do.
+  THE TRAP THAT WAS NOT REAL, checked the same way. The brief anticipated
+  that `StagedManifest.commit()`'s `Manifest(**self.model_dump(), ...)`
+  -- which dumps the nested `RuntimeProfile` field to a plain dict before
+  splatting it back in -- would fail once `StagedManifest` (and by
+  inheritance `Manifest`) turned strict, since a strict model should
+  refuse a dict where an instance belongs. It does not, for the reason
+  above: `runtime_profile` validates under `RuntimeProfile`'s own lax
+  config regardless of `Manifest`'s `strict=True`, so `commit()` kept
+  working, unmodified, through the whole targeted pre-fix test run (577
+  tests, listed under DIGEST NEUTRALITY below). Reworked anyway, per the brief's
+  own instruction and because relying on that undocumented nested laxity
+  is exactly the fragility this entry's rule warns about: `commit()` now
+  builds `Manifest(**dict(self), ...)` -- the shallow field-name-to-value
+  iteration a Pydantic model supports natively, which keeps the nested
+  `RuntimeProfile` as the validated instance it already is rather than
+  flattening and reconstructing it. Audited every other `Manifest(...)`
+  and `Candidate(...)` construction in `src/` and `tests/` for the same
+  shape: `stage_manifest`, the one `Candidate(...)` call in
+  `stage_next_period`, and the one direct `Manifest(...)` in
+  `tests/test_period_identity.py` all already pass a real
+  `RuntimeProfile` instance, not a dump of one -- nothing else to fix.
+  OUT OF SCOPE, found by the parametrized test below and left unfixed on
+  the brief's own instruction (report, don't fix): `EstateAnchor.read()`
+  and `EstateAnchor.read_claim()` still call `Anchor.model_validate(...)`
+  / `Claim.model_validate(...)` lax. `Anchor.head.period_id`
+  (`Field(ge=1)`) accepts a laundered `true` -- coerced to `1`, which
+  clears the floor, so nothing downstream notices; `Claim.next_period`
+  (`Field(ge=2)`) is protected from a `true` coercion only by accident
+  (`True` -> `1`, and `1 < 2` refuses on the bound whether or not the
+  reader is strict), but a numeric string (`"3"` -> `3`, clearing the
+  floor) launders the same way. Neither reader was in DL-165's Group B
+  and neither is touched here; both are pinned `xfail(strict=True)` so
+  the finding is a citable, running fact rather than a sentence, and each
+  needs its own fix -- and its `xfail` promoted to a real assertion --
+  when `EstateAnchor`'s turn comes.
+  THE SYNC GUARANTEE.
+  `test_dl168_every_closed_artifact_reader_refuses_a_laundered_int_field`
+  (test_boundary.py) launders one int field and reads back through every
+  in-scope closed-artifact reader: the sentinel (caught by `canon.decode`'s
+  own gate, ahead of any model -- a fourth, independent mechanism), the
+  staged manifest and the candidate (this entry's `_read_artifact` fix),
+  the committed manifest (the pre-existing `model_validate_json(raw,
+  strict=True)` precedent), the attestation and the archive receipt
+  (their pre-existing `strict=True` model config), and the seal sidecar
+  (refused by its self-describing digest before a model is even built --
+  no field strictness required at all).
+  `test_dl168_an_anchor_still_launders_a_nested_int_field` and
+  `test_dl168_a_claim_still_launders_its_int_field` (test_boundary.py,
+  both `xfail(strict=True)`) are the out-of-scope findings above, made
+  citable. `test_dl168_a_seal_reads_its_next_period_strict_too`
+  (test_runner_control.py) drives the real control socket for the wire
+  ingress specifically: verified RED before the `StagedNextPeriod` fix
+  (the request passed construction and failed two steps later on an
+  unrelated "nothing is staged at this digest" refusal, proving the
+  laundered value WAS accepted at `next_period=StagedNextPeriod.
+  model_validate(...)`) and green after, on the message fragment
+  ("malformed seal request" plus "valid integer") only the fixed gate
+  produces.
+  DIGEST NEUTRALITY, checked by the existing corpus rather than a new
+  test: `test_boundary.py`, `test_period_identity.py`,
+  `test_seal_artifact.py`, `test_runner_control.py`, `test_estate.py`,
+  `test_nightbank_boundary.py` and `test_canon.py` -- 577 tests --
+  all passed UNMODIFIED with `StagedManifest`, `Candidate` and
+  `StagedNextPeriod` already strict, before the four DL-168 tests were
+  added. Every one of those 577 builds a VALID instance, writes it, reads
+  it back, and several compare digests or a `stage_digest`/`baseline_id`
+  derived from them (`test_pr05b_first_index_does_not_move_the_stage_
+  digest` and neighbours) -- none moved, which is the neutrality gate for
+  a valid artifact under all three models.
+  THE GATE. Full suite green, ruff and mypy clean,
+  `scripts/arch_check.py` exits 0. Sanctioned test edits: none needed --
+  every existing construction of `StagedManifest`, `Candidate` and
+  `StagedNextPeriod` already passed typed instances, not dumps, so no
+  test required a dict-to-instance rewrite.
+  THE REVIEW, and what it changed. Opus, fresh context, independently
+  reproduced every load-bearing claim above -- the nested-strictness
+  repro, the commit() trap being real vs. not real, the pre-fix RED state
+  of the wire test (by monkeypatching a faithful lax `StagedNextPeriod`
+  replica rather than touching the tree), and all four gate numbers. No
+  blocker. Four findings changed the tree.
+  * The seal-sidecar case in the sync test was vacuous: it wrote
+    `json.dumps(s_payload, sort_keys=True)` bytes, non-canonical, so
+    `Seal.from_bytes` refused on the canonical-form gate whether or not
+    `epoch` was laundered -- the case would have passed with the mutation
+    line deleted. Fixed to `canonical_bytes(payload)`, which the review
+    confirmed still refuses, on the digest-mismatch message the case's
+    docstring actually claims.
+  * The sync test was one linear function over seven sections and was
+    called "the parametrized test" in this entry's own prose -- wrong; an
+    early section's failure would have masked the other six, and nothing
+    about it was parametrized. Split into seven `_dl168_*_case` functions
+    plus one real `@pytest.mark.parametrize("case", _DL168_CASES)`, so
+    `pytest -v` now reports `[sentinel]`, `[staged_manifest]`,
+    `[candidate]`, `[manifest]`, `[attestation]`, `[archive_receipt]`,
+    `[seal_sidecar]` as seven independent results.
+  * `protocol-evolution.md`'s new paragraph claimed the `StagedManifest`/
+    `Candidate` `strict=True` belt as unqualified; it is top-level only --
+    `StagedManifest.runtime_profile` stays lax under a lax
+    `model_validate` (proven above, under THE TRAP THAT WAS NOT REAL) --
+    and `Candidate.next_period` is protected only because
+    `StagedNextPeriod` itself is strict, not because `Candidate` is.
+    Caveat added in place.
+  * The two `xfail` cases asserted only `pytest.raises(EngineError)` --
+    ANY future `EngineError` from `EstateAnchor.read()`/`read_claim()`,
+    laundering-related or not, would XPASS and read as "fixed". Tightened
+    to `match="period_id"` / `match="next_period"`, pinning the xfail to
+    the mechanism rather than to the mere fact of a refusal.
+  Two more findings landed as source and docstring, not test, changes: a
+  one-line `# DL-168` comment at each of the two lax `model_validate`
+  calls in `boundary.py` (`EstateAnchor.read`, `EstateAnchor.read_claim`)
+  -- the finding was citable in the test file and this entry already, but
+  invisible to a future reader editing those methods directly -- and a
+  paragraph on `_read_artifact`'s own docstring stating why `decode(raw)`
+  must run BEFORE `model_validate_json`: pydantic's JSON parser accepts a
+  duplicate object key (last value wins) where `decode` refuses one
+  (PR-12), so dropping the first parse as "redundant now that pydantic
+  parses too" would reopen PR-12 silently.
+  ONE PRE-EXISTING DEFECT FOUND, OUT OF SCOPE, not fixed: `json.loads`
+  raises a bare `ValueError` (not `JSONDecodeError`) on an integer literal
+  over 4300 digits, which escapes both `decode`'s `except
+  json.JSONDecodeError` and every reader's `except (CanonError,
+  ValidationError)` -- the same defect class DL-151 closed for
+  `UnicodeDecodeError`, unrelated to this entry's diff, pre-dating it.

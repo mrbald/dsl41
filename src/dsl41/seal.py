@@ -546,9 +546,17 @@ class StagedNextPeriod(BaseModel):
     never exist -- an unauditable lineage by construction (PR-05c). The
     line between this model and the committed one is who may say it, and
     `extra="forbid"` is what makes a staged request carrying `period_id` a
-    refusal instead of a field somebody later trusted."""
+    refusal instead of a field somebody later trusted.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    `strict=True` (DL-168): this is the model a `seal` request's
+    `next_period` validates against directly, over the wire
+    (`runner_control.py`'s `_seal`), and every field here is int or str --
+    no nested model to validate under a laxer config of its own -- so the
+    config alone closes that ingress. `CommittedNextPeriod` inherits it,
+    and `commit` below stays safe because `model_dump()` over scalars-only
+    fields never produces anything strict has to refuse."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     catalog_hash: str
