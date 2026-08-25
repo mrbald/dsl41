@@ -1405,7 +1405,13 @@ journal holds, and a seal cuts that evidence away. Anchor exclusive of the
 cutoff and an unconsumed tick vanishes; anchor inclusive with nothing else to
 dedup against and a consumed one fires twice. Since DL-166 the anchor is
 unconditionally inclusive and the sweep carries both dedup sources: the ticks
-this segment journaled, and the cutoff the seal records.
+this segment journaled, and the cutoff the seal records *(amended by
+DL-174: "journaled" reads as "admitted" here, and that is now the narrower
+half. `scheduler_frontier` counts a `drop` record too — PR-25a — so a tick
+this segment already dropped is journaled evidence exactly as an admitted
+one is, and the first dedup source has to read both or the sweep re-derives
+a drop-set frontier and drops the same tick again on every later resume of
+the segment)*.
 
 1. the **operator** holds the runbook's set — every scheduled top-level job
    or box with a future tick (`deployment-runbook.md` §6 step 1) — with
@@ -2510,6 +2516,7 @@ whole.
 | --- | --- |
 | PR-25 | no tick due ≤ T lost; none admitted twice |
 | PR-25a | crash immediately after the opening `leader` record and before the missed-tick sweep: a tick between T and the leader's `at` is admitted or dropped-and-recorded, never silently consumed by `leader.at` |
+| PR-25b | a missed tick, once dropped-and-recorded, is never re-dropped by a later resume of the same segment — exactly one `drop` record per tick, across any number of resumes (DL-174) |
 | PR-26 | one held tick under C1 → exactly one start after C2 — unless an admitted `DISARM` dropped the latch in between: then none *(Amended by DL-158)* |
 | PR-27 | **table-driven over every §8 gate**: non-empty input queue; open transaction; effect delivery in progress; a KILL ladder unresolved; an applied SPAWN with no `spawn.json` yet; unreconciled candidate; unreachable supervisor; restarted supervisor with empty `LIST`; pending outbox on a physical roll; indeterminate KILL — each refuses |
 | PR-28 | phase-1 readiness, one injected failure per check — unsupported format version, hash mismatch, profile mismatch, SM-version mismatch, preflight, `request_id` collision, R gate — each refuses while C1 is open and untouched; **two live seal clients** staging different C2s — the engine commits exactly the one its request's fingerprint names and the committed boundary opens |

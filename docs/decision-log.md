@@ -10290,3 +10290,100 @@ relitigate an entry; append a new one.
   gains no new test here. Full findings:
   scratchpad/s12-review.md (session-local; this paragraph is the durable
   record).
+- DL-174 a journaled adjudication is an accounting: the resume sweep reads
+  its own `drop` records too, and a drop-set frontier stops re-dropping
+  (2026-08-26; runner_startup.py + test_runner_scheduler.py +
+  docs/ops-model.md + docs/period-model.md; pays DL-166's deferred "FOUND,
+  NOT FIXED" finding; Sonnet implements, fresh-context Opus adversarial
+  review over the uncommitted diff).
+  THE FINDING, as DL-166 left it (its own "FOUND, NOT FIXED" paragraph):
+  `replayed_ticks` filtered on scheduler `input`/STARTJOB records only,
+  while `scheduler_frontier` counts `drop` and `advance` records too
+  (`runner_journal.py`, PR-25a). So when the frontier is set by a `drop`,
+  the next resume re-anchors inclusively at that instant, re-derives the
+  tick that was already dropped, finds it in neither dedup clause, and
+  drops and journals it again -- once per resume. DL-166 reproduced this
+  twice (a seal-opened segment resumed four times; a genesis root ticking
+  10:00/11:00, resumed at 10:30 then 12:00, leaves the 10:00 drop twice)
+  and deferred the fix for one reason: that slice's whole asset was a
+  measured behavior-neutrality result over five resume scenarios, and the
+  two-line fix CHANGES durable output, which would have invalidated that
+  measurement.
+  THE RULE. A tick this segment's journal has already ADJUDICATED --
+  admitted as a scheduler `input`, or dropped with a reason -- is
+  accounted for, and the sweep skips it. A journaled adjudication is an
+  accounting the sweep reads, not a fact it re-derives an opinion about.
+  `replayed_ticks` now reads BOTH `input` (source=scheduler, kind=STARTJOB)
+  and `drop` records, keyed the same way: `(payload.job, at)`.
+  THE ADVANCE DECISION. `advance` records stay OUT of `replayed_ticks`, and
+  not by policy choice -- structurally. `Journal.admit` writes an `advance`
+  record only when the attempt carries neither a verb (`kind`) nor a host,
+  and in that branch it writes neither `kind` nor `payload` at all: DL-44's
+  bare time observation names no job. The set comprehension's leading
+  clause is `record.get("kind") == "STARTJOB"`, so an `advance` record
+  cannot enter the set even if the `or` clause named it -- there is no
+  `payload.job` to key it by. And `journal.drop` has exactly one call site
+  in the whole tree (the sweep itself, `runner_startup.py`), always fed a
+  `tick_ev` from `Scheduler.pop_due`, which yields nothing but
+  `Event(kind="STARTJOB", payload={"job": ...})` -- so a tick's fate is
+  always recorded as `input` or `drop`, never folded into an `advance`.
+  There is no "advance's tick" to re-derive.
+  THE DURABLE-OUTPUT CHANGE, stated plainly: a segment resumed more than
+  once over a tick it already dropped used to accumulate one duplicate
+  `drop` record per extra resume; it now writes exactly one, ever, for that
+  tick. `Engine.drops` -- the in-memory list `cli_run.py` reports the
+  operator-facing `dropped STARTJOB ...` line from -- gets the same guard:
+  it used to repeat that line on every resume past the first; it now
+  reports it once, at the resume that made the verdict, and stays empty on
+  every later resume of the same segment. DL-166's own tests -- the DL-45
+  sibling test (`test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten`)
+  and the tick-after-T skip test
+  (`test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop`)
+  -- pass UNMODIFIED; nothing pinned the duplicate as a feature.
+  THE TESTS. One new test,
+  `test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes`
+  (tests/test_runner_scheduler.py): a genesis root with one job ticking
+  once at 10:00, resumed three times with `now` past the tick, holds
+  exactly ONE `drop` record for it, and `engine.drops` is populated only on
+  the resume that made the verdict -- empty on the two that read it back.
+  THE MUTATION CHECK. Reverting `replayed_ticks` to the `input`-only clause
+  (leaving the new test and everything else in place) reddens exactly
+  `test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes`,
+  on the SECOND resume (`assert 2 == 1`) -- the bug's first observable
+  moment. Restored; the whole suite green again.
+  THE DOCS. `docs/ops-model.md` G7 quoted the OLD resume comment verbatim
+  ("the ticks THIS segment's journal holds") -- the exact staleness DL-166
+  fixed once already (its own entry rewrote a different stale G7 quote),
+  re-broken by this slice's comment rewrite and fixed again here, now
+  citing DL-166 and DL-174 together. `docs/period-model.md` ss6's gloss
+  ("the ticks this segment journaled") is amended *(amended by DL-174)* to
+  say a journaled tick includes one this segment already dropped, not only
+  one it admitted. A new obligation row, PR-25b, states the invariant a
+  test now pins: a missed tick, once dropped-and-recorded, is never
+  re-dropped by a later resume of the same segment.
+  THE GATE. 3440 passed (was 3439), 6 skipped, 2 xfailed; `uv run ruff
+  check src tests` clean; `uv run mypy src` clean; `scripts/arch_check.py`
+  exits 0, advisory only -- `_resume_under_lock` grows from 256 to 280
+  lines against the baseline, comment prose (DL-166's own precedent for
+  the same function), not new branching.
+  THE REVIEW. Fresh-context Opus adversarial review ran over the
+  uncommitted diff: independently re-ran the full gate, mutation-checked
+  the new test, probed DL-166's own two-tick reproduction for a false
+  negative (in a 10:00/11:00 pair the 11:00 tick is still dropped exactly
+  once after the 10:00 tick is suppressed -- the added clause suppresses
+  re-adjudication and nothing else), and confirmed `records` is
+  single-segment-scoped, so a `drop` from an earlier period can never
+  suppress a legitimate one in a later segment. No blockers. Two MAJOR
+  findings, both folded in above: the not-yet-written `DL-174` citation
+  (this entry) and the `docs/ops-model.md` stale quote (THE DOCS
+  paragraph). Five of seven MINORs applied: the comment's site-attribution
+  for `input` vs `drop` corrected, a note added on why the `kind ==
+  "STARTJOB"` guard is sound today and what would silently break it, the
+  test now asserts `engine.drops` on all three resumes and the `reason`
+  string, the docstring's `(ss7,` opener corrected to `(ss5/ss7,` to match
+  its section-5 siblings, and the PR-25b row (THE DOCS paragraph). Two
+  left as noted, not fixed: the size-advisory note (already the gate's own
+  advisory, restated above) and that PR-25b has no dedicated
+  `test_pr25b_*`-named test of its own -- `test_dl174_...` pins it under
+  the DL that paid it, the same convention DL-45's and DL-166's own tests
+  already use for a PR obligation they also prove.

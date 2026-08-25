@@ -869,13 +869,28 @@ async def _resume_under_lock(
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
     if scheduler is not None:
-        # the ticks THIS segment's journal holds: replay already fed them
+        # the ticks THIS segment's journal has already ADJUDICATED: admitted
+        # as a scheduler `input` (`Engine._enqueue` -> `Journal.admit`, replay
+        # already fed them) or already dropped-and-journaled by an earlier
+        # resume's own sweep below (`journal.drop`, the one call site).
+        # Both are a durable verdict on the tick; re-deriving either a
+        # second time must read it, not act on it again (DL-166's finding,
+        # paid by DL-174). `advance` records are DL-44's bare time
+        # observation -- they carry neither `kind` nor a job, and no path
+        # ever folds a tick's fate into one -- so there is no "advance's
+        # tick" to re-derive and they stay out of this set. The leading
+        # `kind == "STARTJOB"` filter is what actually excludes them; it is
+        # sound today because `pop_due` is the only source of both an
+        # admitted and a dropped tick, and every one it yields is STARTJOB
+        # -- a future non-STARTJOB drop would need this filter widened too.
         replayed_ticks = {
             (record["payload"].get("job"), record["at"])
             for record in records
-            if record.get("rec") == "input"
-            and record.get("source") == "scheduler"
-            and record.get("kind") == "STARTJOB"
+            if record.get("kind") == "STARTJOB"
+            and (
+                (record.get("rec") == "input" and record.get("source") == "scheduler")
+                or record.get("rec") == "drop"
+            )
         }
         # the PREVIOUS segment's cutoff T, read off the OPENING rather than
         # off `lineage.seal`: the boundary writes the opening with
@@ -894,12 +909,17 @@ async def _resume_under_lock(
         scheduler.reset(frontier)
         sweep_upto = max(clock.now(), frontier)  # virtual resume: now < the frontier
         for tick_ev in scheduler.pop_due(sweep_upto):
-            # one question, two sources, either enough: this segment
-            # journaled the tick, or C1's cutoff owned it (ss6 step 9 -- C1
-            # admitted every tick due at or before T). The second clause is
-            # what keeps the inclusive anchor at T from journaling a `drop`
-            # for the tick C1 just ran, a durable false record (DL-166).
-            # What neither claims is dropped AND journaled, never fired late.
+            # one question, two sources, either enough: this segment already
+            # adjudicated the tick (admitted it, or an earlier resume of
+            # this same segment already dropped it), or C1's cutoff owned it
+            # (ss6 step 9 -- C1 admitted every tick due at or before T). The
+            # second clause is what keeps the inclusive anchor at T from
+            # journaling a `drop` for the tick C1 just ran, a durable false
+            # record (DL-166). The first clause's `drop` half is what keeps
+            # a drop-set frontier from being re-derived and re-dropped on
+            # every later resume, a durable DUPLICATE record (DL-166's own
+            # deferred finding, paid by DL-174). What neither claims is
+            # dropped AND journaled, once, never fired late.
             already_admitted = (tick_ev.job(), tick_ev.at.isoformat()) in replayed_ticks or (
                 admitted_through is not None and tick_ev.at <= admitted_through
             )

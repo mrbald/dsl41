@@ -938,6 +938,90 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     assert admitted == [(tick.isoformat(), "sib_a")]
 
 
+def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
+    tmp_path: Path,
+) -> None:
+    """(ss5/ss7, DL-166's own deferred finding, paid here as PR-25b):
+    `scheduler_frontier` counts `drop` records as well as `input` ones
+    (PR-25a), but the old `replayed_ticks` dedup set only ever looked at
+    `input`. So when the frontier IS a drop's instant, the next resume
+    re-anchors there, re-derives the SAME tick, finds it in neither dedup
+    source, and drops and journals it AGAIN -- once per resume.
+
+    A genesis root with one job ticking once at 10:00, resumed three times
+    with `now` past the tick, must hold exactly ONE `drop` record for it:
+    the first resume adjudicates the tick, and every later resume's sweep
+    has to read that adjudication off the journal rather than repeat it.
+    `Engine.drops` -- the in-memory list `cli_run.py` reports the operator-
+    facing `dropped STARTJOB ...` line from -- gets the same guard: it holds
+    the tick once, from the resume that made the verdict, and stays empty
+    on the resumes that only read it back."""
+    from dsl41.period import genesis_manifest, write_period_manifest
+    from dsl41.runner_journal import Journal
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
+
+    text = (
+        "insert_job: once_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    catalog = lower_source(text)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "runs").mkdir()
+    (run_root / "logs").mkdir()
+
+    start = datetime(2026, 7, 1, 9, 0)
+    tick = datetime(2026, 7, 1, 10, 0)
+    now = datetime(2026, 7, 1, 10, 5)  # past the tick, short of tomorrow's
+
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
+    write_period_manifest(run_root, manifest)
+    journal = Journal.create(
+        run_root / "journal.jsonl",
+        catalog=catalog,
+        clock_domain="virtual",
+        started_at=start,
+        manifest=manifest,
+    )
+    journal.close()
+
+    def drop_records() -> list[dict]:
+        return [r for r in read_journal(run_root / "journal.jsonl") if r.get("rec") == "drop"]
+
+    async def one_resume() -> Engine:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=now),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        return engine
+
+    first = asyncio.run(one_resume())
+    assert len(drop_records()) == 1  # the tick's first, real adjudication
+    assert [ev.at for ev, _ in first.drops] == [tick]
+
+    second = asyncio.run(one_resume())
+    assert len(drop_records()) == 1  # a second resume must read it, not redo it
+    assert second.drops == []  # already adjudicated -- nothing new to report
+
+    third = asyncio.run(one_resume())
+    assert len(drop_records()) == 1  # and a third
+    assert third.drops == []
+
+    only = drop_records()[0]
+    assert only["kind"] == "STARTJOB"
+    assert only["at"] == tick.isoformat()
+    assert only["payload"]["job"] == "once_job"
+    assert "missed" in only["reason"]
+
+
 # ------------------------------------------------------------------ 6. preflight
 
 
