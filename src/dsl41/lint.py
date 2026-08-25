@@ -671,12 +671,12 @@ def rule_l008(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     RUNNING. Fires on exactly derive's M16 box-override edges.
 
     Deliberately narrower than the complement of `DerivedEdge.is_start_gate`
-    (DL-162). That complement holds two more things this rule must stay off:
-    M15 member refs, which are the legitimate early-exit shape, and every
-    GLOBAL edge -- the M09 gates a `condition` derives as well as the M16
-    gate a box override derives. A global is outside the predicate because it
-    names no job to reason about, which is not a claim about whether it
-    delays a start. This rule tests the one row (DL-162a)."""
+    (DL-162), and not a subset of it either way. The complement holds M15,
+    M16 and M09; this rule wants M16 and only M16 -- every form of it, the
+    global gate included, which is why the message below has a branch for
+    one. What it must stay off is M15, the legitimate early-exit shape, and
+    M09, which gates a start rather than a box. A row test says that; the
+    predicate cannot (DL-162a)."""
     out: list[Violation] = []
     for edge in graph.edges:
         if edge.mapping_row != "M16":

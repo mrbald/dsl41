@@ -110,9 +110,14 @@ def test_the_conversion_carries_the_dst_edges_at_the_default_fold() -> None:
     cross -- a second spelling would have been a second DST pin.
 
     `to_utc` does not IMPOSE fold=0; it honours whatever fold the caller's
-    datetime carries, and every caller builds a plain `datetime`, whose fold
-    is 0. That default is what these instants pin, and the last assertion
-    shows the other fold is still reachable by a caller that asks for it.
+    datetime carries. The scheduler's ticks are plain `datetime`s, whose fold
+    is 0, and that default is what these instants pin. The oracle's window
+    math is the caller that differs: it passes a `to_local` result through
+    `_next_occurrence`/`_prev_occurrence`, both of which preserve fold, so on
+    the second occurrence of an ambiguous local time it hands `to_utc` a
+    fold=1 datetime -- and the fold=1 answer is the RIGHT one there, since the
+    fold=0 instant is in the past and would make `to_open` negative. The last
+    assertion is that honouring.
 
     Fall back (2026-11-01, America/New_York): 01:30 local happens twice and
     fold=0 is the FIRST, the -04:00 one. Spring forward (2026-03-08): 02:30

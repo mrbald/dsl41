@@ -8955,6 +8955,13 @@ relitigate an entry; append a new one.
   The corpus dumps are identical again -- every lint rule's firing set
   and the whole derived graph, per file and over the corpus as one
   catalog.
+  WHAT IS STILL UNSOUND, named so the next review finds a list and not a
+  surprise. The same `edge.src`-against-a-job-name-set test survives at
+  `lint.rule_l011` (where review proved a false negative), at
+  `derive.components`, at four sites in `viz.py` and at `backend_uc`'s
+  workflow grouping. All predate DL-162 and none is a regression from
+  it, so none is fixed here; they are the same defect class and they are
+  a slice of their own.
   THREE CORRECTIONS TO DL-162'S OWN TEXT.
   Its neutrality claim was stated as REACHABILITY -- "within
   {via==success, no lookback, src in catalog.jobs} the only rows
@@ -8964,8 +8971,11 @@ relitigate an entry; append a new one.
   above. The property that is actually wanted is an EQUIVALENCE: within
   {via==success, no lookback, LOCAL producer}, `is_start_gate` agrees
   edge for edge with the old row-pair test. That is what the corpus
-  assertion checks now, and it is the assertion that would have caught
-  the defect.
+  assertion checks now -- and it would NOT have caught this defect
+  either, for the same reason the zero-diff gate did not: no corpus file
+  has a caret-named job. The fixture test is what catches it. The
+  assertion earns its place by being the right property rather than a
+  circular one, not by being a net.
   "The predicates L020 and derive moved to were byte-identical" is
   wrong: L020's was the De Morgan complement and derive's was two
   statements plus an extra conjunct. Equivalent, not identical.
@@ -9011,7 +9021,12 @@ relitigate an entry; append a new one.
   oracle's `_local` and `_engine_time`, and -- found by review, not by
   the plan -- `runner_preflight._preflight_local_day`, which ends in the
   same idiom character for character. Three spellings of one conversion
-  is three DST pins, and PEP 495 fold=0 is the pin (runner-design E10).
+  is three DST pins, and the fold rule is the pin (runner-design E10): the
+  conversion HONOURS the fold its caller's datetime carries, and a plain
+  datetime carries 0. The scheduler's ticks are plain; the oracle's window
+  math passes a `to_local` result back through, so it can carry fold=1, and
+  on the second occurrence of an ambiguous local time that is the answer it
+  needs -- the fold=0 instant is in the past.
   Verified equivalent over 233,280 instants across both 2026 US DST
   edges, Lord Howe, Chatham, a leap day and a year boundary: zero
   mismatches. `_occurrence`'s anchor did not strip tzinfo before
@@ -9046,10 +9061,23 @@ relitigate an entry; append a new one.
   that is NO start_time, with an operator's sendevent given only as an
   example of one. A provenance test is also unavailable: the T34c trace
   tests feed a bare STARTJOB with no `source`, so "not from the
-  scheduler" would break the tests that pin the pairing. What was real
-  in that item is the ZONE, and it is fixed above: a mismatch between
-  the oracle's ladder and the scheduler's made the wall-clock match fail
-  SILENTLY and fall back to offset[0].
+  scheduler" would break the tests that pin the pairing.
+  THE RESIDUE, because the refutation is narrower than it first reads.
+  Two things are real in that item and neither is the sendevent. The ZONE
+  is fixed above: a mismatch between the oracle's ladder and the
+  scheduler's made the wall-clock match fail SILENTLY and fall back to
+  offset[0]. The second survives, found while writing this entry and
+  recorded rather than fixed. A `start_times` entry inside a
+  spring-forward GAP can never match: the scheduler fires the tick at the
+  instant fold=0 maps the missing local time to, and reading that instant
+  back gives the hour PAST the gap -- `start_times "02:30"` in
+  America/New_York on 2026-03-08 fires at 07:30Z, which reads back as
+  03:30 local and matches no declared start time, so the slot is None and
+  the pairing silently takes offset[0]. Invisible with one offset, wrong
+  with several. THIS is the corner where a tick carrying its own slot
+  would be strictly better, and it stays open: the fix needs the payload
+  question answered first, since scheduler ticks are admitted inputs and
+  reach the WAL (DL-138's dialect rules).
   THE TESTS. The ladder's five tests moved with it into
   `tests/test_timezones.py` (91 collected before, 86 + 5 after; the
   Scheduler-building ones stayed, they pin the caller). Five are new:

@@ -273,7 +273,14 @@ class DerivedEdge(BaseModel):
         ...                               #   not a box override (M15/M16 fold a box) and
                                           #   not a global (names no job). Says nothing
                                           #   about whether the catalog defines that job
-                                          #   -- readers add `src in catalog.jobs` (DL-162)
+                                          #   (DL-162)
+
+def local_producer(edge: DerivedEdge,     # the catalog job `edge`'s producer names, or None.
+                   catalog: CatalogIR     #   Read off the ATOM's `instance` -- NEVER by
+                   ) -> str | None:       #   testing `src` against catalog.jobs: for a
+    ...                                   #   cross-instance ref `src` is the composite
+                                          #   `name^INST`, and a catalog job spelt that way
+                                          #   collides with it (DL-162a)
 
 class DerivedGraph(BaseModel):
     nodes: list[str]

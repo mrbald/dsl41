@@ -1189,7 +1189,7 @@ def test_is_start_gate_splits_the_derived_row_vocabulary() -> None:
 
 
 def test_l009_quiet_on_every_success_edge_that_is_not_a_start_gate() -> None:
-    """The DL-152 swap is behavior-neutral, and this states the property
+    """The DL-162 swap is behavior-neutral, and this states the property
     correctly: within {via==success, no lookback, LOCAL producer this catalog
     defines}, `is_start_gate` and the old `mapping_row in (M01, M02)` test
     agree edge for edge. The rows the predicate has to keep out are box
