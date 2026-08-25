@@ -83,6 +83,7 @@ from dsl41.canon import (
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
 from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
+from dsl41.timezones import alias_table
 
 #: every stored digest is spelled exactly this way; an address outside the
 #: grammar is not an address, and a native period must never open under one
@@ -377,12 +378,9 @@ def tz_aliases_of(profile: "RuntimeProfile | None") -> dict[str, str] | None:
     only record of one. `ujo_timezones` names are site-local, and a name only
     the table resolves is `OracleError` without it.
 
-    Empty is None -- the "no map" reading `wire_from_profile` already uses --
-    because the ladder's unique-city default is conditioned on the ABSENCE of
-    a table and the pin cannot tell an empty table from no table."""
-    if profile is None:
-        return None
-    return dict(profile.tz_aliases) or None
+    Empty reads as absent, by `timezones.alias_table`: the pin cannot tell
+    an empty table from no table, and the ladder owns which one it means."""
+    return alias_table(None if profile is None else profile.tz_aliases)
 
 
 def runtime_profile_from_cli(

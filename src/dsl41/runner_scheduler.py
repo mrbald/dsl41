@@ -1,5 +1,8 @@
-"""Runner scheduler (ss5): the calendar the oracle deliberately lacks, and
-the SEM-35 timezone ladder that turns its ticks into UTC instants.
+"""Runner scheduler (ss5): the calendar the oracle deliberately lacks.
+
+SEM-35 name resolution and the naive-UTC <-> local conversion moved to
+`dsl41.timezones` with DL-163; this module is one of its callers, not its
+home. `_scheduler_tz` below stays: the REFUSAL is the scheduler's own.
 
 Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
 
@@ -24,15 +27,9 @@ Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
 
 from __future__ import annotations
 
-import contextlib
-import functools
-import re
-
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
-from typing import Literal, NamedTuple
-from zoneinfo import ZoneInfo, available_timezones
+from datetime import date, datetime, timedelta, tzinfo
 
 from dsl41.autocal import (
     CalendarRuleError,
@@ -43,6 +40,7 @@ from dsl41.autocal import (
 from dsl41.ir import CatalogIR, ScheduleBlock
 from dsl41.oracle_state import Event
 from dsl41.runner_clock import EngineError
+from dsl41.timezones import resolve_timezone, to_local, to_utc
 
 
 # ------------------------------------------------------------------ scheduler (ss5)
@@ -115,11 +113,7 @@ class _SchedulePlan:
         ticks = []
         for hour, minute in times:
             naive_local = datetime(day.year, day.month, day.day, hour, minute)
-            ticks.append(
-                naive_local.replace(tzinfo=self.tz).astimezone(UTC).replace(tzinfo=None)
-                if self.tz
-                else naive_local
-            )
+            ticks.append(to_utc(naive_local, self.tz))
         return ticks
 
 
@@ -141,123 +135,6 @@ def _scheduler_calendar(
         return standard_rows(cal)
     except CalendarRuleError as exc:
         raise EngineError(f"{job}: {exc}") from exc
-
-
-# ------------------------------------------------------------- timezone names
-#
-# SEM-35 name resolution (TechDocs 12.1, `timezone` attribute + the
-# autotimezone command): a JIL `timezone:` value is matched against the OS
-# zone database FIRST; only if that misses is the instance's ujo_timezones
-# table read -- a vendor-shipped, admin-editable map whose City/Alias
-# entries chain ("up to five times") down to a Zone the OS recognizes.
-# Values are not case-sensitive. dsl41's port: zoneinfo is the OS database;
-# `--timezone-map` (the `autotimezone -l` listing, or bare `name zone`
-# pairs) is the table. Without a map, a city name resolves through a
-# documented deterministic default (DL-62): the UNIQUE zoneinfo zone whose
-# final path component matches (Zurich -> Europe/Zurich), surfaced as a
-# preflight WARN -- a supplied listing is complete estate truth, so the
-# default is off when a map is given. A POSIX fixed-offset form (`GMT+5`,
-# `IST-5:30`) resolves per the POSIX sign convention (positive = WEST of
-# GMT); POSIX strings WITH dst rules stay unresolvable -- modelling vendor
-# DST rules approximately would silently shift ticks.
-
-_TZ_CHAIN_LIMIT = 5  # vendor: "the ujo_timezones table is read up to five times"
-
-_POSIX_FIXED = re.compile(r"^([A-Za-z]{3,})([+-]?\d{1,2})(?::(\d{2})(?::(\d{2}))?)?$")
-
-
-class ResolvedTz(NamedTuple):
-    tz: tzinfo
-    zone: str  # the zoneinfo key / POSIX token it landed on
-    how: Literal["os", "map", "city", "posix"]
-
-
-def _tz_fold(name: str) -> str:
-    """Vendor names are case-insensitive; fold -/_ too (both are valid JIL
-    characters, zoneinfo uses each: Port-au-Prince vs New_York)."""
-    return name.casefold().replace("-", "_")
-
-
-@functools.lru_cache(maxsize=1)
-def _zone_tables() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
-    """(folded full name -> canonical key, folded final path component ->
-    candidate keys) over the zoneinfo database, built once."""
-    full: dict[str, str] = {}
-    leaf: dict[str, list[str]] = {}
-    for zone in sorted(available_timezones()):
-        full.setdefault(_tz_fold(zone), zone)
-        leaf.setdefault(_tz_fold(zone.rsplit("/", 1)[-1]), []).append(zone)
-    return full, {component: tuple(zones) for component, zones in leaf.items()}
-
-
-def _city_candidates(name: str) -> tuple[str, ...]:
-    """Zoneinfo keys whose final path component is `name` (folded)."""
-    return _zone_tables()[1].get(_tz_fold(name), ())
-
-
-def _os_zone(token: str) -> ResolvedTz | None:
-    """One vendor "recognized by the operating system" lookup: zoneinfo
-    exact, zoneinfo case/-/_-insensitive, then a POSIX fixed offset."""
-    with contextlib.suppress(KeyError, ValueError, OSError):
-        return ResolvedTz(ZoneInfo(token), token, "os")
-    canonical = _zone_tables()[0].get(_tz_fold(token))
-    if canonical is not None:
-        return ResolvedTz(ZoneInfo(canonical), canonical, "os")
-    if (match := _POSIX_FIXED.match(token)) is not None:
-        _, hours, minutes, seconds = match.groups()
-        offset = timedelta(
-            hours=abs(int(hours)), minutes=int(minutes or 0), seconds=int(seconds or 0)
-        )
-        if int(minutes or 0) < 60 and int(seconds or 0) < 60 and offset < timedelta(hours=24):
-            west = not hours.startswith("-")  # POSIX: unsigned/+ = west of GMT
-            return ResolvedTz(timezone(-offset if west else offset, token), token, "posix")
-    return None
-
-
-def parse_timezone_map(text: str) -> dict[str, str]:
-    """An `autotimezone -l`/-q listing (`Entry Type Zone` rows) or bare
-    `name zone` pairs -> folded alias map. Header, ruler, and blank lines
-    skip; any other unparseable line raises ValueError (no silent loss)."""
-    aliases: dict[str, str] = {}
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line or not set(line) - set("- "):
-            continue
-        fields = line.split()
-        if [f.casefold() for f in fields] == ["entry", "type", "zone"]:
-            continue
-        if len(fields) == 3 and fields[1].casefold() in {"zone", "alias", "city"}:
-            name, _, zone = fields
-        elif len(fields) == 2:
-            name, zone = fields
-        else:
-            raise ValueError(
-                f"line {lineno}: expected an autotimezone 'entry type zone' row"
-                f" or a 'name zone' pair, got {raw!r}"
-            )
-        aliases[_tz_fold(name)] = zone
-    return aliases
-
-
-def resolve_timezone(name: str, aliases: Mapping[str, str] | None = None) -> ResolvedTz | None:
-    """The SEM-35 ladder (module comment above): OS lookup, then the alias
-    map chained <=5 hops with an OS lookup per hop, then -- only with NO
-    map -- the unique-city default. None = genuinely unresolvable."""
-    current = name
-    seen: set[str] = set()
-    for hop in range(_TZ_CHAIN_LIMIT + 1):
-        if (resolved := _os_zone(current)) is not None:
-            if current == name:
-                return resolved
-            return ResolvedTz(resolved.tz, resolved.zone, "map")
-        folded = _tz_fold(current)
-        if aliases is None or hop == _TZ_CHAIN_LIMIT or folded in seen or folded not in aliases:
-            break
-        seen.add(folded)
-        current = aliases[folded]
-    if aliases is None and len(candidates := _city_candidates(name)) == 1:
-        return ResolvedTz(ZoneInfo(candidates[0]), candidates[0], "city")
-    return None
 
 
 def _scheduler_tz(name: str, owner: str, aliases: Mapping[str, str] | None) -> tzinfo:
@@ -462,7 +339,7 @@ class Scheduler:
         # arithmetic can skip a 25h fall-back local date); per-day ticks are
         # sorted AFTER conversion because a fold=0 nonexistent time can land
         # past a later tick's UTC instant inside a spring-forward gap
-        anchor_date = (t.replace(tzinfo=UTC).astimezone(plan.tz) if plan.tz else t).date()
+        anchor_date = to_local(t, plan.tz).date()
         # a non-empty weekly day set always hits within 7; explicit dates
         # push the bound past the last one, after which weekly recurrence
         # (if any) is unobstructed again; unbounded extended rules scan to

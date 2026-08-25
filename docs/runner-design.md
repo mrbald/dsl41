@@ -980,8 +980,9 @@ its wire vocabulary, and both clients; frozen in
 `docs/control-protocol.md`, the outer counterpart to the lifecycle tier's
 `docs/supervisor-protocol.md`), `runner_clock.py` (the §9 clock domains,
 plus `EngineError` at the bottom of the import graph), `runner_scheduler.py`
-(the §5 scheduler and the SEM-35 timezone ladder that turns its ticks into
-UTC instants), `runner_adapters.py` (the §6/§6a adapter contract and every
+(the §5 scheduler, turning its ticks into UTC instants through `timezones.py`
+— SEM-35 name resolution and the one naive-UTC ↔ local conversion, phase-free
+and shared with the oracle since DL-163), `runner_adapters.py` (the §6/§6a adapter contract and every
 adapter), `runner_journal.py` (the §7 WAL and its replay), and
 `runner_preflight.py` (the §8 rules). The §10 server ran inside `runner.py`
 until DL-78 on the argument that it shares the loop's single-writer

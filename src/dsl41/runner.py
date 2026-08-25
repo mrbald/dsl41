@@ -10,7 +10,8 @@ Oracle-direct and Engine(VirtualClock, FakeAdapter) with identical traces.
 
 DL-74 split this module: the clocks (runner_clock), the adapters and the
 supervisor client (runner_adapters), the WAL (runner_journal), the calendar
-scheduler with its timezone ladder (runner_scheduler), and preflight
+scheduler (runner_scheduler; its timezone ladder left for the phase-free
+`timezones` module with DL-163), and preflight
 (runner_preflight) each own their file and their paragraphs of this
 docstring; DL-78 continued it with the ss10 control plane
 (runner_control), and DL-106 with taking possession of a run root --
@@ -212,6 +213,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import Fence
 from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
+from dsl41.timezones import alias_table
 
 
 #: How many event-loop turns the sealed engine gives the control server to
@@ -330,11 +332,9 @@ def _oracle_aliases(scheduler: "Scheduler | None") -> dict[str, str] | None:
     deliberately re-points still resolved through the ladder's unique-city
     default (DL-151).
 
-    Empty is `None` -- "no map" -- because that is what the ladder's city
-    default is conditioned on, and because the period's own pin carries
-    `{}` for both."""
-    aliases = scheduler.tz_aliases if scheduler is not None else {}
-    return aliases or None
+    Empty reads as absent, by `timezones.alias_table`: the rule belongs to
+    the ladder, and the period's own pin carries `{}` for both."""
+    return alias_table(scheduler.tz_aliases if scheduler is not None else None)
 
 
 class Engine:

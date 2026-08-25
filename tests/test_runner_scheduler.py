@@ -36,7 +36,8 @@ from dsl41.runner_preflight import (
     preflight,
     resolve_machine,
 )
-from dsl41.runner_scheduler import Scheduler, parse_timezone_map, resolve_timezone
+from dsl41.runner_scheduler import Scheduler
+from dsl41.timezones import parse_timezone_map
 
 # 2026-07-01 is a Wednesday; 07-03 Fri, 07-04 Sat, 07-05 Sun, 07-06 Mon.
 
@@ -244,80 +245,6 @@ def test_timezone_unresolvable_in_scheduler_raises_engine_error() -> None:
     )
     with pytest.raises(EngineError, match="bad_tz.*not resolvable"):
         Scheduler(lower_source(text), start=datetime(2026, 7, 6, 0, 0))
-
-
-def test_resolve_timezone_posix_offsets_are_west_positive() -> None:
-    """(SEM-35, TechDocs TZ syntax): POSIX offsets are west-positive --
-    IST-5:30 (the docs' own example) is UTC+05:30, GMT+5 is UTC-05:00.
-    A POSIX string WITH dst rules stays unresolvable (modelling vendor DST
-    rules approximately would silently shift ticks)."""
-    ist = resolve_timezone("IST-5:30")
-    assert ist is not None and ist.how == "posix"
-    assert ist.tz.utcoffset(None) == timedelta(hours=5, minutes=30)
-    gmt5 = resolve_timezone("GMT+5")
-    assert gmt5 is not None and gmt5.tz.utcoffset(None) == timedelta(hours=-5)
-    assert resolve_timezone("MET-1METDST") is None
-
-
-def test_resolve_timezone_chain_limit_and_cycles_stay_unresolved() -> None:
-    """(SEM-35: 'the ujo_timezones table is read up to five times'): a
-    six-hop chain exhausts the limit; a cycle terminates as unresolvable."""
-    deep = {
-        "a": "b",
-        "b": "c",
-        "c": "d",
-        "d": "e",
-        "e": "f",
-        "f": "Europe/Zurich",
-    }
-    assert resolve_timezone("a", deep) is None  # 6th read would be needed
-    assert resolve_timezone("b", deep) is not None  # 5 reads suffice from here
-    assert resolve_timezone("loop", {"loop": "pool", "pool": "loop"}) is None
-
-
-def test_resolve_timezone_map_suppresses_the_city_default() -> None:
-    """(DL-62): a supplied listing is complete estate truth -- a city name
-    missing from it does NOT fall back to the zoneinfo city match."""
-    assert resolve_timezone("Zurich") is not None
-    assert resolve_timezone("Zurich", {"dallas": "US/Central"}) is None
-
-
-def test_resolve_timezone_ambiguous_city_component_is_refused() -> None:
-    """(DL-62): the city default requires a UNIQUE match; multiple zones
-    sharing a final path component resolve to none (the preflight ERROR
-    names the candidates)."""
-    from dsl41 import runner_scheduler as runner_mod
-
-    monkey = {"x": ("A/X", "B/X")}
-    original = runner_mod._zone_tables
-    runner_mod._zone_tables = lambda: ({}, monkey)  # type: ignore[assignment]
-    try:
-        assert resolve_timezone("x") is None
-        assert resolve_timezone("X") is None
-    finally:
-        runner_mod._zone_tables = original
-
-
-def test_parse_timezone_map_listing_pairs_and_junk() -> None:
-    """(DL-62): the autotimezone -l shape (header + ruler + 3-field rows)
-    and bare pairs parse; names fold case and -/_; junk raises naming the
-    line (no silent loss)."""
-    listing = (
-        "Entry Type Zone\n"
-        "---------------------- ------ ----------------\n"
-        "US/Samoa Alias Pacific/Samoa\n"
-        "Port-au-Prince City America/Port-au-Prince\n"
-        "\n"
-        "Zurich Europe/Zurich\n"
-    )
-    aliases = parse_timezone_map(listing)
-    assert aliases == {
-        "us/samoa": "Pacific/Samoa",
-        "port_au_prince": "America/Port-au-Prince",
-        "zurich": "Europe/Zurich",
-    }
-    with pytest.raises(ValueError, match="line 1"):
-        parse_timezone_map("this is not a listing row\n")
 
 
 def test_dst_ticks_strictly_increase_across_repeated_pop_due_calls() -> None:

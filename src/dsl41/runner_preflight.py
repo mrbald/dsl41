@@ -21,7 +21,7 @@ import socket as socket_mod
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -36,7 +36,8 @@ from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, JobIR, MachineIR, _unquote
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import OracleError
-from dsl41.runner_scheduler import _DAY_CODES, _city_candidates, resolve_timezone
+from dsl41.runner_scheduler import _DAY_CODES
+from dsl41.timezones import city_candidates, resolve_timezone, to_local
 
 
 # ------------------------------------------------------------------ preflight (ss8)
@@ -300,7 +301,7 @@ def _preflight_local_day(
     tz = None
     if tz_name and (resolved := resolve_timezone(tz_name, aliases)) is not None:
         tz = resolved.tz
-    return (start.replace(tzinfo=UTC).astimezone(tz) if tz else start).date()
+    return to_local(start, tz).date()
 
 
 def _next_eligible_day(
@@ -568,7 +569,7 @@ def preflight(
             if tz_res is None:
                 if tz_aliases is not None:
                     detail = "not a zoneinfo name and not in the supplied --timezone-map"
-                elif len(candidates := _city_candidates(sched.timezone)) > 1:
+                elif len(candidates := city_candidates(sched.timezone)) > 1:
                     detail = (
                         f"ambiguous city name ({', '.join(candidates)}); use the full"
                         " zone name or a --timezone-map"

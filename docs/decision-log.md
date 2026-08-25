@@ -8925,3 +8925,137 @@ relitigate an entry; append a new one.
   global half, which no fixture held before: a consumer gated on one
   iced job AND a global has exactly one job predecessor, it is iced, and
   the M19 divergence is real.
+- DL-162a amendment to DL-162, from its own adversarial review: the
+  locality test the four readers shared was unsound, and DL-162 said
+  three things about itself that were not true (2026-08-25; derive +
+  lint + tests).
+  THE DEFECT. DL-162 swapped L009's `mapping_row in ("M01","M02")` for
+  `is_start_gate` and called the swap behavior-neutral. It is not. A
+  cross-instance edge's `src` is the COMPOSITE display form
+  `name^INST`, and lowering constrains job-name characters nowhere --
+  `_lower_job` refuses only an empty or duplicate subject, and the `^`
+  ban lives in the condition grammar's JOB_NAME, not in `insert_job`.
+  So a catalog that holds its own job called `foo^PRD` makes
+  `edge.src in catalog.jobs` answer YES about a producer derive has
+  just placed on another instance (M33, redesign, pushed to
+  external_boundary). Probe: `insert_xinst: PRD` + `insert_job:
+  foo^PRD` + a scheduled consumer on `s(foo^PRD)` lints clean at
+  82de5e6 and emits L009 at DL-162 -- a stale-latch warning about a
+  job the same run reports as external, and, with the xinst
+  declaration dropped, L001 and L009 firing together, which is the
+  contradiction L009's own skip exists to prevent.
+  THE FIX, and it is wider than the regression. `derive.local_producer`
+  answers "the catalog job this edge's producer names, or None", read
+  off the ATOM's `instance` -- the fact -- never off `src`. L009, L020
+  and `_local_condition_adjacency` all take it. L020 and the adjacency
+  pass carried the SAME collision before DL-162 and independently of
+  it: L020 would have counted a caret-named ON_ICE job as an iceable
+  predecessor of a consumer whose real producer is on another
+  instance. Three readers, one unsound spelling, now one sound one.
+  The corpus dumps are identical again -- every lint rule's firing set
+  and the whole derived graph, per file and over the corpus as one
+  catalog.
+  THREE CORRECTIONS TO DL-162'S OWN TEXT.
+  Its neutrality claim was stated as REACHABILITY -- "within
+  {via==success, no lookback, src in catalog.jobs} the only rows
+  derive can reach ARE M01 and M02" -- and that is false twice over.
+  M15/M16 reach that slice whenever a scheduled box carries
+  `box_success: s(member)`, and M33 reaches it through the collision
+  above. The property that is actually wanted is an EQUIVALENCE: within
+  {via==success, no lookback, LOCAL producer}, `is_start_gate` agrees
+  edge for edge with the old row-pair test. That is what the corpus
+  assertion checks now, and it is the assertion that would have caught
+  the defect.
+  "The predicates L020 and derive moved to were byte-identical" is
+  wrong: L020's was the De Morgan complement and derive's was two
+  statements plus an extra conjunct. Equivalent, not identical.
+  The row-vocabulary fixture claimed "every row a catalog can put on an
+  edge" and "all ten"; eleven are reachable and it carried no f/d/t
+  atom, so M04, M05 and M06 were absent. It reaches all eleven now.
+  THE TESTS.
+  `test_a_job_named_like_a_cross_instance_ref_is_not_its_producer`
+  pins the regression from both ends -- the collision is still THERE
+  (`edge.src in catalog.jobs` is asserted true) and is no longer
+  believed -- and mutation-checks against the exact pre-fix predicate.
+  The neutrality test asserts the equivalence per edge over the whole
+  lowerable corpus, with a guard against a vacuous loop.
+  THE PROCESS NOTE, on the record because it cost something. DL-162
+  shipped and was pushed on a solo self-review; the corpus before/after
+  gate it leaned on was zero-diff and stayed zero-diff through this
+  fix, because the corpus has no caret-named job. A zero-diff gate over
+  a synthetic corpus is evidence about the corpus, not a proof about
+  the rule, and DL-162 read it as the latter.
+- DL-163 SEM-35 gets a phase-free home, and the conversion stops being
+  spelled three times (2026-08-25; new `timezones.py` + scheduler +
+  oracle + preflight + period + runner + startup + cli_common; pays the
+  third DL-152 deferred slice, and refutes one quarter of it).
+  THE FINDING, as DL-152 left it: "SEM-35 name resolution to a neutral
+  home, because the oracle reaches into the scheduler through a deferred
+  import that only HIDES the dependency -- and with it the
+  scheduler-to-oracle re-derivation family: the zone re-resolved from a
+  copied alias map, the conversion restated, and the start SLOT
+  recovered by wall-clock match when the tick could carry it".
+  THE HOME. `src/dsl41/timezones.py` imports nothing from `dsl41`, so
+  every layer that reads a `timezone:` reaches the same ladder without
+  reaching THROUGH another layer for it. The oracle is phase 7 and
+  `runner_scheduler` is phase 11c; `oracle._job_tz` imported the ladder
+  from the scheduler INSIDE the function, which removes the import cycle
+  and leaves the dependency exactly where it was. The move is verbatim
+  -- every executable line, the `lru_cache`, the refusal wording -- with
+  one rename: `_city_candidates` is public `city_candidates`, because
+  preflight was already reaching across the module line for the private
+  spelling and `scripts/arch_baseline.json` carried that as a finding.
+  The stale baseline row goes with it.
+  THE CONVERSION. `to_local` and `to_utc` are one definition each. There
+  were three: the scheduler's `utc_ticks_on` and `_occurrence`, the
+  oracle's `_local` and `_engine_time`, and -- found by review, not by
+  the plan -- `runner_preflight._preflight_local_day`, which ends in the
+  same idiom character for character. Three spellings of one conversion
+  is three DST pins, and PEP 495 fold=0 is the pin (runner-design E10).
+  Verified equivalent over 233,280 instants across both 2026 US DST
+  edges, Lord Howe, Chatham, a leap day and a year boundary: zero
+  mismatches. `_occurrence`'s anchor did not strip tzinfo before
+  `.date()` and the shared form does; `.date()` ignores tzinfo, so that
+  is a no-op, and no zoneinfo zone is falsy, so `if self.tz` and
+  `if tz is None` agree.
+  THE TABLE. `alias_table` states once that an EMPTY ujo_timezones table
+  reads as NO table -- SEM-35's unique-city default is conditioned on
+  absence, so a caller passing `{}` where it meant "no map" retires that
+  default for every per-job zone. Three callers each said it in their
+  own words (`runner._oracle_aliases`, `period.tz_aliases_of`, and an
+  inline copy in `runner_startup` that now calls `tz_aliases_of`), and
+  DL-151 was the bug that came of one of them not saying it at all.
+  WHAT THIS DOES NOT DO, stated so the next review does not read silence
+  as an oversight. The oracle still holds its OWN copy of the alias
+  table rather than sharing the scheduler's object: it is an
+  interpreter, its configuration is its own, and aliasing a mutable
+  table across two components to save a dict would be the worse trade.
+  What was unified is the RULE, not the storage.
+  AND THE REFUTATION. DL-152's fourth item -- the start slot recovered
+  by wall-clock match, "so an operator sendevent landing on a start
+  minute silently claims that slot's offset" -- is REFUTED, and the
+  present behavior kept. `must_start_times` is an alarm on the SCHEDULE.
+  With `start_times "08:00, 09:00"` and `must_start_times "+5, +30"`, an
+  operator STARTJOB at 09:00 should arm the 09:30 deadline: that is what
+  the instant-based match gives, and the 09:00 scheduler tick would have
+  armed the same deadline at the same moment. Making the tick carry the
+  slot would hand that start the 08:00 slot's +5 -- a deadline for a
+  slot that is not happening. SEM-34's model note reads the same way:
+  "the oracle reads the tick's own time of day, in the job's timezone,
+  to name the slot", and its unpairable case is a start at an instant
+  that is NO start_time, with an operator's sendevent given only as an
+  example of one. A provenance test is also unavailable: the T34c trace
+  tests feed a bare STARTJOB with no `source`, so "not from the
+  scheduler" would break the tests that pin the pairing. What was real
+  in that item is the ZONE, and it is fixed above: a mismatch between
+  the oracle's ladder and the scheduler's made the wall-clock match fail
+  SILENTLY and fall back to offset[0].
+  THE TESTS. The ladder's five tests moved with it into
+  `tests/test_timezones.py` (91 collected before, 86 + 5 after; the
+  Scheduler-building ones stayed, they pin the caller). Five are new:
+  the conversion is identity without a zone, it carries both DST edges
+  at the default fold -- and does NOT impose fold=0, it honours the
+  caller's, which the last assertion shows -- it round-trips every
+  unambiguous local time, and `alias_table` reads `{}` as absent and
+  hands back a private copy, with the end-to-end switch between the
+  city default and the map. Each mutation-checked.

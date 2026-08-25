@@ -626,10 +626,13 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   reconciles and re-drives recorded kills, and a mutex taken after those is not
   one
 - src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
-  day sets and windowed extended-calendar generators, DL-56/57) and the SEM-35
-  timezone ladder that turns its ticks into UTC instants (zoneinfo, the
+  day sets and windowed extended-calendar generators, DL-56/57), turning its
+  ticks into UTC instants through src/dsl41/timezones.py
+- src/dsl41/timezones.py — SEM-35 name resolution (zoneinfo, the
   `--timezone-map` ujo_timezones table, the DL-62 unique-city default, POSIX
-  fixed offsets)
+  fixed offsets) and the one naive-UTC <-> local conversion every layer
+  crosses. Phase-free: imports nothing from dsl41, so the oracle reaches the
+  same ladder as the scheduler without reaching through it (DL-163)
 - src/dsl41/runner_preflight.py — ss8 preflight: the ERROR/WARN item model and
   its rules — job type, machine resolution through insert_machine (DL-49/52),
   owner, calendars, timezones, resources (DL-50), oracle construction, and the
@@ -818,6 +821,10 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping
+- tests/test_timezones.py — the SEM-35 ladder itself (POSIX west-positive
+  offsets, the <=5-hop alias chain and its cycles, map-suppresses-city,
+  ambiguous-city refusal, autotimezone listing parsing) and the naive-UTC <->
+  local conversion at both DST edges (DL-163)
 - tests/test_runner_scheduler.py — phase-11c scheduler occurrence math (days/times/
   start_mins, timezone + DST corners, E10 defaults), engine integration under the
   virtual clock, resume re-anchoring + the E9 missed-tick drops, the ss8

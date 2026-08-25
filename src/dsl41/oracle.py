@@ -170,7 +170,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
-from datetime import UTC, datetime, time as dtime, timedelta, tzinfo
+from datetime import datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
 from dsl41.canon import CanonError, canonical_bytes
@@ -200,6 +200,7 @@ from dsl41.oracle_state import (
     RuntimeState,
     TraceEntry,
 )
+from dsl41.timezones import resolve_timezone, to_local, to_utc
 
 #: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
 #: SUSPENDED are out-of-scope states the oracle never produces). QUE_WAIT is
@@ -359,7 +360,7 @@ class Oracle:
         #: the scheduler (DL-62). None means no map, which is a DIFFERENT
         #: resolution than an empty one: the ladder's unique-city default
         #: applies only when the estate supplied no table, so a run with a
-        #: map gets the map's answer and nothing else (runner_scheduler's
+        #: map gets the map's answer and nothing else (`timezones`'
         #: `resolve_timezone`). Wired from the scheduler at engine build:
         #: an oracle that resolved without it refused a map-only name at the
         #: first start although preflight had passed (DL-151).
@@ -885,8 +886,6 @@ class Oracle:
         if name is None:
             return None
         if name not in self._tz_cache:
-            from dsl41.runner_scheduler import resolve_timezone
-
             resolved = resolve_timezone(name, self._tz_aliases)
             if resolved is None:
                 raise OracleError(
@@ -896,21 +895,6 @@ class Oracle:
                 )
             self._tz_cache[name] = resolved.tz
         return self._tz_cache[name]
-
-    @staticmethod
-    def _local(when: datetime, tz: tzinfo | None) -> datetime:
-        """An engine instant as naive wall time in `tz`."""
-        if tz is None:
-            return when
-        return when.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
-
-    @staticmethod
-    def _engine_time(local: datetime, tz: tzinfo | None) -> datetime:
-        """The inverse of _local. DST corners follow PEP 495 fold=0, the same
-        pin the scheduler's tick conversion uses (runner-design E10)."""
-        if tz is None:
-            return local
-        return local.replace(tzinfo=tz).astimezone(UTC).replace(tzinfo=None)
 
     def _run_window_permits(self, job_ir: JobIR, cause: str) -> bool:
         """SEM-33 closer-edge rule; True == start may proceed now. The window
@@ -922,7 +906,7 @@ class Oracle:
             return True
         assert self._now is not None
         tz = self._job_tz(job_ir)
-        now_local = self._local(self._now, tz)
+        now_local = to_local(self._now, tz)
         lo, hi = schedule.run_window
         now_t = now_local.time()
         lo_t = _to_time(lo)
@@ -933,8 +917,8 @@ class Oracle:
             inside = now_t >= lo_t or now_t <= hi_t
         if inside:
             return True
-        next_open = self._engine_time(_next_occurrence(now_local, lo_t), tz)
-        prev_close = self._engine_time(_prev_occurrence(now_local, hi_t), tz)
+        next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
+        prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
         # both distances are measured on the ENGINE clock: a DST shift inside
         # the gap makes the two wall-clock distances lie about elapsed time
         to_open = next_open - self._now
@@ -1356,7 +1340,7 @@ class Oracle:
         if schedule is None or not schedule.start_times:
             return None
         assert self._now is not None
-        now_local = self._local(self._now, self._job_tz(job_ir))
+        now_local = to_local(self._now, self._job_tz(job_ir))
         for index, start in enumerate(schedule.start_times):
             if (start.hour, start.minute) == (now_local.hour, now_local.minute):
                 return index

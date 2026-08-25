@@ -23,6 +23,7 @@ import typer
 
 from dsl41.ast_jil import JilFile, JilParseError, parse
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
+from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:
@@ -110,8 +111,6 @@ def load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
     """Parse --timezone-map (DL-62); unreadable/malformed exits 2."""
     if path is None:
         return None
-    from dsl41.runner_scheduler import parse_timezone_map
-
     try:
         return parse_timezone_map(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -124,8 +123,6 @@ def check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = No
     Scheduler with the wrong exit code (DL-45)."""
     if timezone is None:
         return
-    from dsl41.runner_scheduler import resolve_timezone
-
     if resolve_timezone(timezone, tz_aliases) is None:
         typer.echo(
             f"--timezone {timezone!r} is not resolvable (SEM-35: zoneinfo, the"

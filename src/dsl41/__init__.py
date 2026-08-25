@@ -52,8 +52,10 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
                committed manifests, and the `segment` record
   runner_journal - the ss7 inputs-only WAL: Journal, read_journal, the
                two-pass replay_inputs, and the catalog_hash resume gate
-  runner_scheduler - the ss5 calendar scheduler + the SEM-35 timezone ladder
-               that turns its ticks into UTC instants
+  runner_scheduler - the ss5 calendar scheduler, turning its ticks into UTC
+               instants through the shared timezone module
+  timezones - SEM-35 name resolution and the one naive-UTC <-> local
+               conversion; phase-free, imports nothing from dsl41 (DL-163)
   runner_preflight - the ss8 ERROR/WARN item model and its rules
   runner_tui - the ss11 Textual TUI, a client of the control socket only
                (optional `dsl41[ui]` extra)

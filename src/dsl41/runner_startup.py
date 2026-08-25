@@ -87,6 +87,7 @@ from dsl41.period import (
     wal_segments,
     write_period_manifest,
     split_run_dir,
+    tz_aliases_of,
 )
 from dsl41.runner_journal import (
     Journal,
@@ -283,13 +284,13 @@ async def wire_from_profile(
             catalog,
             start=start,
             default_tz=profile.default_tz,
-            # SEM-35's unique-city default applies only with NO map, and the
-            # profile cannot spell "no map": an absent `--timezone-map` is an
-            # EMPTY table on it. An empty dict passed on would retire that
-            # ladder for every per-job zone -- so empty reads as absent, which
-            # is what `dsl41 run` has always done and what the offline sealer,
-            # closing an estate opened that way, was silently NOT doing.
-            tz_aliases=dict(profile.tz_aliases) or None,
+            # the profile cannot spell "no map" -- an absent `--timezone-map`
+            # is an EMPTY table on it -- and passing that empty dict on would
+            # retire SEM-35's unique-city default for every per-job zone. That
+            # is `tz_aliases_of`'s whole subject, so read it from there rather
+            # than re-deciding here (DL-163); the offline sealer closing an
+            # estate opened that way was the bug (DL-151).
+            tz_aliases=tz_aliases_of(profile),
         )
     except BaseException:
         # the LEASE is this function's until it hands back a `Wiring`, and

@@ -55,7 +55,6 @@
   "private_cross_module_imports": [
     "src/dsl41/lint.py:dsl41.ir._unquote",
     "src/dsl41/runner_preflight.py:dsl41.ir._unquote",
-    "src/dsl41/runner_preflight.py:dsl41.runner_scheduler._DAY_CODES",
-    "src/dsl41/runner_preflight.py:dsl41.runner_scheduler._city_candidates"
+    "src/dsl41/runner_preflight.py:dsl41.runner_scheduler._DAY_CODES"
   ]
 }
