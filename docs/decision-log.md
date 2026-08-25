@@ -9506,3 +9506,100 @@ relitigate an entry; append a new one.
   happen, which is now exactly what the code does; its prose was
   rewritten to the guarantee it verifies, and NOT one assertion or line of its
   body was touched -- it is a must-pass-unmodified net test.
+- DL-167 the review after the tier: eleven findings over the drift since
+  arch-review/2026-08-24, nine acted in three batches, two declined
+  (2026-08-25; the DL-75 architecture review over 5,975 insertions in 68
+  files -- the DL-153..161 debt tail and the DL-162..166 Tier 1 slices --
+  read by a fresh-context reviewer under the arch-review lens; the
+  script's eighteen size notes stay advisory).
+  THE STANDARD, unchanged from DL-152: complexity the code added, not
+  complexity the domain forces. Every finding named its sites and the
+  divergence between them or was dropped.
+  The item that carries the why: `UNQUOTING_JOB_ATTRS` was a hand-copied
+  union of two constants that already existed -- `_BOX_INERT_ATTRS |
+  TIME_CLUSTER` plus six stragglers, twenty-two names verified member by
+  member -- with a comment asking a human to do what a test now does. It
+  is `UNQUOTED_AT_LOWERING` now, named for its mechanism, spelled as the
+  union, three names wider: `type`/`res_type`/`xtype` are `_unquote`
+  lanes too, so `machine()`/`resource()`/`xinst()` stop refusing a value
+  whose quoted spelling round-trips exactly -- the old name scoped the
+  mechanism by statement kind, and the builders inherited the scoping as
+  a false refusal. A parametrized round-trip test over every name plus a
+  membership pin are the sync guarantee; the pin exists because dropping
+  a name from the set would otherwise only shrink the parametrize list,
+  which reddens nothing.
+  The rest, one item each. One `require_artifact_version` in canon
+  beside `check_artifact_version` (opposite policies, deliberately
+  unmerged: one checks a version that IS there, the other that a version
+  is there AT ALL), called by all four DL-157 readers; it raises a bare
+  `CanonError` and each reader's own wrapping supplies the path and the
+  noun -- canon stays stdlib-only for the supervisor tier (DL-42), so it
+  cannot raise EngineError itself, and every pinned message survived
+  byte for byte; `_read_artifact`'s one-value `require=` parameter went
+  with it. One twin per report run: `compile_to_uc` takes an optional
+  `twin=` (trusted, not re-checked -- the file's caller-trust style, now
+  stated) and the report passes down the one it built, instead of two
+  `UcModel`s over one catalog with "they are equal" as an unstated
+  invariant. `excluded` + `excluded_kinds` became one `excluded_entries:
+  list[ExclusionEntry]` -- DL-164's validator held two lists in step,
+  and a validator that exists to keep two lists the same length is the
+  signature of a shape that should be one list; the length invariant is
+  unrepresentable now, the validator and its test deleted (DL-164's
+  citation of that test annotated in place -- the DL-110 gate reads
+  backticked names only), both report zip-filters read `.kind`, and the
+  emitted bundle and report are byte-identical over the corpus,
+  verified independently by the reviewer from a clean checkout (56
+  report+bundle pairs) -- the U3a contract constrains the bundle FILE
+  and never carried the kind. The review added `extra="forbid"` to
+  `UcModel` and `ExclusionEntry`: with the validator gone, a caller
+  spelling the old field name would have been silently ignored instead
+  of refused (the DL-82 typo-guard convention). The rule-5 trailing
+  fact is carried, not re-sniffed: the scanner stamps
+  `Comment.trailing_block` at the moment it builds the opener, one
+  `_trailing_pair` classifier serves both renderers, and each keeps
+  only its own format strings -- a boolean rather than a third
+  `attachment` value because four of the six existing
+  `attachment == "trailing"` comparisons ask "is this trailing at all"
+  and a new Literal member would have silently dropped block riders
+  from them. `runner._oracle_aliases` inlined at its one caller (a
+  one-line body under a fourteen-line docstring after DL-163).
+  `_split_trailing_comment` returns a named tuple; the `[4]` index in
+  `value_opens_comment` now reads `.opens_comment`. One
+  `_has_terminators` for M17's predicate, which was spelled at the
+  report site and again in `_per_job_exclusions` -- DL-164 argued the
+  two sites "cannot drift apart" because both read the catalog; two
+  spellings of one predicate is exactly how they drift.
+  TWO DECLINED, on the record so they stop being re-found. "Read one
+  digest-stamped closed artifact" is implemented three times
+  (`Seal.from_bytes`, `Attestation.from_bytes`,
+  `ArchiveReceipt.from_bytes`), the last two the same six-step protocol
+  differing in a noun and one coercion -- mostly pre-existing, not
+  drift. The message wordings are contract text quoted in period-model,
+  so a shared loader must carry them character for character; worth it
+  only when a FOURTH artifact of this shape appears. Until then the
+  duplication is cheaper than the parameterization. And quote parity
+  over one line is computed four ways in ast_jil (two walkers, two
+  counters), agreeing only because `_mask_closed_blocks` blanks quotes
+  inside closed spans first -- a coupling stated in three docstrings
+  and enforced nowhere. No cheap fix: the one-pass shape merges two
+  functions with different callers. Watch item; a FIFTH spelling
+  triggers the merge.
+  THE LOAD-BEARING LIST, so the next review does not re-find these:
+  `check_replay_version`'s wrapper (it translates the error type; the
+  DL-165 import cycle is real), the `mode` enum on the version door,
+  the oracle's own alias table (DL-163 unified the rule, not the
+  storage), the two member sets in the SEM-11 fold, L008/L011
+  deliberately not reading `is_start_gate` (DL-162), `local_producer`
+  as a free function, `_occurrence`'s surviving `inclusive` (a
+  different concern than the one DL-166 retired), `replayed_ticks` as
+  the second dedup source (DL-166 proves the minimum is two), the three
+  per-layer timezone refusal wordings, the citation density, the
+  date-row exemptions, and the ten over-1200-line period-model files
+  (scope, not complexity -- the two function-size notes worth acting on
+  shrink as a side effect of the one-list ledger).
+  One process note the batches earned: an informal review label is not
+  a citation. A finding id like "F11" in a source comment resolves
+  against the fidelity namespace and fails the gate, so the finding ids
+  stayed in the review file and out of the sources -- twice, once per
+  batch that tried.
+  Tagged arch-review/2026-08-25; baseline re-armed the same day.
