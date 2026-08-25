@@ -1,0 +1,19 @@
+{
+  // Navigation only: mypy is this repo's type gate. "off" keeps go-to-def,
+  // references and hover working while silencing pyright diagnostics
+  // (syntax errors still report). venv wiring so symbols resolve.
+  // This file, not pyproject [tool.pyright]: every pyright integration
+  // reads pyrightconfig.json first, and its explicit settings also win
+  // over language-server overrides -- the pyproject section was being
+  // ignored by at least one integration.
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "off",
+  "reportMissingImports": "none",
+  "reportUndefinedVariable": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportInvalidTypeForm": "none",
+  "reportInvalidTypeArguments": "none",
+  "reportCallIssue": "none"
+}
