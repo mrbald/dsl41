@@ -1,6 +1,6 @@
 [project]
 name = "dsl41"
-version = "0.9.0"
+version = "1.0.0"
 description = "AutoSys->Stonebranch migration compiler: JIL frontend, semantic IR, linter, Mermaid visualizer, equivalence validator, UC backend, Python DSL."
 readme = "README.md"
 requires-python = ">=3.12"
