@@ -99,6 +99,7 @@ from dsl41.period import (
     own_or_refuse,
     period_dir,
     quarantine_dir,
+    read_or_none,
     read_sentinel,
     runtime_hash,
     seal_dir,
@@ -559,12 +560,9 @@ class EstateAnchor:
         Absence is a fact; a file that exists and does not parse is not.
         A present-but-unreadable anchor refuses, because "no anchor" is
         what genesis is allowed to create over."""
-        try:
-            raw = self.path.read_bytes()
-        except FileNotFoundError:
+        raw = read_or_none(self.path)
+        if raw is None:
             return None
-        except OSError as exc:
-            raise EngineError(f"{self.path}: unreadable: {exc}") from exc
         try:
             payload = decode(raw)
             if not isinstance(payload, dict):
@@ -595,12 +593,9 @@ class EstateAnchor:
 
     def read_claim(self, claim_id: str) -> Claim | None:
         path = self.claim_path(claim_id)
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
+        raw = read_or_none(path)
+        if raw is None:
             return None
-        except OSError as exc:
-            raise EngineError(f"{path}: unreadable: {exc}") from exc
         try:
             payload = decode(raw)
             if not isinstance(payload, dict):
@@ -1560,12 +1555,9 @@ def _read_artifact(path: Path, model: type[Any]) -> Any:
     above always inspects the SAME payload `model_validate_json` goes on to
     validate. Dropping the first parse as "redundant now that pydantic
     parses too" would reopen PR-12 silently."""
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
+    raw = read_or_none(path)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
     try:
         payload = decode(raw)
         if not isinstance(payload, dict):

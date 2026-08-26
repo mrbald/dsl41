@@ -1484,7 +1484,11 @@ def test_pr22_every_stated_load_rule_has_an_injected_failure() -> None:
     # tried and rejected: f-string concatenation and value-bearing
     # fragments ("artifact_format_version 99") make it archaeology, not a
     # gate. When this fails: add or remove the case, then move the count.
-    assert rules == 53, f"{rules} ValueError sites in seal.py; the registry expects 53"
+    # DL-178(c): the sha256-address loop's `raise ValueError(` moved to
+    # `period.check_addresses`, one owner for the rule three artifacts
+    # wrote by hand -- the case stays (it still trips the same message
+    # through the shared helper) and only the source-local count drops.
+    assert rules == 52, f"{rules} ValueError sites in seal.py; the registry expects 52"
     assert len(_INVARIANTS) == 54  # two cases share the shared-field rule's site,
     # one shares the one-identity site, the two index bounds share one case
     # (the join makes them move together), and canonicalizability is proven

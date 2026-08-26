@@ -597,6 +597,30 @@ def check_stamp(value: str, field: str) -> None:
         raise ValueError(f"{field} {value!r}: exactly six fractional digits")
 
 
+def check_wire_ints(model: BaseModel, names: Iterable[str]) -> None:
+    """Every named field of `model` is an exact integer, never a bool
+    coercion (ss3.2). `check_stamp`'s precedent for the sibling check two
+    artifacts wrote by hand."""
+    for name in names:
+        value = getattr(model, name)
+        if not is_wire_int(value):
+            raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
+
+
+def check_addresses(pairs: Mapping[str, str], *, cite: str = "") -> None:
+    """Every value in `pairs` is a spelled sha256 address (ss3.2), named by
+    the caller's own DISPLAY name and not an attribute name, so a nested
+    field (`next_period.catalog_hash`) needs no getattr walk to name
+    itself. `check_stamp`'s precedent for the sibling check three artifacts
+    wrote by hand; `cite` carries the one caller (`Seal`'s) whose refusal
+    adds a reason instead of a bare mismatch."""
+    for name, value in pairs.items():
+        if not is_hash_address(value):
+            if cite:
+                raise ValueError(f"{name} {value!r} is not a sha256 address -- {cite}")
+            raise ValueError(f"{name} {value!r}: not a sha256 address")
+
+
 #: the retention class DL-144 opened, spelled once. The receipt carries it
 #: so a reader meeting an archived period knows WHICH policy removed the
 #: inputs and not merely that something did (period-model ss12).
@@ -684,6 +708,24 @@ def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, A
     return payload, stamped
 
 
+def read_or_none(path: Path) -> bytes | None:
+    """The file's bytes, or None when the file is not there.
+
+    Absence is a fact and corruption is not: absence means exactly ENOENT,
+    because an EACCES or EIO is a file that exists and cannot be read, and
+    degrading on it would treat a broken root as an empty one. ONE
+    implementation, called by every reader that opens an optional artifact
+    -- `read_sentinel`'s `readline` and `boundary.read_seal`'s
+    absence-is-a-refusal are the two deliberate exceptions and do not call
+    this."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+
+
 class ArchiveReceipt(BaseModel):
     """ss12's archive receipt: what was deleted, whose proof stands in for
     it, and under which policy (DL-144).
@@ -723,13 +765,10 @@ class ArchiveReceipt(BaseModel):
 
     @model_validator(mode="after")
     def _artifact_invariants(self) -> "ArchiveReceipt":
-        for name in ("artifact_format_version", "period_id", "chain_through_period"):
-            value = getattr(self, name)
-            if not is_wire_int(value):
-                raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
-        for name in ("seal_digest", "attestation_digest"):
-            if not is_hash_address(getattr(self, name)):
-                raise ValueError(f"{name} {getattr(self, name)!r}: not a sha256 address")
+        check_wire_ints(self, ("artifact_format_version", "period_id", "chain_through_period"))
+        check_addresses(
+            {"seal_digest": self.seal_digest, "attestation_digest": self.attestation_digest}
+        )
         if self.chain_through_period < self.period_id:
             raise ValueError(
                 f"chain_through_period {self.chain_through_period} is below the period"
@@ -835,12 +874,9 @@ def read_archive_receipt(run_root: Path, period_id: int) -> "ArchiveReceipt | No
     accidental loss, and a reader that fell back the other way would read
     loss as an archive. Both are wrong, so neither happens."""
     path = archive_receipt_path(run_root, period_id)
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
+    raw = read_or_none(path)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
     receipt = ArchiveReceipt.from_bytes(raw, where=str(path))
     if receipt.retention_class != ARCHIVE_CLASS:
         # bound HERE and not in one consumer: a reader that honoured a
@@ -1480,12 +1516,9 @@ def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> 
     this tree raises does not meet a bare decoder or validator error."""
     path = period_dir(run_root, period_id) / "manifest.json"
     try:
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
+        raw = read_or_none(path)
+        if raw is None:
             return None
-        except OSError as exc:
-            raise EngineError(f"{path}: unreadable: {exc}") from exc
         payload = decode(raw)  # the ss3.2 ingress: dup keys, floats, surrogates
         if not isinstance(payload, dict):
             raise EngineError(f"{path}: not a JSON object")
@@ -1521,12 +1554,9 @@ def _read_canonical_file(path: Path) -> dict[str, Any] | None:
     not -- and absent means exactly ENOENT, because an EACCES or EIO is a
     file that exists and cannot be read, and degrading on it would treat a
     broken root as an empty one."""
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
+    raw = read_or_none(path)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
     payload = decode(raw)
     if not isinstance(payload, dict):
         raise EngineError(f"{path}: not a JSON object")

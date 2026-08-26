@@ -69,7 +69,6 @@ from dsl41.canon import (
     canonical_bytes,
     digest as digest_over,
     is_canonical_file,
-    is_wire_int,
     with_digest,
 )
 from dsl41.classify import Baseline, carried_from_oracle, classify
@@ -81,16 +80,18 @@ from dsl41.period import (
     Manifest,
     archive_receipt_path,
     attestation_path,
+    check_addresses,
     check_stamp,
+    check_wire_ints,
     read_period_manifest,
     seal_path,
     wal_path,
     check_manifest_against_segment,
     disagreements,
-    is_hash_address,
     opening_at,
     parse_sealed_preamble,
     read_archive_receipt,
+    read_or_none,
     read_sentinel,
     tz_aliases_of,
     wrote_period,
@@ -316,29 +317,24 @@ class Attestation(BaseModel):
 
     @model_validator(mode="after")
     def _artifact_invariants(self) -> Attestation:
-        for name in (
-            "artifact_format_version",
-            "period_id",
-            "chain_through_period",
-            "state_machine_version",
-        ):
-            value = getattr(self, name)
-            if not is_wire_int(value):
-                raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
-        if not is_hash_address(self.seal_digest):
-            raise ValueError(f"seal_digest {self.seal_digest!r}: not a sha256 address")
+        check_wire_ints(
+            self,
+            (
+                "artifact_format_version",
+                "period_id",
+                "chain_through_period",
+                "state_machine_version",
+            ),
+        )
+        check_addresses({"seal_digest": self.seal_digest})
         if (self.prev_attestation_digest is None) != (self.period_id == 1):
             raise ValueError(
                 f"period {self.period_id} with prev_attestation_digest"
                 f" {self.prev_attestation_digest!r}: null is period 1's base case and"
                 " nothing else's (period-model ss1.3)"
             )
-        if self.prev_attestation_digest is not None and not is_hash_address(
-            self.prev_attestation_digest
-        ):
-            raise ValueError(
-                f"prev_attestation_digest {self.prev_attestation_digest!r}: not a sha256 address"
-            )
+        if self.prev_attestation_digest is not None:
+            check_addresses({"prev_attestation_digest": self.prev_attestation_digest})
         if not self.dsl41_version:
             raise ValueError("dsl41_version is empty: the producing interpreter is load-bearing")
         check_stamp(self.audited_at, "audited_at")
@@ -390,12 +386,9 @@ def read_attestation(run_root: Path, period_id: int) -> Attestation | None:
 
     Absence is a fact; a file that exists and does not parse is not."""
     path = attestation_path(run_root, period_id)
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
+    raw = read_or_none(path)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
     return Attestation.from_bytes(raw, where=str(path))
 
 

@@ -87,6 +87,7 @@ from dsl41.oracle_state import CarriedRows, Event, GlobalRuntime, HostRuntime, H
 from dsl41.period import (
     CATALOG_HASH_VERSION,
     Manifest,
+    check_addresses,
     check_manifest_self_consistent,
     disagreements,
     is_hash_address,
@@ -769,12 +770,9 @@ class Seal(BaseModel):
         }
         if self.prev_seal_digest is not None:
             addresses["prev_seal_digest"] = self.prev_seal_digest
-        for field_name, value in addresses.items():
-            if not is_hash_address(value):
-                raise ValueError(
-                    f"{field_name} {value!r} is not a sha256 address -- a typed"
-                    " artifact names no address audit cannot reproduce (ss3.2)"
-                )
+        check_addresses(
+            addresses, cite="a typed artifact names no address audit cannot reproduce (ss3.2)"
+        )
         try:
             canonical_bytes(self.to_payload())
         except CanonError as exc:
