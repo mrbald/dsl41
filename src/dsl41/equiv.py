@@ -58,8 +58,8 @@ import hashlib
 import itertools
 import json
 import random
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -288,33 +288,20 @@ def canonical_catalog(
                 "span": None,
             }
         )
-    machines = {
-        name: machine.model_copy(update={"span": None})
-        for name, machine in catalog.machines.items()
-    }
-    resources = {
-        name: resource.model_copy(update={"span": None})
-        for name, resource in catalog.resources.items()
-    }
-    external_instances = {
-        name: xinst.model_copy(update={"span": None})
-        for name, xinst in catalog.external_instances.items()
-    }
-    calendars = {
-        name: calendar.model_copy(update={"span": None})
-        for name, calendar in catalog.calendars.items()
-    }
-    cycles = {
-        name: cycle.model_copy(update={"span": None}) for name, cycle in catalog.cycles.items()
+    # Five namespaces (jobs handled above, meta reset below) are span-stripped
+    # the same way: one comprehension per field used to re-spell this once
+    # per namespace (DL-178r).
+    span_free = {
+        field: {
+            name: model.model_copy(update={"span": None})
+            for name, model in getattr(catalog, field).items()
+        }
+        for field in ("machines", "resources", "external_instances", "calendars", "cycles")
     }
     canonical = catalog.model_copy(
         update={
             "jobs": jobs,
-            "machines": machines,
-            "resources": resources,
-            "calendars": calendars,
-            "cycles": cycles,
-            "external_instances": external_instances,
+            **span_free,
             "meta": type(catalog.meta)(),
         }
     )
@@ -335,6 +322,42 @@ class TierAResult(BaseModel):
     right_only: list[str] = []
     differing: list[str] = []  # common names whose canonical JobIR differs
     detail: dict[str, str] = {}  # job -> one-line what-differs summary
+
+
+def _machine_key(v: MachineIR) -> tuple:
+    # members are ordered (DL-49); compare order-sensitively -- a reorder
+    # or a dropped component is a real difference, never false-equal.
+    return (v.machine_type, v.attrs, [(mm.name, mm.attrs) for mm in v.members])
+
+
+# Six catalog namespaces tier (a) compares whole (field name on CatalogIR,
+# per-item comparison key, detail message). DL-37a found resources and
+# external instances missing from an earlier four-row version of this list:
+# catalog_hash already covered them, so a difference used to be a hash
+# mismatch with no tier-a detail (the ss8 short-circuit and tier (a)
+# disagreed). One table now owns all six, so that drift class is
+# unrepresentable -- a namespace not in the table cannot silently exist
+# (DL-178r). Calendar/cycle definitions drive run-day semantics (M24): the
+# same run_calendar name over different dates is a different schedule
+# (DL-36).
+_NAMESPACE_CHECKS: tuple[tuple[str, str, Callable[[Any], Any], str], ...] = (
+    ("<globals>", "globals_declared", lambda v: v, "globals_declared differ"),
+    ("<machines>", "machines", _machine_key, "machine definitions differ"),
+    (
+        "<calendars>",
+        "calendars",
+        lambda v: (v.kind, v.attrs, v.conditions, v.dates),
+        "calendar definitions differ",
+    ),
+    ("<cycles>", "cycles", lambda v: (v.attrs, v.periods), "cycle definitions differ"),
+    ("<resources>", "resources", lambda v: (v.res_type, v.attrs), "resource definitions differ"),
+    (
+        "<external_instances>",
+        "external_instances",
+        lambda v: (v.xtype, v.attrs),
+        "external-instance definitions differ",
+    ),
+)
 
 
 def equivalent_tier_a(
@@ -361,56 +384,18 @@ def equivalent_tier_a(
                 if getattr(ja, field, None) != getattr(jb, field, None)
             ]
             detail[name] = "differs in: " + ", ".join(sorted(fields))
-    globals_equal = a.globals_declared == b.globals_declared
-    if not globals_equal:
-        detail["<globals>"] = "globals_declared differ"
-
-    def _machine_key(v: MachineIR) -> tuple:
-        # members are ordered (DL-49); compare order-sensitively -- a reorder
-        # or a dropped component is a real difference, never false-equal.
-        return (v.machine_type, v.attrs, [(mm.name, mm.attrs) for mm in v.members])
-
-    machines_equal = {m: _machine_key(v) for m, v in a.machines.items()} == {
-        m: _machine_key(v) for m, v in b.machines.items()
-    }
-    if not machines_equal:
-        detail["<machines>"] = "machine definitions differ"
-    # Calendar/cycle definitions drive run-day semantics (M24): the same
-    # run_calendar name over different dates is a different schedule (DL-36).
-    calendars_equal = {
-        c: (v.kind, v.attrs, v.conditions, v.dates) for c, v in a.calendars.items()
-    } == {c: (v.kind, v.attrs, v.conditions, v.dates) for c, v in b.calendars.items()}
-    if not calendars_equal:
-        detail["<calendars>"] = "calendar definitions differ"
-    cycles_equal = {c: (v.attrs, v.periods) for c, v in a.cycles.items()} == {
-        c: (v.attrs, v.periods) for c, v in b.cycles.items()
-    }
-    if not cycles_equal:
-        detail["<cycles>"] = "cycle definitions differ"
-    # Resources and external instances joined tier a with DL-37a: catalog_hash
-    # already covered them, so a difference used to be a hash mismatch with no
-    # tier-a detail -- the ss8 short-circuit and tier (a) disagreed.
-    resources_equal = {r: (v.res_type, v.attrs) for r, v in a.resources.items()} == {
-        r: (v.res_type, v.attrs) for r, v in b.resources.items()
-    }
-    if not resources_equal:
-        detail["<resources>"] = "resource definitions differ"
-    xinsts_equal = {x: (v.xtype, v.attrs) for x, v in a.external_instances.items()} == {
-        x: (v.xtype, v.attrs) for x, v in b.external_instances.items()
-    }
-    if not xinsts_equal:
-        detail["<external_instances>"] = "external-instance definitions differ"
-    equivalent = (
-        not left_only
-        and not right_only
-        and not differing
-        and globals_equal
-        and machines_equal
-        and calendars_equal
-        and cycles_equal
-        and resources_equal
-        and xinsts_equal
-    )
+    # Namespace comparisons run against the RAW catalogs (a, b), not ca/cb:
+    # rename/case_fold apply only to job names and their refs (module
+    # docstring); globals, machines, calendars, cycles, resources, and
+    # external instances are identity v1.
+    namespaces_equal = True
+    for tag, field, key_fn, message in _NAMESPACE_CHECKS:
+        left = {name: key_fn(v) for name, v in getattr(a, field).items()}
+        right = {name: key_fn(v) for name, v in getattr(b, field).items()}
+        if left != right:
+            detail[tag] = message
+            namespaces_equal = False
+    equivalent = not left_only and not right_only and not differing and namespaces_equal
     return TierAResult(
         equivalent=equivalent,
         left_only=left_only,
