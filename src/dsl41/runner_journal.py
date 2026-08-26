@@ -397,6 +397,12 @@ class Journal:
         rec = dict(record)
         if self._lock is not None:
             self._lock.check()  # the same ss1 fence every append passes
+        # Plain json.dumps(sort_keys=True), not canon.canonical_bytes (same
+        # non-canonical spelling as `_write` below): nothing ever digests a
+        # WAL line's own bytes -- a seal record's digest is computed over
+        # canon bytes in `boundary` and re-derived on read -- and the
+        # control door already refuses a lone surrogate before it can reach
+        # dispatch, so canon's extra guarantees buy this writer nothing.
         self._f.write(json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n")
         # UNCONDITIONALLY durable, whatever the journal's per-record policy:
         # a virtual-domain journal buffers and fsyncs on close, and a seal

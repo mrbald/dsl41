@@ -157,6 +157,9 @@ class LeaderLock:
         print. Written under the lock, after the epoch is allocated."""
         if self._fd is None:
             raise EngineError(f"{self.path}: not held")
+        # Plain json.dumps(sort_keys=True), not canon.canonical_bytes: this
+        # blob is only ever read back by `_holder()` for a refusal message,
+        # never digested, so canon's guarantees buy nothing here either.
         blob = json.dumps(
             {
                 "pid": os.getpid(),
