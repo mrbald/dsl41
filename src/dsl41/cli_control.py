@@ -52,6 +52,20 @@ def _control_roundtrip(socket_path: Path, request: dict) -> dict:
         raise typer.Exit(refuse(exc)) from exc
 
 
+def _answer_or_exit(response: dict) -> None:
+    """Print one control answer and exit on its `ok` flag: `host list`,
+    `query`'s non-brief read, and `supervise list`/`shutdown` all did this
+    by hand, two of them indented and two not (DL-178h).
+
+    Compact JSON (sort_keys=True, no indent): the split was an even two and
+    two, and the tie breaks toward this file's other JSON idiom --
+    `_stream_subscribe` already reads the wire as one record per line."""
+    import json as json_mod
+
+    typer.echo(json_mod.dumps(response, sort_keys=True))
+    raise typer.Exit(0 if response.get("ok") else 2)
+
+
 def _mutate(socket_path: Path, request: dict) -> None:
     """`sendevent`'s and `host`'s exit: one ss6 command envelope, its
     outcome as this process's status.
@@ -152,8 +166,7 @@ def sendevent(
     if global_kv is not None:
         name, sep, value = global_kv.partition("=")
         if not sep or not name:
-            typer.echo('--global expects "NAME=value"', err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse('--global expects "NAME=value"'))
         payload["name"], payload["value"] = name, value
     if exit_code is not None:
         payload["exit_code"] = exit_code
@@ -211,19 +224,14 @@ def host(
     Mutations take `sendevent`'s four exit codes (0 applied / 2 refused /
     3 rejected / 4 unknown) for the same reason: four outcomes, four next
     moves."""
-    import json as json_mod
-
     from dsl41.oracle_state import RuntimeState
     from dsl41.runner_control import claimed_actor, command
 
     verb = action.lower()
     if verb == "list":
-        response = _control_roundtrip(socket_path, {"cmd": "hosts"})
-        typer.echo(json_mod.dumps(response, sort_keys=True))
-        raise typer.Exit(0 if response.get("ok") else 2)
+        _answer_or_exit(_control_roundtrip(socket_path, {"cmd": "hosts"}))
     if not host_id:
-        typer.echo(f"`host {verb}` needs a host id", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"`host {verb}` needs a host id"))
     key = RuntimeState.host_key(host_id)
     baseline, epoch, current = _read_revision(socket_path, key)
     request = command(
@@ -247,8 +255,7 @@ def ui(socket_path: Path = _SOCKET_OPT) -> None:
     run alone (unlike `run --ui`, whose terminal owns the run)."""
     runner_tui = import_tui_or_exit_2()
     if not socket_path.exists():
-        typer.echo(f"control socket {socket_path}: no such file", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
     runner_tui.RunnerApp(socket_path).run()
 
 
@@ -285,8 +292,7 @@ def serve(
 
     server_cls = _import_textual_serve_or_exit_2()
     if not socket_path.exists():
-        typer.echo(f"control socket {socket_path}: no such file", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
     command = f"{shlex.quote(sys.executable)} -m dsl41 ui --socket {shlex.quote(str(socket_path))}"
     try:
         server_cls(command, host=host, port=port).serve()
@@ -385,33 +391,25 @@ def query(
     NAMED entity, and `global` answers an unset name at revision 0 rather
     than omitting it, because absence you cannot name is absence you cannot
     lock against."""
-    import json as json_mod
-
     verb = what.lower()
     known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
     if verb not in known and verb not in predicates:
-        typer.echo(f"unknown query {what!r} ({'|'.join([*known, *predicates])})", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"unknown query {what!r} ({'|'.join([*known, *predicates])})"))
     if verb in predicates:
         if job is None:
-            typer.echo(f"{verb} requires --job", err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse(f"{verb} requires --job"))
         response = _control_roundtrip(socket_path, {"cmd": "status", "job": job})
         if not response.get("ok"):
-            typer.echo(str(response.get("error", "status query failed")), err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
         current = response["jobs"][job]["status"]
         typer.echo(current)
         raise typer.Exit(0 if current in predicates[verb] else 1)
     if brief and verb != "status":
-        typer.echo("--brief applies to status only", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse("--brief applies to status only"))
     if verb in ("global", "globals") and not name:
-        typer.echo(f"{verb} requires --name (repeat it for several)", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"{verb} requires --name (repeat it for several)"))
     if verb == "global" and len(name or ()) > 1:
-        typer.echo("global names one; use `globals` for several", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse("global names one; use `globals` for several"))
     request: dict = {"cmd": verb}
     if job is not None:
         request["job"] = job
@@ -442,8 +440,7 @@ def query(
             if response.get("spec_drift"):
                 typer.echo("SPEC DRIFT: estate files changed on disk", err=True)
             raise typer.Exit(0)
-        typer.echo(json_mod.dumps(response, indent=2, sort_keys=True))
-        raise typer.Exit(0 if response.get("ok") else 2)
+        _answer_or_exit(response)
     _stream_subscribe(socket_path, request)
 
 
@@ -466,35 +463,29 @@ def supervise(
 
     verb = action.lower()
     if verb not in ("list", "shutdown"):
-        typer.echo(f"unknown supervise action {action!r} (list|shutdown)", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"unknown supervise action {action!r} (list|shutdown)"))
     sock_path = run_root / "supervisor.sock"
     if not sock_path.exists():
-        typer.echo(f"no supervisor at {sock_path}", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"no supervisor at {sock_path}"))
     try:
         conn = SupervisorConn(sock_path)
     except OSError as exc:
         raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
     try:
         if verb == "list":
-            resp = conn.send({"cmd": "LIST"})
-            typer.echo(json_mod.dumps(resp, indent=2, sort_keys=True))
-            raise typer.Exit(0 if resp.get("ok") else 2)
+            _answer_or_exit(conn.send({"cmd": "LIST"}))
         acq = conn.send(
             {"cmd": "ACQUIRE", "controller_id": f"supervise-cli-{os.getpid()}", "ttl_s": 60}
         )
         if not acq.get("ok"):
-            typer.echo(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}", err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}"))
         # the token alone does not authorize a mutating verb: DL-80 pairs it
         # with the incarnation the same ACQUIRE reply names, and `conn` has
         # read that back off this reply and stamps it on every later request
         # (supervisor-protocol ss5). Sending only the token answers
         # wrong_incarnation.
         resp = conn.send({"cmd": "SHUTDOWN", "token": acq["token"]})
-        typer.echo(json_mod.dumps(resp, sort_keys=True))
-        raise typer.Exit(0 if resp.get("ok") else 2)
+        _answer_or_exit(resp)
     except OSError as exc:
         raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
     finally:

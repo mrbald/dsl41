@@ -105,10 +105,9 @@ def _next_profile(
         # loud, not silent: without a supervisor there is nothing to hold
         # the lifelines, so nothing a deadman could bound
         # (concurrency-model ss8). `run` says the same of its own flags.
-        typer.echo(
-            "--next-deadman needs --next-detached: a tethered run has no supervisor", err=True
+        raise typer.Exit(
+            refuse("--next-deadman needs --next-detached: a tethered run has no supervisor")
         )
-        raise typer.Exit(2)
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
     try:
@@ -352,13 +351,11 @@ def _live_seal(
 
     socket_path = run_root / "control.sock"
     if not socket_path.exists():
-        typer.echo(
+        return refuse(
             f"{run_root}: an engine holds leader.lock and {socket_path} is not there --"
             " a live seal is asked for over the control socket, and this root has a"
-            " leader with no door (period-model ss7)",
-            err=True,
+            " leader with no door (period-model ss7)"
         )
-        return 2
     try:
         header = roundtrip(socket_path, {"cmd": "status"})
     except ControlClientError as exc:
@@ -449,13 +446,11 @@ async def _offline_seal(
     except Exception as exc:  # RunHistoryError or EngineError: both are refusals
         return refuse(exc, prefix=str(run_root))
     if pinned is None:
-        typer.echo(
+        return refuse(
             f"{run_root}: no period manifest -- an offline seal reads the CLOSING"
             " period's identity from the root itself, and this root has none"
-            " (period-model ss7)",
-            err=True,
+            " (period-model ss7)"
         )
-        return 2
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
@@ -542,14 +537,12 @@ def _answer_from_committed(
     if seal is None:
         return None
     if seal.request_fingerprint != request.fingerprint:
-        typer.echo(
+        return refuse(
             f"request_id {request.request_id} already named the boundary that closed"
             f" period {seal.period_id} under a different envelope: force is an"
             " authorization and the actor is attribution, and neither may be swapped"
-            " under a retry (period-model ss2.2, PR-30c)",
-            err=True,
+            " under a retry (period-model ss2.2, PR-30c)"
         )
-        return 2
     typer.echo(
         f"period {seal.period_id} was already closed by request_id"
         f" {request.request_id}: seal {seal.digest}. No second boundary."
@@ -698,12 +691,12 @@ def audit(
     from dsl41.boundary import EstateAnchor, default_anchor_dir
 
     if run_root is None and estate_anchor is None:
-        typer.echo(
-            "name a --run-root, or --estate-anchor alone to audit every root the"
-            " registry names (period-model ss1.3, PR-02f)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                "name a --run-root, or --estate-anchor alone to audit every root the"
+                " registry names (period-model ss1.3, PR-02f)"
+            )
         )
-        raise typer.Exit(2)
     # the anchor below is taken by `audit_period` for the ONE write that
     # needs it and released again, so auditing a closed period while a later
     # one is live is possible: a leader holds the lineage lock for its life
@@ -725,8 +718,7 @@ def audit(
     if not targets:
         for line in skipped:
             typer.echo(line)
-        typer.echo(f"{where}: no closed period to audit", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"{where}: no closed period to audit"))
     try:
         _attest_each(targets, anchor, name_root=run_root is None)
     finally:
@@ -778,8 +770,7 @@ def _closed_across_roots(
             if period in walk.provisional
             else "is in no registry row of this lineage"
         )
-        typer.echo(f"{walk.anchor_dir}: period {period} {why} (period-model ss1.3)", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"{walk.anchor_dir}: period {period} {why} (period-model ss1.3)"))
     targets: list[tuple[int, Path]] = []
     skipped: list[str] = []
     for entry in walk.periods:
@@ -904,8 +895,7 @@ def verify(
     if period is None:
         held = attestation_periods(run_root)
         if not held:
-            typer.echo(f"{run_root}: no attestation to verify", err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse(f"{run_root}: no attestation to verify"))
         period = held[-1]
     try:
         attestation = verify_attestation(run_root, period)
@@ -949,13 +939,13 @@ def estate_reclaim(
     from dsl41.runner_control import claimed_actor as default_actor
 
     if not force:
-        typer.echo(
-            "refusing without --force: reclaiming a live claimant's head forks the"
-            " lineage, and this verb exists for the case where you have PROVED it is"
-            " gone (period-model ss1.3)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                "refusing without --force: reclaiming a live claimant's head forks the"
+                " lineage, and this verb exists for the case where you have PROVED it is"
+                " gone (period-model ss1.3)"
+            )
         )
-        raise typer.Exit(2)
     anchor = EstateAnchor(estate_anchor)
     try:
         anchor.acquire()
@@ -1071,34 +1061,32 @@ def estate_prune(
     from dsl41.runner_clock import EngineError
 
     if run_root is None and estate_anchor is None:
-        typer.echo(
-            "name a --run-root, or --estate-anchor alone to prune every root the"
-            " registry names (period-model ss1.3, PR-02f)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                "name a --run-root, or --estate-anchor alone to prune every root the"
+                " registry names (period-model ss1.3, PR-02f)"
+            )
         )
-        raise typer.Exit(2)
-    classes = [
-        name
-        for name, on in (
-            ("tombstones", tombstones),
-            ("quarantine", quarantine),
-            (ARCHIVE_CLASS, archive_inputs),
-        )
-        if on
-    ]
+    # the PAIRING derives from retention.CLASSES, the canon of which classes
+    # exist (DL-152's fix pattern: cli_control._QUERY_VERBS off
+    # runner_access.REQUIRED_TIER) -- a class added to CLASSES without a
+    # flag here is a KeyError, not a silent gap that reaches the --dry-run
+    # survey below and not this table (DL-178h).
+    flag_of = {"tombstones": tombstones, "quarantine": quarantine, ARCHIVE_CLASS: archive_inputs}
+    classes = [name for name in CLASSES if flag_of[name]]
     if not classes and dry_run:
         # a listing with no class named is a survey: it shows every
         # licensed deletion, so the operator can pick from what is there
         classes = sorted(CLASSES)
     if not classes and not dry_run:
-        typer.echo(
-            "nothing selected: name at least one class (--tombstones, --quarantine,"
-            f" --{ARCHIVE_CLASS}) or ask for --dry-run. A prune verb with a default"
-            " set would be a retention policy, and that is the operator's"
-            " (period-model ss12)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                "nothing selected: name at least one class (--tombstones, --quarantine,"
+                f" --{ARCHIVE_CLASS}) or ask for --dry-run. A prune verb with a default"
+                " set would be a retention policy, and that is the operator's"
+                " (period-model ss12)"
+            )
         )
-        raise typer.Exit(2)
     if run_root is None:
         roots = walk_estate_or_exit_2(estate_anchor).roots()
     else:

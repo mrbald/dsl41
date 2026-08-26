@@ -74,8 +74,9 @@ def _preflight_or_exit(
     from dsl41.runner_preflight import MachinePolicy, preflight
 
     if machine_policy not in ("strict", "local-eligible"):
-        typer.echo(f"--machine-policy {machine_policy!r}: expected strict|local-eligible", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(
+            refuse(f"--machine-policy {machine_policy!r}: expected strict|local-eligible")
+        )
     items = preflight(
         catalog,
         execution=execution,
@@ -91,8 +92,7 @@ def _preflight_or_exit(
             err=item.severity == "ERROR",
         )
     if any(item.severity == "ERROR" for item in items):
-        typer.echo("preflight: refusing to run (runner-design ss8)", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse("preflight: refusing to run (runner-design ss8)"))
     return items
 
 
@@ -212,20 +212,20 @@ def run(
         import_tui_or_exit_2()  # fail before the engine starts, not after
     if open_from is not None:
         if resume:
-            typer.echo(
-                "--open-from and --resume are the two OPENERS and you get one:"
-                " --resume continues the lineage in this root, --open-from opens the"
-                " next period into a fresh one (period-model ss7)",
-                err=True,
+            raise typer.Exit(
+                refuse(
+                    "--open-from and --resume are the two OPENERS and you get one:"
+                    " --resume continues the lineage in this root, --open-from opens the"
+                    " next period into a fresh one (period-model ss7)"
+                )
             )
-            raise typer.Exit(2)
         if estate_anchor is not None and Path(estate_anchor) != Path(open_from):
-            typer.echo(
-                f"--open-from {open_from} IS the lineage anchor; --estate-anchor"
-                f" {estate_anchor} names another one (period-model ss7)",
-                err=True,
+            raise typer.Exit(
+                refuse(
+                    f"--open-from {open_from} IS the lineage anchor; --estate-anchor"
+                    f" {estate_anchor} names another one (period-model ss7)"
+                )
             )
-            raise typer.Exit(2)
         estate_anchor = open_from
     catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     tz_aliases = load_tz_aliases(timezone_map)
@@ -241,11 +241,9 @@ def run(
     if deadman is not None and not detached:
         # loud, not silent: without a supervisor there is nothing to hold the
         # lifelines, so nothing a deadman could bound (concurrency-model ss8)
-        typer.echo("--deadman needs --detached: a tethered run has no supervisor", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse("--deadman needs --detached: a tethered run has no supervisor"))
     if deadman is not None and deadman <= 0:
-        typer.echo("--deadman must be a positive number of seconds", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse("--deadman must be a positive number of seconds"))
     from dsl41.runner_clock import EngineError
     from dsl41.period import runtime_profile_from_cli
 
@@ -1217,14 +1215,14 @@ def _announce_gap(segment: Path, *, where: str) -> None:
     except (OSError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=where)) from exc
     if receipt is None:
-        typer.echo(
-            f"{where}: {segment} is not there, and no archive receipt licenses its"
-            f" absence (`{archive_receipt_path(root, period_id).name}`) -- this is"
-            " LOSS and not an archive: retention writes the receipt before it deletes"
-            " anything, exactly so the two can be told apart (period-model ss12)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                f"{where}: {segment} is not there, and no archive receipt licenses its"
+                f" absence (`{archive_receipt_path(root, period_id).name}`) -- this is"
+                " LOSS and not an archive: retention writes the receipt before it deletes"
+                " anything, exactly so the two can be told apart (period-model ss12)"
+            )
         )
-        raise typer.Exit(2)
     typer.echo(
         f"period {period_id} in {root}: inputs archived"
         f" ({archive_receipt_path(root, period_id).name}) -- UNREPLAYABLE GAP, no"
@@ -1394,21 +1392,21 @@ def _period_catalog(
         except EngineError as exc:
             raise typer.Exit(refuse(exc, prefix=where)) from exc
         if opening["catalog_hash"] != catalog_hash_for(opening, catalog):
-            typer.echo(
-                f"{named}the bundle {opening['source_bundle_hash']} does not reproduce"
-                " the catalog hash this segment pins -- the stored inputs are not the"
-                " ones this period ran (period-model ss1.1)",
-                err=True,
+            raise typer.Exit(
+                refuse(
+                    f"{named}the bundle {opening['source_bundle_hash']} does not reproduce"
+                    " the catalog hash this segment pins -- the stored inputs are not the"
+                    " ones this period ran (period-model ss1.1)"
+                )
             )
-            raise typer.Exit(2)
         return catalog
     if opening["catalog_hash"] != catalog_hash_for(opening, supplied):
-        typer.echo(
-            f"{named}catalog hash mismatch: the estate differs from the one this"
-            " journal ran (runner-design ss7: no silent semantic drift)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                f"{named}catalog hash mismatch: the estate differs from the one this"
+                " journal ran (runner-design ss7: no silent semantic drift)"
+            )
         )
-        raise typer.Exit(2)
     return supplied
 
 
@@ -1525,30 +1523,20 @@ def runs(
     period order, so a lineage that has rolled reads as one table and
     period 1's root is found rather than remembered (PR-02f). A root the
     registry names and the disk does not refuses by name."""
-    from datetime import UTC
-    from datetime import datetime as datetime_mod
-
     from dsl41.boundary import is_anchor_dir
     from dsl41.runner_history import RunHistoryError, archived_coverage, read_run_roots
 
     anchors = [path for path in run_roots if is_anchor_dir(path)]
     if anchors and len(run_roots) > 1:
-        typer.echo(
-            f"{anchors[0]} is a lineage anchor: name it ALONE. It already names every"
-            " root of the estate, and mixing it with roots would fold some of them"
-            " twice (period-model ss1.3)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                f"{anchors[0]} is a lineage anchor: name it ALONE. It already names every"
+                " root of the estate, and mixing it with roots would fold some of them"
+                " twice (period-model ss1.3)"
+            )
         )
-        raise typer.Exit(2)
     roots = list(walk_estate_or_exit_2(anchors[0]).roots()) if anchors else list(run_roots)
-    since_at = None
-    if since is not None:
-        try:
-            since_at = datetime_mod.fromisoformat(since)
-        except ValueError as exc:
-            raise typer.Exit(refuse(exc, prefix="--since")) from exc
-        if since_at.tzinfo is not None:  # journal timestamps are naive UTC
-            since_at = since_at.astimezone(UTC).replace(tzinfo=None)
+    since_at = None if since is None else _naive_utc_arg(since, "--since")
     try:
         rows = read_run_roots(roots, job=job, since=since_at)
         missing = archived_coverage(roots)
