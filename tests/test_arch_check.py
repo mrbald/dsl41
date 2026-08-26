@@ -51,6 +51,14 @@ _BODY = """
     return total, seen
 """
 
+_OTHER_BODY = """
+    mapping = {}
+    scale = 1
+    for item in items:
+        mapping[item] = item
+    return mapping, scale
+"""
+
 
 def test_identical_body_in_two_modules_blocks(tmp_path: Path) -> None:
     a = _write(tmp_path / "a.py", f"def sum_a(items):{_BODY}")
@@ -61,10 +69,19 @@ def test_identical_body_in_two_modules_blocks(tmp_path: Path) -> None:
     assert "sum_b()" in findings[0].message
 
 
-def test_identical_body_twice_in_one_module_does_not_block(tmp_path: Path) -> None:
-    # one module's own repetition is that module's business; the drift class
-    # DL-72 removed was a copy that two modules maintained separately
+def test_identical_body_twice_in_one_module_blocks(tmp_path: Path) -> None:
+    # DL-177: one module's own repetition is the same drift class DL-72
+    # named -- a copy strays from its own module's sibling just as easily as
+    # from another module's
     a = _write(tmp_path / "a.py", f"def sum_a(items):{_BODY}\n\ndef sum_b(items):{_BODY}")
+    findings = arch_check.duplicate_function_bodies([a])
+    assert len(findings) == 1
+    assert "identical body again in this module" in findings[0].message
+    assert "sum_b()" in findings[0].message
+
+
+def test_distinct_bodies_in_one_module_do_not_block(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.py", f"def sum_a(items):{_BODY}\n\ndef other(items):{_OTHER_BODY}")
     assert arch_check.duplicate_function_bodies([a]) == []
 
 
@@ -77,6 +94,79 @@ def test_trivial_and_dunder_bodies_are_exempt(tmp_path: Path) -> None:
     c = _write(tmp_path / "c.py", long_dunder)
     d = _write(tmp_path / "d.py", long_dunder.replace("class A", "class B"))
     assert arch_check.duplicate_function_bodies([c, d]) == []
+
+
+# --------------------------------------------- 1b. near-miss duplicates (DL-177)
+
+_NEAR_A = """
+    a = x + 1
+    b = y + 2
+    c = a * b
+    d = c - 3
+    return d
+"""
+
+# same shape as _NEAR_A -- every local name renamed, every literal changed
+_NEAR_B = """
+    m = p + 10
+    n = q + 20
+    o = m * n
+    r = o - 30
+    return r
+"""
+
+# same names and literals as _NEAR_A, but the first assignment sits inside a
+# try/except instead of standing bare -- a different control-flow shape,
+# which alpha-normalisation does not, and should not, paper over
+_NEAR_STRUCTURAL = """
+    try:
+        a = x + 1
+    except ValueError:
+        a = 0
+    b = y + 2
+    c = a * b
+    d = c - 3
+    return d
+"""
+
+
+def test_renamed_and_reliteralled_copy_is_a_near_miss(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.py", f"def calc_a(x, y):{_NEAR_A}")
+    b = _write(tmp_path / "b.py", f"def calc_b(p, q):{_NEAR_B}")
+    pairs = arch_check.near_miss_duplicate_bodies([a, b])
+    assert pairs == [f"{arch_check._rel(a)}:calc_a ~ {arch_check._rel(b)}:calc_b"]
+    # renamed names and changed literals mean the raw bodies do not match --
+    # this pair is this tier's own subject, not the blocking tier's
+    assert arch_check.duplicate_function_bodies([a, b]) == []
+
+
+def test_an_exact_duplicate_pair_is_not_also_reported_as_near_miss(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.py", f"def calc_a(x, y):{_NEAR_A}")
+    b = _write(tmp_path / "b.py", f"def calc_b(x, y):{_NEAR_A}")
+    assert len(arch_check.duplicate_function_bodies([a, b])) == 1
+    assert arch_check.near_miss_duplicate_bodies([a, b]) == []
+
+
+def test_structurally_different_bodies_are_not_a_near_miss(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.py", f"def calc_a(x, y):{_NEAR_A}")
+    d = _write(tmp_path / "d.py", f"def calc_d(x, y):{_NEAR_STRUCTURAL}")
+    assert arch_check.near_miss_duplicate_bodies([a, d]) == []
+
+
+def test_short_bodies_are_exempt_from_the_near_miss_tier(tmp_path: Path) -> None:
+    short = "\n    a = 1\n    b = 2\n    return a + b\n"  # 3 statements, under the floor
+    a = _write(tmp_path / "a.py", f"def f(x):{short}")
+    b = _write(tmp_path / "b.py", f"def g(y):{short}")
+    assert arch_check.near_miss_duplicate_bodies([a, b]) == []
+
+
+def test_a_baselined_near_miss_pair_is_not_reported(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.py", f"def calc_a(x, y):{_NEAR_A}")
+    b = _write(tmp_path / "b.py", f"def calc_b(p, q):{_NEAR_B}")
+    pairs = arch_check.near_miss_duplicate_bodies([a, b])
+    assert arch_check.near_miss_advisories(pairs, {}) == [f"near-miss duplicate: {pairs[0]}"]
+    baseline = {"near_miss_duplicate_bodies": pairs}
+    assert arch_check.near_miss_advisories(pairs, baseline) == []
 
 
 # --------------------------------------------- 2. private cross-module imports

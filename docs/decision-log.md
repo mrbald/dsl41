@@ -10619,3 +10619,72 @@ relitigate an entry; append a new one.
   locally (`DSL41_BROWSER_TESTS=1` opt-in, playwright dev-only, DL-77); CI's
   three-engine explore-page job is the gate for this class of defect, not a
   local run.
+- DL-177 the duplicate-body gate learns its own module, and its own shadow
+  (2026-08-26). Two changes to `scripts/arch_check.py`'s DL-72/DL-75 exact-
+  duplicate check, `duplicate_function_bodies`.
+  (1) SAME-MODULE SCOPE, now blocking. The check used to skip a body
+  repeated twice inside one module (`len({module for ...}) < 2: continue`)
+  -- as if a copy sitting in one file cannot drift the way a copy split
+  across two files does. DL-72's whole point was that copies drift; that
+  is not a fact about which file holds them. A same-module pair now blocks
+  too, with its own message ("has an identical body again in this
+  module"), so the report does not send a reader hunting for a second file
+  that does not exist. Same exemptions as before: dunders, and any body at
+  or under `TRIVIAL_BODY_STATEMENTS`.
+  (2) NEAR-MISS, a new ADVISORY tier: a copy that renamed its locals and
+  changed its literals but kept the shape. Every qualifying function's
+  body (docstring already stripped, floor of 5 statements -- stricter than
+  the exact tier's floor of 4, since a short body normalises the same as a
+  hundred unrelated ones) is alpha-normalised: `_local_names` collects
+  every name the function BINDS -- its own parameters, plus every
+  assignment/for/with/comprehension target and except alias -- and
+  `_AlphaNormalizer` renames each to a positional placeholder by first
+  occurrence (`_v0`, `_v1`, ...), while every `Constant` becomes a
+  placeholder for its Python type (`_const_placeholder`, one placeholder
+  per type, not per value). Everything else -- imported and global names,
+  builtins, attribute names, a call target that is never itself bound --
+  passes through untouched: that is the part of a body that carries
+  similarity rather than noise. `ast.dump(..., include_attributes=False)`
+  of the normalised body is hashed the same way the exact tier hashes the
+  raw one. A pair whose EXACT hash already matches is that tier's own
+  subject and is excluded here, so the two tiers never double-report one
+  pair.
+  BASELINED the same way size is. `scripts/arch_baseline.json` gains
+  `near_miss_duplicate_bodies`, a flat sorted list of stable pair ids
+  (`"module:function ~ module:function"`, via `_pair_key`);
+  `--update-baseline` now writes it, and `near_miss_advisories` prints only
+  a pair NOT already in it, as `note`. Seeded empty: the tree holds no
+  near-miss pair today at the 5-statement floor, so the check starts
+  quiet. The existing size baseline was left untouched by this seeding --
+  that ratchet is its own ongoing concern and this slice did not refresh
+  it, so the size drift `arch_check.py` already reports is unrelated to
+  this entry. Promotion of near-miss to blocking is deferred until it has
+  stayed quiet for a while, the discipline DL-75's own size ratchet uses.
+  THE BOUNDARY, named so this is not mistaken for a bigger claim: this
+  whole gate, both tiers, is a COPY detector -- same tokens, different
+  names or literals. Two bodies that do the same thing through a
+  different SHAPE (an `if`/`else` where the other reaches for
+  `try`/`except`, a loop where the other reaches for a comprehension)
+  normalise to different `ast.dump` output and are invisible to it. That
+  class of duplication stays the architecture review's subject
+  (`/arch-review`), not this deterministic gate's.
+  THE TESTS (`tests/test_arch_check.py`). Same-module: an identical pair
+  blocks with the new message text; two distinct bodies in one module stay
+  silent. Near-miss: a renamed-and-reliteralled copy fires as advisory and
+  is confirmed absent from the blocking tier; the same pair made byte-
+  identical is confirmed absent from near-miss instead (the exclusion
+  rule); a structurally different pair (`try`/`except` swapped in for a
+  bare assignment) stays silent; a pair under the 5-statement floor stays
+  silent even when byte-identical; a baselined pair is not printed. Six
+  new tests, one renamed for its flipped (now-blocking) behavior -- all in
+  the DL-75 style: tiny synthesised trees, not the real repo.
+  THE GATE. `uv run python scripts/arch_check.py` over the real tree: no
+  blocking finding from either tier against `src/dsl41/`, and no NEW
+  near-miss note -- the 13 advisory lines it prints are all pre-existing
+  size drift, unrelated to this entry. 3452 -> 3458 passed, 6 skipped, 2
+  xfailed unchanged; `uv run ruff check src tests scripts` and
+  `uv run ruff format --check src tests scripts examples` clean;
+  `uv run mypy src` clean. No adversarial review this entry -- both
+  changes are self-verifying (a blocking/silent pair per case, a printed/
+  suppressed advisory per case), the class `size_advisories` already
+  covers -- allocation per the brief.

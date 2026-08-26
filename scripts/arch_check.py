@@ -4,8 +4,10 @@
 Blocking checks (exit 1) are objective regressions -- each one names a
 specific way the tree got worse, never a matter of taste:
 
-1. identical function bodies in two different modules (the wrapper/supervisor
-   drift class DL-72 removed: copies drift, and the drift is the bug);
+1. identical function bodies, in two different modules or twice in one
+   module (the wrapper/supervisor drift class DL-72 removed: copies drift,
+   and the drift is the bug; DL-177 widened the scope to one module, since a
+   copy drifts just as easily from itself);
 2. a NEW private cross-module import (`from dsl41.x import _y`) in src/ --
    the ones the tree already had are pinned in scripts/arch_baseline.json, so
    this catches additions, not history. tests/ is deliberately not scanned: a
@@ -27,6 +29,16 @@ Advisory checks (reported, exit 0) are measured against the baseline, so
 only NEW or WORSENED sizes surface: modules over 1200 lines, functions over
 120 lines, functions over 40 branches. Taste is not a build failure.
 
+DL-177 adds a second advisory: near-miss duplicates, two function bodies
+whose ALPHA-NORMALISED form matches -- local names and literal values
+collapsed to positional placeholders, everything else (imports, globals,
+builtins, attribute names, non-local call targets) left verbatim -- but
+whose raw bodies differ, so the exact-duplicate check above does not see
+them. Also baselined, so only a NEW pair prints. This is a copy-detector,
+not a structure-detector: two bodies that do the same thing through a
+different shape (if/else where the other uses try/except) are invisible to
+it and stay the architecture review's subject, not this gate's.
+
 Either way the script prints "architecture review due -- run /arch-review"
 when a check trips, or when the diff since the most recent arch-review/*
 tag (branch point if there is no such tag) exceeds 800 changed lines. That
@@ -42,7 +54,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import io
+import itertools
 import json
 import re
 import subprocess
@@ -67,6 +81,10 @@ MAX_FUNCTION_LINES = 120
 MAX_FUNCTION_BRANCHES = 40
 REVIEW_DIFF_LINES = 800
 TRIVIAL_BODY_STATEMENTS = 3
+#: Near-miss (DL-177) is stricter than the exact tier: a short body normalises
+#: the same as a hundred unrelated ones (an `if`, a `return`), so noise below
+#: this size would drown the signal.
+NEAR_MISS_MIN_STATEMENTS = 5
 
 #: sha256 of json.dumps(CatalogIR.model_json_schema(), sort_keys=True) at the
 #: pinned ir_version. Bumping IR_VERSION is what licenses a new hash here --
@@ -126,11 +144,20 @@ def _body_without_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef) -> lis
 # ------------------------------------------------------------ 1. duplicate bodies
 
 
-def duplicate_function_bodies(paths: Iterable[Path]) -> list[Finding]:
-    """Blocking: the same normalised body (docstrings and formatting stripped,
-    positions ignored) defined in two different modules. Trivial bodies and
-    dunder/protocol stubs are exempt -- `return self._x` is not duplication."""
-    seen: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+_Site = tuple[str, str, int]  # (module, function, line)
+
+
+def _exact_body_key(body: list[ast.stmt]) -> str:
+    return "\n".join(ast.dump(stmt, include_attributes=False) for stmt in body)
+
+
+def _qualifying_functions(
+    paths: Iterable[Path], min_statements: int
+) -> Iterator[tuple[_Site, ast.FunctionDef | ast.AsyncFunctionDef, list[ast.stmt]]]:
+    """(site, node, docstring-stripped body) for every function whose body is
+    longer than `min_statements`, dunders exempt. Shared by the exact and
+    near-miss tiers so both key qualifying functions the same way; the tiers
+    differ only in `min_statements` and what they hash the body into."""
     for path in sorted(paths):
         tree = _parse(path)
         if tree is None:
@@ -139,25 +166,169 @@ def duplicate_function_bodies(paths: Iterable[Path]) -> list[Finding]:
             if node.name.startswith("__") and node.name.endswith("__"):
                 continue
             body = _body_without_docstring(node)
-            if len(body) <= TRIVIAL_BODY_STATEMENTS:
+            if len(body) < min_statements:
                 continue
-            key = "\n".join(ast.dump(stmt, include_attributes=False) for stmt in body)
-            seen[key].append((_rel(path), node.name, node.lineno))
+            yield (_rel(path), node.name, node.lineno), node, body
+
+
+def duplicate_function_bodies(paths: Iterable[Path]) -> list[Finding]:
+    """Blocking: the same normalised body (docstrings and formatting stripped,
+    positions ignored) defined more than once -- in two different modules, or
+    twice in the same one (DL-177: a copy drifts from its own module's sibling
+    exactly as it drifts from another module's). Trivial bodies and
+    dunder/protocol stubs are exempt -- `return self._x` is not duplication."""
+    seen: dict[str, list[_Site]] = defaultdict(list)
+    for site, _node, body in _qualifying_functions(paths, TRIVIAL_BODY_STATEMENTS + 1):
+        seen[_exact_body_key(body)].append(site)
     findings: list[Finding] = []
     for sites in seen.values():
-        if len({module for module, _, _ in sites}) < 2:
+        if len(sites) < 2:
             continue
         first, rest = sites[0], sites[1:]
         others = ", ".join(f"{module}:{line} {name}()" for module, name, line in rest)
-        findings.append(
-            Finding(
-                first[0],
-                first[2],
+        if len({module for module, _, _ in sites}) >= 2:
+            message = (
                 f"{first[1]}() has an identical body in another module ({others}):"
-                " one owner, or extract the shared helper -- copies drift (DL-72)",
+                " one owner, or extract the shared helper -- copies drift (DL-72)"
             )
-        )
+        else:
+            message = (
+                f"{first[1]}() has an identical body again in this module ({others}):"
+                " one owner, or extract the shared helper -- copies drift (DL-177)"
+            )
+        findings.append(Finding(first[0], first[2], message))
     return sorted(findings)
+
+
+# --------------------------------------------------- 1b. near-miss duplicates (DL-177)
+
+
+def _bound_names(expr: ast.expr) -> Iterator[ast.Name]:
+    """Every Name a target expression binds, unwrapping tuple/list
+    destructuring and starred targets. An Attribute or Subscript target
+    (`self.x = ...`, `d[k] = ...`) binds no new local name and yields
+    nothing -- the attribute/key stays verbatim under normalisation."""
+    if isinstance(expr, ast.Name):
+        yield expr
+    elif isinstance(expr, ast.Tuple | ast.List):
+        for element in expr.elts:
+            yield from _bound_names(element)
+    elif isinstance(expr, ast.Starred):
+        yield from _bound_names(expr.value)
+
+
+def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef, body: list[ast.stmt]) -> set[str]:
+    """Every name near-miss normalisation may rename: the function's own
+    parameters, plus every name BOUND somewhere in `body` -- assignment
+    targets, for-targets, with-targets, comprehension targets, except
+    aliases. Everything else -- imported, global, builtin, an attribute
+    name, a call target that is never itself bound -- is left out on
+    purpose: that is the part of the body that carries the similarity, not
+    the noise around it."""
+    args = node.args
+    names = {
+        arg.arg
+        for arg in (
+            *args.posonlyargs,
+            *args.args,
+            *args.kwonlyargs,
+            *([args.vararg] if args.vararg else []),
+            *([args.kwarg] if args.kwarg else []),
+        )
+    }
+    for stmt in body:
+        for child in ast.walk(stmt):
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    names |= {n.id for n in _bound_names(target)}
+            elif isinstance(child, ast.AugAssign | ast.AnnAssign | ast.For | ast.AsyncFor):
+                names |= {n.id for n in _bound_names(child.target)}
+            elif isinstance(child, ast.comprehension):
+                names |= {n.id for n in _bound_names(child.target)}
+            elif isinstance(child, ast.withitem) and child.optional_vars is not None:
+                names |= {n.id for n in _bound_names(child.optional_vars)}
+            elif isinstance(child, ast.ExceptHandler) and child.name:
+                names.add(child.name)
+    return names
+
+
+def _const_placeholder(value: object) -> str:
+    """One placeholder per TYPE, not per value: `1` and `2` normalise the
+    same, `1` and `"1"` do not."""
+    return f"_const_{type(value).__name__}"
+
+
+class _AlphaNormalizer(ast.NodeTransformer):
+    """Renames every Name bound to a local name (`_local_names`) to a
+    positional placeholder by first occurrence (`_v0`, `_v1`, ...), and every
+    Constant to a placeholder for its type. Everything else -- imported,
+    global, builtin and attribute names, non-local call targets -- passes
+    through untouched: it is the part that makes two bodies similar rather
+    than merely renamed."""
+
+    def __init__(self, local: set[str]) -> None:
+        self._local = local
+        self._assigned: dict[str, str] = {}
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        if node.id not in self._local:
+            return node
+        placeholder = self._assigned.setdefault(node.id, f"_v{len(self._assigned)}")
+        return ast.copy_location(ast.Name(id=placeholder, ctx=node.ctx), node)
+
+    def visit_Constant(self, node: ast.Constant) -> ast.Constant:
+        return ast.copy_location(ast.Constant(value=_const_placeholder(node.value)), node)
+
+
+def _alpha_normalised_key(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, body: list[ast.stmt]
+) -> str:
+    normalizer = _AlphaNormalizer(_local_names(node, body))
+    normalised = [normalizer.visit(copy.deepcopy(stmt)) for stmt in body]
+    return "\n".join(ast.dump(stmt, include_attributes=False) for stmt in normalised)
+
+
+def _pair_key(a: _Site, b: _Site) -> str:
+    left, right = sorted((f"{a[0]}:{a[1]}", f"{b[0]}:{b[1]}"))
+    return f"{left} ~ {right}"
+
+
+def near_miss_duplicate_bodies(paths: Iterable[Path]) -> list[str]:
+    """Advisory (DL-177): pairs of functions whose raw body differs but whose
+    ALPHA-NORMALISED body matches -- a copy that renamed its locals and
+    changed its literals. A pair whose EXACT body already matches is the
+    blocking tier's subject (`duplicate_function_bodies`) and is excluded
+    here. Stricter size floor than the exact tier (`NEAR_MISS_MIN_STATEMENTS`):
+    a short body normalises the same as a hundred unrelated ones. Returns
+    stable "module:function ~ module:function" ids, sorted -- plain strings,
+    never a Finding, because this tier never blocks."""
+    exact: dict[str, list[_Site]] = defaultdict(list)
+    near: dict[str, list[_Site]] = defaultdict(list)
+    for site, node, body in _qualifying_functions(paths, NEAR_MISS_MIN_STATEMENTS):
+        exact[_exact_body_key(body)].append(site)
+        near[_alpha_normalised_key(node, body)].append(site)
+    already_exact = {
+        frozenset((a, b))
+        for sites in exact.values()
+        if len(sites) >= 2
+        for a, b in itertools.combinations(sites, 2)
+    }
+    pairs: set[str] = set()
+    for sites in near.values():
+        if len(sites) < 2:
+            continue
+        for a, b in itertools.combinations(sites, 2):
+            if frozenset((a, b)) not in already_exact:
+                pairs.add(_pair_key(a, b))
+    return sorted(pairs)
+
+
+def near_miss_advisories(pairs: Iterable[str], baseline: dict[str, object]) -> list[str]:
+    """Advisory: a near-miss pair not already in the baseline. A ratchet like
+    `size_advisories` -- only a NEW pair prints; a baselined one stays quiet."""
+    recorded = baseline.get("near_miss_duplicate_bodies") or []
+    known = set(recorded) if isinstance(recorded, list) else set()
+    return [f"near-miss duplicate: {pair}" for pair in pairs if pair not in known]
 
 
 # --------------------------------------------- 2. private cross-module imports
@@ -729,8 +900,11 @@ def main(argv: list[str] | None = None) -> int:
                 " private_cross_module_imports pins the src/ sites that predate the"
                 " gate: a new one fails the build. The size maps make the advisory"
                 " checks a ratchet -- only new or worsened entries are reported."
+                " near_miss_duplicate_bodies (DL-177) pins the alpha-normalised"
+                " near-miss pairs the tree already had: only a NEW pair is advisory."
             ),
             "private_cross_module_imports": private_import_keys(src_files),
+            "near_miss_duplicate_bodies": near_miss_duplicate_bodies(src_files),
             **measure_sizes(src_files),
         }
         BASELINE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -758,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
     blocking += state_owner_bypasses(src_files)
 
     advisories = size_advisories(measure_sizes(src_files), baseline)
+    advisories += near_miss_advisories(near_miss_duplicate_bodies(src_files), baseline)
 
     for finding in blocking:
         print(f"BLOCK {finding.render()}")
