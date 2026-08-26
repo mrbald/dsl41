@@ -282,9 +282,7 @@ class ControlServer:
                 os.chown(self.path, -1, policy.socket_gid)
                 os.chmod(self.path, 0o660)
             except OSError as exc:
-                raise EngineError(
-                    f"cannot arm control socket for group {group!r}: {exc}"
-                ) from exc
+                raise EngineError(f"cannot arm control socket for group {group!r}: {exc}") from exc
 
     async def close(self) -> None:
         # cancel handlers BEFORE wait_closed(): since 3.12 wait_closed blocks

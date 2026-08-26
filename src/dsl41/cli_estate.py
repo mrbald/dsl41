@@ -471,9 +471,7 @@ async def _offline_seal(
         # whether an unknown attribute was acceptable ran once at launch,
         # and re-asking it here would make `dsl41 seal` refuse a root
         # `dsl41 run` is serving.
-        catalog = load_bundle_catalog(
-            run_root, pinned.source_bundle_hash, permit_unknown=True
-        )
+        catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
         wiring = await wire_from_profile(
             run_root,
             catalog,
@@ -753,7 +751,9 @@ def _root_periods(run_root: Path) -> list[int]:
     # `closed_periods`: that list is empty exactly when every closed period
     # has lost its segment, so a range taken from it would collapse
     # precisely in the case this set exists to catch (DL-144 review)
-    lost = {period_id for period_id in sealed_periods(run_root) if wrote_period(run_root, period_id)}
+    lost = {
+        period_id for period_id in sealed_periods(run_root) if wrote_period(run_root, period_id)
+    }
     return sorted(set(closed_periods(run_root)) | set(archived_periods(run_root)) | lost)
 
 

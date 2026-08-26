@@ -1740,8 +1740,10 @@ class RunnerApp(App[None]):
         if row is not None and isinstance(row.get("state_rev"), int):
             return self._baseline, self._epoch, row["state_rev"]
         read = await self._client.request(read_for(key))
-        return str(read.get("baseline_id") or ""), int(read.get("epoch") or 0), revision_in(
-            read, key
+        return (
+            str(read.get("baseline_id") or ""),
+            int(read.get("epoch") or 0),
+            revision_in(read, key),
         )
 
     def _console_write(self, text: Text) -> None:

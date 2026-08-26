@@ -727,8 +727,7 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
         if not isinstance(record, dict):
             # a line that is not a JSON object has no `rec` to dispatch on
             raise EngineError(
-                f"journal {path}: line {position + 1} is not a record object"
-                " (period-model ss2)"
+                f"journal {path}: line {position + 1} is not a record object (period-model ss2)"
             )
         check_record(record, where=f"journal {path}: line {position + 1}")
     if not records or not is_opening(records[0]):

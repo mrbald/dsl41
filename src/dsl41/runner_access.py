@@ -514,9 +514,7 @@ class AccessControl:
             )
             need = required.name.lower() if required is not None else "no listed"
             have = granted.name.lower() if granted is not None else "no"
-            return False, (
-                f"{principal.spelling} holds {have} tier; {action} needs {need} tier"
-            )
+            return False, (f"{principal.spelling} holds {have} tier; {action} needs {need} tier")
         if required >= Tier.OPS:
             self.journal.write(
                 "privileged_admitted",

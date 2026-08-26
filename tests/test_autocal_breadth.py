@@ -110,9 +110,7 @@ def test_xfomweek_xeomweek_exclude_forms() -> None:
     assert _days(_ext(conditions=["WEEKDAYS", "XEOMWEEK"]), lo, hi) == weekdays - {
         date(2026, 7, 31)
     }
-    assert _days(_ext(conditions=["WEEKDAYS", "XFOMWEEK"]), lo, hi) == weekdays - {
-        date(2026, 7, 1)
-    }
+    assert _days(_ext(conditions=["WEEKDAYS", "XFOMWEEK"]), lo, hi) == weekdays - {date(2026, 7, 1)}
 
 
 def test_weekdmn_backward_and_weekdxn_exclude() -> None:
@@ -151,9 +149,7 @@ def test_week_of_year_family() -> None:
     assert _days(_ext(conditions=["WEEKM01"]), date(2026, 12, 1), date(2026, 12, 31)) == {
         date(2026, 12, 31)
     }
-    assert (
-        _days(_ext(conditions=["DAILY", "WEEKX01"]), date(2026, 1, 1), date(2026, 1, 7)) == set()
-    )
+    assert _days(_ext(conditions=["DAILY", "WEEKX01"]), date(2026, 1, 1), date(2026, 1, 7)) == set()
 
 
 def test_mnthdxnn_excludes_a_day_of_month() -> None:
@@ -268,7 +264,9 @@ def test_cwrk_ordinal_backward_and_exclude_forms() -> None:
 
     def gen(*conditions: str) -> set[date]:
         cal, catalog = _cycle_catalog(*conditions)
-        return set(compile_calendar(cal, catalog).days_between(date(2026, 1, 1), date(2026, 12, 31)))
+        return set(
+            compile_calendar(cal, catalog).days_between(date(2026, 1, 1), date(2026, 12, 31))
+        )
 
     assert gen("CWRK#01") == {date(2026, 3, 30), date(2026, 6, 29)}
     assert gen("CWRK#02") == {date(2026, 3, 31), date(2026, 6, 30)}
@@ -313,9 +311,7 @@ def test_w_walk_crosses_month_and_year_boundary() -> None:
     to land on the first valid non-holiday workday: Jan 2 2027 is a
     Saturday, Jan 3 a Sunday (non-workdays under the default Mon-Fri mask),
     landing on Monday Jan 4 2027."""
-    hol = CalendarIR(
-        name="hols", kind="standard", dates=["12/31/2026 00:00", "01/01/2027 00:00"]
-    )
+    hol = CalendarIR(name="hols", kind="standard", dates=["12/31/2026 00:00", "01/01/2027 00:00"])
     cal = _ext(holiday="W", holcal="hols", conditions=["dec#31"])
     days = _days(cal, date(2026, 12, 1), date(2027, 1, 31), hols=hol)
     assert days == {date(2027, 1, 4)}
@@ -337,9 +333,7 @@ def test_adjust_can_push_a_date_outside_its_own_cycle_period() -> None:
     cyc = CycleIR(name="c", periods=[("01/01/2026", "01/05/2026")])
     cal = _ext(cyccal="c", adjust="-3", conditions=["CYCL#01"])
     catalog = CatalogIR(jobs={}, calendars={"ext": cal}, cycles={"c": cyc})
-    days = set(
-        compile_calendar(cal, catalog).days_between(date(2025, 12, 20), date(2026, 1, 10))
-    )
+    days = set(compile_calendar(cal, catalog).days_between(date(2025, 12, 20), date(2026, 1, 10)))
     assert days == {date(2025, 12, 29)}
 
 
@@ -373,7 +367,9 @@ def test_touching_cycle_periods_index_independently() -> None:
     day (Jan 1, Jan 6), not a bleed across the join, and CYCL#05 -- each
     period is exactly 5 days -- resolves to each period's own last day
     (Jan 5, Jan 10), never double-counting the boundary."""
-    cyc = CycleIR(name="touch", periods=[("01/01/2026", "01/05/2026"), ("01/06/2026", "01/10/2026")])
+    cyc = CycleIR(
+        name="touch", periods=[("01/01/2026", "01/05/2026"), ("01/06/2026", "01/10/2026")]
+    )
     cal1 = _ext(cyccal="touch", conditions=["CYCL#01"])
     catalog1 = CatalogIR(jobs={}, calendars={"ext": cal1}, cycles={"touch": cyc})
     assert set(

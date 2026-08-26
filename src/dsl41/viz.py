@@ -56,7 +56,14 @@ from __future__ import annotations
 from typing import Literal, NamedTuple
 
 from dsl41.conditions import STATUS_LETTER, GlobalAtom
-from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components, derive_graph, local_producer
+from dsl41.derive import (
+    BoxTree,
+    DerivedEdge,
+    DerivedGraph,
+    components,
+    derive_graph,
+    local_producer,
+)
 from dsl41.ir import CatalogIR, FwSpec, JobIR, ScheduleBlock
 
 #: Via -> chart letter. The status half IS conditions.STATUS_LETTER under the
@@ -84,6 +91,7 @@ _CLASS_DEFS = {
     "collapsedBox": "fill:#ece9fd,stroke:#5b21b6,color:#111",
     "lockNode": "fill:#f3f4f6,stroke:#6b7280,color:#111,stroke-dasharray: 2 2",
 }
+
 
 def _frontmatter(*, elk: bool, fixed_scale: bool) -> str:
     """One merged per-chart YAML frontmatter block. `layout:` precedes

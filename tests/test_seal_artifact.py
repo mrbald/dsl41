@@ -1096,9 +1096,7 @@ def test_the_artifact_comparisons_are_one_walk() -> None:
 
     # the two sides are read differently ON PURPOSE: a mapping's absent key
     # is a value that disagrees, a model's missing field is a caller bug
-    assert walk(manifest, {}, ["clock_domain"]) == [
-        ("clock_domain", manifest.clock_domain, None)
-    ]
+    assert walk(manifest, {}, ["clock_domain"]) == [("clock_domain", manifest.clock_domain, None)]
     with pytest.raises(AttributeError):
         walk(manifest, manifest, ["no_such_field"])
 

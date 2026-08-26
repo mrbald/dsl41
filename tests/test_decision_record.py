@@ -574,10 +574,7 @@ def test_the_retired_fold_reaches_a_history_and_a_retention_consumer(tmp_path: P
     records = read_journal(_wal(run_root))
     _rewrite(
         run_root,
-        [
-            {**r, "legacy_batch": True} if r.get("rec") == "decision" else r
-            for r in records
-        ],
+        [{**r, "legacy_batch": True} if r.get("rec") == "decision" else r for r in records],
     )
     with pytest.raises(RunHistoryError, match="RETIRED") as history:
         read_run_root(run_root)

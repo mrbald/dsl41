@@ -227,9 +227,7 @@ def run(
             )
             raise typer.Exit(2)
         estate_anchor = open_from
-    catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(
-        files, permit_unknown, properties
-    )
+    catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     tz_aliases = load_tz_aliases(timezone_map)
     warns = _preflight_or_exit(
         catalog,
@@ -609,7 +607,9 @@ async def _serve_run(
         # (DL-91 finding 4 declined splitting them); the wording no longer claims
         # they are only the tick sweep.
         for ev, reason in engine.drops:
-            typer.echo(f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True)
+            typer.echo(
+                f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True
+            )
         if warns and engine.journal is not None:
             engine.journal.preflight(warns)
         access = None
@@ -1144,9 +1144,7 @@ def _replay_lineage(
             _prove_crossing(
                 root,
                 records[0],
-                predecessor=(
-                    None if previous_segment is None else root_of_wal(previous_segment)
-                ),
+                predecessor=(None if previous_segment is None else root_of_wal(previous_segment)),
                 where=where,
             )
         if _periodized(segment):
@@ -1266,9 +1264,7 @@ def _announce_archived(segment: Path, *, where: str) -> None:
     )
 
 
-def _prove_crossing(
-    root: Path, opening: dict, *, predecessor: "Path | None", where: str
-) -> None:
+def _prove_crossing(root: Path, opening: dict, *, predecessor: "Path | None", where: str) -> None:
     """ss11's "verified means RE-DERIVED, not self-consistent", asked of the
     seal this period opens from -- before the period is opened and before
     the crossing is announced.
@@ -1312,9 +1308,7 @@ def _prove_crossing(
         raise typer.Exit(refuse(exc, prefix=where)) from exc
 
 
-def _period_aliases(
-    root: Path, opening: "dict", *, where: str
-) -> "dict[str, str] | None":
+def _period_aliases(root: Path, opening: "dict", *, where: str) -> "dict[str, str] | None":
     """This period's SEM-35 alias table, from its own pin (period-model
     ss2.1). None where the root no longer holds the manifest, which is the
     same degrade `_period_catalog` makes for the same reason."""

@@ -1483,8 +1483,13 @@ def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
     """The status payload's `armed` boolean (SEM-32; served since DL-54 but
     never rendered) surfaces as flag A, ordered after I/H/N."""
     app = RunnerApp(Path("/tmp/unused.sock"))
-    all_on = {"status": "INACTIVE", "on_ice": True, "on_hold": True, "on_noexec": True,
-              "armed": True}
+    all_on = {
+        "status": "INACTIVE",
+        "on_ice": True,
+        "on_hold": True,
+        "on_noexec": True,
+        "armed": True,
+    }
     assert app._row_cells("j", all_on)[5] == "IHNA"
     assert app._row_cells("j", {"status": "INACTIVE", "armed": True})[5] == "A"
     assert app._row_cells("j", {"status": "INACTIVE", "armed": False})[5] == ""

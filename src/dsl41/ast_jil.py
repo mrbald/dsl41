@@ -592,9 +592,7 @@ class _Scanner:
                 # 4b detector reads it alone, the comment body is consumed
                 # atomically, and the comment closes the continuation (rule
                 # 6: a comment line closes it).
-                cvalue, cgap, ctext, _cp, copen = _split_trailing_comment(
-                    line, in_quote=cont_quote
-                )
+                cvalue, cgap, ctext, _cp, copen = _split_trailing_comment(line, in_quote=cont_quote)
                 scan_text = cvalue + cgap if copen else line
                 masked = _mask_closed_blocks(scan_text, in_quote=cont_quote)
                 if (pair := _find_inline_pair(masked, in_quote=cont_quote)) is not None:

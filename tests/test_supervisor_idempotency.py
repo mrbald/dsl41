@@ -1113,7 +1113,9 @@ def test_pr36a_a_supervisor_known_dead_run_with_no_local_trace_still_replays(
 
     class _DeadListing:
         async def list_runs(self) -> dict:
-            return {"runs": [{"job": "j", "run_number": 1, "wrapper_alive": False, "run_id": bound}]}
+            return {
+                "runs": [{"job": "j", "run_number": 1, "wrapper_alive": False, "run_id": bound}]
+            }
 
     probe = _probe_adapter()
 

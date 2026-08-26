@@ -439,7 +439,12 @@ def test_resume_watch_falls_back_to_the_conventional_run_dir_when_none_is_named(
     log_path.parent.mkdir(parents=True)
     append_watch_line(
         log_path,
-        {"artifact_format_version": ARTIFACT_FORMAT_VERSION, "at": T0, "kind": "start", "run_id": None},
+        {
+            "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+            "at": T0,
+            "kind": "start",
+            "run_id": None,
+        },
     )
     for seconds, stable in ((60, 1), (120, 2)):
         append_watch_line(

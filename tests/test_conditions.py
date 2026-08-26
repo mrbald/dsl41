@@ -365,12 +365,15 @@ def test_every_corpus_condition_attr_parses() -> None:
     for path in CORPUS:
         jf = parse_file(path)
         for stmt in jf.statements:
-            if stmt.subcommand.lower() in {"calendar", "cycle", "extended_calendar", "ext_calendar"}:
+            if stmt.subcommand.lower() in {
+                "calendar",
+                "cycle",
+                "extended_calendar",
+                "ext_calendar",
+            }:
                 continue
             for attr in stmt.attrs:
                 if attr.key.lower() in CONDITION_ATTRS:
                     parse_condition(attr.raw_value)
                     checked += 1
     assert checked >= 8  # grows with the corpus; keep >= current count
-
-

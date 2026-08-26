@@ -2201,7 +2201,9 @@ def test_pr54_the_archive_refuses_until_the_spool_is_pruned(tmp_path: Path) -> N
     run_dir = _tombstone(run_root, effect)
     for boundary_no in range(1, 4):
         text = [C2_JIL, C3_JIL][(boundary_no - 1) % 2]
-        asyncio.run(_seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}")))
+        asyncio.run(
+            _seal(engine, _request(engine, _stage(run_root, text), request_id=f"r-{boundary_no}"))
+        )
         _close(engine)
         engine = _resume(run_root, text)
     _close(engine)
@@ -2523,9 +2525,7 @@ def test_pr56_a_receipt_that_does_not_license_the_missing_file_is_not_a_licence(
     assert segment_only is not None and segment_only.archived == ("wal/000001.jsonl",)
     assert verify_archive_receipt(run_root, 1, licensing=wal_path(run_root, 1)) is not None
     with pytest.raises(EngineError, match="does not license it"):
-        verify_archive_receipt(
-            run_root, 1, licensing=period_dir(run_root, 1) / "candidate.json"
-        )
+        verify_archive_receipt(run_root, 1, licensing=period_dir(run_root, 1) / "candidate.json")
 
 
 def test_pr55_a_stranger_receipt_licenses_nothing(tmp_path: Path) -> None:
@@ -3161,9 +3161,9 @@ def test_b6_audit_period_and_rederive_seal_refuse_a_receipt_themselves(
     # rather than a build in which the two never succeed
     durable_write(
         str(archive_receipt_path(run_root, 1)),
-        read_archive_receipt(run_root, 1).model_copy(
-            update={"attestation_digest": verify_attestation(run_root, 1).digest}
-        ).to_bytes(),
+        read_archive_receipt(run_root, 1)
+        .model_copy(update={"attestation_digest": verify_attestation(run_root, 1).digest})
+        .to_bytes(),
     )
     assert audit_period(run_root, 1, anchor=_anchor(run_root)).period_id == 1
     with pytest.raises(EngineError, match="inputs were ARCHIVED"):

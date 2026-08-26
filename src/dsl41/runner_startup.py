@@ -371,9 +371,7 @@ def _profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]
     """Which profile fields moved -- names only, because the caller reports
     the drift rather than the values. The walk is `period.disagreements`
     (DL-137), the same one every artifact comparison uses."""
-    return sorted(
-        name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields)
-    )
+    return sorted(name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields))
 
 
 def _manifest_profile_drift(

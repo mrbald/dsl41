@@ -870,17 +870,13 @@ def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
         return "unattested: nothing stands in for inputs that were never proved"
     if scan.covered_through is None or scan.covered_through <= period_id:
         return (
-            f"no chain checkpoint above period {period_id} covers it"
-            " -- attest a later period first"
+            f"no chain checkpoint above period {period_id} covers it -- attest a later period first"
         )
     remaining = _remaining_spool(scan.run_root, scan.born, period_id)
     if remaining:
         shown = ", ".join(str(path) for path in remaining[:4])
         more = f" (+{len(remaining) - 4} more)" if len(remaining) > 4 else ""
-        return (
-            f"its spool is still on disk and must be pruned first (PR-36b order):"
-            f" {shown}{more}"
-        )
+        return f"its spool is still on disk and must be pruned first (PR-36b order): {shown}{more}"
     return None
 
 
@@ -1697,11 +1693,7 @@ def _index_run(path: Path) -> tuple[str, int, str] | None:
         return None  # unversioned or foreign-version evidence: unreadable, floored
     job, run_number = payload.get("job"), payload.get("run_number")
     run_id = payload.get("run_id")
-    if (
-        isinstance(job, str)
-        and is_wire_int(run_number)
-        and isinstance(run_id, str)
-    ):
+    if isinstance(job, str) and is_wire_int(run_number) and isinstance(run_id, str):
         return (job, run_number, run_id)
     return None
 
@@ -1920,9 +1912,7 @@ def _archive_receipts_first(
         stored = verify_archive_receipt(plan.run_root, period_id)
         if stored is not None:
             done.add(period_id)
-            unlicensed = [
-                item for item in items if not stored.licenses(plan.run_root, item.path)
-            ]
+            unlicensed = [item for item in items if not stored.licenses(plan.run_root, item.path)]
             if unlicensed:
                 kept += [item for item in items if item not in unlicensed]
                 refused += [
@@ -1988,9 +1978,7 @@ def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str
             " (period-model ss1.3)"
         )
     try:
-        covered = _covered_through(
-            plan.estate_id, _registry_periods(stored, plan.anchor_dir)
-        )
+        covered = _covered_through(plan.estate_id, _registry_periods(stored, plan.anchor_dir))
     except EngineError as exc:
         return str(exc)
     if covered is None or covered <= period_id:
@@ -2050,9 +2038,7 @@ def _write_receipt(plan: RetentionPlan, period_id: int, items: Sequence[Artifact
         attestation_digest=attestation.digest,
         chain_through_period=attestation.chain_through_period,
         retention_class=ARCHIVE_CLASS,
-        archived=tuple(
-            sorted({item.path.relative_to(plan.run_root).as_posix() for item in items})
-        ),
+        archived=tuple(sorted({item.path.relative_to(plan.run_root).as_posix() for item in items})),
         archived_at=datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="microseconds"),
         dsl41_version=dsl41_version(),
     )

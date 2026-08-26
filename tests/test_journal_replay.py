@@ -142,8 +142,7 @@ def test_dl142_replay_crosses_a_boundary_folding_state_and_switching_catalogs(
     seal_record = read_journal(wal_path(run_root, 1))[-1]
     assert seal_record["rec"] == "seal"
     assert lines[boundary[0]] == (
-        f"period 1 sealed at index {seal_record['closes_at_index']};"
-        f" period 2 opens in {run_root}"
+        f"period 1 sealed at index {seal_record['closes_at_index']}; period 2 opens in {run_root}"
     )
     after = lines[boundary[0] + 1 :]
     # the CARRY: period 1's status is the FROM half of period 2's start
@@ -235,8 +234,7 @@ def test_dl142_naming_one_segment_replays_exactly_that_period(tmp_path: Path) ->
     assert "j1 INACTIVE->STARTING" in out.output
     assert "j2" not in out.output
     assert not any(
-        "sealed at index" in line or line.startswith("period ")
-        for line in out.output.splitlines()
+        "sealed at index" in line or line.startswith("period ") for line in out.output.splitlines()
     )  # no boundary line and no per-period labelling on a single segment
 
 
@@ -256,10 +254,8 @@ def test_dl142_a_three_period_read_crosses_both_boundaries(tmp_path: Path) -> No
     crossings = [line for line in lines if "sealed at index" in line]
     closes = [read_journal(wal_path(run_root, period))[-1] for period in (1, 2)]
     assert crossings == [
-        f"period 1 sealed at index {closes[0]['closes_at_index']};"
-        f" period 2 opens in {run_root}",
-        f"period 2 sealed at index {closes[1]['closes_at_index']};"
-        f" period 3 opens in {run_root}",
+        f"period 1 sealed at index {closes[0]['closes_at_index']}; period 2 opens in {run_root}",
+        f"period 2 sealed at index {closes[1]['closes_at_index']}; period 3 opens in {run_root}",
     ]
     # each period's own catalog ruled, in its own place in the stream
     second = lines.index(crossings[0])

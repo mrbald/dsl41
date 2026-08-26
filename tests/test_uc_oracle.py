@@ -942,9 +942,7 @@ def test_pM12_independent_or_first_branch_fires_vs_and_join() -> None:
         ("pm12i_a", "pm12i_cons"),
         ("pm12i_b", "pm12i_cons"),
     }  # naive lowering: BOTH OR branches became edges into the consumer
-    assert any(
-        "M12 OR shapes present" in e and "U1-gated" in e for e in _excluded_texts(model)
-    )
+    assert any("M12 OR shapes present" in e and "U1-gated" in e for e in _excluded_texts(model))
 
     script = [ev("STARTJOB", 0, job="pm12i_a"), ev("STATUS", 1, job="pm12i_a", status="SUCCESS")]
     autosys_trace, uc_trace = run_both(text, script)

@@ -333,7 +333,14 @@ def test_cli_viz_explore_writes_out_file(tmp_path: Path) -> None:
     target = tmp_path / "explore.html"
     result = runner.invoke(
         app,
-        ["viz", "--format", "explore", "--out", str(target), str(CORPUS_DIR / "sem10_box_basic.jil")],
+        [
+            "viz",
+            "--format",
+            "explore",
+            "--out",
+            str(target),
+            str(CORPUS_DIR / "sem10_box_basic.jil"),
+        ],
     )
     assert result.exit_code == 0
     assert target.read_text(encoding="utf-8").startswith("<!doctype html>")

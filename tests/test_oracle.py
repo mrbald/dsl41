@@ -1936,9 +1936,7 @@ def test_sem33_box_skip_transition_route_evaluates_the_override_too() -> None:
     o.feed(Event(at=datetime(2026, 7, 2, 4, 31), kind="STARTJOB", payload={"job": "rw_member33h"}))
     assert transitions(o, "rw_member33h")[-2:] == ["RUN_WINDOW_SKIP", "SUCCESS->INACTIVE"]
     assert o.store.job["box_rw33h"].status == "SUCCESS"
-    folds = [
-        t for t in o.trace() if t.job == "box_rw33h" and t.transition.endswith("->SUCCESS")
-    ]
+    folds = [t for t in o.trace() if t.job == "box_rw33h" and t.transition.endswith("->SUCCESS")]
     assert folds[-1].cause == "box_success override met (SEM-12)"
 
 
@@ -2103,9 +2101,7 @@ def test_sem33_box_skip_keeps_the_ticks_must_start_deadline_armed() -> None:
     o.feed(Event(at=datetime(2026, 7, 1, 4, 31), kind="STARTJOB", payload={"job": "rw_member33m"}))
     assert transitions(o, "rw_member33m") == ["RUN_WINDOW_SKIP"]
     assert o.store.job["box_rw33m"].status == "SUCCESS"  # sole member skipped: empty-vote fold
-    deadlines = [
-        ev for _, _, ev in o.store.timers() if ev.payload.get("check") == "must_start"
-    ]
+    deadlines = [ev for _, _, ev in o.store.timers() if ev.payload.get("check") == "must_start"]
     assert len(deadlines) == 1  # the tick's deadline survives the skip
     emitted = o.feed(
         Event(
@@ -3599,6 +3595,7 @@ def test_dl158_disarm_wakes_no_waiter_where_a_wake_would_act() -> None:
     assert o.store.job["qm158"].status == "QUE_WAIT"  # still queued: no scan rode the disarm
     o.feed(ev("STATUS", 6, job="hog158", status="SUCCESS"))  # the real scan
     assert o.store.job["qm158"].status == "INACTIVE"  # cancelled by the release, not the DISARM
+
 
 # ------------------------------------------- DL-54 fix pins
 

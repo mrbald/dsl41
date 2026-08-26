@@ -735,18 +735,22 @@ def _split_list(value: str) -> list[str]:
 #: `TIME_CLUSTER` are exec-cluster and SEM-30 job attrs that happen to route
 #: through `_unquote` too, plus nine names that route through no other named
 #: cluster, three of them not job attrs at all.
-UNQUOTED_AT_LOWERING = _BOX_INERT_ATTRS | TIME_CLUSTER | frozenset(
-    {
-        "command",
-        "watch_file",
-        "box_name",
-        "status",
-        "success_codes",
-        "fail_codes",
-        "type",
-        "res_type",
-        "xtype",
-    }
+UNQUOTED_AT_LOWERING = (
+    _BOX_INERT_ATTRS
+    | TIME_CLUSTER
+    | frozenset(
+        {
+            "command",
+            "watch_file",
+            "box_name",
+            "status",
+            "success_codes",
+            "fail_codes",
+            "type",
+            "res_type",
+            "xtype",
+        }
+    )
 )
 
 

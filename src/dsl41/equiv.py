@@ -213,9 +213,7 @@ def _canon_schedule(schedule: ScheduleBlock) -> ScheduleBlock:
     therefore sort as ONE row set, and a duplicate row -- same start time,
     same alarms -- collapses as before."""
     update: dict[str, object] = {
-        "start_mins": sorted(set(schedule.start_mins))
-        if schedule.start_mins is not None
-        else None,
+        "start_mins": sorted(set(schedule.start_mins)) if schedule.start_mins is not None else None,
         "days_of_week": sorted(set(schedule.days_of_week))
         if schedule.days_of_week is not None
         else None,
@@ -366,6 +364,7 @@ def equivalent_tier_a(
     globals_equal = a.globals_declared == b.globals_declared
     if not globals_equal:
         detail["<globals>"] = "globals_declared differ"
+
     def _machine_key(v: MachineIR) -> tuple:
         # members are ordered (DL-49); compare order-sensitively -- a reorder
         # or a dropped component is a real difference, never false-equal.

@@ -2267,9 +2267,7 @@ def test_a_failing_journal_close_still_gives_the_leader_lock_back(
     monkeypatch.setattr(runner_journal.Journal, "close", _bad_close)
 
     with pytest.raises(OSError, match="fsync failed on the way out"):
-        asyncio.run(
-            _serve_run(catalog, run_root, False, [], profile=runtime_profile_from_cli())
-        )
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=runtime_profile_from_cli()))
     retry = acquire_run_root(run_root)
     retry.release()
 

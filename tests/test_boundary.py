@@ -333,9 +333,7 @@ def test_pr08d_a_sentinel_missing_its_version_refuses_by_name(tmp_path: Path) ->
     missing = tmp_path / "missing-version"
     missing.mkdir()
     sentinel_path(missing).write_bytes(
-        json.dumps(
-            {"rec": "period_root", "estate_id": "e", "see": "wal/"}, sort_keys=True
-        ).encode()
+        json.dumps({"rec": "period_root", "estate_id": "e", "see": "wal/"}, sort_keys=True).encode()
         + b"\n"
     )
     with pytest.raises(EngineError, match="missing artifact_format_version"):
@@ -478,9 +476,7 @@ def test_a_claim_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
     claim = anchor.read_claim("present-version")
     assert claim is not None and claim.claim_id == "c1"
 
-    _write(
-        "unsupported-version", {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1}
-    )
+    _write("unsupported-version", {**body, "artifact_format_version": ARTIFACT_FORMAT_VERSION + 1})
     with pytest.raises(EngineError, match="not a claim this binary can read") as unsup:
         anchor.read_claim("unsupported-version")
     assert "missing artifact_format_version" not in str(unsup.value)
@@ -1037,9 +1033,7 @@ def test_an_existing_next_segment_that_disagrees_refuses_before_the_cas(tmp_path
         path.write_text("\n".join([json.dumps(segment, sort_keys=True), *lines[1:]]) + "\n")
 
         with pytest.raises(EngineError, match="did not open") as refused:
-            open_next_period(
-                run_root=run_root, anchor=anchor, committed=committed, catalog=catalog
-            )
+            open_next_period(run_root=run_root, anchor=anchor, committed=committed, catalog=catalog)
         message = str(refused.value)
         stored = anchor.require(committed.seal.estate_id)
     assert f"runtime_hash: segment {stranger!r}" in message  # the field, and both sides
@@ -3132,9 +3126,7 @@ def test_pr28_phase_one_refuses_each_of_its_own_checks(tmp_path: Path) -> None:
     # and the message would then be a neighbouring rule's
     with pytest.raises(EngineError, match="one executable implements one version"):
         validate_staged(
-            _staged_context(
-                run_root, engine, state_machine_version=STATE_MACHINE_VERSION + 1
-            )
+            _staged_context(run_root, engine, state_machine_version=STATE_MACHINE_VERSION + 1)
         )
     _close(engine)
 
@@ -3982,9 +3974,7 @@ def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Pat
         async def list_runs(self) -> dict[str, Any]:
             self.calls += 1  # every call re-arms the queue: nothing ever settles
             engine.inject(
-                Event(
-                    at=T0, kind="SET_GLOBAL", payload={"name": "LATE", "value": str(self.calls)}
-                )
+                Event(at=T0, kind="SET_GLOBAL", payload={"name": "LATE", "value": str(self.calls)})
             )
             return await super().list_runs()
 
@@ -4578,10 +4568,7 @@ def test_a_closed_segment_with_a_torn_tail_refuses_rather_than_skipping_records(
 #: a box and its one member: the only shape that can put a live BOX row
 #: behind an `executions` entry, which is what ss3.5's CMD-or-FW half is
 #: about
-BOX_JIL = (
-    "insert_job: bx\njob_type: b\n\n"
-    "insert_job: a\njob_type: c\ncommand: x\nbox_name: bx\n"
-)
+BOX_JIL = "insert_job: bx\njob_type: b\n\ninsert_job: a\njob_type: c\ncommand: x\nbox_name: bx\n"
 
 
 def _resume_wired(

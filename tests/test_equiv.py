@@ -197,9 +197,7 @@ _ATOM_STRS = [
     ),
     last=st.sampled_from(_ATOM_STRS),
 )
-def test_canonical_cond_is_idempotent_property(
-    parts: list[tuple[str, str]], last: str
-) -> None:
+def test_canonical_cond_is_idempotent_property(parts: list[tuple[str, str]], last: str) -> None:
     expr = "".join(f"{atom} {op} " for atom, op in parts) + last
     cond = parse_condition(expr)
     once = canonical_cond(cond)
@@ -219,8 +217,7 @@ def test_virtual_pool_membership_is_not_false_equal() -> None:
     # hash-equal (machine defs feed catalog_hash and tier a) -- silent loss
     # of a component would otherwise read as "equivalent".
     a = lower_source(
-        "insert_machine: h1\ntype: a\nnode_name: n1\n\n"
-        "insert_machine: pool\ntype: v\nmachine: h1\n"
+        "insert_machine: h1\ntype: a\nnode_name: n1\n\ninsert_machine: pool\ntype: v\nmachine: h1\n"
     )
     b = lower_source(
         "insert_machine: h1\ntype: a\nnode_name: n1\n\n"
@@ -1143,8 +1140,7 @@ def test_tier_c_rename_collision_raises() -> None:
 
 
 _JIL_UNSET_LITERAL = (
-    "insert_job: sentinel_reader\njob_type: c\ncommand: x\nmachine: m1\n"
-    "condition: v(G) = <unset>\n"
+    "insert_job: sentinel_reader\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(G) = <unset>\n"
 )
 
 

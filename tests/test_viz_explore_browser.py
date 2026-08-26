@@ -90,7 +90,9 @@ def driven(request: pytest.FixtureRequest, page_url: str) -> Any:
         except PlaywrightError as exc:  # pragma: no cover -- environment, not logic
             if "Executable doesn't exist" not in str(exc):
                 raise
-            pytest.skip(f"the {request.param} binary is absent; `playwright install {request.param}`")
+            pytest.skip(
+                f"the {request.param} binary is absent; `playwright install {request.param}`"
+            )
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
         d = Driven(engine=request.param, page=page)
         page.on("pageerror", lambda err: d.errors.append(str(err)))
@@ -218,7 +220,9 @@ def test_search_unhides_a_node_hidden_by_a_focus(driven: Driven) -> None:
     _ready(driven)
     _show_all(driven)
     sample = _sample_node(driven)
-    driven.page.evaluate("(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample)
+    driven.page.evaluate(
+        "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
+    )
     driven.page.wait_for_timeout(_SETTLE_MS)
     hidden = driven.page.evaluate(
         "() => { const h = cy.nodes().filter(n => n.isChildless() && !n.visible())[0];"
@@ -264,11 +268,19 @@ def test_relayout_toggle_off_leaves_leaf_positions_alone(driven: Driven) -> None
         ".map(n => [n.id(), [n.position('x'), n.position('y')]]))"
     )
     before = driven.page.evaluate(leaves)
-    driven.page.evaluate("(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample)
+    driven.page.evaluate(
+        "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
+    )
     driven.page.wait_for_timeout(_SETTLE_MS)
     after = driven.page.evaluate(leaves)
-    moved = [k for k, v in before.items() if abs(v[0] - after[k][0]) > 0.5 or abs(v[1] - after[k][1]) > 0.5]
-    assert not moved, f"{driven.engine}: {len(moved)} leaf node(s) moved with re-layout off: {moved[:5]}"
+    moved = [
+        k
+        for k, v in before.items()
+        if abs(v[0] - after[k][0]) > 0.5 or abs(v[1] - after[k][1]) > 0.5
+    ]
+    assert not moved, (
+        f"{driven.engine}: {len(moved)} leaf node(s) moved with re-layout off: {moved[:5]}"
+    )
     driven.page.check("#relayout")
     _show_all(driven)
 
@@ -279,7 +291,9 @@ def test_details_panel_opens_for_a_node_and_for_an_edge(driven: Driven) -> None:
     sample = _sample_node(driven)
     driven.page.evaluate("(id) => { cy.$id(id).emit('tap'); }", sample)
     driven.page.wait_for_timeout(200)
-    assert driven.page.get_attribute("#details", "hidden") is None, f"{driven.engine}: panel stayed shut"
+    assert driven.page.get_attribute("#details", "hidden") is None, (
+        f"{driven.engine}: panel stayed shut"
+    )
     assert driven.page.inner_text("#d-title") == sample
     assert driven.page.evaluate("() => document.querySelectorAll('#d-rows tr').length") > 0
 
@@ -323,7 +337,9 @@ def test_context_menu_opens_on_right_click_and_an_item_narrows_the_graph(driven:
     _click(driven, "#fan-in-tree")
     driven.page.wait_for_timeout(_SETTLE_MS)
     after = _counts(driven)["visible_nodes"]
-    assert 0 < after < before, f"{driven.engine}: fan-in tree left {after} of {before} nodes visible"
+    assert 0 < after < before, (
+        f"{driven.engine}: fan-in tree left {after} of {before} nodes visible"
+    )
     assert driven.page.evaluate("(id) => cy.$id(id).visible()", sample)
     _show_all(driven)
 

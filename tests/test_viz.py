@@ -875,7 +875,9 @@ def test_to_markdown_fixed_scale_prepends_flowchart_frontmatter() -> None:
     md = to_markdown(catalog_of(text), title="t", fixed_scale=True)
     fences = _mermaid_fences(md)
     assert not fences[0].startswith("---")  # legend is a fixed template, untouched
-    assert fences[1].startswith("---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\nflowchart")
+    assert fences[1].startswith(
+        "---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\nflowchart"
+    )
 
 
 def test_to_markdown_elk_and_fixed_scale_merge_into_one_frontmatter_block() -> None:
@@ -1057,7 +1059,14 @@ def test_cli_viz_format_chart_includes_standalone_jobs() -> None:
     # has no appendices, so they render unconditionally -- which is also why
     # --include-singletons stays silent here instead of being refused (DL-75)
     result = runner.invoke(
-        app, ["viz", "--format", "chart", "--include-singletons", str(CORPUS_DIR / "sem30_schedule.jil")]
+        app,
+        [
+            "viz",
+            "--format",
+            "chart",
+            "--include-singletons",
+            str(CORPUS_DIR / "sem30_schedule.jil"),
+        ],
     )
     assert result.exit_code == 0
     assert '"test_must_start_complete' in result.stdout

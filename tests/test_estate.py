@@ -1765,8 +1765,14 @@ def test_dl169_a_rolled_roots_retry_still_answers_from_the_imported_sidecar(
     assert sealed_periods(root_b) == [1]  # the imported copy is what stands in for it
 
     retried = _seal_next(
-        root_b, c2, "--request-id", "r-roll", "--claimed-actor", "tester@ci",
-        "--estate-anchor", str(anchor_dir),
+        root_b,
+        c2,
+        "--request-id",
+        "r-roll",
+        "--claimed-actor",
+        "tester@ci",
+        "--estate-anchor",
+        str(anchor_dir),
     )
     assert retried.exit_code == 0, retried.output
     assert "already closed" in retried.output and "period 1" in retried.output

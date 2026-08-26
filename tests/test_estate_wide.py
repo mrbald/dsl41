@@ -519,8 +519,7 @@ def test_dl142_journal_names_every_segment_and_replays_across_the_roll(
     closing = read_journal(wal_path(line.root_a, 1))[-1]
     assert closing["rec"] == "seal"
     assert (
-        f"period 1 sealed at index {closing['closes_at_index']};"
-        f" period 2 opens in {line.root_b}"
+        f"period 1 sealed at index {closing['closes_at_index']}; period 2 opens in {line.root_b}"
     ) in out.output
     # period 2, in root B, under root B's own bundle: j2 is C2's alone
     assert "j2 INACTIVE->STARTING" in out.output and "j2 RUNNING->SUCCESS" in out.output
@@ -912,8 +911,13 @@ def test_pr56_an_archived_period_in_another_root_reads_through_the_walk(
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
-            "--next", str(line.c3),
+            "seal",
+            "--run-root",
+            str(line.root_b),
+            "--estate-anchor",
+            str(line.anchor),
+            "--next",
+            str(line.c3),
         ).exit_code
         == 0
     )
@@ -924,8 +928,13 @@ def test_pr56_an_archived_period_in_another_root_reads_through_the_walk(
     # period 1's spool goes first (PR-36b's order), then its inputs
     assert (
         _invoke(
-            "estate", "prune", "--run-root", str(line.root_a),
-            "--estate-anchor", str(line.anchor), "--tombstones",
+            "estate",
+            "prune",
+            "--run-root",
+            str(line.root_a),
+            "--estate-anchor",
+            str(line.anchor),
+            "--tombstones",
         ).exit_code
         == 0
     )
@@ -982,16 +991,26 @@ def test_pr56_a_root_whose_every_period_is_archived_still_plans(tmp_path: Path) 
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
-            "--next", str(line.c3),
+            "seal",
+            "--run-root",
+            str(line.root_b),
+            "--estate-anchor",
+            str(line.anchor),
+            "--next",
+            str(line.c3),
         ).exit_code
         == 0
     )
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "estate", "prune", "--run-root", str(line.root_a),
-            "--estate-anchor", str(line.anchor), "--tombstones",
+            "estate",
+            "prune",
+            "--run-root",
+            str(line.root_a),
+            "--estate-anchor",
+            str(line.anchor),
+            "--tombstones",
         ).exit_code
         == 0
     )
@@ -1045,16 +1064,26 @@ def test_pr56_a_lost_period_in_a_fully_archived_root_still_refuses(tmp_path: Pat
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
-            "--next", str(line.c3),
+            "seal",
+            "--run-root",
+            str(line.root_b),
+            "--estate-anchor",
+            str(line.anchor),
+            "--next",
+            str(line.c3),
         ).exit_code
         == 0
     )
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "estate", "prune", "--run-root", str(line.root_a),
-            "--estate-anchor", str(line.anchor), "--tombstones",
+            "estate",
+            "prune",
+            "--run-root",
+            str(line.root_a),
+            "--estate-anchor",
+            str(line.anchor),
+            "--tombstones",
         ).exit_code
         == 0
     )
@@ -1142,16 +1171,26 @@ def test_b7_a_wrong_branch_pair_in_a_registered_root_releases_nothing(
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "seal", "--run-root", str(line.root_b), "--estate-anchor", str(line.anchor),
-            "--next", str(line.c3),
+            "seal",
+            "--run-root",
+            str(line.root_b),
+            "--estate-anchor",
+            str(line.anchor),
+            "--next",
+            str(line.c3),
         ).exit_code
         == 0
     )
     assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
     assert (
         _invoke(
-            "estate", "prune", "--run-root", str(line.root_a),
-            "--estate-anchor", str(line.anchor), "--tombstones",
+            "estate",
+            "prune",
+            "--run-root",
+            str(line.root_a),
+            "--estate-anchor",
+            str(line.anchor),
+            "--tombstones",
         ).exit_code
         == 0
     )

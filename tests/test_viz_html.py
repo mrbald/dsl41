@@ -84,7 +84,7 @@ def test_to_html_chart_count_matches_markdown_fences() -> None:
 def test_to_html_escapes_the_json_but_round_trips_the_chart() -> None:
     # a scheduled job's label line-breaks with <br/>: the raw script block
     # must not contain "<", yet the decoded chart must get the tag back
-    text = "insert_job: nightly\njob_type: c\ncommand: x\nmachine: m1\nstart_times: \"03:00\"\n"
+    text = 'insert_job: nightly\njob_type: c\ncommand: x\nmachine: m1\nstart_times: "03:00"\n'
     page = to_html(catalog_of(text), include_singletons=True)
     decoded = "\n".join(c["src"] for c in _charts(page))
     assert "<br/>" in decoded
@@ -265,9 +265,12 @@ def test_cli_viz_html_stays_silent_on_elk_and_fixed_scale() -> None:
     )
     assert result.exit_code == 0
     assert result.stderr == ""
-    assert result.stdout == runner.invoke(
-        app, ["viz", "--format", "html", str(CORPUS_DIR / "sem10_box_basic.jil")]
-    ).stdout
+    assert (
+        result.stdout
+        == runner.invoke(
+            app, ["viz", "--format", "html", str(CORPUS_DIR / "sem10_box_basic.jil")]
+        ).stdout
+    )
 
 
 def test_cli_viz_html_shaping_flags_reach_the_charts() -> None:

@@ -528,7 +528,11 @@ def test_q9_braces_group_like_parens() -> None:
     braced = _days(_ext(conditions=["{MNTHD#7} | {MNTHD#21}"]), lo, hi)
     assert braced == {date(2026, 7, 7), date(2026, 7, 21)}
     assert braced == _days(_ext(conditions=["(MNTHD#7) | (MNTHD#21)"]), lo, hi)
-    mixed = _days(_ext(workday="all", conditions=["{feb | jul}&workd#1"]), date(2026, 1, 1), date(2026, 12, 31))
+    mixed = _days(
+        _ext(workday="all", conditions=["{feb | jul}&workd#1"]),
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+    )
     assert mixed == {date(2026, 2, 1), date(2026, 7, 1)}  # workday all: workd#1 = the 1st
 
 
@@ -538,7 +542,9 @@ def test_q9_hash_l_ordinal_means_last() -> None:
     the form)."""
     lo, hi = JUL26
     assert _days(_ext(conditions=["WORKD#L"]), lo, hi) == {date(2026, 7, 31)}  # Friday
-    assert _days(_ext(conditions=["WORKD#L"]), lo, hi) == _days(_ext(conditions=["WORKDM1"]), lo, hi)
+    assert _days(_ext(conditions=["WORKD#L"]), lo, hi) == _days(
+        _ext(conditions=["WORKDM1"]), lo, hi
+    )
     assert _days(_ext(conditions=["MNTHD#L"]), lo, hi) == {date(2026, 7, 31)}
     assert _days(_ext(conditions=["SAT#L"]), lo, hi) == {date(2026, 7, 25)}  # last Saturday
 

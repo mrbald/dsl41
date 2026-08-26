@@ -1131,9 +1131,7 @@ def test_multi_period_cycle_and_multi_condition_calendar_roundtrip() -> None:
 
 def test_cycle_periods_and_kwarg_pair_are_mutually_exclusive() -> None:
     with pytest.raises(DslError, match="not both"):
-        CatalogBuilder().cycle(
-            "q", periods=[("01/01/2026", "01/05/2026")], start_date="02/01/2026"
-        )
+        CatalogBuilder().cycle("q", periods=[("01/01/2026", "01/05/2026")], start_date="02/01/2026")
     with pytest.raises(DslError, match="not both"):
         CatalogBuilder().extended_calendar("e", conditions=["EOM"], condition="FOM")
 
@@ -1854,8 +1852,7 @@ def test_decompile_reports_a_non_name_shaped_resource_as_staying_explicit() -> N
     source = decompile(catalog, report=report)
     assert "c.contend(" not in source
     assert any(
-        "not resource-name-shaped for contend()" in line and "'BAD NAME'" in line
-        for line in report
+        "not resource-name-shaped for contend()" in line and "'BAD NAME'" in line for line in report
     )
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
 
@@ -1926,20 +1923,38 @@ def test_decompile_schedule_name_collision_gets_a_deterministic_suffix() -> None
     the second gets a deterministic _2 suffix, first-seen order."""
     c = CatalogBuilder()
     c.job(
-        "g1a", command="a", machine="m1", date_conditions=True, run_calendar="CAL",
+        "g1a",
+        command="a",
+        machine="m1",
+        date_conditions=True,
+        run_calendar="CAL",
         start_times='"05:00"',
     )
     c.job(
-        "g1b", command="b", machine="m1", date_conditions=True, run_calendar="CAL",
+        "g1b",
+        command="b",
+        machine="m1",
+        date_conditions=True,
+        run_calendar="CAL",
         start_times='"05:00"',
     )
     c.job(
-        "g2a", command="c", machine="m1", date_conditions=True, run_calendar="CAL",
-        start_times='"05:00"', timezone="UTC",
+        "g2a",
+        command="c",
+        machine="m1",
+        date_conditions=True,
+        run_calendar="CAL",
+        start_times='"05:00"',
+        timezone="UTC",
     )
     c.job(
-        "g2b", command="d", machine="m1", date_conditions=True, run_calendar="CAL",
-        start_times='"05:00"', timezone="UTC",
+        "g2b",
+        command="d",
+        machine="m1",
+        date_conditions=True,
+        run_calendar="CAL",
+        start_times='"05:00"',
+        timezone="UTC",
     )
     catalog = c.build()
     source = decompile(catalog)
@@ -1991,9 +2006,7 @@ def test_decompiler_folds_the_t006_corpus_resources_and_leaves_the_multi_group_j
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
 
 
-def test_decompiler_folds_the_t007_corpus_schedules_and_leaves_near_identical_ones_inline() -> (
-    None
-):
+def test_decompiler_folds_the_t007_corpus_schedules_and_leaves_near_identical_ones_inline() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     source = decompile(catalog)
     assert "**SCHED_0500_MO_TU_WE_TH_FR" in _job_line(source, "fold_sched_a")
@@ -2033,9 +2046,7 @@ def test_report_explains_why_a_lookback_qualified_link_stays_explicit() -> None:
     catalog = c.build()
     report: list[str] = []
     decompile(catalog, report=report)
-    assert any(
-        "explicit: link 'p1'->'p2' -- lookback-qualified (Q2)" in line for line in report
-    )
+    assert any("explicit: link 'p1'->'p2' -- lookback-qualified (Q2)" in line for line in report)
 
 
 # --------------------------------------------------------------- CLI: folds/--no-fold
@@ -2137,6 +2148,7 @@ def test_dl39_builder_escapes_colon_names_in_generated_jil() -> None:
     assert "condition: n(down\\:stream)" in jil  # the head's mutex half
     catalog = c.build()
     assert set(catalog.jobs) == {"up:stream", "down:stream"}
+
 
 # ------------------------------------------------------- DL-40: review fixes
 

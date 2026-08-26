@@ -1252,9 +1252,7 @@ def test_dl33_exit_is_success_fail_codes_decide_alone(code: int, expected: bool)
     ],
     ids=["listed-succeeds", "zero-unlisted", "threshold-ignored"],
 )
-def test_dl33_exit_is_success_success_codes_replace_the_default(
-    code: int, expected: bool
-) -> None:
+def test_dl33_exit_is_success_success_codes_replace_the_default(code: int, expected: bool) -> None:
     """Q7 (DL-58, KB 408778): absent fail_codes, a present success_codes
     alone decides -- unlisted codes (0 included) are FAILURE."""
     assert exit_is_success(code, max_exit_success=2, success_codes=[(20, 30)]) is expected
@@ -1291,7 +1289,5 @@ def test_dl39_both_subject_spellings_converge() -> None:
     """A raw-colon subject (legal value text, rule 4b's no-whitespace shape)
     and the vendor-canonical escaped spelling lower to the SAME key."""
     for subject in ("alpha:one", "alpha\\:one"):
-        catalog = lower_source(
-            f"insert_job: {subject}\njob_type: c\ncommand: /bin/x\n", file="<t>"
-        )
+        catalog = lower_source(f"insert_job: {subject}\njob_type: c\ncommand: /bin/x\n", file="<t>")
         assert list(catalog.jobs) == ["alpha:one"], subject

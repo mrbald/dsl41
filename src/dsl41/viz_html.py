@@ -131,9 +131,9 @@ def _page(
             "__DSL41_MERMAID_JS__": (package / "_vendor" / "mermaid.min.js").read_text(
                 encoding="utf-8"
             ),
-            "__DSL41_ELK_JS__": (
-                package / "_vendor" / "mermaid-layout-elk.iife.min.js"
-            ).read_text(encoding="utf-8"),
+            "__DSL41_ELK_JS__": (package / "_vendor" / "mermaid-layout-elk.iife.min.js").read_text(
+                encoding="utf-8"
+            ),
         },
     )
 
@@ -253,9 +253,7 @@ def to_html(
         body_a = _table(["job", "kind", "schedule", "command / watched file"], meta_rows)
     else:
         body_a = "<p>None.</p>"
-    tables.append(
-        f'<section id="appendix-a">\n<h2>{_text(heading_a)}</h2>\n{body_a}\n</section>'
-    )
+    tables.append(f'<section id="appendix-a">\n<h2>{_text(heading_a)}</h2>\n{body_a}\n</section>')
 
     toc.append('<li><a href="#appendix-b">Appendix B</a></li>')
     heading_b = "Appendix B \N{EM DASH} edge annotations"
@@ -278,9 +276,7 @@ def to_html(
         )
     else:
         body_b = "<p>None \N{EM DASH} every edge maps exactly.</p>"
-    tables.append(
-        f'<section id="appendix-b">\n<h2>{_text(heading_b)}</h2>\n{body_b}\n</section>'
-    )
+    tables.append(f'<section id="appendix-b">\n<h2>{_text(heading_b)}</h2>\n{body_b}\n</section>')
 
     toc.append('<li><a href="#appendix-c">Appendix C</a></li>')
     heading_c = "Appendix C \N{EM DASH} redesign flags, OR shapes, cycles"
@@ -289,13 +285,10 @@ def to_html(
         flag_rows = [
             [_text(f.job), _text(f.mapping_row), _text(f.reason)] for f in graph.redesign_flags
         ]
-        parts_c.append(
-            "<h3>Redesign flags</h3>\n" + _table(["job", "row", "reason"], flag_rows)
-        )
+        parts_c.append("<h3>Redesign flags</h3>\n" + _table(["job", "row", "reason"], flag_rows))
     if graph.or_shapes:
         shape_rows = [
-            [_text(s.job), _text(s.attr), _text(s.kind), _text(s.lowering)]
-            for s in graph.or_shapes
+            [_text(s.job), _text(s.attr), _text(s.kind), _text(s.lowering)] for s in graph.or_shapes
         ]
         parts_c.append(
             "<h3>OR shapes (M12)</h3>\n"
@@ -307,9 +300,7 @@ def to_html(
         )
         parts_c.append(f"<h3>Cycles (L010)</h3>\n<ul>\n{items}\n</ul>")
     body_c = "\n".join(parts_c) if parts_c else "<p>None.</p>"
-    tables.append(
-        f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>'
-    )
+    tables.append(f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>')
 
     return _page(
         title=title,

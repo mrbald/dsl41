@@ -83,8 +83,7 @@ app.command()(cli_estate.verify)
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Lineage-level operations: prune what retention allows, and the"
-    " break-glass reclaim.",
+    help="Lineage-level operations: prune what retention allows, and the break-glass reclaim.",
 )
 app.add_typer(estate_app, name="estate")
 estate_app.command("reclaim")(cli_estate.estate_reclaim)

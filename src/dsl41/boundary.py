@@ -1170,9 +1170,7 @@ def walk_estate(anchor_dir: Path) -> EstateWalk:
             provisional.append(period_id)
             continue
         root, receipt = _prove_root(stored, period_id, row)
-        periods.append(
-            EstatePeriod(period_id=period_id, root=root, row=row, archived=receipt)
-        )
+        periods.append(EstatePeriod(period_id=period_id, root=root, row=row, archived=receipt))
     if not periods:
         raise EngineError(
             f"{anchor_dir}: the registry names no period whose segment is durable"
@@ -1247,7 +1245,9 @@ def _prove_root(
             # always licenses THIS file. The argument is what keeps the
             # walk correct on the day that shape rule is relaxed, and the
             # door's own test is what pins it
-            root, period_id, licensing=None if segment.is_file() else segment
+            root,
+            period_id,
+            licensing=None if segment.is_file() else segment,
         )
     except EngineError as exc:
         raise EngineError(f"{where}: {exc}") from exc
@@ -1609,9 +1609,7 @@ def load_staged_catalog(
     that could never hash back to the pin. That is also what lets an engine
     validate a candidate on a host where the original files do not
     exist."""
-    return load_bundle_catalog(
-        run_root, staged.source_bundle_hash, permit_unknown=permit_unknown
-    )
+    return load_bundle_catalog(run_root, staged.source_bundle_hash, permit_unknown=permit_unknown)
 
 
 # ---------------------------------------------------------- the ss9 gate

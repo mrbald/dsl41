@@ -2279,9 +2279,7 @@ def test_a_deeply_nested_request_is_answered_bad_request_and_stays_in_sync(
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            reader, writer = await asyncio.open_unix_connection(
-                str(server.path), limit=LINE_LIMIT
-            )
+            reader, writer = await asyncio.open_unix_connection(str(server.path), limit=LINE_LIMIT)
             try:
                 deep = b"[" * 100_000 + b"]" * 100_000
                 assert len(deep) < LINE_LIMIT  # the ceiling is not what refuses it
@@ -2441,9 +2439,7 @@ def test_dl168_a_seal_reads_its_next_period_strict_too(short_root: Path) -> None
                 state_machine_version=STATE_MACHINE_VERSION,
             )
             laundered = {**staged.model_dump(mode="json"), "state_machine_version": True}
-            answer = await _control_call(
-                server.path, _seal_wire(engine, next_period=laundered)
-            )
+            answer = await _control_call(server.path, _seal_wire(engine, next_period=laundered))
             assert answer["refused"] is True
             assert "malformed seal request" in answer["error"]
             assert "valid integer" in answer["error"]

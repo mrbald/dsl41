@@ -78,9 +78,7 @@ def _live_status(text: str, result: object) -> dict:
     )
     seen: list[Event] = []
     engine._enqueue = seen.append  # type: ignore[method-assign]
-    asyncio.run(
-        engine._run_adapter(engine.oracle.catalog.jobs["j"], 1, _ReturnsAdapter(result))
-    )
+    asyncio.run(engine._run_adapter(engine.oracle.catalog.jobs["j"], 1, _ReturnsAdapter(result)))
     [event] = seen
     assert {event.payload["job"], event.payload["run_number"]} == {"j", 1}
     return {k: v for k, v in event.payload.items() if k not in ("job", "run_number")}
@@ -157,7 +155,6 @@ def test_one_adapter_result_is_reported_the_same_live_and_at_resume(
         _live_status(text, "not an adapter result")
     with pytest.raises(EngineError, match="the spool ladder for j.1 returned"):
         _resumed_status(tmp_path / "root-bad", text, "not an adapter result", monkeypatch)
-
 
 
 # --------------------------------------------------------------- 1. RealClock
