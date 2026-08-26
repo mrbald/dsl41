@@ -336,6 +336,290 @@ def _next_eligible_day(
     return None
 
 
+def _job_type_preflight(name: str, job: JobIR) -> list[PreflightItem]:
+    """ERROR: job_type is outside the runner's executable universe
+    (CMD/BOX/FW) -- no adapter exists to run it."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="job-type", job=name, message=message))
+
+    if job.job_type not in _RUNNABLE_TYPES:
+        err(f"job_type {job.job_type!r} has no adapter (runner universe is CMD/BOX/FW)")
+    return items
+
+
+def _machine_preflight(
+    name: str,
+    job: JobIR,
+    catalog: CatalogIR,
+    local: frozenset[str],
+    machine_policy: MachinePolicy,
+) -> list[PreflightItem]:
+    """ERROR/WARN: `machine:` placement (DL-49/DL-52). Caller skips this
+    rule entirely for rehearse (`execution=False`) -- it guards real
+    processes and the FakeAdapter runs none."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="machine", job=name, message=message))
+
+    def warn(message: str) -> None:
+        items.append(
+            PreflightItem(severity="WARN", code="machine-mixed", job=name, message=message)
+        )
+
+    spec = job.exec_
+    if spec is None or spec.machine is None:
+        return items
+    resolution = resolve_machine(spec.machine, catalog.machines, local)
+    if resolution.verdict == "foreign":
+        err(
+            f"machine {spec.machine!r} resolves to {resolution.detail},"
+            f" not this host (accepted: {', '.join(sorted(local))}); no remote fabric (ss12)"
+        )
+    elif resolution.verdict == "error":
+        err(resolution.detail)
+    elif resolution.verdict == "mixed":
+        if machine_policy == "local-eligible":
+            warn(
+                f"{resolution.detail}: running here"
+                " (--machine-policy local-eligible); pool placement ignored"
+            )
+        else:
+            err(f"{resolution.detail}; refusing (--machine-policy local-eligible to run it here)")
+    return items
+
+
+def _owner_preflight(name: str, job: JobIR, user: str) -> list[PreflightItem]:
+    """ERROR: `exec_.owner` set and not the invoking user (no setuid in MVP,
+    ss6). Caller skips this rule entirely for rehearse, same reason as
+    `_machine_preflight`."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="owner", job=name, message=message))
+
+    spec = job.exec_
+    if spec is not None and spec.owner is not None and spec.owner != user:
+        err(f"owner {spec.owner!r} is not the invoking user {user!r} (no setuid in MVP, ss6)")
+    return items
+
+
+def _calendar_preflight(
+    name: str,
+    job: JobIR,
+    catalog: CatalogIR,
+    start: datetime | None,
+    tz_aliases: Mapping[str, str] | None,
+) -> list[PreflightItem]:
+    """ERROR/WARN: `run_calendar`/`exclude_calendar` resolution, exhaustion
+    and dormancy (DL-56/DL-57) -- every finding here carries `code="calendar"`."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="calendar", job=name, message=message))
+
+    def warn(message: str) -> None:
+        items.append(PreflightItem(severity="WARN", code="calendar", job=name, message=message))
+
+    sched = job.schedule
+    if sched is None:
+        return items
+    resolved: dict[str, frozenset[date] | CompiledCalendar] = {}
+    for role, ref in (
+        ("run_calendar", sched.run_calendar),
+        ("exclude_calendar", sched.exclude_calendar),
+    ):
+        if ref is None:
+            continue
+        calendar = catalog.calendars.get(ref)
+        if calendar is None:
+            # L018's lint WARN, fail-closed at run (same strictness split as
+            # L016-vs-DL-50 resources)
+            err(
+                f"{role} {ref!r} has no calendar definition in the loaded set"
+                " -- a missing autocal export cannot be guessed (DL-56)"
+            )
+            continue
+        # extended calendars compile through the autocal interpreter
+        # (DL-57); what the SEM-36..39 freeze cannot express refuses here
+        # with the interpreter's reason
+        try:
+            resolved[role] = (
+                compile_calendar(calendar, catalog)
+                if calendar.kind == "extended"
+                else standard_days(calendar)
+            )
+        except CalendarRuleError as exc:
+            err(f"{role} {ref!r}: {exc}")
+    if sched.run_calendar is not None and "run_calendar" in resolved:
+        run_src = resolved["run_calendar"]
+        exclude_src = resolved.get("exclude_calendar")
+        if isinstance(run_src, frozenset) and not isinstance(exclude_src, CompiledCalendar):
+            eligible = run_src - (exclude_src or frozenset())
+            if not eligible:
+                warn(
+                    f"run_calendar {sched.run_calendar!r} has no eligible"
+                    " dates after exclude_calendar subtraction -- the job never"
+                    " fires (DL-56)"
+                )
+            elif start is not None:
+                local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+                if max(eligible) < local_day:
+                    warn(
+                        f"run_calendar {sched.run_calendar!r} is exhausted:"
+                        f" last eligible date {max(eligible).isoformat()} lies before"
+                        f" the run start -- the job never fires (DL-56)"
+                    )
+        elif start is not None:
+            # an extended source probes its generator from the run anchor
+            # (run: wall-now; rehearse: --start); anchorless construction
+            # gets compile validation only (DL-56/57)
+            local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+            try:
+                nxt = _next_eligible_day(run_src, exclude_src, local_day)
+            except CalendarRuleError as exc:
+                # the interpreter's message names the offending calendar
+                # itself (run or exclude)
+                err(str(exc))
+            else:
+                if nxt is None:
+                    warn(
+                        f"run_calendar {sched.run_calendar!r} generates no"
+                        " eligible day at or after the run start -- the job is"
+                        " dormant (DL-57)"
+                    )
+    exclude_only = resolved.get("exclude_calendar")
+    if (
+        sched.run_calendar is None
+        and start is not None
+        and (sched.start_times or sched.start_mins)
+        and isinstance(exclude_only, CompiledCalendar)
+    ):
+        # a days_of_week source under an extended exclusion: a standard
+        # exclude set can never cover a weekly source, an extended one can
+        # (DL-57) -- probe two years of it
+        local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+        tokens = (
+            frozenset(_DAY_CODES)
+            if (sched.days_of_week is None or "all" in sched.days_of_week)
+            else frozenset(sched.days_of_week)
+        )
+        try:
+            covered = exclude_only.days_between(local_day, local_day + timedelta(days=731))
+        except CalendarRuleError as exc:
+            err(str(exc))
+        else:
+            if all(
+                _DAY_CODES[day.weekday()] not in tokens or day in covered
+                for day in (local_day + timedelta(days=i) for i in range(732))
+            ):
+                warn(
+                    f"exclude_calendar {sched.exclude_calendar!r} covers"
+                    " every eligible day within two years of the run start --"
+                    " the job never fires (DL-57 probe bound)"
+                )
+    return items
+
+
+def _timezone_preflight(
+    name: str, job: JobIR, tz_aliases: Mapping[str, str] | None
+) -> list[PreflightItem]:
+    """ERROR/WARN: `timezone:` resolution (SEM-35/DL-62)."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="timezone", job=name, message=message))
+
+    def warn(message: str) -> None:
+        items.append(PreflightItem(severity="WARN", code="timezone", job=name, message=message))
+
+    sched = job.schedule
+    if sched is None or sched.timezone is None:
+        return items
+    tz_res = resolve_timezone(sched.timezone, tz_aliases)
+    if tz_res is None:
+        if tz_aliases is not None:
+            detail = "not a zoneinfo name and not in the supplied --timezone-map"
+        elif len(candidates := city_candidates(sched.timezone)) > 1:
+            detail = (
+                f"ambiguous city name ({', '.join(candidates)}); use the full"
+                " zone name or a --timezone-map"
+            )
+        else:
+            detail = (
+                "not a zoneinfo name; the vendor resolves SEM-35 names through"
+                " the instance's ujo_timezones table -- feed its `autotimezone"
+                " -l` listing in via --timezone-map"
+            )
+        err(f"timezone {sched.timezone!r} is not resolvable: {detail}")
+    elif tz_res.how == "city":
+        warn(
+            f"timezone {sched.timezone!r} assumed to be {tz_res.zone}"
+            " (unique zoneinfo city match, DL-62); pin it with --timezone-map"
+            " (`autotimezone -l`) if the estate maps it differently"
+        )
+    elif tz_res.how == "posix" and tz_res.tz.utcoffset(None) != timedelta(0):
+        offset = tz_res.tz.utcoffset(None) or timedelta(0)
+        hh, rem = divmod(abs(int(offset.total_seconds())), 3600)
+        rendered = f"UTC{'+' if offset >= timedelta(0) else '-'}{hh:02d}:{rem // 60:02d}"
+        warn(
+            f"timezone {sched.timezone!r} read as a POSIX fixed offset"
+            f" = {rendered} (POSIX offsets are west-positive: GMT+5 means"
+            " 5h WEST of GMT)"
+        )
+    return items
+
+
+def _retry_preflight(name: str, job: JobIR) -> list[PreflightItem]:
+    """WARN: `n_retrys > 0` runs WITHOUT retries (unmodeled v1, DL-53 scope)."""
+    items: list[PreflightItem] = []
+
+    def warn(message: str) -> None:
+        items.append(PreflightItem(severity="WARN", code="n-retrys", job=name, message=message))
+
+    if job.sem.n_retrys > 0:
+        warn(
+            f"n_retrys={job.sem.n_retrys}: runs WITHOUT retries (unmodeled v1,"
+            " DL-53 scope; a shell-side retry would fork semantics from the oracle)"
+        )
+    return items
+
+
+def _oracle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
+    """ERROR: the oracle itself fails to construct over this catalog."""
+    items: list[PreflightItem] = []
+
+    def err(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="oracle", message=message))
+
+    try:
+        Oracle(catalog)
+    except OracleError as exc:
+        err(f"oracle construction failed: {exc}")
+    return items
+
+
+def _skeleton_cycle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
+    """WARN: a cycle in the AND-success skeleton disables `plan` (legal
+    AutoSys, edge-triggered re-runs, DL-13/L010)."""
+    items: list[PreflightItem] = []
+
+    def warn(message: str) -> None:
+        items.append(PreflightItem(severity="WARN", code="skeleton-cycle", message=message))
+
+    try:
+        graphlib.TopologicalSorter(and_success_skeleton(catalog)).prepare()
+    except graphlib.CycleError as exc:
+        warn(
+            "cycle in the AND-success skeleton"
+            f" ({' -> '.join(exc.args[1])}): legal AutoSys (edge-triggered re-runs,"
+            " DL-13/L010); `plan` is disabled for this estate"
+        )
+    return items
+
+
 def preflight(
     catalog: CatalogIR,
     *,
@@ -372,278 +656,23 @@ def preflight(
     (default) refuses it -- placement among members is unmodelled;
     `local-eligible` runs it here with a WARN that pool placement was
     ignored. Unambiguous verdicts (all-local, none-local, bad definition)
-    ignore the policy."""
+    ignore the policy.
+
+    Each rule below is independent (DL-178t): the per-job rules run in the
+    same fixed order every call, one `_*_preflight` helper each, all
+    following `_resource_preflight`'s `err`/`warn` closure precedent."""
     items: list[PreflightItem] = []
     local = _local_identity(as_machine)
     user = getpass.getuser()
     for name, job in sorted(catalog.jobs.items()):
-        if job.job_type not in _RUNNABLE_TYPES:
-            items.append(
-                PreflightItem(
-                    severity="ERROR",
-                    code="job-type",
-                    job=name,
-                    message=f"job_type {job.job_type!r} has no adapter"
-                    " (runner universe is CMD/BOX/FW)",
-                )
-            )
-        spec = job.exec_
-        if execution and spec is not None and spec.machine is not None:
-            resolution = resolve_machine(spec.machine, catalog.machines, local)
-            if resolution.verdict == "foreign":
-                items.append(
-                    PreflightItem(
-                        severity="ERROR",
-                        code="machine",
-                        job=name,
-                        message=f"machine {spec.machine!r} resolves to {resolution.detail},"
-                        f" not this host (accepted: {', '.join(sorted(local))});"
-                        " no remote fabric (ss12)",
-                    )
-                )
-            elif resolution.verdict == "error":
-                items.append(
-                    PreflightItem(
-                        severity="ERROR", code="machine", job=name, message=resolution.detail
-                    )
-                )
-            elif resolution.verdict == "mixed":
-                if machine_policy == "local-eligible":
-                    items.append(
-                        PreflightItem(
-                            severity="WARN",
-                            code="machine-mixed",
-                            job=name,
-                            message=f"{resolution.detail}: running here"
-                            " (--machine-policy local-eligible); pool placement ignored",
-                        )
-                    )
-                else:
-                    items.append(
-                        PreflightItem(
-                            severity="ERROR",
-                            code="machine",
-                            job=name,
-                            message=f"{resolution.detail}; refusing"
-                            " (--machine-policy local-eligible to run it here)",
-                        )
-                    )
-        if execution and spec is not None and spec.owner is not None and spec.owner != user:
-            items.append(
-                PreflightItem(
-                    severity="ERROR",
-                    code="owner",
-                    job=name,
-                    message=f"owner {spec.owner!r} is not the invoking user {user!r}"
-                    " (no setuid in MVP, ss6)",
-                )
-            )
-        sched = job.schedule
-        if sched is not None:
-            resolved: dict[str, frozenset[date] | CompiledCalendar] = {}
-            for role, ref in (
-                ("run_calendar", sched.run_calendar),
-                ("exclude_calendar", sched.exclude_calendar),
-            ):
-                if ref is None:
-                    continue
-                calendar = catalog.calendars.get(ref)
-                if calendar is None:
-                    # L018's lint WARN, fail-closed at run (same strictness
-                    # split as L016-vs-DL-50 resources)
-                    message = (
-                        f"{role} {ref!r} has no calendar definition in the loaded set"
-                        " -- a missing autocal export cannot be guessed (DL-56)"
-                    )
-                else:
-                    # extended calendars compile through the autocal
-                    # interpreter (DL-57); what the SEM-36..39 freeze cannot
-                    # express refuses here with the interpreter's reason
-                    try:
-                        resolved[role] = (
-                            compile_calendar(calendar, catalog)
-                            if calendar.kind == "extended"
-                            else standard_days(calendar)
-                        )
-                        continue
-                    except CalendarRuleError as exc:
-                        message = f"{role} {ref!r}: {exc}"
-                items.append(
-                    PreflightItem(severity="ERROR", code="calendar", job=name, message=message)
-                )
-            if sched.run_calendar is not None and "run_calendar" in resolved:
-                run_src = resolved["run_calendar"]
-                exclude_src = resolved.get("exclude_calendar")
-                if isinstance(run_src, frozenset) and not isinstance(exclude_src, CompiledCalendar):
-                    eligible = run_src - (exclude_src or frozenset())
-                    if not eligible:
-                        items.append(
-                            PreflightItem(
-                                severity="WARN",
-                                code="calendar",
-                                job=name,
-                                message=f"run_calendar {sched.run_calendar!r} has no eligible"
-                                " dates after exclude_calendar subtraction -- the job never"
-                                " fires (DL-56)",
-                            )
-                        )
-                    elif start is not None:
-                        local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
-                        if max(eligible) < local_day:
-                            items.append(
-                                PreflightItem(
-                                    severity="WARN",
-                                    code="calendar",
-                                    job=name,
-                                    message=f"run_calendar {sched.run_calendar!r} is exhausted:"
-                                    f" last eligible date {max(eligible).isoformat()} lies before"
-                                    f" the run start -- the job never fires (DL-56)",
-                                )
-                            )
-                elif start is not None:
-                    # an extended source probes its generator from the run
-                    # anchor (run: wall-now; rehearse: --start); anchorless
-                    # construction gets compile validation only (DL-56/57)
-                    local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
-                    try:
-                        nxt = _next_eligible_day(run_src, exclude_src, local_day)
-                    except CalendarRuleError as exc:
-                        # the interpreter's message names the offending
-                        # calendar itself (run or exclude)
-                        items.append(
-                            PreflightItem(
-                                severity="ERROR", code="calendar", job=name, message=str(exc)
-                            )
-                        )
-                    else:
-                        if nxt is None:
-                            items.append(
-                                PreflightItem(
-                                    severity="WARN",
-                                    code="calendar",
-                                    job=name,
-                                    message=f"run_calendar {sched.run_calendar!r} generates no"
-                                    " eligible day at or after the run start -- the job is"
-                                    " dormant (DL-57)",
-                                )
-                            )
-            exclude_only = resolved.get("exclude_calendar")
-            if (
-                sched.run_calendar is None
-                and start is not None
-                and (sched.start_times or sched.start_mins)
-                and isinstance(exclude_only, CompiledCalendar)
-            ):
-                # a days_of_week source under an extended exclusion: a
-                # standard exclude set can never cover a weekly source, an
-                # extended one can (DL-57) -- probe two years of it
-                local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
-                tokens = (
-                    frozenset(_DAY_CODES)
-                    if (sched.days_of_week is None or "all" in sched.days_of_week)
-                    else frozenset(sched.days_of_week)
-                )
-                try:
-                    covered = exclude_only.days_between(local_day, local_day + timedelta(days=731))
-                except CalendarRuleError as exc:
-                    items.append(
-                        PreflightItem(severity="ERROR", code="calendar", job=name, message=str(exc))
-                    )
-                else:
-                    if all(
-                        _DAY_CODES[day.weekday()] not in tokens or day in covered
-                        for day in (local_day + timedelta(days=i) for i in range(732))
-                    ):
-                        items.append(
-                            PreflightItem(
-                                severity="WARN",
-                                code="calendar",
-                                job=name,
-                                message=f"exclude_calendar {sched.exclude_calendar!r} covers"
-                                " every eligible day within two years of the run start --"
-                                " the job never fires (DL-57 probe bound)",
-                            )
-                        )
-        if sched is not None and sched.timezone is not None:
-            tz_res = resolve_timezone(sched.timezone, tz_aliases)
-            if tz_res is None:
-                if tz_aliases is not None:
-                    detail = "not a zoneinfo name and not in the supplied --timezone-map"
-                elif len(candidates := city_candidates(sched.timezone)) > 1:
-                    detail = (
-                        f"ambiguous city name ({', '.join(candidates)}); use the full"
-                        " zone name or a --timezone-map"
-                    )
-                else:
-                    detail = (
-                        "not a zoneinfo name; the vendor resolves SEM-35 names through"
-                        " the instance's ujo_timezones table -- feed its `autotimezone"
-                        " -l` listing in via --timezone-map"
-                    )
-                items.append(
-                    PreflightItem(
-                        severity="ERROR",
-                        code="timezone",
-                        job=name,
-                        message=f"timezone {sched.timezone!r} is not resolvable: {detail}",
-                    )
-                )
-            elif tz_res.how == "city":
-                items.append(
-                    PreflightItem(
-                        severity="WARN",
-                        code="timezone",
-                        job=name,
-                        message=f"timezone {sched.timezone!r} assumed to be {tz_res.zone}"
-                        " (unique zoneinfo city match, DL-62); pin it with --timezone-map"
-                        " (`autotimezone -l`) if the estate maps it differently",
-                    )
-                )
-            elif tz_res.how == "posix" and tz_res.tz.utcoffset(None) != timedelta(0):
-                offset = tz_res.tz.utcoffset(None) or timedelta(0)
-                hh, rem = divmod(abs(int(offset.total_seconds())), 3600)
-                rendered = f"UTC{'+' if offset >= timedelta(0) else '-'}{hh:02d}:{rem // 60:02d}"
-                items.append(
-                    PreflightItem(
-                        severity="WARN",
-                        code="timezone",
-                        job=name,
-                        message=f"timezone {sched.timezone!r} read as a POSIX fixed offset"
-                        f" = {rendered} (POSIX offsets are west-positive: GMT+5 means"
-                        " 5h WEST of GMT)",
-                    )
-                )
-        if job.sem.n_retrys > 0:
-            items.append(
-                PreflightItem(
-                    severity="WARN",
-                    code="n-retrys",
-                    job=name,
-                    message=f"n_retrys={job.sem.n_retrys}: runs WITHOUT retries (unmodeled v1,"
-                    " DL-53 scope; a shell-side retry would fork semantics from the oracle)",
-                )
-            )
+        items.extend(_job_type_preflight(name, job))
+        if execution:
+            items.extend(_machine_preflight(name, job, catalog, local, machine_policy))
+            items.extend(_owner_preflight(name, job, user))
+        items.extend(_calendar_preflight(name, job, catalog, start, tz_aliases))
+        items.extend(_timezone_preflight(name, job, tz_aliases))
+        items.extend(_retry_preflight(name, job))
         items.extend(_resource_preflight(name, job, catalog))
-    try:
-        Oracle(catalog)
-    except OracleError as exc:
-        items.append(
-            PreflightItem(
-                severity="ERROR",
-                code="oracle",
-                message=f"oracle construction failed: {exc}",
-            )
-        )
-    try:
-        graphlib.TopologicalSorter(and_success_skeleton(catalog)).prepare()
-    except graphlib.CycleError as exc:
-        items.append(
-            PreflightItem(
-                severity="WARN",
-                code="skeleton-cycle",
-                message="cycle in the AND-success skeleton"
-                f" ({' -> '.join(exc.args[1])}): legal AutoSys (edge-triggered re-runs,"
-                " DL-13/L010); `plan` is disabled for this estate",
-            )
-        )
+    items.extend(_oracle_preflight(catalog))
+    items.extend(_skeleton_cycle_preflight(catalog))
     return items
