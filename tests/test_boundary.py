@@ -1060,28 +1060,81 @@ def _scheduler(text: str, at: datetime):
     return Scheduler(catalog, start=at)
 
 
-def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path) -> None:
-    """ss10.4: armed latches cross a release, deliberately -- dropping one
-    at the boundary would be an implicit transition with no admitted input.
-    One tick under C1 while the job is held; the operator's `OFF_HOLD` in
-    C2 produces EXACTLY ONE start (PR-26)."""
-    run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
+def _genesis_scheduled(
+    run_root: Path,
+    text: str,
+    *,
+    clock_at: datetime,
+    scheduler_at: datetime | None = None,
+) -> Engine:
+    """A periodized root with period 1 open and a scheduler wired to
+    `text`. `scheduler_at` defaults to `clock_at`; passing it separately
+    is how a resumed cutoff's tests anchor the scheduler earlier than the
+    engine clock they resume at."""
+    catalog, sources = _catalog(text)
     staged = stage_manifest(
         catalog,
         source_bundle_hash=write_bundle(run_root, sources),
         profile=RuntimeProfile(),
         state_machine_version=STATE_MACHINE_VERSION,
     )
-    clock = VirtualClock(start=T0)
-    engine = start_run(
+    return start_run(
         catalog,
         run_root,
-        clock=clock,
+        clock=VirtualClock(start=clock_at),
         adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
+        scheduler=_scheduler(text, scheduler_at if scheduler_at is not None else clock_at),
         staged=staged,
     )
+
+
+def _resume_scheduled(
+    run_root: Path,
+    text: str,
+    *,
+    clock_at: datetime,
+    scheduler_at: datetime | None = None,
+) -> Engine:
+    """Resume a run with a scheduler wired to `text`, right after a seal."""
+    catalog, _ = _catalog(text)
+    return asyncio.run(
+        resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=clock_at),
+            adapters={"CMD": FakeAdapter(default=None)},
+            scheduler=_scheduler(text, scheduler_at if scheduler_at is not None else clock_at),
+        )
+    )
+
+
+def _spawns(run_root: Path, period: int, job: str) -> list[dict[str, Any]]:
+    """SPAWN effects for `job` recorded in `period`'s WAL decisions."""
+    return [
+        effect
+        for record in read_journal(wal_path(run_root, period))
+        if record.get("rec") == "decision"
+        for effect in record["effects"]
+        if effect["kind"] == "SPAWN" and effect["job"] == job
+    ]
+
+
+def _scheduler_ticks(run_root: Path, period: int) -> list[dict[str, Any]]:
+    """Scheduler-sourced input records admitted into `period`'s WAL."""
+    return [
+        record
+        for record in read_journal(wal_path(run_root, period))
+        if record.get("rec") == "input" and record.get("source") == "scheduler"
+    ]
+
+
+def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path) -> None:
+    """ss10.4: armed latches cross a release, deliberately -- dropping one
+    at the boundary would be an implicit transition with no admitted input.
+    One tick under C1 while the job is held; the operator's `OFF_HOLD` in
+    C2 produces EXACTLY ONE start (PR-26)."""
+    run_root = tmp_path / "run"
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=T0)
 
     async def under_c1() -> None:
         engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}))
@@ -1094,16 +1147,7 @@ def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path
     boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
     _close(engine)
 
-    catalog2, _ = _catalog(SCHED_C2)
-    opened = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=boundary.seal.closed_at),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, boundary.seal.closed_at),
-        )
-    )
+    opened = _resume_scheduled(run_root, SCHED_C2, clock_at=boundary.seal.closed_at)
     assert opened.oracle.store.runtime("a").armed is True  # the latch crossed
 
     async def under_c2() -> None:
@@ -1113,13 +1157,7 @@ def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path
     asyncio.run(under_c2())
     assert opened.oracle.store.runtime("a").run_number == 1
     assert opened.oracle.store.runtime("a").armed is False
-    starts = [
-        effect
-        for record in read_journal(wal_path(run_root, 2))
-        if record.get("rec") == "decision"
-        for effect in record["effects"]
-        if effect["kind"] == "SPAWN" and effect["job"] == "a"
-    ]
+    starts = _spawns(run_root, 2, "a")
     assert len(starts) == 1  # exactly one, and it belongs to C2
     _close(opened)
 
@@ -1131,22 +1169,7 @@ def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -
     DISARM before sealing: the latch does NOT cross, C2's OFF_HOLD starts
     NOTHING, and the new period's WAL carries no SPAWN for the job."""
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    clock = VirtualClock(start=T0)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=clock,
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
-        staged=staged,
-    )
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=T0)
 
     async def under_c1() -> None:
         engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}))
@@ -1162,16 +1185,7 @@ def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -
     boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
     _close(engine)
 
-    catalog2, _ = _catalog(SCHED_C2)
-    opened = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=boundary.seal.closed_at),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, boundary.seal.closed_at),
-        )
-    )
+    opened = _resume_scheduled(run_root, SCHED_C2, clock_at=boundary.seal.closed_at)
     assert opened.oracle.store.runtime("a").armed is False  # nothing crossed
 
     async def under_c2() -> None:
@@ -1180,13 +1194,7 @@ def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -
 
     asyncio.run(under_c2())
     assert opened.oracle.store.runtime("a").run_number == 0  # no start: the drop held
-    starts = [
-        effect
-        for record in read_journal(wal_path(run_root, 2))
-        if record.get("rec") == "decision"
-        for effect in record["effects"]
-        if effect["kind"] == "SPAWN" and effect["job"] == "a"
-    ]
+    starts = _spawns(run_root, 2, "a")
     assert starts == []  # C2 produced no SPAWN for the disarmed job
     _close(opened)
 
@@ -1198,22 +1206,7 @@ def test_dl158_disarm_composed_in_c2_drops_the_carried_latch_no_start(tmp_path: 
     is sent in the new period, after resume and before the OFF_HOLD: the
     carried latch drops, the OFF_HOLD starts nothing."""
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    clock = VirtualClock(start=T0)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=clock,
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
-        staged=staged,
-    )
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=T0)
 
     async def under_c1() -> None:
         engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}))
@@ -1225,16 +1218,7 @@ def test_dl158_disarm_composed_in_c2_drops_the_carried_latch_no_start(tmp_path: 
     boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
     _close(engine)
 
-    catalog2, _ = _catalog(SCHED_C2)
-    opened = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=boundary.seal.closed_at),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, boundary.seal.closed_at),
-        )
-    )
+    opened = _resume_scheduled(run_root, SCHED_C2, clock_at=boundary.seal.closed_at)
     assert opened.oracle.store.runtime("a").armed is True  # the latch crossed
 
     async def under_c2() -> None:
@@ -1247,13 +1231,7 @@ def test_dl158_disarm_composed_in_c2_drops_the_carried_latch_no_start(tmp_path: 
 
     asyncio.run(under_c2())
     assert opened.oracle.store.runtime("a").run_number == 0  # no start: the drop held
-    starts = [
-        effect
-        for record in read_journal(wal_path(run_root, 2))
-        if record.get("rec") == "decision"
-        for effect in record["effects"]
-        if effect["kind"] == "SPAWN" and effect["job"] == "a"
-    ]
+    starts = _spawns(run_root, 2, "a")
     assert starts == []  # C2 produced no SPAWN for the disarmed job
     _close(opened)
 
@@ -1577,22 +1555,8 @@ def test_pr25_c1_owns_every_tick_at_or_before_t(tmp_path: Path) -> None:
     before T, and `scheduler_admitted_through: T` is the only carried
     evidence -- C1 owns every tick <= T, C2 owns every tick after it."""
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
     at = datetime(2026, 7, 1, 9, 30)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=VirtualClock(start=at),
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, at),
-        staged=staged,
-    )
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=at)
     # the 09:00 tick of the NEXT day is not due; the cutoff admits nothing
     boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
     _close(engine)
@@ -2378,22 +2342,8 @@ def test_pr25_the_cutoff_admits_a_tick_due_at_t(tmp_path: Path) -> None:
     T -- C1 owns them, and `Scheduler._next` cannot be re-derived after a
     seal cuts the evidence away."""
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    tick = datetime(2026, 7, 1, 9, 0)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=VirtualClock(start=tick),  # T is the tick's own instant
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
-        staged=staged_manifest,
-    )
+    tick = datetime(2026, 7, 1, 9, 0)  # T is the tick's own instant
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=tick, scheduler_at=T0)
     staged = _stage(run_root, SCHED_C2)
 
     async def scenario():
@@ -2404,11 +2354,7 @@ def test_pr25_the_cutoff_admits_a_tick_due_at_t(tmp_path: Path) -> None:
 
     boundary = asyncio.run(scenario())
     _close(engine)
-    ticks = [
-        record
-        for record in read_journal(wal_path(run_root, 1))
-        if record.get("rec") == "input" and record.get("source") == "scheduler"
-    ]
+    ticks = _scheduler_ticks(run_root, 1)
     assert [record["at"] for record in ticks] == [tick.isoformat()]
     assert boundary.seal.scheduler_admitted_through == tick
     # C1 owns the tick, and the hold turns it into a latch rather than a run
@@ -2870,22 +2816,8 @@ def test_pr25_the_next_period_starts_its_scheduler_strictly_after_t(tmp_path: Pa
     (DL-166). That record would be durably false, and it would move the ss6
     frontier and read to an operator as a lost tick."""
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
     tick = datetime(2026, 7, 1, 9, 0)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=VirtualClock(start=tick),
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
-        staged=staged_manifest,
-    )
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=tick, scheduler_at=T0)
 
     async def under_c1():
         await engine.run_until_quiescent(tick)  # the tick fires and `a` starts
@@ -2900,16 +2832,7 @@ def test_pr25_the_next_period_starts_its_scheduler_strictly_after_t(tmp_path: Pa
     assert boundary.seal.state.jobs["a"].run_number == 1  # C1 ran the tick at T
     assert boundary.seal.scheduler_admitted_through == tick
 
-    catalog2, _ = _catalog(SCHED_C2)
-    opened = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=tick),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, T0),
-        )
-    )
+    opened = _resume_scheduled(run_root, SCHED_C2, clock_at=tick, scheduler_at=T0)
     _close(opened)
     drops = [r for r in read_journal(wal_path(run_root, 2)) if r.get("rec") == "drop"]
     assert drops == []  # C1 owned that tick; C2 never missed it
@@ -2930,37 +2853,14 @@ def test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop(
     from dsl41.runner_journal import scheduler_frontier
 
     run_root = tmp_path / "run"
-    catalog, sources = _catalog(SCHED_C1)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        scheduler=_scheduler(SCHED_C1, T0),
-        staged=staged_manifest,
-    )
+    engine = _genesis_scheduled(run_root, SCHED_C1, clock_at=T0)
     # sealed at T0, an hour BEFORE the 09:00 tick: C1 admitted none of it
     boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, SCHED_C2))))
     _close(engine)
     assert boundary.seal.scheduler_admitted_through == T0
 
-    catalog2, _ = _catalog(SCHED_C2)
     tick = datetime(2026, 7, 1, 9, 0)
-    opened = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, T0),
-        )
-    )
+    opened = _resume_scheduled(run_root, SCHED_C2, clock_at=T0)
 
     async def under_c2() -> None:
         await opened.run_until_quiescent(tick)  # C2 admits the tick and journals it
@@ -2971,34 +2871,18 @@ def test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop(
 
     asyncio.run(under_c2())
     _close(opened)  # the crash, one tick past the opening
-    admitted = [
-        record
-        for record in read_journal(wal_path(run_root, 2))
-        if record.get("rec") == "input" and record.get("source") == "scheduler"
-    ]
+    admitted = _scheduler_ticks(run_root, 2)
     assert [record["at"] for record in admitted] == [tick.isoformat()]
     assert scheduler_frontier(read_journal(wal_path(run_root, 2))) == tick  # > T
 
-    again = asyncio.run(
-        resume_run(
-            catalog2,
-            run_root,
-            clock=VirtualClock(start=tick),
-            adapters={"CMD": FakeAdapter(default=None)},
-            scheduler=_scheduler(SCHED_C2, T0),
-        )
-    )
+    again = _resume_scheduled(run_root, SCHED_C2, clock_at=tick, scheduler_at=T0)
     _close(again)
     assert again.drops == []
     drops = [r for r in read_journal(wal_path(run_root, 2)) if r.get("rec") == "drop"]
     assert drops == []
     # nor re-admitted: the sweep only ever drops today, so this is the guard
     # on the other half of the risk -- one tick, fired once
-    still = [
-        record
-        for record in read_journal(wal_path(run_root, 2))
-        if record.get("rec") == "input" and record.get("source") == "scheduler"
-    ]
+    still = _scheduler_ticks(run_root, 2)
     assert [record["at"] for record in still] == [tick.isoformat()]
 
 

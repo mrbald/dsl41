@@ -176,6 +176,57 @@ def _rewrite_anchor(anchor_dir: Path, periods: dict[str, PeriodRow]) -> None:
         store.release()
 
 
+def _two_closed_periods_one_root(tmp_path: Path) -> tuple[Path, Path]:
+    """One root, two SEALED periods (1 and 2), neither attested yet, period
+    3 open -- no physical roll, both checkpoints live in the same root."""
+    c1, c2, c3 = _write_catalogs(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    asyncio.run(_run_real_and_manifest(C1_JIL, run_root, ["j1"], file=str(c1)))
+    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c2)).exit_code == 0
+    asyncio.run(_resume_real(c2, run_root, ["j2"]))
+    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c3)).exit_code == 0
+    return run_root, default_anchor_dir(run_root)
+
+
+def _audited_lineage_ready_to_archive(tmp_path: Path) -> Lineage:
+    """A rolled lineage with BOTH checkpoints attested (period 3 sealed
+    open in root B): the DL-144 precondition every archive/prune test
+    below builds from."""
+    line = _lineage(tmp_path)
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    assert (
+        _invoke(
+            "seal",
+            "--run-root",
+            str(line.root_b),
+            "--estate-anchor",
+            str(line.anchor),
+            "--next",
+            str(line.c3),
+        ).exit_code
+        == 0
+    )
+    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    return line
+
+
+def _prune_tombstones(line: Lineage) -> None:
+    """PR-36b's ordering: clear root A's spool/tombstones through the CLI
+    gate BEFORE its inputs are archived."""
+    assert (
+        _invoke(
+            "estate",
+            "prune",
+            "--run-root",
+            str(line.root_a),
+            "--estate-anchor",
+            str(line.anchor),
+            "--tombstones",
+        ).exit_code
+        == 0
+    )
+
+
 #: how each of the four verbs addresses the whole estate. The rule is one
 #: sentence and it is the same for all four: name the lineage ANCHOR where
 #: a run root would go
@@ -438,13 +489,7 @@ def test_the_estate_wide_audit_attests_in_period_order(tmp_path: Path) -> None:
     Two closed periods, neither attested, audited by ONE command: the walk
     is ascending, so period 1 establishes the induction that period 2
     stands on. A walk that answered newest-first would refuse here."""
-    c1, c2, c3 = _write_catalogs(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    asyncio.run(_run_real_and_manifest(C1_JIL, run_root, ["j1"], file=str(c1)))
-    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c2)).exit_code == 0
-    asyncio.run(_resume_real(c2, run_root, ["j2"]))
-    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c3)).exit_code == 0
-    anchor = default_anchor_dir(run_root)
+    run_root, anchor = _two_closed_periods_one_root(tmp_path)
 
     audited = _invoke("audit", "--estate-anchor", str(anchor))
     assert audited.exit_code == 0, audited.output
@@ -466,13 +511,7 @@ def test_a_busy_lineage_lock_does_not_end_the_estate_wide_audit(tmp_path: Path) 
 
     Both checkpoints land; only the registry rows are outstanding, and the
     verb says how many."""
-    c1, c2, c3 = _write_catalogs(tmp_path / "estate")
-    run_root = tmp_path / "run"
-    asyncio.run(_run_real_and_manifest(C1_JIL, run_root, ["j1"], file=str(c1)))
-    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c2)).exit_code == 0
-    asyncio.run(_resume_real(c2, run_root, ["j2"]))
-    assert _invoke("seal", "--run-root", str(run_root), "--next", str(c3)).exit_code == 0
-    anchor = default_anchor_dir(run_root)
+    run_root, anchor = _two_closed_periods_one_root(tmp_path)
 
     holder = EstateAnchor(anchor)
     holder.acquire()  # what a live engine holds for its process lifetime
@@ -907,37 +946,12 @@ def test_pr56_an_archived_period_in_another_root_reads_through_the_walk(
     from dsl41.period import ARCHIVE_CLASS, archive_receipt_path, read_archive_receipt
     from dsl41.retention import plan_retention, prune
 
-    line = _lineage(tmp_path)
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "seal",
-            "--run-root",
-            str(line.root_b),
-            "--estate-anchor",
-            str(line.anchor),
-            "--next",
-            str(line.c3),
-        ).exit_code
-        == 0
-    )
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
+    line = _audited_lineage_ready_to_archive(tmp_path)
     assert attestation_path(line.root_b, 2).exists()
     assert not attestation_path(line.root_a, 2).exists()
 
     # period 1's spool goes first (PR-36b's order), then its inputs
-    assert (
-        _invoke(
-            "estate",
-            "prune",
-            "--run-root",
-            str(line.root_a),
-            "--estate-anchor",
-            str(line.anchor),
-            "--tombstones",
-        ).exit_code
-        == 0
-    )
+    _prune_tombstones(line)
     plan = plan_retention(line.root_a, anchor_dir=line.anchor)
     offered = [item for item in plan.prunable() if item.kind == "wal"]
     assert [item.period_id for item in offered] == [1], plan.artifacts
@@ -987,33 +1001,8 @@ def test_pr56_a_root_whose_every_period_is_archived_still_plans(tmp_path: Path) 
     from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
     from dsl41.retention import plan_retention, prune
 
-    line = _lineage(tmp_path)
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "seal",
-            "--run-root",
-            str(line.root_b),
-            "--estate-anchor",
-            str(line.anchor),
-            "--next",
-            str(line.c3),
-        ).exit_code
-        == 0
-    )
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "estate",
-            "prune",
-            "--run-root",
-            str(line.root_a),
-            "--estate-anchor",
-            str(line.anchor),
-            "--tombstones",
-        ).exit_code
-        == 0
-    )
+    line = _audited_lineage_ready_to_archive(tmp_path)
+    _prune_tombstones(line)
     prune(
         plan_retention(line.root_a, anchor_dir=line.anchor),
         classes=(ARCHIVE_CLASS,),
@@ -1060,33 +1049,8 @@ def test_pr56_a_lost_period_in_a_fully_archived_root_still_refuses(tmp_path: Pat
     from dsl41.period import ARCHIVE_CLASS, archive_receipt_path
     from dsl41.retention import plan_retention, prune
 
-    line = _lineage(tmp_path)
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "seal",
-            "--run-root",
-            str(line.root_b),
-            "--estate-anchor",
-            str(line.anchor),
-            "--next",
-            str(line.c3),
-        ).exit_code
-        == 0
-    )
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "estate",
-            "prune",
-            "--run-root",
-            str(line.root_a),
-            "--estate-anchor",
-            str(line.anchor),
-            "--tombstones",
-        ).exit_code
-        == 0
-    )
+    line = _audited_lineage_ready_to_archive(tmp_path)
+    _prune_tombstones(line)
     prune(
         plan_retention(line.root_a, anchor_dir=line.anchor),
         classes=(ARCHIVE_CLASS,),
@@ -1167,33 +1131,8 @@ def test_b7_a_wrong_branch_pair_in_a_registered_root_releases_nothing(
     from dsl41.period import ARCHIVE_CLASS
     from dsl41.retention import plan_retention, prune
 
-    line = _lineage(tmp_path)
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "seal",
-            "--run-root",
-            str(line.root_b),
-            "--estate-anchor",
-            str(line.anchor),
-            "--next",
-            str(line.c3),
-        ).exit_code
-        == 0
-    )
-    assert _invoke("audit", "--estate-anchor", str(line.anchor)).exit_code == 0
-    assert (
-        _invoke(
-            "estate",
-            "prune",
-            "--run-root",
-            str(line.root_a),
-            "--estate-anchor",
-            str(line.anchor),
-            "--tombstones",
-        ).exit_code
-        == 0
-    )
+    line = _audited_lineage_ready_to_archive(tmp_path)
+    _prune_tombstones(line)
     plan = plan_retention(line.root_a, anchor_dir=line.anchor)
     assert [item.period_id for item in plan.prunable() if item.kind == "wal"] == [1]
 
