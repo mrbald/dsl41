@@ -35,9 +35,9 @@ from dsl41.ir import (
     ScheduleBlock,
     Semantics,
     Time,
-    _unquote,
     lower_catalog,
     lower_source,
+    unquote_jil_value,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -272,8 +272,9 @@ def test_builder_refuses_an_unquotable_comment_opening_value() -> None:
 
 
 def test_builder_auto_quotes_only_the_lanes_lowering_unquotes() -> None:
-    """DL-161 review B2: the auto-quote is exact only where ir._unquote
-    strips it back (UNQUOTED_AT_LOWERING). On any other lane the quotes would
+    """DL-161 review B2: the auto-quote is exact only where
+    ir.unquote_jil_value strips it back (UNQUOTED_AT_LOWERING). On any
+    other lane the quotes would
     survive into the stored value, so the builder refuses by name instead of
     silently rewriting -- `description` routes to verbatim annotations."""
     c = CatalogBuilder()
@@ -327,17 +328,17 @@ def test_unquoted_at_lowering_is_exactly_the_real_unquote_lanes(name: str) -> No
     """UNQUOTED_AT_LOWERING is the sync guarantee the old hand-copied
     "keep in sync" comment asked a human for. For every name in the set: the
     builder auto-quotes a comment-opening bare value (DL-161), and
-    ir._unquote -- the exact function lowering funnels the value through --
-    strips the quote back to the original, byte for byte.
+    ir.unquote_jil_value -- the exact function lowering funnels the value
+    through -- strips the quote back to the original, byte for byte.
 
-    render (to_jil) -> parse (ast_jil.parse) -> lower (ir._unquote on the
-    parsed raw value) -> compare. Deliberately NOT a full c.build(): several
-    members (days_of_week, start_times/start_mins, run_window,
+    render (to_jil) -> parse (ast_jil.parse) -> lower (ir.unquote_jil_value
+    on the parsed raw value) -> compare. Deliberately NOT a full c.build():
+    several members (days_of_week, start_times/start_mins, run_window,
     must_start/complete_times, status, success/fail_codes) have their OWN
-    strict typed grammar past `_unquote` (Time, int, a fixed status
-    vocabulary, exit-code ranges) that no comment-opening string can also
-    satisfy -- that is a fact about those types, not about this set.
-    `type`/`res_type`/`xtype` are real `_unquote` lanes too, for
+    strict typed grammar past `unquote_jil_value` (Time, int, a fixed
+    status vocabulary, exit-code ranges) that no comment-opening string can
+    also satisfy -- that is a fact about those types, not about this set.
+    `type`/`res_type`/`xtype` are real `unquote_jil_value` lanes too, for
     insert_machine/insert_resource/insert_xinst rather than insert_job, so
     they build through their own statement kind."""
     opener = "tail /*open"
@@ -354,14 +355,14 @@ def test_unquoted_at_lowering_is_exactly_the_real_unquote_lanes(name: str) -> No
     assert f'{name}: "{opener}"' in jil
     stmt = parse(jil).statements[0]
     (raw,) = [a.raw_value for a in stmt.attrs if a.key == name]
-    assert _unquote(raw) == opener
+    assert unquote_jil_value(raw) == opener
 
 
 def test_builder_machine_type_quotes_a_comment_opening_value() -> None:
-    """`type` is a real `_unquote` lane for insert_machine (ir.py's
-    `_lower_machine`, `machine_type = _unquote(attr.raw_value)`), so
-    `machine()` auto-quotes it the same way `job()` auto-quotes its lanes,
-    instead of refusing a value the quoted spelling would round-trip
+    """`type` is a real `unquote_jil_value` lane for insert_machine (ir.py's
+    `_lower_machine`, `machine_type = unquote_jil_value(attr.raw_value)`),
+    so `machine()` auto-quotes it the same way `job()` auto-quotes its
+    lanes, instead of refusing a value the quoted spelling would round-trip
     exactly."""
     c = CatalogBuilder()
     c.machine("m1", type="/tmp/pool /*glob")
@@ -370,7 +371,7 @@ def test_builder_machine_type_quotes_a_comment_opening_value() -> None:
 
 
 def test_builder_resource_res_type_quotes_a_comment_opening_value() -> None:
-    """`res_type` is a real `_unquote` lane for insert_resource
+    """`res_type` is a real `unquote_jil_value` lane for insert_resource
     (`_lower_resource`), so `resource()` auto-quotes it too."""
     c = CatalogBuilder()
     c.resource("r1", res_type="/tmp/pool /*glob")
@@ -379,7 +380,7 @@ def test_builder_resource_res_type_quotes_a_comment_opening_value() -> None:
 
 
 def test_builder_xinst_xtype_quotes_a_comment_opening_value() -> None:
-    """`xtype` is a real `_unquote` lane for insert_xinst
+    """`xtype` is a real `unquote_jil_value` lane for insert_xinst
     (`_lower_xinst`), so `xinst()` auto-quotes it too."""
     c = CatalogBuilder()
     c.xinst("x1", xtype="/tmp/pool /*glob")

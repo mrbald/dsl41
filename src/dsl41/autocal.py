@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from .ir import CalendarIR, CatalogIR
+from .ir import CalendarIR, CatalogIR, unquote_jil_value
 
 __all__ = [
     "CalendarRuleError",
@@ -208,6 +208,21 @@ def _period_matching(day: date, ctx: _Ctx, keep: Callable[[date], bool]) -> list
     ]
 
 
+def _ordinal(cal: str, raw: str, letter: str, digits: str, *, lo: int, hi: int) -> tuple[int, bool]:
+    """Decode one `(#|m|x)(\\d+|l)`-shaped ordinal suffix (SEM-37): `letter`
+    is the family's back/exclusion marker character, `digits` its
+    ordinal-or-`l` body. `l` ("last", extended uniformly across families by
+    Q9/DL-60) maps to n=1 with back forced True -- the ONE encoding this
+    collapses two into. `_nth_of(seq, n, back=back)` then reads the last
+    element the same way an ordinary from-end count would, so no family
+    needs its own `seq[-1]` special case. `m` also forces back (the
+    vendor's own from-end marker)."""
+    last = digits == "l"
+    n = 1 if last else _ord_in(cal, raw, digits, lo, hi)
+    back = letter == "m" or last
+    return n, back
+
+
 def _parse_token(cal: str, raw: str) -> _Token:
     """One keyword to its day predicate. Case-insensitive (SEM-37 [V]);
     unknown and doc-defective tokens refuse loudly."""
@@ -256,14 +271,10 @@ def _parse_token(cal: str, raw: str) -> _Token:
     # observed export sample uses WORKD#L, and the CWRK/Cddd families already
     # documented the form -- extended uniformly (Q9, DL-60)
     if m := re.fullmatch(r"workd([#m])(\d+|l)", body):
-        last = m.group(2) == "l"
-        back = m.group(1) == "m" or last
-        n = 1 if last else _ord_in(cal, raw, m.group(2), 1, 31)
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
         return mk(lambda d, c: _nth_of(workday_seq(d, c), n, back=back) == d)
     if m := re.fullmatch(r"weekd([#mx])(\d+|l)", body):
-        last = m.group(2) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(2), 1, 7)
-        back = m.group(1) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=7)
         pred: _Pred = (
             (lambda d, c: (d - _week_start(d, _jan1_anchor(d))).days == 7 - n)
             if back
@@ -272,9 +283,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
         return mk(pred, excl=exclusive or m.group(1) == "x")
     if m := re.fullmatch(r"wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\d+|l)", body):
         anchor = _DAY_NAMES.index(m.group(1))
-        last = m.group(3) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(3), 1, 7)
-        back = m.group(2) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=7)
         pred = (
             (lambda d, c: (d - _week_start(d, anchor)).days == 7 - n)
             if back
@@ -285,9 +294,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
         parity = 0 if m.group(1) == "e" else 1
         return mk(lambda d, c: _week_number(d) % 2 == parity)
     if m := re.fullmatch(r"week([#mx])(\d+|l)", body):
-        last = m.group(2) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(2), 1, 53)
-        back = m.group(1) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
         pred = (
             (lambda d, c: _week_number(d) == _year_weeks(d) - n + 1)
             if back
@@ -295,9 +302,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
         )
         return mk(pred, excl=exclusive or m.group(1) == "x")
     if m := re.fullmatch(r"mnthd([#mx])(\d+|l)", body):
-        last = m.group(2) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(2), 1, 31)
-        back = m.group(1) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
         pred = (lambda d, c: d.day == _month_days(d) - n + 1) if back else (lambda d, c: d.day == n)
         return mk(pred, excl=exclusive or m.group(1) == "x")
     if body in _MONTH_NAMES:
@@ -305,9 +310,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
         return mk(lambda d, c: d.month == month)
     if m := re.fullmatch(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)([#m])(\d+|l)", body):
         month = _MONTH_NAMES.index(m.group(1)) + 1
-        last = m.group(3) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(3), 1, 31)
-        back = m.group(2) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=31)
         pred = (
             (lambda d, c: d.month == month and d.day == _month_days(d) - n + 1)
             if back
@@ -319,9 +322,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
         return mk(lambda d, c: d.weekday() == wd)
     if m := re.fullmatch(r"(mon|tue|wed|thu|fri|sat|sun)([#m])(\d|l)", body):
         wd = _DAY_NAMES.index(m.group(1))
-        last = m.group(3) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(3), 1, 5)
-        back = m.group(2) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=5)
         return mk(
             lambda d, c: (
                 d.weekday() == wd
@@ -329,9 +330,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
             )
         )
     if m := re.fullmatch(r"cycl([#mx])(\d+|l)", body):
-        last = m.group(2) == "l"
-        n = 1 if last else _ord_in(cal, raw, m.group(2), 1, 365)
-        back = m.group(1) == "m" or last
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
 
         def cycl(d: date, c: _Ctx) -> bool:
             hit = _period_of(d, c)
@@ -357,8 +356,9 @@ def _parse_token(cal: str, raw: str) -> _Token:
 
         return mk(cweek_l, cycle=True)
     if m := re.fullmatch(r"cweek([#mx])(\d+)", body):
-        n = _ord_in(cal, raw, m.group(2), 1, 53)
-        back = m.group(1) == "m"
+        # no literal 'l' here -- `cweek#([eol])` above owns that spelling for
+        # this family; _ordinal's `last` branch is simply never taken
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
 
         def cweek(d: date, c: _Ctx) -> bool:
             chunk = _period_chunk(d, c)
@@ -369,24 +369,18 @@ def _parse_token(cal: str, raw: str) -> _Token:
 
         return mk(cweek, cycle=True, excl=exclusive or m.group(1) == "x")
     if m := re.fullmatch(r"cwrk([#mx])(\d+|l)", body):
-        back = m.group(1) == "m"
-        last = m.group(2) == "l"
-        n = 0 if last else _ord_in(cal, raw, m.group(2), 1, 365)
+        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
 
         def cwrk(d: date, c: _Ctx) -> bool:
             seq = _period_matching(d, c, lambda x: x.weekday() in c.workdays)
             if seq is None:
                 return False
-            if last:
-                return bool(seq) and d == seq[-1]
             return _nth_of(seq, n, back=back) == d
 
         return mk(cwrk, cycle=True, excl=exclusive or m.group(1) == "x")
     if m := re.fullmatch(r"c(mon|tue|wed|thu|fri|sat|sun)([#m])(\d+|l)", body):
         wd = _DAY_NAMES.index(m.group(1))
-        back = m.group(2) == "m"
-        last = m.group(3) == "l"
-        n = 0 if last else _ord_in(cal, raw, m.group(3), 1, 53)
+        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=53)
 
         def cddd(d: date, c: _Ctx) -> bool:
             if d.weekday() != wd:
@@ -394,8 +388,6 @@ def _parse_token(cal: str, raw: str) -> _Token:
             seq = _period_matching(d, c, lambda x: x.weekday() == wd)
             if seq is None:
                 return False
-            if last:
-                return bool(seq) and d == seq[-1]
             return _nth_of(seq, n, back=back) == d
 
         return mk(cddd, cycle=True)
@@ -721,7 +713,7 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
     holidays: frozenset[date] = frozenset()
     holcal_name = cal.attrs.get("holcal", "").strip()
     if holcal_name:
-        hol = catalog.calendars.get(_unquote(holcal_name))
+        hol = catalog.calendars.get(unquote_jil_value(holcal_name))
         if hol is None:
             raise _err(cal.name, f"holcal {holcal_name!r} names no calendar in the loaded set")
         if hol.kind != "standard":
@@ -786,10 +778,13 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
     if needs_cycle:
         if not cyccal_name:
             raise _err(cal.name, "cycle-scoped conditions require cyccal (SEM-36)")
-        periods = _parse_periods(cal.name, _unquote(cyccal_name), catalog)
+        periods = _parse_periods(cal.name, unquote_jil_value(cyccal_name), catalog)
     elif cyccal_name:
-        # a named but unused cycle must still resolve (L018 parity)
-        periods = _parse_periods(cal.name, _unquote(cyccal_name), catalog)
+        # a named but unused cycle must still resolve, same as L018's own
+        # check (rule_l018, lint.py) -- both now key the lookup through
+        # ir.unquote_jil_value, so a quoted name resolves identically here
+        # and there (DL-178q; this was the divergent lenient _unquote before)
+        periods = _parse_periods(cal.name, unquote_jil_value(cyccal_name), catalog)
 
     if (non_workday in ("w", "p") or holiday in ("w", "p")) and not workdays:
         raise _err(cal.name, "a W/P action with an all-non-workday mask has nowhere to walk")
@@ -871,7 +866,7 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
     has_holcal = bool(holcal_raw)
     holidays: frozenset[date] | None = None  # None = unresolvable, be conservative
     if has_holcal and catalog is not None:
-        hol = catalog.calendars.get(_unquote(holcal_raw))
+        hol = catalog.calendars.get(unquote_jil_value(holcal_raw))
         if hol is not None and hol.kind == "standard":
             try:
                 holidays = standard_days(hol)
@@ -943,15 +938,8 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
             and non_workday_action is not None
             and action_touches_a_holiday(),
         ),
-        _unquote(cal.attrs.get("holcal", "").strip()) or None,
-        _unquote(cal.attrs.get("cyccal", "").strip()) or None,
+        unquote_jil_value(cal.attrs.get("holcal", "").strip()) or None,
+        unquote_jil_value(cal.attrs.get("cyccal", "").strip()) or None,
         adjust,
         parsed_rules(),
     )
-
-
-def _unquote(name: str) -> str:
-    text = name.strip()
-    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
-        return text[1:-1]
-    return text

@@ -84,7 +84,7 @@ from dsl41.ast_jil import SourceSpan
 from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
 from dsl41.derive import DerivedGraph, derive_graph, local_producer
-from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, _unquote
+from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
 
 Severity = Literal["error", "warn", "info"]
 
@@ -100,7 +100,7 @@ class Violation(BaseModel):
     detail: str | None = None  # machine-usable hook (referenced name, attr, token)
 
     def render(self) -> str:
-        loc = f"{self.span.file}:{self.span.line_start}: " if self.span else ""
+        loc = f"{self.span.at}: " if self.span else ""
         return f"{loc}{self.code} {self.severity}: {self.message}"
 
 
@@ -498,7 +498,7 @@ def rule_l018(catalog: CatalogIR) -> list[Violation]:
             ("holcal", catalog.calendars, "calendar"),
             ("cyccal", catalog.cycles, "cycle"),
         ):
-            ref = _unquote(calendar.attrs.get(attr, ""))
+            ref = unquote_jil_value(calendar.attrs.get(attr, ""))
             if ref and ref not in defined:
                 out.append(
                     Violation(

@@ -122,7 +122,7 @@ def _edge_line(edge: DerivedEdge) -> str:
         lookback = f", lookback {edge.lookback.token}"
     where = ""
     if edge.source_atom is not None:
-        where = f" — `{edge.source_atom.file}:{edge.source_atom.line_start}`"
+        where = f" — `{edge.source_atom.at}`"
     line = f"- **{edge.mapping_row}** `{edge.src}` →({edge.via}{lookback})→ `{edge.dst}`{where}"
     if edge.assumption:
         line += f"\n  - {edge.assumption}"
@@ -234,7 +234,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         for flag in graph.redesign_flags:
             where = ""
             if flag.span is not None:
-                where = f" — `{flag.span.file}:{flag.span.line_start}`"
+                where = f" — `{flag.span.at}`"
             lines.append(f"- **{flag.mapping_row}** `{flag.job}`{where}\n  - {flag.reason}")
     if plan.assumed:
         lines += [

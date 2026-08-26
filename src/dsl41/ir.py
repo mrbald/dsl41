@@ -665,7 +665,7 @@ class LoweringFinding(BaseModel):
     def render(self) -> str:
         if self.span is None:
             return self.message
-        return f"{self.span.file}:{self.span.line_start}: {self.message}"
+        return f"{self.span.at}: {self.message}"
 
 
 class LoweringError(ValueError):
@@ -708,11 +708,17 @@ _BOX_INERT_ATTRS = frozenset(EXEC_BASE_ATTRS) | {"std_in_file", "envvars"}
 _WRAPPED_QUOTES_RE = re.compile(r'"[^"]*"')
 
 
-def _unquote(value: str) -> str:
+def unquote_jil_value(value: str) -> str:
     """Semantic unquoting (jil-statement-syntax rule 7) for the typed lane:
     exactly one wrapping quote pair with no interior quotes. Anything else --
     partial quoting, multiple pairs -- belongs to the value (e.g. shell syntax
-    inside command) and is returned stripped-but-verbatim."""
+    inside command) and is returned stripped-but-verbatim.
+
+    The one public owner of the rule (DL-178q): this function produces the
+    calendar catalog key (`_lower_calendar`/`_lower_cycle` below), and every
+    site that later looks a name up against that key -- autocal's holcal/
+    cyccal resolution, classify's `_named_ref`, lint's L018 -- imports and
+    calls this, so the lookup uses the same predicate as the production."""
     v = value.strip()
     if _WRAPPED_QUOTES_RE.fullmatch(v):
         return v[1:-1]
@@ -722,10 +728,10 @@ def _unquote(value: str) -> str:
 def _split_list(value: str) -> list[str]:
     """Comma-separated JIL list; tolerates newlines (rule-6 continuations) and
     empty segments (trailing commas) -- lexical normalization only."""
-    return [t for t in (part.strip() for part in _unquote(value).split(",")) if t]
+    return [t for t in (part.strip() for part in unquote_jil_value(value).split(",")) if t]
 
 
-#: Attribute names whose values lowering funnels through `_unquote` (directly,
+#: Attribute names whose values lowering funnels through `unquote_jil_value` (directly,
 #: or via `_split_list`), across every statement kind that has such a lane --
 #: insert_job, and insert_machine/insert_resource/insert_xinst's own `type`/
 #: `res_type`/`xtype`. The DSL builder auto-quotes ONLY these lanes
@@ -735,7 +741,7 @@ def _split_list(value: str) -> list[str]:
 #: would silently change the stored value. Named for the mechanism (what
 #: lowering unquotes), not for statement kind: `_BOX_INERT_ATTRS` and
 #: `TIME_CLUSTER` are exec-cluster and SEM-30 job attrs that happen to route
-#: through `_unquote` too, plus nine names that route through no other named
+#: through `unquote_jil_value` too, plus nine names that route through no other named
 #: cluster, three of them not job attrs at all.
 UNQUOTED_AT_LOWERING = (
     _BOX_INERT_ATTRS
@@ -1119,7 +1125,7 @@ class _Lowerer:
         if (attr := attrs.pop("box_name", None)) is not None:
             # DL-39: same semantic-name funnel as the job subject and the
             # condition transformer, so the linkage joins the catalog key.
-            box_name = unescape_job_name(_unquote(attr.raw_value))
+            box_name = unescape_job_name(unquote_jil_value(attr.raw_value))
             if not box_name:
                 self.err("box_name: empty value", attr.span)
                 box_name = None
@@ -1153,7 +1159,7 @@ class _Lowerer:
         if (attr := attrs.pop("auto_hold", None)) is not None:
             sem.auto_hold = self._bool_attr(attr) or False
         if (attr := attrs.pop("status", None)) is not None:
-            value = _unquote(attr.raw_value).upper()
+            value = unquote_jil_value(attr.raw_value).upper()
             if value in _INITIAL_STATUSES:
                 sem.initial_status = cast(InitialStatus, value)
             else:
@@ -1190,11 +1196,11 @@ class _Lowerer:
         if (attr := take("days_of_week")) is not None:
             fields["days_of_week"] = self._days_of_week(attr)
         if (attr := take("run_calendar")) is not None:
-            fields["run_calendar"] = _unquote(attr.raw_value)
+            fields["run_calendar"] = unquote_jil_value(attr.raw_value)
         if (attr := take("exclude_calendar")) is not None:
-            fields["exclude_calendar"] = _unquote(attr.raw_value)
+            fields["exclude_calendar"] = unquote_jil_value(attr.raw_value)
         if (attr := take("timezone")) is not None:
-            fields["timezone"] = _unquote(attr.raw_value)
+            fields["timezone"] = unquote_jil_value(attr.raw_value)
         if (attr := take("start_times")) is not None:
             fields["start_times"] = self._times_attr(attr)
         if (attr := take("start_mins")) is not None:
@@ -1271,7 +1277,7 @@ class _Lowerer:
         return values
 
     def _run_window(self, attr: RawAttr) -> tuple[Time, Time] | None:
-        parts = _unquote(attr.raw_value).split("-")
+        parts = unquote_jil_value(attr.raw_value).split("-")
         if len(parts) != 2:
             self.err(
                 f'run_window: expected "HH:MM-HH:MM", got {attr.raw_value.strip()!r}', attr.span
@@ -1357,7 +1363,7 @@ class _Lowerer:
         base: dict[str, str] = {}
         for field_name in EXEC_BASE_ATTRS:
             if (attr := attrs.pop(field_name, None)) is not None:
-                base[field_name] = _unquote(attr.raw_value)
+                base[field_name] = unquote_jil_value(attr.raw_value)
         if job_type == "CMD":
             for wrong in (watch_file, watch_interval, watch_min_size):
                 if wrong is not None:
@@ -1369,9 +1375,13 @@ class _Lowerer:
             envvars = attrs.pop("envvars", None)
             return ExecSpec.model_validate(
                 {
-                    "command": _unquote(command.raw_value),
-                    "std_in_file": _unquote(std_in.raw_value) if std_in is not None else None,
-                    "envvars": _unquote(envvars.raw_value) if envvars is not None else None,
+                    "command": unquote_jil_value(command.raw_value),
+                    "std_in_file": unquote_jil_value(std_in.raw_value)
+                    if std_in is not None
+                    else None,
+                    "envvars": unquote_jil_value(envvars.raw_value)
+                    if envvars is not None
+                    else None,
                     **base,
                 }
             )
@@ -1387,7 +1397,7 @@ class _Lowerer:
         min_size = self._int_attr(watch_min_size) if watch_min_size is not None else None
         return FwSpec.model_validate(
             {
-                "watch_file": _unquote(watch_file.raw_value),
+                "watch_file": unquote_jil_value(watch_file.raw_value),
                 "watch_interval": interval,
                 "watch_file_min_size": min_size,
                 **base,
@@ -1411,7 +1421,7 @@ class _Lowerer:
             self.err(f"insert_global {name!r}: missing value attribute", stmt.span)
             return
         # unquoted so it compares equal to unquoted value() condition comparands
-        self.globals_declared[name] = _unquote(value.raw_value)
+        self.globals_declared[name] = unquote_jil_value(value.raw_value)
 
     #: Per-member pool attributes that legitimately repeat inside one
     #: insert_machine (once per component machine, DL-49). Every other
@@ -1444,7 +1454,7 @@ class _Lowerer:
                     self.err("duplicate attribute 'type' in one insert_machine", attr.span)
                     ok = False
                     continue
-                machine_type = _unquote(attr.raw_value)
+                machine_type = unquote_jil_value(attr.raw_value)
             elif key == "machine":
                 opened = len(members)
                 for member in (m.strip() for m in value.split(",")):
@@ -1490,7 +1500,7 @@ class _Lowerer:
             return
         res_type = None
         if (attr := attrs.pop("res_type", None)) is not None:
-            res_type = _unquote(attr.raw_value)
+            res_type = unquote_jil_value(attr.raw_value)
         self.resources[name] = ResourceIR(
             name=name,
             res_type=res_type,
@@ -1516,7 +1526,7 @@ class _Lowerer:
         # this per-file-tolerant lowering's.
         self.external_instances[name] = XinstIR(
             name=name,
-            xtype=_unquote(xtype.raw_value),
+            xtype=unquote_jil_value(xtype.raw_value),
             attrs={a.key: a.raw_value.strip() for a in attrs.values()},
             span=stmt.span,
         )
@@ -1543,7 +1553,7 @@ class _Lowerer:
         if not ok:
             return
         # unquoted so it compares equal to unquoted run_calendar refs (L018)
-        name = _unquote(name)
+        name = unquote_jil_value(name)
         if name in self.calendars:
             self.err(
                 f"duplicate calendar {name!r} (standard and extended calendars share the"
@@ -1593,7 +1603,7 @@ class _Lowerer:
             ok = False
         if not ok:
             return
-        name = _unquote(name)
+        name = unquote_jil_value(name)
         if name in self.cycles:
             self.err(f"duplicate cycle {name!r}", stmt.span)
             return

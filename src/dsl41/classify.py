@@ -63,7 +63,7 @@ from dsl41.capacity import CapacityPool
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.derive import BoxTree, derive_graph
 from dsl41.equiv import canonical_cond
-from dsl41.ir import CatalogIR, CondAttr, JobIR
+from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, JobRuntime
 from dsl41.period import RuntimeProfile, job_fingerprints, tz_aliases_of
@@ -291,17 +291,12 @@ def _named_ref(attrs: Mapping[str, str], key: str) -> str | None:
     """The record `attrs[key]` NAMES, or None.
 
     Attribute values are verbatim JIL and a calendar reference is often
-    quoted (`cyccal: "q1"`), so the quotes come off here. ONE wrapping pair
-    of DOUBLE quotes, which is what `ir._unquote` and `autocal._unquote` --
-    the latter resolving this same `holcal` attribute -- both do; a third
-    rule that also stripped `'...'` would make one JIL spelling mean two
-    things. `ir._unquote` is private and DL-75's gate forbids a new
-    cross-module private import, so this stays local rather than a sixth
-    import site nobody may add."""
-    raw = attrs.get(key, "").strip()
-    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-        raw = raw[1:-1]
-    return raw or None
+    quoted (`cyccal: "q1"`), so the quotes come off here through
+    `ir.unquote_jil_value` (jil-statement-syntax rule 7) -- the same
+    function that produced the calendar catalog key this name is looked up
+    against, and that `autocal`'s holcal/cyccal resolution and lint's L018
+    also call (DL-178q)."""
+    return unquote_jil_value(attrs.get(key, "")) or None
 
 
 def _cycle_periods(periods: Iterable[Any]) -> tuple[Any, ...]:

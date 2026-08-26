@@ -563,6 +563,30 @@ def test_ss10_2_an_extended_calendar_reaches_its_cycle(cyccal: str) -> None:
     assert result.by_job["j"].verdict == "R"
 
 
+def test_dl178q_interior_quoted_cyccal_resolves_under_one_shared_rule() -> None:
+    """DL-178q: the cycle's declared name and the calendar's `cyccal`
+    reference share ONE unquoting rule (`ir.unquote_jil_value`, rule 7) end
+    to end. `"a"b"c"` carries interior quotes, so rule 7 refuses to strip
+    it -- the value lowers into the catalog key, and is looked back up,
+    VERBATIM, quotes included, on both sides. Before the rule was unified,
+    the consumer side stripped only the first and last character
+    (`a"b"c"` -> `a"b"c`), a different string than the catalog key `ir`
+    produced (`"a"b"c"`) -- the reference would have silently failed to
+    resolve, an edge missing from the graph with no symptom."""
+    estate = (
+        'cycle: "a"b"c"\nstart_date: 03/28/2026\nend_date: 04/02/2026\n\n'
+        "extended_calendar: cwrk\nworkday: mo,tu,we,th,fr\n"
+        'cyccal: "a"b"c"\ncondition: CWRK#L\n\n'
+        "insert_job: j\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nrun_calendar: cwrk\nstart_times: "08:00"\n'
+    )
+    catalog = lower_source(estate)
+    assert '"a"b"c"' in catalog.cycles
+    assert catalog.calendars["cwrk"].attrs["cyccal"] == '"a"b"c"'
+    graph = ClassificationGraph(_side(estate), _side(estate))
+    assert 'cycle:"a"b"c"' in graph.forward(JOB + "j")
+
+
 # -------------------------------------------------------- ss10.3 named cases
 
 

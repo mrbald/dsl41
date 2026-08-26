@@ -33,7 +33,7 @@ from dsl41.autocal import (
     standard_days,
 )
 from dsl41.conditions import And, Cond, Paren, StatusAtom
-from dsl41.ir import CatalogIR, JobIR, MachineIR, _unquote
+from dsl41.ir import CatalogIR, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
@@ -100,7 +100,7 @@ def _node_name(machine: MachineIR) -> str | None:
     carries quotes) -- node_name feeds host resolution, so it must not be
     read as the raw opaque carry (review: quoted node_name false-refused)."""
     raw = machine.attrs.get("node_name")
-    return _unquote(raw) if raw else None
+    return unquote_jil_value(raw) if raw else None
 
 
 def _leaf_host(machine: MachineIR) -> tuple[str | None, str | None]:

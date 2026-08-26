@@ -157,12 +157,27 @@ class JilParseError(ValueError):
         self.line = line
 
 
+def render_location(file: str, line: int) -> str:
+    """`file:line` -- the citation shorthand every diagnostic renderer
+    composes (DL-178, finding 11). `SourceSpan.at` is the usual caller;
+    this loose-pair form is for one that carries the file/line apart from
+    a span (placeholders._Entry, which predates SourceSpan in that lane)."""
+    return f"{file}:{line}"
+
+
 class SourceSpan(BaseModel):
     file: str
     line_start: int  # 1-based, inclusive
     line_end: int  # 1-based, inclusive
     byte_start: int  # UTF-8 offset of the first line's start
     byte_end: int  # UTF-8 offset past the last line's content (EOL excluded)
+
+    @property
+    def at(self) -> str:
+        """`file:line_start`: LoweringFinding.render, Violation.render, and
+        backend_uc's edge/redesign-flag lines all read this instead of
+        re-spelling the f-string."""
+        return render_location(self.file, self.line_start)
 
 
 class Comment(BaseModel):

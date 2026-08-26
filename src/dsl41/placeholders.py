@@ -43,6 +43,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from dsl41.ast_jil import render_location
+
 PLACEHOLDER_RE = re.compile(r"~\{\$([A-Za-z_][A-Za-z0-9_]*)\}~")
 #: Anything still `~{...}~`-shaped after substitution: undefined names and
 #: malformed lookalikes both refuse to pass silently.
@@ -68,7 +70,7 @@ class _Entry(BaseModel):
     line: int
 
     def where(self) -> str:
-        return f"{self.file}:{self.line}"
+        return render_location(self.file, self.line)
 
 
 def _substitute_known(text: str, bindings: Mapping[str, str]) -> str:
