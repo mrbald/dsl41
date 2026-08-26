@@ -79,7 +79,7 @@ from dsl41.conditions import (
 from dsl41.derive import derive_graph
 from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, ScheduleBlock, SlaSpec, Time
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, TraceEntry
+from dsl41.oracle_state import TERMINAL, Event, TraceEntry
 
 STATE_CEILING = 2**18
 
@@ -594,7 +594,7 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
         if status == "NEVER_RAN":
             return hit  # no timestamp: lookback trivially holds (oracle parity)
     elif wanted == "DONE":
-        hit = status in ("SUCCESS", "FAILURE", "TERMINATED")
+        hit = status in TERMINAL
     else:
         hit = status == wanted
     return hit and _lookback_holds(cond.lookback, key, state, alphabet)

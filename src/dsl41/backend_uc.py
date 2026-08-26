@@ -68,7 +68,7 @@ from pydantic import BaseModel, ConfigDict
 from dsl41.conditions import ExitCodeAtom, GlobalAtom
 from dsl41.derive import DerivedEdge, DerivedGraph, components, derive_graph
 from dsl41.equiv import catalog_hash
-from dsl41.ir import CatalogIR, InitialStatus, JobIR, tool_version
+from dsl41.ir import CatalogIR, InitialStatus, JobIR, render_code_ranges, tool_version
 
 
 class CompilePlan(BaseModel):
@@ -935,10 +935,6 @@ def _quarantine_reasons(workflow: UcWorkflow) -> list[str]:
     return reasons
 
 
-def _range_text(ranges: list[tuple[int, int]]) -> str:
-    return ",".join(str(low) if low == high else f"{low}-{high}" for low, high in ranges)
-
-
 def _exit_boundary(twin: UcModel, task: str) -> str:
     """The M31 values a workflow record cannot carry, for one task (DL-33;
     Q7 cited-resolved DL-58: a present fail_codes decides alone)."""
@@ -946,9 +942,9 @@ def _exit_boundary(twin: UcModel, task: str) -> str:
     if task in twin.max_exit_success:
         bits.append(f"max_exit_success={twin.max_exit_success[task]}")
     if task in twin.success_codes:
-        bits.append(f"success_codes={_range_text(twin.success_codes[task])}")
+        bits.append(f"success_codes={render_code_ranges(twin.success_codes[task], sep=',')}")
     if task in twin.fail_codes:
-        bits.append(f"fail_codes={_range_text(twin.fail_codes[task])}")
+        bits.append(f"fail_codes={render_code_ranges(twin.fail_codes[task], sep=',')}")
     return f"{task} ({', '.join(bits)})"
 
 

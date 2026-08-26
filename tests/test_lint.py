@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 
 from dsl41.ast_jil import SourceSpan, parse_file
 from dsl41.cli import app
+from dsl41.derive import derive_graph
 from dsl41.ir import (
     BoxLinkage,
     CatalogIR,
@@ -35,6 +36,8 @@ from dsl41.ir import (
     lower_source,
 )
 from dsl41.lint import (
+    GRAPH_RULES,
+    RULES,
     LintReport,
     Severity,
     Violation,
@@ -503,6 +506,23 @@ def test_l002_v_read_of_undeclared_global_warns_but_declared_or_produced_stay_qu
 
 
 # ------------------------------------------------------ 7. lint_catalog integration
+
+
+def test_every_registered_rule_emits_its_own_registry_code() -> None:
+    """Guard, not a merge (arch-review 2026-08-26, DL-178o): `rule_lNNN`'s
+    function name, the RULES/GRAPH_RULES tuple key, and the `code="LNNN"`
+    inside every Violation it builds are three independent spellings of one
+    fact, and nothing pinned that they agree. Runs every registered rule
+    against the whole corpus and checks each violation it emits carries the
+    code it is registered under."""
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    graph = derive_graph(catalog)
+    for code, rule in RULES:
+        for violation in rule(catalog):
+            assert violation.code == code
+    for code, graph_rule in GRAPH_RULES:
+        for violation in graph_rule(catalog, graph):
+            assert violation.code == code
 
 
 def test_lint_catalog_runs_the_whole_lowerable_corpus_without_crashing() -> None:

@@ -86,12 +86,14 @@ from dsl41.conditions import (
 from dsl41.derive import DerivedGraph, derive_graph
 from dsl41.ir import (
     CatalogIR,
+    EXEC_BASE_ATTRS,
     JobIR,
     ScheduleBlock,
     SlaSpec,
     Time,
     UNQUOTED_AT_LOWERING,
     lower_source,
+    render_code_ranges,
 )
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -678,12 +680,6 @@ def _sla(spec: SlaSpec) -> str:
     return ", ".join(_time(t) for t in spec.times)
 
 
-def _code_ranges(ranges: list[tuple[int, int]]) -> str:
-    """SEM-09/DL-33 exit-code sets back to their surface form; lowering keeps
-    the author's partition sorted-not-merged, so render(parse(x)) is stable."""
-    return ", ".join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
-
-
 def _record_kwargs(attrs: dict[str, str]) -> list[str]:
     """Opaque record attrs as builder kwargs. Keys are JIL-key-shaped
     (scanner rule 1) but may collide with Python keywords or the builders'
@@ -742,7 +738,7 @@ def _job_kwargs(
             value = getattr(exec_, field, None)
             if value is not None:
                 out.append(f"{field}={value}")
-        for field in ("machine", "owner", "profile", "std_out_file", "std_err_file"):
+        for field in EXEC_BASE_ATTRS:
             value = getattr(exec_, field)
             if value is not None:
                 out.append(f"{field}={_py(value)}")
@@ -761,9 +757,9 @@ def _job_kwargs(
     if sem.max_exit_success:
         out.append(f"max_exit_success={sem.max_exit_success}")
     if sem.success_codes is not None:
-        out.append(f"success_codes={_py(_code_ranges(sem.success_codes))}")
+        out.append(f"success_codes={_py(render_code_ranges(sem.success_codes))}")
     if sem.fail_codes is not None:
-        out.append(f"fail_codes={_py(_code_ranges(sem.fail_codes))}")
+        out.append(f"fail_codes={_py(render_code_ranges(sem.fail_codes))}")
     if sem.term_run_time_min is not None:
         out.append(f"term_run_time={sem.term_run_time_min}")
     if sem.n_retrys:

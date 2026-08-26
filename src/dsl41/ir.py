@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Container, Iterable, Iterator, Sequence
 from importlib import metadata
 from typing import Annotated, Literal, cast, get_args
 
@@ -695,12 +695,14 @@ _SUPPORTED_SUBCOMMANDS = {
 }
 
 #: Exec-cluster attributes valid on both CMD and FW jobs (ExecSpecBase).
-_EXEC_BASE_ATTRS = ("machine", "owner", "profile", "std_out_file", "std_err_file")
+#: Public: dsl.py's decompiler emits this same five-name cluster and
+#: imports it rather than hand-copying (DL-178).
+EXEC_BASE_ATTRS = ("machine", "owner", "profile", "std_out_file", "std_err_file")
 
 #: Exec-shaped attributes that are inert on a BOX (boxes do not execute,
 #: SEM-10) and route to passthrough verbatim; the CMD-only pair joins the
 #: base cluster here (DL-32).
-_BOX_INERT_ATTRS = frozenset(_EXEC_BASE_ATTRS) | {"std_in_file", "envvars"}
+_BOX_INERT_ATTRS = frozenset(EXEC_BASE_ATTRS) | {"std_in_file", "envvars"}
 
 
 _WRAPPED_QUOTES_RE = re.compile(r'"[^"]*"')
@@ -752,6 +754,13 @@ UNQUOTED_AT_LOWERING = (
         }
     )
 )
+
+
+def render_code_ranges(ranges: list[tuple[int, int]], *, sep: str = ", ") -> str:
+    """SEM-09/DL-33 exit-code sets back to their surface form, beside their
+    parser (_code_set_attr below): lowering keeps the author's partition
+    sorted-not-merged, so render(parse(x)) is stable."""
+    return sep.join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
 
 
 def find_var_sites(attr: str, value: str) -> list[VarSite]:
@@ -856,18 +865,26 @@ class _Lowerer:
 
     # ------------------------------------------------------------- shared helpers
 
+    def _dup_attr(self, seen: Container[str], attr: RawAttr) -> bool:
+        """True on a fresh key; on a repeat, emits the duplicate-attribute
+        lowering error and returns False (module docstring: last-wins would
+        be silent loss). One owner for the four source-order lowerers that
+        each re-walk `stmt.attrs` by hand (DL-178)."""
+        if attr.key.lower() in seen:
+            self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+            return False
+        return True
+
     def _collect_attrs(self, stmt: JilStatement) -> dict[str, RawAttr] | None:
         """Key-lowered attr map; duplicate keys are lowering errors (module
         docstring: last-wins would be silent loss)."""
         attrs: dict[str, RawAttr] = {}
         ok = True
         for attr in stmt.attrs:
-            key = attr.key.lower()
-            if key in attrs:
-                self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+            if not self._dup_attr(attrs, attr):
                 ok = False
-            else:
-                attrs[key] = attr
+                continue
+            attrs[attr.key.lower()] = attr
         return attrs if ok else None
 
     def _subject(self, stmt: JilStatement, what: str) -> str | None:
@@ -1338,7 +1355,7 @@ class _Lowerer:
                     self.err(f"{wrong.key}: not valid on a BOX job", wrong.span)
             return None
         base: dict[str, str] = {}
-        for field_name in _EXEC_BASE_ATTRS:
+        for field_name in EXEC_BASE_ATTRS:
             if (attr := attrs.pop(field_name, None)) is not None:
                 base[field_name] = _unquote(attr.raw_value)
         if job_type == "CMD":
@@ -1449,8 +1466,7 @@ class _Lowerer:
                 # guard is case-insensitive and the resolver's node_name lookup
                 # cannot miss an upper/mixed-case spelling (review: no silent
                 # dup, no false accept).
-                if key in level_attrs:
-                    self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+                if not self._dup_attr(level_attrs, attr):
                     ok = False
                     continue
                 level_attrs[key] = value
@@ -1520,8 +1536,7 @@ class _Lowerer:
             key = attr.key.lower()
             if key == "condition" and kind == "extended":
                 conditions.append(attr.raw_value.strip())
-            elif key in attrs:
-                self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+            elif not self._dup_attr(attrs, attr):
                 ok = False
             else:
                 attrs[key] = attr.raw_value.strip()
@@ -1569,8 +1584,7 @@ class _Lowerer:
                 else:
                     periods.append((open_start, attr.raw_value.strip()))
                     open_start = None
-            elif key in attrs:
-                self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
+            elif not self._dup_attr(attrs, attr):
                 ok = False
             else:
                 attrs[key] = attr.raw_value.strip()
