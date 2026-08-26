@@ -10387,3 +10387,174 @@ relitigate an entry; append a new one.
   `test_pr25b_*`-named test of its own -- `test_dl174_...` pins it under
   the DL that paid it, the same convention DL-45's and DL-166's own tests
   already use for a PR obligation they also prove.
+- DL-175 the S-EDGE class closes at five sites, and stays open at a sixth
+  its own review found (2026-08-26; lint + viz + backend_uc; pays DL-162a's
+  own residue).
+  THE FINDING, as DL-162a left it: "the same `edge.src`-against-a-job-name-
+  set test survives at `lint.rule_l011`, at `derive.components`, at four
+  sites in `viz.py` and at `backend_uc`'s workflow grouping." A cross-
+  instance edge's `src` is the composite display form `name^INST`, and a
+  local job may legally spell its own name the same way (DL-162a); testing
+  the raw string against a job-name set answers a different question than
+  it looks like.
+  THE SIX NAMED SITES.
+  1. `lint.rule_l011` -- LIVE false negative. `wired.add(edge.src)` fired
+  unconditionally for non-global edges, so a foreign producer's display
+  form shielded an identically-spelled local dangler. Now wires only the
+  RESOLVED local producer (`local_producer`); the docstring gained one
+  sentence.
+  2. `derive.components`'s callers -- LIVE at its viz caller, sound by
+  construction at its backend_uc caller (site 6). `components()` itself
+  stays generic (nodes/edges, no catalog), per its own docstring.
+  3+4. `viz._incident_nodes` and `viz._auto_direction` -- LIVE, same
+  membership test. Fixed at their one caller.
+  5. `viz`'s pseudo-source classifier (`_render_chart`) -- LIVE, and worse
+  than a false negative: `edge.src in graph.nodes` decided "already a local
+  node, skip" and `"^" in edge.src` decided external-vs-undefined SHAPE, so
+  a colliding foreign producer rendered as the LOCAL job's own vertex --
+  two different producers folded into one Mermaid node.
+  6. `backend_uc`'s workflow grouping (`e.src in members`/`e.src in tasks`
+  over `compiled`) -- VERIFIED SOUND, not fixed, independently re-verified
+  by adversarial review. `compile_twin` excludes every `cls=="redesign"`
+  edge before building `compiled`, and M33/M16 cross-instance edges are
+  ALWAYS `cls="redesign"` (`derive._edge_for_ref`'s `atom.job.instance is
+  not None` branch has exactly one `return`, both the `condition` and
+  `box_success`/`box_failure` arms) -- no path gives a cross-instance edge
+  `cls="exact"` or `"assumed"`. A caret-spelled `e.src` reaching `compiled`
+  can only be a genuine local job. One comment says why, citing this entry.
+  THE FIX, one mechanism reused everywhere: `derive.local_producer(edge,
+  catalog)` -- the resolved LOCAL producer name or None, read off the
+  atom's `instance` fact -- replaces every raw `edge.src` membership test.
+  `viz.py` gained `_local_graph(catalog, graph)`: a copy of the graph where
+  every edge whose producer does not resolve locally has its `src`
+  REWRITTEN (not dropped) to a sentinel. Rewrite, not drop, because
+  `_incident_nodes` marks BOTH `edge.src` and `edge.dst` "touched"
+  unconditionally, and dropping the edge would have also dropped the
+  always-correct `dst`-side signal: a job whose only predecessor is foreign
+  IS wired, just not to another local job, and must not be reported
+  standalone. `report_content` builds this once and threads it through
+  `split_components`, `_incident_nodes`, `_auto_direction` and
+  `_component_title` -- all four keep their existing signature and code
+  unchanged, so every direct unit test of them passes UNMODIFIED, and
+  `_component_title` (never separately named by DL-162a's tally, a de
+  facto sixth viz.py site by the same argument) is covered as a side
+  effect of feeding it the resolved graph, not by a separate change.
+  `_render_chart` keeps the REAL, unfiltered graph throughout: it still has
+  to draw the foreign producer as its own pseudo-source.
+  THE VERTEX-ID QUESTION (DL-162a's own open note). Checked: yes, a local
+  `foo^PRD` job node and a foreign `foo^PRD` pseudo-source WOULD collide as
+  Mermaid vertex ids too -- `_Ids` keyed purely on the raw display string.
+  Fixed with a namespaced lookup key: `_Ids` now takes `IdKey = str |
+  tuple[str, str]`, and `_pseudo_key(name) = ("pseudo", name)` -- a real
+  catalog job's key stays a plain `str`, a pseudo-source's is a 2-tuple,
+  and a `str` can never equal a tuple, so the two spaces cannot collide
+  regardless of what characters a job name contains. The shared `n{k}`
+  counter is untouched, so the existing golden-render test's hardcoded
+  `n4` for a pseudo-source stays correct. Applied consistently everywhere
+  a pseudo-source id is looked up: its declaration, the edge-rendering
+  loop's `src_key(edge)` helper, and (after the review below) the mutex
+  dangling-member loop and its two reference sites via a shared
+  `node_key(name)` helper, and the `style_rows`/`class_line` classDef
+  application.
+  `_local_graph`'s rewritten `src` cannot use the tuple trick --
+  `DerivedEdge.src` is a `str` Pydantic field -- so it uses a different,
+  equally rigorous mechanism: a sentinel string CHECKED against this
+  catalog's actual, finite `catalog.jobs` before use, widening
+  (`"\x00pseudo"`, then `"\x00pseudo\x00"`, ...) until it is provably not
+  one of them. One shared sentinel value suffices for every rewritten edge
+  in one call: none of the four consumers ever compares two DIFFERENT
+  foreign producers' sentinels for equality, only tests membership in the
+  real job-name set.
+  THE FIXTURE, one JIL text kept independently (not imported) in three test
+  files: `insert_xinst: PRD`, a local dangling `insert_job: foo^PRD` (no
+  schedule, no conditions), and a local `insert_job: bar` with `condition:
+  s(foo^PRD)` -- a genuinely foreign M33 producer whose display form
+  collides with the dangler's own name.
+  THE TESTS.
+  `test_l011_dl175_a_local_dangler_is_not_shielded_by_a_cross_instance_display_form`
+  (tests/test_derive.py) pins the L011 fix and the collision's continued
+  presence (`edge.src in catalog.jobs`, still true -- what the fix stops
+  believing).
+  `test_dl175_local_dangler_and_foreign_producer_are_distinct_mermaid_vertices`
+  (tests/test_viz.py) is an exact golden render: `n0` the real local job,
+  `n2` the external pseudo-source, the M33 edge drawn FROM `n2`, never `n0`.
+  `test_dl175_report_does_not_merge_bar_with_the_dangler_it_collides_with`
+  (tests/test_viz.py) proves the component/incidence half: `bar` charts
+  alone and stays OFF Appendix A (it IS wired, just not to another local
+  job); `foo^PRD` alone is standalone.
+  `test_dl175_workflow_grouping_is_sound_for_a_local_job_named_like_the_collision`
+  (tests/test_backend_uc.py) is the regression net for site 6.
+  MUTATION CHECKS, by hand: reverting `rule_l011`'s fix to unconditional
+  `wired.add(edge.src)` reddens its test on the unpack (0 violations, not
+  1); reverting `_local_graph` to a no-op reddens the report non-merge
+  test; reverting the pseudo-source classifier's skip condition to
+  `edge.src in graph.nodes` reddens the golden Mermaid test. All restored;
+  the whole suite green again.
+  THE REVIEW. Fresh-context Opus adversarial review ran over the
+  uncommitted diff before this entry existed, independently re-derived the
+  `backend_uc` soundness proof end to end (agreed), and confirmed
+  `rule_l011`'s fix is behavior-identical except on the collision. It found
+  four real problems.
+  BLOCKER, now fixed: the id-namespacing landed at the dangling-n()-member
+  DECLARATION but not at the two places that draw its lock LINK (the mutex-
+  pair loop and the clique loop still called plain `target()`), so a
+  dangling member's exclusion link pointed at a freshly-minted, never-
+  declared vertex -- a phantom node the corpus dump could not catch (no
+  corpus file has a dangling n() member either). Fixed with the shared
+  `node_key` helper above.
+  Two new regression tests close this net, not just the one repro:
+  `test_dl175_dangling_lock_pair_and_clique_members_reference_their_own_declared_id`
+  (the exact pair/clique repros) and
+  `test_every_corpus_chart_has_no_referenced_but_undeclared_vertex` (a
+  RELATIONAL check -- every `n<k>` a chart references has a declaration
+  line -- over every per-component chart in the whole corpus, the general
+  net the substring-only pre-existing test could not be).
+  MAJOR, now fixed: `_pseudo_key`'s original docstring claimed "the prefix
+  byte cannot occur in a JIL name" -- false; `insert_job: \x00pseudo`
+  lowers cleanly (`_lower_job` bans only empty/duplicate subjects, DL-
+  162a), which would have re-created the exact collision this entry closes
+  one level down. Fixed with the tuple-typed `IdKey` above (`_Ids`) and the
+  catalog-checked widening sentinel (`_local_graph`), both provable by
+  construction rather than by an unstated alphabet assumption.
+  `test_dl175_local_graph_sentinel_widens_past_a_job_named_like_the_sentinel`
+  pins it with the pathological name itself.
+  MINOR, now fixed: `lint.rule_l008`'s external-instance message wording
+  still read `"^" in edge.src` -- accidentally sound today (box_success/
+  box_failure share the condition grammar's JOB_NAME, which bans `^`, so
+  this is provably equivalent on every reachable input), but the same
+  shape-decider spelling this entry closes everywhere else, and no test
+  exercised this wording at all before now. Converted to the atom's
+  `instance` fact; `test_l008_names_a_cross_instance_gate_by_the_atom_fact_not_the_display_shape`
+  is new coverage this rule never had.
+  MINOR, named not fixed: `viz_explore._elements` (`src/dsl41/viz_explore.py`,
+  the interactive exploration page, DL-71) has the identical unsound
+  `endpoint in charted` spelling and, verified by the review, the same live
+  collision -- a foreign M33 producer merges into the local dangler's
+  cytoscape node, no `ext` node synthesized. DL-162a's own "four sites in
+  viz.py" tally structurally could not have counted a sibling module; this
+  is a genuine seventh site, discovered by this entry's own review, not
+  named by DL-162a. Deferred as its own slice, the same discipline DL-162a
+  itself used for the five sites this entry paid -- not fixed here.
+  MINOR, addressed lightly: `split_components`'s new docstring read as a
+  hard precondition on a PUBLIC function that its own direct unit tests
+  (and any future caller) do not have to honor -- reworded across all four
+  functions to describe what `report_content` actually does, not a
+  contract the functions enforce or could check. The fixture text
+  triplicated across three test files stays triplicated (no shared-fixture
+  module exists in this suite); each copy now cross-references the other
+  two.
+  THE GATE, re-run after the review's fixes. Corpus dumps -- every lint
+  rule's firing set, the whole derived graph, `to_markdown` output,
+  `compile_twin` exclusions and workflows, and the migration report --
+  diffed byte-for-byte before/after over every corpus file individually
+  and over the whole corpus as one catalog, both before AND after the
+  review's fixes: identical both times (re-checked per the brief, since
+  the corpus cannot witness this class -- DL-162a says so -- the fixture
+  is the actual witness). 3448 passed (was 3440), 6 skipped, 2 xfailed;
+  `uv run ruff check src tests` clean; `uv run mypy src` clean;
+  `scripts/arch_check.py` exits 0, advisory only -- `_render_chart` grows
+  from 166 to 200 lines (60 to 66 branches) and `compile_twin` from 228 to
+  234 lines, all from added prose/branching this fix and its review needed.
+  Existing tests pass UNMODIFIED: no fixture in the whole corpus or the
+  suite pinned the unsound behavior by name (DL-162a's own text: no corpus
+  file has a caret-named job), so nothing needed sanctioning.

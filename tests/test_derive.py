@@ -827,6 +827,22 @@ def test_l008_quiet_on_sem10_box_basic_member_ref() -> None:
     assert rule_l008(catalog, graph) == []  # M15 (member ref) is the legitimate early-exit shape
 
 
+def test_l008_names_a_cross_instance_gate_by_the_atom_fact_not_the_display_shape() -> None:
+    """DL-175 (found by its own adversarial review): the external-instance
+    wording used to read `"^" in edge.src` -- accidentally sound today
+    (box_success/box_failure share the condition grammar's JOB_NAME, which
+    bans `^`), but a string-shape decider is the same defect class as
+    everywhere else in this codebase, and no test exercised this wording at
+    all before this one. Now reads the atom's `instance` fact."""
+    text = (
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        "insert_job: l8bx\njob_type: b\nbox_success: s(l8ext^PRD)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l008(catalog, derive_graph(catalog))
+    assert "'l8ext^PRD' on an external instance" in violation.message
+
+
 def test_l009_fires_on_consumer_stale_in_sem04_lookback() -> None:
     catalog = lower_catalog([parse_file(SEM04_LOOKBACK)])
     graph = derive_graph(catalog)
@@ -907,6 +923,34 @@ def test_l011_fires_for_a_bare_unwired_job() -> None:
     (violation,) = rule_l011(catalog, derive_graph(catalog))
     assert violation.jobs == ["bare_j"]
     assert violation.severity == "warn"
+
+
+#: DL-175 (the S-EDGE class): a local dangling job spelled exactly like a
+#: cross-instance display form, and a second local job whose producer is
+#: genuinely on that instance. The same text (kept local, not imported) also
+#: appears in test_viz.py and test_backend_uc.py.
+S_EDGE_TEXT = (
+    "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+    "insert_job: foo^PRD\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: bar\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo^PRD)\n"
+)
+
+
+def test_l011_dl175_a_local_dangler_is_not_shielded_by_a_cross_instance_display_form() -> None:
+    """DL-162a named this a live false negative: `wired.add(edge.src)`
+    unconditionally added `bar`'s M33 edge's display form "foo^PRD" -- the
+    SAME string as the local, genuinely dangling job's own name -- so L011
+    never fired on it. `local_producer` resolves None for the M33 edge (its
+    atom's instance is PRD, not this catalog), so the local job is not
+    wired and L011 catches it (DL-175)."""
+    catalog = lower_source(S_EDGE_TEXT)
+    graph = derive_graph(catalog)
+    (edge,) = graph.edges
+    assert edge.mapping_row == "M33" and edge.src == "foo^PRD"
+    (violation,) = rule_l011(catalog, graph)
+    assert violation.jobs == ["foo^PRD"]
+    # the collision itself, still present -- what the fix stops believing:
+    assert edge.src in catalog.jobs
 
 
 def test_l012_fires_per_group_from_m07_mutex_self_exclusion_mentions_instance_wait() -> None:

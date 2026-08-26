@@ -676,17 +676,24 @@ def rule_l008(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     global gate included, which is why the message below has a branch for
     one. What it must stay off is M15, the legitimate early-exit shape, and
     M09, which gates a start rather than a box. A row test says that; the
-    predicate cannot (DL-162a)."""
+    predicate cannot (DL-162a). The message's external-vs-member wording
+    reads the atom's `instance` fact, not `edge.src`'s shape (DL-175): the
+    row is already M16-classified, so this decides WORDING only, but a
+    string-shape decider is the same unsound spelling everywhere else in
+    this codebase."""
     out: list[Violation] = []
     for edge in graph.edges:
         if edge.mapping_row != "M16":
             continue
         if edge.via == "global":
             gated_on = f"global variable {edge.src!r}"
-        elif "^" in edge.src:
-            gated_on = f"{edge.src!r} on an external instance"
         else:
-            gated_on = f"{edge.src!r}, which is not one of its members"
+            atom = edge.atom
+            assert not isinstance(atom, GlobalAtom)  # via matches atom kind (DL-73)
+            if atom.job.instance is not None:
+                gated_on = f"{edge.src!r} on an external instance"
+            else:
+                gated_on = f"{edge.src!r}, which is not one of its members"
         out.append(
             Violation(
                 code="L008",
@@ -771,12 +778,17 @@ def rule_l011(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     one reader of the four that must not use it: a job gated on a global,
     or named by a `box_success`, is wired -- something in this catalog
     reaches it, which is the whole question here. Only the SRC side skips
-    globals, because a global is a pseudo-node and never a dangling job."""
+    globals, because a global is a pseudo-node and never a dangling job.
+    The src side wires the RESOLVED local producer (`local_producer`), not
+    the raw display form, so a cross-instance job spelled like a local one
+    cannot shield it (DL-175, the S-EDGE class; DL-162a)."""
     wired: set[str] = set()
     for edge in graph.edges:
         wired.add(edge.dst)
         if edge.via != "global":
-            wired.add(edge.src)  # global srcs are pseudo-nodes, not jobs
+            local = local_producer(edge, catalog)
+            if local is not None:
+                wired.add(local)  # unresolved srcs are pseudo/foreign, not jobs
     for group in graph.mutex_groups:
         wired.update(group)
     out: list[Violation] = []

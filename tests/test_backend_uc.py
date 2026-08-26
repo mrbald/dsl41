@@ -552,6 +552,36 @@ def test_component_workflows_come_out_in_first_task_order() -> None:
     assert [wf.tasks for wf in twin.workflows] == [["a", "d"], ["b", "c"]]
 
 
+#: DL-175 (the S-EDGE class): a local dangling job spelled exactly like a
+#: cross-instance display form, and a second local job whose producer is
+#: genuinely on that instance. The same text (kept local, not imported --
+#: this suite has no shared-fixture module) also appears in test_derive.py
+#: and test_viz.py.
+S_EDGE_TEXT = (
+    "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+    "insert_job: foo^PRD\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: bar\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo^PRD)\n"
+)
+
+
+def test_dl175_workflow_grouping_is_sound_for_a_local_job_named_like_the_collision() -> None:
+    """Regression net for DL-175's item 6, verified not assumed: `compile_
+    twin`'s `e.src in members`/`e.src in tasks` tests over `compiled` never
+    see a redesign (M33/M16) edge -- excluded above, before `compiled` is
+    built -- so a caret-spelled `e.src` in `compiled` can only be a genuine
+    local job. `foo^PRD` and `bar` land in two SEPARATE singleton
+    workflows, never merged, and the M33 edge is excluded exactly as it was
+    before this slice -- unchanged, not fixed."""
+    catalog = lower_source(S_EDGE_TEXT)
+    model = compile_twin(catalog)
+    assert not any(e.src == "foo^PRD" for wf in model.workflows for e in wf.edges)
+    by_tasks = {tuple(wf.tasks): wf for wf in model.workflows}
+    assert by_tasks[("foo^PRD",)].edges == []
+    assert by_tasks[("bar",)].edges == []
+    (excl,) = [e for e in _excluded_texts(model) if "M33" in e]
+    assert excl == "M33 edge foo^PRD -> bar (R-class)"
+
+
 # --------------------------------------------------------------- migration report
 
 

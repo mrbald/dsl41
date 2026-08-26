@@ -75,6 +75,29 @@ def _assert_ids_are_generated(mermaid: str) -> None:
         assert re.match(r"n\d+\b", stripped), line
 
 
+_DECL_ID = re.compile(r"\bn\d+(?=[\[({])")
+_ANY_ID = re.compile(r"\bn\d+\b")
+
+
+def _assert_every_referenced_id_is_declared(mermaid: str) -> None:
+    """DL-175 (found by its own adversarial review): a dangling mutex/
+    clique member's lock LINK could look its id up under a different
+    `_Ids` key than its own node declaration used, pointing the link at a
+    phantom vertex no line ever declares. Every `n<k>` token this chart
+    mentions must have a DECLARATION line ('n<k>[', 'n<k>((', 'n<k>{{', or
+    'subgraph n<k>[') somewhere in the same chart."""
+    declared: set[str] = set()
+    referenced: set[str] = set()
+    for line in mermaid.splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.startswith(("classDef", "linkStyle", "end")):
+            continue
+        declared |= set(_DECL_ID.findall(stripped))
+        referenced |= set(_ANY_ID.findall(stripped))
+    missing = referenced - declared
+    assert not missing, f"referenced but never declared: {missing}\n{mermaid}"
+
+
 def _assert_subgraphs_balance(mermaid: str) -> None:
     opens = [ln for ln in mermaid.splitlines() if ln.strip().startswith("subgraph")]
     ends = [ln for ln in mermaid.splitlines() if ln.strip() == "end"]
@@ -212,6 +235,39 @@ def test_pseudo_node_shapes_and_classes() -> None:
     for cls in ("globalvar", "external", "undefined"):
         class_def_line = next(ln for ln in mermaid.splitlines() if f"classDef {cls}" in ln)
         assert "color:#111" in class_def_line
+
+
+#: DL-175 (the S-EDGE class): a local dangling job spelled exactly like a
+#: cross-instance display form, and a second local job whose producer is
+#: genuinely on that instance. Reused across the component/incidence and
+#: rendering assertions below. The same text (kept local, not imported --
+#: this suite has no shared-fixture module) also appears in test_derive.py
+#: and test_backend_uc.py.
+S_EDGE_TEXT = (
+    "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+    "insert_job: foo^PRD\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: bar\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo^PRD)\n"
+)
+
+
+def test_dl175_local_dangler_and_foreign_producer_are_distinct_mermaid_vertices() -> None:
+    """DL-162a named this live: a local job `foo^PRD` and the display form
+    of a genuinely foreign M33 producer `foo^PRD` used to fold onto ONE
+    Mermaid vertex id (`_Ids` keys on the raw string, and the classifier
+    read `edge.src in graph.nodes` -- true for the wrong reason). Both are
+    now their own node: n0 the real local job, n2 the external pseudo-
+    source, with the M33 edge drawn FROM n2, never from n0 (DL-175)."""
+    expected = (
+        "flowchart LR\n"
+        '    n0["foo^PRD"]\n'
+        '    n1["bar"]\n'
+        '    n2{{"foo^PRD"}}\n'
+        '    n2 ==>|"s M33"| n1\n'
+        "    linkStyle 0 stroke:#b91c1c,stroke-width:2px\n"
+        "    classDef external fill:#e0ecff,stroke:#1d4ed8,color:#111\n"
+        "    class n2 external\n"
+    )
+    assert to_mermaid(catalog_of(S_EDGE_TEXT)) == expected
 
 
 def test_fw_job_renders_as_stadium_with_trigger_class() -> None:
@@ -616,6 +672,43 @@ def test_to_markdown_include_singletons_adds_a_standalone_chart() -> None:
     assert "(Appendix A, not charted)" not in md  # summary line drops the caveat too
 
 
+def test_dl175_report_does_not_merge_bar_with_the_dangler_it_collides_with() -> None:
+    """DL-162a named this live: `foo^PRD`'s M33 display form is the SAME
+    string as an unrelated local, dangling job's own name. The report's
+    component/incidence/title passes now take a resolved-src copy of the
+    graph (`_local_graph`, DL-175): `bar` charts on its own -- not merged
+    with the dangler -- and stays OFF Appendix A, because it IS wired, just
+    not to another local job. `foo^PRD` alone is standalone."""
+    md = to_markdown(catalog_of(S_EDGE_TEXT), title="t", include_singletons=True)
+    assert "## W1 \N{EM DASH} bar (1 job)" in md
+    assert "## Standalone jobs (1)" in md
+    fences = _mermaid_fences(md)
+    assert any('n0["foo^PRD"]' in f and "bar" not in f for f in fences)  # its own chart, alone
+    appendix_a = md.split("## Appendix A")[1].split("## Appendix B")[0]
+    assert "| foo^PRD |" in appendix_a
+    assert "| bar |" not in appendix_a
+
+
+def test_dl175_local_graph_sentinel_widens_past_a_job_named_like_the_sentinel() -> None:
+    """DL-175's own adversarial review found this: `_local_graph`'s
+    rewritten `src` used to be `_pseudo_key(edge.src)` under an assumption
+    ("this prefix cannot occur in a JIL name") the scanner never enforces
+    -- `insert_job: \\x00pseudo` lowers cleanly. The sentinel is now CHECKED
+    against this catalog's actual job names and widens until it is not one
+    of them, so a job pathologically named `"\\x00pseudo"` still lands in
+    its own component, not merged with the M33 consumer."""
+    text = (
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        "insert_job: \x00pseudo\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: bar2\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo2^PRD)\n"
+    )
+    catalog = catalog_of(text)
+    assert "\x00pseudo" in catalog.jobs  # the pathological name really parsed
+    md = to_markdown(catalog, title="t", include_singletons=True)
+    assert "## W1 \N{EM DASH} bar2 (1 job)" in md
+    assert "## Standalone jobs (1)" in md  # the sentinel-named job, alone
+
+
 def test_to_markdown_locks_section_enumerates_every_group() -> None:
     """DL-35a (2): the Locks section lists ALL mutex groups with kind and
     chart ids -- cross-component pairs included, nothing only-counted."""
@@ -640,6 +733,41 @@ def test_dangling_mutex_member_renders_undefined_not_keyerror() -> None:
     assert "x-. lock .-x" in chart
     assert "undefined" in chart  # classDef applied
     assert "| ghost \N{MULTIPLICATION SIGN} real_job | pair | not in catalog, W1 |" in md
+    _assert_every_referenced_id_is_declared(chart)
+
+
+def test_dl175_dangling_lock_pair_and_clique_members_reference_their_own_declared_id() -> None:
+    """DL-175's own adversarial review found this: the pseudo-source id
+    namespacing (`_pseudo_key`) was applied at a dangling n() member's
+    DECLARATION but not at the two places that draw its lock LINK (the
+    pair loop and the clique loop still called plain `target()`), so the
+    link pointed at a freshly-minted, never-declared id -- a phantom
+    vertex. `node_key` unifies both. Covers a pair and a >=3 clique, one
+    dangling member each."""
+    pair_text = "insert_job: rj\njob_type: c\ncommand: x\nmachine: m1\ncondition: n(ghost)\n"
+    pair_chart = to_mermaid(catalog_of(pair_text))
+    assert "n1 x-. lock .-x n0" in pair_chart
+    _assert_every_referenced_id_is_declared(pair_chart)
+
+    clique_text = (
+        "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\ncondition: n(j2) & n(ghost)\n\n"
+        "insert_job: j2\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(j1) & n(ghost)\n"
+    )
+    clique_chart = to_mermaid(catalog_of(clique_text))
+    assert "n3 -.- n2" in clique_chart  # the lock hub linking to the dangler
+    _assert_every_referenced_id_is_declared(clique_chart)
+
+
+def test_every_corpus_chart_has_no_referenced_but_undeclared_vertex() -> None:
+    """DL-175: the class the review found (a link keyed differently than
+    its declaration) would show up here as a referenced `n<k>` with no
+    matching declaration line, in ANY per-component chart over the whole
+    corpus."""
+    md = to_markdown(corpus_catalog(), title="corpus", include_singletons=True)
+    fences = _mermaid_fences(md)
+    assert len(fences) > 5  # more than just the legend; a real check
+    for fence in fences[1:]:  # [0] is the legend, a fixed hand-written chart
+        _assert_every_referenced_id_is_declared(fence)
 
 
 def test_lock_hidden_by_collapse_still_enumerated_in_locks_section() -> None:

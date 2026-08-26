@@ -641,7 +641,13 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             " lowerings are U1-gated and NOT emitted",
             "other",
         )
-    # workflows: boxes first (nested flatten to top), then edge components
+    # workflows: boxes first (nested flatten to top), then edge components.
+    # Every `e.src`/`e.dst` membership test below (here and at the loose-task
+    # `components()` call) is sound: `compiled` never carries a redesign
+    # (M33/M16 cross-instance) edge -- excluded above, before `compiled` is
+    # built -- so a caret-spelled `e.src` in `compiled` can only be a
+    # genuine local job (DL-175, the S-EDGE class; DL-162a). Verified, not
+    # fixed here: this site predates DL-162 and was never unsound.
     workflows: list[UcWorkflow] = []
     in_box: set[str] = set()
     for root in graph.box_tree.roots:

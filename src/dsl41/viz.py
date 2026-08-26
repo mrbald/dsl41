@@ -55,8 +55,8 @@ from __future__ import annotations
 
 from typing import Literal, NamedTuple
 
-from dsl41.conditions import STATUS_LETTER
-from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components, derive_graph
+from dsl41.conditions import STATUS_LETTER, GlobalAtom
+from dsl41.derive import BoxTree, DerivedEdge, DerivedGraph, components, derive_graph, local_producer
 from dsl41.ir import CatalogIR, FwSpec, JobIR, ScheduleBlock
 
 #: Via -> chart letter. The status half IS conditions.STATUS_LETTER under the
@@ -106,14 +106,34 @@ def _esc(name: str) -> str:
     return name.replace('"', "#quot;")
 
 
+#: `_Ids` key: a real catalog job's own name (a plain `str`), or a pseudo-
+#: source's namespaced key (a `(str, str)` tuple, `_pseudo_key` below). A
+#: `str` can never equal a 2-tuple, so the two key spaces cannot collide
+#: regardless of what characters a job name contains -- unlike a string
+#: prefix, which would need an assumption about the JIL name alphabet
+#: (DL-175, found unsound by its own adversarial review: a NUL-prefixed
+#: string is not provably distinct from a job name the scanner never
+#: promised to reject).
+IdKey = str | tuple[str, str]
+
+
 class _Ids:
     def __init__(self) -> None:
-        self._by_name: dict[str, str] = {}
+        self._by_key: dict[IdKey, str] = {}
 
-    def __call__(self, name: str) -> str:
-        if name not in self._by_name:
-            self._by_name[name] = f"n{len(self._by_name)}"
-        return self._by_name[name]
+    def __call__(self, key: IdKey) -> str:
+        if key not in self._by_key:
+            self._by_key[key] = f"n{len(self._by_key)}"
+        return self._by_key[key]
+
+
+def _pseudo_key(name: str) -> IdKey:
+    """`_Ids` lookup key for a pseudo-source node, namespaced apart from a
+    real catalog job's own key (a plain `str`) by TYPE, not by content. A
+    cross-instance producer's display form (`name^INST`) can be spelled
+    exactly like a local job (DL-162a); without this, the two would fold
+    onto ONE Mermaid vertex id (DL-175, the S-EDGE class)."""
+    return ("pseudo", name)
 
 
 def edge_label(edge: DerivedEdge) -> str:
@@ -217,18 +237,70 @@ def _box_members(tree: BoxTree, box: str) -> set[str]:
     return out
 
 
+def _local_graph(catalog: CatalogIR, graph: DerivedGraph) -> DerivedGraph:
+    """`graph` with every edge's `src` resolved to its real local producer,
+    or -- when there is none -- REWRITTEN to a namespaced sentinel that can
+    never equal a catalog job's own name. `derive.components` is generic
+    (DL-162a) and its union reads `edge.src in nodes`, sound only when `src`
+    is known to be a real catalog job; `split_components`, `_incident_nodes`,
+    `_auto_direction` and `_component_title` all ask "does this catalog job
+    reach another", never "does this display string reach another", so they
+    take this resolved copy from their one caller (`report_content`) instead
+    of each re-deriving locality. `derive.local_producer` is the sound test
+    (DL-162a); a cross-instance producer's display form (`name^INST`) can be
+    spelled exactly like a local job.
+
+    REWRITE, not drop: `dst` stays whatever it already was (always a real
+    catalog job), so a job with only a foreign/global/undefined predecessor
+    stays correctly "touched" in `_incident_nodes` -- it is not wired to
+    another LOCAL job, but it is not unwired either. Only the SRC identity
+    is what must never collide (DL-175, the S-EDGE class). `_render_chart`
+    keeps the REAL graph: it still has to draw the foreign producer as its
+    own pseudo-source.
+
+    `DerivedEdge.src` is a `str` field, so this cannot use `_pseudo_key`'s
+    tuple trick (that one is for `_Ids`, an internal lookup structure with
+    no such constraint). Instead the sentinel is checked against THIS
+    catalog's actual, finite job-name set before use -- proven, not
+    assumed, distinct (DL-175, found unsound by its own adversarial review:
+    a string prefix is only as safe as an unstated assumption about the
+    JIL name alphabet)."""
+    sentinel = "\x00pseudo"
+    while sentinel in catalog.jobs:
+        sentinel += "\x00"
+    resolved = [
+        e if local_producer(e, catalog) is not None else e.model_copy(update={"src": sentinel})
+        for e in graph.edges
+    ]
+    return graph.model_copy(update={"edges": resolved})
+
+
 def split_components(graph: DerivedGraph) -> list[list[str]]:
     """Connected components over dependency edges between catalog jobs plus
     box co-membership; mutex and pseudo-sources do NOT connect (DL-35).
     Members in graph.nodes (catalog) order; components ordered by descending
-    size, ties by first member's catalog position."""
+    size, ties by first member's catalog position.
+
+    Generic over `graph.edges` -- no catalog, no locality resolution (DL-
+    162a): a caller wanting IN-CATALOG-ONLY connectivity (its one production
+    caller, `report_content`) passes a `_local_graph`-resolved copy, else a
+    foreign display form colliding with a local job's own spelling would
+    union two unrelated jobs (DL-175). Not a precondition this function
+    enforces or can check -- callers testing raw union mechanics over a
+    plain graph (this module's own tests) are exercising a different,
+    equally legitimate question."""
     index = {name: i for i, name in enumerate(graph.nodes)}
     grouped = components(graph.nodes, graph.edges, bind_box_members=graph.box_tree)
     return sorted(grouped, key=lambda comp: (-len(comp), index[comp[0]]))
 
 
 def _incident_nodes(graph: DerivedGraph) -> set[str]:
-    """Catalog jobs touching any edge (either end) or any mutex group."""
+    """Catalog jobs touching any edge (either end) or any mutex group.
+
+    Same genericity as `split_components` (DL-175): `report_content` is the
+    caller that needs `edge.src` to never be a foreign display form
+    spelling a local job's own name, and it is the one that passes a
+    `_local_graph`-resolved graph to get that."""
     touched: set[str] = set()
     for edge in graph.edges:
         touched.add(edge.src)
@@ -244,7 +316,12 @@ def _is_standalone(comp: list[str], touched: set[str]) -> bool:
 
 def _component_title(comp: list[str], graph: DerivedGraph) -> str:
     """Top-level box name if the component has one, else the first source
-    node; '(+n more)' when the name covers only part of the component."""
+    node; '(+n more)' when the name covers only part of the component.
+
+    Same genericity as `split_components` (DL-175): `e.src in comp_set`
+    below reads whatever `graph` it is given; `report_content` is the
+    caller that needs it locally-resolved and passes a `_local_graph`
+    copy."""
     comp_set = set(comp)
     roots_in = [r for r in graph.box_tree.roots if r in comp_set]
     if roots_in:
@@ -279,7 +356,12 @@ def _common_prefix(comp: list[str]) -> str:
 
 def _auto_direction(comp: list[str], graph: DerivedGraph) -> Direction:
     """TD when the component is wider than deep (BFS levels over local
-    job->job edges), else LR. Deterministic."""
+    job->job edges), else LR. Deterministic.
+
+    Same genericity as `split_components` (DL-175): `report_content` passes
+    a `_local_graph`-resolved graph so a foreign display form in `comp_set`
+    cannot manufacture a false succ edge; this function itself does not
+    enforce that."""
     comp_set = set(comp)
     succs: dict[str, list[str]] = {n: [] for n in comp}
     has_in: set[str] = set()
@@ -441,6 +523,27 @@ def _render_chart(
     def label(name: str) -> str:
         return _node_label(name, catalog, strip_prefix, self_locked)
 
+    def src_key(edge: DerivedEdge) -> IdKey:
+        """`_Ids` lookup key for this edge's SOURCE. A resolved local
+        producer keys off its own (target-resolved) name, matching its own
+        node's declaration; any other edge -- global, cross-instance,
+        undefined -- keys off the namespaced pseudo-source id instead, so a
+        foreign display form can never alias a local job spelled the same
+        way (DL-175, the S-EDGE class; DL-162a)."""
+        local = local_producer(edge, catalog)
+        return target(local) if local is not None else _pseudo_key(edge.src)
+
+    def node_key(name: str) -> IdKey:
+        """`_Ids` lookup key for a mutex pair/clique member: a real catalog
+        job (target-resolved, same as any other node) or a dangling n()
+        reference (L001's finding), which is declared as a pseudo-source
+        below and must be looked up with the SAME namespaced key it was
+        declared with -- `target(name)` alone would mint a second, never-
+        declared id for it (DL-175, found by adversarial review of this
+        entry: a dangling lock member rendered its link to a phantom
+        vertex)."""
+        return target(name) if name in graph.nodes else _pseudo_key(name)
+
     lines: list[str] = [f"flowchart {direction}"]
     box_nodes: set[str] = set(graph.box_tree.children)
     trigger_nodes: list[str] = []
@@ -480,41 +583,49 @@ def _render_chart(
         if name not in box_nodes and graph.box_tree.parent.get(name) is None and in_scope(name):
             emit_node(name, "    ")
 
-    # pseudo-sources: globals, cross-instance producers, undefined locals
+    # pseudo-sources: globals, cross-instance producers, undefined locals.
+    # Classified off the edge's ATOM facts, never off `edge.src`'s shape
+    # (DL-175, the S-EDGE class): `local_producer` resolving means this is
+    # already a real node above, and a cross-instance atom means external
+    # regardless of whether its display form happens to spell a local job's
+    # name (DL-162a) -- the "^" shape stays rendering TEXT only, never the
+    # decider.
     global_srcs: list[str] = []
     external_srcs: list[str] = []
     undefined_srcs: list[str] = []
     for edge in graph.edges:
-        if edge.src in graph.nodes or not in_scope(edge.dst):
+        if not in_scope(edge.dst) or local_producer(edge, catalog) is not None:
             continue
-        if edge.via == "global":
-            bucket, shape = global_srcs, f'    {ids(edge.src)}[/"{_esc(edge.src)}"/]'
-        elif "^" in edge.src:
-            bucket, shape = external_srcs, f'    {ids(edge.src)}{{{{"{_esc(edge.src)}"}}}}'
+        atom = edge.atom
+        node_id = ids(_pseudo_key(edge.src))
+        if isinstance(atom, GlobalAtom):
+            bucket, shape = global_srcs, f'    {node_id}[/"{_esc(edge.src)}"/]'
+        elif atom.job.instance is not None:
+            bucket, shape = external_srcs, f'    {node_id}{{{{"{_esc(edge.src)}"}}}}'
         else:
-            bucket, shape = (
-                undefined_srcs,
-                f'    {ids(edge.src)}["\N{WARNING SIGN} {_esc(edge.src)}"]',
-            )
+            bucket, shape = undefined_srcs, f'    {node_id}["\N{WARNING SIGN} {_esc(edge.src)}"]'
         if edge.src not in bucket:
             bucket.append(edge.src)
             lines.append(shape)
 
-    # dangling n() members (L001's finding) render like undefined producers
+    # dangling n() members (L001's finding) render like undefined producers.
+    # Always local vocabulary (the condition grammar bans "^" in n()), so no
+    # collision is possible here -- prefixed anyway, for one consistent id
+    # scheme across the whole "undefined" bucket (DL-175).
     lock_members = [n for pair in mutex_pairs for n in pair]
     lock_members += [n for clique in cliques for n in clique]
     for name in lock_members:
         if name not in graph.nodes and name not in undefined_srcs:
             undefined_srcs.append(name)
-            lines.append(f'    {ids(name)}["\N{WARNING SIGN} {_esc(name)}"]')
+            lines.append(f'    {ids(node_key(name))}["\N{WARNING SIGN} {_esc(name)}"]')
 
     link_index = 0
     redesign_links: list[int] = []
-    seen_edges: set[tuple[str, str, str, str]] = set()
+    seen_edges: set[tuple[IdKey, str, str, str]] = set()
     for edge in graph.edges:
         if not in_scope(edge.dst):
             continue
-        src, dst = target(edge.src), target(edge.dst)
+        src, dst = src_key(edge), target(edge.dst)
         if src == dst and edge.src != edge.dst:
             continue  # both endpoints inside one collapsed box
         text = edge_label(edge)
@@ -531,9 +642,9 @@ def _render_chart(
             redesign_links.append(link_index)
         link_index += 1
 
-    seen_locks: set[tuple[str, str]] = set()
+    seen_locks: set[tuple[IdKey, IdKey]] = set()
     for a, b in mutex_pairs:
-        at, bt = target(a), target(b)
+        at, bt = node_key(a), node_key(b)
         if (at == bt and a != b) or (at, bt) in seen_locks:
             continue  # exclusion internal to a collapsed box / re-anchored dup
         seen_locks.add((at, bt))
@@ -544,7 +655,7 @@ def _render_chart(
         lock = f"lock:{'+'.join(clique)}"
         lock_ids.append(ids(lock))
         lines.append(f'    {ids(lock)}(("\N{LOCK}"))')
-        for member_anchor in dict.fromkeys(target(m) for m in clique):
+        for member_anchor in dict.fromkeys(node_key(m) for m in clique):
             lines.append(f"    {ids(lock)} -.- {ids(member_anchor)}")
             link_index += 1
 
@@ -552,18 +663,23 @@ def _render_chart(
         joined = ",".join(str(i) for i in redesign_links)
         lines.append(f"    linkStyle {joined} {_REDESIGN_LINKSTYLE}")
 
-    def class_line(cls: str, names: list[str]) -> str | None:
-        rendered = [ids(n) for n in names if visible(n) or n not in anchor]
+    def class_line(cls: str, names: list[IdKey]) -> str | None:
+        # a pseudo-source key (a tuple) is never a box member, so it is
+        # always kept -- matching the plain-string check's own effect on a
+        # name that was never in `anchor` either.
+        rendered = [ids(n) for n in names if isinstance(n, tuple) or visible(n) or n not in anchor]
         return f"    class {','.join(rendered)} {cls}" if rendered else None
 
     # (class name, node names) -- one row per node kind; collapsed's names
     # are sorted (deterministic order over a set), the others keep
-    # first-seen order from the loops above.
-    style_rows: list[tuple[str, list[str]]] = [
+    # first-seen order from the loops above. The three pseudo-source rows
+    # carry raw display names, mapped through the SAME `_pseudo_key` the
+    # declaration loops above keyed their `ids()` calls with (DL-175).
+    style_rows: list[tuple[str, list[IdKey]]] = [
         ("trigger", [n for n in trigger_nodes if visible(n)]),
-        ("globalvar", global_srcs),
-        ("external", external_srcs),
-        ("undefined", undefined_srcs),
+        ("globalvar", [_pseudo_key(n) for n in global_srcs]),
+        ("external", [_pseudo_key(n) for n in external_srcs]),
+        ("undefined", [_pseudo_key(n) for n in undefined_srcs]),
         ("collapsedBox", sorted(c for c in collapsed if in_scope(c))),
     ]
     style_block: list[str] = []
@@ -689,8 +805,11 @@ def report_content(
     direction: Direction | Literal["auto"],
     include_singletons: bool,
 ) -> ReportContent:
-    comps = split_components(graph)
-    touched = _incident_nodes(graph)
+    local_graph = _local_graph(catalog, graph)  # DL-175: connectivity/title
+    # passes below ask "does this catalog job reach another"; _render_chart
+    # keeps the REAL `graph` -- it still draws a foreign producer's node.
+    comps = split_components(local_graph)
+    touched = _incident_nodes(local_graph)
     standalone = [comp[0] for comp in comps if _is_standalone(comp, touched)]
     charted = [comp for comp in comps if not _is_standalone(comp, touched)]
 
@@ -714,11 +833,11 @@ def report_content(
         for name in comp:
             comp_of[name] = wid
         prefix = _common_prefix(comp)
-        chart_dir = _auto_direction(comp, graph) if direction == "auto" else direction
+        chart_dir = _auto_direction(comp, local_graph) if direction == "auto" else direction
         sections.append(
             ChartSection(
                 wid=wid,
-                comp_title=_component_title(comp, graph),
+                comp_title=_component_title(comp, local_graph),
                 count_label=f"{len(comp)} job" + ("s" if len(comp) != 1 else ""),
                 prefix=prefix,
                 chart=_render_chart(
