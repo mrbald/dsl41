@@ -112,7 +112,7 @@ import functools
 import os
 import re
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -196,6 +196,71 @@ def _cell_sig(value: Any) -> tuple[str, str]:
     if isinstance(value, Text):
         return value.plain, str(value.style)
     return str(value), ""
+
+
+class _TableSync:
+    """One DataTable refresh engine (DL-178v), shared by TriggersScreen and
+    RunnerApp. Both need the same three-way call: identity (row order +
+    membership) unchanged is a steady state -- diff cell signatures and push
+    only the cells that actually changed, so a countdown ticking over doesn't
+    queue every cell of every row for textual's width recompute (O(cells x
+    rows) at estate scale); identity changed means clear() and rebuild every
+    row, restoring the cursor to whichever identity survived. `_COLUMN_WIDTHS`
+    is applied here, so every caller gets that policy -- not just the one
+    that remembered to ask.
+
+    `identity` is what decides rebuild-vs-steady-state and indexes `sigs`;
+    `keys` is the DataTable row key per row, same order -- the two differ for
+    TriggersScreen, whose rows are keyed by position but identified by
+    (job, kind, detail)."""
+
+    def __init__(self) -> None:
+        self.identity: list[Any] = []
+        self.sigs: list[list[tuple[str, str]]] = []
+
+    def refresh(
+        self,
+        table: DataTable,
+        *,
+        identity: Sequence[Any],
+        keys: Sequence[str],
+        columns: Sequence[str],
+        rows: Sequence[Sequence[Any]],
+        on_rebuild: Callable[[Sequence[Any]], Any | None] | None = None,
+        default_to_first_row: bool = False,
+    ) -> None:
+        """On a membership/order change, `on_rebuild` runs once, right after
+        clear() and before any add_row -- so a caller can arm its own bounce
+        guard first -- and names the identity value to restore the cursor
+        to, or None. `default_to_first_row` covers the caller that wants row
+        0 when nothing survived; the caller that doesn't leaves the cursor
+        wherever clear()/add_row left it."""
+        if list(identity) != self.identity:
+            table.clear()
+            target = on_rebuild(identity) if on_rebuild is not None else None
+            self.identity = list(identity)
+            self.sigs = []
+            for key, cells in zip(keys, rows):
+                self.sigs.append([_cell_sig(c) for c in cells])
+                table.add_row(*cells, key=key)
+            if target is not None and target in self.identity:
+                table.move_cursor(row=self.identity.index(target))
+            elif default_to_first_row and rows:
+                table.move_cursor(row=0)
+            return
+        for i, (key, cells) in enumerate(zip(keys, rows)):
+            sigs = [_cell_sig(c) for c in cells]
+            old = self.sigs[i]
+            if sigs == old:
+                continue
+            for col_i, (column, cell, sig) in enumerate(zip(columns, cells, sigs)):
+                if old[col_i] == sig:
+                    continue
+                # update_width only where it can matter: an auto-width
+                # column whose rendered width changed with the text
+                widen = column not in _COLUMN_WIDTHS and cell_len(old[col_i][0]) != cell_len(sig[0])
+                table.update_cell(key, column, cell, update_width=widen)
+            self.sigs[i] = sigs
 
 
 class _UTCHeaderClock(HeaderClock):
@@ -414,8 +479,7 @@ class TriggersScreen(ModalScreen[None]):
             table.add_column(label, key=label)
         table.border_title = "triggers"
         table.focus()
-        self._row_ids: list[tuple[str, str, str]] = []
-        self._last_rows: list[tuple[str, str, str, str, str]] = []
+        self._table_sync = _TableSync()
         self.action_refresh_now()
         self.set_interval(2.0, self.action_refresh_now)
 
@@ -442,30 +506,23 @@ class TriggersScreen(ModalScreen[None]):
             table = self.query_one("#trigbox", DataTable)
         except NoMatches:
             return  # a worker resuming after the await can outlive the screen
+        # membership/order changed: rebuild, then put the cursor back on the
+        # same trigger if it survived. The cursor's current row must be read
+        # (and mapped through the OLD identity) before _TableSync.refresh
+        # clears the table -- clear() every 2s would otherwise reset the row
+        # cursor and scroll (the jobs-table pathology, DL-67; review MAJOR).
         ids = [(job, kind, detail) for _, _, job, kind, detail in rows]
-        if ids == self._row_ids:
-            # steady state: countdowns tick but membership is unchanged --
-            # update cells in place; clear() every 2s would reset the row
-            # cursor and scroll (the jobs-table pathology, DL-67; review
-            # MAJOR)
-            for i, (row, old) in enumerate(zip(rows, self._last_rows)):
-                if row == old:
-                    continue
-                for column, new, prev in zip(self._COLUMNS, row, old):
-                    if new != prev:
-                        table.update_cell(str(i), column, new, update_width=True)
-        else:
-            # membership/order changed: rebuild, then put the cursor back on
-            # the same trigger if it survived
-            cursor = table.cursor_row
-            selected = self._row_ids[cursor] if 0 <= cursor < len(self._row_ids) else None
-            table.clear()
-            for i, row in enumerate(rows):
-                table.add_row(*row, key=str(i))
-            if selected in ids:
-                table.move_cursor(row=ids.index(selected))
-            self._row_ids = ids
-        self._last_rows = rows
+        cursor = table.cursor_row
+        old_identity = self._table_sync.identity
+        selected = old_identity[cursor] if 0 <= cursor < len(old_identity) else None
+        self._table_sync.refresh(
+            table,
+            identity=ids,
+            keys=[str(i) for i in range(len(rows))],
+            columns=self._COLUMNS,
+            rows=rows,
+            on_rebuild=lambda _ids: selected,
+        )
         table.border_title = f"triggers ({len(rows)})"
 
 
@@ -1018,11 +1075,7 @@ class RunnerApp(App[None]):
         self._filter = ""  # space-separated substrings, AND'd, case-insensitive
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
-        self._row_order: list[str] = []  # current table order; differs -> rebuild
-        #: row key -> cell signatures as last rendered; the steady-state diff
-        #: (unchanged rows cost nothing, changed rows update only their
-        #: changed cells)
-        self._cell_sigs: dict[str, list[tuple[str, str]]] = {}
+        self._table_sync = _TableSync()  # DL-178v: shared with TriggersScreen
         #: set across a table rebuild that restores the selection: the first
         #: add_row fires a spurious row-0 highlight BEFORE move_cursor lands,
         #: and each such bounce would wipe the log tail (review MAJOR). The
@@ -1283,6 +1336,18 @@ class RunnerApp(App[None]):
         cells[0] = Text(label, style=style)
         return cells
 
+    def _on_table_rebuild(self, order: Sequence[Any]) -> str | None:
+        # arm the bounce guard BEFORE _TableSync.refresh's add_row loop: the
+        # first row fires a spurious row-0 highlight ahead of the cursor
+        # restore
+        self._rows = set(order)
+        self._restore_selected = self._selected if self._selected in self._rows else None
+        if not order:
+            # nothing visible: keyed verbs must not fire at a job the
+            # operator cannot see (review MAJOR)
+            self._selected = None
+        return self._restore_selected
+
     def _render_table(self) -> None:
         try:
             table = self.query_one("#jobs", DataTable)
@@ -1292,49 +1357,16 @@ class RunnerApp(App[None]):
         kids = self._children()
         flat = bool(self._filter or self._view_mode)
         order = [name for name, _ in visible]
-        if order != self._row_order:
-            # membership/order changed (fold, filter, mode, new jobs):
-            # rebuild wholesale and put the cursor back on the selected key
-            table.clear()
-            self._row_order = order
-            self._rows = set(order)
-            # arm the bounce guard BEFORE add_row: the first row fires a
-            # spurious row-0 highlight ahead of the cursor restore below
-            self._restore_selected = self._selected if self._selected in self._rows else None
-            if not order:
-                # nothing visible: keyed verbs must not fire at a job the
-                # operator cannot see (review MAJOR)
-                self._selected = None
-            self._cell_sigs = {}
-            for name, depth in visible:
-                cells = self._decorated_cells(name, depth, kids, flat=flat)
-                self._cell_sigs[name] = [_cell_sig(cell) for cell in cells]
-                table.add_row(*cells, key=name)
-            if self._restore_selected is not None:
-                table.move_cursor(row=order.index(self._restore_selected))
-            elif order:
-                table.move_cursor(row=0)  # highlight event resyncs _selected
-        else:
-            # steady state: update only cells whose (text, style) actually
-            # changed -- pushing every cell each refresh queues them all for
-            # textual's width recompute, which re-measures a whole column per
-            # shrunk cell (the O(cells x rows) freeze at estate scale)
-            for name, depth in visible:
-                cells = self._decorated_cells(name, depth, kids, flat=flat)
-                sigs = [_cell_sig(cell) for cell in cells]
-                old = self._cell_sigs.get(name)
-                if sigs == old:
-                    continue
-                for i, (column, cell, sig) in enumerate(zip(_COLUMNS, cells, sigs)):
-                    if old is not None and old[i] == sig:
-                        continue
-                    # update_width only where it can matter: an auto-width
-                    # column whose rendered width changed with the text
-                    widen = column not in _COLUMN_WIDTHS and (
-                        old is None or cell_len(old[i][0]) != cell_len(sig[0])
-                    )
-                    table.update_cell(name, column, cell, update_width=widen)
-                self._cell_sigs[name] = sigs
+        rows = [self._decorated_cells(name, depth, kids, flat=flat) for name, depth in visible]
+        self._table_sync.refresh(
+            table,
+            identity=order,
+            keys=order,
+            columns=_COLUMNS,
+            rows=rows,
+            on_rebuild=self._on_table_rebuild,
+            default_to_first_row=True,  # highlight event resyncs _selected
+        )
         # a Text title: border_title strings parse as rich markup, so a
         # user-typed filter (or a bracketed mode tag) would vanish into it
         title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")

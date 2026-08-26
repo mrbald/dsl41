@@ -800,7 +800,7 @@ def test_pilot_box_tree_order_indent_fold_and_fold_all(short_root: Path) -> None
         try:
             app = RunnerApp(server.path)
             async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
                 table = app.query_one("#jobs", DataTable)
                 assert str(table.get_cell("bt_box", "job")) == "▾ bt_box"
                 assert str(table.get_cell("bt_inner", "job")) == "  ▾ bt_inner"
@@ -814,17 +814,17 @@ def test_pilot_box_tree_order_indent_fold_and_fold_all(short_root: Path) -> None
                 assert app._selected == "bt_box"
 
                 await pilot.press("space")  # fold: the whole subtree buries
-                await _wait_for_ui(pilot, lambda: app._row_order == ["bt_box", "bt_solo"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["bt_box", "bt_solo"])
                 assert str(table.get_cell("bt_box", "job")) == "▸ bt_box (4)"
 
                 await pilot.press("space")  # unfold restores the same order
-                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
                 assert str(table.get_cell("bt_box", "job")) == "▾ bt_box"
 
                 await pilot.press("z")  # fold ALL boxes
-                await _wait_for_ui(pilot, lambda: app._row_order == ["bt_box", "bt_solo"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["bt_box", "bt_solo"])
                 await pilot.press("z")  # unfold all
-                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -861,7 +861,7 @@ def test_pilot_folded_box_rollup_carries_a_red_problem_tally(short_root: Path) -
                 await pilot.pause()
                 assert app._selected == "pr_box"
                 await pilot.press("space")
-                await _wait_for_ui(pilot, lambda: app._row_order == ["pr_box"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["pr_box"])
                 label = table.get_cell("pr_box", "job")
                 assert str(label) == "▸ pr_box (2, 1!)"
                 assert label.style == "bold red"
@@ -890,7 +890,7 @@ def test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears(short_root: P
         try:
             app = RunnerApp(server.path)
             async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
                 table = app.query_one("#jobs", DataTable)
 
                 await pilot.press("slash")
@@ -898,25 +898,27 @@ def test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears(short_root: P
                 assert app.focused is not None and app.focused.id == "filterline"
 
                 await pilot.press("a", "p")
-                await _wait_for_ui(pilot, lambda: app._row_order == ["fx_apple", "fx_apricot"])
+                await _wait_for_ui(
+                    pilot, lambda: app._table_sync.identity == ["fx_apple", "fx_apricot"]
+                )
                 # the filtered view is FLAT: the box member renders unindented
                 assert str(table.get_cell("fx_apple", "job")) == "fx_apple"
                 assert "jobs 2/4" in str(table.border_title)
                 assert "/ap/" in str(table.border_title)
 
                 await pilot.press("space", "p", "l", "e")  # "ap ple": terms AND
-                await _wait_for_ui(pilot, lambda: app._row_order == ["fx_apple"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fx_apple"])
 
                 await pilot.press("enter")  # keep the filter, back to the table
                 await pilot.pause()
                 assert app.focused is table
                 assert app._filter == "ap ple"
-                assert app._row_order == ["fx_apple"]
+                assert app._table_sync.identity == ["fx_apple"]
 
                 await pilot.press("slash")
                 await pilot.pause()
                 await pilot.press("escape")  # clear and refocus the table
-                await _wait_for_ui(pilot, lambda: app._row_order == tree_order)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
                 assert app._filter == ""
                 assert app.focused is table
         finally:
@@ -952,13 +954,13 @@ def test_pilot_v_cycles_all_problems_active_and_back_to_all(short_root: Path) ->
 
                 table.focus()
                 await pilot.press("v")  # problems: only the FAILURE row stays
-                await _wait_for_ui(pilot, lambda: app._row_order == ["vc_bad"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["vc_bad"])
                 assert "problems" in str(table.border_title)
 
                 await pilot.press("v")  # active: nothing STARTING/RUNNING/QUE_WAIT
-                await _wait_for_ui(pilot, lambda: app._row_order == [])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
                 await pilot.press("v")  # back to all
-                await _wait_for_ui(pilot, lambda: app._row_order == ["vc_bad", "vc_ok"])
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["vc_bad", "vc_ok"])
         finally:
             await _teardown(engine, server, loop_task)
 
