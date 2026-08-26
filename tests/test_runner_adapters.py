@@ -49,6 +49,7 @@ from dsl41.runner_adapters import (
     FileWatcherAdapter,
     LocalCommandAdapter,
     Terminated,
+    spool_names_run,
 )
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 
@@ -593,6 +594,25 @@ def test_a_kill_refuses_a_spawn_record_naming_a_stranger(tmp_path: Path) -> None
             await adapter._kill(run_dir, _Proc(), "rid-wal")  # type: ignore[arg-type]
 
     asyncio.run(scenario())
+
+
+def test_spool_names_run_checks_only_the_dimensions_given() -> None:
+    """DL-178y: `spool_names_run` is the one owner of the DL-118 identity
+    gate -- absent doc, a job/run_number mismatch, or a run_id mismatch are
+    each False, but only for a dimension the caller actually supplies. A
+    caller that never asks about `run_id` (or `job`/`run_number`) does not
+    get a new refusal it did not ask for -- the predicate's whole point is
+    that each of the five sites keeps its own checked dimensions."""
+    doc = {"job": "j", "run_number": 1, "run_id": "rid"}
+    assert spool_names_run(doc) is True  # nothing checked -> named
+    assert spool_names_run(None) is False
+    assert spool_names_run(doc, job="j", run_number=1) is True
+    assert spool_names_run(doc, job="other") is False
+    assert spool_names_run(doc, run_number=2) is False
+    assert spool_names_run(doc, run_id="rid") is True
+    assert spool_names_run(doc, run_id="stranger") is False
+    assert spool_names_run(doc, job="j", run_number=1, run_id="rid") is True
+    assert spool_names_run(doc, job="j", run_number=1, run_id="stranger") is False
 
 
 def test_durable_write_leaves_no_temp_file_and_content_matches(tmp_path: Path) -> None:

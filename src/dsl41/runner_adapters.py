@@ -471,7 +471,7 @@ class LocalCommandAdapter:
             if spawn is not None or proc.returncode is not None:
                 break
             await asyncio.sleep(0.05)
-        if spawn is not None and spawn.get("run_id") != run_id:
+        if spawn is not None and not spool_names_run(spawn, run_id=run_id):
             raise EngineError(
                 f"{run_dir.name}: spawn.json reports run_id {spawn.get('run_id')!r} but"
                 f" this run is {run_id!r} -- refusing to signal a stranger's process"
@@ -1722,12 +1722,45 @@ class SupervisedCommandAdapter:
             self.client.forget_exit(run_id)
 
 
+def spool_names_run(
+    doc: Mapping[str, Any] | None,
+    *,
+    job: str | None = None,
+    run_number: int | None = None,
+    run_id: str | None = None,
+) -> bool:
+    """DL-118's identity gate, one owner (DL-178y): does this spool document
+    (`spawn.json`, `status.json`, `watch.jsonl`'s start line -- anything
+    dict-shaped) name this run? False on an absent document, a `job` or
+    `run_number` mismatch, or a `run_id` mismatch -- each dimension checked
+    only when the caller supplies it, so a caller with less to check does
+    not gain a new refusal by adopting this function. Callers keep their own
+    posture on a False: raise loudly (a live path, corruption/spoof) or
+    degrade silently (offline reporting, one corrupt directory costs one
+    row, not the whole report) -- this predicate answers only "does it
+    name the run", never what to do about a no.
+
+    `job`/`run_number`/`run_id` are keyword-only: a positional
+    `spool_names_run(doc, run_id)` would otherwise silently bind to `job`,
+    which is exactly the kind of identity-check mistake this function
+    exists to prevent, not commit."""
+    if doc is None:
+        return False
+    if job is not None and doc.get("job") != job:
+        return False
+    if run_number is not None and doc.get("run_number") != run_number:
+        return False
+    if run_id is not None and doc.get("run_id") != run_id:
+        return False
+    return True
+
+
 def _named(status: dict[str, Any], run_id: str, job: str, run_number: int) -> dict[str, Any]:
     """A status record is consumed as a run's FATE, so it must name the run
     (DL-118): the detached path awaits an outcome by `run_id`, and a record
     carrying a different one is a stranger's -- corruption or a spoof --
     refused before `outcome_from_status` turns it into this job's verdict."""
-    if status.get("run_id") != run_id:
+    if not spool_names_run(status, run_id=run_id):
         raise EngineError(
             f"{job}.{run_number}: status.json reports run_id {status.get('run_id')!r}"
             f" but this run is {run_id!r} -- refusing to consume a stranger's fate"
@@ -1761,11 +1794,15 @@ async def resolve_spool(
     status_path = run_dir / "status.json"
 
     def _checked(name: str, doc: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The identity gate, applied to the RAW document at every load --
+        """The run_id gate, applied to the RAW document at every load --
         before the tuple filter (a wrong-tuple wrong-id record must refuse,
         not be cleared into a fabricated absence) and on every settle-window
         reload (the first load being absent must not exempt the last)."""
-        if expected_run_id is not None and doc is not None and doc.get("run_id") != expected_run_id:
+        if (
+            expected_run_id is not None
+            and doc is not None
+            and not spool_names_run(doc, run_id=expected_run_id)
+        ):
             raise EngineError(
                 f"{job}.{run_number}: the spool's {name} reports run_id"
                 f" {doc.get('run_id')!r} but the durable effect bound"
@@ -1774,14 +1811,20 @@ async def resolve_spool(
             )
         return doc
 
-    def _load_status() -> dict[str, Any] | None:
-        return _checked("status.json", load_json(status_path))
+    def _tuple_checked(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+        """DL-178y: a spool document naming a DIFFERENT (job, run_number) is
+        a stranger's -- dropped, not trusted, same rule as `_checked` above
+        but silent (existence under the right name is not identity, and this
+        mismatch degrades rather than refuses: the caller can still resolve
+        this run's fate honestly from whatever remains). Applied to every
+        doc load, spawn.json and status.json alike -- previously spawn.json
+        only, which let a wrong-tuple status.json slip through unchecked."""
+        return doc if spool_names_run(doc, job=job, run_number=run_number) else None
 
-    spawn = _checked("spawn.json", load_json(run_dir / "spawn.json"))
-    if spawn is not None and not (
-        spawn.get("job") == job and spawn.get("run_number") == run_number
-    ):
-        spawn = None  # spoofed/corrupt spawn record: never trust, never signal
+    def _load_status() -> dict[str, Any] | None:
+        return _tuple_checked(_checked("status.json", load_json(status_path)))
+
+    spawn = _tuple_checked(_checked("spawn.json", load_json(run_dir / "spawn.json")))
     status = _load_status()
     if status is None and spawn is not None and spawn.get("boot_id") == boot_now:
         # same boot: liveness checks mean something (DL-42 item 5)

@@ -113,6 +113,7 @@ Five decisions, each with its reason here; the decision itself is
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -140,7 +141,7 @@ from dsl41.period import (
     check_manifest_against_segment,
     SEGMENT_FIELDS,
 )
-from dsl41.runner_adapters import load_json
+from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
@@ -457,35 +458,37 @@ def _decided_attempts(records: list[dict[str, Any]]) -> set[int]:
     return decided
 
 
-def _leaf_rows(
+@dataclass(frozen=True)
+class _LeafIndex:
+    """The leaf index for one segment's CMD/FW walk (D3, DL-178w): every
+    container `_emit_leaf_rows` reads, keyed the same way `_index_leaves`
+    fills them -- one named value ("the leaf index for this segment")
+    instead of six parallel dicts kept in sync by hand."""
+
+    dispatch_by_key: dict[tuple[str, int], dict[str, Any]]
+    order: list[tuple[str, int]]
+    completion_by_key: dict[tuple[str, int], dict[str, Any]]
+    undecided_keys: set[tuple[str, int]]
+    executor_by_key: dict[tuple[str, int], str]
+
+
+def _index_leaves(
     records: list[dict[str, Any]],
-    catalog: CatalogIR | None,
-    catalog_hash: str,
-    spool: Mapping[tuple[str, int], SpoolRead],
-    trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
-    fingerprints: Mapping[str, str],
+    rejected: set[int],
+    decided: AbstractSet[int],
     fidelity: Literal["full", "records_only"],
-    recovered: Sequence[ApplyResult],
-) -> list[RunRow]:
-    """Every CMD/FW job's run rows, from `dispatch` + `input(kind=STATUS)`
-    records (decision 1), with the trace as fallback for a close that never
-    produced its own STATUS input (decision 2's KILLJOB/term_run_time
-    case)."""
+) -> _LeafIndex:
+    """Walk phase (D3): one pass over the segment's records builds the leaf
+    index; `_emit_leaf_rows` reads it as a pure function. `rejected`/
+    `decided` are the caller's, computed BEFORE this walk -- a decision is a
+    later record than the attempt it answers, so one pass here would store a
+    completion it cannot yet judge."""
     dispatch_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     order: list[tuple[str, int]] = []
     last_run_number: dict[str, int] = {}
     completion_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     undecided_keys: set[tuple[str, int]] = set()
     executor_by_key: dict[tuple[str, int], str] = {}
-    # BEFORE the walk: a decision is a later record than the attempt it
-    # answers, so one pass would store a completion it cannot yet judge.
-    # The recovered verdicts are the gate's own re-run over the crash
-    # window (DL-156), and only the REJECTIONS join the skip set: a
-    # recovered application decides its row exactly as a durable one does
-    rejected = _rejected_attempts(records) | {
-        result.index for result in recovered if result.decision == "rejected"
-    }
-    decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
 
     for record in records:
         rec = record.get("rec")
@@ -539,11 +542,31 @@ def _leaf_rows(
                 if effect.kind == "SPAWN":
                     executor_by_key[(effect.job, effect.run_number)] = effect.executor_id
 
+    return _LeafIndex(
+        dispatch_by_key=dispatch_by_key,
+        order=order,
+        completion_by_key=completion_by_key,
+        undecided_keys=undecided_keys,
+        executor_by_key=executor_by_key,
+    )
+
+
+def _emit_leaf_rows(
+    index: _LeafIndex,
+    catalog: CatalogIR | None,
+    catalog_hash: str,
+    spool: Mapping[tuple[str, int], SpoolRead],
+    trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
+    fingerprints: Mapping[str, str],
+    fidelity: Literal["full", "records_only"],
+) -> list[RunRow]:
+    """Emit phase (D3): a pure function of the leaf index -- one `RunRow`
+    per dispatched (job, run_number), in dispatch order."""
     rows: list[RunRow] = []
-    for key in order:
+    for key in index.order:
         job, run_number = key
-        dispatch = dispatch_by_key[key]
-        completion = completion_by_key.get(key)
+        dispatch = index.dispatch_by_key[key]
+        completion = index.completion_by_key.get(key)
         # by NUMBER, never by position: a run carried across a boundary has
         # a run number the segment's own window list does not index (I2)
         window = trace_windows.get(job, {}).get(run_number)
@@ -585,16 +608,44 @@ def _leaf_rows(
                 status=status,  # type: ignore[arg-type]
                 exit_code=exit_code,
                 started_by=started_by,
-                executor_id=executor_by_key.get(key),
+                executor_id=index.executor_by_key.get(key),
                 run_dir=run_dir if isinstance(run_dir, str) else None,
                 box_name=box_name,
                 clock_source=clock_source,  # type: ignore[arg-type]
                 job_hash=fingerprints.get(job),
                 fidelity=fidelity,
-                undecided=key in undecided_keys,
+                undecided=key in index.undecided_keys,
             )
         )
     return rows
+
+
+def _leaf_rows(
+    records: list[dict[str, Any]],
+    catalog: CatalogIR | None,
+    catalog_hash: str,
+    spool: Mapping[tuple[str, int], SpoolRead],
+    trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
+    fingerprints: Mapping[str, str],
+    fidelity: Literal["full", "records_only"],
+    recovered: Sequence[ApplyResult],
+) -> list[RunRow]:
+    """Every CMD/FW job's run rows, from `dispatch` + `input(kind=STATUS)`
+    records (decision 1), with the trace as fallback for a close that never
+    produced its own STATUS input (decision 2's KILLJOB/term_run_time
+    case). Two phases (DL-178w): `_index_leaves` walks the records once,
+    `_emit_leaf_rows` reads the result as a pure function."""
+    # The recovered verdicts are the gate's own re-run over the crash window
+    # (DL-156), and only the REJECTIONS join the skip set: a recovered
+    # application decides its row exactly as a durable one does
+    rejected = _rejected_attempts(records) | {
+        result.index for result in recovered if result.decision == "rejected"
+    }
+    decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
+    index = _index_leaves(records, rejected, decided, fidelity)
+    return _emit_leaf_rows(
+        index, catalog, catalog_hash, spool, trace_windows, fingerprints, fidelity
+    )
 
 
 def fold_run_rows(
@@ -685,21 +736,20 @@ def read_spool(
     Absent, not refused: this is offline reporting, and one corrupt
     directory should cost one row's timings, not the whole report."""
     spawn = load_json(run_dir / "spawn.json")
-    if spawn is None or spawn.get("job") != job or spawn.get("run_number") != run_number:
+    if not spool_names_run(spawn, job=job, run_number=run_number, run_id=bound_run_id):
         return None
-    if bound_run_id is not None and spawn.get("run_id") != bound_run_id:
-        return None
+    assert spawn is not None
     raw_started = spawn.get("started_at")
     if not isinstance(raw_started, str):
         return None
     started_at = _parse_timestamp(raw_started)
     ended_at = None
     status = load_json(run_dir / "status.json")
-    if status is not None and status.get("job") == job and status.get("run_number") == run_number:
-        if bound_run_id is None or status.get("run_id") == bound_run_id:
-            raw_ended = status.get("ended_at")
-            if isinstance(raw_ended, str):
-                ended_at = _parse_timestamp(raw_ended)
+    if spool_names_run(status, job=job, run_number=run_number, run_id=bound_run_id):
+        assert status is not None
+        raw_ended = status.get("ended_at")
+        if isinstance(raw_ended, str):
+            ended_at = _parse_timestamp(raw_ended)
     return SpoolRead(started_at=started_at, ended_at=ended_at)
 
 

@@ -604,6 +604,35 @@ def test_spoofed_spawn_json_never_signals_innocents(tmp_path: Path) -> None:
         innocent.wait()
 
 
+def test_stranger_status_json_tuple_mismatch_never_signals_the_wrong_job(tmp_path: Path) -> None:
+    """DL-178y: `resolve_spool` tuple-checked spawn.json's (job, run_number)
+    but not status.json's -- a stranger's status record, with no bound
+    `run_id` to catch it (expected_run_id is None, the real reconciliation
+    path for a pre-DL-118 chain), used to be consumed as this run's own
+    fate: a directory with NO evidence of its own would read SUCCESS off
+    another job's status.json. Fixed: the same (job, run_number) gate now
+    applies to status.json too, so a stranger's record degrades to the
+    honest E7 unobservable instead."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "stranger",
+                "job": "OTHER",
+                "run_number": 99,
+                "outcome": "exited",
+                "exit_code": 0,
+                "ended_at": "2026-07-11T00:00:00+00:00",
+            }
+        )
+    )
+    result, ended_at = _resolve(run_dir)
+    assert result == Failed("exit_status_unobservable")
+    assert ended_at is None
+
+
 def test_boot_id_flip_voids_liveness_and_resolves_from_records(tmp_path: Path) -> None:
     """DL-42 item 5: a foreign boot_id proves nothing survived -- liveness
     checks are skipped entirely (a matching pid would be a recycled one)

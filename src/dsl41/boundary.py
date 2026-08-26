@@ -2077,7 +2077,7 @@ def executions_at(
     An applied SPAWN with neither file is the state ss8 forbids -- the
     sealer waits it out (PR-27) -- and reaching here with one is a
     refusal, not a fourth kind."""
-    from dsl41.runner_adapters import WATCH_LOG, load_json, read_watch_log
+    from dsl41.runner_adapters import WATCH_LOG, load_json, read_watch_log, spool_names_run
 
     out: list[Execution] = []
     for effect, state in live_spawns(outbox, rows):
@@ -2152,8 +2152,9 @@ def executions_at(
                 " and no watch.jsonl -- ss8 requires every applied CMD SPAWN to be bound"
                 " or terminal before the seal commits, and the sealer waits (PR-27)"
             )
-        if spawn.get("run_id") != run_id:
+        if not spool_names_run(spawn, run_id=run_id):
             # same DL-118 rule as the watch log: existence is not identity
+            # (DL-178y: `spool_names_run` is the one owner of this check)
             raise EngineError(
                 f"{effect.job}.{effect.run_number}: spawn.json reports run_id"
                 f" {spawn.get('run_id')!r} but the bound run is {run_id!r} -- refusing"
