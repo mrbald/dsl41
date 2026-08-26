@@ -36,9 +36,11 @@ resume — spool contract frozen in
 [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md)
 — headless CLI), 11d (Textual TUI), 11e (`serve` via textual-serve), and
 11f (the detached supervisor tier). Phase 12 — mandatory optimistic
-concurrency and multihost execution — is specified and under construction;
-its contract is frozen in
-[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md).
+concurrency and multihost execution — is under construction. The
+concurrency contract is frozen in
+[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md);
+the multihost deployment shape is a plan, not a frozen contract, in
+[docs/ha-deployment.md](https://github.com/mrbald/dsl41/blob/main/docs/ha-deployment.md).
 The evolution contract for every versioned protocol and durable artifact is
 [docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md);
 the access perimeter is
@@ -337,6 +339,23 @@ of its own here. The control socket is 0600 from birth (ss10). Thus `serve`
 only sees what its own user can already reach directly. It does not widen
 access. It makes existing access reachable from a browser.
 
+### Run history
+
+```sh
+dsl41 runs ./run1                            # one row per job run, this root
+dsl41 runs ./run1 ./run2 --job extract       # multiple roots, one job
+dsl41 runs ./lineage --format json           # a lineage anchor: every period's root, in order
+```
+
+`runs` (DL-113) folds run history from a run root's journal, manifest and
+spool — offline only, no control socket, no live engine. Point it at a
+lineage anchor directory alone and it reads every root the estate's archive
+registry names, in period order, so a rolled lineage still reads as one
+table. `--format` is `table` (default), `json`, or `csv`; every row carries
+its `catalog_hash`, so a caller can segment a series itself by watching that
+field change. A run root with no stored inputs reports its rows as
+`fidelity=records_only`, with a warning on stderr.
+
 ### Training sandbox (examples/nightbank)
 
 A synthetic bank overnight estate — three regions closing follow-the-sun,
@@ -390,7 +409,7 @@ has six tiers, all built:
   [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
   ss5 socket protocol
 
-The suite spans 25 test files (`pytest --collect-only -q` shows the current
+The suite spans 55 test files (`pytest --collect-only -q` shows the current
 count) plus the 28-file synthetic/doc-derived JIL corpus under
 `tests/corpus/`.
 
@@ -482,11 +501,12 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   constructs
 - src/dsl41/runner_control.py — the ss10 control plane, both ends (DL-78): the
   unix-socket server (sendevent parity, status/trace/explain/spec/deps/timers/
-  plan, subscribe), the wire vocabulary, and the two clients — a persistent
-  async one for the TUI and a one-shot blocking one for the CLI. `subscribe`'s
-  backfill spans WAL segments since DL-135 — bounded, newest segment first — and
-  a cursor below what the root still retains gets an explicit gap marker rather
-  than a short stream. The protocol
+  plan, subscribe), the wire vocabulary, and three clients — a persistent
+  async one for the TUI, a one-shot blocking one for the CLI, and a blocking
+  generator (`subscribe_lines`, DL-172) that streams the CLI's `subscribe`.
+  `subscribe`'s backfill spans WAL segments since DL-135 — bounded, newest
+  segment first — and a cursor below what the root still retains gets an
+  explicit gap marker rather than a short stream. The protocol
   is frozen in
   [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
   the outer counterpart to the lifecycle tier's supervisor protocol; every
@@ -640,7 +660,8 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
 - src/dsl41/runner_supervisor.py — the ss6a Tier-1 supervisor (phase 11f): stdlib-only
   (same enforced boundary as the wrapper), one per run_root. It owns the wrapper
   lifelines, so an engine restart reattaches and does not kill jobs. It speaks the
-  frozen docs/supervisor-protocol.md ss5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING +
+  frozen [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
+  ss5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING +
   lease), with same-uid peer-cred and a Linux subreaper.
 - src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
   client of the control socket only (jobs table with pending timers/alarms, explain
@@ -649,7 +670,8 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   every view that the TUI shows comes from the idempotent ss10 queries.
 - src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
   (enforced DL-42 extraction boundary). It records spawn.json/status.json durably.
-  On lifeline EOF, it kills and records. Spool contract in docs/supervisor-protocol.md.
+  On lifeline EOF, it kills and records. Spool contract in
+  [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md).
 - src/dsl41/runner_procid.py — the durability liturgy (fsync/rename/fsync) and process
   identity (boot id, (pid, start-time) PID-reuse guard, quiet group kill) the wrapper
   and the supervisor share: one stdlib-only module both import by top-level name (DL-72)
@@ -662,7 +684,9 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
   `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
   preprocessor), `journal` (render-by-replay of a run WAL, crossing period
-  boundaries over re-derived seals — DL-142), `run` (headless executor: wall clock,
+  boundaries over re-derived seals — DL-142), `runs` (DL-113: offline run
+  history folded from one or more run roots' journal, manifest and spool —
+  or one lineage anchor, read in period order), `run` (headless executor: wall clock,
   real processes, control socket, stop with SIGINT/SIGTERM, and `--detached` runs CMD
   jobs under a supervisor that survives engine restarts), `rehearse` (virtual
   clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
@@ -684,7 +708,9 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
 - scripts/arch_check.py — the DL-75 architecture gate CI runs alongside ruff and
   mypy: stdlib-only, no LLM. Blocking checks are objective regressions (a body
   duplicated across modules, a new private cross-module import in src/, a
-  citation token with no row in docs/citation-index.md, an IR-F schema change
+  citation token with no row in
+  [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md),
+  an IR-F schema change
   without an
   IR_VERSION bump); size checks are advisory and ratcheted against
   scripts/arch_baseline.json. It also prints when a conceptual review is due —
@@ -765,6 +791,10 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   pinned catalog hash, missing opening manifest, a supplied catalog that
   disagrees with the pin) — plus a three-period read that crosses two
   boundaries and the rule that a refused crossing is never announced
+- tests/test_run_history.py — the `dsl41 runs` CLI (DL-113): per-root and
+  multi-root folding, the `--job`/`--since`/`--format` filters, a run
+  history spanning a boundary, and the `records_only` fidelity degrade for
+  a root with no stored inputs
 - tests/test_ledger.py — phase-12 stage S6: one leader per run root (a second
   engine refused, with the holder named), the ordering that makes it worth having
   (a refused resume leaves the log, the estate and the spool untouched), the
@@ -1006,7 +1036,8 @@ rows' own HH:MM, 00:00 default, job start_times overrides).
 DL-59 (same day, a priority decision) then downgraded the remaining
 scheduler-path refusals to documented deterministic defaults, so an ordinary
 estate always loads and schedules. Q8b runs replace-then-shift, and the Q8d
-all-exclusive compounds evaluate literally. docs/live-instance-runbook.md
+all-exclusive compounds evaluate literally.
+[docs/live-instance-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/live-instance-runbook.md)
 keeps the probe protocols. If instance access appears, these protocols can
 confirm vendor parity. DL-60 (same day) closed Q9 from one observed
 `autocal_asc` export sample, which pinned the format (`extended_calendar:`
@@ -1016,14 +1047,15 @@ These facts carry the dossier's weakest confidence marker, **[F]**: one
 observation, not verified against TechDocs. Five interpreter/scanner gaps
 were also corrected the same day. Without the correction, each of these gaps
 refuses an ordinary export.
-Still open: Q3c, Q6 (narrowed — the ON_ICE atom half is now cited), Q8b-Q8d
+Still open: Q3c, Q3d (arm x ON_ICE round-trip, DL-69), Q6 (narrowed — the
+ON_ICE atom half is now cited), Q8b-Q8d
 (autosys dossier §9), U1, U3b, U6b (stonebranch Part III), and the runner's
 E5-E10 (runner-design ss15). E8 was re-swept: a spawn-path signal-9 KB leans
 FAILURE, but the mid-run kill still needs a live instance. The questions
-with a behavior default in code (Q3c, Q8b-Q8d, U1, U3b, E5-E10) run on a
+with a behavior default in code (Q3c, Q3d, Q8b-Q8d, U1, U3b, E5-E10) run on a
 documented default marked `# PENDING: Qn/Un/En`. Q6 is dossier-only (no code
 switch), and U6b lives in the backend_uc migration-report question table.
-Q3c, Q6, and Q8b-Q8d need a live AutoSys instance. U3b needs a live UC
+Q3c, Q3d, Q6, and Q8b-Q8d need a live AutoSys instance. U3b needs a live UC
 controller. The runner is complete through phase 11f (the detached
 supervisor tier). The custom-pattern door of the decompiler (`--patterns`
 recognizer/expander pairs, agreed alongside DL-38) remains the one
@@ -1058,7 +1090,7 @@ uv run coverage report
 
 The last two are one gate: the suite runs under branch coverage and the
 concurrency tier is held at **100%** of it. `[tool.coverage.report]` in
-`pyproject.toml` names the seven modules and argues the scope — a missed
+`pyproject.toml` names the nine modules and argues the scope — a missed
 branch there is a rule the code states that no test holds it to (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
