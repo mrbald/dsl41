@@ -103,8 +103,10 @@ def mkdir_durable(path: str) -> None:
 def fsync_dir(path: "str | os.PathLike[str]") -> None:
     """Fsync a directory: a create, rename or unlink is a directory-entry
     write, and without this it is not durable across a power loss. The
-    ONE spelling (DL-137) -- five modules each had their own; the Tier-0/1
-    copies (runner_wrapper, runner_supervisor) stay by DL-42's licence."""
+    ONE spelling (DL-137) -- five modules each had their own; runner_wrapper
+    never had a copy, and runner_supervisor's is gone too now (DL-178k), so
+    the DL-42 licence for a Tier-0/1 copy protects nothing that still
+    exists."""
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -124,12 +126,14 @@ def fsync_file(path: "str | os.PathLike[str]") -> None:
         os.close(fd)
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def write_all(fd: int, data: bytes) -> None:
     """Every byte, or an error. `os.write` may write FEWER bytes than it was
     given and return the count without raising, and the liturgy below then
     fsyncs and renames a TRUNCATED record into place (DL-151) -- a
     half-written `spawn.json` published as the durable one, which is the
-    exact loss the liturgy exists to prevent."""
+    exact loss the liturgy exists to prevent. Public (DL-178i): the third
+    append site outside this module, `runner_adapters.append_watch_line`,
+    needed the same guard."""
     written = 0
     while written < len(data):
         count = os.write(fd, data[written:])
@@ -150,7 +154,7 @@ def durable_write(path: str, data: bytes) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # owner-only, not umask's call
     try:
         try:
-            _write_all(fd, data)
+            write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -183,7 +187,7 @@ def durable_create(path: str, data: bytes) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         try:
-            _write_all(fd, data)
+            write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)

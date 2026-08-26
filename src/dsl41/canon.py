@@ -239,7 +239,7 @@ def _write(value: object, parts: list[str], path: str) -> None:
     elif isinstance(value, str):
         parts.append(_encode_string(value, path))
     elif isinstance(value, datetime):
-        parts.append(_encode_string(_naive_utc(value).isoformat(timespec="microseconds"), path))
+        parts.append(_encode_string(naive_utc(value).isoformat(timespec="microseconds"), path))
     elif isinstance(value, Mapping):
         _write_object(value, parts, path)
     elif isinstance(value, (list, tuple)):
@@ -297,7 +297,10 @@ def _encode_string(value: str, path: str) -> str:
     return "".join(out)
 
 
-def _naive_utc(value: datetime) -> datetime:
+def naive_utc(value: datetime) -> datetime:
+    """Aware-ISO -> the naive-UTC basis every durable record uses (ss3.2).
+    Public (DL-178j): the one owner for the copies that used to re-derive
+    this from a parsed ISO string in runner_adapters/runner_history."""
     return value if value.tzinfo is None else value.astimezone(UTC).replace(tzinfo=None)
 
 

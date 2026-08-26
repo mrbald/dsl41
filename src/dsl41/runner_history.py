@@ -114,7 +114,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -122,7 +122,7 @@ from pydantic import BaseModel, ConfigDict
 
 from dsl41.ast_jil import JilParseError, parse
 from dsl41.boundary import read_seal
-from dsl41.canon import is_wire_int
+from dsl41.canon import is_wire_int, naive_utc
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
@@ -245,10 +245,9 @@ def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "c
 def _parse_timestamp(value: str) -> datetime:
     """Spool/manifest timestamps may carry a UTC offset (supervisor-protocol
     ss3: "aware-UTC ISO-8601"); the journal's own never do (RealClock strips
-    tzinfo). Normalize to the journal's naive-UTC basis so a duration is
-    never `aware - naive`."""
-    parsed = datetime.fromisoformat(value)
-    return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
+    tzinfo). Normalize to the journal's naive-UTC basis (canon.naive_utc,
+    DL-178j) so a duration is never `aware - naive`."""
+    return naive_utc(datetime.fromisoformat(value))
 
 
 def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list[_TraceWindow]:

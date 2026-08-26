@@ -44,7 +44,7 @@ import uuid
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -60,9 +60,10 @@ from dsl41.canon import (
     decode,
     is_scalar_json,
     is_wire_int,
+    naive_utc,
 )
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported
+from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported, write_all
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
@@ -255,14 +256,6 @@ def load_json(path: Path) -> dict[str, Any] | None:
     if not spool_version_supported(loaded):
         return None
     return loaded
-
-
-def _naive_utc(iso: str) -> datetime:
-    """Wrapper timestamps (aware UTC ISO) -> the engine's naive-UTC basis."""
-    parsed = datetime.fromisoformat(iso)
-    if parsed.tzinfo is None:
-        return parsed
-    return parsed.astimezone(UTC).replace(tzinfo=None)
 
 
 def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
@@ -729,6 +722,12 @@ def _is_json(line: bytes) -> bool:
 
 
 def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
+    # No naive_utc normalization here (unlike _parse_timestamp/_naive_utc's
+    # siblings): every "at" this reads was written by append_watch_line
+    # below from ctx.clock.now(), which is already naive in both time
+    # domains (RealClock.now()'s own docstring, VirtualClock's default
+    # datetime.min) -- this is the one reader of the three that never
+    # crosses the wire's aware-UTC ISO, so there is nothing to normalize.
     at = record.get("at")
     if not isinstance(at, str):
         raise EngineError(f"{path}: a {record.get('kind')!r} line has no timestamp")
@@ -743,9 +742,7 @@ def append_watch_line(path: Path, record: dict[str, Any]) -> None:
     data = canonical_bytes(record) + b"\n"
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        written = 0
-        while written < len(data):
-            written += os.write(fd, data[written:])
+        write_all(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -1831,6 +1828,6 @@ async def resolve_spool(
         ended_at = status.get("ended_at")
         return (
             outcome_from_status(status),
-            _naive_utc(ended_at) if isinstance(ended_at, str) else None,
+            naive_utc(datetime.fromisoformat(ended_at)) if isinstance(ended_at, str) else None,
         )
     return Failed("exit_status_unobservable"), None  # PENDING: E7
