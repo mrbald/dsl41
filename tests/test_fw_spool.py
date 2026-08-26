@@ -483,8 +483,8 @@ def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
     -- an `artifact_format_version` this binary does not implement (PR-08d) --
     is evidence a future binary wrote, and truncating it as "torn" would
     delete it. It refuses loudly and the bytes stay."""
-    from dsl41.runner_adapters import _repair_watch_tail
     from dsl41.runner_clock import EngineError
+    from dsl41.runner_journal import repair_tail
 
     run_root = tmp_path / "run"
 
@@ -498,7 +498,7 @@ def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
         f.write(b'{"artifact_format_version":2,"at":"2026-07-01T08:01:00.000000","kind":"poll"}\n')
     before = _log_path(run_root).read_bytes()
 
-    _repair_watch_tail(_log_path(run_root))
+    repair_tail(_log_path(run_root))  # the watch log follows the WAL's own rule
     assert _log_path(run_root).read_bytes() == before
 
     try:

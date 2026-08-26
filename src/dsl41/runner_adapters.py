@@ -64,9 +64,10 @@ from dsl41.canon import (
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported
 from dsl41.runner_clock import Clock, EngineError
+from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 
-if TYPE_CHECKING:  # annotation only: the WAL is the engine's, not an adapter's
+if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an adapter's
     from dsl41.runner_journal import Journal
 
 
@@ -734,26 +735,6 @@ def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
     return datetime.fromisoformat(at)
 
 
-def _repair_watch_tail(path: Path) -> None:
-    """Make the log end on a line boundary before anything appends, the same
-    rule the WAL's tail repair follows: a reader drops a torn final line, and
-    the bytes must agree with that reading before the next line lands, or the
-    fragment and its successor become one corrupt interior line."""
-    if not path.exists():
-        return
-    with path.open("r+b") as f:
-        data = f.read()
-        if not data or data.endswith(b"\n"):
-            return
-        cut = data.rfind(b"\n") + 1
-        if _is_json(data[cut:]):
-            f.write(b"\n")  # a whole line that lost only its newline
-        else:
-            f.truncate(cut)
-        f.flush()
-        os.fsync(f.fileno())
-
-
 def append_watch_line(path: Path, record: dict[str, Any]) -> None:
     """One ss3.2-canonical line, fsynced (period-model ss2.2). Append-only,
     so there is no rename to make it atomic; a torn tail is truncated on the
@@ -808,7 +789,9 @@ class FileWatcherAdapter:
             run_dir.mkdir(parents=True, exist_ok=True)
             fsync_dir(run_dir.parent)
             log_path = run_dir / WATCH_LOG
-            _repair_watch_tail(log_path)
+            # the watch log follows the WAL's own tail-repair rule (ss2.2):
+            # make it end on a line boundary before anything appends
+            repair_tail(log_path)
             log = read_watch_log(run_dir)
             if log is None:
                 if ctx.fence is not None:
