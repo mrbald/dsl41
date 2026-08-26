@@ -1154,45 +1154,13 @@ def _explicit_notes(
     return notes
 
 
-def decompile(
-    catalog: CatalogIR,
-    graph: DerivedGraph | None = None,
-    *,
-    disable: Collection[str] = (),
-    report: list[str] | None = None,
-) -> str:
-    """Emit a runnable Python module of builder calls; executing it rebuilds
-    a catalog canonically equal to this one (the round-trip property).
-
-    `disable` opts out of individual folds by code (FOLDS registry, DL-38);
-    a bare string means that ONE code; unknown codes are refused loudly.
-    `report`, when given, collects the fold inventory and the per-link
-    explicit-stays diagnostics."""
-    if isinstance(disable, str):  # satisfies Collection[str] but iterates chars
-        disable = (disable,)
-    disabled = {code.strip().upper() for code in disable if code.strip()}
-    unknown = disabled - FOLDS.keys()
-    if unknown:
-        raise DslError(
-            f"unknown fold code(s): {', '.join(sorted(unknown))} (known: {', '.join(FOLDS)})"
-        )
-    unbuildable = [name for name in catalog.jobs if not _buildable_job_name(name)]
-    if unbuildable:
-        preview = ", ".join(repr(n) for n in unbuildable[:5])
-        if len(unbuildable) > 5:
-            preview += ", ..."
-        raise DslError(
-            f"{len(unbuildable)} job name(s) the builder cannot express"
-            f" ({preview}); the emitted module could never rebuild this catalog"
-        )
-    if graph is None:
-        graph = derive_graph(catalog)
-    lines: list[str] = [
-        "# Decompiled by dsl41 (phase 10); executing this module rebuilds the catalog.",
-        "from dsl41.dsl import CatalogBuilder",
-        "",
-        "c = CatalogBuilder()",
-    ]
+def _decompile_records(catalog: CatalogIR) -> list[str]:
+    """Record-namespace emission: globals, machines, resources, external
+    instances, calendars, cycles. Reads only `catalog`; writes only the
+    returned lines. Split from the fold/wiring phase below because the two
+    share no state -- one is the record catalog, the other is job/box
+    emission over the derived graph (DL-178s)."""
+    lines: list[str] = []
     has_records = any(
         (
             catalog.globals_declared,
@@ -1267,12 +1235,26 @@ def decompile(
             pairs = ", ".join(f"({_py(s)}, {_py(e)})" for s, e in cycle.periods)
             kwargs.append(f"periods=[{pairs}]")
         lines.append(f"c.cycle({_py(name)}{', ' if kwargs else ''}{', '.join(kwargs)})")
+    return lines
 
-    # T-005 first: fold detection runs on RESIDUAL conditions (mutex atoms
-    # stripped), so folds compose -- the emitted module re-conjoins via
-    # mutex() AFTER sequence()/parallel() wiring. Stripping can never
-    # invalidate derive's chains: bare n() atoms are mutex-classified and
-    # contribute no edges (M07).
+
+def _decompile_fold_wiring(
+    catalog: CatalogIR,
+    graph: DerivedGraph,
+    disabled: set[str],
+    report: list[str] | None,
+) -> list[str]:
+    """Fold-composed job/box emission, wiring, and the fold-inventory
+    report. Reads `catalog`/`graph`/`disabled`, writes only the returned
+    lines (plus `report`, an explicit out-param); shares no state with
+    `_decompile_records` (DL-178s).
+
+    T-005 first: fold detection runs on RESIDUAL conditions (mutex atoms
+    stripped), so folds compose -- the emitted module re-conjoins via
+    mutex() AFTER sequence()/parallel() wiring. Stripping can never
+    invalidate derive's chains: bare n() atoms are mutex-classified and
+    contribute no edges (M07)."""
+    lines: list[str] = []
     residual: dict[str, Cond | None] = {
         n: j.sem.condition.cond if j.sem.condition is not None else None
         for n, j in catalog.jobs.items()
@@ -1384,6 +1366,50 @@ def decompile(
         if sched_defs:
             report.append(f"T-007: {len(sched_defs)} shared schedule(s) ({len(sched_vars)} jobs)")
         report.extend(notes)
+    return lines
+
+
+def decompile(
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
+    *,
+    disable: Collection[str] = (),
+    report: list[str] | None = None,
+) -> str:
+    """Emit a runnable Python module of builder calls; executing it rebuilds
+    a catalog canonically equal to this one (the round-trip property).
+
+    `disable` opts out of individual folds by code (FOLDS registry, DL-38);
+    a bare string means that ONE code; unknown codes are refused loudly.
+    `report`, when given, collects the fold inventory and the per-link
+    explicit-stays diagnostics."""
+    if isinstance(disable, str):  # satisfies Collection[str] but iterates chars
+        disable = (disable,)
+    disabled = {code.strip().upper() for code in disable if code.strip()}
+    unknown = disabled - FOLDS.keys()
+    if unknown:
+        raise DslError(
+            f"unknown fold code(s): {', '.join(sorted(unknown))} (known: {', '.join(FOLDS)})"
+        )
+    unbuildable = [name for name in catalog.jobs if not _buildable_job_name(name)]
+    if unbuildable:
+        preview = ", ".join(repr(n) for n in unbuildable[:5])
+        if len(unbuildable) > 5:
+            preview += ", ..."
+        raise DslError(
+            f"{len(unbuildable)} job name(s) the builder cannot express"
+            f" ({preview}); the emitted module could never rebuild this catalog"
+        )
+    if graph is None:
+        graph = derive_graph(catalog)
+    lines: list[str] = [
+        "# Decompiled by dsl41 (phase 10); executing this module rebuilds the catalog.",
+        "from dsl41.dsl import CatalogBuilder",
+        "",
+        "c = CatalogBuilder()",
+    ]
+    lines += _decompile_records(catalog)
+    lines += _decompile_fold_wiring(catalog, graph, disabled, report)
     lines += [
         "",
         "catalog = c.build()",
