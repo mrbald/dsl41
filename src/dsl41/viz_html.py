@@ -37,14 +37,15 @@ from typing import Literal
 from dsl41.derive import DerivedGraph, derive_graph
 from dsl41.ir import CatalogIR
 from dsl41.viz import (
+    APPENDIX_A_HEADERS,
+    APPENDIX_B_HEADERS,
     DEFAULT_COLLAPSE_THRESHOLD,
     LEGEND_CHART,
     LEGEND_PROSE,
     LOCKS_PROSE,
+    OR_SHAPE_HEADERS,
+    REDESIGN_FLAG_HEADERS,
     Direction,
-    job_detail,
-    job_kind,
-    job_schedule,
     report_content,
     to_mermaid,
     truncate_cell,
@@ -220,7 +221,7 @@ def to_html(
         toc.append('<li><a href="#standalone">Standalone jobs</a></li>')
         sections.append(
             '<section id="standalone">\n<details open>\n'
-            f'<summary><span class="h2">Standalone jobs ({len(content.standalone)})'
+            f'<summary><span class="h2">Standalone jobs ({len(content.standalone_rows)})'
             f"</span></summary>\n{_viewport(chart_id)}\n</details>\n</section>"
         )
 
@@ -237,42 +238,32 @@ def to_html(
 
     toc.append('<li><a href="#appendix-a">Appendix A</a></li>')
     heading_a = "Appendix A \N{EM DASH} standalone jobs (not part of any workflow)"
-    if content.standalone:
-        meta_rows = []
-        for name in content.standalone:
-            job = catalog.jobs.get(name)
-            meta_rows.append(
-                [
-                    _text(name),
-                    _text(job_kind(job)),
-                    _text(job_schedule(job)),
-                    _code(job_detail(job)),
-                ]
-            )
-        body_a = _table(["job", "kind", "schedule", "command / watched file"], meta_rows)
+    if content.standalone_rows:
+        meta_rows = [
+            [_text(name), _text(kind), _text(schedule), _code(detail)]
+            for name, kind, schedule, detail in content.standalone_rows
+        ]
+        body_a = _table(list(APPENDIX_A_HEADERS), meta_rows)
     else:
         body_a = "<p>None.</p>"
     tables.append(f'<section id="appendix-a">\n<h2>{_text(heading_a)}</h2>\n{body_a}\n</section>')
 
     toc.append('<li><a href="#appendix-b">Appendix B</a></li>')
     heading_b = "Appendix B \N{EM DASH} edge annotations"
-    if content.annotated:
+    if content.annotated_rows:
         edge_rows = [
             [
-                _text(e.src),
-                _text(e.dst),
-                e.via,
-                _text(e.lookback.raw if e.lookback is not None else ""),
-                e.cls,
-                _text(e.mapping_row),
-                _text(e.assumption),
+                _text(src),
+                _text(dst),
+                via,
+                _text(lookback),
+                cls,
+                _text(mapping_row),
+                _text(assumption),
             ]
-            for e in content.annotated
+            for src, dst, via, lookback, cls, mapping_row, assumption in content.annotated_rows
         ]
-        body_b = _table(
-            ["producer", "consumer", "via", "lookback", "class", "row", "assumption"],
-            edge_rows,
-        )
+        body_b = _table(list(APPENDIX_B_HEADERS), edge_rows)
     else:
         body_b = "<p>None \N{EM DASH} every edge maps exactly.</p>"
     tables.append(f'<section id="appendix-b">\n<h2>{_text(heading_b)}</h2>\n{body_b}\n</section>')
@@ -280,23 +271,20 @@ def to_html(
     toc.append('<li><a href="#appendix-c">Appendix C</a></li>')
     heading_c = "Appendix C \N{EM DASH} redesign flags, OR shapes, cycles"
     parts_c: list[str] = []
-    if graph.redesign_flags:
+    if content.redesign_flag_rows:
         flag_rows = [
-            [_text(f.job), _text(f.mapping_row), _text(f.reason)] for f in graph.redesign_flags
+            [_text(job), _text(mapping_row), _text(reason)]
+            for job, mapping_row, reason in content.redesign_flag_rows
         ]
-        parts_c.append("<h3>Redesign flags</h3>\n" + _table(["job", "row", "reason"], flag_rows))
-    if graph.or_shapes:
+        parts_c.append("<h3>Redesign flags</h3>\n" + _table(list(REDESIGN_FLAG_HEADERS), flag_rows))
+    if content.or_shape_rows:
         shape_rows = [
-            [_text(s.job), _text(s.attr), _text(s.kind), _text(s.lowering)] for s in graph.or_shapes
+            [_text(job), _text(attr), _text(kind), _text(lowering)]
+            for job, attr, kind, lowering in content.or_shape_rows
         ]
-        parts_c.append(
-            "<h3>OR shapes (M12)</h3>\n"
-            + _table(["job", "attr", "kind", "suggested lowering"], shape_rows)
-        )
-    if graph.cycles:
-        items = "\n".join(
-            f"<li>{_text(' \N{RIGHTWARDS ARROW} '.join(cycle))}</li>" for cycle in graph.cycles
-        )
+        parts_c.append("<h3>OR shapes (M12)</h3>\n" + _table(list(OR_SHAPE_HEADERS), shape_rows))
+    if content.cycle_rows:
+        items = "\n".join(f"<li>{_text(cycle)}</li>" for cycle in content.cycle_rows)
         parts_c.append(f"<h3>Cycles (L010)</h3>\n<ul>\n{items}\n</ul>")
     body_c = "\n".join(parts_c) if parts_c else "<p>None.</p>"
     tables.append(f'<section id="appendix-c">\n<h2>{_text(heading_c)}</h2>\n{body_c}\n</section>')

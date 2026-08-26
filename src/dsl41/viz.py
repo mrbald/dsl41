@@ -790,17 +790,33 @@ class ChartSection(NamedTuple):
     chart: str  # _render_chart body, no frontmatter
 
 
+# Appendix A/B/C headers: one spelling, shared by to_markdown (joined into a
+# pipe row) and viz_html.to_html (passed straight to _table). DL-178u.
+APPENDIX_A_HEADERS = ("job", "kind", "schedule", "command / watched file")
+APPENDIX_B_HEADERS = ("producer", "consumer", "via", "lookback", "class", "row", "assumption")
+REDESIGN_FLAG_HEADERS = ("job", "row", "reason")
+OR_SHAPE_HEADERS = ("job", "attr", "kind", "suggested lowering")
+
+
 class ReportContent(NamedTuple):
     """Everything the report says, before either emitter formats it. Rows
-    carry RAW strings; each emitter applies its own escaping. Appendix C
-    (redesign flags / OR shapes / cycles) is read off the graph directly."""
+    carry RAW strings; each emitter applies its own escaping. Appendix A/B/C
+    row tuples are computed once here (DL-178u), from the catalog/graph, so
+    both emitters render the same data instead of each re-deriving it."""
 
     summary: str
     sections: list[ChartSection]
-    standalone: list[str]  # Appendix A job names
     standalone_chart: str | None  # only when include_singletons and any exist
     lock_rows: list[tuple[str, str, str]]  # (members joined with x, kind, charts)
-    annotated: list[DerivedEdge]  # Appendix B rows
+    standalone_rows: list[tuple[str, str | None, str | None, str | None]]
+    # Appendix A: (name, kind, schedule, command / watched file)
+    annotated_rows: list[tuple[str, str, str, str, str, str, str | None]]
+    # Appendix B: (producer, consumer, via, lookback raw, class, mapping row, assumption)
+    redesign_flag_rows: list[tuple[str, str, str]]  # Appendix C: (job, mapping row, reason)
+    or_shape_rows: list[
+        tuple[str, str, str, str]
+    ]  # Appendix C: (job, attr, kind, suggested lowering)
+    cycle_rows: list[str]  # Appendix C: arrow-joined job chains
 
 
 def report_content(
@@ -870,13 +886,38 @@ def report_content(
         charts = ", ".join(dict.fromkeys(comp_of.get(m, "not in catalog") for m in group))
         lock_rows.append((" \N{MULTIPLICATION SIGN} ".join(group), kind, charts))
 
+    standalone_rows: list[tuple[str, str | None, str | None, str | None]] = []
+    for name in standalone:
+        job = catalog.jobs.get(name)
+        standalone_rows.append((name, job_kind(job), job_schedule(job), job_detail(job)))
+
+    annotated_rows: list[tuple[str, str, str, str, str, str, str | None]] = []
+    for edge in graph.edges:
+        if edge.cls == "exact":
+            continue
+        lookback = edge.lookback.raw if edge.lookback is not None else ""
+        annotated_rows.append(
+            (edge.src, edge.dst, edge.via, lookback, edge.cls, edge.mapping_row, edge.assumption)
+        )
+
+    redesign_flag_rows: list[tuple[str, str, str]] = [
+        (f.job, f.mapping_row, f.reason) for f in graph.redesign_flags
+    ]
+    or_shape_rows: list[tuple[str, str, str, str]] = [
+        (s.job, s.attr, s.kind, s.lowering) for s in graph.or_shapes
+    ]
+    cycle_rows = [" \N{RIGHTWARDS ARROW} ".join(cycle) for cycle in graph.cycles]
+
     return ReportContent(
         summary=summary,
         sections=sections,
-        standalone=standalone,
         standalone_chart=standalone_chart,
         lock_rows=lock_rows,
-        annotated=[e for e in graph.edges if e.cls != "exact"],
+        standalone_rows=standalone_rows,
+        annotated_rows=annotated_rows,
+        redesign_flag_rows=redesign_flag_rows,
+        or_shape_rows=or_shape_rows,
+        cycle_rows=cycle_rows,
     )
 
 
@@ -908,6 +949,16 @@ def _code_cell(text: str | None) -> str:
         return ""
     flat = truncate_cell(_cell(text.replace("`", "'")))
     return f"`{flat}`"
+
+
+def _table_header(headers: tuple[str, ...]) -> str:
+    """Markdown header row for one of the shared APPENDIX_*_HEADERS tuples."""
+    return "| " + " | ".join(headers) + " |"
+
+
+def _table_separator(width: int) -> str:
+    """Markdown separator row matching `_table_header`'s column count."""
+    return "|" + "---|" * width
 
 
 def to_markdown(
@@ -949,7 +1000,7 @@ def to_markdown(
         out.extend(fence(sec.chart))
 
     if content.standalone_chart is not None:
-        out.append(f"## Standalone jobs ({len(content.standalone)})")
+        out.append(f"## Standalone jobs ({len(content.standalone_rows)})")
         out.append("")
         out.extend(fence(content.standalone_chart))
 
@@ -960,21 +1011,18 @@ def to_markdown(
         out.append("")
         out.append("| lock | kind | charts |")
         out.append("|---|---|---|")
-        for joined, kind, charts in content.lock_rows:
-            out.append(f"| {_cell(joined)} | {kind} | {charts} |")
+        for joined, lock_kind, lock_charts in content.lock_rows:
+            out.append(f"| {_cell(joined)} | {lock_kind} | {lock_charts} |")
         out.append("")
 
     out.append("## Appendix A \N{EM DASH} standalone jobs (not part of any workflow)")
     out.append("")
-    if content.standalone:
-        out.append("| job | kind | schedule | command / watched file |")
-        out.append("|---|---|---|---|")
-        for name in content.standalone:
-            job = catalog.jobs.get(name)
+    if content.standalone_rows:
+        out.append(_table_header(APPENDIX_A_HEADERS))
+        out.append(_table_separator(len(APPENDIX_A_HEADERS)))
+        for name, kind, schedule, detail in content.standalone_rows:
             out.append(
-                f"| {_cell(name)} | {_cell(job_kind(job))}"
-                f" | {_cell(job_schedule(job))}"
-                f" | {_code_cell(job_detail(job))} |"
+                f"| {_cell(name)} | {_cell(kind)} | {_cell(schedule)} | {_code_cell(detail)} |"
             )
     else:
         out.append("None.")
@@ -982,48 +1030,45 @@ def to_markdown(
 
     out.append("## Appendix B \N{EM DASH} edge annotations")
     out.append("")
-    if content.annotated:
-        out.append("| producer | consumer | via | lookback | class | row | assumption |")
-        out.append("|---|---|---|---|---|---|---|")
-        for e in content.annotated:
-            lookback = e.lookback.raw if e.lookback is not None else ""
+    if content.annotated_rows:
+        out.append(_table_header(APPENDIX_B_HEADERS))
+        out.append(_table_separator(len(APPENDIX_B_HEADERS)))
+        for src, dst, via, lookback, cls, mapping_row, assumption in content.annotated_rows:
             out.append(
-                f"| {_cell(e.src)} | {_cell(e.dst)} | {e.via} | {_cell(lookback)}"
-                f" | {e.cls} | {e.mapping_row} | {_cell(e.assumption)} |"
+                f"| {_cell(src)} | {_cell(dst)} | {via} | {_cell(lookback)}"
+                f" | {cls} | {mapping_row} | {_cell(assumption)} |"
             )
     else:
         out.append("None \N{EM DASH} every edge maps exactly.")
     out.append("")
 
-    has_c = graph.redesign_flags or graph.or_shapes or graph.cycles
+    has_c = content.redesign_flag_rows or content.or_shape_rows or content.cycle_rows
     out.append("## Appendix C \N{EM DASH} redesign flags, OR shapes, cycles")
     out.append("")
     if not has_c:
         out.append("None.")
         out.append("")
-    if graph.redesign_flags:
+    if content.redesign_flag_rows:
         out.append("### Redesign flags")
         out.append("")
-        out.append("| job | row | reason |")
-        out.append("|---|---|---|")
-        for flag in graph.redesign_flags:
-            out.append(f"| {_cell(flag.job)} | {flag.mapping_row} | {_cell(flag.reason)} |")
+        out.append(_table_header(REDESIGN_FLAG_HEADERS))
+        out.append(_table_separator(len(REDESIGN_FLAG_HEADERS)))
+        for job, mapping_row, reason in content.redesign_flag_rows:
+            out.append(f"| {_cell(job)} | {mapping_row} | {_cell(reason)} |")
         out.append("")
-    if graph.or_shapes:
+    if content.or_shape_rows:
         out.append("### OR shapes (M12)")
         out.append("")
-        out.append("| job | attr | kind | suggested lowering |")
-        out.append("|---|---|---|---|")
-        for shape in graph.or_shapes:
-            out.append(
-                f"| {_cell(shape.job)} | {shape.attr} | {shape.kind} | {_cell(shape.lowering)} |"
-            )
+        out.append(_table_header(OR_SHAPE_HEADERS))
+        out.append(_table_separator(len(OR_SHAPE_HEADERS)))
+        for job, attr, kind, lowering in content.or_shape_rows:
+            out.append(f"| {_cell(job)} | {attr} | {kind} | {_cell(lowering)} |")
         out.append("")
-    if graph.cycles:
+    if content.cycle_rows:
         out.append("### Cycles (L010)")
         out.append("")
-        for cycle in graph.cycles:
-            out.append(f"- {' \N{RIGHTWARDS ARROW} '.join(cycle)}")
+        for cycle in content.cycle_rows:
+            out.append(f"- {cycle}")
         out.append("")
 
     return "\n".join(out)
