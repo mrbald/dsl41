@@ -10777,6 +10777,15 @@ relitigate an entry; append a new one.
   (y) the spool identity predicate, five spellings, one already drifted
   (runner_adapters.py:1728/1766/1783, runner_history.py:674,
   boundary.py:2160) -- verify the drift first; it may be a bug.
+  [(y) OUTCOME, same day: the drift WAS a bug. `resolve_spool`
+  tuple-checked spawn.json but not status.json, so with no bound run_id
+  (the pre-DL-118 reconciliation path) a stranger's status.json could be
+  consumed as this run's fate. Fixed with the unification; a test pins
+  the refusal. One owner `spool_names_run` (runner_adapters), adopted at
+  six sites -- a sixth (`_kill`, same file) surfaced in review.
+  runner_supervisor's four spellings of the same gate STAY hand-rolled:
+  DL-42's import boundary (nothing from dsl41 beyond its two siblings,
+  import-graph test) licenses those copies; do not re-find them.]
   DECLINED, recorded so they are not re-found: the byte-identical
   `digest`/`to_bytes` pair (attest.py:349/period.py:779 -- three lines;
   a mixin adds a concept); boundary's lax `read_claim` vs the strict
