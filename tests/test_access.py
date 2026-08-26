@@ -1088,6 +1088,29 @@ def test_access_reload_refuses_a_socket_group_change(tmp_path: Path) -> None:
     assert "fixed at arming" in failures[0]["error"]
 
 
+def test_access_arming_chown_failure_is_one_named_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss8: a run root the kernel will not open to the socket group is an
+    arming refusal that names the group and the cause, never a bare
+    OSError. The probe that used to exercise this branch went with DL-152's
+    preflight deletion; this is its witness now."""
+    assert MY_GROUP is not None
+    map_path = _write_map(
+        tmp_path / "roles.toml",
+        f'format_version = 1\nunmapped = "deny"\nsocket_group = "{MY_GROUP}"\n',
+    )
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+
+    def _refuse(path: object, uid: int, gid: int) -> None:
+        raise OSError("kernel says no")
+
+    monkeypatch.setattr("dsl41.runner_access.os.chown", _refuse)
+    with pytest.raises(AccessError, match="cannot open the run root to group"):
+        AccessControl.arm(map_path, run_root)
+
+
 def test_access_reload_refuses_a_group_that_kept_its_name_and_changed_its_gid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
