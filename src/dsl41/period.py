@@ -82,7 +82,7 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.ir import CatalogIR
-from dsl41.runner_clock import EngineError
+from dsl41.runner_clock import EngineError, parse_sealed_preamble
 from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
 from dsl41.timezones import alias_table
 
@@ -765,19 +765,7 @@ class ArchiveReceipt(BaseModel):
 
         A receipt is what stands between an archive and a loss, so a
         receipt that disagrees with its own bytes is never read past."""
-        try:
-            payload = decode(data)
-        except CanonError as exc:
-            raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
-        if not isinstance(payload, dict):
-            raise EngineError(f"{where}: not a JSON object")
-        stamped = payload.pop("digest", None)
-        version = payload.get("artifact_format_version")
-        if version != ARTIFACT_FORMAT_VERSION:
-            raise EngineError(
-                f"{where}: artifact_format_version {version!r}: this binary implements"
-                f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
-            )
+        payload, stamped = parse_sealed_preamble(data, where=where)
         listed = payload.get("archived")
         if isinstance(listed, list):
             payload["archived"] = tuple(listed)

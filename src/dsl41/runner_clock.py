@@ -19,13 +19,40 @@ import asyncio
 import heapq
 
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
+
+from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, decode
 
 
 class EngineError(RuntimeError):
     """A shell-level refusal (never a semantics verdict): the engine detected
     it cannot make progress -- e.g. the zero-delay-cycle guard in
     run_until_quiescent. Loud by design (CLAUDE.md: no silent loss)."""
+
+
+def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, Any], object]:
+    """The preamble every sealed-artifact reader shares (PR-08d): decode
+    ss3.2-canonical JSON, refuse a payload that is not a JSON object, pop
+    the stamped `digest` key, and check `artifact_format_version`.
+
+    Returns `(payload, stamped)`. Everything after this is each artifact's
+    own: `model_validate`, its own error prose, the stamped-vs-computed
+    digest check, and any class-specific coercion (`Attestation.from_bytes`,
+    `ArchiveReceipt.from_bytes`)."""
+    try:
+        payload = decode(data)
+    except CanonError as exc:
+        raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise EngineError(f"{where}: not a JSON object")
+    stamped = payload.pop("digest", None)
+    version = payload.get("artifact_format_version")
+    if version != ARTIFACT_FORMAT_VERSION:
+        raise EngineError(
+            f"{where}: artifact_format_version {version!r}: this binary implements"
+            f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
+        )
+    return payload, stamped
 
 
 class Clock(Protocol):

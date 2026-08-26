@@ -66,9 +66,7 @@ from dsl41.boundary import (
 )
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
-    CanonError,
     canonical_bytes,
-    decode,
     digest as digest_over,
     is_canonical_file,
     is_wire_int,
@@ -96,7 +94,7 @@ from dsl41.period import (
     tz_aliases_of,
     wrote_period,
 )
-from dsl41.runner_clock import EngineError
+from dsl41.runner_clock import EngineError, parse_sealed_preamble
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
 from dsl41.runner_journal import dsl41_version, read_journal, replay_inputs
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, next_epoch
@@ -362,19 +360,7 @@ class Attestation(BaseModel):
         A stamped digest that does not match the bytes it stamps is the
         one thing an attestation must never be read past -- the whole
         artifact exists to be a checkpoint somebody trusts."""
-        try:
-            payload = decode(data)
-        except CanonError as exc:
-            raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
-        if not isinstance(payload, dict):
-            raise EngineError(f"{where}: not a JSON object")
-        stamped = payload.pop("digest", None)
-        version = payload.get("artifact_format_version")
-        if version != ARTIFACT_FORMAT_VERSION:
-            raise EngineError(
-                f"{where}: artifact_format_version {version!r}: this binary implements"
-                f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
-            )
+        payload, stamped = parse_sealed_preamble(data, where=where)
         try:
             attestation = cls.model_validate(payload)
         except ValidationError as exc:
