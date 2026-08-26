@@ -69,6 +69,7 @@ from __future__ import annotations
 import keyword
 import re
 from collections.abc import Collection, Sequence
+from typing import NamedTuple
 
 from dsl41.ast_jil import value_opens_comment
 from dsl41.conditions import (
@@ -622,8 +623,8 @@ class CatalogBuilder:
             # value, so it falls through to _check_value's loud refusal, and
             # so does a value that embeds a quote (cannot be wrapped). The
             # wrapped form still runs _check_value (control characters). Not
-            # job-only: `type`/`res_type`/`xtype` are real `_unquote` lanes
-            # for machine/resource/xinst too, so `machine()`, `resource()`
+            # job-only: `type`/`res_type`/`xtype` are real `unquote_jil_value`
+            # lanes for machine/resource/xinst too, so `machine()`, `resource()`
             # and `xinst()` call this same method for those three keys.
             return _check_value(key, f'"{rendered}"')
         return _check_value(key, rendered)
@@ -939,9 +940,27 @@ def _fold_mutex(
     return pairs, residual
 
 
+class _Seq(NamedTuple):
+    """One sequence() candidate from _fold_chains: a same-letter run."""
+
+    names: list[str]
+    letter: str
+
+
+class _Par(NamedTuple):
+    """One parallel() candidate from _fold_fanout: a fan-out group plus
+    its unique fan-in joins."""
+
+    members: list[str]
+    producer: str
+    letter: str
+    then: str | None
+    then_any: str | None
+
+
 def _fold_chains(
     graph: DerivedGraph, residual: dict[str, Cond | None], disabled: set[str]
-) -> tuple[list[tuple[list[str], str]], set[str], int, set[str], list[str]]:
+) -> tuple[list[_Seq], set[str], int, set[str], list[str]]:
     """sequence() candidates: derived chains whose links each carry EXACTLY
     one plain status atom on the predecessor -- adjacency alone is not
     enough (module docstring). T-001 admits s-links, T-004 f/d/t-links;
@@ -950,7 +969,7 @@ def _fold_chains(
     stays-explicit note is already written, notes)."""
     notes: list[str] = []
     noted: set[str] = set()
-    sequences: list[tuple[list[str], str]] = []
+    sequences: list[_Seq] = []
     sequenced: set[str] = set()
     split_chains = 0
 
@@ -991,14 +1010,14 @@ def _fold_chains(
                 split_chains += 1
         for start, end, letter in runs:
             names = chain[start : end + 1]
-            sequences.append((names, letter))
+            sequences.append(_Seq(names, letter))
             sequenced.update(names[1:])  # run heads keep their own condition
     return sequences, sequenced, split_chains, noted, notes
 
 
 def _fold_fanout(
     catalog: CatalogIR, residual: dict[str, Cond | None], disabled: set[str]
-) -> tuple[list[tuple[list[str], str, str, str | None, str | None]], set[str]]:
+) -> tuple[list[_Par], set[str]]:
     """parallel() candidates (DL-37): fan-out groups -- >= 2 jobs whose
     entire (residual) condition is exactly letter(p) for one in-catalog
     producer p -- plus the unique fan-in joins. Grouping is by exact
@@ -1026,7 +1045,7 @@ def _fold_fanout(
             shape = _success_combo_shape(residual[name])
             if shape is not None:
                 joins_by_shape.setdefault(shape, []).append(name)
-    parallels: list[tuple[list[str], str, str, str | None, str | None]] = []
+    parallels: list[_Par] = []
     paralleled: set[str] = set()
     for (producer, letter), members in fanout.items():
         if len(members) < 2:
@@ -1040,7 +1059,7 @@ def _fold_fanout(
             if "T-003" not in disabled:
                 or_joins = joins_by_shape.get((member_key, False), [])
                 then_any = or_joins[0] if len(or_joins) == 1 else None
-        parallels.append((members, producer, letter, then, then_any))
+        parallels.append(_Par(members, producer, letter, then, then_any))
         paralleled.update(members)
         for join in (then, then_any):
             if join is not None:
@@ -1337,16 +1356,16 @@ def _decompile_fold_wiring(
         lines.append(f"c.contend({args}, resource={_py(res_name)}, quantity={quantity}{tail})")
 
     if report is not None:
-        s_seq = [s for s in sequences if s[1] == "s"]
-        x_seq = [s for s in sequences if s[1] != "s"]
-        s_par = [p for p in parallels if p[2] == "s"]
-        x_par = [p for p in parallels if p[2] != "s"]
-        any_joins = sum(1 for p in parallels if p[4] is not None)
+        s_seq = [s for s in sequences if s.letter == "s"]
+        x_seq = [s for s in sequences if s.letter != "s"]
+        s_par = [p for p in parallels if p.letter == "s"]
+        x_par = [p for p in parallels if p.letter != "s"]
+        any_joins = sum(1 for p in parallels if p.then_any is not None)
         if s_seq or s_par:
             report.append(
-                f"T-001: {len(s_seq)} sequence(s) ({sum(len(s[0]) for s in s_seq)} jobs),"
+                f"T-001: {len(s_seq)} sequence(s) ({sum(len(s.names) for s in s_seq)} jobs),"
                 f" {len(s_par)} parallel group(s)"
-                f" ({sum(len(p[0]) for p in s_par)} members)"
+                f" ({sum(len(p.members) for p in s_par)} members)"
             )
         if split_chains:
             report.append(f"T-002: {split_chains} chain(s) folded as sub-runs")

@@ -226,18 +226,25 @@ class _TableSync:
         keys: Sequence[str],
         columns: Sequence[str],
         rows: Sequence[Sequence[Any]],
-        on_rebuild: Callable[[Sequence[Any]], Any | None] | None = None,
+        on_rebuild: Callable[[Sequence[Any], Any], Any | None] | None = None,
         default_to_first_row: bool = False,
     ) -> None:
         """On a membership/order change, `on_rebuild` runs once, right after
         clear() and before any add_row -- so a caller can arm its own bounce
-        guard first -- and names the identity value to restore the cursor
-        to, or None. `default_to_first_row` covers the caller that wants row
-        0 when nothing survived; the caller that doesn't leaves the cursor
+        guard first. It gets `(new_identity, old_selected)`: the identity
+        about to be shown, and the identity value the cursor sat on before
+        this call -- read HERE, before clear() bounces `table.cursor_row`
+        back to 0, so no caller needs its own pre-refresh read of the
+        cursor or of `self.identity` (DL-178v: the engine owns every stale
+        read). It names the identity value to restore the cursor to, or
+        None. `default_to_first_row` covers the caller that wants row 0
+        when nothing survived; the caller that doesn't leaves the cursor
         wherever clear()/add_row left it."""
         if list(identity) != self.identity:
+            cursor = table.cursor_row
+            old_selected = self.identity[cursor] if 0 <= cursor < len(self.identity) else None
             table.clear()
-            target = on_rebuild(identity) if on_rebuild is not None else None
+            target = on_rebuild(identity, old_selected) if on_rebuild is not None else None
             self.identity = list(identity)
             self.sigs = []
             for key, cells in zip(keys, rows):
@@ -507,21 +514,18 @@ class TriggersScreen(ModalScreen[None]):
         except NoMatches:
             return  # a worker resuming after the await can outlive the screen
         # membership/order changed: rebuild, then put the cursor back on the
-        # same trigger if it survived. The cursor's current row must be read
-        # (and mapped through the OLD identity) before _TableSync.refresh
-        # clears the table -- clear() every 2s would otherwise reset the row
-        # cursor and scroll (the jobs-table pathology, DL-67; review MAJOR).
+        # same trigger if it survived. `_TableSync.refresh` reads the
+        # cursor's current row itself, before clear() resets it -- clear()
+        # every 2s would otherwise bounce the row cursor and scroll first
+        # (the jobs-table pathology, DL-67; review MAJOR).
         ids = [(job, kind, detail) for _, _, job, kind, detail in rows]
-        cursor = table.cursor_row
-        old_identity = self._table_sync.identity
-        selected = old_identity[cursor] if 0 <= cursor < len(old_identity) else None
         self._table_sync.refresh(
             table,
             identity=ids,
             keys=[str(i) for i in range(len(rows))],
             columns=self._COLUMNS,
             rows=rows,
-            on_rebuild=lambda _ids: selected,
+            on_rebuild=lambda _new_ids, old_selected: old_selected,
         )
         table.border_title = f"triggers ({len(rows)})"
 
@@ -1336,10 +1340,12 @@ class RunnerApp(App[None]):
         cells[0] = Text(label, style=style)
         return cells
 
-    def _on_table_rebuild(self, order: Sequence[Any]) -> str | None:
+    def _on_table_rebuild(self, order: Sequence[Any], _old_selected: Any) -> str | None:
         # arm the bounce guard BEFORE _TableSync.refresh's add_row loop: the
         # first row fires a spurious row-0 highlight ahead of the cursor
-        # restore
+        # restore. This app tracks selection in `_selected`, not the
+        # pre-clear cursor _TableSync.refresh now reads for us, so the
+        # second argument goes unused here (DL-178v).
         self._rows = set(order)
         self._restore_selected = self._selected if self._selected in self._rows else None
         if not order:

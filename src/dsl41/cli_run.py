@@ -97,15 +97,15 @@ def _preflight_or_exit(
 
 
 def _naive_utc_arg(text: str, option: str) -> "datetime":
-    from datetime import UTC, datetime
+    from datetime import datetime
+
+    from dsl41.canon import naive_utc
 
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise typer.Exit(refuse(exc, prefix=option)) from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-    return parsed
+    return naive_utc(parsed)
 
 
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":

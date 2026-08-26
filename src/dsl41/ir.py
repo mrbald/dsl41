@@ -871,10 +871,10 @@ class _Lowerer:
 
     # ------------------------------------------------------------- shared helpers
 
-    def _dup_attr(self, seen: Container[str], attr: RawAttr) -> bool:
-        """True on a fresh key; on a repeat, emits the duplicate-attribute
-        lowering error and returns False (module docstring: last-wins would
-        be silent loss). One owner for the four source-order lowerers that
+    def _fresh_attr(self, seen: Container[str], attr: RawAttr) -> bool:
+        """Fresh key: True. Repeat: emits the duplicate-attribute lowering
+        error and returns False (module docstring: last-wins would be
+        silent loss). One owner for the four source-order lowerers that
         each re-walk `stmt.attrs` by hand (DL-178)."""
         if attr.key.lower() in seen:
             self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
@@ -887,7 +887,7 @@ class _Lowerer:
         attrs: dict[str, RawAttr] = {}
         ok = True
         for attr in stmt.attrs:
-            if not self._dup_attr(attrs, attr):
+            if not self._fresh_attr(attrs, attr):
                 ok = False
                 continue
             attrs[attr.key.lower()] = attr
@@ -1476,7 +1476,7 @@ class _Lowerer:
                 # guard is case-insensitive and the resolver's node_name lookup
                 # cannot miss an upper/mixed-case spelling (review: no silent
                 # dup, no false accept).
-                if not self._dup_attr(level_attrs, attr):
+                if not self._fresh_attr(level_attrs, attr):
                     ok = False
                     continue
                 level_attrs[key] = value
@@ -1546,7 +1546,7 @@ class _Lowerer:
             key = attr.key.lower()
             if key == "condition" and kind == "extended":
                 conditions.append(attr.raw_value.strip())
-            elif not self._dup_attr(attrs, attr):
+            elif not self._fresh_attr(attrs, attr):
                 ok = False
             else:
                 attrs[key] = attr.raw_value.strip()
@@ -1594,7 +1594,7 @@ class _Lowerer:
                 else:
                     periods.append((open_start, attr.raw_value.strip()))
                     open_start = None
-            elif not self._dup_attr(attrs, attr):
+            elif not self._fresh_attr(attrs, attr):
                 ok = False
             else:
                 attrs[key] = attr.raw_value.strip()

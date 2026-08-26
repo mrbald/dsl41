@@ -1622,7 +1622,11 @@ def _subscribe_refusal(ack: bytes) -> str | None:
     if not ack:
         return "engine hung up before the subscribe ack"
     if not ack.endswith(b"\n"):
-        return "the subscribe ack did not end within the read limit"
+        # true on both transports that share this check: the blocking
+        # reader's size-capped readline() can truncate at the limit, while
+        # asyncio's readline() only reaches here on a real hang-up mid-line
+        # (a limit overrun raises ValueError instead, upstream of this call)
+        return "the subscribe ack ended without a newline: read limit, or a hang-up mid-line"
     try:
         parsed = json.loads(ack)
     except (ValueError, RecursionError) as exc:

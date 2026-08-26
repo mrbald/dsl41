@@ -429,12 +429,12 @@ def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> N
     generic loop below would send its user to two formats that emit
     something else."""
     if whole_graph and html:
-        typer.echo(
-            "--html --whole-graph (the single-chart offline page, DL-70) was replaced"
-            " by --format html-chart (DL-76)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                "--html --whole-graph (the single-chart offline page, DL-70) was replaced"
+                " by --format html-chart (DL-76)"
+            )
         )
-        raise typer.Exit(2)
     removed = [
         (flag, mode)
         for flag, mode, passed in (

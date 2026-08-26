@@ -798,6 +798,52 @@ REDESIGN_FLAG_HEADERS = ("job", "row", "reason")
 OR_SHAPE_HEADERS = ("job", "attr", "kind", "suggested lowering")
 
 
+class LockRow(NamedTuple):
+    """One Locks-table row: a mutex group and where it's charted."""
+
+    members: str  # joined with x
+    kind: str
+    charts: str
+
+
+class StandaloneRow(NamedTuple):
+    """One Appendix A row: a job with no wiring to any charted workflow."""
+
+    name: str
+    kind: str | None
+    schedule: str | None
+    command: str | None
+
+
+class AnnotatedRow(NamedTuple):
+    """One Appendix B row: a non-exact edge and how it got there."""
+
+    producer: str
+    consumer: str
+    via: str
+    lookback: str
+    cls: str
+    mapping_row: str
+    assumption: str | None
+
+
+class RedesignFlagRow(NamedTuple):
+    """One Appendix C redesign-flags row."""
+
+    job: str
+    mapping_row: str
+    reason: str
+
+
+class OrShapeRow(NamedTuple):
+    """One Appendix C OR-shapes row (M12)."""
+
+    job: str
+    attr: str
+    kind: str
+    suggestion: str
+
+
 class ReportContent(NamedTuple):
     """Everything the report says, before either emitter formats it. Rows
     carry RAW strings; each emitter applies its own escaping. Appendix A/B/C
@@ -807,15 +853,11 @@ class ReportContent(NamedTuple):
     summary: str
     sections: list[ChartSection]
     standalone_chart: str | None  # only when include_singletons and any exist
-    lock_rows: list[tuple[str, str, str]]  # (members joined with x, kind, charts)
-    standalone_rows: list[tuple[str, str | None, str | None, str | None]]
-    # Appendix A: (name, kind, schedule, command / watched file)
-    annotated_rows: list[tuple[str, str, str, str, str, str, str | None]]
-    # Appendix B: (producer, consumer, via, lookback raw, class, mapping row, assumption)
-    redesign_flag_rows: list[tuple[str, str, str]]  # Appendix C: (job, mapping row, reason)
-    or_shape_rows: list[
-        tuple[str, str, str, str]
-    ]  # Appendix C: (job, attr, kind, suggested lowering)
+    lock_rows: list[LockRow]
+    standalone_rows: list[StandaloneRow]  # Appendix A
+    annotated_rows: list[AnnotatedRow]  # Appendix B
+    redesign_flag_rows: list[RedesignFlagRow]  # Appendix C
+    or_shape_rows: list[OrShapeRow]  # Appendix C
     cycle_rows: list[str]  # Appendix C: arrow-joined job chains
 
 
@@ -880,31 +922,35 @@ def report_content(
             catalog, sub, None, collapse_threshold=collapse_threshold, direction="LR"
         )
 
-    lock_rows: list[tuple[str, str, str]] = []
+    lock_rows: list[LockRow] = []
     for group in graph.mutex_groups:
         kind = "self" if len(group) == 1 else "pair"
         charts = ", ".join(dict.fromkeys(comp_of.get(m, "not in catalog") for m in group))
-        lock_rows.append((" \N{MULTIPLICATION SIGN} ".join(group), kind, charts))
+        lock_rows.append(LockRow(" \N{MULTIPLICATION SIGN} ".join(group), kind, charts))
 
-    standalone_rows: list[tuple[str, str | None, str | None, str | None]] = []
+    standalone_rows: list[StandaloneRow] = []
     for name in standalone:
         job = catalog.jobs.get(name)
-        standalone_rows.append((name, job_kind(job), job_schedule(job), job_detail(job)))
+        standalone_rows.append(
+            StandaloneRow(name, job_kind(job), job_schedule(job), job_detail(job))
+        )
 
-    annotated_rows: list[tuple[str, str, str, str, str, str, str | None]] = []
+    annotated_rows: list[AnnotatedRow] = []
     for edge in graph.edges:
         if edge.cls == "exact":
             continue
         lookback = edge.lookback.raw if edge.lookback is not None else ""
         annotated_rows.append(
-            (edge.src, edge.dst, edge.via, lookback, edge.cls, edge.mapping_row, edge.assumption)
+            AnnotatedRow(
+                edge.src, edge.dst, edge.via, lookback, edge.cls, edge.mapping_row, edge.assumption
+            )
         )
 
-    redesign_flag_rows: list[tuple[str, str, str]] = [
-        (f.job, f.mapping_row, f.reason) for f in graph.redesign_flags
+    redesign_flag_rows: list[RedesignFlagRow] = [
+        RedesignFlagRow(f.job, f.mapping_row, f.reason) for f in graph.redesign_flags
     ]
-    or_shape_rows: list[tuple[str, str, str, str]] = [
-        (s.job, s.attr, s.kind, s.lowering) for s in graph.or_shapes
+    or_shape_rows: list[OrShapeRow] = [
+        OrShapeRow(s.job, s.attr, s.kind, s.lowering) for s in graph.or_shapes
     ]
     cycle_rows = [" \N{RIGHTWARDS ARROW} ".join(cycle) for cycle in graph.cycles]
 

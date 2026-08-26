@@ -126,12 +126,12 @@ def check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = No
     if timezone is None:
         return
     if resolve_timezone(timezone, tz_aliases) is None:
-        typer.echo(
-            f"--timezone {timezone!r} is not resolvable (SEM-35: zoneinfo, the"
-            " --timezone-map table, or a POSIX fixed offset)",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                f"--timezone {timezone!r} is not resolvable (SEM-35: zoneinfo, the"
+                " --timezone-map table, or a POSIX fixed offset)"
+            )
         )
-        raise typer.Exit(2)
 
 
 def import_tui_or_exit_2():

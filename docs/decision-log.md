@@ -10816,3 +10816,69 @@ relitigate an entry; append a new one.
   (DL-175/DL-176); retention's fourteen `_*_artifacts` functions, one
   spec rule each; the four control transports (DL-172); the citation
   density everywhere -- it is the discipline, not the complexity.
+- DL-179 the drift review after the payoff: residue at the edges of
+  shipped merges (2026-08-26). /arch-review over the window
+  arch-review/2026-08-25..HEAD -- the DL-178 payoff series, the
+  formatter adoption, 1.0.0 -- read as two clusters (compiler chain +
+  surfaces; runner + period tier) by fresh-context reviewers, anchors
+  re-read before ruling. Verdict first: the window REMOVED concepts.
+  Every DL-178 merge checked moved whole -- preflight gained no
+  registry, `_leaf_rows` split clean, `spool_names_run` left no stale
+  spelling, runner_clock holds no preamble orphan, the old spellings
+  behind refuse()/_emit/unquote_jil_value/render_code_ranges are gone.
+  Eight residues acted, all landed with this entry:
+  (a) viz's ReportContent row tuples become named records (LockRow,
+  StandaloneRow, AnnotatedRow, RedesignFlagRow, OrShapeRow) -- the
+  naked-tuple shape DL-178(d) converted in retention, grown here to
+  five fields, one seven wide (viz.py:801).
+  (b) dsl's fold results become `_Seq`/`_Par`; the report block in
+  `_decompile_fold_wiring` read `p[2]`/`p[4]` twelve lines under a
+  destructuring loop of the same tuples -- one vocabulary, two
+  spellings (dsl.py:943, 1359).
+  (c) two refuse() stragglers adopt refuse(): `check_base_tz`
+  (cli_common.py:129) and `_refuse_removed_viz_flags`' single-message
+  first branch (cli_compile.py:432). DL-178(f)'s "one spelling" claim
+  is exact again; error bytes preserved.
+  (d) `ir._dup_attr` renamed `_fresh_attr`: it returned True on the
+  FRESH key, so all four callers read as a double negative (ir.py:874).
+  (e) `cli_run._naive_utc_arg` adopts `canon.naive_utc` -- a third
+  private copy of the aware-ISO->naive-UTC rule, missed by DL-178(j)
+  and invisible to the DL-177 near-miss gate (two statements, below
+  the floor) (cli_run.py:99).
+  (f) `_TableSync.refresh` owns the pre-clear cursor read: it hands
+  `on_rebuild` `(new_identity, old_selected)`, so TriggersScreen stops
+  reading `_table_sync.identity` stale at exactly the right moment --
+  that temporal coupling was DL-178(v)'s unpaid half. RunnerApp keeps
+  tracking selection in its own `_selected` and ignores the new
+  argument (runner_tui.py:226).
+  (g) one stale `_unquote` word in a dsl.py comment survived the
+  DL-178(q) rename (dsl.py:625); autocal.py:786 names the old
+  function deliberately and stays.
+  (h) `_subscribe_refusal`'s no-newline message claimed "read limit"
+  on both transports; true only for the blocking reader -- asyncio's
+  readline() returns a bare tail on a hang-up mid-line and raises on
+  a real limit hit. The message now names both cases and a comment
+  carries the shading (runner_control.py:1625). No doc or test pinned
+  the old bytes.
+  DECLINED, recorded so they are not re-found: `check_addresses`'
+  `cite` flag (period.py:607) -- two message voices, one cite-caller
+  (seal.py:770); deliberate residue of DL-178's error-bytes-preserved
+  constraint; drop `cite` only if the seal clause stops being contract
+  text. arch_check's near-miss tier re-deriving the exact-pair set
+  inside `near_miss_duplicate_bodies` -- two derivations of "these two
+  are exact copies" at two floors is DL-177's own design; extract a
+  pair-set function only when a third consumer appears.
+  DEFERRED RE-RANKED (DL-178 asks each review to re-rank):
+  `_render_chart`'s phase split stays deferred and DROPS in rank --
+  the window's growth (166->198 lines) is one concept, S-EDGE locality
+  threaded through every phase via the id scheme; a split would thread
+  ids/anchor/collapsed through every fragment to save none. Revisit if
+  a phase gains a second concept. `_serve_run`: formatting-only this
+  window, no re-rank basis. The other DL-178 deferrals were not
+  re-priced; their files did not move conceptually this window.
+  THE GATE: 3460 passed, 6 skipped, 2 xfailed; ruff check, ruff
+  format --check, mypy src clean. Size baseline re-armed; the tree's
+  tag is arch-review/2026-08-26. No adversarial review of the fixes --
+  each self-verifies (a rename, named tuples the type checker
+  re-checks, refusal bytes the suite pins) -- allocation per the
+  brief.
