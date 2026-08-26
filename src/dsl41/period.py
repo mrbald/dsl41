@@ -73,6 +73,7 @@ from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
     canonical_bytes,
+    check_artifact_version,
     decode,
     digest as digest_over,
     hash_over,
@@ -673,12 +674,13 @@ def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, A
     if not isinstance(payload, dict):
         raise EngineError(f"{where}: not a JSON object")
     stamped = payload.pop("digest", None)
-    version = payload.get("artifact_format_version")
-    if version != ARTIFACT_FORMAT_VERSION:
+    try:
+        require_artifact_version(payload)
+    except CanonError:
         raise EngineError(
-            f"{where}: artifact_format_version {version!r}: this binary implements"
-            f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
-        )
+            f"{where}: artifact_format_version {payload.get('artifact_format_version')!r}:"
+            f" this binary implements {ARTIFACT_FORMAT_VERSION} (PR-08d)"
+        ) from None
     return payload, stamped
 
 
@@ -1340,11 +1342,13 @@ def _bundle_entries(run_root: Path, source_bundle_hash: str) -> list[tuple[Path,
     payload = _read_canonical_file(directory / "sources.json")
     if payload is None:
         raise EngineError(f"{directory}: no readable sources.json (period-model ss1.1)")
-    if payload.get("artifact_format_version") != ARTIFACT_FORMAT_VERSION:
+    try:
+        require_artifact_version(payload)
+    except CanonError:
         raise EngineError(
             f"{directory}/sources.json carries artifact_format_version"
             f" {payload.get('artifact_format_version')!r}"
-        )
+        ) from None
     if payload.get("source_bundle_hash") != source_bundle_hash:
         # the vector's own claim must be the address it sits under: a
         # falsified claim is a malformed artifact even when the files
@@ -1438,11 +1442,13 @@ def check_manifest_self_consistent(manifest: StagedManifest, where: str) -> None
     and its `catalog_hash_version` must be the current recipe -- a native
     manifest under a retired recipe would re-manufacture the patch-release
     outage v2 exists to end."""
-    if manifest.artifact_format_version != ARTIFACT_FORMAT_VERSION:
+    try:
+        check_artifact_version({"artifact_format_version": manifest.artifact_format_version})
+    except CanonError:
         raise EngineError(
             f"{where}: artifact_format_version {manifest.artifact_format_version}:"
             f" this binary writes {ARTIFACT_FORMAT_VERSION}"
-        )
+        ) from None
     # the FOURTH owner of the D4 question, through the same dispatcher
     # (DL-138): a manifest is where a segment's pin comes from, and a gate
     # here that spelled the refusal its own way would tell an operator

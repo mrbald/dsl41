@@ -69,6 +69,7 @@ from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
     canonical_bytes,
+    check_artifact_version,
     decode,
     hash_over,
     is_wire_int,
@@ -1745,11 +1746,13 @@ def validate_staged(ctx: StagedContext) -> Classification:
         ("the candidate", staged.artifact_format_version),
         ("the staged manifest", bytes_.artifact_format_version),
     ):
-        if value != ARTIFACT_FORMAT_VERSION:
+        try:
+            check_artifact_version({"artifact_format_version": value})
+        except CanonError:
             raise EngineError(
                 f"{name} carries artifact_format_version {value}: this binary implements"
                 f" {ARTIFACT_FORMAT_VERSION} (period-model ss8, PR-08d)"
-            )
+            ) from None
     disagree = [
         f"{field}: candidate {named!r} vs staged bytes {stored!r}"
         for field, named, stored in disagreements(staged, bytes_, StagedNextPeriod.model_fields)

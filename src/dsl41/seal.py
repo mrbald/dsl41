@@ -713,11 +713,13 @@ class Seal(BaseModel):
 
     @model_validator(mode="after")
     def _artifact_invariants(self) -> Seal:
-        if self.artifact_format_version != ARTIFACT_FORMAT_VERSION:
+        try:
+            check_artifact_version({"artifact_format_version": self.artifact_format_version})
+        except CanonError:
             raise ValueError(
                 f"artifact_format_version {self.artifact_format_version}: this binary"
                 f" implements {ARTIFACT_FORMAT_VERSION} (PR-08d)"
-            )
+            ) from None
         _check_cutoff(self)
         _check_opening(self)
         _check_order(self)

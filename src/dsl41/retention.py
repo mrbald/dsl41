@@ -1681,7 +1681,7 @@ def _index_artifacts(
 
 
 def _index_run(path: Path) -> tuple[str, int, str] | None:
-    from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, decode
+    from dsl41.canon import CanonError, decode, require_artifact_version
 
     try:
         payload = decode(path.read_bytes())
@@ -1689,7 +1689,9 @@ def _index_run(path: Path) -> tuple[str, int, str] | None:
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("artifact_format_version") != ARTIFACT_FORMAT_VERSION:
+    try:
+        require_artifact_version(payload)
+    except CanonError:
         return None  # unversioned or foreign-version evidence: unreadable, floored
     job, run_number = payload.get("job"), payload.get("run_number")
     run_id = payload.get("run_id")
