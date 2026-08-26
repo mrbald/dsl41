@@ -1530,16 +1530,8 @@ class ControlClient:
             writer.write(json.dumps(request).encode("utf-8") + b"\n")
             await writer.drain()
             ack_line = await reader.readline()
-            if not ack_line:
-                raise ControlClientError("engine hung up before the subscribe ack")
-            try:
-                ack = json.loads(ack_line)
-            except (ValueError, RecursionError) as exc:
-                raise ControlClientError(f"bad subscribe ack: {exc}") from exc
-            if not isinstance(ack, dict):
-                raise ControlClientError("subscribe ack is not a JSON object")
-            if not ack.get("ok"):
-                raise ControlClientError(str(ack.get("error", "subscribe refused")))
+            if (why := _subscribe_refusal(ack_line)) is not None:
+                raise ControlClientError(why)
             while True:
                 line = await reader.readline()
                 if not line:
@@ -1634,7 +1626,7 @@ def _subscribe_refusal(ack: bytes) -> str | None:
     try:
         parsed = json.loads(ack)
     except (ValueError, RecursionError) as exc:
-        return f"unreadable subscribe ack: {exc}"
+        return f"bad subscribe ack: {exc}"
     if not isinstance(parsed, dict):
         return "subscribe ack is not a JSON object"
     if not parsed.get("ok"):
@@ -1665,8 +1657,8 @@ def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]
     An unversioned subscribe is refused, and (DL-151) a refusal does NOT
     close the connection: a caller that stops after the ack without
     checking it would print nothing wrong and then wait forever for records
-    that can never come. `_subscribe_refusal` is that check, private
-    because no other caller needs it -- reading the ack IS opening the
+    that can never come. `_subscribe_refusal` is that check, shared with
+    `ControlClient.subscribe` (DL-178l) -- reading the ack IS opening the
     subscription, not a step before it."""
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:

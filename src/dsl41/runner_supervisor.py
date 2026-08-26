@@ -122,6 +122,7 @@ if TYPE_CHECKING:
         current_boot_id,
         durable_write,
         durable_write_json,
+        fsync_dir,
         killpg_quiet,
         spool_version_supported,
         utc_now_iso,
@@ -139,6 +140,7 @@ else:
         current_boot_id,
         durable_write,
         durable_write_json,
+        fsync_dir,
         killpg_quiet,
         spool_version_supported,
         utc_now_iso,
@@ -1014,8 +1016,8 @@ class Supervisor:
                 os.mkdir(run_dir)
             except FileExistsError:
                 pass  # the orphan directory the resolver cleared for reuse
-            _fsync_dir(run_dir)
-            _fsync_dir(os.path.dirname(run_dir))
+            fsync_dir(run_dir)
+            fsync_dir(os.path.dirname(run_dir))
             self._crash_point("after_mkdir")
             _write_canonical(
                 self.index_path(run_id),
@@ -1293,14 +1295,6 @@ class Supervisor:
             os.unlink(self.sock_path)
         with contextlib.suppress(OSError):
             os.unlink(self.pid_path)
-
-
-def _fsync_dir(path: str) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 #: the frozen ss2 wrapper-input schema, as (key, predicate) -- the whole of
