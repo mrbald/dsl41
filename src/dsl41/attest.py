@@ -89,12 +89,13 @@ from dsl41.period import (
     disagreements,
     is_hash_address,
     opening_at,
+    parse_sealed_preamble,
     read_archive_receipt,
     read_sentinel,
     tz_aliases_of,
     wrote_period,
 )
-from dsl41.runner_clock import EngineError, parse_sealed_preamble
+from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
 from dsl41.runner_journal import dsl41_version, read_journal, replay_inputs
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, next_epoch

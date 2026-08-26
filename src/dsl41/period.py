@@ -82,7 +82,7 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.ir import CatalogIR
-from dsl41.runner_clock import EngineError, parse_sealed_preamble
+from dsl41.runner_clock import EngineError
 from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
 from dsl41.timezones import alias_table
 
@@ -645,6 +645,41 @@ def archive_receipt_path(run_root: Path, period_id: int) -> Path:
     Missing evidence with NO receipt is loss and refuses -- accidental loss
     must never read as archiving."""
     return seal_dir(run_root) / f"{period_id:06d}.archive.json"
+
+
+def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, Any], object]:
+    """The preamble `Attestation.from_bytes` and `ArchiveReceipt.from_bytes`
+    share: decode ss3.2-canonical JSON, refuse a payload that is not a JSON
+    object, pop the stamped `digest` key, and check `artifact_format_version`.
+
+    `Seal.from_payload` (seal.py) deliberately does NOT share this: it
+    requires `digest` present and a `str` as its own refusal, and it
+    recomputes the digest over the raw document BEFORE any model is built --
+    both orderings differ from here on purpose and must stay that way.
+
+    `decode` already refuses a PRESENT-but-wrong `artifact_format_version`
+    (`canon.check_artifact_version`), so the branch below only ever fires
+    for the key being ABSENT -- DL-157's rule, not PR-08d's. The message
+    still cites PR-08d because that citation is for the wording, not for
+    which rule reaches this line.
+
+    Returns `(payload, stamped)`. Everything after this is each artifact's
+    own: `model_validate`, its own error prose, the stamped-vs-computed
+    digest check, and any class-specific coercion."""
+    try:
+        payload = decode(data)
+    except CanonError as exc:
+        raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise EngineError(f"{where}: not a JSON object")
+    stamped = payload.pop("digest", None)
+    version = payload.get("artifact_format_version")
+    if version != ARTIFACT_FORMAT_VERSION:
+        raise EngineError(
+            f"{where}: artifact_format_version {version!r}: this binary implements"
+            f" {ARTIFACT_FORMAT_VERSION} (PR-08d)"
+        )
+    return payload, stamped
 
 
 class ArchiveReceipt(BaseModel):

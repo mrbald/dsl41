@@ -2576,6 +2576,17 @@ def test_pr53_the_receipt_is_a_closed_artifact_like_every_other(tmp_path: Path) 
         ArchiveReceipt.from_bytes(raw + b"\n", where="x")
     with pytest.raises(EngineError, match="not ss3.2-canonical JSON"):
         ArchiveReceipt.from_bytes(b"{,}", where="x")
+    with pytest.raises(EngineError, match="not a JSON object"):
+        ArchiveReceipt.from_bytes(b"[]", where="x")
+
+    # the PRESENT-but-wrong version above is caught inside `decode` itself
+    # (canon.check_artifact_version); the preamble's own version branch is
+    # only ever reached with the key ABSENT -- DL-157's rule, PR-08d's cite
+    absent_version = json.loads(raw)
+    del absent_version["artifact_format_version"]
+    with pytest.raises(EngineError, match="artifact_format_version None") as excinfo:
+        ArchiveReceipt.from_bytes(canonical_bytes(absent_version), where="x")
+    assert "(PR-08d)" in str(excinfo.value)
 
     # the list is sorted, has no repeat, and is relative to the run root:
     # a retry completes from exactly it, so an absolute or traversing

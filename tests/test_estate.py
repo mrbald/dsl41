@@ -439,6 +439,28 @@ def test_pr08b_the_attestation_golden_vector(tmp_path: Path) -> None:
         )
 
 
+def test_an_attestation_payload_that_is_not_an_object_refuses() -> None:
+    """The preamble's second branch: a canonical JSON document that decodes
+    to something other than an object is not an attestation, whatever its
+    shape (period-model ss3.2)."""
+    with pytest.raises(EngineError, match="not a JSON object"):
+        Attestation.from_bytes(b"[]", where="x")
+
+
+def test_an_attestation_with_no_artifact_format_version_refuses() -> None:
+    """The preamble's third branch, in the shape it actually reaches: a
+    PRESENT-but-wrong version is already caught inside `decode` itself
+    (canon.check_artifact_version), so the only live case here is the key
+    being ABSENT -- DL-157's rule, and the message still cites PR-08d."""
+    from dsl41.canon import canonical_bytes as canon_bytes
+
+    payload = json.loads(_golden().to_bytes())
+    del payload["artifact_format_version"]
+    with pytest.raises(EngineError, match="artifact_format_version None") as excinfo:
+        Attestation.from_bytes(canon_bytes(payload), where="x")
+    assert "(PR-08d)" in str(excinfo.value)
+
+
 def test_verify_refuses_a_checkpoint_filed_under_another_period(tmp_path: Path) -> None:
     """ss1.3's CONSUMER rule has exactly three checks, and each of them
     decides.
