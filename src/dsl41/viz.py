@@ -657,7 +657,6 @@ def _render_chart(
             continue  # exclusion internal to a collapsed box / re-anchored dup
         seen_locks.add((at, bt))
         lines.append(f"    {ids(at)} x-. lock .-x {ids(bt)}")
-        link_index += 1
     lock_ids: list[str] = []
     for clique in cliques:
         lock = f"lock:{'+'.join(clique)}"
@@ -665,7 +664,6 @@ def _render_chart(
         lines.append(f'    {ids(lock)}(("\N{LOCK}"))')
         for member_anchor in dict.fromkeys(node_key(m) for m in clique):
             lines.append(f"    {ids(lock)} -.- {ids(member_anchor)}")
-            link_index += 1
 
     if redesign_links:
         joined = ",".join(str(i) for i in redesign_links)
@@ -893,14 +891,22 @@ def _cell(text: str | None) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def truncate_cell(text: str) -> str:
+    """60-char ellipsis for a command/path cell: full text is IR-F's, not
+    the report's, responsibility. Shared by `_code_cell` (markdown) and
+    `viz_html._code` (HTML), so the two emitters cut at the same place
+    (DL-178h)."""
+    if len(text) > 60:
+        return text[:59] + "\N{HORIZONTAL ELLIPSIS}"
+    return text
+
+
 def _code_cell(text: str | None) -> str:
     """Command/path cell: code span, truncated -- full text is IR-F's, not
     the report's, responsibility."""
     if not text:
         return ""
-    flat = _cell(text.replace("`", "'"))
-    if len(flat) > 60:
-        flat = flat[:59] + "\N{HORIZONTAL ELLIPSIS}"
+    flat = truncate_cell(_cell(text.replace("`", "'")))
     return f"`{flat}`"
 
 

@@ -22,8 +22,8 @@ Rendering decisions (each with a test):
   content is never re-scanned, so marker-shaped user input (a job or file
   named __DSL41_..._JS__) cannot trigger a second substitution.
 - Table cells mirror viz's content policy: full text for assumptions,
-  60-char ellipsis for command/path cells (_code_cell's rule); escaping is
-  html.escape here, pipe-escaping there.
+  60-char ellipsis for command/path cells (viz.truncate_cell, shared with
+  _code_cell); escaping is html.escape here, pipe-escaping there.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from dsl41.viz import (
     job_schedule,
     report_content,
     to_mermaid,
+    truncate_cell,
 )
 
 
@@ -67,13 +68,11 @@ def _text(raw: str | None) -> str:
 
 
 def _code(raw: str | None) -> str:
-    """Command/path cell: <code> span, 60-char ellipsis -- same content
-    policy as viz._code_cell (full text is IR-F's responsibility)."""
+    """Command/path cell: <code> span, 60-char ellipsis (viz.truncate_cell:
+    full text is IR-F's responsibility, not the report's)."""
     if not raw:
         return ""
-    flat = raw.replace("\n", " ")
-    if len(flat) > 60:
-        flat = flat[:59] + "\N{HORIZONTAL ELLIPSIS}"
+    flat = truncate_cell(raw.replace("\n", " "))
     return f"<code>{html.escape(flat)}</code>"
 
 

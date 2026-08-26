@@ -167,6 +167,14 @@ _STATUS_STYLE = {
     "TERMINATED": "magenta",
 }
 _TAIL_SEED_BYTES = 8192  # start a fresh tail this close to EOF
+#: the details popup's one-shot log preview: read this many trailing bytes,
+#: then keep the last `_DETAILS_TAIL_LINES` of them (DL-178h). Deliberately
+#: NOT `_TAIL_SEED_BYTES`: that one seeds a LIVE, continuously polled tail
+#: and wants enough history to read while it is running; this is a single
+#: read for a ten-line snapshot in a popup, and 8192 bytes for ten lines
+#: would be wasted work on every `_show_details` call.
+_DETAILS_TAIL_BYTES = 4096
+_DETAILS_TAIL_LINES = 10
 #: pager memory bound: buffer, widget, and display list all cap here in
 #: lockstep. Paging serves triage; the file on disk is the forensic truth.
 _PAGER_BUFFER_LINES = 10_000
@@ -267,6 +275,14 @@ def format_countdown(due: datetime, now: datetime) -> str:
     if minutes:
         return f"{minutes}m{seconds:02d}s"
     return f"{seconds}s"
+
+
+def clock_of(iso: str) -> str:
+    """HH:MM:SS out of an ISO datetime string, or the string itself when it
+    is too short to hold one. A pure function beside `format_due`/
+    `format_countdown` (same shape: testable without a terminal); this rule
+    stayed inline three times before it existed (DL-178h)."""
+    return iso[11:19] if len(iso) >= 19 else iso
 
 
 def assemble_trigger_rows(
@@ -1118,11 +1134,10 @@ class RunnerApp(App[None]):
             return
         self._connected = up
         self._refresh_subtitle()
-        console = self.query_one("#console", RichLog)
         if up:
-            console.write(Text("connected", style="green"))
+            self._console_write(Text("connected", style="green"))
         else:
-            console.write(Text(f"control socket unreachable: {detail}", style="red"))
+            self._console_write(Text(f"control socket unreachable: {detail}", style="red"))
 
     def _set_drift(self, drift: bool) -> None:
         """DL-65 daemon-reload-hint analog, inverted: there is no reload --
@@ -1141,7 +1156,6 @@ class RunnerApp(App[None]):
             )
 
     def _consume_trace(self, entries: list[dict[str, Any]]) -> None:
-        console = self.query_one("#console", RichLog)
         for entry in entries:
             seq = entry.get("seq")
             if isinstance(seq, int):
@@ -1153,7 +1167,7 @@ class RunnerApp(App[None]):
             if transition in _ALARM_TRANSITIONS:
                 self._alarms[job] = self._alarms.get(job, 0) + 1
             at = str(entry.get("at", ""))
-            clock = at[11:19] if len(at) >= 19 else at
+            clock = clock_of(at)
             if transition in _ALARM_TRANSITIONS:
                 style = "bold red"
             elif transition == "START_REFUSED":
@@ -1162,7 +1176,7 @@ class RunnerApp(App[None]):
                 style = "yellow"
             else:
                 style = "dim"
-            console.write(
+            self._console_write(
                 Text(f"{clock} {job} {transition} [{entry.get('cause', '')}]", style=style)
             )
 
@@ -1346,7 +1360,7 @@ class RunnerApp(App[None]):
         if timers:
             first = timers[0]
             due = str(first.get("due", ""))
-            clock = due[11:19] if len(due) >= 19 else due
+            clock = clock_of(due)
             timer_text = f"{first.get('kind', '?')}@{clock}"
             if len(timers) > 1:
                 timer_text += f" +{len(timers) - 1}"
@@ -1355,7 +1369,7 @@ class RunnerApp(App[None]):
         return [
             name,
             Text(status, style=_STATUS_STYLE.get(status, "")),
-            at[11:19] if len(at) >= 19 else at,
+            clock_of(at),
             str(row.get("run_number", "")),
             "" if exit_code is None else str(exit_code),
             flags,
@@ -1561,8 +1575,12 @@ class RunnerApp(App[None]):
         if out_path:
             try:
                 with open(out_path, "rb") as handle:
-                    handle.seek(max(0, os.stat(out_path).st_size - 4096))
-                    lines = handle.read().decode("utf-8", errors="replace").splitlines()[-10:]
+                    handle.seek(max(0, os.stat(out_path).st_size - _DETAILS_TAIL_BYTES))
+                    lines = (
+                        handle.read()
+                        .decode("utf-8", errors="replace")
+                        .splitlines()[-_DETAILS_TAIL_LINES:]
+                    )
             except OSError:
                 lines = []
             if lines:
@@ -1609,9 +1627,8 @@ class RunnerApp(App[None]):
 
     def action_send(self, verb: str) -> None:
         request = parse_console_command(verb, self._selected)
-        console = self.query_one("#console", RichLog)
         if isinstance(request, str):
-            console.write(Text(request, style="red"))
+            self._console_write(Text(request, style="red"))
             return
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
@@ -1683,9 +1700,8 @@ class RunnerApp(App[None]):
         if not text:
             return
         request = parse_console_command(text, self._selected)
-        console = self.query_one("#console", RichLog)
         if isinstance(request, str):
-            console.write(Text(request, style="red"))
+            self._console_write(Text(request, style="red"))
             return
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
