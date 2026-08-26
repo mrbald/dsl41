@@ -31,7 +31,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests scripts
+      - run: uv run ruff format --check src tests scripts examples
       - run: uv run mypy src
       # DL-75: blocking checks only decide the exit code (duplicate bodies,
       # new private cross-module imports in src/, unresolvable citations, an
