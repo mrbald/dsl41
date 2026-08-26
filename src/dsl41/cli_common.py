@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 # ------------------------------------------------- the shared options
 
 
+CATALOG_FILES = typer.Argument(..., help="JIL files / autocal calendar exports forming one catalog")
+
 PERMIT_UNKNOWN = typer.Option(
     False,
     "--permit-unknown",

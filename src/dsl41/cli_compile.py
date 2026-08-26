@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from dsl41.cli_common import PERMIT_UNKNOWN, PROPERTIES, load_catalog_or_exit_2, refuse
+from dsl41.cli_common import (
+    CATALOG_FILES,
+    PERMIT_UNKNOWN,
+    PROPERTIES,
+    load_catalog_or_exit_2,
+    refuse,
+)
 from dsl41.ir import CatalogIR
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
@@ -23,10 +29,24 @@ if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
 
 
+def _emit(body: str, out: "Path | None") -> None:
+    """Write BODY to --out, or echo it to stdout -- one spelling of the five
+    emitters `report`/`uc`/`decompile`/`resolve`/`viz` used to write by hand
+    (DL-178g). Always writes bytes to the file: line endings survive exact,
+    which is what the three callers that used to `write_text` needed too --
+    `write_text` newline-translates on Windows, `write_bytes` never does, and
+    on POSIX the two are the same bytes. The caller supplies BODY exactly as
+    it should read in both places, including any trailing newline (`uc`
+    wants one; the rest do not)."""
+    if out is None:
+        typer.echo(body, nl=False)
+    else:
+        out.write_bytes(body.encode("utf-8"))
+        typer.echo(f"wrote {out}")
+
+
 def lint(
-    files: list[Path] = typer.Argument(
-        ..., help="JIL files / autocal calendar exports forming one catalog"
-    ),
+    files: list[Path] = CATALOG_FILES,
     strict: bool = typer.Option(False, "--strict", help="Warnings also fail the exit code."),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
@@ -45,12 +65,12 @@ def lint(
     }
     unknown = sorted(codes - RULE_CODES)
     if unknown:
-        typer.echo(
-            f"--suppress: unknown rule code(s) {', '.join(unknown)}"
-            f" (known: {', '.join(sorted(RULE_CODES))})",
-            err=True,
+        raise typer.Exit(
+            refuse(
+                f"--suppress: unknown rule code(s) {', '.join(unknown)}"
+                f" (known: {', '.join(sorted(RULE_CODES))})"
+            )
         )
-        raise typer.Exit(2)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
     report = lint_catalog(catalog).suppress(codes)
     for violation in report.violations:
@@ -130,14 +150,12 @@ def equiv(
     )
 
     if tier not in ("a", "b", "c", "all"):
-        typer.echo(f"--tier must be a, b, c, or all, got {tier!r}", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"--tier must be a, b, c, or all, got {tier!r}"))
     rename_map: dict[str, str] = {}
     for pair in rename:
         old, sep, new = pair.partition("=")
         if not sep or not old or not new:
-            typer.echo(f"--rename expects OLD=NEW, got {pair!r}", err=True)
-            raise typer.Exit(2)
+            raise typer.Exit(refuse(f"--rename expects OLD=NEW, got {pair!r}"))
         rename_map[old] = new
     catalog_a = load_catalog_or_exit_2(files, permit_unknown, properties)
     catalog_b = load_catalog_or_exit_2(against, permit_unknown, properties)
@@ -183,9 +201,7 @@ def equiv(
 
 
 def report(
-    files: list[Path] = typer.Argument(
-        ..., help="JIL files / autocal calendar exports forming one catalog"
-    ),
+    files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
         None, "--out", "-o", help="Write the markdown report here instead of stdout."
     ),
@@ -202,17 +218,11 @@ def report(
 
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
     markdown = render_migration_report(catalog)
-    if out is None:
-        typer.echo(markdown, nl=False)
-    else:
-        out.write_text(markdown, encoding="utf-8")
-        typer.echo(f"wrote {out}")
+    _emit(markdown, out)
 
 
 def uc(
-    files: list[Path] = typer.Argument(
-        ..., help="JIL files / autocal calendar exports forming one catalog"
-    ),
+    files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
         None, "--out", "-o", help="Write the JSON bundle here instead of stdout."
     ),
@@ -236,12 +246,9 @@ def uc(
 
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
     bundle = compile_to_uc(catalog)
-    text = bundle.model_dump_json(indent=2)
-    if out is None:
-        typer.echo(text)
-    else:
-        out.write_text(text + "\n", encoding="utf-8")
-        typer.echo(f"wrote {out}")
+    # +"\n": the one emitter that wants its body to end in one, in both
+    # places (`_emit` writes and echoes BODY as given, never adding its own)
+    _emit(bundle.model_dump_json(indent=2) + "\n", out)
     typer.echo(
         f"{len(bundle.records)} record(s); {len(bundle.quarantined)} quarantined",
         err=True,
@@ -254,9 +261,7 @@ def uc(
 
 
 def decompile(
-    files: list[Path] = typer.Argument(
-        ..., help="JIL files / autocal calendar exports forming one catalog"
-    ),
+    files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
         None, "--out", "-o", help="Write the Python module here instead of stdout."
     ),
@@ -303,11 +308,7 @@ def decompile(
         raise typer.Exit(refuse(exc, prefix="decompile refused")) from exc
     # Emit BEFORE checking (DL-37a): the module must survive for inspection
     # even when the check finds a decompiler gap.
-    if out is None:
-        typer.echo(source, nl=False)
-    else:
-        out.write_text(source, encoding="utf-8")
-        typer.echo(f"wrote {out}")
+    _emit(source, out)
     for line in fold_report:
         typer.echo(f"fold: {line}", err=True)
     if check:
@@ -403,11 +404,7 @@ def resolve(
         if merged and not merged.endswith("\n"):
             merged += "\r\n" if "\r\n" in merged else "\n"
         merged += chunk
-    if out is None:
-        typer.echo(merged, nl=False)
-    else:
-        out.write_bytes(merged.encode("utf-8"))  # bytes: keep line endings exact
-        typer.echo(f"wrote {out}")
+    _emit(merged, out)
 
 
 class VizFormat(str, Enum):
@@ -491,9 +488,7 @@ def _refuse_undeliverable_viz_flags(*, collapse_threshold: int | None, fixed_sca
 
 
 def viz(
-    files: list[Path] = typer.Argument(
-        ..., help="JIL files / autocal calendar exports forming one catalog"
-    ),
+    files: list[Path] = CATALOG_FILES,
     output_format: VizFormat = typer.Option(
         VizFormat.report,
         "--format",
@@ -554,8 +549,7 @@ def viz(
 
     _refuse_removed_viz_flags(whole_graph, html, explore)
     if direction not in ("auto", "LR", "TD"):
-        typer.echo(f"--direction must be auto, LR, or TD, got {direction!r}", err=True)
-        raise typer.Exit(2)
+        raise typer.Exit(refuse(f"--direction must be auto, LR, or TD, got {direction!r}"))
     if output_format is VizFormat.explore:
         _refuse_undeliverable_viz_flags(
             collapse_threshold=collapse_threshold,
@@ -609,8 +603,4 @@ def viz(
             elk=elk,
             fixed_scale=fixed_scale,
         )
-    if out is None:
-        typer.echo(report, nl=False)
-    else:
-        out.write_bytes(report.encode("utf-8"))  # bytes: keep line endings exact
-        typer.echo(f"wrote {out}")
+    _emit(report, out)
