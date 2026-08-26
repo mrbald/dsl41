@@ -1,11 +1,8 @@
 # The project's quality gates on every push/PR: pytest (the CLAUDE.md suite,
-# bisimulation gate included), ruff check, mypy, and the DL-75 architecture
-# gate (scripts/arch_check.py), plus a second job that runs the emitted explore
-# page in three browser engines (DL-77). No `ruff format --check`:
-# 41 of 113 files carry pre-formatter spelling (measured 2026-08-25; the old
-# "three pre-phase-11 files" count was stale), so the formatter is local
-# discipline for touched files only. Turning this gate on means a one-commit
-# repo-wide format -- a release boundary is the cheap moment for it.
+# bisimulation gate included), ruff check, ruff format --check (the whole tree
+# adopted formatter output at the 1.0.0 boundary), mypy, and the DL-75
+# architecture gate (scripts/arch_check.py), plus a second job that runs the
+# emitted explore page in three browser engines (DL-77).
 # README's "tests" brick badges this workflow.
 #
 # The python matrix is deliberate, not ceremony: the v0.2.0 release hang was a
@@ -34,6 +31,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests scripts
       - run: uv run mypy src
       # DL-75: blocking checks only decide the exit code (duplicate bodies,
       # new private cross-module imports in src/, unresolvable citations, an
