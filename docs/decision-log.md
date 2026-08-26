@@ -10688,3 +10688,122 @@ relitigate an entry; append a new one.
   changes are self-verifying (a blocking/silent pair per case, a printed/
   suppressed advisory per case), the class `size_advisories` already
   covers -- allocation per the brief.
+- DL-178 the factorization review: each repeated rule gets one owner
+  (2026-08-26). A whole-tree duplication-and-factorization review of
+  `src/dsl41/`, read per cluster (runner, compiler chain, surfaces,
+  period tier) under the /arch-review lens. Mechanical baselines first:
+  token duplication 0.12% in src -- seven clones, the two real ones
+  extracted the same day (`parse_sealed_preamble`, `repair_tail`) --
+  and 1.24% in tests; cyclomatic tail 23 D / 6 E / 8 F. The lists below
+  are the review's whole output. ACCEPTED items are owed as fix slices
+  citing this entry; DECLINED items are settled -- do not re-find them.
+  A site that fails verification at fix time is skipped and the payoff
+  commit says so; this entry is then amended, not silently shrunk.
+  ACCEPTED, MECHANICAL -- one owner replaces N spellings, no behavior
+  change, error bytes preserved:
+  (a) `artifact_format_version` refusals hand-rolled beside their canon
+  owner: period.py:676/1343/1441, seal.py:716, boundary.py:1743,
+  retention.py:1692 -- each site adopts whichever of canon's two
+  version helpers (opposite policies, both deliberate) it re-spells.
+  (b) the "absence is a fact" open-and-read guard, seven identical
+  copies: attest.py:392, period.py:835/1476/1517,
+  boundary.py:560/596/1561; the two deliberate variants stay.
+  (c) wire-int and sha256-address validator loops, `check_stamp`'s
+  one-owner precedent: attest.py:322/328, period.py:724/728,
+  seal.py:766.
+  (d) retention's `_run_verdict` naked 4-tuple becomes a named record
+  (retention.py:1488 and its three unpack sites).
+  (e) `_is_hash` deleted -- a second name for `is_hash_address` in its
+  own module (period.py:101).
+  (f) `refuse()` adopted at its ~25 hand-written `echo(err=True)` +
+  `Exit(2)` shapes across the five cli_* modules -- DL-137 merged only
+  the exception half of this rule.
+  (g) one `--out`-or-stdout emitter for cli_compile's five copies; the
+  `write_text`/`write_bytes` fork settles on bytes, line endings exact.
+  (h) surfaces small merges: the catalog-files help literal
+  (cli_compile x5), the dead `link_index` (viz.py:660), control-answer
+  printing (cli_control x4, one JSON spelling), the 60-char truncation
+  rule (viz.py:896/viz_html.py:69), `--since` beside its own helper
+  (cli_run.py:99), ISO->HH:MM:SS slicing (runner_tui x3), the two
+  undocumented log-tail windows (runner_tui.py:1433/1560), guarded
+  console-write (runner_tui), and cli_estate.py:1080's prune
+  flag->class pairing re-encoding `retention.CLASSES`.
+  (i) `write_all` goes public in runner_procid; `append_watch_line`
+  (runner_adapters.py:746) adopts it and thereby gains the
+  `count <= 0` guard its two siblings carry (DL-151's rule);
+  runner_access's dirty-tracking variant is deliberate and stays.
+  (j) one aware-ISO->naive-UTC owner (canon.py:300); the private copies
+  at runner_adapters.py:260 and runner_history.py:245 adopt it.
+  (k) runner_supervisor.py:1298's `_fsync_dir` copy deleted -- its
+  DL-42 licence went stale when the module started importing
+  runner_procid.
+  (l) `_subscribe_refusal` called by the one caller that re-spells it
+  inline (runner_control.py:1622).
+  (m) `normalize_transition` deleted -- no production caller, only its
+  own test (uc_oracle.py:445); `_AUTOSYS_MILESTONES` derived from
+  `_TO_AUTOSYS.values()` instead of hand-copied.
+  (n) exit-code range rendering: dsl.py:681 and backend_uc.py:938 call
+  the owner at ir.py:898.
+  (o) equiv's tier-b evaluator imports `TERMINAL` instead of
+  hand-copying it (equiv.py:597); plus the compiler cluster's small
+  items -- the exec-attr cluster copy (ir.py:698/dsl.py:745), the
+  dup-attr guard x4 (ir.py:868/1450/1519/1573), `file:line` rendering
+  x5, the lint registry-code guard.
+  (p) one sentence in runner_journal naming why the WAL encoder is
+  deliberately not `canon.canonical_bytes` -- the rule exists, it was
+  written nowhere.
+  ACCEPTED, SEMANTIC -- each its own slice, adversarially reviewed:
+  (q) ONE JIL wrapping-quote rule. `ir._unquote` (rule 7: one pair, no
+  interior quotes) and `autocal._unquote` (strip any first/last pair)
+  DIVERGE on interior quotes, and classify.py:290's docstring asserts a
+  parity that does not hold; ir produces the calendar key, autocal
+  resolves it with the other predicate. One owner with rule-7
+  semantics; the false parity comments go; two arch_baseline allowlist
+  entries drop.
+  (r) `equivalent_tier_a`'s six namespaces longhand become the table
+  DL-37a already proved out (equiv.py:364-413).
+  (s) `decompile` splits record emission from fold emission
+  (dsl.py:1161, CC 93; the phases share nothing).
+  (t) `preflight` names its 19 rules with the `err()` closure precedent
+  twelve lines away (runner_preflight.py:339, CC 58).
+  (u) viz/viz_html appendix parity becomes structural: `ReportContent`
+  carries the rows both emitters rebuild (viz.py:961/viz_html.py:239).
+  (v) one DataTable refresh engine in the TUI; the screen's copy lacks
+  the `_COLUMN_WIDTHS` policy (runner_tui.py:429/1272).
+  (w) `_leaf_rows`' six parallel dicts become one named index; walk and
+  emit split (runner_history.py:475).
+  (x) `_parse_token`'s ordinal-suffix decode: eleven spellings and two
+  encodings of "L = last" become one of each (autocal.py:258-385).
+  (y) the spool identity predicate, five spellings, one already drifted
+  (runner_adapters.py:1728/1766/1783, runner_history.py:674,
+  boundary.py:2160) -- verify the drift first; it may be a bug.
+  DECLINED, recorded so they are not re-found: the byte-identical
+  `digest`/`to_bytes` pair (attest.py:349/period.py:779 -- three lines;
+  a mixin adds a concept); boundary's lax `read_claim` vs the strict
+  loader (DL-168 owns the gap); the 6-line same-file pairs
+  (runner_control.py:967/1003, runner_tui.py:363/540 and 1611/1685);
+  `PeriodRow`'s three fields encoding a four-state progression
+  (boundary.py:361 -- wire dialect; a change is protocol-evolution
+  work, not cleanup); boundary.py's interleaving of fence, staging,
+  transition and resume (an observation; splitting deletes no
+  concept). DEFERRED, re-rank next review: the four torn-tail readers
+  (three tail rules, some deliberate), `SupervisorRunRow`'s shim,
+  runner_control's three parse-or-refuse conventions, the `load_policy`
+  and `read_watch_log` phase splits, `_serve_run` and `_render_chart`
+  phase splits.
+  COMPLEXITY TRIAGE of the E/F tail: accidental and owed above --
+  preflight (t), decompile (s), _leaf_rows (w); accidental and
+  deferred -- read_watch_log, load_policy, _serve_run, _render_chart.
+  Inherent, leave: _next_work, _resume_under_lock, _reconcile (each
+  with one small extractable sub-block, priced separately),
+  seal._check_join (four straight-line spec passes), ast_jil.scan
+  (every branch a numbered syntax rule with an F-test),
+  runner_tui._show_details (four protocol response shapes).
+  LOAD-BEARING, LEAVE ALONE -- named so this review is not read as
+  "everything is too complex": boundary's double parse, the only
+  holder of PR-12's duplicate-key refusal; canon's two version helpers
+  (opposite policies, documented); the `reason: str | None` idiom
+  across nine runner gates; viz's three id-namespacing mechanisms
+  (DL-175/DL-176); retention's fourteen `_*_artifacts` functions, one
+  spec rule each; the four control transports (DL-172); the citation
+  density everywhere -- it is the discipline, not the complexity.
