@@ -1468,21 +1468,33 @@ def _spool_artifacts(scan: _Scan) -> list[Artifact]:
                 )
             )
             continue
-        verdict, rule, why, period_id = _run_verdict(scan, run, born, carried)
+        outcome = _run_verdict(scan, run, born, carried)
         out.append(
             Artifact(
                 path=entry,
                 kind="run",
-                verdict=verdict,
-                rule=rule,
-                why=why,
-                period_id=period_id,
+                verdict=outcome.verdict,
+                rule=outcome.rule,
+                why=outcome.why,
+                period_id=outcome.period_id,
                 run=run,
             )
         )
-        out += _log_artifacts(scan, run, verdict, rule, why, period_id)
+        out += _log_artifacts(scan, run, outcome)
     out += _index_artifacts(scan, born, carried)
     return out
+
+
+@dataclass(frozen=True)
+class RunVerdict:
+    """One run's retention verdict: `Artifact`'s four verdict fields,
+    decided once by `_run_verdict` and threaded to every artifact the
+    run's identity touches -- the spool entry, its index entry, its logs."""
+
+    verdict: Verdict
+    rule: str
+    why: str
+    period_id: int | None
 
 
 def _run_verdict(
@@ -1490,7 +1502,7 @@ def _run_verdict(
     run: tuple[str, int],
     born: Mapping[tuple[str, int], tuple[int, Any]],
     carried: Mapping[tuple[str, int], int],
-) -> tuple[Verdict, str, str, int | None]:
+) -> RunVerdict:
     """PR-36b's two conditions as one answer: the period holding the SPAWN
     effect is attested, and the run is terminal.
 
@@ -1508,14 +1520,14 @@ def _run_verdict(
         # never reached an adapter -- and whatever left THIS one both
         # unbound and with a tombstone on disk, deleting the tombstone
         # would sever the only identity evidence there is
-        return (
+        return RunVerdict(
             "floored",
             "ss11a",
             "its SPAWN effect carries no run_id: provenance incomplete",
             bound[0],
         )
     if birth is None:
-        return (
+        return RunVerdict(
             "floored",
             "ss11a",
             "no SPAWN effect in the retained WAL names this run: provenance unknown",
@@ -1527,20 +1539,20 @@ def _run_verdict(
         # open here, or closed in a root this one is not: a rolled root
         # holds no successor seal by design, and "I cannot prove it ended"
         # is the same answer as "it has not" for a floor
-        return (
+        return RunVerdict(
             "floored",
             "ss12",
             f"live or carried into period {ended}, and this root holds no seal for it",
             ended,
         )
     if ended not in scan.attested:
-        return (
+        return RunVerdict(
             "floored",
             "ss12",
             f"period {ended} is unattested and its audit needs this spool",
             ended,
         )
-    return (
+    return RunVerdict(
         "prunable",
         "PR-36b",
         f"period {ended} is attested and the run is terminal",
@@ -1665,15 +1677,15 @@ def _index_artifacts(
                 f" {bound[1]!r}, not this filename -- the ss11a pair is broken and"
                 " retention refuses to plan over it (period-model ss11a, ss12)"
             )
-        verdict, rule, why, period_id = _run_verdict(scan, run, born, carried)
+        outcome = _run_verdict(scan, run, born, carried)
         out.append(
             Artifact(
                 path=entry,
                 kind="run_index",
-                verdict=verdict,
-                rule=rule,
-                why=why,
-                period_id=period_id,
+                verdict=outcome.verdict,
+                rule=outcome.rule,
+                why=outcome.why,
+                period_id=outcome.period_id,
                 run=run,
             )
         )
@@ -1700,14 +1712,7 @@ def _index_run(path: Path) -> tuple[str, int, str] | None:
     return None
 
 
-def _log_artifacts(
-    scan: _Scan,
-    run: tuple[str, int],
-    verdict: Verdict,
-    rule: str,
-    why: str,
-    period_id: int | None,
-) -> list[Artifact]:
+def _log_artifacts(scan: _Scan, run: tuple[str, int], outcome: RunVerdict) -> list[Artifact]:
     """`logs/<job>.<run_number>.out` and `.err`, when they are where the
     default resolver puts them.
 
@@ -1729,10 +1734,10 @@ def _log_artifacts(
                 Artifact(
                     path=path,
                     kind="run_log",
-                    verdict=verdict,
-                    rule=rule,
-                    why=why,
-                    period_id=period_id,
+                    verdict=outcome.verdict,
+                    rule=outcome.rule,
+                    why=outcome.why,
+                    period_id=outcome.period_id,
                     run=run,
                 )
             )

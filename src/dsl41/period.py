@@ -99,9 +99,6 @@ def is_hash_address(value: object) -> bool:
     return isinstance(value, str) and _HASH_RE.fullmatch(value) is not None
 
 
-_is_hash = is_hash_address  # the schema tables above read the short name
-
-
 #: The recipe `catalog_hash` names, carried explicitly on every `segment`
 #: and every manifest (ss1.1).
 CATALOG_HASH_VERSION: Final[int] = 2
@@ -1492,7 +1489,7 @@ def check_manifest_self_consistent(manifest: StagedManifest, where: str) -> None
     # opens it
     check_catalog_hash_version(manifest.catalog_hash_version, where=where)
     for field in ("catalog_hash", "source_bundle_hash", "runtime_hash"):
-        if not _is_hash(getattr(manifest, field)):
+        if not is_hash_address(getattr(manifest, field)):
             raise EngineError(
                 f"{where}: {field} {getattr(manifest, field)!r} is not a sha256 address"
             )
@@ -1619,7 +1616,7 @@ def _opens_from_seal_ok(value: object) -> bool:
         isinstance(value, dict)
         and set(value) == {"period_id", "digest"}
         and is_wire_int(value["period_id"])
-        and _is_hash(value["digest"])
+        and is_hash_address(value["digest"])
     )
 
 
@@ -1633,13 +1630,13 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
     "estate_id": _str,
     "period_id": is_wire_int,
     "baseline_id": _str,
-    "catalog_hash": _is_hash,
+    "catalog_hash": is_hash_address,
     # TYPE only here -- which recipes are readable is the D4 dispatcher's
     # question and `check_segment_record` asks it below. The check is
     # int-first, because JSON loads `2.0` as a float that COMPARES equal to 2
     "catalog_hash_version": is_wire_int,
-    "source_bundle_hash": _is_hash,
-    "runtime_hash": _is_hash,
+    "source_bundle_hash": is_hash_address,
+    "runtime_hash": is_hash_address,
     "state_machine_version": is_wire_int,
     "clock_domain": _str,
     # >= 1: index 1 is the first index there ever is, and a forged 0 would
