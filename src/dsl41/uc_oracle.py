@@ -442,16 +442,7 @@ class UcOracle:
 # ---------------------------------------------------------------------- comparator
 
 
-def normalize_transition(transition: str) -> str | None:
-    """Map a UC trace transition into the AutoSys vocabulary; None for
-    UC-internal markers the comparator ignores."""
-    if "->" not in transition:
-        return None
-    target = transition.split("->")[-1]
-    return _TO_AUTOSYS.get(target)
-
-
-_AUTOSYS_MILESTONES = frozenset({"RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "SKIPPED"})
+_AUTOSYS_MILESTONES = frozenset(_TO_AUTOSYS.values())
 
 
 def job_outcomes(trace: list[TraceEntry]) -> dict[str, list[str]]:

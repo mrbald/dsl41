@@ -33,7 +33,7 @@ Section map:
   2. compile_twin lowering: JIL -> UcModel shape assertions.
   3. The P-Mxx pairs: run_both + first_divergence (the point of the file).
   4. Convergence sanity: the comparator does not cry wolf on faithful shapes.
-  5. Comparator unit tests: normalize_transition / job_outcomes / first_divergence.
+  5. Comparator unit tests: job_outcomes / first_divergence.
 """
 
 from __future__ import annotations
@@ -54,7 +54,6 @@ from dsl41.uc_oracle import (
     UcOracleError,
     first_divergence,
     job_outcomes,
-    normalize_transition,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -1176,25 +1175,27 @@ def test_convergence_box_fold_excludes_the_box_workflow_name_marker() -> None:
 @pytest.mark.parametrize(
     ("transition", "expected"),
     [
-        ("Waiting->Running", "RUNNING"),
-        ("Running->Success", "SUCCESS"),
-        ("Running->Failed", "FAILURE"),
-        ("Running->Cancelled", "TERMINATED"),
-        ("Waiting->Skipped", "SKIPPED"),
-        ("Waiting->Held", None),  # unrecognized UC target
-        ("Waiting->ExclusiveWait", None),
-        ("ON_ICE", None),  # no "->" at all
-        ("INACTIVE->STARTING", None),  # AutoSys-shaped: no fallback in this function
-        ("STARTING->RUNNING", None),  # ditto -- "RUNNING" is not a _TO_AUTOSYS key
+        ("Waiting->Running", ["RUNNING"]),
+        ("Running->Success", ["SUCCESS"]),
+        ("Running->Failed", ["FAILURE"]),
+        ("Running->Cancelled", ["TERMINATED"]),
+        ("Waiting->Skipped", ["SKIPPED"]),
+        ("Waiting->Held", []),  # unrecognized UC target
+        ("Waiting->ExclusiveWait", []),
+        ("ON_ICE", []),  # no "->" at all
     ],
 )
-def test_normalize_transition_mapping_table(transition: str, expected: str | None) -> None:
-    """normalize_transition is a UC-only mapping (target -> _TO_AUTOSYS
-    lookup, no fallback): it recognizes the 5 UC terminal/running targets
-    and returns None for anything else, INCLUDING already-AutoSys-shaped
-    transitions -- job_outcomes (below) is the bilateral function that
-    handles both vocabularies; this one does not."""
-    assert normalize_transition(transition) == expected
+def test_job_outcomes_maps_every_uc_target_through_to_autosys(
+    transition: str, expected: list[str]
+) -> None:
+    """job_outcomes is now the only spelling of the UC-target -> AutoSys
+    milestone mapping (normalize_transition deleted, DL-178m: no production
+    caller, only its own test). Pins all five _TO_AUTOSYS rows -- including
+    FAILURE/TERMINATED/SKIPPED, not otherwise exercised below -- plus the
+    UC-internal targets it drops. STARTING and already-AutoSys-shaped
+    coverage lives in test_job_outcomes_drops_starting_and_uc_internal_markers."""
+    trace = [TraceEntry(at=T0, job="x", transition=transition, cause="c")]
+    assert job_outcomes(trace).get("x", []) == expected
 
 
 def test_job_outcomes_drops_starting_and_uc_internal_markers() -> None:
