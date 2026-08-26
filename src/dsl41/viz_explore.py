@@ -17,7 +17,10 @@ Emission decisions (each with a test):
   become cytoscape compound nodes.
 - Edge endpoints outside the catalog (undefined producers, externals
   "name^INST", global variable names) synthesize EXT nodes, class `ext`
-  plus `global` when some referencing edge has via=="global".
+  plus `global` when some referencing edge has via=="global"; locality is
+  the atom's `instance` fact, never `edge.src`'s spelling, and an EXT id
+  is namespaced when it would collide with a same-spelled local job's own
+  id (DL-176).
 - Edges carry via/lookback/cls/mapping_row/assumption; cls doubles as the
   style class (exact/assumed/redesign); the canvas label reuses
   viz.edge_label, so the DL-35 thinning grammar is re-expressed, not forked.
@@ -39,7 +42,7 @@ import json
 from importlib.resources import files
 from typing import Literal
 
-from dsl41.derive import DerivedGraph, derive_graph
+from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph, local_producer
 from dsl41.ir import CatalogIR
 from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule
 from dsl41.viz_html import substitute
@@ -67,23 +70,42 @@ def _elements(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, list[dict[st
             data["parent"] = parent
         nodes.append({"data": data, "classes": _KIND_CLASS.get(kind, "cmd")})
 
-    charted = set(graph.nodes)
+    # Producer locality is decided off the atom's `instance` fact
+    # (`derive.local_producer`), never off `edge.src`'s membership in
+    # `graph.nodes` -- a foreign M33 producer's composite display form
+    # ("name^INST") can be spelled exactly like a local job's own name
+    # (DL-162a), and a raw membership test folds the two into one cytoscape
+    # node (DL-175's own deferred seventh S-EDGE site, paid here, DL-176).
+    # `edge.dst` is always the local consumer whose own condition/box
+    # override this edge derives from (DerivedEdge.dst's docstring), so it
+    # is never a candidate for an EXT node and needs no such check.
     ext_order: list[str] = []
     ext_global: dict[str, bool] = {}
+    ext_id: dict[str, str] = {}  # display name -> assigned cytoscape id
+    taken_ids = {node["data"]["id"] for node in nodes}  # type: ignore[index]
     for edge in graph.edges:
-        for endpoint in (edge.src, edge.dst):
-            if endpoint in charted:
-                continue
-            if endpoint not in ext_global:
-                ext_order.append(endpoint)
-                ext_global[endpoint] = False
-            if endpoint == edge.src and edge.via == "global":
-                ext_global[endpoint] = True
+        if local_producer(edge, catalog) is not None:
+            continue
+        endpoint = edge.src
+        if endpoint not in ext_global:
+            ext_order.append(endpoint)
+            ext_global[endpoint] = False
+            # the same collision one level down: a foreign producer's raw
+            # display form can equal a local job's own id (this entry's own
+            # fixture has a local `foo^PRD`) -- widen with a leading
+            # underscore until free, the same idiom `edge_id` below uses.
+            candidate = endpoint
+            while candidate in taken_ids:
+                candidate = "_" + candidate
+            taken_ids.add(candidate)
+            ext_id[endpoint] = candidate
+        if edge.via == "global":
+            ext_global[endpoint] = True
     for name in ext_order:
         nodes.append(
             {
                 "data": {
-                    "id": name,
+                    "id": ext_id[name],
                     "label": name,
                     "kind": "EXT",
                     "schedule": None,
@@ -105,13 +127,21 @@ def _elements(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, list[dict[st
             candidate = "_" + candidate
         return candidate
 
+    def src_id(edge: DerivedEdge) -> str:
+        """Cytoscape id for this edge's SOURCE endpoint: the resolved local
+        producer's own (unnamespaced) id when there is one, else the
+        namespaced EXT id assigned above -- never the raw `edge.src` string,
+        which can collide with a same-spelled local job's id (DL-176)."""
+        local = local_producer(edge, catalog)
+        return local if local is not None else ext_id[edge.src]
+
     edges: list[dict[str, object]] = []
     for i, edge in enumerate(graph.edges):
         edges.append(
             {
                 "data": {
                     "id": edge_id(i),
-                    "source": edge.src,
+                    "source": src_id(edge),
                     "target": edge.dst,
                     "via": edge.via,
                     "lookback": edge.lookback.raw if edge.lookback is not None else None,

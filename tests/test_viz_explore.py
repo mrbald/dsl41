@@ -156,6 +156,41 @@ def test_elements_edge_ids_never_collide_with_job_names() -> None:
     assert els["edges"][0]["data"]["id"] == "_e0"  # type: ignore[index]
 
 
+#: DL-175's own S-EDGE fixture, closing its named residue in this module too
+#: (DL-176): a local `insert_job: foo^PRD` whose display form collides with
+#: a genuinely foreign M33 producer referenced by `bar`'s condition. Kept
+#: local, not imported (this suite has no shared-fixture module) -- also
+#: appears in test_derive.py, test_viz.py and test_backend_uc.py.
+S_EDGE_TEXT = (
+    "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+    "insert_job: foo^PRD\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: bar\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo^PRD)\n"
+)
+
+
+def test_dl176_local_dangler_and_foreign_producer_are_distinct_cytoscape_elements() -> None:
+    """DL-175's review named this module's `endpoint in charted` test as its
+    own deferred seventh S-EDGE site: a local job `foo^PRD` and the display
+    form of a genuinely foreign M33 producer `foo^PRD` used to fold onto ONE
+    cytoscape node, no `ext` element synthesized. Now two elements: the
+    local job keeps its own raw id, the foreign producer gets a namespaced
+    id (it collides with the local job's id), and the M33 edge's `source`
+    is the foreign element, never the local one (DL-176)."""
+    catalog = catalog_of(S_EDGE_TEXT)
+    graph = derive_graph(catalog)
+    (edge,) = graph.edges
+    assert edge.mapping_row == "M33" and edge.src == "foo^PRD"
+    els = _elements(catalog, graph)
+    ids = [n["data"]["id"] for n in els["nodes"]]  # type: ignore[index]
+    assert ids == ["foo^PRD", "bar", "_foo^PRD"]  # two distinct elements, not one
+    ext = _node(els, "_foo^PRD")
+    assert ext["classes"] == "ext"
+    assert ext["data"]["label"] == "foo^PRD"  # type: ignore[index]  # same display form
+    (ext_edge,) = els["edges"]
+    assert ext_edge["data"]["source"] == "_foo^PRD"  # type: ignore[index]  # never "foo^PRD"
+    assert ext_edge["data"]["target"] == "bar"  # type: ignore[index]
+
+
 def test_elements_are_deterministic_across_hash_seeds() -> None:
     # in-process double emission is a tautology (same PYTHONHASHSEED, same
     # insertion history); a set-iteration regression only shows across

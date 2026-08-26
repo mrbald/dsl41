@@ -10558,3 +10558,64 @@ relitigate an entry; append a new one.
   Existing tests pass UNMODIFIED: no fixture in the whole corpus or the
   suite pinned the unsound behavior by name (DL-162a's own text: no corpus
   file has a caret-named job), so nothing needed sanctioning.
+- DL-176 the seventh S-EDGE site pays DL-175's own deferred residue: the
+  interactive explore page (2026-08-26).
+  `viz_explore._elements` (`src/dsl41/viz_explore.py`) tested
+  `endpoint in charted` for both `edge.src` and `edge.dst` -- the same
+  unsound display-form spelling DL-175 closed at five sites and named, not
+  fixed, at this sixth (a genuine seventh by DL-162a's own tally, which
+  could not have counted a sibling module). A foreign M33 producer's
+  composite display form ("name^INST") can be spelled exactly like a local
+  job's own name (DL-162a); the raw membership test folded the two into
+  ONE cytoscape node, no `ext` element synthesized -- confirmed live by
+  DL-175's own reviewer.
+  THE FIX, same mechanism DL-175 used everywhere else:
+  `derive.local_producer(edge, catalog)` -- the atom's `instance` fact,
+  never `edge.src`'s shape -- decides whether this edge's producer is local.
+  `edge.dst` needed no such check and is no longer even tested against it:
+  `DerivedEdge.dst`'s own docstring is "the job whose condition/box
+  override references src", always a real catalog job by construction, so
+  it can never be a foreign producer and was already a no-op in the old
+  loop (`dst` is always in `graph.nodes`).
+  THE ID QUESTION, this module's own version of DL-175's vertex-id note.
+  `_elements` uses raw job names as cytoscape ids directly (no `_Ids`/
+  `IdKey` tuple scheme -- that mechanism is `viz.py`-internal, and a
+  cytoscape id must be a plain string field regardless), so a local
+  `foo^PRD` job and a foreign `foo^PRD` producer would still collide as
+  cytoscape ids even after the locality fix. Namespaced with the idiom
+  this file already uses one function down for the same reason (`edge_id`,
+  DL-71's own review finding: a job literally named "e0" swallowing an
+  edge id) -- prepend `_` until the candidate is free of every id assigned
+  so far. Applied once, at first reference, and threaded through a new
+  `ext_id: dict[str, str]` (display name -> assigned id) so the M33 edge's
+  `source` field points at the namespaced EXT element, never at the raw
+  `edge.src` string that would silently resolve to the wrong (local)
+  node -- the same class of dangling/wrong-target reference DL-175's own
+  review caught at the mutex-lock links, checked here explicitly via the
+  new `src_id` helper rather than assumed sound by inspection.
+  THE FIXTURE, a fourth copy of DL-175's own S-EDGE text
+  (`insert_xinst: PRD`, local dangling `insert_job: foo^PRD`, consumer
+  `bar` on `s(foo^PRD)`) -- kept local per this suite's
+  no-shared-fixture-module convention, cross-referencing the three
+  existing copies in test_viz.py, test_derive.py and test_backend_uc.py.
+  THE TEST.
+  `test_dl176_local_dangler_and_foreign_producer_are_distinct_cytoscape_elements`
+  (tests/test_viz_explore.py) asserts three elements from two edges' worth
+  of endpoints collapse to one local node id ("foo^PRD"), one consumer
+  ("bar") and one namespaced EXT node ("_foo^PRD", label still "foo^PRD"),
+  and that the M33 edge's `source` is the namespaced id, never the local
+  job's own id.
+  THE GATE. Corpus dumps -- `viz_explore._elements` over every corpus file
+  individually and over the whole corpus as one catalog (the same two
+  shapes DL-175's own gate used) -- diffed byte-for-byte before/after:
+  identical (no corpus file has a caret-named job, DL-162a/DL-175's own
+  finding, re-checked here). 3449 passed (was 3448), 6 skipped, 2 xfailed;
+  `uv run ruff check src tests` clean; `uv run mypy src` clean;
+  `scripts/arch_check.py` exits 0, advisory only, `viz_explore.py` under
+  every threshold. No adversarial review this entry (DL-175 built the
+  pattern, the fixture shape and the tests this entry copies; the browser
+  gate covers rendering) -- allocation per the brief. The browser smoke
+  suite (`tests/test_viz_explore_browser.py`) is environment-skipped
+  locally (`DSL41_BROWSER_TESTS=1` opt-in, playwright dev-only, DL-77); CI's
+  three-engine explore-page job is the gate for this class of defect, not a
+  local run.
