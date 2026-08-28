@@ -1159,9 +1159,11 @@ def test_cli_rehearse_format_json_carries_trace_and_per_job_summary(tmp_path: Pa
     doc = json.loads(result.output)
     assert doc["jobs"]["js_job"] == {"runs": 1, "final_status": "SUCCESS"}
     assert any(t["transition"].endswith("->STARTING") for t in doc["trace"])
+    # typer owns the enum refusal; its usage box is styled and
+    # width-wrapped per environment (the v1.2.0 release build failed on a
+    # string match against it), so the exit code is the whole assertion
     bogus = cli_runner.invoke(app, ["rehearse", str(jil), "--format", "yaml"])
     assert bogus.exit_code == 2
-    assert "--format" in bogus.output  # typer owns the enum refusal now
 
 
 def test_cli_rehearse_format_json_keeps_stdout_one_document_under_warns(tmp_path: Path) -> None:
