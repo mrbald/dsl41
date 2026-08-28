@@ -11048,3 +11048,51 @@ relitigate an entry; append a new one.
   overrides in the consumption walk (quiet-direction approximation,
   stated in the docstring) and transitive strand propagation (the
   named producer is where the operator looks first).
+- DL-183 the DL-75 review over arch-review/2026-08-26..HEAD -- the
+  DL-180..182 window (2026-08-28). Gate first: four advisory size
+  notes, nothing blocking. Two clusters, fresh-context reviewers.
+  Verdict: the window added two rules and three surfaces, and with
+  them a set of cheap duplications and two unsound spellings -- all
+  acted the same day:
+  lint/derive: (a) the start-gate-by-consumer index was folded per
+  rule in L020/L021/L022; now ONE `_start_gates` (DL-162 homed the
+  predicate, this homes the index). (b) L022 keyed its consumed set
+  on raw edge.src -- the DL-162a display-form unsoundness L008's own
+  docstring names -- now keyed on resolved local producers. (c) L021
+  gains the SKIP_TRANSLATED consumer exemption L022 already had: an
+  iced consumer cannot start, so it cannot multi-fire (DL-180's
+  ladder had no ICE stance; this is the ruling). (d) mutex_groups is
+  now the undirected projection of bare_notrunning -- one scan, two
+  views, agreement by construction. (e) L021's inline instance split
+  carries its DL-162a citation. (f) the L021 message names the
+  latches it tells the reader to qualify.
+  CLI: (g) --summary + --format collapsed into one RehearseFormat
+  axis (text|summary|json) -- two flags, three modes, one silently
+  ignored combination was the DL-75 shape, and both flags were
+  unreleased so the change was free. (h) the cli_control exit-code
+  header owns release-held's aggregate 1. (i) one `_trace_line`
+  spelling for rehearse and journal replay. (j) the json trace rides
+  TraceEntry.model_dump. (k) release-held reads revisions via
+  `revision_in` -- the fifth hand copy of that lookup, deleted.
+  (l) `_load_scenario`'s anonymous four-tuple became
+  `_scenario_adapter` -> (FakeAdapter, events): three of four members
+  were the adapter's own ctor args. (m) the on_hold selection cites
+  the DL-94 `held` distinction next to it.
+  DECLINED, each with a re-find trigger: L022's two engines for
+  "does FAILURE satisfy this" (tier-b in status space, the via table
+  in edge space) stay two -- unifying changes behaviour and both are
+  cited; revisit if a third spelling appears. The scenario
+  isinstance/ValueError ladder next to Event.model_validate stays --
+  the hand ladder exists exactly for the DL-180 refusal texts;
+  revisit if the scenario grows a model. `warns_to_stderr` stays a
+  caller flag -- "always stderr" would move `run`'s RELEASED warn
+  stream; revisit when a second json surface appears. `default:
+  null` vs `park` stay two spellings: they name two scopes
+  (estate-wide vs per-job), collapsing them adds a rule. The
+  transition-target parse in three modules is noted and below the
+  helper floor.
+  THE GATE: 3487 passed, 6 skipped, 2 xfailed; ruff check, ruff
+  format --check, mypy src clean. No second adversarial pass on the
+  fixes -- helpers the type checker re-checks, counts the suite
+  pins, message text the unit tests pin (allocation per the DL-179
+  precedent). Tag arch-review/2026-08-28.

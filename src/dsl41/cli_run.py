@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from dsl41.boundary import EstateWalk
     from dsl41.oracle_state import Event, TraceEntry
+    from dsl41.runner_adapters import FakeAdapter
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
@@ -743,27 +744,39 @@ async def _serve_run(
                 lock.release()
 
 
-def _load_scenario(
-    scenario: Path | None,
-) -> tuple[
-    dict[tuple[str, int], tuple[float, int] | None],
-    tuple[float, int] | None,
-    frozenset[str],
-    list[Event],
-]:
-    """The rehearse scenario file, parsed: (script, default, park, events)
-    -- the docstring on `rehearse` states the accepted shapes. Raises
-    OSError/ValueError/TypeError/KeyError; the caller owns the refusal."""
+class RehearseFormat(str, Enum):
+    """`rehearse --format` (arch-review 2026-08-28: one axis for what were
+    two flags with a silently-ignored combination -- the DL-75 shape)."""
+
+    text = "text"  # trace lines
+    summary = "summary"  # trace lines + the per-job rollup
+    json = "json"  # one document: trace + rollup
+
+
+def _trace_line(entry: "TraceEntry") -> str:
+    """The one spelling of a printed trace line -- rehearse and the journal
+    replay used to carry a copy each (arch-review 2026-08-28)."""
+    return f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]"
+
+
+def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]":
+    """The rehearse scenario file, parsed into what rehearse actually wires:
+    the scripted adapter and the events to inject -- three of the old
+    four-tuple's members were FakeAdapter's own ctor args (arch-review
+    2026-08-28). The docstring on `rehearse` states the accepted shapes.
+    Raises OSError/ValueError/TypeError/KeyError; the caller owns the
+    refusal."""
     import json as json_mod
 
     from dsl41.oracle_state import Event
+    from dsl41.runner_adapters import FakeAdapter
 
     script: dict[tuple[str, int], tuple[float, int] | None] = {}
     default: tuple[float, int] | None = (0.0, 0)
     park: frozenset[str] = frozenset()
     events: list[Event] = []
     if scenario is None:
-        return script, default, park, events
+        return FakeAdapter(script, default=default, park=park), events
     data = json_mod.loads(scenario.read_bytes())
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object at the top level")
@@ -790,11 +803,11 @@ def _load_scenario(
         else:
             script[key] = _scenario_completion(entry, f"adapter.runs {key[0]}#{key[1]}")
     events = [Event.model_validate(entry) for entry in data.get("events", [])]
-    return script, default, park, events
+    return FakeAdapter(script, default=default, park=park), events
 
 
 def _emit_rehearsal(
-    trace: list[TraceEntry], catalog_jobs: Iterable[str], *, output: str, summary: bool
+    trace: list[TraceEntry], catalog_jobs: Iterable[str], *, fmt: RehearseFormat
 ) -> None:
     """The rehearse report: the trace, and the per-job rollup -- a run is a
     transition INTO STARTING; the final status is the last transition's
@@ -814,12 +827,9 @@ def _emit_rehearsal(
         if new_status == "STARTING":
             run_counts[t.job] = run_counts.get(t.job, 0) + 1
     names = sorted(set(catalog_jobs) | set(final_status))
-    if output == "json":
+    if fmt is RehearseFormat.json:
         doc = {
-            "trace": [
-                {"at": t.at.isoformat(), "job": t.job, "transition": t.transition, "cause": t.cause}
-                for t in trace
-            ],
+            "trace": [t.model_dump(mode="json") for t in trace],
             "jobs": {
                 name: {"runs": run_counts.get(name, 0), "final_status": final_status.get(name)}
                 for name in names
@@ -828,8 +838,8 @@ def _emit_rehearsal(
         typer.echo(json_mod.dumps(doc, sort_keys=True))
         return
     for t in trace:
-        typer.echo(f"{t.at.isoformat()} {t.job} {t.transition} [{t.cause}]")
-    if summary:
+        typer.echo(_trace_line(t))
+    if fmt is RehearseFormat.summary:
         typer.echo("-- summary: runs per job --")
         for name in names:
             typer.echo(f"{name} runs={run_counts.get(name, 0)} final={final_status.get(name, '-')}")
@@ -866,16 +876,11 @@ def rehearse(
     hours: float = typer.Option(
         24.0, "--hours", help="Horizon: quiesce once no work remains within start + HOURS."
     ),
-    summary: bool = typer.Option(
-        False,
-        "--summary",
-        help="Append per-job run counts and final statuses after the trace"
-        " (--format json always carries the rollup).",
-    ),
-    output: str = typer.Option(
-        "text",
+    output: RehearseFormat = typer.Option(
+        RehearseFormat.text,
         "--format",
-        help="text|json: json emits one document (trace + per-job summary) instead of trace lines.",
+        help="text: trace lines; summary: trace + per-job run counts and final"
+        " statuses; json: one document carrying both.",
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
@@ -912,12 +917,9 @@ def rehearse(
     from dsl41.period import runtime_profile_from_cli
     from dsl41.runner import Engine
     from dsl41.runner_startup import start_run
-    from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
     from dsl41.runner_scheduler import Scheduler
 
-    if output not in ("text", "json"):
-        raise typer.Exit(refuse(f"--format {output!r} (text|json)"))
     catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     start_dt = (
         _naive_utc_arg(start, "--start")
@@ -930,15 +932,14 @@ def rehearse(
         execution=False,
         start=start_dt,
         tz_aliases=tz_aliases,
-        warns_to_stderr=output == "json",
+        warns_to_stderr=output is RehearseFormat.json,
     )
     check_base_tz(timezone, tz_aliases)
     try:
-        script, default, park, events = _load_scenario(scenario)
+        adapter, events = _scenario_adapter(scenario)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"scenario {scenario}")) from exc
     clock = VirtualClock(start_dt)
-    adapter = FakeAdapter(script, default=default, park=park)
     scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone, tz_aliases=tz_aliases)
     adapters = {"CMD": adapter, "FW": adapter}
     try:
@@ -991,7 +992,7 @@ def rehearse(
     finally:
         if engine.journal is not None:
             engine.journal.close()
-    _emit_rehearsal(engine.oracle.trace(), catalog.jobs, output=output, summary=summary)
+    _emit_rehearsal(engine.oracle.trace(), catalog.jobs, fmt=output)
 
 
 # ------------------------------------------------- reading a run back
@@ -1480,7 +1481,7 @@ def _run_period(
     except (OracleError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
     for entry in oracle.trace():
-        typer.echo(f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]")
+        typer.echo(_trace_line(entry))
 
 
 def _period_catalog(

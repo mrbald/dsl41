@@ -1055,7 +1055,8 @@ def test_cli_rehearse_scenario_object_default_and_summary(tmp_path: Path) -> Non
             "2026-07-06T08:00:00",
             "--hours",
             "2",
-            "--summary",
+            "--format",
+            "summary",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1105,7 +1106,8 @@ def test_cli_rehearse_scenario_park_per_job_and_per_run(tmp_path: Path) -> None:
             "2026-07-06T08:00:00",
             "--hours",
             "2",
-            "--summary",
+            "--format",
+            "summary",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1159,7 +1161,7 @@ def test_cli_rehearse_format_json_carries_trace_and_per_job_summary(tmp_path: Pa
     assert any(t["transition"].endswith("->STARTING") for t in doc["trace"])
     bogus = cli_runner.invoke(app, ["rehearse", str(jil), "--format", "yaml"])
     assert bogus.exit_code == 2
-    assert "text|json" in bogus.output
+    assert "--format" in bogus.output  # typer owns the enum refusal now
 
 
 def test_cli_rehearse_format_json_keeps_stdout_one_document_under_warns(tmp_path: Path) -> None:

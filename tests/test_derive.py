@@ -1120,9 +1120,10 @@ def test_l021_fires_for_the_condition_only_double_fire_shape() -> None:
 
 
 def test_l021_exempts_scheduled_consumers_and_box_members() -> None:
-    """The two engine-enforced caps the rule must not restate: a scheduled
+    """The engine-enforced caps the rule must not restate: a scheduled
     consumer arms and runs at most once per tick (SEM-32; L009/L019 own its
-    hazards), a member starts at most once per box execution (SEM-10)."""
+    hazards), a member starts at most once per box execution (SEM-10), and
+    a skip-translated consumer never starts at all (SEM-20)."""
     scheduled = lower_source(
         "insert_job: sch_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: sch_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
@@ -1139,6 +1140,15 @@ def test_l021_exempts_scheduled_consumers_and_box_members() -> None:
         "box_name: mf_box\ncondition: s(box_a) & s(box_b)\n"
     )
     assert rule_l021(boxed, derive_graph(boxed)) == []
+    iced = lower_source(
+        "insert_job: ice_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ice_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ice_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "status: ON_ICE\ncondition: s(ice_a) & s(ice_b)\n"
+    )
+    # an iced/noexec consumer cannot start at all (SEM-20): nothing to
+    # multi-fire (arch-review 2026-08-28)
+    assert rule_l021(iced, derive_graph(iced)) == []
 
 
 def test_l021_quiet_when_latches_are_qualified_or_absent() -> None:

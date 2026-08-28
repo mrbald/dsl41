@@ -926,6 +926,18 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
+def _start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
+    """The start-gate edges indexed by CONSUMER -- the one index L020, L021
+    and L022 each read. DL-162 homed the predicate (`is_start_gate`); this
+    homes the index it was being folded into per rule (arch-review
+    2026-08-28)."""
+    gates: dict[str, list[DerivedEdge]] = {}
+    for edge in graph.edges:
+        if edge.is_start_gate:
+            gates.setdefault(edge.dst, []).append(edge)
+    return gates
+
+
 def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     """Iced consumer (M19; Part II requirement 3's last detector): EVERY
     immediate predecessor of the job translates to a UC Skip.
@@ -951,11 +963,10 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     cross-instance edge `src` is the composite `name^INST` and the lookup
     would say yes to a catalog job that merely spells its own name that way
     (DL-162a)."""
-    predecessors: dict[str, dict[str, str | None]] = {}
-    for edge in graph.edges:
-        if not edge.is_start_gate:
-            continue
-        predecessors.setdefault(edge.dst, {})[edge.src] = local_producer(edge, catalog)
+    predecessors: dict[str, dict[str, str | None]] = {
+        dst: {edge.src: local_producer(edge, catalog) for edge in edges}
+        for dst, edges in _start_gates(graph).items()
+    }
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         if job.sem.initial_status in SKIP_TRANSLATED:
@@ -1026,22 +1037,26 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     edge reader sees that they wake. Self counts: n(self) next to a latch
     re-triggers the job on its own completion, a tight loop L010 cannot
     see because mutex refs are not edges."""
-    gates: dict[str, list[DerivedEdge]] = {}
-    for edge in graph.edges:
-        if edge.is_start_gate:
-            gates.setdefault(edge.dst, []).append(edge)
+    gates = _start_gates(graph)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         if job.schedule is not None or job.box.box_name is not None:
             continue
+        if job.sem.initial_status in SKIP_TRANSLATED:
+            continue  # an iced/noexec consumer cannot start at all (SEM-20):
+            # nothing to multi-fire (arch-review 2026-08-28)
         wakes: set[str] = set()
         latches: set[str] = set()
         span: SourceSpan | None = None
         for edge in gates.get(name, ()):
             atom = edge.atom
             assert not isinstance(atom, GlobalAtom)  # is_start_gate excludes via=="global"
+            # not local_producer alone (DL-162a): the atom-level instance
+            # fact splits its None -- a cross-instance producer stays a wake
+            # source HERE, while L022 drops it (the remote estate's wiring
+            # is invisible only for the consumption question)
             if atom.job.instance is None and local_producer(edge, catalog) is None:
-                continue
+                continue  # undefined local: emits no events, L001's error
             wakes.add(edge.src)
             if edge.lookback is None and edge.via != "notrunning":
                 latches.add(edge.src)
@@ -1053,6 +1068,7 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
         if len(wakes) < 2 or not latches:
             continue
         listed = ", ".join(repr(src) for src in sorted(wakes))
+        stale = ", ".join(repr(src) for src in sorted(latches))
         out.append(
             Violation(
                 code="L021",
@@ -1061,8 +1077,8 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
                     f"condition-only job {name!r} can fire more than once per cycle:"
                     f" any event on {listed} re-evaluates it, and an unqualified atom"
                     " stays satisfied (SEM-01/DL-13) -- a bare n() guard is also a"
-                    " trigger; qualify the latches with lookbacks (s(x,0)) or schedule"
-                    " the job (the SEM-32 arm caps runs at one per tick)"
+                    f" trigger; qualify the latches ({stale}) with lookbacks (s(x,0))"
+                    " or schedule the job (the SEM-32 arm caps runs at one per tick)"
                 ),
                 jobs=[name],
                 span=span,
@@ -1120,13 +1136,19 @@ def rule_l022(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     a defect list."""
     from dsl41.equiv import cond_truth_profile
 
+    # keyed on RESOLVED catalog names, never edge.src (arch-review
+    # 2026-08-28): src is the display form -- "name^INST" for a
+    # cross-instance atom -- and querying it with catalog names is the
+    # DL-162a unsoundness. local_producer drops what cannot be a local
+    # producer anyway (undefined and remote reads credit nothing here).
     consumed: set[str] = {
-        edge.src
+        producer
         for edge in graph.edges
         if edge.via in _FAILURE_CONSUMING_VIA
         and edge.is_start_gate
         and (reader := catalog.jobs.get(edge.dst)) is not None
         and reader.sem.initial_status not in SKIP_TRANSLATED
+        and (producer := local_producer(edge, catalog)) is not None
     }
     parents = graph.box_tree.parent
 
@@ -1138,10 +1160,7 @@ def rule_l022(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
             current = parents.get(current)
         return False
 
-    gates: dict[str, list[DerivedEdge]] = {}
-    for edge in graph.edges:
-        if edge.is_start_gate:
-            gates.setdefault(edge.dst, []).append(edge)
+    gates = _start_gates(graph)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         attr = job.sem.condition

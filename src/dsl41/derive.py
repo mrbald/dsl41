@@ -291,26 +291,25 @@ def _is_mutex_ref(ref: _RawRef) -> bool:
     )
 
 
-def _mutex_groups(refs: list[_RawRef]) -> list[list[str]]:
-    groups: set[tuple[str, ...]] = set()
-    for ref in refs:
-        if _is_mutex_ref(ref):
-            assert isinstance(ref.atom, StatusAtom)
-            other = ref.atom.job.name
-            pair = (ref.dst,) if other == ref.dst else tuple(sorted((ref.dst, other)))
-            groups.add(pair)
-    return [list(g) for g in sorted(groups)]
-
-
 def _bare_notrunning(refs: list[_RawRef]) -> dict[str, list[str]]:
-    """Pass 2, the directed reading of the same predicate: which jobs each
-    consumer's own condition names in bare local n() form (self included)."""
+    """Pass 2, the ONE scan of the mutex predicate: which jobs each
+    consumer's own condition names in bare local n() form (self included).
+    `_mutex_groups` is its undirected projection -- one fact, two views,
+    agreement by construction (arch-review 2026-08-28)."""
     out: dict[str, set[str]] = {}
     for ref in refs:
         if _is_mutex_ref(ref):
             assert isinstance(ref.atom, StatusAtom)
             out.setdefault(ref.dst, set()).add(ref.atom.job.name)
     return {dst: sorted(targets) for dst, targets in sorted(out.items())}
+
+
+def _mutex_groups(bare_notrunning: dict[str, list[str]]) -> list[list[str]]:
+    groups: set[tuple[str, ...]] = set()
+    for dst, targets in bare_notrunning.items():
+        for other in targets:
+            groups.add((dst,) if other == dst else tuple(sorted((dst, other))))
+    return [list(g) for g in sorted(groups)]
 
 
 # ------------------------------------------------------------- cadence (pass 3 core)
@@ -944,7 +943,8 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
     """Pure IR-F -> IR-G derivation, ss5 passes 1-7 in order."""
     tree = _build_box_tree(catalog)
     refs = _extract_refs(catalog)  # pass 1
-    mutex_groups = _mutex_groups(refs)  # pass 2
+    bare_notrunning = _bare_notrunning(refs)  # pass 2
+    mutex_groups = _mutex_groups(bare_notrunning)
     cond_preds = _condition_pred_map(catalog, refs)
     cadence = _cadences(catalog, cond_preds)  # pass 3 core
     boundary: list[JobRef] = []
@@ -979,7 +979,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
         nodes=nodes,
         edges=edges,
         mutex_groups=mutex_groups,
-        bare_notrunning=_bare_notrunning(refs),
+        bare_notrunning=bare_notrunning,
         or_shapes=or_shapes,
         box_tree=tree,
         external_boundary=deduped_boundary,

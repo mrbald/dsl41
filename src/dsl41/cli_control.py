@@ -26,7 +26,10 @@ from dsl41.runner_access import REQUIRED_TIER, Tier
 # Exit codes: 0 a clean answer (an `ok` response), 2 the command never
 # reached the engine (an unreachable socket, an unreadable answer, a
 # refusal); `run`'s 1 -- the estate failed while running -- belongs to the
-# engine and no client here can see it.
+# engine and no single-command client here can see it. `release-held` is
+# the one aggregate: its 1 means "some per-job decision was not applied",
+# with the detail on the per-job lines (DL-181 era, arch-review
+# 2026-08-28).
 #
 # `sendevent` splits 2 further, because since S3 a command can fail in three
 # ways that call for three different next moves and a script that cannot tell
@@ -210,7 +213,7 @@ def release_held(
     did not -- the per-job answers, each prefixed `-- <job>`, carry
     `sendevent`'s 0/2/3/4 detail, which one aggregate number cannot."""
     from dsl41.runner_admission import addressed_key
-    from dsl41.runner_control import claimed_actor, command
+    from dsl41.runner_control import claimed_actor, command, revision_in
 
     response = _control_roundtrip(socket_path, {"cmd": "status"})
     if not response.get("ok"):
@@ -220,6 +223,8 @@ def release_held(
         raise typer.Exit(2)
     baseline, epoch = header
     rows = response.get("jobs", {})
+    # on_hold is the job-verb latch, NOT DL-94's `held` run-state in the
+    # same row; the name `release-held` stays (declined rename, DL-181)
     held = sorted(name for name, row in rows.items() if row.get("on_hold"))
     if not held:
         typer.echo("no jobs held")
@@ -231,11 +236,12 @@ def release_held(
     all_applied = True
     for name in held:
         payload = {"job": name}
+        key = addressed_key("OFF_HOLD", payload)
         request = command(
             "OFF_HOLD",
             payload,
-            key=addressed_key("OFF_HOLD", payload),
-            revision=int(rows[name]["state_rev"]),
+            key=key,
+            revision=revision_in(response, key),
             baseline_id=baseline,
             epoch=epoch,
             request_id=None,

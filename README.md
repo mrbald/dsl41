@@ -239,7 +239,7 @@ dsl41 host drain local -S ./run1/control.sock   # stop routing new work here
 dsl41 host activate local -S ./run1/control.sock    # route again; re-dispatch held
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
-dsl41 rehearse jobs.jil --hours 24 --summary    # virtual clock: a day in seconds
+dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in seconds
 dsl41 release-held -S ./run1/control.sock       # estate-wide OFF_HOLD sweep
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
