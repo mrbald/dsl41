@@ -396,7 +396,9 @@ def gen_infra(shards: int) -> Jil:
 
 def gen_global(acs: list[str]) -> Jil:
     jil = Jil("Bank-scale global tail: risk consolidation, SOD flip, ops.")
-    jil.job("GLOBAL_RISK_B", "b", condition="s(APAC_EOD_B) & s(EMEA_EOD_B) & s(AMER_EOD_B)")
+    # zero lookbacks (L021): unqualified, the first region's close would fire
+    # this box over the other two regions' day-old latches -- the double fire
+    jil.job("GLOBAL_RISK_B", "b", condition="s(APAC_EOD_B,0) & s(EMEA_EOD_B,0) & s(AMER_EOD_B,0)")
     expo = "GLOBAL_RISK_EXPO_C"
     jil.job(
         expo,

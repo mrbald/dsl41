@@ -25,7 +25,7 @@ JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──�
 Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
 consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
 `decompile(catalog, graph)` all need the faithful layer. The linter has the same shape —
-L001–L007 and L015–L019 read IR-F, L008–L014 and L020 read IR-G next to it.
+L001–L007 and L015–L019 read IR-F, L008–L014 and L020–L021 read IR-G next to it.
 
 The four representations have four contracts:
 
@@ -445,6 +445,7 @@ follows, with each rule traceable to a SEM/M row:
 | L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
 | L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, cited-resolved DL-58) have no UC-side arm concept — per-estate migration-attention item | SEM-32/M02 |
 | L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer — an iced producer satisfies its atoms — while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
+| L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with ≥2 wake sources and ≥1 unqualified latching atom can fire more than once per cycle — up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources = start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways — flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
 
 ## 10. Design decisions D1–D4
 

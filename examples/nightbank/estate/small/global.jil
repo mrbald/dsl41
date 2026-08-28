@@ -3,10 +3,13 @@
 
 /* -------- Group risk ------------------------------------------------- */
 
+/* Zero lookbacks (L021): each region must have closed since OUR last run.
+   Unqualified, the first region's close would fire this box over the other
+   two regions' day-old latches -- the classic double-fire. */
 insert_job: GLOBAL_RISK_B
 job_type: b
 owner: ~{$OWNER}~
-condition: s(APAC_EOD_B) & s(EMEA_EOD_B) & s(AMER_EOD_B)
+condition: s(APAC_EOD_B,0) & s(EMEA_EOD_B,0) & s(AMER_EOD_B,0)
 
 insert_job: GLOBAL_RISK_EXPO_C
 job_type: c

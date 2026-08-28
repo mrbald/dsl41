@@ -206,7 +206,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     T-002), fold_res_* (T-006), and fold_sched_* (T-007) job sets;
     names_colon_join.jil (DL-39) the colon-named etl:*/night:box/
     boxed:member set (semantic, unescaped keys). l020_iced_consumer.jil
-    (DL-151) added the l20_* set (the M19 iced-consumer rule L020)."""
+    (DL-151) added the l20_* set (the M19 iced-consumer rule L020);
+    l021_multifire.jil (DL-180) the l21_* set (the multi-fire rule L021)."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -266,6 +267,11 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "l20_iced",
         "l20_live",
         "l20_mixed",
+        "l21_daily",
+        "l21_fixed",
+        "l21_guard",
+        "l21_src_a",
+        "l21_src_b",
         "long_lists",
         "mutex_a",
         "mutex_b",

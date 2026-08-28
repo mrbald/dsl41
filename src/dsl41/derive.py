@@ -238,6 +238,12 @@ class DerivedGraph(BaseModel):
     nodes: list[str] = []  # catalog job names, source order
     edges: list[DerivedEdge] = []
     mutex_groups: list[list[str]] = []  # n() detector pairs (M07)
+    #: consumer -> the bare local n() targets in ITS OWN condition, self
+    #: included. mutex_groups sorts each pair and loses who references whom;
+    #: L021 needs the direction (the referencing job is the one every target
+    #: completion WAKES), and re-deriving it there would restate
+    #: _is_mutex_ref the way DL-162 forbids for is_start_gate.
+    bare_notrunning: dict[str, list[str]] = {}
     or_shapes: list[OrShape] = []  # M12 classifier output
     box_tree: BoxTree = BoxTree()
     external_boundary: list[JobRef] = []  # cross-instance refs (M33)
@@ -294,6 +300,17 @@ def _mutex_groups(refs: list[_RawRef]) -> list[list[str]]:
             pair = (ref.dst,) if other == ref.dst else tuple(sorted((ref.dst, other)))
             groups.add(pair)
     return [list(g) for g in sorted(groups)]
+
+
+def _bare_notrunning(refs: list[_RawRef]) -> dict[str, list[str]]:
+    """Pass 2, the directed reading of the same predicate: which jobs each
+    consumer's own condition names in bare local n() form (self included)."""
+    out: dict[str, set[str]] = {}
+    for ref in refs:
+        if _is_mutex_ref(ref):
+            assert isinstance(ref.atom, StatusAtom)
+            out.setdefault(ref.dst, set()).add(ref.atom.job.name)
+    return {dst: sorted(targets) for dst, targets in sorted(out.items())}
 
 
 # ------------------------------------------------------------- cadence (pass 3 core)
@@ -962,6 +979,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
         nodes=nodes,
         edges=edges,
         mutex_groups=mutex_groups,
+        bare_notrunning=_bare_notrunning(refs),
         or_shapes=or_shapes,
         box_tree=tree,
         external_boundary=deduped_boundary,

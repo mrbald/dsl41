@@ -10882,3 +10882,70 @@ relitigate an entry; append a new one.
   each self-verifies (a rename, named tuples the type checker
   re-checks, refusal bytes the suite pins) -- allocation per the
   brief.
+- DL-180 the first field feedback batch: five gaps from a user
+  rehearsing a production double fire (2026-08-28). The job:
+  `condition: s(A) & s(B) & n(C)`, meant once a day, fired twice --
+  the s()&s() stale latch, and the n() guard doubling as a trigger
+  (SEM-01 x DL-13). Decisions, one per gap:
+  (1) New rule L021 (warn): condition-only multi-fire. An unscheduled,
+  unboxed consumer with >=2 wake sources and >=1 unqualified latching
+  atom starts once per source per cycle. L009 could not see it
+  (scheduled consumers only), and bare n() could not be seen at all:
+  mutex classification (M07/R6) removes it from the edge set, and
+  sorted mutex_groups lose who references whom. DerivedGraph grows
+  `bare_notrunning` (consumer -> its own bare n() targets, self
+  included) so the rule reads derive's classification instead of
+  restating it (the DL-162 lesson). Exemptions are caps the engine
+  itself enforces: SEM-32 arm (scheduled), SEM-10 once-per-execution
+  (members). n()-only conditions stay quiet -- the mutex idiom, no
+  latch to go stale. Fixture l021_multifire.jil; ir-design ss9 row.
+  (2) `release-held`: estate-wide OFF_HOLD as a CLIENT-side sweep --
+  one status read, one ordinary ss6 envelope per held job -- NOT a
+  protocol verb. The protocol stays per-key CAS; the sweep is safe
+  because OFF_HOLD with no latch is the journaled no-op. Aggregate
+  exit 0/1; per-job decisions keep the 0/2/3/4 detail.
+  (3) Rehearse scenarios can park: `park` (per job -- the file-watcher
+  ask), runs entries with park:true (per run), null default
+  (estate-wide, as before). FakeAdapter precedence: script entry,
+  then park, then default.
+  (4) `adapter.default` accepts the runs-entry object form next to
+  the [duration_s, exit_code] list; malformed shapes refuse naming
+  both forms. The trap: the object form died as a leaked KeyError(0)
+  printed `scenario file.json: 0`.
+  (5) Rehearse grows `--summary` and `--format json`: per-job run
+  counts (transitions into STARTING) and final statuses, catalog jobs
+  with zero runs included -- counting trace lines by hand was most of
+  the user's harness. The trace line format itself is unchanged.
+  AMENDED same day, after running the rule over the estates: global
+  gates are OUTSIDE L021, as wake and as latch both. A v() flag does
+  wake on SET_GLOBAL and never expires (SEM-08), but whether it is
+  stale is reset discipline in the SETTING system, which the catalog
+  cannot see -- nightbank's SOD_B (three recon flags and a risk gate)
+  is the intentional arm-on-flags shape that proved it; flagging every
+  one would bury the s()&s() signal. Globals stay L002's. And the rule
+  found a real one at home: both nightbank estates' GLOBAL_RISK_B
+  carried the unqualified three-region EOD join -- the first region's
+  close would fire it over the other two regions' day-old latches.
+  Fixed to zero lookbacks in small/global.jil and generate.py (the
+  bank estate is generated), with the teaching comment in place; the
+  estates lint clean again, now honestly.
+  THE REVIEW (same day, fresh-context adversarial pass; findings on
+  file in the session scratchpad): one blocker -- preflight WARN lines
+  printed to stdout AHEAD of the --format json document, breaking any
+  `| jq` on a warn-carrying estate; fixed by routing WARNs to stderr
+  under json only, pinned by a n_retrys-warn regression test. Acted
+  should-fixes: the once-per-source claim softened to "more than once
+  per cycle, up to once per source" everywhere it appeared (a
+  zero-lookback atom under AND narrows the count); the release-held
+  sweep now composes every envelope from the ONE status read that
+  selected the held set (it acts on what it saw; a moved job is
+  REJECTED, not re-released) and its docstring cites control-protocol
+  ss3 and names the SEM-21 start re-evaluation; cross-instance bare
+  n() (an M33 edge) is wake-only like the local form -- an n()
+  satisfaction is current truth, not a recorded completion; L-ranges
+  in citation-index and README caught up to L021 and the README names
+  release-held/--summary. Hardened: adapter.park refuses a bare
+  string, park:true refuses a contradictory duration, non-object
+  scenario tops refuse readably. Declined: renaming release-held (the
+  DL-94 held field is a different plane) and the wait_for-around-
+  sendevent house idiom (pre-existing, not this slice's).

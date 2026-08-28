@@ -1,0 +1,32 @@
+/* L021 trigger: l21_daily is condition-only (no schedule, no box) with two
+   unqualified latches and a bare n() guard -- three wake sources, so one
+   estate cycle can start it three times (SEM-01 latch x DL-13 event wake;
+   the guard is also a trigger). l21_fixed is the in-file non-trigger: the
+   same shape with zero-lookback qualifiers (SEM-04), which anchor to the
+   consumer's own last end and leave nothing latched stale. Synthetic. */
+insert_job: l21_src_a
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l21_src_b
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l21_guard
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l21_daily
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l21_src_a) & s(l21_src_b) & n(l21_guard)
+
+insert_job: l21_fixed
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l21_src_a,0) & s(l21_src_b,0) & n(l21_guard)

@@ -3,7 +3,7 @@
 
 insert_job: GLOBAL_RISK_B
 job_type: b
-condition: s(APAC_EOD_B) & s(EMEA_EOD_B) & s(AMER_EOD_B)
+condition: s(APAC_EOD_B,0) & s(EMEA_EOD_B,0) & s(AMER_EOD_B,0)
 owner: ~{$OWNER}~
 std_out_file: ~{$NB_LOGS}~/GLOBAL_RISK_B.out
 std_err_file: ~{$NB_LOGS}~/GLOBAL_RISK_B.err

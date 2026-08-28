@@ -70,6 +70,12 @@ Phase-5 graph-rule readings (each with a test):
   consumer (SEM-05/SEM-20) while UC cascades the skip (UCS-02). One live
   predecessor converges, so the rule needs ALL of them; predecessors are
   the `is_start_gate` edges above.
+- L021 condition-only multi-fire (DL-180): an unscheduled, unboxed consumer
+  with >=2 wake sources and >=1 unqualified latch can fire more than once
+  per cycle -- the s(A)&s(B) double fire, and bare n() as guard-turned-
+  trigger. Wake sources add `graph.bare_notrunning` to the start-gate
+  edges, because mutex classification removes bare n() from the edge set
+  and no edge reader sees that its targets still WAKE the consumer.
 """
 
 from __future__ import annotations
@@ -83,7 +89,7 @@ from pydantic import BaseModel
 from dsl41.ast_jil import SourceSpan
 from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
-from dsl41.derive import DerivedGraph, derive_graph, local_producer
+from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph, local_producer
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
 
 Severity = Literal["error", "warn", "info"]
@@ -977,6 +983,87 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
+def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
+    """Condition-only multi-fire (SEM-01 latch x DL-13 event wake): an
+    unscheduled, unboxed consumer starts on EVERY event that finds its
+    condition true. With two or more wake sources and at least one
+    unqualified latching atom, one estate cycle can start it more than
+    once -- up to once per source when every latch is unqualified: the
+    s(A) & s(B) double fire, either job's completion finding the other's
+    latch still true, and the bare n(C) guard, which every completion of C
+    turns into a TRIGGER while the other atoms stay latched. Both shapes
+    fired one production job twice a day (DL-180).
+
+    Exemptions, each a cap this rule would otherwise restate: a scheduled
+    consumer arms and runs at most once per tick (SEM-32; its staleness
+    story is L009's), and a box member starts at most once per box
+    execution (SEM-10). Lookback-qualified atoms are exempt as LATCHES --
+    the qualifier is the fix, s(x,0) anchors to the consumer's own last
+    end (SEM-04) -- but their producers still wake, so they still count as
+    wake sources. A condition of bare n() guards ALONE stays quiet -- the
+    M07 mutex idiom (R6): an n() satisfaction is current truth about the
+    partner, not a recorded completion that outlives its cycle, so it is a
+    wake source and never a latch (the cross-instance bare form, which
+    stays an edge under M33, gets the same reading). Global gates
+    are OUTSIDE the rule, as wake and as latch both: a v() flag does wake
+    on SET_GLOBAL and never expires (SEM-08), but whether it is stale is
+    reset discipline in the SETTING system, which this catalog cannot see
+    -- the arm-on-flags pattern is common and intentional, and flagging
+    every one would bury the s()&s() signal (DL-180; globals stay L002's).
+
+    Wake sources: is_start_gate edges (an undefined local producer is
+    dropped -- it emits no events, and L001 owns it; a cross-instance one
+    counts, SEM-07) and the consumer's own bare n() targets from
+    graph.bare_notrunning -- mutex-classified out of the edge set, so no
+    edge reader sees that they wake. Self counts: n(self) next to a latch
+    re-triggers the job on its own completion, a tight loop L010 cannot
+    see because mutex refs are not edges."""
+    gates: dict[str, list[DerivedEdge]] = {}
+    for edge in graph.edges:
+        if edge.is_start_gate:
+            gates.setdefault(edge.dst, []).append(edge)
+    out: list[Violation] = []
+    for name, job in catalog.jobs.items():
+        if job.schedule is not None or job.box.box_name is not None:
+            continue
+        wakes: set[str] = set()
+        latches: set[str] = set()
+        span: SourceSpan | None = None
+        for edge in gates.get(name, ()):
+            atom = edge.atom
+            assert not isinstance(atom, GlobalAtom)  # is_start_gate excludes via=="global"
+            if atom.job.instance is None and local_producer(edge, catalog) is None:
+                continue
+            wakes.add(edge.src)
+            if edge.lookback is None and edge.via != "notrunning":
+                latches.add(edge.src)
+            if span is None:
+                span = edge.source_atom
+        for target in graph.bare_notrunning.get(name, ()):
+            if target in catalog.jobs:
+                wakes.add(target)
+        if len(wakes) < 2 or not latches:
+            continue
+        listed = ", ".join(repr(src) for src in sorted(wakes))
+        out.append(
+            Violation(
+                code="L021",
+                severity="warn",
+                message=(
+                    f"condition-only job {name!r} can fire more than once per cycle:"
+                    f" any event on {listed} re-evaluates it, and an unqualified atom"
+                    " stays satisfied (SEM-01/DL-13) -- a bare n() guard is also a"
+                    " trigger; qualify the latches with lookbacks (s(x,0)) or schedule"
+                    " the job (the SEM-32 arm caps runs at one per tick)"
+                ),
+                jobs=[name],
+                span=span,
+                detail=",".join(sorted(wakes)),
+            )
+        )
+    return out
+
+
 # -------------------------------------------------------------------------- registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -1007,6 +1094,7 @@ GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
     ("L013", rule_l013),
     ("L014", rule_l014),
     ("L020", rule_l020),
+    ("L021", rule_l021),
 )
 
 

@@ -555,7 +555,10 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     consumer with a condition is exactly the schedule+condition composition
     the rule flags (one job, two distinct hazards: L009 staleness, L019
     arm-and-wait with no UC arm concept). L020 (M19, DL-151) joined with
-    l020_iced_consumer.jil's all-iced consumer."""
+    l020_iced_consumer.jil's all-iced consumer. L021 (DL-180) joined with
+    l021_multifire.jil's l21_daily -- and six other fixtures whose
+    condition-only consumers genuinely multi-fire (the counts test names
+    them)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -571,6 +574,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L018",
         "L019",
         "L020",
+        "L021",
     }
 
 
@@ -596,7 +600,14 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     sem04_lookback.jil's consumer_stale, the corpus's one schedule+condition
     composition (Q3, DL-54). L020 x1 via l020_iced_consumer.jil's
     l20_consumer (DL-151); its l20_mixed sibling is the in-file non-trigger
-    and adds no other finding."""
+    and adds no other finding. L021 x7 (DL-180): l21_daily (the designed
+    trigger), plus six existing condition-only consumers whose shapes
+    genuinely multi-fire -- the fold_t003 OR-joins (fold_or_join,
+    fold_or2_joina/b: either branch's completion finds the other's latch),
+    l20_mixed (two unqualified latches), and the two guard-as-trigger
+    shapes the rule was built for, mutex_b and etl:load. L012 3 -> 5 with
+    l021_multifire.jil's two guard pairs (l21_daily and l21_fixed each
+    name n(l21_guard))."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -606,7 +617,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L011": 3,
             "L015": 2,
             "L008": 2,
-            "L012": 3,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
+            "L012": 5,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
             "L002": 3,
             "L005": 2,
             "L009": 1,
@@ -614,6 +625,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L018": 1,
             "L019": 1,
             "L020": 1,
+            "L021": 7,
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))

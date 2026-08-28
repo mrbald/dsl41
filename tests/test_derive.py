@@ -53,6 +53,7 @@ from dsl41.lint import (
     rule_l013,
     rule_l014,
     rule_l020,
+    rule_l021,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -453,6 +454,19 @@ def test_m07_mutex_groups_from_the_fixture() -> None:
     assert graph.mutex_groups == [["mutex_a", "mutex_b"], ["mutex_serial"]]
 
 
+def test_bare_notrunning_keeps_direction_and_self() -> None:
+    """mutex_groups sorts each pair away from who-references-whom;
+    bare_notrunning is the directed reading L021 needs (DL-180): every
+    completion of a target WAKES the referencing consumer, self included."""
+    catalog = lower_catalog([parse_file(M07_MUTEX)])
+    graph = derive_graph(catalog)
+    assert graph.bare_notrunning == {
+        "mutex_a": ["mutex_b"],
+        "mutex_b": ["mutex_a"],
+        "mutex_serial": ["mutex_serial"],
+    }
+
+
 def test_m07_mutex_refs_produce_no_edges_only_the_feeder_edge_remains() -> None:
     catalog = lower_catalog([parse_file(M07_MUTEX)])
     graph = derive_graph(catalog)
@@ -466,6 +480,7 @@ def test_n_cross_instance_ref_stays_an_edge_not_a_mutex_pair() -> None:
     text = "insert_job: cons_xinst\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(other^PRD)\n"
     graph = _graph(text)
     assert graph.mutex_groups == []
+    assert graph.bare_notrunning == {}
     (edge,) = graph.edges
     assert edge.via == "notrunning"
     assert edge.cls == "redesign"
@@ -727,12 +742,16 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     shares one inherited cadence), and 1 more same-cadence M01 success edge; names_colon_join.jil
     (DL-39) adds 1 M01 success edge between colon-named jobs.
     l020_iced_consumer.jil (DL-151) adds 3 M02 edges: its four jobs are all
-    unscheduled and unboxed, so every s() latch there is cross-stream."""
+    unscheduled and unboxed, so every s() latch there is cross-stream.
+    l021_multifire.jil (DL-180) adds 4: l21_daily's two unqualified s()
+    latches are cross-stream (+2 M02, everything there is unscheduled), and
+    l21_fixed's zero-lookback pair is +2 M03; both n(l21_guard) refs are
+    mutex-classified and add no edge."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 40
+    assert len(graph.edges) == 44
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 13, "M02": 11, "M04": 4, "M05": 3, "M09": 2, "M03": 2, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 13, "M02": 13, "M04": 4, "M05": 3, "M09": 2, "M03": 4, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
@@ -741,6 +760,8 @@ def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
     graph = derive_graph(catalog)
     assert graph.mutex_groups == [
         ["etl:load", "etl:probe"],  # names_colon_join.jil (DL-39)
+        ["l21_daily", "l21_guard"],  # l021_multifire.jil (DL-180)
+        ["l21_fixed", "l21_guard"],
         ["mutex_a", "mutex_b"],
         ["mutex_serial"],
     ]
@@ -1071,6 +1092,145 @@ def test_l020_fires_once_on_the_corpus_fixture() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     (violation,) = rule_l020(catalog, derive_graph(catalog))
     assert violation.jobs == ["l20_consumer"]
+
+
+def test_l021_fires_for_the_condition_only_double_fire_shape() -> None:
+    """DL-180's production shape: `s(A) & s(B) & n(C)`, meant once a day,
+    fired twice. Three wake sources, two unqualified latches -- either
+    producer's completion finds the other's latch true, and every completion
+    of the guard is a third trigger."""
+    text = (
+        "insert_job: mf_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: mf_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: mf_guard\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: mf_daily\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(mf_a) & s(mf_b) & n(mf_guard)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l021(catalog, derive_graph(catalog))
+    assert violation.code == "L021"
+    assert violation.severity == "warn"
+    assert violation.jobs == ["mf_daily"]
+    assert violation.detail == "mf_a,mf_b,mf_guard"
+    assert "more than once per cycle" in violation.message
+    assert "s(x,0)" in violation.message
+
+
+def test_l021_exempts_scheduled_consumers_and_box_members() -> None:
+    """The two engine-enforced caps the rule must not restate: a scheduled
+    consumer arms and runs at most once per tick (SEM-32; L009/L019 own its
+    hazards), a member starts at most once per box execution (SEM-10)."""
+    scheduled = lower_source(
+        "insert_job: sch_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: sch_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: sch_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "condition: s(sch_a) & s(sch_b)\n"
+    )
+    assert rule_l021(scheduled, derive_graph(scheduled)) == []
+    boxed = lower_source(
+        "insert_job: mf_box\njob_type: b\n\n"
+        "insert_job: box_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: box_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: box_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "box_name: mf_box\ncondition: s(box_a) & s(box_b)\n"
+    )
+    assert rule_l021(boxed, derive_graph(boxed)) == []
+
+
+def test_l021_quiet_when_latches_are_qualified_or_absent() -> None:
+    """Lookback qualifiers are the fix (SEM-04: s(x,0) anchors to the
+    consumer's own last end), so qualified atoms wake but do not latch; a
+    condition of bare n() guards alone is the M07 mutex idiom with no latch
+    to go stale; a single unqualified source is plain sequencing."""
+    qualified = lower_source(
+        "insert_job: q_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: q_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: q_guard\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: q_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(q_a,0) & s(q_b,0) & n(q_guard)\n"
+    )
+    assert rule_l021(qualified, derive_graph(qualified)) == []
+    guards_only = lower_source(
+        "insert_job: g_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: g_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: g_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: n(g_a) & n(g_b)\n"
+    )
+    assert rule_l021(guards_only, derive_graph(guards_only)) == []
+    single = lower_source(
+        "insert_job: s_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: s_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(s_a)\n"
+    )
+    assert rule_l021(single, derive_graph(single)) == []
+
+
+def test_l021_drops_undefined_producers_and_ignores_global_gates() -> None:
+    """An undefined local producer emits no events (and is L001's error), so
+    it is not a wake source: s(ghost) & s(real) is one source, quiet. A
+    global gate is outside the rule both ways (DL-180): whether a v() flag
+    is stale is reset discipline in the setting system, which the catalog
+    cannot see -- the arm-on-flags pattern is intentional, so
+    v(FLAG) & v(FLAG2) & s(real) stays quiet too."""
+    with_ghost = lower_source(
+        "insert_job: u_real\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: u_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(ghost) & s(u_real)\n"
+    )
+    assert rule_l021(with_ghost, derive_graph(with_ghost)) == []
+    with_globals = lower_source(
+        "insert_job: v_real\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: v_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: v(FLAG) = 1 & v(FLAG2) = 1 & s(v_real)\n"
+    )
+    assert rule_l021(with_globals, derive_graph(with_globals)) == []
+
+
+def test_l021_cross_instance_bare_guard_wakes_but_never_latches() -> None:
+    """The bare n() reading is uniform (DL-180 review): the cross-instance
+    bare form stays an EDGE (M33), but its satisfaction is current truth
+    about the partner, not a recorded completion -- a wake source, never a
+    latch. Guards alone stay quiet; next to a real latch the guard is the
+    extra trigger."""
+    guards_only = lower_source(
+        "insert_job: xg_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: n(a^PRD) & n(b^PRD)\n"
+    )
+    assert rule_l021(guards_only, derive_graph(guards_only)) == []
+    with_latch = lower_source(
+        "insert_job: xl_src\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: xl_cons\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(xl_src) & n(other^PRD)\n"
+    )
+    (violation,) = rule_l021(with_latch, derive_graph(with_latch))
+    assert violation.jobs == ["xl_cons"]
+    assert violation.detail == "other^PRD,xl_src"
+
+
+def test_l021_self_guard_next_to_a_latch_fires() -> None:
+    """n(self) plus a latched atom re-triggers the job on its OWN completion
+    -- the tight loop L010 cannot see, mutex refs not being edges."""
+    text = (
+        "insert_job: loop_gate\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: loop_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(loop_gate) & n(loop_job)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l021(catalog, derive_graph(catalog))
+    assert violation.jobs == ["loop_job"]
+    assert violation.detail == "loop_gate,loop_job"
+
+
+def test_l021_corpus_fixture_trigger_and_non_trigger() -> None:
+    """The house rule for l021_multifire.jil: l21_daily trips, its l21_fixed
+    sibling (zero-lookback qualifiers) does not. The corpus-wide count --
+    the OTHER fixtures whose shapes genuinely multi-fire -- is pinned in
+    test_lint.py's per-code table."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "l021_multifire.jil")])
+    (violation,) = rule_l021(catalog, derive_graph(catalog))
+    assert violation.jobs == ["l21_daily"]
+    assert violation.detail == "l21_guard,l21_src_a,l21_src_b"
 
 
 # --------------------------------------------------------- 11. lint_catalog integration
