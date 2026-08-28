@@ -5,7 +5,7 @@ The last sentence here used to read "the live-engine path is exercised
 manually via the RUNBOOK; these tests pin what CI can pin", and
 docs/concurrency-model.md quotes it as the gap the whole phase-12 programme
 closes. The virtual-clock half of it is closed: the sweep at the foot of
-this file drives the real 81-job night through seeded interleavings of
+this file drives the real 82-job night through seeded interleavings of
 leader failover, a spawn decided and never acted on, duplicated and stale
 completions, quarantine and drain, and checks CM-14 and CM-09 over every
 one. What is still manual is the REAL-PROCESS path -- actual subprocesses,
@@ -223,7 +223,7 @@ NIGHT_STEPS = 8
 
 @pytest.fixture(scope="module")
 def small_catalog(props_file: Path):
-    """Built once: 81 jobs across five files with placeholder substitution
+    """Built once: 82 jobs across five files with placeholder substitution
     is 40ms, and a sweep that paid it per seed would spend its time on
     parsing rather than on interleavings."""
     return load_estate("small", props_file)

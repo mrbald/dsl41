@@ -489,6 +489,16 @@ def gen_global(acs: list[str]) -> Jil:
         command="fakework OPS_SPOOL_C --sleep 240",
         extra=["job_terminator: 1"],
     )
+    # failure consumer (L022): the estate's failure CONTROL FLOW, not just
+    # the alarm plane. Zero lookbacks: one alert per fresh failure (L021)
+    jil.job(
+        "OPS_FAIL_ALERT_C",
+        "c",
+        machine="ops_util",
+        condition="f(APAC_EOD_B,0) | f(EMEA_EOD_B,0) | f(AMER_EOD_B,0)"
+        " | f(GLOBAL_RISK_B,0) | f(SOD_B,0) | f(OPS_B,0)",
+        command="fakework OPS_FAIL_ALERT_C --sleep 2",
+    )
     jil.job(
         "OPS_HEARTBEAT_C",
         "c",

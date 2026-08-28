@@ -10949,3 +10949,102 @@ relitigate an entry; append a new one.
   scenario tops refuse readably. Declined: renaming release-held (the
   DL-94 held field is a different plane) and the wait_for-around-
   sendevent house idiom (pre-existing, not this slice's).
+- DL-181 L022, the under-fire twin (2026-08-28, same feedback thread
+  as DL-180): when a producer its condition cannot survive fails, a
+  condition-only, unboxed consumer misses at least one cycle if no
+  start gate reads that failure -- release waits for the producer's
+  next SUCCESS (its own next tick where it has one, a rerun, or an
+  operator; indefinite only for an unscheduled producer). The "job did
+  not run last night" incident, with only the alarm plane watching.
+  Decisions:
+  (1) "Cannot do without" is DECIDED BY TIER-B, not by shape: the
+  producer's status is pinned to FAILURE and cond_truth_profile asked
+  whether anything still satisfies the condition. OR escapes and
+  f/d/e-gated consumers fall out quiet for free; a too-large condition
+  is skipped whole, the L006 precedent. First rule to reuse the
+  truth-table engine for a graph question.
+  (2) "Failure is read" means a LIVE consumer's START GATE (f/d/t/e
+  vias) from the producer or its ancestor boxes -- SEM-11's default
+  fold carries a member failure to its box, so an f(BOX) consumer
+  covers members; an override can defeat that fold, the accepted
+  quiet-direction approximation at info tier. Box-override edges
+  classify a fold and start nothing, so they do not count;
+  skip-translated readers cannot run, so they do not either. n() is
+  excluded: a mutex partner freed by a failure is not a reaction to
+  it.
+  (3) Alarm attributes CANNOT exempt: alarm_if_fail defaults on
+  vendor-side and the whole family is observability with no control
+  flow (DL-32). The message says so instead. SEM-14 terminators are
+  failure control flow but only kill -- they release no waiting
+  consumer, so they neither exempt nor contradict.
+  (4) Severity is INFO, per-consumer: estates lean on the alarm plane
+  by convention, so this is an inventory of where control flow ends.
+  Scope: scheduled consumers are L019's arm story, members are the
+  hung-box family, skip-translated jobs on either side are L020's,
+  cross-instance producers are unknowable (DL-162a frame).
+  (5) Nightbank takes the advice again: OPS_FAIL_ALERT_C consumes
+  f() of the three EOD boxes, GLOBAL_RISK_B, SOD_B and OPS_B, with
+  zero lookbacks -- one alert per fresh failure, and the qualifier
+  keeps the alert itself out of L021. Both estates lint clean with the
+  rule on. Fixture l022_stranded.jil; its l22_either OR-join is also
+  L021's eighth corpus trigger (an unqualified OR pair -- true
+  positive, recorded in the counts test).
+- DL-182 PROPOSAL (2026-08-28, design only -- no code in this entry's
+  slice): the dynamic estate check. L021/L022 are static
+  approximations of questions the oracle answers exactly WITHIN ITS
+  MODEL (n_retrys and the other DL-53 unmodeled attributes stay
+  outside it), and each bought quiet with a deliberate miss (DL-180:
+  globals excluded; DL-181: alarm-plane convention). The proposal:
+  drive the estate
+  through N virtual days and compare observed per-job run counts
+  against expectations, vendor-faithful (no run root -- statuses
+  latch across days, which is exactly what reproduced the DL-180
+  production double fire).
+  Shape: a rehearse mode (working name `rehearse --check-cadence`,
+  final surface open). Scheduled producers complete per their own
+  ticks under the FakeAdapter default; condition-only chains follow.
+  Expectation default: a job runs at most once per its OWN cadence
+  (scheduled: its ticks; condition-only: the max cadence among its
+  producers); a sidecar file, the scenario-file precedent, declares
+  intended exceptions (alerts, pollers, mutex idlers).
+  Sweeps beyond the happy path: (a) one run per producer with that
+  producer scripted to FAIL -- the dynamic L022, catching strands the
+  static rule's scope excludes (scheduled consumers, members); (b)
+  completion-order permutations via the equiv tier-c hypothesis
+  harness -- order-dependent multi-fire that operator-blind static
+  rules cannot see; (c) flag scripts (SET_GLOBAL with and without
+  resets) -- the DL-180 globals exclusion, recovered dynamically.
+  Report: the DL-180 --summary/--format json rollup, plus an
+  expected/observed column and a nonzero exit on deviation.
+  Reuses: oracle, VirtualClock, Scheduler, FakeAdapter, and the
+  tier-c approach -- hypothesis event scripts, which live in the test
+  suite today and would need a src-side home. New: cadence-driven
+  completion synthesis, the comparator, the sidecar schema. Open:
+  where the surface lives (lint --dynamic vs rehearse flag vs new
+  verb), sidecar shape, and whether sweep (b) is v1 or follows.
+  Implementation is a future slice; this entry is the design of
+  record for it.
+  THE REVIEW (same day, fresh-context adversarial pass; findings on
+  file in the session scratchpad): the predicate survived every probe
+  -- the tier-b pin is correct on the lookback, zero-freshness, n(),
+  e() and multi-atom axes -- but the CONSEQUENCE clause did not:
+  "waits indefinitely" was false for half the corpus findings, whose
+  producers are daily-scheduled and self-heal next tick (a FAILURE
+  does not block a later tick, SEM-32). Softened to "misses at least
+  one cycle ... release waits for the next SUCCESS" in the message,
+  docstring, ss9 row and this entry. Also acted: consumption narrowed
+  to live consumers' START GATES (box-override edges classify a fold
+  and start nothing; skip-translated readers cannot run), decision
+  (2) above rewritten to match; SEM-14 terminators named in (3); the
+  multi-producer message made explicitly disjunctive ("if any of");
+  the OR-escape test split into its own catalog so a |-to-&
+  mutation can actually fail it; the dead too-large reset replaced
+  with the reason it was dead (the state ceiling reads the condition
+  alone, so the first answer decides); stale counts caught up
+  (30-file corpus, 82-job nightbank night in README,
+  test_nightbank_example and concurrency-model prose); DL-182's
+  "answers exactly" scoped to the oracle's model and its tier-c
+  reuse line honest about living in tests/. Declined: modeling fold
+  overrides in the consumption walk (quiet-direction approximation,
+  stated in the docstring) and transitive strand propagation (the
+  named producer is where the operator looks first).

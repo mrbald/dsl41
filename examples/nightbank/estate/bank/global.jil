@@ -121,6 +121,16 @@ std_out_file: ~{$NB_LOGS}~/OPS_SPOOL_C.out
 std_err_file: ~{$NB_LOGS}~/OPS_SPOOL_C.err
 job_terminator: 1
 
+insert_job: OPS_FAIL_ALERT_C
+job_type: c
+condition: f(APAC_EOD_B,0) | f(EMEA_EOD_B,0) | f(AMER_EOD_B,0) | f(GLOBAL_RISK_B,0) | f(SOD_B,0) | f(OPS_B,0)
+command: fakework OPS_FAIL_ALERT_C --sleep 2
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_FAIL_ALERT_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_FAIL_ALERT_C.err
+
 insert_job: OPS_HEARTBEAT_C
 job_type: c
 command: fakework OPS_HEARTBEAT_C --sleep 3

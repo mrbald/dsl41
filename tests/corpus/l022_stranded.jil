@@ -1,0 +1,41 @@
+/* L022 trigger: l22_tail misses its cycle if l22_prod fails -- the
+   FAILURE latch satisfies nothing it gates on, and no start gate reads
+   f(l22_prod). Two in-file non-triggers: l22_watched's producer failure
+   is consumed by l22_alert (zero-lookback f() -- an alert fires once per
+   FRESH failure, and the qualifier keeps it out of L021), and l22_either
+   survives either producer's failure through the OR. l22_either IS an
+   L021 trigger, though: an unqualified OR pair multi-fires (the counts
+   test records it). Synthetic. */
+insert_job: l22_prod
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l22_tail
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l22_prod)
+
+insert_job: l22_prod2
+job_type: c
+command: /usr/bin/true
+machine: m1
+
+insert_job: l22_watched
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l22_prod2)
+
+insert_job: l22_alert
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: f(l22_prod2,0)
+
+insert_job: l22_either
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: s(l22_prod) | s(l22_prod2)

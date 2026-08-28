@@ -25,7 +25,7 @@ JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──�
 Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
 consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
 `decompile(catalog, graph)` all need the faithful layer. The linter has the same shape —
-L001–L007 and L015–L019 read IR-F, L008–L014 and L020–L021 read IR-G next to it.
+L001–L007 and L015–L019 read IR-F, L008–L014 and L020–L022 read IR-G next to it.
 
 The four representations have four contracts:
 
@@ -446,6 +446,7 @@ follows, with each rule traceable to a SEM/M row:
 | L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, cited-resolved DL-58) have no UC-side arm concept — per-estate migration-attention item | SEM-32/M02 |
 | L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer — an iced producer satisfies its atoms — while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
 | L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with ≥2 wake sources and ≥1 unqualified latching atom can fire more than once per cycle — up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources = start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways — flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
+| L022 | info | stranded-on-failure consumer, L021's under-fire twin: a condition-only, unboxed consumer misses at least one cycle when a producer it cannot do without fails and no start gate in the estate reads that failure — release waits for that producer's next SUCCESS (its own next tick, a rerun, or an operator; indefinite only for an unscheduled producer). "Cannot do without" is tier-b — the producer's status pinned to FAILURE, the condition asked whether any state still satisfies it — so OR escapes and `f()`/`d()`/`e()` gates stay quiet. "Reads that failure" = a live consumer's start-gate `f`/`d`/`t`/`e` edge from the producer or an ancestor box (SEM-11 default fold; overrides can defeat it — accepted quiet-direction approximation; box-override edges classify a fold and start nothing, so they do not count). Alarms cannot exempt — observability, not control flow (DL-32); SEM-14 terminators kill, they release nothing. Scheduled consumers (L019's arm story), box members (the hung-box family), skip-translated jobs on either side, and cross-instance producers are out of scope. Info: an inventory of where control flow ends, not a defect list (DL-181) | SEM-01/SEM-11 |
 
 ## 10. Design decisions D1–D4
 

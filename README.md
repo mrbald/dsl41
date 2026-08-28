@@ -85,7 +85,7 @@ dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 ```
 
-The command runs rules L001-L021 (IR-F rules, truth-table rules, graph rules
+The command runs rules L001-L022 (IR-F rules, truth-table rules, graph rules
 over the derived graph, dangling-name rules). `--strict` is the migration
 gate: do not ship a catalog that lints dirty.
 
@@ -411,7 +411,7 @@ has six tiers, all built:
   ss5 socket protocol
 
 The suite spans 55 test files (`pytest --collect-only -q` shows the current
-count) plus the 28-file synthetic/doc-derived JIL corpus under
+count) plus the 30-file synthetic/doc-derived JIL corpus under
 `tests/corpus/`.
 
 ### Source map
@@ -430,8 +430,8 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   `permit_unknown` is not set, the DL-07 firewall refuses unknown attributes.
   Calendar/cycle repeat-key lanes (`CalendarIR.conditions`, `CycleIR.periods`,
   DL-57) keep real multi-condition/multi-period autocal exports loadable.
-- src/dsl41/lint.py — Violation model + rules L001-L021 (pure IR-F rules L001-L005/L015,
-  truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 and L020-L021 over the
+- src/dsl41/lint.py — Violation model + rules L001-L022 (pure IR-F rules L001-L005/L015,
+  truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 and L020-L022 over the
   derived graph, dangling-name rules L016-L018)
 - src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes that produce edges, mutex
   pairs, box tree, same-cycle detection, M01-M36 mapping-row classification

@@ -556,9 +556,10 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     the rule flags (one job, two distinct hazards: L009 staleness, L019
     arm-and-wait with no UC arm concept). L020 (M19, DL-151) joined with
     l020_iced_consumer.jil's all-iced consumer. L021 (DL-180) joined with
-    l021_multifire.jil's l21_daily -- and six other fixtures whose
+    l021_multifire.jil's l21_daily -- and seven other fixtures whose
     condition-only consumers genuinely multi-fire (the counts test names
-    them)."""
+    them). L022 (DL-181) joined with l022_stranded.jil's l22_tail plus the
+    corpus's other unread-failure tails."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     assert {v.code for v in report.violations} <= {
@@ -575,6 +576,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L019",
         "L020",
         "L021",
+        "L022",
     }
 
 
@@ -600,14 +602,21 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     sem04_lookback.jil's consumer_stale, the corpus's one schedule+condition
     composition (Q3, DL-54). L020 x1 via l020_iced_consumer.jil's
     l20_consumer (DL-151); its l20_mixed sibling is the in-file non-trigger
-    and adds no other finding. L021 x7 (DL-180): l21_daily (the designed
-    trigger), plus six existing condition-only consumers whose shapes
+    and adds no other finding. L021 x8 (DL-180): l21_daily (the designed
+    trigger), plus seven existing condition-only consumers whose shapes
     genuinely multi-fire -- the fold_t003 OR-joins (fold_or_join,
     fold_or2_joina/b: either branch's completion finds the other's latch),
-    l20_mixed (two unqualified latches), and the two guard-as-trigger
-    shapes the rule was built for, mutex_b and etl:load. L012 3 -> 5 with
+    l20_mixed (two unqualified latches), the two guard-as-trigger shapes
+    the rule was built for, mutex_b and etl:load, and l022_stranded.jil's
+    l22_either (an unqualified OR pair, DL-181). L012 3 -> 5 with
     l021_multifire.jil's two guard pairs (l21_daily and l21_fixed each
-    name n(l21_guard))."""
+    name n(l21_guard)). L022 x14 (DL-181): l22_tail (the designed
+    trigger), the fold_t003 fan-out members and fold_mixed_b stranding on
+    their seeds, l20_mixed on l20_live (its iced producer is skipped),
+    l21_daily/l21_fixed on their sources, the guard-shape consumers
+    mutex_b and etl:load on their feeders, the sem04 pitfall pair on
+    upstream_feed, and sem24_status_resource's NIGHT_SB on SEED_C -- every
+    one a condition-only tail whose producer's failure nothing reads."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -625,7 +634,8 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L018": 1,
             "L019": 1,
             "L020": 1,
-            "L021": 7,
+            "L021": 8,
+            "L022": 14,
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))
@@ -662,9 +672,15 @@ def test_cli_suppress_l005_flips_strict_exit(tmp_path: Path) -> None:
     strict = runner.invoke(app, ["lint", str(dead), "--strict"])
     assert strict.exit_code == 1
     assert "L005" in strict.stdout
-    suppressed = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "L005"])
+    # tz_dead also draws L022 (DL-181: nothing reads f(tz_conv)) -- info
+    # never moves the exit code, so only its line needs suppressing too
+    # for the empty-stdout half of the assertion
+    suppressed = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "L005,L022"])
     assert suppressed.exit_code == 0
     assert suppressed.stdout == ""
+    info_only = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "L005"])
+    assert info_only.exit_code == 0  # the remaining finding is info-tier
+    assert "L022" in info_only.stdout
 
 
 def test_cli_suppress_accepts_comma_lists_and_case(tmp_path: Path) -> None:

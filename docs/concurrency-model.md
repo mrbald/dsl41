@@ -17,7 +17,7 @@ property of that estate under injected faults, not an assertion in prose.
 
 *(Amended by DL-109, at build — stage S7b.* The virtual-clock half of that
 sentence is now false, which was the point of writing it down. CM-14 and
-CM-09 are checked over the real 81-job night under seeded interleavings of
+CM-09 are checked over the real 82-job night under seeded interleavings of
 every fault one host can suffer — §9's "property of that estate under
 injected faults", held rather than promised. The real-PROCESS half stands:
 §9 calls it a separate tier and it is S7c.*)*
@@ -1084,7 +1084,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its claimed principal | landed (DL-94/95/97): every precondition now produced rather than built by hand, and at S7c (DL-112) produced by real processes end to end -- a deadman read back off a live supervisor, a `last_contact` stamped by a real lease exchange, a quarantine no test wrote by hand |
 | CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
-| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 81-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. S7c (DL-112) adds the half no interpreter can hold: the mutex is refused between two OS processes, and an engine that loses its lock file stops before the work rather than after it. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
+| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 82-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. S7c (DL-112) adds the half no interpreter can hold: the mutex is refused between two OS processes, and an engine that loses its lock file stops before the work rather than after it. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
 
 CM-01–CM-14 are this document's. `docs/ha-deployment.md` §7 drafts
 CM-15–CM-23 for the second host and the second site. One of them landed

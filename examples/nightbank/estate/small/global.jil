@@ -136,6 +136,19 @@ std_out_file: ~{$NB_LOGS}~/OPS_SPOOL_C.out
 std_err_file: ~{$NB_LOGS}~/OPS_SPOOL_C.err
 job_terminator: 1
 
+/* Failure consumer (L022): the estate's failure CONTROL FLOW, not just the
+   alarm plane. Zero lookbacks: the alert fires once per FRESH failure and
+   stays out of L021's multi-fire warning. */
+insert_job: OPS_FAIL_ALERT_C
+job_type: c
+condition: f(APAC_EOD_B,0) | f(EMEA_EOD_B,0) | f(AMER_EOD_B,0) | f(GLOBAL_RISK_B,0) | f(SOD_B,0) | f(OPS_B,0)
+command: fakework OPS_FAIL_ALERT_C --sleep 2
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_FAIL_ALERT_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_FAIL_ALERT_C.err
+
 /* -------- Standalone scheduled + parked jobs -------------------------- */
 
 /* Fires every quarter hour inside a one-hour window stamped at launch:

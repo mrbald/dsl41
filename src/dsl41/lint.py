@@ -76,6 +76,14 @@ Phase-5 graph-rule readings (each with a test):
   trigger. Wake sources add `graph.bare_notrunning` to the start-gate
   edges, because mutex classification removes bare n() from the edge set
   and no edge reader sees that its targets still WAKE the consumer.
+- L022 stranded-on-failure consumer (DL-181), L021's under-fire twin at
+  info tier: a condition-only, unboxed consumer whose condition cannot
+  survive a producer's FAILURE (tier-b, producer pinned to FAILURE --
+  so OR escapes and f/d/e gates stay quiet), where no live consumer's
+  START GATE reads that failure (f/d/t/e from the producer or an
+  ancestor box, the SEM-11 default fold). The miss is at least one
+  cycle; indefinite only when the producer has no schedule of its own.
+  Alarms cannot exempt: observability, not control flow (DL-32).
 """
 
 from __future__ import annotations
@@ -1064,6 +1072,130 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
+#: L022: the via kinds whose presence as a start gate means a producer's
+#: FAILURE releases SOMETHING -- f()/t() directly, d() covers both ends,
+#: e() reads the exit code a run recorded, failing runs included.
+#: notrunning is deliberately absent: a mutex partner freed by the failure
+#: is not a reaction to it.
+_FAILURE_CONSUMING_VIA: frozenset[str] = frozenset({"failure", "terminated", "done", "exitcode"})
+
+
+def rule_l022(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
+    """Stranded-on-failure consumer (DL-181): when a producer its condition
+    cannot do without fails, a condition-only, unboxed job misses at least
+    one cycle -- the FAILURE latch satisfies nothing it gates on (SEM-01),
+    and if no condition reads that failure, no job starts because of it:
+    release waits for that producer's next SUCCESS (its own next tick
+    where it has one, a rerun, or an operator). A producer with no
+    schedule of its own makes the wait indefinite. The vendor's JOBFAILURE
+    alarm does fire (alarm_if_fail defaults on), but alarms are
+    observability, not control flow (DL-32) -- which is why alarm
+    attributes cannot exempt. SEM-14 terminators are failure control flow
+    but they only KILL; they release no waiting consumer, so they neither
+    exempt nor contradict.
+
+    "Cannot do without" is tier-b, not shape-matching: the producer's
+    status is PINNED to FAILURE and the condition asked whether any state
+    still satisfies it (`cond_truth_profile`, the L006/L007 engine). So
+    the OR escape s(a)|s(b) stays quiet -- either branch survives the
+    other's failure -- and so do f()/d()/e()-gated consumers, whose atoms
+    the failure itself satisfies. A too-large condition is skipped
+    silently, like L006 (tier-c territory).
+
+    "A condition reads the failure" means a START GATE of a live consumer
+    -- a job that would run because of it. Box-override edges do not
+    count: an override CLASSIFIES the box's fold, it starts nothing.
+    Reads of an ancestor box count, because a member's failure folds its
+    box FAILURE under the default fold (SEM-11) -- an approximation in
+    the quiet direction: a box_success/box_failure override can defeat
+    that fold, and this info-tier rule does not model overrides. Skipped
+    as producers: cross-instance jobs (the remote estate's failure wiring
+    is invisible, DL-162a's frame) and skip-translated ones (an iced
+    producer cannot run, so it cannot fail -- its story is L020's).
+    Skipped as consumers: scheduled jobs (the armed-tick wait is L019's
+    migration-attention item) and box members (a member waiting on a
+    failed external producer hangs its BOX -- SEM-12's family, L008's
+    neighborhood). Severity is info: estates conventionally lean on the
+    alarm plane, so this is an inventory of where control flow ends, not
+    a defect list."""
+    from dsl41.equiv import cond_truth_profile
+
+    consumed: set[str] = {
+        edge.src
+        for edge in graph.edges
+        if edge.via in _FAILURE_CONSUMING_VIA
+        and edge.is_start_gate
+        and (reader := catalog.jobs.get(edge.dst)) is not None
+        and reader.sem.initial_status not in SKIP_TRANSLATED
+    }
+    parents = graph.box_tree.parent
+
+    def failure_is_read(producer: str) -> bool:
+        current: str | None = producer
+        while current is not None:
+            if current in consumed:
+                return True
+            current = parents.get(current)
+        return False
+
+    gates: dict[str, list[DerivedEdge]] = {}
+    for edge in graph.edges:
+        if edge.is_start_gate:
+            gates.setdefault(edge.dst, []).append(edge)
+    out: list[Violation] = []
+    for name, job in catalog.jobs.items():
+        attr = job.sem.condition
+        if attr is None or job.schedule is not None or job.box.box_name is not None:
+            continue
+        if job.sem.initial_status in SKIP_TRANSLATED:
+            continue  # the consumer itself never runs (SEM-20): no strand
+        candidates: set[str] = set()
+        span: SourceSpan | None = None
+        for edge in gates.get(name, ()):
+            producer = local_producer(edge, catalog)
+            if producer is None:
+                continue  # undefined local (L001's error) or cross-instance (DL-162a)
+            if catalog.jobs[producer].sem.initial_status in SKIP_TRANSLATED:
+                continue  # cannot run, cannot fail (L020's story)
+            candidates.add(producer)
+            if span is None:
+                span = edge.source_atom
+        stranding: list[str] = []
+        for producer in sorted(candidates):
+            profile = cond_truth_profile(attr.cond, fixed_status={producer: "FAILURE"})
+            if profile is None:
+                # the state ceiling reads the condition alone, never the pin,
+                # so the FIRST answer decides for every producer: skip the
+                # consumer whole (tier-c territory, the L006 precedent).
+                # Nothing is appended before this break can fire.
+                break
+            satisfiable, _ = profile
+            if not satisfiable and not failure_is_read(producer):
+                stranding.append(producer)
+        if not stranding:
+            continue
+        listed = ", ".join(repr(p) for p in stranding)
+        out.append(
+            Violation(
+                code="L022",
+                severity="info",
+                message=(
+                    f"condition-only job {name!r} misses at least one cycle if any of"
+                    f" {listed} fails: the FAILURE latch satisfies nothing it gates on"
+                    " (SEM-01), no start gate in the estate reads that failure (f/d/t/e),"
+                    " and the JOBFAILURE alarm is observability, not control flow (DL-32)"
+                    " -- release waits for the producer's next SUCCESS (its own next tick"
+                    " where it has one, a rerun, or an operator); give the failure a"
+                    " consumer if a silently missed cycle is not acceptable"
+                ),
+                jobs=[name],
+                span=span,
+                detail=",".join(stranding),
+            )
+        )
+    return out
+
+
 # -------------------------------------------------------------------------- registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -1095,6 +1227,7 @@ GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
     ("L014", rule_l014),
     ("L020", rule_l020),
     ("L021", rule_l021),
+    ("L022", rule_l022),
 )
 
 

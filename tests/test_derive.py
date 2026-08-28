@@ -54,6 +54,7 @@ from dsl41.lint import (
     rule_l014,
     rule_l020,
     rule_l021,
+    rule_l022,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -746,12 +747,14 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     l021_multifire.jil (DL-180) adds 4: l21_daily's two unqualified s()
     latches are cross-stream (+2 M02, everything there is unscheduled), and
     l21_fixed's zero-lookback pair is +2 M03; both n(l21_guard) refs are
-    mutex-classified and add no edge."""
+    mutex-classified and add no edge. l022_stranded.jil (DL-181) adds 5:
+    four unscheduled s() gates (+4 M02 -- tail, watched, and the either
+    pair) and l22_alert's zero-lookback failure gate (+1 M03)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 44
+    assert len(graph.edges) == 49
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 13, "M02": 13, "M04": 4, "M05": 3, "M09": 2, "M03": 4, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 13, "M02": 17, "M04": 4, "M05": 3, "M09": 2, "M03": 5, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
@@ -1231,6 +1234,124 @@ def test_l021_corpus_fixture_trigger_and_non_trigger() -> None:
     (violation,) = rule_l021(catalog, derive_graph(catalog))
     assert violation.jobs == ["l21_daily"]
     assert violation.detail == "l21_guard,l21_src_a,l21_src_b"
+
+
+def test_l022_fires_for_the_unread_failure_and_names_the_producer() -> None:
+    """DL-181: the tail misses at least a cycle if its producer fails --
+    the FAILURE latch satisfies nothing it gates on, no start gate reads
+    f(prod), and release waits for prod's next SUCCESS."""
+    text = (
+        "insert_job: st_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: st_tail\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(st_prod)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l022(catalog, derive_graph(catalog))
+    assert violation.code == "L022"
+    assert violation.severity == "info"
+    assert violation.jobs == ["st_tail"]
+    assert violation.detail == "st_prod"
+    assert "misses at least one cycle" in violation.message
+    assert "next SUCCESS" in violation.message
+
+
+def test_l022_quiet_when_the_failure_is_read_directly_or_via_the_box() -> None:
+    """Consumption is any f/d/t/e edge from the producer OR an ancestor box:
+    a member's failure folds its box FAILURE (SEM-11), so a watcher on the
+    box covers the member."""
+    direct = lower_source(
+        "insert_job: dr_prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: dr_tail\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(dr_prod)\n\n"
+        "insert_job: dr_alert\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: f(dr_prod,0)\n"
+    )
+    assert rule_l022(direct, derive_graph(direct)) == []
+    boxed = (
+        "insert_job: BOX_P\njob_type: b\n\n"
+        "insert_job: inner_prod\njob_type: c\ncommand: x\nmachine: m1\nbox_name: BOX_P\n\n"
+        "insert_job: bx_tail\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(inner_prod)\n"
+    )
+    unwatched = lower_source(boxed)
+    (violation,) = rule_l022(unwatched, derive_graph(unwatched))
+    assert violation.jobs == ["bx_tail"]
+    watched = lower_source(
+        boxed + "\ninsert_job: bx_watch\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: f(BOX_P,0)\n"
+    )
+    assert rule_l022(watched, derive_graph(watched)) == []
+
+
+def test_l022_quiet_for_or_escapes_and_failure_tolerant_gates() -> None:
+    """Tier-b decides "cannot do without", not atom shapes: an OR survives
+    either producer's failure, and d()/f() gates are satisfied BY it. The
+    OR escape stands ALONE -- with the d()/f() readers next to it, both
+    producers would be consumption-exempt before the tier-b question is
+    ever asked, and a `|`-to-`&` mutation could not fail the assertion
+    (DL-181 review, S2)."""
+    or_alone = lower_source(
+        "insert_job: oa_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: oa_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: oa_or\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(oa_a) | s(oa_b)\n"
+    )
+    assert rule_l022(or_alone, derive_graph(or_alone)) == []
+    tolerant = lower_source(
+        "insert_job: tp_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: tp_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: tp_done\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: d(tp_a)\n\n"
+        "insert_job: tp_fail\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: f(tp_b)\n"
+    )
+    assert rule_l022(tolerant, derive_graph(tolerant)) == []
+
+
+def test_l022_scope_exemptions() -> None:
+    """Out of scope, each owned elsewhere: scheduled consumers (L019's arm
+    story), box members (the hung-box family), skip-translated jobs on
+    either side (SEM-20/L020), cross-instance producers (DL-162a frame)."""
+    scheduled = lower_source(
+        "insert_job: ex_p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ex_sched\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "condition: s(ex_p)\n"
+    )
+    assert rule_l022(scheduled, derive_graph(scheduled)) == []
+    member = lower_source(
+        "insert_job: EX_BOX\njob_type: b\n\n"
+        "insert_job: ex_p2\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ex_member\njob_type: c\ncommand: x\nmachine: m1\n"
+        "box_name: EX_BOX\ncondition: s(ex_p2)\n"
+    )
+    assert rule_l022(member, derive_graph(member)) == []
+    iced_consumer = lower_source(
+        "insert_job: ex_p3\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ex_icedc\njob_type: c\ncommand: x\nmachine: m1\n"
+        "status: ON_ICE\ncondition: s(ex_p3)\n"
+    )
+    assert rule_l022(iced_consumer, derive_graph(iced_consumer)) == []
+    iced_producer = lower_source(
+        "insert_job: ex_icedp\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: ex_tail\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(ex_icedp)\n"
+    )
+    assert rule_l022(iced_producer, derive_graph(iced_producer)) == []
+    xinst = lower_source(
+        "insert_job: ex_xtail\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(remote^PRD)\n"
+    )
+    assert rule_l022(xinst, derive_graph(xinst)) == []
+
+
+def test_l022_corpus_fixture_trigger_and_non_triggers() -> None:
+    """The house rule for l022_stranded.jil: l22_tail trips; l22_watched
+    (failure consumed by l22_alert) and l22_either (the OR escape) do not.
+    The corpus-wide count is pinned in test_lint.py's per-code table."""
+    catalog = lower_catalog([parse_file(CORPUS_DIR / "l022_stranded.jil")])
+    (violation,) = rule_l022(catalog, derive_graph(catalog))
+    assert violation.jobs == ["l22_tail"]
+    assert violation.detail == "l22_prod"
 
 
 # --------------------------------------------------------- 11. lint_catalog integration
