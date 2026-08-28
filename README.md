@@ -85,7 +85,7 @@ dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 ```
 
-The command runs rules L001-L020 (IR-F rules, truth-table rules, graph rules
+The command runs rules L001-L021 (IR-F rules, truth-table rules, graph rules
 over the derived graph, dangling-name rules). `--strict` is the migration
 gate: do not ship a catalog that lints dirty.
 
@@ -239,7 +239,8 @@ dsl41 host drain local -S ./run1/control.sock   # stop routing new work here
 dsl41 host activate local -S ./run1/control.sock    # route again; re-dispatch held
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
-dsl41 rehearse jobs.jil --hours 24              # virtual clock: a day in seconds
+dsl41 rehearse jobs.jil --hours 24 --summary    # virtual clock: a day in seconds
+dsl41 release-held -S ./run1/control.sock       # estate-wide OFF_HOLD sweep
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
@@ -429,8 +430,8 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   `permit_unknown` is not set, the DL-07 firewall refuses unknown attributes.
   Calendar/cycle repeat-key lanes (`CalendarIR.conditions`, `CycleIR.periods`,
   DL-57) keep real multi-condition/multi-period autocal exports loadable.
-- src/dsl41/lint.py — Violation model + rules L001-L020 (pure IR-F rules L001-L005/L015,
-  truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 and L020 over the
+- src/dsl41/lint.py — Violation model + rules L001-L021 (pure IR-F rules L001-L005/L015,
+  truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 and L020-L021 over the
   derived graph, dangling-name rules L016-L018)
 - src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes that produce edges, mutex
   pairs, box tree, same-cycle detection, M01-M36 mapping-row classification
@@ -689,7 +690,8 @@ count) plus the 28-file synthetic/doc-derived JIL corpus under
   or one lineage anchor, read in period order), `run` (headless executor: wall clock,
   real processes, control socket, stop with SIGINT/SIGTERM, and `--detached` runs CMD
   jobs under a supervisor that survives engine restarts), `rehearse` (virtual
-  clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`
+  clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`,
+  `release-held` (the estate-wide OFF_HOLD sweep, one envelope per held job)
   and `query` (clients of a running engine's control socket), `supervise`
   (11f: `list`/`shutdown` a run-root's detached supervisor, read-only by default),
   `ui` (the ss11 Textual TUI attached to a running engine — `run --ui` starts both

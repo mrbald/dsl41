@@ -188,6 +188,65 @@ def sendevent(
     _mutate(socket_path, request)
 
 
+def release_held(
+    socket_path: Path = _SOCKET_OPT,
+    dry_run: bool = typer.Option(False, "--dry-run", help="List the held jobs, send nothing."),
+) -> None:
+    """Release every ON_HOLD job in one sweep -- the estate-wide OFF_HOLD
+    the one-job `sendevent` cannot say (DL-180).
+
+    A CLIENT-side sweep, not a protocol verb: ONE `status` read both
+    selects the held jobs and supplies the revision every OFF_HOLD envelope
+    is composed against -- the sweep acts on exactly what it saw, so a job
+    that moved in between is REJECTED with its own printed decision rather
+    than re-released over a state nobody looked at. A release that loses
+    the race to another operator applies as the journaled no-op
+    (control-protocol ss3, DL-158's "the OFF_HOLD shape"); applying one
+    also re-evaluates the job's start (SEM-21), exactly as the one-job
+    verb does.
+
+    Exit codes: 2 when the status read failed (nothing was sent);
+    otherwise 0 when every release applied, 1 when any per-job decision
+    did not -- the per-job answers, each prefixed `-- <job>`, carry
+    `sendevent`'s 0/2/3/4 detail, which one aggregate number cannot."""
+    from dsl41.runner_admission import addressed_key
+    from dsl41.runner_control import claimed_actor, command
+
+    response = _control_roundtrip(socket_path, {"cmd": "status"})
+    if not response.get("ok"):
+        raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
+    header = read_header_of(response)
+    if header is None:
+        raise typer.Exit(2)
+    baseline, epoch = header
+    rows = response.get("jobs", {})
+    held = sorted(name for name, row in rows.items() if row.get("on_hold"))
+    if not held:
+        typer.echo("no jobs held")
+        raise typer.Exit(0)
+    if dry_run:
+        for name in held:
+            typer.echo(name)
+        raise typer.Exit(0)
+    all_applied = True
+    for name in held:
+        payload = {"job": name}
+        request = command(
+            "OFF_HOLD",
+            payload,
+            key=addressed_key("OFF_HOLD", payload),
+            revision=int(rows[name]["state_rev"]),
+            baseline_id=baseline,
+            epoch=epoch,
+            request_id=None,
+            claimed_actor=claimed_actor(),
+        )
+        typer.echo(f"-- {name}")
+        if command_outcome(socket_path, request) != 0:
+            all_applied = False
+    raise typer.Exit(0 if all_applied else 1)
+
+
 def host(
     action: str = typer.Argument(..., help="list|drain|activate|evict"),
     host_id: str = typer.Argument(None, help="The host id (all but `list`)."),

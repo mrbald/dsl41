@@ -1013,6 +1013,189 @@ def test_cli_rehearse_with_a_scenario_file(tmp_path: Path) -> None:
     assert "SUCCESS" in result.output
 
 
+def test_cli_rehearse_scenario_object_default_and_summary(tmp_path: Path) -> None:
+    """DL-180 (4)+(5): `adapter.default` in the runs-entry object form used
+    to die as a leaked KeyError(0); --summary appends per-job run counts,
+    never-started catalog jobs included with runs=0."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text(
+        "insert_job: twice_job\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: idle_job\njob_type: c\ncommand: x\nmachine: m1\n",
+        encoding="utf-8",
+    )
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps(
+            {
+                "adapter": {"default": {"duration_s": 0.0, "exit_code": 0}},
+                "events": [
+                    {
+                        "at": "2026-07-06T08:00:00",
+                        "kind": "STARTJOB",
+                        "payload": {"job": "twice_job"},
+                    },
+                    {
+                        "at": "2026-07-06T09:00:00",
+                        "kind": "STARTJOB",
+                        "payload": {"job": "twice_job"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2026-07-06T08:00:00",
+            "--hours",
+            "2",
+            "--summary",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "twice_job runs=2 final=SUCCESS" in result.output
+    assert "idle_job runs=0 final=-" in result.output
+
+
+def test_cli_rehearse_scenario_park_per_job_and_per_run(tmp_path: Path) -> None:
+    """DL-180 (3): `park` parks every run of the named jobs -- the file
+    watcher that must not fire -- and a runs entry with park:true parks one
+    run while the default still completes the rest."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text(
+        "insert_job: watcher\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: worker\njob_type: c\ncommand: x\nmachine: m1\n",
+        encoding="utf-8",
+    )
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps(
+            {
+                "adapter": {
+                    "park": ["watcher"],
+                    "runs": [{"job": "worker", "run_number": 2, "park": True}],
+                },
+                "events": [
+                    {
+                        "at": "2026-07-06T08:00:00",
+                        "kind": "STARTJOB",
+                        "payload": {"job": "watcher"},
+                    },
+                    {"at": "2026-07-06T08:00:00", "kind": "STARTJOB", "payload": {"job": "worker"}},
+                    {"at": "2026-07-06T09:00:00", "kind": "STARTJOB", "payload": {"job": "worker"}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2026-07-06T08:00:00",
+            "--hours",
+            "2",
+            "--summary",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "watcher runs=1 final=RUNNING" in result.output  # parked, never completes
+    assert "worker runs=2 final=RUNNING" in result.output  # run 1 done, run 2 parked
+
+
+def test_cli_rehearse_scenario_bad_default_shape_names_both_forms(tmp_path: Path) -> None:
+    jil = tmp_path / "estate.jil"
+    jil.write_text("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(json.dumps({"adapter": {"default": {"duration": 1}}}), encoding="utf-8")
+    result = cli_runner.invoke(app, ["rehearse", str(jil), "--scenario", str(scenario)])
+    assert result.exit_code == 2
+    assert "adapter.default" in result.output
+    assert "duration_s" in result.output
+
+
+def test_cli_rehearse_format_json_carries_trace_and_per_job_summary(tmp_path: Path) -> None:
+    jil = tmp_path / "estate.jil"
+    jil.write_text("insert_job: js_job\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {"at": "2026-07-06T08:00:00", "kind": "STARTJOB", "payload": {"job": "js_job"}}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2026-07-06T08:00:00",
+            "--hours",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    assert doc["jobs"]["js_job"] == {"runs": 1, "final_status": "SUCCESS"}
+    assert any(t["transition"].endswith("->STARTING") for t in doc["trace"])
+    bogus = cli_runner.invoke(app, ["rehearse", str(jil), "--format", "yaml"])
+    assert bogus.exit_code == 2
+    assert "text|json" in bogus.output
+
+
+def test_cli_rehearse_format_json_keeps_stdout_one_document_under_warns(tmp_path: Path) -> None:
+    """DL-180 review B1: preflight WARN used to print to stdout AHEAD of the
+    JSON document, so any warn-carrying estate broke `| jq`. Under --format
+    json the WARN lines go to stderr; stdout parses whole."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text(
+        "insert_job: warned_job\njob_type: c\ncommand: x\nmachine: m1\nn_retrys: 2\n",
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-07-06T08:00:00",
+            "--hours",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["jobs"]["warned_job"] == {"runs": 0, "final_status": None}
+    assert "preflight WARN" in result.stderr
+    # text mode is unchanged: the same estate keeps its WARN on stdout
+    text = cli_runner.invoke(
+        app, ["rehearse", str(jil), "--start", "2026-07-06T08:00:00", "--hours", "1"]
+    )
+    assert text.exit_code == 0, text.output
+    assert "preflight WARN" in text.stdout
+
+
 def test_cli_rehearse_preflight_error_estate_exits_2(tmp_path: Path) -> None:
     jil = tmp_path / "bad.jil"
     jil.write_text(
@@ -1124,6 +1307,101 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def _release_held_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from dsl41.cli import app; app()",
+            "release-held",
+            *args,
+            "--socket",
+            str(sock_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
+    """DL-180 (2): the estate-wide OFF_HOLD. One status read, then one
+    ordinary per-job envelope per held job -- the unheld job is untouched,
+    --dry-run only lists, and the empty sweep says so and exits 0."""
+    jil = short_root / "estate.jil"
+    jil.write_text(
+        "insert_job: held_one\njob_type: c\ncommand: exit 0\n\n"
+        "insert_job: held_two\njob_type: c\ncommand: exit 0\n\n"
+        "insert_job: free_job\njob_type: c\ncommand: exit 0\n",
+        encoding="utf-8",
+    )
+    run_root = short_root / "run"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from dsl41.cli import app; app()",
+            "run",
+            str(jil),
+            "--run-root",
+            str(run_root),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        sock_path = run_root / "control.sock"
+        wait_for(lambda: sock_path.exists(), timeout_s=5.0)
+        for job in ("held_one", "held_two"):
+            resp = wait_for(
+                lambda j=job: _sync_sendevent(sock_path, "ON_HOLD", job=j), timeout_s=5.0
+            )
+            assert resp["ok"] is True
+
+        def both_held() -> bool:
+            r = _sync_control_call(sock_path, {"cmd": "status"})
+            return (
+                bool(r["ok"])
+                and r["jobs"]["held_one"]["on_hold"]
+                and r["jobs"]["held_two"]["on_hold"]
+            )
+
+        wait_for(both_held, timeout_s=5.0)
+
+        listed = _release_held_cli(sock_path, "--dry-run")
+        assert listed.returncode == 0, listed.stderr
+        assert listed.stdout.split() == ["held_one", "held_two"]
+
+        swept = _release_held_cli(sock_path)
+        assert swept.returncode == 0, swept.stderr
+        assert "-- held_one" in swept.stdout
+        assert "-- held_two" in swept.stdout
+        assert "free_job" not in swept.stdout
+
+        def released() -> bool:
+            r = _sync_control_call(sock_path, {"cmd": "status"})
+            return (
+                bool(r["ok"])
+                and not r["jobs"]["held_one"]["on_hold"]
+                and not r["jobs"]["held_two"]["on_hold"]
+            )
+
+        wait_for(released, timeout_s=5.0)
+
+        empty = _release_held_cli(sock_path)
+        assert empty.returncode == 0, empty.stderr
+        assert "no jobs held" in empty.stdout
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
 
 # --------------------------------------------------- 7. status query extensions (11d, DL-46)

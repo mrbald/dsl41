@@ -42,7 +42,7 @@ import sys
 import time
 import uuid
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -204,23 +204,34 @@ class JobAdapter(Protocol):
 
 class FakeAdapter:
     """ss6: scripted ``(job, run_number) -> (duration_s, exit_code)``;
-    default instant success. ``default=None`` makes unscripted runs INERT:
-    the task parks on a sleep at datetime.max, which no real horizon ever
-    reaches, so the SCRIPT drives completions via injected STATUS -- exactly
-    the role the oracle trace tests already play. The bisimulation harness
-    runs this mode; rehearse scenarios use scripted entries."""
+    default instant success. A ``None`` entry -- per run in the script, per
+    job via ``park``, or estate-wide via ``default=None`` -- makes the run
+    INERT: the task parks on a sleep at datetime.max, which no real horizon
+    ever reaches, so the SCRIPT drives completions via injected STATUS --
+    exactly the role the oracle trace tests already play. The bisimulation
+    harness runs the estate-wide mode; rehearse scenarios use scripted
+    entries and ``park`` for jobs -- file watchers above all -- that must
+    not fire. Precedence: script entry, then park, then default."""
 
     def __init__(
         self,
-        script: Mapping[tuple[str, int], tuple[float, int]] | None = None,
+        script: Mapping[tuple[str, int], tuple[float, int] | None] | None = None,
         *,
         default: tuple[float, int] | None = (0.0, 0),
+        park: Collection[str] = (),
     ) -> None:
         self.script = dict(script or {})
         self.default = default
+        self.park = frozenset(park)
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> int:
-        entry = self.script.get((job_ir.name, run_number), self.default)
+        key = (job_ir.name, run_number)
+        if key in self.script:
+            entry = self.script[key]
+        elif job_ir.name in self.park:
+            entry = None
+        else:
+            entry = self.default
         if entry is None:
             await ctx.clock.sleep_until(datetime.max)
             raise AssertionError("inert park elapsed: horizon reached datetime.max")
