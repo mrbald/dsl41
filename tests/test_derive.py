@@ -1098,7 +1098,7 @@ def test_l020_fires_once_on_the_corpus_fixture() -> None:
 
 
 def test_l021_fires_for_the_condition_only_double_fire_shape() -> None:
-    """DL-180's production shape: `s(A) & s(B) & n(C)`, meant once a day,
+    """DL-180's reported shape: `s(A) & s(B) & n(C)`, meant once a day,
     fired twice. Three wake sources, two unqualified latches -- either
     producer's completion finds the other's latch true, and every completion
     of the guard is a third trigger."""

@@ -1000,7 +1000,7 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     s(A) & s(B) double fire, either job's completion finding the other's
     latch still true, and the bare n(C) guard, which every completion of C
     turns into a TRIGGER while the other atoms stay latched. Both shapes
-    fired one production job twice a day (DL-180).
+    fired one reported job twice a day (DL-180).
 
     Exemptions, each a cap this rule would otherwise restate: a scheduled
     consumer arms and runs at most once per tick (SEM-32; its staleness

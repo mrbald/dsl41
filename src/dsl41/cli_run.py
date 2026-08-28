@@ -801,7 +801,7 @@ def _emit_rehearsal(
     target (out-of-band markers carry no "->" and count for neither).
     Never-started catalog jobs appear with runs=0: "which job fired how
     often" is the question a rehearsal answers (DL-180 -- counting trace
-    lines by hand was most of the user's harness)."""
+    lines by hand was most of the reporting harness)."""
     import json as json_mod
 
     run_counts: dict[str, int] = {}

@@ -10882,8 +10882,8 @@ relitigate an entry; append a new one.
   each self-verifies (a rename, named tuples the type checker
   re-checks, refusal bytes the suite pins) -- allocation per the
   brief.
-- DL-180 the first field feedback batch: five gaps from a user
-  rehearsing a production double fire (2026-08-28). The job:
+- DL-180 the first field feedback batch: five gaps surfaced by
+  rehearsing a reported double fire (2026-08-28). The job:
   `condition: s(A) & s(B) & n(C)`, meant once a day, fired twice --
   the s()&s() stale latch, and the n() guard doubling as a trigger
   (SEM-01 x DL-13). Decisions, one per gap:
@@ -10915,7 +10915,7 @@ relitigate an entry; append a new one.
   (5) Rehearse grows `--summary` and `--format json`: per-job run
   counts (transitions into STARTING) and final statuses, catalog jobs
   with zero runs included -- counting trace lines by hand was most of
-  the user's harness. The trace line format itself is unchanged.
+  the reporting harness. The trace line format itself is unchanged.
   AMENDED same day, after running the rule over the estates: global
   gates are OUTSIDE L021, as wake and as latch both. A v() flag does
   wake on SET_GLOBAL and never expires (SEM-08), but whether it is
@@ -10999,7 +10999,7 @@ relitigate an entry; append a new one.
   through N virtual days and compare observed per-job run counts
   against expectations, vendor-faithful (no run root -- statuses
   latch across days, which is exactly what reproduced the DL-180
-  production double fire).
+  double fire).
   Shape: a rehearse mode (working name `rehearse --check-cadence`,
   final surface open). Scheduled producers complete per their own
   ticks under the FakeAdapter default; condition-only chains follow.
