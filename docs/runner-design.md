@@ -829,7 +829,10 @@ this jump possible.
 - `dsl41 rehearse` — VirtualClock + FakeAdapter + optional scenario, in
   batch mode. It exits when quiescent (no queued events, no due timers,
   no occurrence within the horizon). Same engine loop, byte-identical
-  trace format.
+  trace format. `--check-cadence` (DL-182/DL-184) compares each job's
+  observed run count — a run_number delta — against a typed cadence
+  bound and exits 3 on deviations; `--cadence-policy` declares intended
+  exceptions. The expectation side lives in `rehearse_check.py`.
 
 ## 10. Control plane
 

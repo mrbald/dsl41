@@ -11096,3 +11096,107 @@ relitigate an entry; append a new one.
   fixes -- helpers the type checker re-checks, counts the suite
   pins, message text the unit tests pin (allocation per the DL-179
   precedent). Tag arch-review/2026-08-28.
+- DL-184 (2026-08-31) the DL-182 open items, ruled after a two-round
+  fresh-context adversarial design review (plan and findings on file
+  in the session scratchpad; every acted finding re-verified against
+  the tree before folding). The check's stance first, because two
+  findings turned on it: the expectation is a POLICY BOUND -- the
+  DL-182 default, "at most once per own cadence" -- not a soundness
+  proof. An estate that legitimately exceeds it (the unqualified OR
+  join firing once per wake, the DL-180 shape) is the check's
+  intended true positive; the policy file is the declared-exception
+  channel, the L021-qualifier precedent. Deviations are triage
+  findings. Every per-job expectation is TYPED: policy(N) with its
+  provenance named, or unchecked with the reason -- and unchecked is
+  ABSORBING through conditions, box containment and cycle SCCs.
+  Exit-0 claims are scoped to checked jobs and the sweeps actually
+  run.
+  Surface: `rehearse --check-cadence`, plus `--sweep fail|flags`
+  (repeatable; refuses without the mode flag) and `--cadence-policy
+  FILE` -- NOT `--expect`, which is the control plane's revision
+  precondition. Policy schema: {"schema_version": 1, "policies":
+  {JOB: {"max_runs": N|null, "reason": non-empty}}}; strict on
+  unknown keys and unknown jobs; null = unchecked; the reason prints
+  in the report. --format keeps its three meanings; the json
+  document gains ONE nested versioned `cadence_check` block and the
+  legacy jobs[*].runs stays byte-identical. --run-root is
+  baseline-only (a sweep replays the estate; one journal claims one
+  run). Exit 3 = played clean, deviations found -- per-verb exit
+  codes are the house pattern (run's 3 is sealed; the control verbs
+  re-split 2), and the cli_run exit-code note carries the row.
+  Mechanics, each the review's correction of a first-draft error:
+  a run is a run_number increment read from the oracle store, never
+  a STARTING transition (ON_NOEXEC bypasses STARTING yet consumes
+  the tick, Q3/DL-54; injected events could forge trace lines).
+  Wake sources are ALL start-gate edges -- lookback-qualified
+  producers still wake (L021's own reading) and bare n() partners
+  are wake sources and never latches (M07/R6) -- while global-gated
+  consumers are unchecked until the flag sweep scripts their flags.
+  A box member is min-composed, never summed: an unscheduled member
+  inherits bound(parent); a scheduled one takes min(bound(parent),
+  own ticks + injected STARTJOBs) -- SEM-10 runs a member at most
+  once per box execution, and a sum would hide exactly the double
+  run the check hunts. Injected FORCE_STARTJOBs add after the min.
+  Scenario events in check mode are allow-listed to STARTJOB /
+  FORCE_STARTJOB / SET_GLOBAL, each start budgeted +1 on its target;
+  a scripted STATUS forges the counts under test and refuses. The
+  adapter synthesizes each job's completion exit from its OWN
+  SEM-09 boundary in both directions (fail_codes can classify exit
+  0 as FAILURE, so the FakeAdapter global default is not a happy
+  path); a job whose exit vocabulary cannot express the needed
+  class is inconclusive-and-skipped, as are BOX producers (no
+  adapter) and n_retrys > 0 producers (retries unmodeled, DL-53) in
+  the fail sweep. The zero-delay-cycle guard grows a typed
+  ZeroDelayCycleError carrying the frozen instant and the jobs that
+  started there; check mode converts exactly that subtype into an
+  unbounded-multi-fire finding (the check FOUND what it hunts) and
+  every other EngineError keeps exit 1. File watchers auto-park and
+  sit unchecked unless scripted.
+  Deferred, still open: sweep (b) completion-order permutations
+  (DL-182 left v1-or-follows open; the coverage block keeps exit 0
+  honest about it -- when built, seeded duration permutations over
+  same-tick cohorts, no hypothesis import into src, the
+  equiv_scripts precedent); rich per-sweep run roots (nothing
+  consumes a sweep's journal today); failing a BOX producer via a
+  scripted leaf member. Slices: expectations + comparator + happy
+  path first, the fail sweep second, the flag sweep third -- the
+  flag sweep builds whole-condition satisfying assignments on the
+  equivalence literal regions through a public API, not
+  literal-by-literal SET_GLOBALs, which miss the ordered operators
+  and compound conditions.
+  THE REVIEW (same day, two independent passes over the slice). The
+  test-writing pass found the wake walk reading only start-gate
+  edges: bare n() lives in bare_notrunning -- exactly the miss
+  L021's docstring warns edge readers about -- so the walk now folds
+  it in, and the cycle guard moved from graph.cycles to SCCs over
+  the wake adjacency (a mutual-n() pair diverged the fixpoint the
+  same way, +1 per trip; graph.cycles cannot see mutex refs). The
+  adversarial pass, acted: (a) blocker -- exit synthesis was
+  clobbering the scenario default's DURATION to zero; this entry
+  authorizes the exit, never the duration (durations drive n()
+  windows, resources and box overlap), so the synthesized entry
+  keeps the default's duration. (b) wake-flavored unchecked reasons
+  were absorbing scheduled jobs and box members whose bounds never
+  read wakes -- the SEM-30/31 arm and the SEM-10 once-per-execution
+  cap bound them regardless -- so global gate, cross-instance,
+  wake-cycle and wake-source absorption are scoped to condition-only
+  unboxed jobs; the review measured roughly half of nightbank's
+  unchecked rows as spurious before the fix. (c) the coverage line
+  separates checked from exercised ("ran N of M"): exit 0 over an
+  estate where nothing ran claimed coverage it did not have. (d)
+  finding lines print their job set in text, not only in json.
+  Minors acted: box_success globals no longer blank the box (a fold
+  starts nothing); member provenance stops claiming the injected
+  budget its min omits; the wall-clock assertion on the convergence
+  pin died (the cap raises, never hangs); text/summary stopped
+  paying for the json trace dump; JobCheck is Bound plus
+  observation. Declined, each with a re-find trigger: the ~14s spin
+  test stays, the one end-to-end guard-to-finding proof (revisit if
+  suite time draws complaints; shortening needs the instant budget
+  as an Engine parameter); play_once ships without a src caller --
+  the slice-2 sweeps are its caller, this entry's own slicing. The
+  review's own shorthand tokens tripped the citation gate (they
+  collide with the mapping-row namespace) and were inlined.
+  THE GATE: 3544 passed, 6 skipped, 2 xfailed; ruff check, ruff
+  format --check, mypy src, arch_check clean of blockers; 7 advisory
+  size notes stand for the next /arch-review.

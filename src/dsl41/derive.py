@@ -764,9 +764,12 @@ def _local_condition_adjacency(
     return preds, succs
 
 
-def _cycles(nodes: list[str], succs: dict[str, set[str]]) -> list[list[str]]:
+def cycles(nodes: list[str], succs: dict[str, set[str]]) -> list[list[str]]:
     """Tarjan SCCs (iterative); SCCs of size >1 plus self-loops, as sorted
-    node lists, list sorted for determinism. Legal AutoSys, L010 warns."""
+    node lists, list sorted for determinism. Legal AutoSys, L010 warns.
+    Public since DL-184: the cadence check runs it over its own wake
+    adjacency (start gates plus bare n(), which mutex classification keeps
+    out of the edge set) to find the loops with no finite bound."""
     index: dict[str, int] = {}
     low: dict[str, int] = {}
     on_stack: set[str] = set()
@@ -974,7 +977,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
         if ref_ not in deduped_boundary:
             # copy: IR-G must not alias IR-F's mutable condition AST nodes
             deduped_boundary.append(ref_.model_copy())
-    cycles = _cycles(nodes, succs)  # pass 7
+    sccs = cycles(nodes, succs)  # pass 7
     return DerivedGraph(
         nodes=nodes,
         edges=edges,
@@ -984,7 +987,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
         box_tree=tree,
         external_boundary=deduped_boundary,
         redesign_flags=redesign_flags,
-        chains=_chains(nodes, preds, succs, {n for scc in cycles for n in scc}),
+        chains=_chains(nodes, preds, succs, {n for scc in sccs for n in scc}),
         parallel_groups=_parallel_groups(nodes, preds, succs),
-        cycles=cycles,
+        cycles=sccs,
     )

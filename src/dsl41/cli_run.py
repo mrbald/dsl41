@@ -42,7 +42,9 @@ if TYPE_CHECKING:
 
     from dsl41.boundary import EstateWalk
     from dsl41.oracle_state import Event, TraceEntry
+    from dsl41.rehearse_check import CadencePolicy
     from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import ZeroDelayCycleError
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
@@ -57,7 +59,9 @@ if TYPE_CHECKING:
 # refusal mid-run), 2 the run never started (preflight ERROR, resume gate,
 # unreadable scenario, unreachable socket). The control-plane verbs read the
 # same 0/1/2 and split 2 three ways on top; that half of the note went with
-# them, to cli_control.py.
+# them, to cli_control.py. Exit 3 is per-verb (the house pattern, DL-184):
+# run's 3 is a committed seal boundary; rehearse's 3 is --check-cadence
+# finding deviations after a clean play.
 
 
 def _preflight_or_exit(
@@ -806,17 +810,13 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     return FakeAdapter(script, default=default, park=park), events
 
 
-def _emit_rehearsal(
-    trace: list[TraceEntry], catalog_jobs: Iterable[str], *, fmt: RehearseFormat
-) -> None:
-    """The rehearse report: the trace, and the per-job rollup -- a run is a
-    transition INTO STARTING; the final status is the last transition's
-    target (out-of-band markers carry no "->" and count for neither).
-    Never-started catalog jobs appear with runs=0: "which job fired how
-    often" is the question a rehearsal answers (DL-180 -- counting trace
-    lines by hand was most of the reporting harness)."""
-    import json as json_mod
-
+def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, dict]:
+    """The per-job rollup rows -- a run is a transition INTO STARTING; the
+    final status is the last transition's target (out-of-band markers carry
+    no "->" and count for neither). Never-started catalog jobs appear with
+    runs=0. This display count deliberately stays STARTING-based
+    (byte-identical legacy, DL-184); the cadence check reads run_number
+    deltas from the store instead."""
     run_counts: dict[str, int] = {}
     final_status: dict[str, str] = {}
     for t in trace:
@@ -827,22 +827,98 @@ def _emit_rehearsal(
         if new_status == "STARTING":
             run_counts[t.job] = run_counts.get(t.job, 0) + 1
     names = sorted(set(catalog_jobs) | set(final_status))
+    return {
+        name: {"runs": run_counts.get(name, 0), "final_status": final_status.get(name)}
+        for name in names
+    }
+
+
+def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict:
+    """The --format json document: the full trace plus the rollup rows.
+    Built only on the json path -- text/summary never pay for the trace
+    dump (the review's m6)."""
+    return {
+        "trace": [t.model_dump(mode="json") for t in trace],
+        "jobs": _rollup(trace, catalog_jobs),
+    }
+
+
+def _emit_rehearsal(
+    trace: list[TraceEntry], catalog_jobs: Iterable[str], *, fmt: RehearseFormat
+) -> None:
+    """The rehearse report: the trace, and the per-job rollup ("which job
+    fired how often" is the question a rehearsal answers, DL-180 --
+    counting trace lines by hand was most of the reporting harness)."""
+    import json as json_mod
+
     if fmt is RehearseFormat.json:
-        doc = {
-            "trace": [t.model_dump(mode="json") for t in trace],
-            "jobs": {
-                name: {"runs": run_counts.get(name, 0), "final_status": final_status.get(name)}
-                for name in names
-            },
-        }
-        typer.echo(json_mod.dumps(doc, sort_keys=True))
+        typer.echo(json_mod.dumps(_rehearsal_doc(trace, catalog_jobs), sort_keys=True))
         return
     for t in trace:
         typer.echo(_trace_line(t))
     if fmt is RehearseFormat.summary:
         typer.echo("-- summary: runs per job --")
-        for name in names:
-            typer.echo(f"{name} runs={run_counts.get(name, 0)} final={final_status.get(name, '-')}")
+        for name, row in _rollup(trace, catalog_jobs).items():
+            typer.echo(f"{name} runs={row['runs']} final={row['final_status'] or '-'}")
+
+
+def _emit_cadence_check(
+    engine: "Engine",
+    catalog: "CatalogIR",
+    runs_before: dict[str, int],
+    *,
+    fmt: RehearseFormat,
+    start_dt: "datetime",
+    horizon: "datetime",
+    timezone: str | None,
+    tz_aliases: dict[str, str] | None,
+    policy: "CadencePolicy | None",
+    injected_start: dict[str, int],
+    injected_force: dict[str, int],
+    parked_fw: frozenset[str],
+    no_success: frozenset[str],
+    cycle: "ZeroDelayCycleError | None",
+) -> None:
+    """The --check-cadence report and exit (DL-184): expected bounds from a
+    fresh Scheduler + the wake-source walk, observed counts as run_number
+    deltas, deviations exit 3. text = table; summary = trace + table; json =
+    the legacy document plus one nested cadence_check block."""
+    import json as json_mod
+
+    from dsl41.derive import derive_graph
+    from dsl41.rehearse_check import compare, expected_bounds, render_text, scheduled_ticks
+
+    observed = {
+        name: engine.oracle.store.runtime(name).run_number - runs_before[name]
+        for name in catalog.jobs
+    }
+    ticks = scheduled_ticks(
+        catalog, start=start_dt, horizon=horizon, default_tz=timezone, tz_aliases=tz_aliases
+    )
+    bounds = expected_bounds(
+        catalog,
+        derive_graph(catalog),
+        ticks,
+        injected_start=injected_start,
+        injected_force=injected_force,
+        policy=policy,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    check = compare(catalog, bounds, observed, start=start_dt, horizon=horizon, cycle=cycle)
+    trace = engine.oracle.trace()
+    if fmt is RehearseFormat.json:
+        doc = _rehearsal_doc(trace, catalog.jobs)
+        doc["cadence_check"] = check.model_dump(mode="json")
+        typer.echo(json_mod.dumps(doc, sort_keys=True))
+    else:
+        if fmt is RehearseFormat.summary:
+            for t in trace:
+                typer.echo(_trace_line(t))
+        for line in render_text(check):
+            typer.echo(line)
+    if check.findings:
+        raise typer.Exit(3)
 
 
 def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
@@ -880,7 +956,21 @@ def rehearse(
         RehearseFormat.text,
         "--format",
         help="text: trace lines; summary: trace + per-job run counts and final"
-        " statuses; json: one document carrying both.",
+        " statuses; json: one document carrying both. With --check-cadence:"
+        " text is the comparison table, summary is trace + table, json gains"
+        " one nested cadence_check block.",
+    ),
+    check_cadence: bool = typer.Option(
+        False,
+        "--check-cadence",
+        help="Compare observed per-job run counts against the DL-182 cadence"
+        " bound and exit 3 on deviations. Latch effects across days need"
+        " --hours 48 or more.",
+    ),
+    cadence_policy: Path = typer.Option(
+        None,
+        "--cadence-policy",
+        help="Declared cadence exceptions (JSON; see command help). Requires --check-cadence.",
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
@@ -907,6 +997,19 @@ def rehearse(
     parks every run of the named jobs -- a file watcher that must not fire
     during the rehearsal -- and a runs entry with park:true parks that one
     run. Precedence: runs entry, then park, then default.
+
+    --check-cadence (DL-182/DL-184) plays the same rehearsal and compares
+    each job's observed run count (a run_number delta, never trace lines)
+    against a typed bound: own scheduler ticks, the max over wake sources
+    for condition-only jobs, min-composed for box members. Deviations exit
+    3; jobs whose bound cannot be honestly computed report as unchecked.
+    Scenario events are allow-listed to STARTJOB/FORCE_STARTJOB/SET_GLOBAL
+    (each start adds +1 to its target's bound); unscripted file watchers
+    auto-park; completions are synthesized from each job's own SEM-09
+    boundary. --cadence-policy declares intended exceptions:
+    {"schema_version": 1, "policies": {JOB:
+    {"max_runs": N | null, "reason": "..."}}} -- null means unchecked, the
+    reason prints in the report.
     """
     import asyncio
 
@@ -917,9 +1020,11 @@ def rehearse(
     from dsl41.period import runtime_profile_from_cli
     from dsl41.runner import Engine
     from dsl41.runner_startup import start_run
-    from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
     from dsl41.runner_scheduler import Scheduler
 
+    if cadence_policy is not None and not check_cadence:
+        raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
     catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     start_dt = (
         _naive_utc_arg(start, "--start")
@@ -939,6 +1044,22 @@ def rehearse(
         adapter, events = _scenario_adapter(scenario)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"scenario {scenario}")) from exc
+    parked_fw: frozenset[str] = frozenset()
+    no_success: frozenset[str] = frozenset()
+    policy = None
+    injected_start: dict[str, int] = {}
+    injected_force: dict[str, int] = {}
+    if check_cadence:
+        from dsl41.rehearse_check import CadenceCheckError, check_adapter, load_policy
+        from dsl41.rehearse_check import scenario_budgets
+
+        try:
+            if cadence_policy is not None:
+                policy = load_policy(cadence_policy, catalog)
+            injected_start, injected_force = scenario_budgets(events)
+        except CadenceCheckError as exc:
+            raise typer.Exit(refuse(exc)) from exc
+        adapter, parked_fw, no_success = check_adapter(catalog, adapter)
     clock = VirtualClock(start_dt)
     scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone, tz_aliases=tz_aliases)
     adapters = {"CMD": adapter, "FW": adapter}
@@ -974,6 +1095,7 @@ def rehearse(
         raise typer.Exit(refuse(exc)) from exc
     if warns and engine.journal is not None:
         engine.journal.preflight(warns)
+    runs_before = {name: engine.oracle.store.runtime(name).run_number for name in catalog.jobs}
     for ev in events:
         engine.inject(ev, source="control")
     horizon = start_dt + timedelta(hours=hours)
@@ -984,15 +1106,39 @@ def rehearse(
         finally:
             await engine.shutdown()
 
+    cycle: ZeroDelayCycleError | None = None
     try:
         asyncio.run(_play())
+    except ZeroDelayCycleError as exc:
+        if not check_cadence:
+            typer.echo(f"rehearse failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        cycle = exc  # the check's own finding, not a shell failure (DL-184)
     except (EngineError, OracleError) as exc:
         typer.echo(f"rehearse failed: {exc}", err=True)
         raise typer.Exit(1) from exc
     finally:
         if engine.journal is not None:
             engine.journal.close()
-    _emit_rehearsal(engine.oracle.trace(), catalog.jobs, fmt=output)
+    if not check_cadence:
+        _emit_rehearsal(engine.oracle.trace(), catalog.jobs, fmt=output)
+        return
+    _emit_cadence_check(
+        engine,
+        catalog,
+        runs_before,
+        fmt=output,
+        start_dt=start_dt,
+        horizon=horizon,
+        timezone=timezone,
+        tz_aliases=tz_aliases,
+        policy=policy,
+        injected_start=injected_start,
+        injected_force=injected_force,
+        parked_fw=parked_fw,
+        no_success=no_success,
+        cycle=cycle,
+    )
 
 
 # ------------------------------------------------- reading a run back

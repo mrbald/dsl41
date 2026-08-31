@@ -191,7 +191,7 @@ from dsl41.runner_admission import (
     apply_attempt,
     fingerprint,
 )
-from dsl41.runner_clock import Clock, EngineError
+from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
 from dsl41.runner_effects import (
     Effect,
     EffectOutcome,
@@ -1280,11 +1280,21 @@ class Engine:
                 continue  # a pure wait is not same-instant work: skip the budget
             instant_events += 1
             if instant_events > instant_budget:
-                raise EngineError(
+                assert instant is not None  # set the iteration `now` first moved
+                started = sorted(
+                    {
+                        t.job
+                        for t in self.oracle.trace()
+                        if t.at == instant and t.transition.endswith("->STARTING")
+                    }
+                )
+                raise ZeroDelayCycleError(
                     f"no virtual-time progress after {instant_events} events at "
                     f"{instant}: zero-delay condition cycle with instant completions? "
                     "(the AutoSys tight-loop pattern, L010; give the loop's jobs a "
-                    "nonzero FakeAdapter duration or break the cycle)"
+                    "nonzero FakeAdapter duration or break the cycle)",
+                    instant=instant,
+                    jobs=tuple(started),
                 )
 
     def _note_corpse(self, task: asyncio.Task[None]) -> None:

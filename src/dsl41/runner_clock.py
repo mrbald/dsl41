@@ -28,6 +28,19 @@ class EngineError(RuntimeError):
     run_until_quiescent. Loud by design (CLAUDE.md: no silent loss)."""
 
 
+class ZeroDelayCycleError(EngineError):
+    """The instant-budget guard, typed (DL-184): a zero-delay condition
+    cycle generated unbounded work at one frozen virtual instant. Carries
+    the instant and the jobs that started there so `rehearse
+    --check-cadence` can convert exactly this refusal -- and no other
+    EngineError -- into an unbounded-multi-fire finding."""
+
+    def __init__(self, message: str, *, instant: datetime, jobs: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.instant = instant
+        self.jobs = jobs
+
+
 class Clock(Protocol):
     """ss9 time domain: the engine's only source of "now" and waiting."""
 

@@ -926,11 +926,13 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
-def _start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
+def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
     """The start-gate edges indexed by CONSUMER -- the one index L020, L021
     and L022 each read. DL-162 homed the predicate (`is_start_gate`); this
     homes the index it was being folded into per rule (arch-review
-    2026-08-28)."""
+    2026-08-28). Public since DL-184: the cadence check's wake-source walk
+    reads the same index, and a private cross-module import is the DL-75
+    gate's own blocking class."""
     gates: dict[str, list[DerivedEdge]] = {}
     for edge in graph.edges:
         if edge.is_start_gate:
@@ -965,7 +967,7 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     (DL-162a)."""
     predecessors: dict[str, dict[str, str | None]] = {
         dst: {edge.src: local_producer(edge, catalog) for edge in edges}
-        for dst, edges in _start_gates(graph).items()
+        for dst, edges in start_gates(graph).items()
     }
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
@@ -1037,7 +1039,7 @@ def rule_l021(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     edge reader sees that they wake. Self counts: n(self) next to a latch
     re-triggers the job on its own completion, a tight loop L010 cannot
     see because mutex refs are not edges."""
-    gates = _start_gates(graph)
+    gates = start_gates(graph)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         if job.schedule is not None or job.box.box_name is not None:
@@ -1160,7 +1162,7 @@ def rule_l022(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
             current = parents.get(current)
         return False
 
-    gates = _start_gates(graph)
+    gates = start_gates(graph)
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         attr = job.sem.condition

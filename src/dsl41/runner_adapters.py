@@ -211,7 +211,12 @@ class FakeAdapter:
     exactly the role the oracle trace tests already play. The bisimulation
     harness runs the estate-wide mode; rehearse scenarios use scripted
     entries and ``park`` for jobs -- file watchers above all -- that must
-    not fire. Precedence: script entry, then park, then default."""
+    not fire. ``job_default`` is a per-job completion used when no script
+    entry matches and the job is not parked: the cadence check synthesizes
+    each job's exit from its own SEM-09 boundary there, because the global
+    exit-0 default is a FAILURE under a ``fail_codes`` that lists 0
+    (DL-184). Precedence: script entry, then park, then job_default, then
+    default."""
 
     def __init__(
         self,
@@ -219,10 +224,12 @@ class FakeAdapter:
         *,
         default: tuple[float, int] | None = (0.0, 0),
         park: Collection[str] = (),
+        job_default: Mapping[str, tuple[float, int] | None] | None = None,
     ) -> None:
         self.script = dict(script or {})
         self.default = default
         self.park = frozenset(park)
+        self.job_default = dict(job_default or {})
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> int:
         key = (job_ir.name, run_number)
@@ -230,6 +237,8 @@ class FakeAdapter:
             entry = self.script[key]
         elif job_ir.name in self.park:
             entry = None
+        elif job_ir.name in self.job_default:
+            entry = self.job_default[job_ir.name]
         else:
             entry = self.default
         if entry is None:
