@@ -1229,7 +1229,7 @@ def test_run_fail_sweep_suppresses_the_release_consumer_and_wakes_the_failure_co
     case_adapter = FakeAdapter(
         script, default=adapter.default, park=adapter.park, job_default=adapter.job_default
     )
-    result = play_once(catalog, start=START, horizon=HORIZON, adapter=case_adapter, case="fail:P")
+    result = play_once(catalog, start=START, horizon=HORIZON, adapter=case_adapter)
     assert result.runs["C2"] == 1  # released, and at most once (its own tick caps it)
 
 
@@ -1519,6 +1519,39 @@ def test_flag_sweep_genesis_true_atoms_earn_the_at_start_credit() -> None:
     }
     assert truth(atoms["NOTRUNNING"]) is True  # never-run partner is notrunning
     assert truth(atoms["SUCCESS"]) is False  # SEM-24 cannot seed a terminal
+
+
+def test_flag_case_checked_counts_only_wake_dependent_global_consumers() -> None:
+    """The arch review's verified over-count (DL-185): a SCHEDULED job with
+    a v() condition is bounded by its own ticks before the sweep and after
+    it -- only the wake-dependent consumer moved, so only it counts in
+    FlagCase.checked. The third hand copy of the global-gated predicate
+    counted both."""
+    text = (
+        "insert_job: fa\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: flag_join\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(fa) & v(FLAG) = 1\n\n"
+        "insert_job: sched_flag\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: v(FLAG) = 1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    adapter, parked_fw, no_success = check_adapter(catalog, FakeAdapter({}, default=(0.0, 0)))
+    fcases, _findings, _uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    assert fcases and all(c.checked == 1 for c in fcases)  # flag_join alone
 
 
 def test_run_flag_sweep_base_scenario_set_global_joins_the_scripted_set() -> None:

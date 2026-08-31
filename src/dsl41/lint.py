@@ -97,7 +97,7 @@ from pydantic import BaseModel
 from dsl41.ast_jil import SourceSpan
 from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
-from dsl41.derive import DerivedEdge, DerivedGraph, derive_graph, local_producer
+from dsl41.derive import DerivedGraph, derive_graph, local_producer, start_gates
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
 
 Severity = Literal["error", "warn", "info"]
@@ -924,20 +924,6 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
             )
         )
     return out
-
-
-def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
-    """The start-gate edges indexed by CONSUMER -- the one index L020, L021
-    and L022 each read. DL-162 homed the predicate (`is_start_gate`); this
-    homes the index it was being folded into per rule (arch-review
-    2026-08-28). Public since DL-184: the cadence check's wake-source walk
-    reads the same index, and a private cross-module import is the DL-75
-    gate's own blocking class."""
-    gates: dict[str, list[DerivedEdge]] = {}
-    for edge in graph.edges:
-        if edge.is_start_gate:
-            gates.setdefault(edge.dst, []).append(edge)
-    return gates
 
 
 def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:

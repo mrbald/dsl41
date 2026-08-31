@@ -51,10 +51,9 @@ from dsl41.conditions import (
     compare_value,
     iter_atoms,
 )
-from dsl41.derive import DerivedGraph, cycles, local_producer
+from dsl41.derive import DerivedGraph, cycles, local_producer, start_gates
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.lint import start_gates
-from dsl41.oracle_state import Event, TraceEntry
+from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock, ZeroDelayCycleError
@@ -182,6 +181,37 @@ class FlagCase(BaseModel):
     checked: int = 0  # consumers this case moved from unchecked to checked
     deviations: int = 0
     cycle: bool = False
+
+
+def _multi_fire_findings(
+    bounds: Mapping[str, Bound], runs: Mapping[str, int], *, case: str | None = None
+) -> list[CheckFinding]:
+    """The one spelling of "observed > bound becomes a multi_fire finding"
+    -- the happy path and both sweeps carried a copy each, and the copies
+    had begun to drift (DL-185)."""
+    out: list[CheckFinding] = []
+    for name in sorted(runs):
+        bound = bounds.get(name)
+        if bound is not None and bound.expected is not None and runs[name] > bound.expected:
+            out.append(
+                CheckFinding(
+                    kind="multi_fire",
+                    jobs=[name],
+                    detail=(
+                        f"observed {runs[name]} runs, expected at most"
+                        f" {bound.expected} ({bound.provenance})"
+                    ),
+                    case=case,
+                )
+            )
+    return out
+
+
+def _cycle_finding(cycle: ZeroDelayCycleError, *, case: str | None = None) -> CheckFinding:
+    """The one spelling of the guard-trip conversion (DL-185)."""
+    return CheckFinding(
+        kind="zero_delay_cycle", jobs=list(cycle.jobs), detail=str(cycle), case=case
+    )
 
 
 class CadenceCheck(BaseModel):
@@ -387,7 +417,6 @@ def run_fail_sweep(
             events=list(events),
             default_tz=default_tz,
             tz_aliases=tz_aliases,
-            case=case_id,
         )
         suppressed = {
             name: baseline_runs.get(name, 0) - runs
@@ -403,28 +432,8 @@ def run_fail_sweep(
             )
         )
         if result.cycle is not None:
-            findings.append(
-                CheckFinding(
-                    kind="zero_delay_cycle",
-                    jobs=list(result.cycle.jobs),
-                    detail=str(result.cycle),
-                    case=case_id,
-                )
-            )
-        for name in sorted(result.runs):
-            bound = bounds[name]
-            if bound.expected is not None and result.runs[name] > bound.expected:
-                findings.append(
-                    CheckFinding(
-                        kind="multi_fire",
-                        jobs=[name],
-                        detail=(
-                            f"observed {result.runs[name]} runs, expected at most"
-                            f" {bound.expected} ({bound.provenance})"
-                        ),
-                        case=case_id,
-                    )
-                )
+            findings.append(_cycle_finding(result.cycle, case=case_id))
+        findings.extend(_multi_fire_findings(bounds, result.runs, case=case_id))
     return cases, findings
 
 
@@ -666,6 +675,7 @@ def run_flag_sweep(
         if ev.kind == "SET_GLOBAL":
             base_globals.append((str(ev.payload["name"]), str(ev.payload["value"]), ev.at <= start))
     cases_spec, uncovered = flag_cases(catalog, graph)
+    gated = _wake_dep_global_consumers(catalog, graph)
     mid = start + (horizon - start) / 2
     out: list[FlagCase] = []
     findings: list[CheckFinding] = []
@@ -705,53 +715,28 @@ def run_flag_sweep(
             events=[*events, *case_events],
             default_tz=default_tz,
             tz_aliases=tz_aliases,
-            case=case_id,
         )
-        deviations = 0
         if result.cycle is not None:
-            findings.append(
-                CheckFinding(
-                    kind="zero_delay_cycle",
-                    jobs=list(result.cycle.jobs),
-                    detail=str(result.cycle),
-                    case=case_id,
-                )
-            )
-        for name in sorted(result.runs):
-            bound = bounds[name]
-            if bound.expected is not None and result.runs[name] > bound.expected:
-                deviations += 1
-                findings.append(
-                    CheckFinding(
-                        kind="multi_fire",
-                        jobs=[name],
-                        detail=(
-                            f"observed {result.runs[name]} runs, expected at most"
-                            f" {bound.expected} ({bound.provenance})"
-                        ),
-                        case=case_id,
-                    )
-                )
+            findings.append(_cycle_finding(result.cycle, case=case_id))
+        case_findings = _multi_fire_findings(bounds, result.runs, case=case_id)
+        findings.extend(case_findings)
+        # ONE predicate decides who is a global-gated consumer (DL-185: the
+        # third hand copy of this rule counted a scheduled job whose bound
+        # never moved -- the house over-claim class)
         scripted_names = {n for n, _v, _s in scripted}
-        checked = 0
-        for name, job in catalog.jobs.items():
-            cond_attr = job.sem.condition
-            if cond_attr is None:
-                continue
-            gnames = {a.name for a in iter_atoms(cond_attr.cond) if isinstance(a, GlobalAtom)}
-            if (
-                gnames
-                and gnames & set(assignment)  # this case's own globals, not
-                and gnames <= scripted_names  # purely base-scripted rows (m1)
-                and bounds[name].expected is not None
-            ):
-                checked += 1
+        checked = sum(
+            1
+            for name, gnames in gated.items()
+            if gnames & set(assignment)  # this case's own globals, not
+            and gnames <= scripted_names  # purely base-scripted rows
+            and bounds[name].expected is not None
+        )
         out.append(
             FlagCase(
                 assignment=assignment,
                 reset=reset,
                 checked=checked,
-                deviations=deviations,
+                deviations=len(case_findings),
                 cycle=result.cycle is not None,
             )
         )
@@ -866,13 +851,20 @@ def expected_bounds(
     inj_f = dict(injected_force or {})
     gates = start_gates(graph)
     parent_of = graph.box_tree.parent
-    # the jobs whose VALUE reads wake sources: condition-only and unboxed --
-    # every wake-flavored unchecked reason is scoped to exactly this set
-    wake_dep = {
-        name
+    # ONE case analysis of what bounds a job, computed once and read by the
+    # value AND provenance passes (DL-185: the (schedule, parent) pair was
+    # re-derived at four sites): member beats scheduled beats wake-dependent
+    kind = {
+        name: (
+            "member"
+            if parent_of.get(name) is not None
+            else ("scheduled" if job.schedule is not None else "wake")
+        )
         for name, job in catalog.jobs.items()
-        if job.schedule is None and parent_of.get(name) is None
     }
+    # the jobs whose VALUE reads wake sources: every wake-flavored unchecked
+    # reason is scoped to exactly this set
+    wake_dep = {name for name, k in kind.items() if k == "wake"}
 
     unchecked: dict[str, str] = {}
     for name in parked:
@@ -883,17 +875,14 @@ def expected_bounds(
     scripted_names = {gname for gname, _value, _at_start in scripted}
     at_start_truth = genesis_truth(catalog)
     global_wakes: dict[str, int] = {}
-    for name, job in catalog.jobs.items():
-        if name not in wake_dep or name in unchecked:
+    # ONE predicate decides who is a global-gated consumer (DL-185); the
+    # START condition only -- a v() inside box_success folds a running box
+    # and starts nothing
+    for name, gnames in _wake_dep_global_consumers(catalog, graph).items():
+        if name in unchecked:
             continue
-        cond_attr = job.sem.condition
-        if cond_attr is None:
-            continue
-        # the START condition only -- a v() inside box_success folds a
-        # running box and starts nothing (the review's m1)
-        gnames = {a.name for a in iter_atoms(cond_attr.cond) if isinstance(a, GlobalAtom)}
-        if not gnames:
-            continue
+        cond_attr = catalog.jobs[name].sem.condition
+        assert cond_attr is not None  # membership implies a condition
         if gnames - scripted_names:
             unchecked[name] = "global-gated: wake budget unknowable until the flag sweep"
             continue
@@ -990,13 +979,12 @@ def expected_bounds(
         for name in value:
             if name in frozen:
                 continue
-            job = catalog.jobs[name]
-            parent = parent_of.get(name)
             own = ticks.get(name, 0) + inj_s.get(name, 0)
-            if parent is not None:
-                box_bound = value.get(parent, 0)
-                base = min(box_bound, own) if job.schedule is not None else box_bound
-            elif job.schedule is not None:
+            if kind[name] == "member":
+                box_bound = value.get(parent_of[name], 0)
+                has_schedule = catalog.jobs[name].schedule is not None
+                base = min(box_bound, own) if has_schedule else box_bound
+            elif kind[name] == "scheduled":
                 base = own
             else:
                 wake = max((value.get(w, 0) for w in wake_srcs[name]), default=0)
@@ -1017,21 +1005,22 @@ def expected_bounds(
                 expected=value[name], provenance=f"policy: {policy.policies[name].reason}"
             )
             continue
-        parent = parent_of.get(name)
-        if parent is not None:
+        if kind[name] == "member":
             prov = (
                 "member: min(box bound, own ticks)"
                 if job.schedule is not None
                 else "member: box bound"
             )
-        elif job.schedule is not None:
+        elif kind[name] == "scheduled":
             prov = f"own ticks ({ticks.get(name, 0)})"
         else:
             prov = "max over wake sources"
         # a member's bound omits inj_s (SEM-10 caps it inside the min), so
         # its provenance must not claim the budget (the review's m2)
         injected = (
-            inj_f.get(name, 0) if parent is not None else inj_s.get(name, 0) + inj_f.get(name, 0)
+            inj_f.get(name, 0)
+            if kind[name] == "member"
+            else inj_s.get(name, 0) + inj_f.get(name, 0)
         )
         if injected:
             prov += f" +{injected} injected"
@@ -1060,32 +1049,20 @@ def compare(
     ZeroDelayCycleError -- and only that EngineError subtype -- converts to
     an unbounded-multi-fire finding: the check FOUND what it hunts."""
     jobs: dict[str, JobCheck] = {}
-    findings: list[CheckFinding] = []
-    if cycle is not None:
-        findings.append(
-            CheckFinding(kind="zero_delay_cycle", jobs=list(cycle.jobs), detail=str(cycle))
-        )
+    runs = {name: observed.get(name, 0) for name in catalog.jobs}
     for name in sorted(catalog.jobs):
         bound = bounds[name]
-        obs = observed.get(name, 0)
-        deviation = bound.expected is not None and obs > bound.expected
+        obs = runs[name]
         jobs[name] = JobCheck(
             expected=bound.expected,
             provenance=bound.provenance,
             observed=obs,
-            deviation=deviation,
+            deviation=bound.expected is not None and obs > bound.expected,
         )
-        if deviation:
-            findings.append(
-                CheckFinding(
-                    kind="multi_fire",
-                    jobs=[name],
-                    detail=(
-                        f"observed {obs} runs, expected at most"
-                        f" {bound.expected} ({bound.provenance})"
-                    ),
-                )
-            )
+    findings: list[CheckFinding] = []
+    if cycle is not None:
+        findings.append(_cycle_finding(cycle))
+    findings.extend(_multi_fire_findings(bounds, runs))
     return CadenceCheck(
         start=start, horizon=horizon, sweeps=list(sweeps), jobs=jobs, findings=findings
     )
@@ -1112,7 +1089,7 @@ def render_text(check: CadenceCheck) -> list[str]:
         f"checked {check.checked}, unchecked {check.unchecked},"
         f" ran {check.ran} of {len(check.jobs)}, findings {len(check.findings)}"
     )
-    if check.fail_sweep:
+    if "fail" in check.sweeps:
         lines.append(f"-- fail sweep: {len(check.fail_sweep)} producers --")
         for case in check.fail_sweep:
             if case.outcome != "ran":
@@ -1124,7 +1101,9 @@ def render_text(check: CadenceCheck) -> list[str]:
                 lines.append(f"fail {case.producer}: suppressed {drops}")
             else:
                 lines.append(f"fail {case.producer}: no suppressed runs")
-    if check.flag_sweep:
+    if "flags" in check.sweeps:
+        # keyed on the ONE encoding of "which sweeps ran" (DL-185); an empty
+        # block then honestly prints its zero
         lines.append(f"-- flag sweep: {len(check.flag_sweep)} cases --")
         by_component: dict[str, list[FlagCase]] = {}
         for fcase in check.flag_sweep:
@@ -1152,12 +1131,12 @@ def render_text(check: CadenceCheck) -> list[str]:
 
 @dataclass
 class PlayResult:
-    """One play's evidence: run_number deltas (the observed counts), the
-    trace, and the cycle refusal if the play tripped the instant budget."""
+    """One play's evidence: run_number deltas (the observed counts) and the
+    cycle refusal if the play tripped the instant budget -- exactly what a
+    sweep case consumes. It carried the case label and the full trace too;
+    nothing read either, and a trace per flag case is real memory (DL-185)."""
 
-    case: str
     runs: dict[str, int]
-    trace: list[TraceEntry]
     cycle: ZeroDelayCycleError | None
 
 
@@ -1170,7 +1149,6 @@ def play_once(
     events: Iterable[Event] = (),
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
-    case: str = "happy",
 ) -> PlayResult:
     """One journal-free virtual-clock play: the reentrant player the sweeps
     and tests reuse (DL-184). A ZeroDelayCycleError is caught and returned
@@ -1199,4 +1177,4 @@ def play_once(
     runs = {
         name: engine.oracle.store.runtime(name).run_number - before[name] for name in catalog.jobs
     }
-    return PlayResult(case=case, runs=runs, trace=engine.oracle.trace(), cycle=cycle)
+    return PlayResult(runs=runs, cycle=cycle)

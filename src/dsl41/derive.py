@@ -169,6 +169,19 @@ class DerivedEdge(BaseModel):
         return self.via != "global" and self.mapping_row not in ("M15", "M16")
 
 
+def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
+    """The start-gate edges indexed by CONSUMER -- the one index L020, L021,
+    L022 and the cadence check's wake walk each read. DL-162 homed the
+    predicate (`is_start_gate`), arch-review 2026-08-28 homed the index,
+    and DL-185 moved it HERE: its inputs are all IR-G, and lint was only
+    hosting it."""
+    gates: dict[str, list[DerivedEdge]] = {}
+    for edge in graph.edges:
+        if edge.is_start_gate:
+            gates.setdefault(edge.dst, []).append(edge)
+    return gates
+
+
 def local_producer(edge: DerivedEdge, catalog: CatalogIR) -> str | None:
     """The catalog job this edge's producer names, or None when there is no
     such job -- the sound spelling of "the producer is defined HERE".

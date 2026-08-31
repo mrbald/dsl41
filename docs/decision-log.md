@@ -11267,3 +11267,57 @@ relitigate an entry; append a new one.
   ruff, ruff format --check, mypy, arch_check blocker-free (9
   advisory size notes stand; the deferred /arch-review is due over
   the whole DL-184 window).
+- DL-185 the DL-75 review over arch-review/2026-08-28..HEAD -- the
+  DL-184 window (2026-08-31). Gate first: nine advisory size notes,
+  nothing blocking; ~3,500 lines, almost all rehearse_check.py and
+  its tests. One fresh-context reviewer (the window has one author,
+  so independence beat context). Verdict: the window built one good
+  module and, in the speed of three same-day slices, spelled several
+  of its rules more than once. Acted, cheapest first:
+  (a) "observed > bound becomes a multi_fire finding" was spelled
+  three times character-identically, and the copies had already begun
+  to drift (the flag copy counted deviations, the fail copy did not);
+  now ONE `_multi_fire_findings` + `_cycle_finding`, the DL-162
+  homing move again. (b) "who is a global-gated consumer" was spelled
+  three times with three filters, and the filterless third
+  OVER-COUNTED: FlagCase.checked claimed a scheduled v()-gated job
+  whose bound never moved -- the house over-claim class, verified
+  empirically by the review and now pinned by a regression test; one
+  predicate (`_wake_dep_global_consumers`) serves all three sites.
+  (c) PlayResult carried a case label and a full oracle trace nothing
+  read -- a trace per flag case is real memory -- slimmed to
+  (runs, cycle), exactly what a sweep case consumes. (d) the
+  (schedule, parent) job-kind trichotomy was re-derived at four
+  sites; one `kind` map now feeds the value and provenance passes.
+  (e) "which sweeps ran" had two encodings (the sweeps list and
+  block non-emptiness) that had already disagreed once on the
+  ceiling path; render keys on the list, and an empty block prints
+  its zero honestly. (f) `start_gates` moved home to derive -- its
+  inputs are all IR-G and lint was only hosting it; the check no
+  longer imports the linter.
+  DECLINED, each with a re-find trigger: parked/no_success_exit stay
+  two sets (the fail sweep's skipped_parked vs
+  inconclusive_no_fail_exit split reads them differently; a third
+  unstartable source reopens); the per-case cycle/deviations
+  counters stay beside findings (fold when the report next changes
+  shape); `_emit_cadence_check`'s sixteen parameters stay until
+  sweep (b) would add more (then a context record); the CLI's happy
+  play stays hand-wired beside play_once (DL-184's own ruling --
+  play_once is the sweeps' seam; unify when a second journaled
+  caller appears); the full expected_bounds split beyond the kind
+  map waits for sweep (b) (the per-flag-case recompute is bounded by
+  the 64-case ceiling); the And/Or/Paren walk stays in three files
+  -- the atom halves are three genuinely different truths (runtime
+  state, region state, counterfactual genesis) and a shared fold
+  would have one honest user.
+  Load-bearing, left alone on purpose: the two deliberately
+  independent counters, the STARTING-based legacy rollup beside the
+  run_number delta, success_exit/failure_exit as two names,
+  case_fail_entry (the twice-found duration blocker keeps its one
+  home), the two flag-sweep ceilings (different explosions),
+  genesis_truth, and the citation density throughout.
+  THE GATE: 3578 passed, 6 skipped, 2 xfailed; ruff, ruff format
+  --check, mypy, arch_check clean; size baseline re-armed. No second
+  adversarial pass on the fixes -- behavior-preserving refactors the
+  suite pins, plus one bug fix with its own regression test (the
+  DL-179 allocation precedent). Tag arch-review/2026-08-31.
