@@ -24,23 +24,29 @@ import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
+from dsl41.conditions import StatusAtom, iter_atoms
 from dsl41.derive import derive_graph
+from dsl41.equiv import global_regions
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.rehearse_check import (
+    FLAG_CASE_CEILING,
     CadenceCheckError,
     CadencePolicy,
     JobPolicy,
     case_fail_entry,
     check_adapter,
+    genesis_truth,
     compare,
     expected_bounds,
     fail_sweep_producers,
     failure_exit,
+    flag_cases,
     load_policy,
     play_once,
     render_text,
     run_fail_sweep,
+    run_flag_sweep,
     scenario_budgets,
     scheduled_ticks,
     success_exit,
@@ -110,6 +116,19 @@ CYCLE_JIL = (
     "insert_job: cy_b\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(cy_a)\n"
 )
 
+#: The DL-180 recovery, smoke-verified end to end (DL-184 item 8): fa/fb wake
+#: an unqualified AND-plus-global join. Set FLAG='1' at start with no reset
+#: and the join fires 3 times over 48h against a bound of 2 -- the stale
+#: latch double fire the flag sweep exists to catch.
+FLAG_SMOKE_JIL = (
+    "insert_job: fa\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+    "insert_job: fb\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n\n'
+    "insert_job: flag_join\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(fa) & s(fb) & v(FLAG) = 1\n"
+)
+
 
 def _bounds(text: str, **kw: object) -> dict:
     """One catalog's expected_bounds over [START, HORIZON], the shared setup
@@ -118,6 +137,82 @@ def _bounds(text: str, **kw: object) -> dict:
     graph = derive_graph(catalog)
     ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
     return expected_bounds(catalog, graph, ticks, **kw)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------- global_regions
+
+
+def test_global_regions_numeric_literal_has_numeric_and_string_cutpoints() -> None:
+    """v(F) = 1: numeric cutpoints v-1/v/v+1, string cutpoints ""/lit/lit+NUL,
+    and the unset None (DL-184 item 1)."""
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(F) = 1\n"
+    )
+    conds = [
+        job.sem.condition.cond for job in catalog.jobs.values() if job.sem.condition is not None
+    ]
+    regions = global_regions(conds)
+    assert set(regions["F"]) == {"", "0", "1", "1\x00", "2", None}
+
+
+def test_global_regions_non_numeric_literal_carries_no_numeric_cutpoints() -> None:
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(G) = go\n"
+    )
+    conds = [
+        job.sem.condition.cond for job in catalog.jobs.values() if job.sem.condition is not None
+    ]
+    regions = global_regions(conds)
+    assert set(regions["G"]) == {"", "go", "go\x00", None}
+
+
+# ------------------------------------------------------------------ flag_cases
+
+
+def test_flag_cases_one_global_one_literal_is_ten_deterministic_cases_no_none() -> None:
+    """v(F) = 1: 5 non-None region values x set/reset == 10 cases, in region
+    order, and no case carries the unset None -- SET_GLOBAL cannot produce it
+    and the happy path already plays it (DL-184). Cases are whole
+    ASSIGNMENTS since the slice review's compound-gate blocker; a
+    single-global component degenerates to one-entry assignments."""
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(F) = 1\n"
+    )
+    cases, uncovered = flag_cases(catalog, derive_graph(catalog))
+    assert uncovered == []
+    assert cases == [
+        ({"F": ""}, False),
+        ({"F": ""}, True),
+        ({"F": "0"}, False),
+        ({"F": "0"}, True),
+        ({"F": "1"}, False),
+        ({"F": "1"}, True),
+        ({"F": "1\x00"}, False),
+        ({"F": "1\x00"}, True),
+        ({"F": "2"}, False),
+        ({"F": "2"}, True),
+    ]
+    assert all(None not in assignment.values() for assignment, _reset in cases)
+
+
+def test_flag_cases_ceiling_drops_later_globals_whole_and_caps_the_total() -> None:
+    """8 globals x 5 OR'd numeric literals each: G1/G2's regions alone reach
+    52 cases (inside the 64 ceiling); G3..G8 would push past it and are
+    dropped WHOLE, in sorted order, never partially (DL-184)."""
+    text = "".join(
+        f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"condition: {' | '.join(f'v(G{i}) = {v}' for v in range(1, 6))}\n\n"
+        for i in range(1, 9)
+    )
+    catalog = lower_source(text)
+    cases, uncovered = flag_cases(catalog, derive_graph(catalog))
+    assert len(cases) <= FLAG_CASE_CEILING
+    assert uncovered == ["G3", "G4", "G5", "G6", "G7", "G8"]
+    by_global: dict[str, int] = {}
+    for assignment, _reset in cases:
+        (gname,) = assignment  # single-global components: one-entry assignments
+        by_global[gname] = by_global.get(gname, 0) + 1
+    assert by_global == {"G1": 26, "G2": 26}  # earlier globals keep the full case list
 
 
 # ------------------------------------------------------------- scheduled_ticks
@@ -407,6 +502,62 @@ def test_expected_bounds_condition_cycle_terminates_with_an_injected_start() -> 
     bounds = _bounds(CYCLE_JIL, injected_start={"cy_a": 1})
     assert bounds["cy_a"].expected is None
     assert bounds["cy_b"].expected is None
+
+
+# ------------------------------------------- expected_bounds: scripted_globals
+
+
+def test_expected_bounds_scripted_globals_lifts_a_pure_global_gate() -> None:
+    """v(F) = 1 alone: scripting F CHECKS the consumer, budgeted 0 wakes + 1
+    satisfying set; a falsifying scripted value budgets 0 (DL-184 item 4)."""
+    text = "insert_job: gated\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(F) = 1\n"
+    satisfying = _bounds(text, scripted_globals=[("F", "1", True)])
+    assert satisfying["gated"].expected == 1
+    falsifying = _bounds(text, scripted_globals=[("F", "0", True)])
+    assert falsifying["gated"].expected == 0
+
+
+def test_expected_bounds_scripted_globals_at_start_set_is_zero_for_latch_gated_consumer() -> None:
+    """s(A) & v(F) = 1, A scheduled twice over the window: an at-start
+    SET_GLOBAL budgets 0 extra for a latch-gated consumer -- its latches
+    are false before the first tick, so the set cannot fire it; a
+    mid-window set (the reset variant) budgets +1 (DL-184 item 5, the
+    normative rule in expected_bounds' own docstring)."""
+    text = (
+        "insert_job: A\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00, 13:00"\n\n'
+        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(A) & v(F) = 1\n"
+    )
+    at_start = _bounds(text, scripted_globals=[("F", "1", True)])
+    assert at_start["cons"].expected == 2  # 2 (own wake bound) + 0
+    mid_window = _bounds(text, scripted_globals=[("F", "1", False)])
+    assert mid_window["cons"].expected == 3  # 2 + 1
+
+
+def test_expected_bounds_scripted_globals_partial_scripting_stays_unchecked() -> None:
+    """A consumer referencing F and H: scripting only F leaves it
+    global-gated -- every referenced global must be scripted (DL-184 item 6)."""
+    text = (
+        "insert_job: gated\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(F) = 1 & v(H) = 2\n"
+    )
+    bounds = _bounds(text, scripted_globals=[("F", "1", True)])
+    assert bounds["gated"].expected is None
+    assert "global-gated" in bounds["gated"].provenance
+
+
+def test_expected_bounds_scripted_globals_ordered_operator_is_checked_per_literal() -> None:
+    """v(F) > 5 on a latch-gated consumer: the region value 6 satisfies the
+    ordered comparison and budgets +1; 4 does not and budgets +0 -- the
+    literal-by-literal miss the region fix exists for (DL-184 item 7)."""
+    text = (
+        "insert_job: A\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: cons\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(A) & v(F) > 5\n"
+    )
+    satisfying = _bounds(text, scripted_globals=[("F", "6", False)])
+    assert satisfying["cons"].expected == 2  # 1 (own wake bound) + 1
+    not_satisfying = _bounds(text, scripted_globals=[("F", "4", False)])
+    assert not_satisfying["cons"].expected == 1  # 1 + 0
 
 
 # ------------------------------------------------------------------ success_exit
@@ -707,6 +858,12 @@ def test_play_once_smoke_estate_run_counts() -> None:
 def _write_smoke(tmp_path: Path) -> Path:
     jil = tmp_path / "smoke.jil"
     jil.write_text(SMOKE_JIL, encoding="utf-8")
+    return jil
+
+
+def _write_flag_smoke(tmp_path: Path) -> Path:
+    jil = tmp_path / "flag_smoke.jil"
+    jil.write_text(FLAG_SMOKE_JIL, encoding="utf-8")
     return jil
 
 
@@ -1250,6 +1407,161 @@ def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding(
     assert finding.jobs == ["cy_a", "cy_b", "kicker"]
 
 
+# --------------------------------------------------------------- run_flag_sweep
+
+
+def test_run_flag_sweep_dl_180_recovery_deviates_on_the_stale_flag_case_only() -> None:
+    """FLAG_SMOKE_JIL over 48h (DL-184 item 8, smoke-verified end to end):
+    the flags:FLAG='1' case with no reset observes flag_join firing 3 times
+    against a bound of 2 -- exactly one multi_fire finding, tagged with that
+    case. Every other case (the +reset variant, every falsifying value)
+    produces no findings. All 10 FlagCase rows check one consumer each; only
+    the deviating case counts a deviation."""
+    horizon = START + timedelta(hours=48)
+    catalog = lower_source(FLAG_SMOKE_JIL)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=horizon)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    fcases, findings, uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        [],
+        start=START,
+        horizon=horizon,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    assert uncovered == []
+    assert len(fcases) == 10
+    assert all(c.checked == 1 for c in fcases)
+    by_case = {(c.assignment["FLAG"], c.reset): c for c in fcases}
+    assert by_case[("1", False)].deviations == 1
+    assert [c.deviations for (v, r), c in by_case.items() if (v, r) != ("1", False)] == [0] * 9
+    (finding,) = findings
+    assert finding.kind == "multi_fire"
+    assert finding.jobs == ["flag_join"]
+    assert finding.case == "flags:FLAG='1'"
+    assert "observed 3 runs, expected at most 2" in finding.detail
+
+
+def test_flag_cases_compound_gate_gets_whole_component_assignments() -> None:
+    """The slice review's first blocker: one global per case never lifted a
+    compound multi-global gate. F1 and F2 co-refer through `compound`, so
+    cases are whole assignments over both, including the whole-condition
+    SATISFYING one the bounded product search finds -- and the consumer is
+    actually checked in them."""
+    text = (
+        "insert_job: ca\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: compound\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(ca) & v(F1) = 1 & v(F2) = go\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    cases, uncovered = flag_cases(catalog, graph)
+    assert uncovered == []
+    assert all(set(assignment) == {"F1", "F2"} for assignment, _reset in cases)
+    assert ({"F1": "1", "F2": "go"}, False) in cases  # the satisfying assignment
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    adapter, parked_fw, no_success = check_adapter(catalog, FakeAdapter({}, default=(0.0, 0)))
+    fcases, findings, _uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    assert all(c.checked == 1 for c in fcases)  # compound IS checked now
+    assert findings == []  # and clean: one wake per ca completion, in bound
+
+
+def test_flag_sweep_genesis_true_atoms_earn_the_at_start_credit() -> None:
+    """The slice review's second blocker: bare n() is TRUE at genesis (a
+    never-run partner is notrunning) and an ON_ICE seed satisfies every
+    atom naming it (SEM-05/SEM-20), so the at-start satisfying set CAN fire
+    `n_flag` legitimately -- the could-fire credit covers it and a clean
+    estate stays clean (the flat latch-counting draft manufactured exit-3
+    findings here)."""
+    text = (
+        "insert_job: guard_ice\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: n_flag\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: n(guard_ice) & v(F3) = 1\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    adapter, parked_fw, no_success = check_adapter(catalog, FakeAdapter({}, default=(0.0, 0)))
+    fcases, findings, _uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    assert fcases and findings == []
+    truth = genesis_truth(catalog)
+    text2 = "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(q) & n(r)\n"
+    atoms = {
+        a.status: a
+        for a in iter_atoms(lower_source(text2).jobs["p"].sem.condition.cond)  # type: ignore[union-attr]
+        if isinstance(a, StatusAtom)
+    }
+    assert truth(atoms["NOTRUNNING"]) is True  # never-run partner is notrunning
+    assert truth(atoms["SUCCESS"]) is False  # SEM-24 cannot seed a terminal
+
+
+def test_run_flag_sweep_base_scenario_set_global_joins_the_scripted_set() -> None:
+    """A base-scenario SET_GLOBAL plays in every case and joins the
+    scripted set (DL-184 item 9). Since the compound-gate blocker fix, F
+    and H co-refer through `cons`, so every case is a whole {F, H}
+    assignment and cons is checked in each; the credit half is pinned at
+    the expected_bounds level -- the base set arrives first (condition not
+    yet true: no credit), the case's satisfying sets then buy one wake
+    each."""
+    text = (
+        "insert_job: cons\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(F) = 1 & v(H) = 2\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    events = [Event(at=START, kind="SET_GLOBAL", payload={"name": "H", "value": "2"})]
+    fcases, _findings, _uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        events,
+        start=START,
+        horizon=HORIZON,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    fh_cases = [c for c in fcases if set(c.assignment) == {"F", "H"}]
+    assert fh_cases and all(c.checked == 1 for c in fh_cases)
+    bounds = expected_bounds(
+        catalog,
+        graph,
+        ticks,
+        scripted_globals=[("H", "2", True), ("F", "1", True), ("H", "2", True)],
+    )
+    # base H first: F unset, condition false, no credit; F=1 makes it true
+    # (+1); the second H=2 re-wakes while still true (+1)
+    assert bounds["cons"].expected == 2
+
+
 # --------------------------------------------------------------- CLI: --sweep fail
 
 
@@ -1364,3 +1676,95 @@ def test_cli_sweep_fail_progress_lines_go_to_stderr_not_stdout(tmp_path: Path) -
     assert "sweep fail cs_b" not in result.stdout
     assert "sweep fail cs_a" in result.stderr
     assert "sweep fail cs_b" in result.stderr
+
+
+# -------------------------------------------------------------- CLI: --sweep flags
+
+
+def test_cli_sweep_flags_format_text_smoke(tmp_path: Path) -> None:
+    jil = _write_flag_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "48",
+            "--check-cadence",
+            "--sweep",
+            "flags",
+            "--format",
+            "text",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert "-- flag sweep: 10 cases --" in result.output
+    assert "flags FLAG: 10 cases, 1 deviations" in result.output
+    finding_line = next(
+        line for line in result.output.splitlines() if line.startswith("finding [multi_fire]")
+    )
+    assert "(flags:FLAG='1')" in finding_line
+
+
+def test_cli_sweep_flags_format_json_smoke(tmp_path: Path) -> None:
+    jil = _write_flag_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "48",
+            "--check-cadence",
+            "--sweep",
+            "flags",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    doc = json.loads(result.stdout)
+    cc = doc["cadence_check"]
+    assert cc["sweeps"] == ["happy", "flags"]
+    assert len(cc["flag_sweep"]) == 10
+    row_keys = {"assignment", "reset", "checked", "deviations", "cycle"}
+    assert all(row_keys <= set(row) for row in cc["flag_sweep"])
+    assert cc["flag_uncovered"] == []
+
+
+def test_cli_sweep_fail_and_flags_together_populate_both_blocks(tmp_path: Path) -> None:
+    """Both sweeps dispatch on the slice-2 smoke estate (DL-184 item 12): the
+    fail sweep's two start-gate producers populate `fail_sweep`; the estate
+    carries no v() condition, so `flag_sweep` is legitimately empty -- the
+    sweeps list, not the row count, is what proves the flag sweep ran.
+    Asserts the document only; a deviation from the OR-join finding still
+    exits 3, but that is not what this test is pinning."""
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "24",
+            "--check-cadence",
+            "--sweep",
+            "fail",
+            "--sweep",
+            "flags",
+            "--format",
+            "json",
+        ],
+    )
+    doc = json.loads(result.stdout)
+    cc = doc["cadence_check"]
+    assert cc["sweeps"] == ["happy", "fail", "flags"]
+    assert len(cc["fail_sweep"]) == 2
+    assert cc["flag_sweep"] == []
+    assert cc["flag_uncovered"] == []

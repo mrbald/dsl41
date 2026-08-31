@@ -442,6 +442,18 @@ def _job_key(atom: StatusAtom | ExitCodeAtom) -> str:
     return f"{atom.job.name}^{atom.job.instance}"
 
 
+def global_regions(conds: "list[Cond]") -> dict[str, list[str | None]]:
+    """Per referenced global, the region-representative values covering every
+    comparison the conditions make: numeric cutpoints v-1/v/v+1 for int-able
+    literals, string cutpoints ""/lit/lit+NUL, and the unset None. The public
+    face of the alphabet's globals half (DL-184): the cadence check's flag
+    sweep builds its SET_GLOBAL cases on these instead of literal-by-literal
+    sets, which miss the ordered operators and compound conditions --
+    equiv_scripts cannot be its entry point (it emits STATUS and out-of-band
+    kinds the check-mode allowlist refuses)."""
+    return _alphabet(conds).globals_
+
+
 def _alphabet(conds: list[Cond]) -> _Alphabet:
     jobs: dict[str, _JobScope] = {}
     global_values: dict[str, set[str]] = {}
@@ -927,4 +939,5 @@ __all__ = [
     "equivalent_tier_a",
     "equivalent_tier_b",
     "equivalent_tier_c",
+    "global_regions",
 ]

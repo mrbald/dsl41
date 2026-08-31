@@ -758,10 +758,10 @@ class RehearseFormat(str, Enum):
 
 
 class SweepKind(str, Enum):
-    """`rehearse --check-cadence --sweep` (DL-184). `flags` joins with the
-    flag-sweep slice."""
+    """`rehearse --check-cadence --sweep` (DL-184)."""
 
     fail = "fail"  # one replay per producer, first run scripted to FAILURE
+    flags = "flags"  # one replay per (global, region value, reset variant)
 
 
 def _trace_line(entry: "TraceEntry") -> str:
@@ -903,6 +903,7 @@ def _emit_cadence_check(
         fail_sweep_producers,
         render_text,
         run_fail_sweep,
+        run_flag_sweep,
         scheduled_ticks,
     )
 
@@ -925,30 +926,54 @@ def _emit_cadence_check(
         no_success_exit=no_success,
     )
     check = compare(catalog, bounds, observed, start=start_dt, horizon=horizon, cycle=cycle)
-    if SweepKind.fail in sweeps and cycle is not None:
+    if sweeps and cycle is not None:
         # the aborted happy play left truncated, spin-inflated counts -- a
         # baseline of fiction, and each case would burn the whole instant
-        # budget again (this slice's review). The cycle finding already
-        # exits 3; the sweeps list honestly omits "fail".
-        typer.echo("fail sweep skipped: the happy path tripped the zero-delay guard", err=True)
-    elif SweepKind.fail in sweeps:
-        cases, sweep_findings = run_fail_sweep(
-            catalog,
-            observed,
-            bounds,
-            adapter,
-            events,
-            start=start_dt,
-            horizon=horizon,
-            default_tz=timezone,
-            tz_aliases=tz_aliases,
-            producers=fail_sweep_producers(catalog, graph),
-            parked=parked_fw,
-            progress=lambda line: typer.echo(line, err=True),
-        )
-        check.sweeps.append(SweepKind.fail.value)
-        check.fail_sweep = cases
-        check.findings.extend(sweep_findings)
+        # budget again (the fail-sweep review). The cycle finding already
+        # exits 3; the sweeps list honestly omits what did not run.
+        typer.echo("sweeps skipped: the happy path tripped the zero-delay guard", err=True)
+    elif sweeps:
+        progress = lambda line: typer.echo(line, err=True)  # noqa: E731
+        if SweepKind.fail in sweeps:
+            cases, sweep_findings = run_fail_sweep(
+                catalog,
+                observed,
+                bounds,
+                adapter,
+                events,
+                start=start_dt,
+                horizon=horizon,
+                default_tz=timezone,
+                tz_aliases=tz_aliases,
+                producers=fail_sweep_producers(catalog, graph),
+                parked=parked_fw,
+                progress=progress,
+            )
+            check.sweeps.append(SweepKind.fail.value)
+            check.fail_sweep = cases
+            check.findings.extend(sweep_findings)
+        if SweepKind.flags in sweeps:
+            fcases, flag_findings, uncovered = run_flag_sweep(
+                catalog,
+                graph,
+                ticks,
+                adapter,
+                events,
+                start=start_dt,
+                horizon=horizon,
+                default_tz=timezone,
+                tz_aliases=tz_aliases,
+                injected_start=injected_start,
+                injected_force=injected_force,
+                policy=policy,
+                parked=parked_fw,
+                no_success_exit=no_success,
+                progress=progress,
+            )
+            check.sweeps.append(SweepKind.flags.value)
+            check.flag_sweep = fcases
+            check.flag_uncovered = uncovered
+            check.findings.extend(flag_findings)
     trace = engine.oracle.trace()
     if fmt is RehearseFormat.json:
         doc = _rehearsal_doc(trace, catalog.jobs)
@@ -1020,7 +1045,9 @@ def rehearse(
         "--sweep",
         help="Additional check-cadence plays (repeatable). fail: one replay per"
         " producer with its first run scripted to FAILURE -- suppressed runs"
-        " are inventory, multi-fire still deviates. Requires --check-cadence;"
+        " are inventory, multi-fire still deviates. flags: one replay per"
+        " (global, region value, reset variant); global-gated consumers"
+        " become checked under the pinned flag. Requires --check-cadence;"
         " refuses --run-root (one journal, one run).",
     ),
     timezone: str = TIMEZONE_OPT,
@@ -1069,6 +1096,15 @@ def rehearse(
     multi-fire in any replay still deviates and exits 3. BOX, parked and
     n_retrys producers report skipped/inconclusive rather than pretending
     coverage. Case progress prints on stderr.
+
+    --sweep flags replays the estate once per (global, region value, reset
+    variant) -- region values come from the equivalence literal regions,
+    covering the ordered operators literal-by-literal sets miss. Under a
+    pinned flag its consumers become CHECKED: the wake budget counts only
+    satisfying assignments, and an at-start set counts nothing for a
+    latch-gated consumer, so the stale-flag multi-fire (the DL-180 shape)
+    deviates while the reset variant shows the fix. Globals past the case
+    ceiling stay unchecked and are named in the report.
     """
     import asyncio
 

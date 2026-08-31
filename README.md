@@ -242,6 +242,7 @@ dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
 dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in seconds
 dsl41 rehearse jobs.jil --check-cadence         # run counts vs cadence bounds; exit 3 on deviation
 dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays (dynamic L022)
+dsl41 rehearse jobs.jil --check-cadence --sweep flags # + per-flag replays; global-gated jobs get checked
 dsl41 release-held -S ./run1/control.sock       # estate-wide OFF_HOLD sweep
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```

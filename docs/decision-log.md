@@ -11229,3 +11229,41 @@ relitigate an entry; append a new one.
   the play_once catch, the jobs/instant payload and the case tag
   together. THE GATE: 3562 passed, 6 skipped, 2 xfailed; ruff, ruff
   format --check, mypy, arch_check blocker-free.
+  THE FLAG-SWEEP SLICE (same day; scoped review on the budget rule
+  and region reuse). Public API landed as ruled: equiv.global_regions
+  (the alphabet's globals half -- numeric and string cutpoints, the
+  unset None) and equiv_scripts confirmed unusable as the entry
+  point (it emits kinds the check-mode allowlist refuses). Two
+  blockers, both in the implementer's own refinements, both acted:
+  (a) one global per case never lifted a compound gate -- a consumer
+  needs EVERY referenced global scripted, so nightbank's three-way
+  AND was unchecked in all eighteen cases while the report claimed
+  coverage; cases are now whole ASSIGNMENTS over co-reference
+  components (globals sharing a consumer merge): single-global
+  components keep the per-region scan, multi-global components get
+  per-consumer whole-condition satisfying and falsifying assignments
+  from a bounded lexicographic search over the region product --
+  DL-184's own sentence, finally implemented as written. (b) "latches
+  are provably false at fresh start" was false twice: bare n() is
+  TRUE at genesis (a never-run partner is notrunning -- this entry
+  itself calls n() never-a-latch) and an ON_ICE seed satisfies every
+  atom naming it (SEM-05/SEM-20), so the flat latch-count zeroing
+  manufactured exit-3 findings on clean estates; the credit is now a
+  COULD-FIRE evaluation of the whole condition -- globals at their
+  values so far with unset false for every operator (the oracle's
+  reading), job atoms at genesis truth for at-start sets (SEM-24 can
+  seed no terminal, so only n() and iced are true) and
+  optimistic-true for mid-window sets. Majors/minors acted: the
+  uncovered-globals line prints even when zero cases ran; per-case
+  `checked` counts only the case's own globals; happy-table rows
+  point at the sweep that exercised them; "reset" wording admits ""
+  is a value that can satisfy != and ordering atoms; cases are
+  generated only for globals a wake-dependent consumer actually
+  reads (eighteen wasted nightbank plays). Declined, with triggers:
+  mid-window over-credit where no latch exists yet (the safe
+  direction, documented); the ceiling drops components in sorted
+  order, not by consumer count (revisit if a real estate loses its
+  hot global to it). THE GATE: 3577 passed, 6 skipped, 2 xfailed;
+  ruff, ruff format --check, mypy, arch_check blocker-free (9
+  advisory size notes stand; the deferred /arch-review is due over
+  the whole DL-184 window).

@@ -834,8 +834,12 @@ this jump possible.
   bound and exits 3 on deviations; `--cadence-policy` declares intended
   exceptions; `--sweep fail` replays the estate once per start-gate
   producer with that producer's first run scripted to a SEM-09 FAILURE
-  and reports the suppressed-run inventory (the dynamic L022). The
-  expectation side lives in `rehearse_check.py`.
+  and reports the suppressed-run inventory (the dynamic L022);
+  `--sweep flags` replays once per (global, region value, reset
+  variant) on the equivalence literal regions, checking global-gated
+  consumers under the pinned flag (the L021 globals exclusion,
+  recovered dynamically). The expectation side lives in
+  `rehearse_check.py`.
 
 ## 10. Control plane
 

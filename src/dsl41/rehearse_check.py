@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +41,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from dsl41.conditions import GlobalAtom, iter_atoms
+from dsl41.conditions import (
+    And,
+    ExitCodeAtom,
+    GlobalAtom,
+    Or,
+    Paren,
+    StatusAtom,
+    compare_value,
+    iter_atoms,
+)
 from dsl41.derive import DerivedGraph, cycles, local_producer
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.lint import start_gates
@@ -158,6 +167,23 @@ class SweepCase(BaseModel):
     cycle: bool = False
 
 
+class FlagCase(BaseModel):
+    """One flag-sweep case: a whole ASSIGNMENT over one co-reference
+    component's globals pinned via SET_GLOBAL at start (the reset variant
+    sets off-values mid-window), the estate replayed, and the consumers
+    gated on those globals checked against bounds whose wake credit is the
+    could-fire evaluation, not a flat per-set +1. One global per case was
+    the slice review's first blocker: a compound multi-global gate never
+    had all its globals scripted, so it never got checked while the report
+    claimed coverage."""
+
+    assignment: dict[str, str]
+    reset: bool  # the mid-window reset variant (DL-182 c: with/without)
+    checked: int = 0  # consumers this case moved from unchecked to checked
+    deviations: int = 0
+    cycle: bool = False
+
+
 class CadenceCheck(BaseModel):
     """The nested `cadence_check` report block (versioned; the legacy
     rehearse rollup around it stays byte-identical, DL-184)."""
@@ -169,6 +195,10 @@ class CadenceCheck(BaseModel):
     jobs: dict[str, JobCheck]
     findings: list[CheckFinding]
     fail_sweep: list[SweepCase] = []
+    flag_sweep: list[FlagCase] = []
+    #: globals whose cases fell past FLAG_CASE_CEILING: their consumers
+    #: stay unchecked and the coverage claim honestly excludes them
+    flag_uncovered: list[str] = []
     note: str = UNMODELED_NOTE
 
     @property
@@ -398,6 +428,336 @@ def run_fail_sweep(
     return cases, findings
 
 
+#: Flag-sweep case ceiling: cases past it are dropped whole-component and
+#: the report names the uncovered globals (DL-184: unchecked past the
+#: ceiling). Components drop in sorted order -- deterministic simplicity;
+#: revisit if a real estate loses its hot global to the ceiling.
+FLAG_CASE_CEILING = 64
+
+#: Bounded whole-condition assignment search per component: region-product
+#: points probed before a consumer's satisfying assignment is declared not
+#: found and its globals reported uncovered (DL-184's ceiling clause).
+FLAG_ASSIGNMENT_PROBES = 4096
+
+
+def _cond_could_fire(
+    cond: object,
+    globals_: Mapping[str, str],
+    job_truth: Callable[[StatusAtom | ExitCodeAtom], bool],
+) -> bool:
+    """Whether the condition can evaluate TRUE under these global values
+    (unset -> False for EVERY operator, the oracle's own reading) with
+    job-atom truth supplied by the caller: the genesis truth for at-start
+    wake credit, all-True optimism for mid-window credit."""
+    if isinstance(cond, And):
+        return all(_cond_could_fire(op, globals_, job_truth) for op in cond.operands)
+    if isinstance(cond, Or):
+        return any(_cond_could_fire(op, globals_, job_truth) for op in cond.operands)
+    if isinstance(cond, Paren):
+        return _cond_could_fire(cond.inner, globals_, job_truth)
+    if isinstance(cond, GlobalAtom):
+        actual = globals_.get(cond.name)
+        if actual is None:
+            return False
+        return compare_value(actual, cond.op, cond.value)
+    assert isinstance(cond, StatusAtom | ExitCodeAtom)
+    return job_truth(cond)
+
+
+def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], bool]:
+    """Job-atom truth at a fresh genesis (the at-start wake-credit side of
+    the flag sweep). SEM-24 can seed only INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
+    -- never a terminal -- so s/f/d/t and exit-code atoms are FALSE at
+    genesis, with two exceptions the slice review caught the first draft
+    missing: bare or qualified n() is TRUE (a never-run partner is
+    notrunning, oracle's own reading), and an ON_ICE seed satisfies EVERY
+    atom naming that job (SEM-05/SEM-20)."""
+
+    def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
+        if atom.job.instance is None:
+            job = catalog.jobs.get(atom.job.name)
+            if job is not None and job.sem.initial_status == "ON_ICE":
+                return True
+        if isinstance(atom, ExitCodeAtom):
+            return False
+        return atom.status == "NOTRUNNING"
+
+    return truth
+
+
+def _optimistic_truth(_atom: StatusAtom | ExitCodeAtom) -> bool:
+    """Mid-window job-atom truth: latches can be true by then, so the
+    could-fire test leans TRUE -- credit granted, never a manufactured
+    deviation (the safe direction; the review's m4 notes the over-credit
+    for windows where no latch exists yet)."""
+    return True
+
+
+def _wake_dep_global_consumers(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, set[str]]:
+    """Wake-dependent (condition-only, unboxed) consumers with global atoms
+    in their START condition, mapped to the referenced global names -- the
+    only jobs whose bound the flag sweep can move, so the only ones whose
+    globals earn cases (the review's m5: nightbank generated 18 cases for
+    globals no such consumer reads)."""
+    parent_of = graph.box_tree.parent
+    out: dict[str, set[str]] = {}
+    for name, job in catalog.jobs.items():
+        if job.schedule is not None or parent_of.get(name) is not None:
+            continue
+        cond_attr = job.sem.condition
+        if cond_attr is None:
+            continue
+        gnames = {a.name for a in iter_atoms(cond_attr.cond) if isinstance(a, GlobalAtom)}
+        if gnames:
+            out[name] = gnames
+    return out
+
+
+def flag_cases(
+    catalog: CatalogIR, graph: DerivedGraph
+) -> tuple[list[tuple[dict[str, str], bool]], list[str]]:
+    """The flag sweep's case list, per CO-REFERENCE COMPONENT of globals
+    (globals sharing a consumer merge; scripting one at a time never lifts
+    a compound gate -- the slice review's first blocker):
+
+    - a single-global component gets one case per region representative
+      (equiv.global_regions -- numeric and string cutpoints, never
+      literal-by-literal), set-only and set-plus-reset variants (DL-182 c);
+    - a multi-global component gets, per consumer it gates, one
+      whole-condition SATISFYING assignment (every global atom true) and
+      one FALSIFYING assignment, found by a bounded lexicographic search
+      over the region product (DL-184's own sentence), deduplicated, each
+      in both variants.
+
+    The unset None representative is excluded (SET_GLOBAL cannot produce
+    it; the happy path already plays it). Whole components past
+    FLAG_CASE_CEILING, and consumers whose bounded search finds no
+    satisfying assignment, land their globals in `uncovered`."""
+    from dsl41.equiv import global_regions
+
+    conds = [
+        job.sem.condition.cond for job in catalog.jobs.values() if job.sem.condition is not None
+    ]
+    regions = {
+        name: [v for v in values if v is not None] for name, values in global_regions(conds).items()
+    }
+    consumers = _wake_dep_global_consumers(catalog, graph)
+    # union-find over co-referenced globals
+    parent: dict[str, str] = {}
+
+    def find(g: str) -> str:
+        root = g
+        while parent.setdefault(root, root) != root:
+            root = parent[root]
+        parent[g] = root
+        return root
+
+    for gnames in consumers.values():
+        first, *rest = sorted(gnames)
+        for other in rest:
+            parent[find(other)] = find(first)
+    components: dict[str, list[str]] = {}
+    for gname in sorted(set().union(*consumers.values())) if consumers else []:
+        components.setdefault(find(gname), []).append(gname)
+
+    cases: list[tuple[dict[str, str], bool]] = []
+    uncovered: set[str] = set()
+    for _root, comp in sorted(components.items(), key=lambda kv: kv[1]):
+        comp_cases: list[dict[str, str]] = []
+        if len(comp) == 1:
+            gname = comp[0]
+            comp_cases = [{gname: v} for v in regions.get(gname, [])]
+        else:
+            atoms_by_consumer = {
+                name: [
+                    a
+                    for a in iter_atoms(catalog.jobs[name].sem.condition.cond)  # type: ignore[union-attr]
+                    if isinstance(a, GlobalAtom)
+                ]
+                for name, gnames in consumers.items()
+                if gnames <= set(comp)
+            }
+            for name in sorted(atoms_by_consumer):
+                gatoms = atoms_by_consumer[name]
+                satisfying = _search_assignment(comp, regions, gatoms, want=True)
+                falsifying = _search_assignment(comp, regions, gatoms, want=False)
+                if satisfying is None:
+                    uncovered.update(comp)  # coverage incomplete for the component
+                for found in (satisfying, falsifying):
+                    if found is not None and found not in comp_cases:
+                        comp_cases.append(found)
+        variant_cases = [
+            (assignment, reset) for assignment in comp_cases for reset in (False, True)
+        ]
+        if len(cases) + len(variant_cases) > FLAG_CASE_CEILING:
+            uncovered.update(comp)
+            continue
+        cases.extend(variant_cases)
+    return cases, sorted(uncovered)
+
+
+def _search_assignment(
+    comp: list[str],
+    regions: Mapping[str, list[str]],
+    gatoms: list[GlobalAtom],
+    *,
+    want: bool,
+) -> dict[str, str] | None:
+    """Bounded lexicographic search over the component's region product for
+    an assignment where every atom is satisfied (want=True) or at least one
+    is not (want=False). None past FLAG_ASSIGNMENT_PROBES."""
+    names = sorted(comp)
+    lists = [regions.get(name, []) for name in names]
+    if any(not values for values in lists):
+        return None
+    indexes = [0] * len(names)
+    probes = 0
+    while probes < FLAG_ASSIGNMENT_PROBES:
+        probes += 1
+        assignment = {name: lists[i][indexes[i]] for i, name in enumerate(names)}
+        all_true = all(
+            compare_value(assignment[a.name], a.op, a.value) for a in gatoms if a.name in assignment
+        )
+        if all_true is want:
+            return assignment
+        pos = len(names) - 1
+        while pos >= 0:
+            indexes[pos] += 1
+            if indexes[pos] < len(lists[pos]):
+                break
+            indexes[pos] = 0
+            pos -= 1
+        if pos < 0:
+            return None  # product exhausted
+    return None
+
+
+def run_flag_sweep(
+    catalog: CatalogIR,
+    graph: DerivedGraph,
+    ticks: Mapping[str, int],
+    adapter: FakeAdapter,
+    events: Iterable[Event],
+    *,
+    start: datetime,
+    horizon: datetime,
+    default_tz: str | None = None,
+    tz_aliases: Mapping[str, str] | None = None,
+    injected_start: Mapping[str, int] | None = None,
+    injected_force: Mapping[str, int] | None = None,
+    policy: CadencePolicy | None = None,
+    parked: Collection[str] = (),
+    no_success_exit: Collection[str] = (),
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[FlagCase], list[CheckFinding], list[str]]:
+    """The dynamic recovery of L021's globals exclusion (DL-182 sweep c,
+    ruled by DL-184): per case, a whole assignment over one co-reference
+    component pinned via SET_GLOBAL at start (the reset variant sets
+    off-values mid-window -- "" or NUL, themselves values that can satisfy
+    != and ordering atoms), the estate replayed, and the bounds recomputed
+    with `scripted_globals` -- consumers gated only on scripted globals
+    become checked, wake-budgeted by the could-fire evaluation. Base
+    scenario SET_GLOBALs join the scripted set (they play in every case).
+    Deviations and tripped guards are case-tagged findings and exit 3;
+    everything else is report-only."""
+    events = list(events)
+    base_globals: list[tuple[str, str, bool]] = []
+    for ev in events:
+        if ev.kind == "SET_GLOBAL":
+            base_globals.append((str(ev.payload["name"]), str(ev.payload["value"]), ev.at <= start))
+    cases_spec, uncovered = flag_cases(catalog, graph)
+    mid = start + (horizon - start) / 2
+    out: list[FlagCase] = []
+    findings: list[CheckFinding] = []
+    for assignment, reset in cases_spec:
+        label = ",".join(f"{g}={v!r}" for g, v in sorted(assignment.items()))
+        case_id = f"flags:{label}" + ("+reset" if reset else "")
+        if progress is not None:
+            progress(f"sweep {case_id}")
+        case_events = [
+            Event(at=start, kind="SET_GLOBAL", payload={"name": g, "value": v})
+            for g, v in sorted(assignment.items())
+        ]
+        scripted = [*base_globals, *((g, v, True) for g, v in sorted(assignment.items()))]
+        if reset:
+            for g, v in sorted(assignment.items()):
+                reset_value = "" if v != "" else "\x00"
+                case_events.append(
+                    Event(at=mid, kind="SET_GLOBAL", payload={"name": g, "value": reset_value})
+                )
+                scripted.append((g, reset_value, False))
+        bounds = expected_bounds(
+            catalog,
+            graph,
+            ticks,
+            injected_start=injected_start,
+            injected_force=injected_force,
+            policy=policy,
+            parked=parked,
+            no_success_exit=no_success_exit,
+            scripted_globals=scripted,
+        )
+        result = play_once(
+            catalog,
+            start=start,
+            horizon=horizon,
+            adapter=adapter,
+            events=[*events, *case_events],
+            default_tz=default_tz,
+            tz_aliases=tz_aliases,
+            case=case_id,
+        )
+        deviations = 0
+        if result.cycle is not None:
+            findings.append(
+                CheckFinding(
+                    kind="zero_delay_cycle",
+                    jobs=list(result.cycle.jobs),
+                    detail=str(result.cycle),
+                    case=case_id,
+                )
+            )
+        for name in sorted(result.runs):
+            bound = bounds[name]
+            if bound.expected is not None and result.runs[name] > bound.expected:
+                deviations += 1
+                findings.append(
+                    CheckFinding(
+                        kind="multi_fire",
+                        jobs=[name],
+                        detail=(
+                            f"observed {result.runs[name]} runs, expected at most"
+                            f" {bound.expected} ({bound.provenance})"
+                        ),
+                        case=case_id,
+                    )
+                )
+        scripted_names = {n for n, _v, _s in scripted}
+        checked = 0
+        for name, job in catalog.jobs.items():
+            cond_attr = job.sem.condition
+            if cond_attr is None:
+                continue
+            gnames = {a.name for a in iter_atoms(cond_attr.cond) if isinstance(a, GlobalAtom)}
+            if (
+                gnames
+                and gnames & set(assignment)  # this case's own globals, not
+                and gnames <= scripted_names  # purely base-scripted rows (m1)
+                and bounds[name].expected is not None
+            ):
+                checked += 1
+        out.append(
+            FlagCase(
+                assignment=assignment,
+                reset=reset,
+                checked=checked,
+                deviations=deviations,
+                cycle=result.cycle is not None,
+            )
+        )
+    return out, findings, uncovered
+
+
 def check_adapter(
     catalog: CatalogIR, base: FakeAdapter
 ) -> tuple[FakeAdapter, frozenset[str], frozenset[str]]:
@@ -447,6 +807,7 @@ def expected_bounds(
     policy: CadencePolicy | None = None,
     parked: Collection[str] = (),
     no_success_exit: Collection[str] = (),
+    scripted_globals: Sequence[tuple[str, str, bool]] | None = None,
 ) -> dict[str, Bound]:
     """The DL-182 default as a typed bound per job (DL-184 mechanics):
 
@@ -478,6 +839,22 @@ def expected_bounds(
       (SEM-10), so their bounds are sound whatever the wake sources do --
       absorbing through them blanked half an estate for nothing (the
       slice's adversarial review).
+    - `scripted_globals` (the flag sweep, DL-184; entries are (name,
+      value, at_start)) lifts the global gate: a consumer EVERY one of
+      whose referenced globals is scripted by this play is checked. The
+      wake budget is a COULD-FIRE evaluation per set on a referenced
+      global: the whole condition, with globals at their values so far
+      (unset -> False for every operator, the oracle's reading) and job
+      atoms at their GENESIS truth for at-start sets -- bare/qualified n()
+      is TRUE there and an ON_ICE seed satisfies every atom on that job
+      (SEM-05/SEM-20); s/f/d/t and exit codes are false, SEM-24 cannot
+      seed a terminal -- or optimistic-TRUE for mid-window sets (latches
+      can be true by then; over-credit is the safe direction). A set whose
+      whole condition cannot then be true buys no headroom: a flat +1
+      would let the DL-180 stale-latch multi-fire slide under the bound.
+      Accepted corner: a tick at exactly --start completing instantly can
+      interleave with an at-start set and fire a latch once legitimately
+      -- a rare false positive the policy file can declare.
     - unchecked, absorbing where the bound depends on it: parked file
       watchers, jobs with no SUCCESS exit, policy nulls; box members
       absorb an unchecked box; wake-dependent consumers absorb any of the
@@ -502,16 +879,41 @@ def expected_bounds(
         unchecked[name] = "file watcher parked: cadence unknowable unless scripted"
     for name in no_success_exit:
         unchecked[name] = "no exit code its SEM-09 boundary calls SUCCESS; parked"
+    scripted = list(scripted_globals or ())
+    scripted_names = {gname for gname, _value, _at_start in scripted}
+    at_start_truth = genesis_truth(catalog)
+    global_wakes: dict[str, int] = {}
     for name, job in catalog.jobs.items():
         if name not in wake_dep or name in unchecked:
             continue
         cond_attr = job.sem.condition
-        if cond_attr is not None and any(
-            isinstance(atom, GlobalAtom) for atom in iter_atoms(cond_attr.cond)
-        ):
-            # the START condition only -- a v() inside box_success folds a
-            # running box and starts nothing (the review's m1)
+        if cond_attr is None:
+            continue
+        # the START condition only -- a v() inside box_success folds a
+        # running box and starts nothing (the review's m1)
+        gnames = {a.name for a in iter_atoms(cond_attr.cond) if isinstance(a, GlobalAtom)}
+        if not gnames:
+            continue
+        if gnames - scripted_names:
             unchecked[name] = "global-gated: wake budget unknowable until the flag sweep"
+            continue
+        # could-fire wake credit, in event order with at-start sets first: a
+        # set on a referenced global buys one wake exactly when the WHOLE
+        # condition can then be true -- job atoms at their genesis truth for
+        # at-start sets (bare n() IS true there, an ON_ICE seed satisfies
+        # everything -- the slice review's second blocker), optimistic-true
+        # for mid-window sets (latches can be true by then)
+        values: dict[str, str] = {}
+        credit = 0
+        for target_at_start in (True, False):
+            truth = at_start_truth if target_at_start else _optimistic_truth
+            for gname, gvalue, at_start in scripted:
+                if at_start is not target_at_start:
+                    continue
+                values[gname] = gvalue
+                if gname in gnames and _cond_could_fire(cond_attr.cond, values, truth):
+                    credit += 1
+        global_wakes[name] = credit
     for edge in graph.edges:
         if edge.dst not in wake_dep or edge.dst in unchecked:
             continue
@@ -598,7 +1000,7 @@ def expected_bounds(
                 base = own
             else:
                 wake = max((value.get(w, 0) for w in wake_srcs[name]), default=0)
-                base = wake + inj_s.get(name, 0)
+                base = wake + inj_s.get(name, 0) + global_wakes.get(name, 0)
             v = base + inj_f.get(name, 0)
             if v > value[name]:
                 value[name] = v
@@ -633,6 +1035,8 @@ def expected_bounds(
         )
         if injected:
             prov += f" +{injected} injected"
+        if global_wakes.get(name):
+            prov += f" +{global_wakes[name]} satisfying global sets"
         bounds[name] = Bound(expected=value[name], provenance=prov)
     return bounds
 
@@ -696,8 +1100,13 @@ def render_text(check: CadenceCheck) -> list[str]:
     for name, job in check.jobs.items():
         expected = "-" if job.expected is None else str(job.expected)
         verdict = "DEVIATION" if job.deviation else ("unchecked" if job.expected is None else "ok")
+        provenance = job.provenance
+        if "flags" in check.sweeps and provenance.startswith("global-gated"):
+            # the happy row keeps its own play's semantics; the pointer says
+            # where this job DID get checked (review m2)
+            provenance += " -- exercised by the flag sweep below"
         lines.append(
-            f"{name:<{width}}  {expected:>8}  {job.observed:>8}  {verdict:<9}  {job.provenance}"
+            f"{name:<{width}}  {expected:>8}  {job.observed:>8}  {verdict:<9}  {provenance}"
         )
     lines.append(
         f"checked {check.checked}, unchecked {check.unchecked},"
@@ -715,6 +1124,22 @@ def render_text(check: CadenceCheck) -> list[str]:
                 lines.append(f"fail {case.producer}: suppressed {drops}")
             else:
                 lines.append(f"fail {case.producer}: no suppressed runs")
+    if check.flag_sweep:
+        lines.append(f"-- flag sweep: {len(check.flag_sweep)} cases --")
+        by_component: dict[str, list[FlagCase]] = {}
+        for fcase in check.flag_sweep:
+            by_component.setdefault(",".join(sorted(fcase.assignment)), []).append(fcase)
+        for key, gcases in by_component.items():
+            dev = sum(c.deviations for c in gcases)
+            spins = sum(1 for c in gcases if c.cycle)
+            line = f"flags {key}: {len(gcases)} cases, {dev} deviations"
+            if spins:
+                line += f", {spins} tripped the zero-delay guard"
+            lines.append(line)
+    if check.flag_uncovered:
+        # outside the case guard: when EVERY component fell past the ceiling
+        # there are zero cases yet the omission must still print (review find)
+        lines.append("flag sweep uncovered (case ceiling): " + ", ".join(check.flag_uncovered))
     for finding in check.findings:
         where = f" ({finding.case})" if finding.case else ""
         lines.append(f"finding [{finding.kind}]{where} {', '.join(finding.jobs)}: {finding.detail}")
