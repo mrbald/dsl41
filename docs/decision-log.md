@@ -11200,3 +11200,32 @@ relitigate an entry; append a new one.
   THE GATE: 3544 passed, 6 skipped, 2 xfailed; ruff check, ruff
   format --check, mypy src, arch_check clean of blockers; 7 advisory
   size notes stand for the next /arch-review.
+  THE FAIL-SWEEP SLICE (same day; scoped review, exit-classification
+  focus). Clean on the named risk: failure_exit is the same SEM-09
+  predicate the oracle applies, all three Q7 corners probed; bounds
+  path-independence held. Four majors, all acted: (a) a producer with
+  ZERO baseline runs reported "ran, no suppressed runs" -- a clean
+  bill for a failure never exercised; now inconclusive_not_reached,
+  decided from the baseline count (the case differs from the
+  baseline only in run 1's script entry, so an unreached producer
+  replays it bit-identically and the play is skipped). (b) the case
+  entry re-clobbered a SCRIPTED run-1 duration with the default --
+  the slice-1 blocker in a second spelling; the preference is now
+  scenario (P,1) entry, then job default, then estate default, homed
+  in case_fail_entry and pinned there directly, because (c) the
+  duration test asserted suppression math that is identical at 600s
+  and 0s -- the over-claiming-test defect class, replaced by the
+  direct pin plus a behavioral companion. (d) after a happy-path
+  zero-delay trip the sweep diffed against the aborted spin's
+  partial counts and burned the instant budget once more per
+  producer ("suppressed cy_a -5000", fiction); the sweep now skips
+  on a tripped baseline with a stderr note and the sweeps list
+  honestly omits "fail". Minors: the case line renders a tripped
+  guard instead of "no suppressed runs"; term_run_time turning the
+  synthesized FAILURE into TERMINATED is documented as accepted
+  (f() reads FAILURE only, t()/d() read the kill); the two ~13s
+  spin tests -- 98% of the file's runtime, and the second was this
+  entry's own declined-trigger firing -- folded into one that pins
+  the play_once catch, the jobs/instant payload and the case tag
+  together. THE GATE: 3562 passed, 6 skipped, 2 xfailed; ruff, ruff
+  format --check, mypy, arch_check blocker-free.

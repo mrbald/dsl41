@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -127,6 +127,9 @@ class CheckFinding(BaseModel):
     kind: Literal["multi_fire", "zero_delay_cycle"]
     jobs: list[str]
     detail: str
+    #: which play raised it: None = the happy path, "fail:<producer>" = that
+    #: fail-sweep case (additive within schema_version 1)
+    case: str | None = None
 
 
 class JobCheck(Bound):
@@ -134,6 +137,25 @@ class JobCheck(Bound):
 
     observed: int
     deviation: bool
+
+
+class SweepCase(BaseModel):
+    """One fail-sweep case: the producer's first run scripted to FAILURE,
+    and what changed against the happy-path baseline. `suppressed` is the
+    dynamic L022 inventory -- info tier, it never exits 3 by itself;
+    `deviations`/`cycle` findings land in the report's findings and do."""
+
+    producer: str
+    outcome: Literal[
+        "ran",
+        "skipped_box",  # no adapter runs a BOX (DL-184)
+        "skipped_parked",  # a parked producer never completes at all
+        "inconclusive_no_fail_exit",  # SEM-09 boundary cannot say FAILURE
+        "inconclusive_retries",  # n_retrys > 0: retries unmodeled (DL-53)
+        "inconclusive_not_reached",  # zero baseline runs: the failure never fires
+    ]
+    suppressed: dict[str, int] = {}  # job -> baseline runs minus this case's
+    cycle: bool = False
 
 
 class CadenceCheck(BaseModel):
@@ -146,6 +168,7 @@ class CadenceCheck(BaseModel):
     sweeps: list[str] = ["happy"]
     jobs: dict[str, JobCheck]
     findings: list[CheckFinding]
+    fail_sweep: list[SweepCase] = []
     note: str = UNMODELED_NOTE
 
     @property
@@ -217,6 +240,162 @@ def success_exit(job: JobIR) -> int | None:
         if job.sem.exit_is_success(code):
             return code
     return None
+
+
+def failure_exit(job: JobIR) -> int | None:
+    """The smallest exit code this job's own SEM-09 boundary calls FAILURE,
+    or None when every code in 0..255 is a SUCCESS (a fail sweep cannot
+    fail such a producer through its exit -- inconclusive, DL-184)."""
+    for code in range(256):
+        if not job.sem.exit_is_success(code):
+            return code
+    return None
+
+
+def fail_sweep_producers(catalog: CatalogIR, graph: DerivedGraph) -> list[str]:
+    """The fail sweep's case list: every distinct LOCAL producer of a live
+    start gate (DL-184; cross-instance and undefined producers are
+    unknowable here, and bare n() partners are not failure producers --
+    the DL-181 reading keeps n() out of failure consumption). Box-override
+    references (box_success/box_failure, M15/M16) are completion
+    predicates, not start gates, so they contribute no producers either."""
+    producers: set[str] = set()
+    for edges in start_gates(graph).values():
+        for edge in edges:
+            lp = local_producer(edge, catalog)
+            if lp is not None:
+                producers.add(lp)
+    return sorted(producers)
+
+
+def case_fail_entry(adapter: FakeAdapter, producer: str, fail_code: int) -> tuple[float, int]:
+    """The script entry a fail-sweep case writes over (producer, 1): the
+    synthesized FAILURE exit with the duration the baseline would have used
+    -- the scenario's own run-1 entry first, then the job default, then the
+    estate default. DL-184 authorizes synthesizing the exit, never the
+    duration (the slice-1 review's blocker); this slice's review found the
+    first draft re-clobbering a scripted run-1 duration the same way. A
+    scripted run-1 PARK falls through to the defaults: the sweep overrides
+    the park (the sweep-entry-over-scenario-entry rule), and a park carries
+    no duration to preserve."""
+    scripted = adapter.script.get((producer, 1))
+    if scripted is not None:
+        return (scripted[0], fail_code)
+    entry = adapter.job_default.get(producer, adapter.default)
+    return (entry[0] if entry is not None else 0.0, fail_code)
+
+
+def run_fail_sweep(
+    catalog: CatalogIR,
+    baseline_runs: Mapping[str, int],
+    bounds: Mapping[str, Bound],
+    adapter: FakeAdapter,
+    events: Iterable[Event],
+    *,
+    start: datetime,
+    horizon: datetime,
+    default_tz: str | None = None,
+    tz_aliases: Mapping[str, str] | None = None,
+    producers: Iterable[str],
+    parked: Collection[str] = (),
+    progress: "Callable[[str], None] | None" = None,
+) -> tuple[list[SweepCase], list[CheckFinding]]:
+    """The dynamic L022 (DL-182 sweep a, ruled by DL-184): one replay per
+    producer with that producer's FIRST run scripted to an exit its own
+    SEM-09 boundary calls FAILURE (a blanket exit 1 is wrong under
+    success_codes/fail_codes -- Q7's lesson); the sweep entry overrides any
+    scenario entry. Jobs that dropped runs against the baseline are the
+    suppressed-run inventory (info tier, never exit 3 alone); a multi-fire
+    against the same bounds, or a tripped zero-delay guard, is a finding
+    and does. Bounds stay valid across cases: they are path-independent
+    upper bounds, and a failure can only redistribute which gates release.
+    BOX producers have no adapter, parked producers never complete,
+    n_retrys > 0 producers are unmodeled (DL-53), and a producer with ZERO
+    baseline runs is never reached (the case would replay the baseline
+    bit-identically -- its only difference is run 1's script entry) -- each
+    skips with its outcome named rather than pretending coverage. A
+    term_run_time shorter than the failing run's duration turns the FAILURE
+    into TERMINATED (SEM-14): accepted -- still a non-success, though f()
+    gates read FAILURE only, t()/d() read the kill."""
+    events = list(events)  # one materialization, replayed per case
+    cases: list[SweepCase] = []
+    findings: list[CheckFinding] = []
+    for producer in producers:
+        job = catalog.jobs[producer]
+        if job.job_type == "BOX":
+            cases.append(SweepCase(producer=producer, outcome="skipped_box"))
+            continue
+        if producer in parked or producer in adapter.park:
+            cases.append(SweepCase(producer=producer, outcome="skipped_parked"))
+            continue
+        if job.sem.n_retrys > 0:
+            cases.append(SweepCase(producer=producer, outcome="inconclusive_retries"))
+            continue
+        fail_code = failure_exit(job)
+        if fail_code is None:
+            cases.append(SweepCase(producer=producer, outcome="inconclusive_no_fail_exit"))
+            continue
+        if baseline_runs.get(producer, 0) == 0:
+            cases.append(SweepCase(producer=producer, outcome="inconclusive_not_reached"))
+            continue
+        if progress is not None:
+            progress(f"sweep fail {producer}")
+        script = dict(adapter.script)
+        script[(producer, 1)] = case_fail_entry(adapter, producer, fail_code)
+        case_adapter = FakeAdapter(
+            script,
+            default=adapter.default,
+            park=adapter.park,
+            job_default=adapter.job_default,
+        )
+        case_id = f"fail:{producer}"
+        result = play_once(
+            catalog,
+            start=start,
+            horizon=horizon,
+            adapter=case_adapter,
+            events=list(events),
+            default_tz=default_tz,
+            tz_aliases=tz_aliases,
+            case=case_id,
+        )
+        suppressed = {
+            name: baseline_runs.get(name, 0) - runs
+            for name, runs in sorted(result.runs.items())
+            if baseline_runs.get(name, 0) - runs > 0
+        }
+        cases.append(
+            SweepCase(
+                producer=producer,
+                outcome="ran",
+                suppressed=suppressed,
+                cycle=result.cycle is not None,
+            )
+        )
+        if result.cycle is not None:
+            findings.append(
+                CheckFinding(
+                    kind="zero_delay_cycle",
+                    jobs=list(result.cycle.jobs),
+                    detail=str(result.cycle),
+                    case=case_id,
+                )
+            )
+        for name in sorted(result.runs):
+            bound = bounds[name]
+            if bound.expected is not None and result.runs[name] > bound.expected:
+                findings.append(
+                    CheckFinding(
+                        kind="multi_fire",
+                        jobs=[name],
+                        detail=(
+                            f"observed {result.runs[name]} runs, expected at most"
+                            f" {bound.expected} ({bound.provenance})"
+                        ),
+                        case=case_id,
+                    )
+                )
+    return cases, findings
 
 
 def check_adapter(
@@ -524,8 +703,21 @@ def render_text(check: CadenceCheck) -> list[str]:
         f"checked {check.checked}, unchecked {check.unchecked},"
         f" ran {check.ran} of {len(check.jobs)}, findings {len(check.findings)}"
     )
+    if check.fail_sweep:
+        lines.append(f"-- fail sweep: {len(check.fail_sweep)} producers --")
+        for case in check.fail_sweep:
+            if case.outcome != "ran":
+                lines.append(f"fail {case.producer}: {case.outcome}")
+            elif case.cycle:
+                lines.append(f"fail {case.producer}: tripped the zero-delay guard")
+            elif case.suppressed:
+                drops = ", ".join(f"{name} -{n}" for name, n in case.suppressed.items())
+                lines.append(f"fail {case.producer}: suppressed {drops}")
+            else:
+                lines.append(f"fail {case.producer}: no suppressed runs")
     for finding in check.findings:
-        lines.append(f"finding [{finding.kind}] {', '.join(finding.jobs)}: {finding.detail}")
+        where = f" ({finding.case})" if finding.case else ""
+        lines.append(f"finding [{finding.kind}]{where} {', '.join(finding.jobs)}: {finding.detail}")
     lines.append(f"note: {check.note}")
     return lines
 

@@ -832,7 +832,10 @@ this jump possible.
   trace format. `--check-cadence` (DL-182/DL-184) compares each job's
   observed run count — a run_number delta — against a typed cadence
   bound and exits 3 on deviations; `--cadence-policy` declares intended
-  exceptions. The expectation side lives in `rehearse_check.py`.
+  exceptions; `--sweep fail` replays the estate once per start-gate
+  producer with that producer's first run scripted to a SEM-09 FAILURE
+  and reports the suppressed-run inventory (the dynamic L022). The
+  expectation side lives in `rehearse_check.py`.
 
 ## 10. Control plane
 

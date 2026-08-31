@@ -31,12 +31,16 @@ from dsl41.rehearse_check import (
     CadenceCheckError,
     CadencePolicy,
     JobPolicy,
+    case_fail_entry,
     check_adapter,
     compare,
     expected_bounds,
+    fail_sweep_producers,
+    failure_exit,
     load_policy,
     play_once,
     render_text,
+    run_fail_sweep,
     scenario_budgets,
     scheduled_ticks,
     success_exit,
@@ -691,21 +695,10 @@ def test_play_once_smoke_estate_run_counts() -> None:
     assert result.cycle is None
 
 
-def test_play_once_zero_delay_cycle_returns_the_cycle_on_the_result() -> None:
-    """A FORCE_STARTJOB kick on a condition SCC spins the zero-delay guard.
-    play_once catches it and returns rather than raising -- the check's own
-    finding, not a shell failure (DL-184).
-
-    NOTE: this spins ~10-15s through the instant budget before the guard
-    trips. That is expected; this is the one such test in the suite."""
-    catalog = lower_source(CYCLE_JIL)
-    kick_at = START + timedelta(hours=1)
-    kick = Event(at=kick_at, kind="FORCE_STARTJOB", payload={"job": "cy_a"})
-    adapter = FakeAdapter({}, default=(0.0, 0))
-    result = play_once(catalog, start=START, horizon=HORIZON, adapter=adapter, events=[kick])
-    assert isinstance(result.cycle, ZeroDelayCycleError)
-    assert result.cycle.jobs == ("cy_a", "cy_b")
-    assert result.cycle.instant == kick_at
+# The play_once spin conversion (a FORCE_STARTJOB kick on CYCLE_JIL) is
+# pinned inside the fail-sweep guard test below -- run_fail_sweep can only
+# see result.cycle because play_once caught it, so one spin covers both
+# (this slice's review: two ~13s spins were 98% of the file's runtime).
 
 
 # --------------------------------------------------------------------- CLI: rehearse
@@ -889,3 +882,485 @@ def test_cli_plain_rehearse_output_is_unchanged_by_the_cadence_check_refactor(
     assert summary_result.exit_code == 0, summary_result.output
     assert "-- summary: runs per job --" in summary_result.output
     assert "cs_a runs=2 final=SUCCESS" in summary_result.output
+
+
+# --------------------------------------------------------------- failure_exit
+
+
+def test_failure_exit_plain_job_is_one() -> None:
+    """max_exit_success 0: exit 0 is SUCCESS, exit 1 is the smallest FAILURE."""
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n")
+    assert failure_exit(catalog.jobs["j"]) == 1
+
+
+def test_failure_exit_fail_codes_covering_zero_gives_zero() -> None:
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nfail_codes: 0\n")
+    assert failure_exit(catalog.jobs["j"]) == 0
+
+
+def test_failure_exit_success_codes_covering_the_whole_vocabulary_gives_none() -> None:
+    """Every code in 0..255 is a SUCCESS: a fail sweep cannot fail this
+    producer through its exit -- inconclusive (DL-184)."""
+    catalog = lower_source(
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nsuccess_codes: 0-255\n"
+    )
+    assert failure_exit(catalog.jobs["j"]) is None
+
+
+# ----------------------------------------------------------- fail_sweep_producers
+
+
+def test_fail_sweep_producers_are_distinct_and_sorted() -> None:
+    text = (
+        "insert_job: zprod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: aprod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons1\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(zprod)\n\n"
+        "insert_job: cons2\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(zprod) | s(aprod)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    assert fail_sweep_producers(catalog, graph) == ["aprod", "zprod"]
+
+
+def test_fail_sweep_producers_bare_notrunning_target_is_not_a_producer() -> None:
+    """A bare n() target is a mutex ref, not failure consumption (DL-181):
+    it must not appear in the fail sweep's case list."""
+    text = (
+        "insert_job: guard\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watcher\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(guard)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    assert fail_sweep_producers(catalog, graph) == []
+
+
+def test_fail_sweep_producers_cross_instance_producer_contributes_nothing() -> None:
+    text = (
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        "insert_job: xi\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(remote^PRD)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    assert fail_sweep_producers(catalog, graph) == []
+
+
+def test_fail_sweep_producers_f_and_d_gated_producer_is_included() -> None:
+    text = (
+        "insert_job: prod\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: consf\njob_type: c\ncommand: x\nmachine: m1\ncondition: f(prod)\n\n"
+        "insert_job: consd\njob_type: c\ncommand: x\nmachine: m1\ncondition: d(prod)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    assert fail_sweep_producers(catalog, graph) == ["prod"]
+
+
+# --------------------------------------------------------------- run_fail_sweep
+
+
+def test_run_fail_sweep_outcomes_box_parked_retries_no_fail_exit_and_ran() -> None:
+    """One replay per producer, five distinct outcomes (DL-184): a BOX has no
+    adapter; a parked FW never completes; n_retrys > 0 is unmodeled (DL-53);
+    an all-SUCCESS exit vocabulary cannot be failed through the exit; a plain
+    producer runs."""
+    text = (
+        'insert_job: bx\njob_type: b\ndate_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: mem\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx\n\n"
+        "insert_job: cons_bx\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(bx)\n\n"
+        "insert_job: fw\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n\n"
+        "insert_job: cons_fw\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(fw)\n\n"
+        "insert_job: retryer\njob_type: c\ncommand: x\nmachine: m1\nn_retrys: 2\n\n"
+        "insert_job: cons_retryer\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(retryer)\n\n"
+        "insert_job: unfailable\njob_type: c\ncommand: x\nmachine: m1\nsuccess_codes: 0-255\n\n"
+        "insert_job: cons_unfailable\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(unfailable)\n\n"
+        "insert_job: plain\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "04:00"\n\n'
+        "insert_job: cons_plain\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(plain)\n\n"
+        "insert_job: unreached\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_unreached\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(unreached)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    bounds = expected_bounds(catalog, graph, ticks, parked=parked_fw, no_success_exit=no_success)
+    producers = fail_sweep_producers(catalog, graph)
+    assert producers == ["bx", "fw", "plain", "retryer", "unfailable", "unreached"]
+    baseline = {name: 0 for name in catalog.jobs}
+    baseline["plain"] = 1  # the one producer the happy path actually reached
+    cases, findings = run_fail_sweep(
+        catalog,
+        baseline,
+        bounds,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=producers,
+        parked=parked_fw,
+    )
+    outcomes = {case.producer: case.outcome for case in cases}
+    assert outcomes == {
+        "bx": "skipped_box",
+        "fw": "skipped_parked",
+        "plain": "ran",
+        "retryer": "inconclusive_retries",
+        "unfailable": "inconclusive_no_fail_exit",
+        "unreached": "inconclusive_not_reached",  # zero baseline runs: never fires
+    }
+    assert findings == []
+
+
+def test_run_fail_sweep_suppresses_the_release_consumer_and_wakes_the_failure_consumer() -> None:
+    """P scheduled twice/day; C (s(P)) is the L022 story dynamically caught:
+    P's first run fails, C's second start still fires, so the fail:P case
+    suppresses C by exactly 1 -- names are examples, the dict is
+    positive-only.
+
+    C2 (f(P), ALSO scheduled with its own start_time) is the strand static
+    L022 cannot see for scheduled consumers: it runs 0 in the baseline and
+    1 in the fail:P case (a released run, not a suppressed one -- negative
+    diffs are dropped from `suppressed`), and its bound (own ticks == 1)
+    covers it, so this is not a deviation either."""
+    text = (
+        "insert_job: P\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00, 13:00"\n\n'
+        "insert_job: C\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(P)\n\n"
+        "insert_job: C2\njob_type: c\ncommand: z\nmachine: m1\ncondition: f(P)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "05:00"\n'
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    bounds = expected_bounds(catalog, graph, ticks, parked=parked_fw, no_success_exit=no_success)
+    assert bounds["C2"].expected == 1
+    assert bounds["C2"].provenance == "own ticks (1)"
+    baseline = play_once(catalog, start=START, horizon=HORIZON, adapter=adapter)
+    assert baseline.runs == {"P": 2, "C": 2, "C2": 0}
+    producers = fail_sweep_producers(catalog, graph)
+    assert producers == ["P"]
+    cases, findings = run_fail_sweep(
+        catalog,
+        baseline.runs,
+        bounds,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=producers,
+        parked=parked_fw,
+    )
+    (case,) = cases
+    assert case.outcome == "ran"
+    assert case.suppressed == {"C": 1}  # C2's release (0 -> 1) is a negative
+    assert findings == []  # diff and never appears here
+
+    # Observe C2's own run count directly: run_fail_sweep's public result
+    # cannot show it (a released run has no positive diff to report), so
+    # build the SAME case adapter run_fail_sweep builds internally and play
+    # it once more (DL-184 mechanics: the sweep entry overrides the key).
+    fail_code = failure_exit(catalog.jobs["P"])
+    assert fail_code is not None
+    script = dict(adapter.script)
+    script[("P", 1)] = (0.0, fail_code)
+    case_adapter = FakeAdapter(
+        script, default=adapter.default, park=adapter.park, job_default=adapter.job_default
+    )
+    result = play_once(catalog, start=START, horizon=HORIZON, adapter=case_adapter, case="fail:P")
+    assert result.runs["C2"] == 1  # released, and at most once (its own tick caps it)
+
+
+def test_run_fail_sweep_sweep_entry_overrides_the_scenario_script() -> None:
+    """A scenario script that already pins (P, 1) to SUCCESS is overridden by
+    the sweep's own FAILURE entry for that case (DL-184): C still gets
+    suppressed."""
+    text = (
+        "insert_job: P\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00, 13:00"\n\n'
+        "insert_job: C\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(P)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base_adapter = FakeAdapter({("P", 1): (0.0, 0)}, default=(0.0, 0))
+    bounds = expected_bounds(catalog, graph, ticks)
+    baseline = play_once(catalog, start=START, horizon=HORIZON, adapter=base_adapter)
+    assert baseline.runs == {"P": 2, "C": 2}
+    producers = fail_sweep_producers(catalog, graph)
+    cases, _findings = run_fail_sweep(
+        catalog,
+        baseline.runs,
+        bounds,
+        base_adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=producers,
+    )
+    (case,) = cases
+    assert case.suppressed == {"C": 1}  # the case script overwrote (P, 1)
+
+
+def test_case_fail_entry_prefers_the_scripted_run_1_duration() -> None:
+    """DL-184 authorizes synthesizing the EXIT, never the duration --
+    asserted where the duration lives (this slice's review found the
+    suppression-math version of this test blind: the counts are identical
+    at 600s and 0s). Preference order: the scenario's own (P, 1) entry,
+    then the job default, then the estate default; a scripted run-1 PARK
+    carries no duration and falls through."""
+    scripted = FakeAdapter({("P", 1): (600.0, 0)}, default=(5.0, 0))
+    assert case_fail_entry(scripted, "P", 7) == (600.0, 7)
+    job_defaulted = FakeAdapter({}, default=(5.0, 0), job_default={"P": (300.0, 0)})
+    assert case_fail_entry(job_defaulted, "P", 7) == (300.0, 7)
+    parked_run = FakeAdapter({("P", 1): None}, default=(5.0, 0))
+    assert case_fail_entry(parked_run, "P", 7) == (5.0, 7)
+    bare = FakeAdapter({}, default=None)
+    assert case_fail_entry(bare, "P", 7) == (0.0, 7)
+
+
+def test_run_fail_sweep_suppression_math_at_a_nonzero_duration() -> None:
+    """The behavioral companion: with a 600s scenario default the sweep's
+    case still fails P's first run and suppresses its consumer by one."""
+    text = (
+        "insert_job: P\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00, 13:00"\n\n'
+        "insert_job: C\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(P)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(600.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    assert adapter.job_default["P"] == (600.0, 0)  # the scenario duration survives synthesis
+    bounds = expected_bounds(catalog, graph, ticks, parked=parked_fw, no_success_exit=no_success)
+    baseline = play_once(catalog, start=START, horizon=HORIZON, adapter=adapter)
+    assert baseline.runs == {"P": 2, "C": 2}
+    producers = fail_sweep_producers(catalog, graph)
+    cases, _findings = run_fail_sweep(
+        catalog,
+        baseline.runs,
+        bounds,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=producers,
+        parked=parked_fw,
+    )
+    (case,) = cases
+    assert case.suppressed == {"C": 1}
+
+
+def test_run_fail_sweep_findings_carry_the_case_tag_happy_path_carries_none() -> None:
+    """The DL-180 OR multi-fire on cs_either is the happy path's finding
+    (case=None) AND the fail:cs_b case's finding (case="fail:cs_b", DL-184)
+    -- cs_b's own failure does not suppress it because the OR join still
+    fires on cs_a's two wakes alone."""
+    catalog = lower_source(SMOKE_JIL)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    bounds = expected_bounds(catalog, graph, ticks, parked=parked_fw, no_success_exit=no_success)
+    baseline = play_once(catalog, start=START, horizon=HORIZON, adapter=adapter)
+    happy = compare(catalog, bounds, baseline.runs, start=START, horizon=HORIZON)
+    (happy_finding,) = happy.findings
+    assert happy_finding.case is None
+
+    producers = fail_sweep_producers(catalog, graph)
+    _cases, findings = run_fail_sweep(
+        catalog,
+        baseline.runs,
+        bounds,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=producers,
+        parked=parked_fw,
+    )
+    (sweep_finding,) = findings
+    assert sweep_finding.kind == "multi_fire"
+    assert sweep_finding.jobs == ["cs_either"]
+    assert sweep_finding.case == "fail:cs_b"
+
+
+def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding() -> None:
+    """A scheduled `kicker` feeds BOTH members of a two-job condition SCC
+    (the CYCLE_JIL shape) via s(kicker). Failing kicker's own run is quiet:
+    neither cy_a nor cy_b is ever woken, so nothing spins. But in ANY OTHER
+    case kicker is unscripted and completes normally, and its SUCCESS kicks
+    both members at once -- one of them then re-triggers the other via
+    their mutual s() forever at zero duration, tripping the guard inside
+    THAT case's play. `case.cycle` is set and the zero_delay_cycle finding
+    carries the case tag.
+
+    NOTE: the fail:cy_a case spins ~13s of virtual-time before the guard
+    trips -- deliberately the ONE spin test in the suite (this slice's
+    review folded play_once's own guard test into it: run_fail_sweep can
+    only see result.cycle because play_once caught it, so this pins the
+    catch, the jobs/instant payload, AND the case tagging in one spin).
+    baseline_runs is a stub pinning both producers as reached: a real
+    baseline here would ALSO spin, doubling the runtime for no additional
+    assertion -- this test checks case.cycle/findings, not suppression."""
+    text = (
+        "insert_job: kicker\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: cy_a\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(cy_b) | s(kicker)\n\n"
+        "insert_job: cy_b\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(cy_a) | s(kicker)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    base = FakeAdapter({}, default=(0.0, 0))
+    adapter, parked_fw, no_success = check_adapter(catalog, base)
+    bounds = expected_bounds(catalog, graph, ticks, parked=parked_fw, no_success_exit=no_success)
+    baseline = {"kicker": 1, "cy_a": 1}  # both reached, else inconclusive_not_reached
+    cases, findings = run_fail_sweep(
+        catalog,
+        baseline,
+        bounds,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        producers=["kicker", "cy_a"],
+        parked=parked_fw,
+    )
+    by_producer = {case.producer: case for case in cases}
+    assert by_producer["kicker"].outcome == "ran"
+    assert by_producer["kicker"].cycle is False  # failing the kicker is quiet
+    assert by_producer["cy_a"].outcome == "ran"
+    assert by_producer["cy_a"].cycle is True
+    (cycle_finding,) = [f for f in findings if f.kind == "zero_delay_cycle"]
+    assert cycle_finding.case == "fail:cy_a"
+    # the ZeroDelayCycleError payload survived the conversion: the spinning
+    # jobs and the frozen instant (kicker completes at its 01:00 tick)
+    assert cycle_finding.jobs == ["cy_a", "cy_b", "kicker"]
+    assert "2026-09-01 01:00:00" in cycle_finding.detail
+    (finding,) = findings
+    assert finding.kind == "zero_delay_cycle"
+    assert finding.case == "fail:cy_a"
+    assert finding.jobs == ["cy_a", "cy_b", "kicker"]
+
+
+# --------------------------------------------------------------- CLI: --sweep fail
+
+
+def test_cli_sweep_fail_without_check_cadence_exits_2(tmp_path: Path) -> None:
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(app, ["rehearse", str(jil), "--sweep", "fail"])
+    assert result.exit_code == 2
+    assert "requires" in result.output
+    assert "--check-cadence" in result.output
+
+
+def test_cli_sweep_fail_with_run_root_exits_2(tmp_path: Path) -> None:
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--check-cadence",
+            "--sweep",
+            "fail",
+            "--run-root",
+            str(tmp_path / "rr"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "journal" in result.output
+
+
+def test_cli_sweep_fail_format_text_smoke(tmp_path: Path) -> None:
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "24",
+            "--check-cadence",
+            "--sweep",
+            "fail",
+            "--format",
+            "text",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert "-- cadence check: happy, fail --" in result.output
+    assert "-- fail sweep: 2 producers --" in result.output
+    assert "fail cs_a: suppressed cs_chain -1, cs_either -1" in result.output
+    assert "fail cs_b: no suppressed runs" in result.output
+    assert "finding [multi_fire] (fail:cs_b) cs_either:" in result.output
+
+
+def test_cli_sweep_fail_format_json_smoke(tmp_path: Path) -> None:
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "24",
+            "--check-cadence",
+            "--sweep",
+            "fail",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    # stdout only: result.output interleaves the sweep's stderr progress
+    # lines ahead of the json document (item 13's stream separation).
+    doc = json.loads(result.stdout)
+    cc = doc["cadence_check"]
+    assert cc["sweeps"] == ["happy", "fail"]
+    assert cc["fail_sweep"] == [
+        {
+            "producer": "cs_a",
+            "outcome": "ran",
+            "suppressed": {"cs_chain": 1, "cs_either": 1},
+            "cycle": False,
+        },
+        {"producer": "cs_b", "outcome": "ran", "suppressed": {}, "cycle": False},
+    ]
+    assert [f["case"] for f in cc["findings"]] == [None, "fail:cs_b"]
+
+
+def test_cli_sweep_fail_progress_lines_go_to_stderr_not_stdout(tmp_path: Path) -> None:
+    jil = _write_smoke(tmp_path)
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-09-01T00:00:00",
+            "--hours",
+            "24",
+            "--check-cadence",
+            "--sweep",
+            "fail",
+            "--format",
+            "text",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert "sweep fail cs_a" not in result.stdout
+    assert "sweep fail cs_b" not in result.stdout
+    assert "sweep fail cs_a" in result.stderr
+    assert "sweep fail cs_b" in result.stderr

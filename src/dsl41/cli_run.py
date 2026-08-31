@@ -757,6 +757,13 @@ class RehearseFormat(str, Enum):
     json = "json"  # one document: trace + rollup
 
 
+class SweepKind(str, Enum):
+    """`rehearse --check-cadence --sweep` (DL-184). `flags` joins with the
+    flag-sweep slice."""
+
+    fail = "fail"  # one replay per producer, first run scripted to FAILURE
+
+
 def _trace_line(entry: "TraceEntry") -> str:
     """The one spelling of a printed trace line -- rehearse and the journal
     replay used to carry a copy each (arch-review 2026-08-28)."""
@@ -878,26 +885,38 @@ def _emit_cadence_check(
     parked_fw: frozenset[str],
     no_success: frozenset[str],
     cycle: "ZeroDelayCycleError | None",
+    sweeps: "list[SweepKind]",
+    adapter: "FakeAdapter",
+    events: "list[Event]",
 ) -> None:
     """The --check-cadence report and exit (DL-184): expected bounds from a
     fresh Scheduler + the wake-source walk, observed counts as run_number
     deltas, deviations exit 3. text = table; summary = trace + table; json =
-    the legacy document plus one nested cadence_check block."""
+    the legacy document plus one nested cadence_check block. --sweep fail
+    replays per producer through play_once; case progress goes to stderr."""
     import json as json_mod
 
     from dsl41.derive import derive_graph
-    from dsl41.rehearse_check import compare, expected_bounds, render_text, scheduled_ticks
+    from dsl41.rehearse_check import (
+        compare,
+        expected_bounds,
+        fail_sweep_producers,
+        render_text,
+        run_fail_sweep,
+        scheduled_ticks,
+    )
 
     observed = {
         name: engine.oracle.store.runtime(name).run_number - runs_before[name]
         for name in catalog.jobs
     }
+    graph = derive_graph(catalog)
     ticks = scheduled_ticks(
         catalog, start=start_dt, horizon=horizon, default_tz=timezone, tz_aliases=tz_aliases
     )
     bounds = expected_bounds(
         catalog,
-        derive_graph(catalog),
+        graph,
         ticks,
         injected_start=injected_start,
         injected_force=injected_force,
@@ -906,6 +925,30 @@ def _emit_cadence_check(
         no_success_exit=no_success,
     )
     check = compare(catalog, bounds, observed, start=start_dt, horizon=horizon, cycle=cycle)
+    if SweepKind.fail in sweeps and cycle is not None:
+        # the aborted happy play left truncated, spin-inflated counts -- a
+        # baseline of fiction, and each case would burn the whole instant
+        # budget again (this slice's review). The cycle finding already
+        # exits 3; the sweeps list honestly omits "fail".
+        typer.echo("fail sweep skipped: the happy path tripped the zero-delay guard", err=True)
+    elif SweepKind.fail in sweeps:
+        cases, sweep_findings = run_fail_sweep(
+            catalog,
+            observed,
+            bounds,
+            adapter,
+            events,
+            start=start_dt,
+            horizon=horizon,
+            default_tz=timezone,
+            tz_aliases=tz_aliases,
+            producers=fail_sweep_producers(catalog, graph),
+            parked=parked_fw,
+            progress=lambda line: typer.echo(line, err=True),
+        )
+        check.sweeps.append(SweepKind.fail.value)
+        check.fail_sweep = cases
+        check.findings.extend(sweep_findings)
     trace = engine.oracle.trace()
     if fmt is RehearseFormat.json:
         doc = _rehearsal_doc(trace, catalog.jobs)
@@ -972,6 +1015,14 @@ def rehearse(
         "--cadence-policy",
         help="Declared cadence exceptions (JSON; see command help). Requires --check-cadence.",
     ),
+    sweep: list[SweepKind] = typer.Option(
+        None,
+        "--sweep",
+        help="Additional check-cadence plays (repeatable). fail: one replay per"
+        " producer with its first run scripted to FAILURE -- suppressed runs"
+        " are inventory, multi-fire still deviates. Requires --check-cadence;"
+        " refuses --run-root (one journal, one run).",
+    ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
     run_root: Path = typer.Option(
@@ -1010,6 +1061,14 @@ def rehearse(
     {"schema_version": 1, "policies": {JOB:
     {"max_runs": N | null, "reason": "..."}}} -- null means unchecked, the
     reason prints in the report.
+
+    --sweep fail replays the estate once per start-gate producer with that
+    producer's first run scripted to an exit its own boundary calls
+    FAILURE. Jobs that dropped runs against the happy-path baseline are
+    the suppressed-run inventory (report-only, the dynamic L022);
+    multi-fire in any replay still deviates and exits 3. BOX, parked and
+    n_retrys producers report skipped/inconclusive rather than pretending
+    coverage. Case progress prints on stderr.
     """
     import asyncio
 
@@ -1025,6 +1084,15 @@ def rehearse(
 
     if cadence_policy is not None and not check_cadence:
         raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
+    sweeps = list(sweep or [])
+    if sweeps and not check_cadence:
+        raise typer.Exit(refuse("--sweep requires --check-cadence"))
+    if sweeps and run_root is not None:
+        raise typer.Exit(
+            refuse(
+                "--sweep refuses --run-root: a sweep replays the estate, one journal claims one run"
+            )
+        )
     catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     start_dt = (
         _naive_utc_arg(start, "--start")
@@ -1138,6 +1206,9 @@ def rehearse(
         parked_fw=parked_fw,
         no_success=no_success,
         cycle=cycle,
+        sweeps=sweeps,
+        adapter=adapter,
+        events=events,
     )
 
 
