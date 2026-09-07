@@ -11321,3 +11321,29 @@ relitigate an entry; append a new one.
   adversarial pass on the fixes -- behavior-preserving refactors the
   suite pins, plus one bug fix with its own regression test (the
   DL-179 allocation precedent). Tag arch-review/2026-08-31.
+- DL-186 shared Codex and Claude harness instructions (2026-09-08).
+  Keep AGENTS.md as a symlink to CLAUDE.md. Replace the copied question
+  ledger and completed phase descriptions with task-specific routes to
+  their normative homes. Keep compiler invariants in the root. This changes
+  reading obligations, not compiler contracts or unresolved defaults.
+  Project configuration selects the requested frontier boss at xhigh;
+  the boss chooses other allocations. High-impact exploration, planning,
+  and review use both vendors, with independent findings before agreement
+  on the exact artifact. CLI recipes and the CI-aligned gate list live in
+  docs/agent-workflow.md rather than startup context.
+  One architecture skill body serves both discovery paths. A review stays
+  read-only until accepted; its annotated timestamped tag records the
+  reviewed commit and is never moved. No architecture stamp is created
+  for this harness-only review.
+  The hats source is unavailable here. Preserve its marked block byte for
+  byte, and state outside it that full gates and multi-file review govern
+  over its skip-review exception. Source ownership and hats onboarding
+  remain separate work. No pre-push guard is shipped or installed here;
+  remove the claim that one protects this checkout, not the hygiene rule.
+  DECLINED: eager imports as a supposed context saving; duplicate provider
+  instruction bodies; universal cost claims from small published studies;
+  relaxed verification before hats ownership is resolved. Reopen on a
+  measured failure, a harness/model upgrade, or the source ownership decision.
+  Evidence, loading limits, paired pilot results, and verification are in
+  docs/agent-harness-review.md. No global configuration or compiler source
+  changes are part of this decision.

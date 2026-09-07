@@ -20,7 +20,10 @@ Read these documents in this order:
 4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - statement scanner spec
 5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
 6. [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md) - what every reference token in the sources means
-7. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - working agreement + implementation order
+7. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - shared agent contract and task-specific reading routes
+
+Agent setup, verification commands, and cross-vendor review recipes are in
+[docs/agent-workflow.md](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md).
 
 Operating the runner on a server — install, systemd, web UI exposure,
 the JIL-update cycle, upgrades — is
@@ -388,7 +391,7 @@ one. CI drives the same flows end to end in
 
 ## Implementation memo
 
-All ten phases from the implementation order in CLAUDE.md are implemented and
+All ten compiler phases in DL-03 are implemented and
 tested. The build order is: ast_jil, conditions, ir, lint, derive, viz,
 oracle, equiv, backend_uc, dsl. Phase 11 (the runner,
 [docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
@@ -1083,20 +1086,9 @@ no behavior change.
 ### Make a release
 
 First, make sure that the working tree is clean. Make sure that `main` is
-pushed. Then run the same gates as CI:
-
-```sh
-uv run ruff check src tests
-uv run mypy src
-uv run python scripts/arch_check.py
-uv run coverage run -m pytest -q
-uv run coverage report
-```
-
-The last two are one gate: the suite runs under branch coverage and the
-concurrency tier is held at **100%** of it. `[tool.coverage.report]` in
-`pyproject.toml` names the nine modules and argues the scope — a missed
-branch there is a rule the code states that no test holds it to (DL-105).
+pushed. Run the [full local gates](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md#verify-a-change).
+The list follows CI, including format checking and the scoped **100%** branch
+coverage requirement (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
 This command writes the same version into `uv.lock`. Commit both files and push

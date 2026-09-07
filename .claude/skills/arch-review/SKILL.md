@@ -1,6 +1,6 @@
 ---
 name: arch-review
-description: Review dsl41 for unnecessary conceptual complexity — duplicated concepts, parallel models, pass-through layers, one-implementation abstractions, flag matrices that should be enums, vocabulary re-encoded per layer. Use when the user asks for an architecture review, or when scripts/arch_check.py printed "architecture review due".
+description: Review dsl41 for unnecessary conceptual complexity when the user requests an architecture review or scripts/arch_check.py reports one due. Covers concepts and ownership beyond the mechanical gate. Does not stamp or publish a review until the boss accepts it.
 ---
 
 # Architecture review (DL-75)
@@ -8,7 +8,7 @@ description: Review dsl41 for unnecessary conceptual complexity — duplicated c
 Run the gate first and read its output:
 
 ```sh
-python scripts/arch_check.py
+uv run python scripts/arch_check.py
 ```
 
 It answers the mechanical questions (duplicate bodies, new private
@@ -60,9 +60,25 @@ re-found every review.
 
 ## Close it out
 
-Stamp the review so the gate measures accumulated drift from here, not from
-the beginning of time:
+The review itself is read-only. Give its findings to the boss before recording
+completion. A partial review or a review of only a proposal does not reset the
+architecture baseline.
+
+After the boss accepts a complete review, stamp the reviewed commit so the gate
+measures drift from it. First check for an existing stamp:
 
 ```sh
-git tag arch-review/$(date +%Y-%m-%d)
+git tag --points-at HEAD --list 'arch-review/*'
 ```
+
+Reuse a stamp that covers this review. Otherwise, with a clean worktree at the
+reviewed commit, create an annotated tag. The timestamp allows multiple reviews
+on the same day and gives the gate a creation date for sorting:
+
+```sh
+git tag -a "arch-review/$(date -u +%Y-%m-%dT%H%M%SZ)" -m 'Architecture review accepted'
+```
+
+Never move an existing tag. If the name already exists, choose a later timestamp.
+Publish only the accepted stamp with its reviewed commit, under the repository's
+push rules. Invoking this skill alone does not authorize publishing either.
