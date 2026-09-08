@@ -2043,7 +2043,7 @@ class RunnerApp(App[None]):
         confirmed = await self.push_screen_wait(ConfirmScreen(title, body))
         return bool(confirmed)
 
-    def action_quit(self) -> None:  # type: ignore[override]
+    async def action_quit(self) -> None:
         """Quit means two different things by posture.
 
         A detached viewer (`dsl41 ui`) leaves the engine running, so `q`
@@ -2051,12 +2051,9 @@ class RunnerApp(App[None]):
         press through the dialog that matters. `run --ui` OWNS the engine,
         so the same key stops the run, and that is confirmed. Ctrl+Q and the
         command palette's Quit both route here, so one override covers all
-        three doors.
-
-        Sync, not async: textual's action dispatch accepts either shape (an
-        action returning a plain value or a coroutine) at runtime, but its
-        own stub types `App.action_quit` as async, which is what the
-        `type: ignore[override]` above answers."""
+        three doors. Async only to match textual's own signature; the
+        confirm itself runs in a worker, because `push_screen_wait` needs
+        one."""
         if not self.owns_run:
             self.exit()
             return

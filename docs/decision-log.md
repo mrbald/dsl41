@@ -11385,3 +11385,54 @@ relitigate an entry; append a new one.
   DECLINED: remapping `k` to scroll (item 1); confirming console-typed
   commands; a console history; an environment fallback for `--socket`.
   Reopen on operator evidence, not on taste.
+- DL-188 the DL-75 review over arch-review/2026-08-31..HEAD -- the
+  DL-187 window (2026-09-09). Gate first: four advisory size notes
+  (runner_tui.py past 1200 lines; cli_run._serve_run past 120 lines
+  and 40 branches), nothing blocking; ~2,200 lines, almost all
+  runner_tui.py and its tests, plus the 1.3.0 bump and the DL-186
+  harness commit (docs and config; no duplicated instruction concept
+  found). One fresh-context reviewer for both halves, correctness and
+  concepts (the window has one author). Verdict: the safety slices
+  held every contract they touched (verb keys unreachable outside the
+  table, the frozen revision genuinely pinned by a test that moves the
+  estate under the open dialog, typed commands unconfirmed, both
+  exit-code doors), and in the speed of three same-day slices spelled
+  a few small things twice. Acted, cheapest first:
+  (a) one confirm idiom: `_confirm` runs every dialog through a worker
+  and `push_screen_wait`, and "one confirm at a time" is read off the
+  screen stack instead of a `_quit_pending` flag a teardown could leave
+  stuck. (b) one echo formatter: the confirm's cancel line uses
+  `echo_label` too. (c) one query-fault concept: a memo keyed by verb
+  (status, trace, timers) with one setter, so a timers refusal marks
+  the subtitle like the others (the review's first MAJOR) and no
+  screen's recovery can erase another's live refusal (the slice's own
+  review had found that clobber; a keyed memo keeps the fix by
+  construction). (d) the console HELP lists the verbs from
+  `_CONSOLE_VERBS`, not by hand. (e) the modals share one help-binding
+  pair. (f) `_serve_run` sheds the --ui attachment lifecycle into
+  `_attach_tui` and `_tui_failure`; the wait and the detach-on-crash
+  stay inline. From the correctness half: the `owns_run` wiring is now
+  pinned (both test fakes had discarded it), a server error is escaped
+  before it reaches a border title, F1 is pressed inside the pager and
+  the triggers view rather than asserted structurally, the trace
+  refusal branch is tested, and a fixed sleep became a message-pump
+  wait.
+  DECLINED, each with a re-find trigger: the log-tail memo stays its
+  own (path, error) slot beside the query memo -- a local read with its
+  own clear rule, not a protocol answer (fold at a third local fault
+  source); the three modal on_mount bodies stay separate (a base class
+  would forward three different bodies; fold at a fourth popup);
+  `_ExplainPane` stays a one-member class (the HelpPanel reads HELP off
+  a class; a second carrier reopens); the rest of `_serve_run`'s length
+  is the DL-145 one-teardown obligation and stays.
+  Load-bearing, left alone on purpose: the bell shadowing lists on the
+  pager and the triggers view (the DL-67 contract; generating them
+  would make the drift guards tautological), the frozen tuple threaded
+  as a parameter (two confirms can be in flight; the revision belongs
+  to one dialog), `_TableSync` (DL-178v), `_precondition`'s
+  snapshot-first rule (DL-90), the citation density, and cli_run's
+  nested teardown finally (DL-145).
+  THE GATE: 3609 passed, 6 skipped, 2 xfailed; ruff, ruff format --check, mypy, arch_check
+  clean; size baseline re-armed. No second adversarial pass on the
+  rework -- behavior-preserving folds the suite pins plus test
+  additions (the DL-179 allocation precedent). Tag arch-review/2026-09-08T233613Z.
