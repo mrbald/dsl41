@@ -52,6 +52,7 @@ from dsl41.runner_tui import (
     RunnerApp,
     SpecScreen,
     TriggersScreen,
+    _CONSOLE_VERBS,
     _ConsoleInput,
     _JobsTable,
     _LogPane,
@@ -62,11 +63,12 @@ from dsl41.runner_tui import (
     assemble_trigger_rows,
     compile_search,
     confirm_body,
+    echo_label,
     format_countdown,
     parse_console_command,
 )
 from textual.binding import Binding
-from textual.widgets import DataTable, Input, RichLog, Static
+from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
@@ -262,11 +264,42 @@ def test_parse_change_status_missing_args_errors(text: str) -> None:
     assert parse_console_command(text, None) == "CHANGE_STATUS expects [job] STATUS [exit_code]"
 
 
+def test_parse_change_status_status_first_but_second_token_is_also_a_status() -> None:
+    """F8 (DL-187 item 8): the shorthand applies only when the SECOND token
+    is not itself a status. Here it is, so this is the explicit `<job>
+    STATUS` form -- a job that happens to be named SUCCESS."""
+    assert parse_console_command("CHANGE_STATUS SUCCESS FAILURE", None) == {
+        "cmd": "sendevent",
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "SUCCESS", "status": "FAILURE"},
+    }
+
+
+def test_parse_change_status_shorthand_survives_a_non_status_second_token() -> None:
+    assert parse_console_command("CHANGE_STATUS SUCCESS 3", "jobx") == {
+        "cmd": "sendevent",
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "jobx", "status": "SUCCESS", "exit_code": 3},
+    }
+
+
+def test_parse_change_status_explicit_form_with_a_status_named_job_and_exit_code() -> None:
+    assert parse_console_command("CHANGE_STATUS SUCCESS FAILURE 2", None) == {
+        "cmd": "sendevent",
+        "verb": "CHANGE_STATUS",
+        "payload": {"job": "SUCCESS", "status": "FAILURE", "exit_code": 2},
+    }
+
+
 def test_parse_unknown_verb_errors() -> None:
-    assert (
-        parse_console_command("FROBNICATE job", None)
-        == "unknown verb 'FROBNICATE' (sendevent verbs only)"
+    """F6 (DL-187 item 7): the error enumerates the verbs sorted, so an
+    operator who mistypes one sees the whole grammar, not just a refusal."""
+    assert parse_console_command("FROBNICATE job", None) == (
+        f"unknown verb 'FROBNICATE' -- expected one of: {', '.join(_CONSOLE_VERBS)}"
     )
+    assert _CONSOLE_VERBS == sorted(_CONSOLE_VERBS)
+    assert "DISARM" in _CONSOLE_VERBS
+    assert {"SET_GLOBAL", "CHANGE_STATUS"} <= set(_CONSOLE_VERBS)
 
 
 @pytest.mark.parametrize("text", ["", "   "])
@@ -326,6 +359,51 @@ def test_the_console_reads_a_lost_round_trip_by_whether_it_was_sent() -> None:
     assert "NO DECISION" in lost.plain and "do not resend" in lost.plain
     assert "engine hung up" in lost.plain
     assert lost.style == "yellow"  # matches the undecided ANSWER above, on purpose
+
+
+# --------------------------------------------------- 1c. echo_label (F9, DL-187 item 9)
+
+
+def test_echo_label_names_a_job_verb() -> None:
+    assert (
+        echo_label({"cmd": "sendevent", "verb": "KILLJOB", "payload": {"job": "j1"}})
+        == "> KILLJOB j1"
+    )
+
+
+def test_echo_label_names_a_globals_value() -> None:
+    assert (
+        echo_label(
+            {"cmd": "sendevent", "verb": "SET_GLOBAL", "payload": {"name": "FLAG", "value": "go"}}
+        )
+        == "> SET_GLOBAL FLAG=go"
+    )
+
+
+def test_echo_label_names_change_status_with_an_exit_code() -> None:
+    assert (
+        echo_label(
+            {
+                "cmd": "sendevent",
+                "verb": "CHANGE_STATUS",
+                "payload": {"job": "j1", "status": "FAILURE", "exit_code": 2},
+            }
+        )
+        == "> CHANGE_STATUS j1 FAILURE 2"
+    )
+
+
+def test_echo_label_names_change_status_without_an_exit_code() -> None:
+    assert (
+        echo_label(
+            {
+                "cmd": "sendevent",
+                "verb": "CHANGE_STATUS",
+                "payload": {"job": "j1", "status": "SUCCESS"},
+            }
+        )
+        == "> CHANGE_STATUS j1 SUCCESS"
+    )
 
 
 # ------------------------------------------------------------- 2. ControlClient
@@ -781,6 +859,141 @@ def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) 
     asyncio.run(scenario())
 
 
+def test_pilot_f1_and_question_mark_toggle_the_help_panel(short_root: Path) -> None:
+    """F6 (DL-187 item 7): F1 mounts Textual's own context help panel and
+    F1 again removes it; `?` does the same while the jobs table has focus
+    (the pager's own `?` is its reverse search, covered elsewhere)."""
+    text = "insert_job: hp_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "hp_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                await pilot.pause()
+
+                def panel_present() -> bool:
+                    return bool(app.screen.query(HelpPanel))
+
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, panel_present)
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: not panel_present())
+
+                await pilot.press("question_mark")
+                await _wait_for_ui(pilot, panel_present)
+                await pilot.press("question_mark")
+                await _wait_for_ui(pilot, lambda: not panel_present())
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: Path) -> None:
+    """F4 (DL-187 item 6): an ok:false status answer is a query refusal,
+    distinct from a dead socket -- the last good table stays, the console
+    gets ONE red line even across two refused passes, the subtitle carries
+    "refused", and a later ok pass clears it with a green line."""
+    text = "insert_job: qf_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "qf_job" in app._rows)
+
+                inner = app._client.request
+                state = {"refuse": True}
+
+                async def flaky(request):
+                    if state["refuse"] and request.get("cmd") == "status":
+                        return {"ok": False, "error": "boom"}
+                    return await inner(request)
+
+                app._client.request = flaky
+                console = app.query_one("#console", RichLog)
+
+                def refusals() -> int:
+                    return sum(1 for ln in console.lines if "status query refused: boom" in ln.text)
+
+                await app._refresh()
+                await _wait_for_ui(pilot, lambda: refusals() == 1)
+                assert app._query_fault == "status: boom"
+                assert "(refused)" in app.sub_title
+
+                await app._refresh()  # a second refused pass must not repeat the line
+                await pilot.pause()
+                assert refusals() == 1
+
+                state["refuse"] = False
+                await app._refresh()
+                await _wait_for_ui(pilot, lambda: app._query_fault is None)
+                assert "(refused)" not in app.sub_title
+                assert any(ln.text == "queries ok again" for ln in console.lines)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_timers_refusal_does_not_erase_a_live_status_refusal(short_root: Path) -> None:
+    """Regression (review MAJOR): TriggersScreen's own `timers` polling and
+    RunnerApp's status/trace polling used to share ONE fault slot, so a
+    good `timers` answer while `status` was still refusing would falsely
+    clear the app's "(refused)" subtitle and print a false "queries ok
+    again" -- the two are different facts and must not stomp each other."""
+    text = "insert_job: xq_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING: a real dated row
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "xq_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("xq_run", "status")) == "RUNNING"
+                )
+
+                inner = app._client.request
+
+                async def refuse_status(request):
+                    if request.get("cmd") == "status":
+                        return {"ok": False, "error": "status down"}
+                    return await inner(request)
+
+                app._client.request = refuse_status
+                await app._refresh()
+                await _wait_for_ui(pilot, lambda: app._query_fault == "status: status down")
+                assert "(refused)" in app.sub_title
+
+                await pilot.press("t")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+                screen = app.screen
+                assert isinstance(screen, TriggersScreen)
+                await screen._refresh()  # timers is NOT refused -- unlike status
+                await pilot.pause()
+
+                # the still-live status refusal must survive an unrelated
+                # screen's successful, independent query
+                assert app._query_fault == "status: status down"
+                assert "(refused)" in app.sub_title
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 # ------------------- 4. DL-65 estate navigation (box tree / filter / views / details)
 
 
@@ -1061,6 +1274,7 @@ def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
         "o",  # out/err stream toggle -- log-scoped
         "r",  # refresh: harmless, keeps the tail's source fresh
         "t",  # triggers view: a read-only modal (DL-68), estate untouched
+        "f1",  # help panel (F6): `?` is already shadowed for reverse search
         "]",
         "[",
         "}",
@@ -1371,6 +1585,107 @@ def test_pilot_pager_follow_is_pinned_at_bottom_and_capital_f_resumes(short_root
     asyncio.run(scenario())
 
 
+def test_pilot_log_tail_permission_fault_is_reported_once_and_recovers(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10 (DL-187 item 10): a read fault that is NOT the ordinary missing-
+    file wait (a permission error, deterministic across macOS and Linux CI
+    via a monkeypatched os.stat) writes one red console line per distinct
+    (path, error) -- never once per poll tick -- and a later successful
+    read clears the memo silently (no recovery line was asked for)."""
+    import os
+
+    text = "insert_job: lt_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING; the test owns the log
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _seed_pager(pilot, app, "lt_run", ["line 0"])
+                path = app._log_paths["lt_run"][0]
+                assert path is not None
+
+                real_stat = os.stat
+                state = {"fail": True}
+
+                def flaky_stat(target, *args, **kwargs):
+                    if state["fail"] and str(target) == path:
+                        raise PermissionError(13, "Permission denied", path)
+                    return real_stat(target, *args, **kwargs)
+
+                monkeypatch.setattr(os, "stat", flaky_stat)
+                console = app.query_one("#console", RichLog)
+
+                def faults() -> int:
+                    return sum(1 for ln in console.lines if f"log tail {path}:" in ln.text)
+
+                await _wait_for_ui(pilot, lambda: faults() == 1)
+                await pilot.pause()
+                assert faults() == 1  # a repeat tick does not repeat the line
+                assert app._tail_fault == (path, "[Errno 13] Permission denied: " + repr(path))
+
+                state["fail"] = False
+                await _wait_for_ui(pilot, lambda: app._tail_fault is None)
+                assert faults() == 1  # the recovery clears the memo without a new line
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_log_tail_open_fault_dedupes_even_while_stat_keeps_succeeding(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (review MAJOR): the memo used to be cleared right after a
+    successful `os.stat`, before `open`/`read` ran. A fault that lives in
+    open() (stat keeps succeeding, open keeps denying -- the realistic
+    Unix shape when directory search is allowed but file read is not)
+    would then be wiped and immediately re-set every 0.5s tick, spamming
+    the console instead of reporting the one line the contract promises."""
+    from dsl41 import runner_tui
+
+    text = "insert_job: lo_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING; the test owns the log
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _seed_pager(pilot, app, "lo_run", ["line 0"])
+                path = app._log_paths["lo_run"][0]
+                assert path is not None
+
+                real_open = open
+
+                def flaky_open(target, *args, **kwargs):
+                    if str(target) == path:
+                        raise PermissionError(13, "Permission denied", path)
+                    return real_open(target, *args, **kwargs)
+
+                # os.stat is left alone -- only open() denies, every call
+                monkeypatch.setattr(runner_tui, "open", flaky_open, raising=False)
+                console = app.query_one("#console", RichLog)
+
+                def faults() -> int:
+                    return sum(1 for ln in console.lines if f"log tail {path}:" in ln.text)
+
+                # a pending, never-consumed delta: with open() denied, the
+                # tail position never advances, so every tick keeps retrying
+                # open() against the SAME unread bytes (a real spam vector)
+                _append_log(app, "lo_run", ["line 1"])
+                await _wait_for_ui(pilot, lambda: faults() == 1)
+                await asyncio.sleep(1.5)  # several more 0.5s ticks, stat still succeeding
+                await pilot.pause()
+                assert faults() == 1  # still one line, not a flood
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 # -------------------- 6. DL-68 triggers view (t: due-ordered timers + armed latch)
 
 
@@ -1665,6 +1980,62 @@ def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Pa
                 await pilot.pause()
                 assert trig.row_count == 2
                 assert trig.cursor_row == 1  # clear() would have bounced it to 0
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_triggers_title_names_a_refused_timers_answer(short_root: Path) -> None:
+    """F4 (DL-187 item 6): an ok:false `timers` answer leaves the last good
+    rows in place and names the refusal on the border title, routing the
+    same console line status/trace use through the app's own helper."""
+    text = "insert_job: tf_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING: a real dated row
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "tf_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("tf_run", "status")) == "RUNNING"
+                )
+
+                await pilot.press("t")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+                screen = app.screen
+                assert isinstance(screen, TriggersScreen)
+                trig = screen.query_one("#trigbox", DataTable)
+                await _wait_for_ui(pilot, lambda: trig.row_count == 1)
+
+                inner = app._client.request
+
+                async def refuse_timers(request):
+                    if request.get("cmd") == "timers":
+                        return {"ok": False, "error": "no timers for you"}
+                    return await inner(request)
+
+                app._client.request = refuse_timers
+                await screen._refresh()
+                await pilot.pause()
+
+                assert "refused: no timers for you" in str(trig.border_title)
+                assert trig.row_count == 1  # the last good row stayed
+                assert screen._timers_fault == "no timers for you"
+                # this screen's own memo, never the app's status/trace slot --
+                # a timers refusal here must not paint the app subtitle too
+                assert app._query_fault is None
+                console = app.query_one("#console", RichLog)
+                assert any(
+                    "timers query refused: no timers for you" in ln.text for ln in console.lines
+                )
         finally:
             await _teardown(engine, server, loop_task)
 
