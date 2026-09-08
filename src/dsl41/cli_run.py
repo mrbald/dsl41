@@ -670,9 +670,17 @@ async def _serve_run(
         waiters = {loop_task, stop_task} | ({ui_task} if ui_task is not None else set())
         done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         stop_task.cancel()
-        tui_exc: BaseException | None = None
+        tui_failure: str | None = None
         if ui_task is not None and ui_task in done and not ui_task.cancelled():
             tui_exc = ui_task.exception()  # a TUI crash is not an operator stop
+            if tui_exc is not None:
+                tui_failure = repr(tui_exc)
+            elif tui is not None and tui.return_code:
+                # textual's fatal-error path returns normally from run_async
+                # with return_code set (app.py _handle_exception): that is a
+                # crash too, not a quit -- and app.py's own exit() default is
+                # return_code 0, so a nonzero value here is never a quit
+                tui_failure = f"exit code {tui.return_code}"
         if tui is not None and ui_task is not None and ui_task not in done:
             tui.exit()  # engine crash or signal: detach the viewer first
             with contextlib.suppress(Exception):
@@ -706,8 +714,8 @@ async def _serve_run(
             # operator stop: a signal, or quitting the attached TUI (ss11 --ui
             # tethers the run to this terminal; viewers that must not stop the
             # run attach with `dsl41 ui` instead)
-            if tui_exc is not None:
-                typer.echo(f"TUI failed: {tui_exc!r}", err=True)
+            if tui_failure is not None:
+                typer.echo(f"TUI failed: {tui_failure}", err=True)
                 code = 1
             if detached:
                 typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")

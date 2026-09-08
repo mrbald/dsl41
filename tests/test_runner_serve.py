@@ -1,4 +1,4 @@
-"""`dsl41 serve` CLI tests (phase 11e).
+"""`dsl41 serve` and `dsl41 ui` CLI tests (phase 11e).
 
 Normative spec: docs/runner-design.md ss11 (UI: textual-serve wraps the same
 app, one app subprocess per browser session) and ss14 (11e scope: serve +
@@ -18,8 +18,12 @@ verified manually for the phase-11e report, see docs/decision-log.md DL-47).
 from __future__ import annotations
 
 import shlex
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -115,3 +119,120 @@ def test_serve_bind_failure_exits_2(tmp_path, monkeypatch) -> None:
     result = cli_runner.invoke(app, ["serve", "--socket", str(sock)])
     assert result.exit_code == 2
     assert "address already in use" in result.output
+
+
+# ---------------------------------------------------------------- `ui` front door
+#
+# F3 of the 2026-09-08 TUI UX review: textual's fatal-error path sets
+# `app.return_code = 1` and returns normally from `run()`/`run_async()`
+# (textual/app.py's `_handle_exception` and its `return_code` property) --
+# it never raises. A front door that only checks for a raised exception
+# treats a crashed TUI as a clean exit.
+
+
+class _FakeTuiModule:
+    """Stand-in for the module `import_tui_or_exit_2` returns: its
+    `RunnerApp.run()` sets `return_code` the way textual's real fatal-error
+    path does, with no need for textual to be installed."""
+
+    def __init__(self, final_return_code: int | None) -> None:
+        final = final_return_code
+
+        class RunnerApp:
+            def __init__(self, socket_path, **kw):
+                self.return_code = None
+
+            def run(self):
+                self.return_code = final
+
+        self.RunnerApp = RunnerApp
+
+
+def test_ui_exits_with_the_tui_return_code_on_a_fatal_error(tmp_path, monkeypatch) -> None:
+    sock = tmp_path / "control.sock"
+    sock.touch()
+    monkeypatch.setattr("dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(1))
+    result = cli_runner.invoke(app, ["ui", "--socket", str(sock)])
+    assert result.exit_code == 1
+
+
+def test_ui_exits_0_when_the_tui_return_code_is_none(tmp_path, monkeypatch) -> None:
+    """The companion case: a TUI that quit cleanly (`return_code` stays
+    `None`) is unaffected by the new check."""
+    sock = tmp_path / "control.sock"
+    sock.touch()
+    monkeypatch.setattr("dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(None))
+    result = cli_runner.invoke(app, ["ui", "--socket", str(sock)])
+    assert result.exit_code == 0
+
+
+# ---------------------------------------------------------- `run --ui` front door
+#
+# `_serve_run` drives a real engine and control socket, so these need a real
+# textual import (`run`'s own `import_tui_or_exit_2` guard, unpatched) and a
+# short AF_UNIX socket path -- test_runner_tui.py's fixture and skip guard,
+# duplicated here rather than imported (that file's own docstring explains
+# why: test_runner.py duplicates test_oracle.py's small helpers the same way).
+
+_MINIMAL_JIL = "insert_job: cc_job\njob_type: c\ncommand: x\n"
+
+
+@pytest.fixture
+def short_root():
+    """A short-path base directory for AF_UNIX control sockets (see
+    test_runner_tui.py's fixture of the same name/docstring)."""
+    d = tempfile.mkdtemp(prefix="dsl41srv-", dir="/tmp")
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _fake_runner_app(final_return_code: int | None):
+    """A `runner_tui.RunnerApp` stand-in whose `run_async` returns normally
+    with `return_code` set -- the textual fatal-error shape `_serve_run`
+    must treat as a crash, not a quit (F3)."""
+
+    class FakeRunnerApp:
+        def __init__(self, socket_path, **kw):
+            self.return_code = None
+
+        async def run_async(self):
+            self.return_code = final_return_code
+
+        def exit(self):
+            pass
+
+    return FakeRunnerApp
+
+
+def _skip_unless_posix_textual() -> None:
+    pytest.importorskip("textual")
+    if not sys.platform.startswith(("linux", "darwin")):
+        pytest.skip("unix-domain control sockets are POSIX-only")
+
+
+def test_run_ui_tui_failure_is_not_an_operator_stop(short_root, monkeypatch) -> None:
+    """F3 end to end: a TUI that fails without raising (return_code set,
+    run_async returns normally) must fail the run, not stop it cleanly."""
+    _skip_unless_posix_textual()
+    jil_path = short_root / "estate.jil"
+    jil_path.write_text(_MINIMAL_JIL)
+    run_root = short_root / "run"
+    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(1))
+    result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
+    assert result.exit_code == 1
+    assert "TUI failed: exit code 1" in result.output
+
+
+def test_run_ui_operator_stop_when_the_tui_return_code_is_none(short_root, monkeypatch) -> None:
+    """The companion case: `return_code` stays `None`, the existing
+    operator-stop path (a clean quit), unaffected by F3's new check."""
+    _skip_unless_posix_textual()
+    jil_path = short_root / "estate.jil"
+    jil_path.write_text(_MINIMAL_JIL)
+    run_root = short_root / "run"
+    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(None))
+    result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
+    assert result.exit_code == 0
+    assert "stopping:" in result.output

@@ -321,7 +321,12 @@ def ui(socket_path: Path = _SOCKET_OPT) -> None:
     runner_tui = import_tui_or_exit_2()
     if not socket_path.exists():
         raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
-    runner_tui.RunnerApp(socket_path).run()
+    app = runner_tui.RunnerApp(socket_path)
+    app.run()
+    if app.return_code:
+        # textual's fatal-error path returns normally with return_code set
+        # (app.py _handle_exception): a crashed TUI must not exit 0
+        raise typer.Exit(app.return_code)
 
 
 def _import_textual_serve_or_exit_2():
