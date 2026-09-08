@@ -665,7 +665,7 @@ async def _serve_run(
             from dsl41.runner_tui import RunnerApp
 
             # same terminal, same loop, still a client of the socket ONLY (ss11)
-            tui = RunnerApp(server.path)
+            tui = RunnerApp(server.path, owns_run=True)
             ui_task = asyncio.ensure_future(tui.run_async())
         waiters = {loop_task, stop_task} | ({ui_task} if ui_task is not None else set())
         done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)

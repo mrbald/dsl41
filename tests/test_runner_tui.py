@@ -48,9 +48,12 @@ from dsl41.runner_control import (
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import RealClock
 from dsl41.runner_tui import (
+    ConfirmScreen,
     RunnerApp,
     SpecScreen,
     TriggersScreen,
+    _ConsoleInput,
+    _JobsTable,
     _LogPane,
     _LogTail,
     _outcome_line,
@@ -58,6 +61,7 @@ from dsl41.runner_tui import (
     assemble_detail_trigger_lines,
     assemble_trigger_rows,
     compile_search,
+    confirm_body,
     format_countdown,
     parse_console_command,
 )
@@ -1068,7 +1072,11 @@ def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
         # would have a hole exactly where a careless future binding lands
         return {b.key if isinstance(b, Binding) else b[0] for b in bindings}
 
-    leaks = keys(RunnerApp.BINDINGS) - keys(_LogTail.BINDINGS) - pass_through
+    # the operator verbs moved to _JobsTable (DL-187), where focus already
+    # gates them -- but the union keeps this guard at the coverage it had:
+    # the pager shadows them too, defense in depth
+    bound = keys(RunnerApp.BINDINGS) | keys(_JobsTable.BINDINGS)
+    leaks = bound - keys(_LogTail.BINDINGS) - pass_through
     assert not leaks, f"app keys reachable from the focused pager: {sorted(leaks)}"
 
 
@@ -1557,7 +1565,8 @@ def test_triggers_screen_shadows_every_app_key() -> None:
     def keys(bindings) -> set[str]:
         return {b.key if isinstance(b, Binding) else b[0] for b in bindings}
 
-    leaks = keys(RunnerApp.BINDINGS) - keys(TriggersScreen.BINDINGS)
+    bound = keys(RunnerApp.BINDINGS) | keys(_JobsTable.BINDINGS)
+    leaks = bound - keys(TriggersScreen.BINDINGS)
     assert not leaks, f"app keys reachable from the triggers screen: {sorted(leaks)}"
 
 
@@ -1656,6 +1665,430 @@ def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Pa
                 await pilot.pause()
                 assert trig.row_count == 2
                 assert trig.cursor_row == 1  # clear() would have bounced it to 0
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+# --------------------------------- 4. safety: focus scope, confirm, posture
+
+
+_VERB_KEYS = {"s", "f", "k", "i", "I", "h", "H", "n", "N"}
+
+
+def test_the_operator_verbs_live_on_the_jobs_table_not_on_the_app() -> None:
+    """Drift guard for DL-187: an app-level `send(...)` binding fires from
+    every focusable widget in the app -- which is how `k` in the console log
+    used to kill the selected job. The verbs belong to the focused table."""
+
+    def keys(bindings) -> set[str]:
+        return {b.key if isinstance(b, Binding) else b[0] for b in bindings}
+
+    def actions(bindings) -> set[str]:
+        return {b.action if isinstance(b, Binding) else b[1] for b in bindings}
+
+    leaked = {a for a in actions(RunnerApp.BINDINGS) if a.startswith("send(")}
+    assert not leaked, f"operator verbs still bound at app level: {sorted(leaked)}"
+    assert keys(_JobsTable.BINDINGS) == _VERB_KEYS
+    assert all(a.startswith("app.send(") for a in actions(_JobsTable.BINDINGS))
+    # widening this set widens what a single keystroke can do unconfirmed
+    assert RunnerApp._CONFIRM_VERBS == frozenset({"KILLJOB", "FORCE_STARTJOB"})
+
+
+def test_confirm_body_names_the_frozen_revision_and_caps_the_member_list() -> None:
+    """The confirm text is a pure function of what the operator was shown:
+    verb, target, the status and the FROZEN revision, and -- for a box --
+    the blast radius, capped so a wide box stays readable."""
+    plain = confirm_body("KILLJOB", "cb_job", "RUNNING", 7, [])
+    assert plain.splitlines() == ["KILLJOB cb_job", "now RUNNING at revision 7"]
+
+    wide = confirm_body("KILLJOB", "cb_box", "RUNNING", 3, [f"m{i}" for i in range(11)])
+    assert "reaches 11 member(s)" in wide
+    assert "m0, m1, m2, m3, m4, m5, m6, m7 and 3 more" in wide
+    assert "m8" not in wide
+
+    unknown = confirm_body("KILLJOB", "cb_ghost", "", None, [])
+    assert unknown.splitlines()[1] == "now ? at revision ?"
+
+
+def test_pilot_k_in_the_console_log_reaches_nothing(short_root: Path) -> None:
+    """The bug DL-187 closes: the event console's RichLog is focusable and
+    shadows nothing, so an app-level `k` killed the selected job from a
+    widget that exists to be read. With the verbs on the table it is dead --
+    no confirm, no echo, no status change."""
+    text = "insert_job: fk_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING: a kill would show
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "fk_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("fk_run", "status")) == "RUNNING"
+                )
+
+                console = app.query_one("#console", RichLog)
+                console.focus()
+                await pilot.pause()
+                assert app.focused is console
+                echoes_before = sum(1 for ln in console.lines if ln.text.startswith("> "))
+
+                await pilot.press("k")
+                await pilot.pause()
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert sum(1 for ln in console.lines if ln.text.startswith("> ")) == echoes_before
+                assert str(table.get_cell("fk_run", "status")) == "RUNNING"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_k_confirms_first_escape_cancels_and_enter_sends(short_root: Path) -> None:
+    """`k` on the focused table opens the confirm, not a kill. Escape sends
+    nothing and says so; a second `k` plus Enter is what reaches the
+    engine."""
+    text = "insert_job: ck_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "ck_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("ck_run", "status")) == "RUNNING"
+                )
+                console = app.query_one("#console", RichLog)
+
+                await pilot.press("k")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                body = str(app.screen.query_one(Static).content)
+                assert body.startswith("KILLJOB ck_run")
+                assert "now RUNNING at revision" in body
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any(ln.text == "> KILLJOB ck_run: cancelled" for ln in console.lines),
+                )
+                assert not any("> KILLJOB ck_run: applied" in ln.text for ln in console.lines)
+                assert str(table.get_cell("ck_run", "status")) == "RUNNING"
+
+                # the modal handed focus back, so the verb keys live again
+                assert app.focused is table
+                await pilot.press("k")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                await pilot.press("enter")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any("> KILLJOB ck_run: applied @ #" in ln.text for ln in console.lines),
+                )
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_the_confirmed_kill_names_the_revision_the_dialog_showed(short_root: Path) -> None:
+    """The freeze is the whole point of the confirm (DL-90, DL-187): the
+    send names the revision the operator AGREED to, so a job that moved
+    while they were reading is rejected instead of killed at whatever state
+    it had reached. A precondition re-read after the confirm can only ever
+    agree with itself, and the kill would land silently."""
+    text = "insert_job: fz_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING for the whole test
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "fz_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("fz_run", "status")) == "RUNNING"
+                )
+
+                sent: list[dict] = []
+                inner = app._client.request
+
+                async def capture(request):
+                    if request.get("cmd") == "sendevent":
+                        sent.append(request)
+                    return await inner(request)
+
+                app._client.request = capture
+
+                await pilot.press("k")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                shown = app._jobs_snapshot["fz_run"]["state_rev"]
+                assert f"at revision {shown}" in str(app.screen.query_one(Static).content)
+
+                # the estate moves under the operator while the dialog is up
+                nudge = parse_console_command("ON_ICE fz_run", None)
+                assert not isinstance(nudge, str)
+                await app._do_sendevent(nudge)
+                await _wait_for_ui(pilot, lambda: app._jobs_snapshot["fz_run"]["state_rev"] > shown)
+
+                console = app.query_one("#console", RichLog)
+                await pilot.press("y")  # enter is not the only way in
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any(
+                        "> KILLJOB fz_run: rejected @ #" in ln.text for ln in console.lines
+                    ),
+                )
+
+                kills = [r for r in sent if r.get("verb") == "KILLJOB"]
+                assert len(kills) == 1
+                assert kills[0]["expect"] == {"job:fz_run": shown}
+                assert not any("> KILLJOB fz_run: applied" in ln.text for ln in console.lines)
+                assert str(table.get_cell("fz_run", "status")) == "RUNNING"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_force_on_a_box_names_the_members_it_reaches(short_root: Path) -> None:
+    """A box verb's blast radius is the confirm's whole point (DL-65): the
+    members are named, not counted."""
+    text = (
+        "insert_job: fb_box\njob_type: b\n\n"
+        "insert_job: fb_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: fb_box\n\n"
+        "insert_job: fb_inner\njob_type: b\nbox_name: fb_box\n\n"
+        "insert_job: fb_deep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: fb_inner\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 4)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "fb_box"
+
+                await pilot.press("f")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                body = str(app.screen.query_one(Static).content)
+                assert body.startswith("FORCE_STARTJOB fb_box")
+                # descendants, depth-first: an inner box's own member counts
+                assert "reaches 3 member(s) -- fb_inner, fb_deep, fb_m1" in body
+
+                await pilot.press("n")  # escape is not the only way out
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_typed_killjob_sends_without_a_confirm(short_root: Path) -> None:
+    """Writing out KILLJOB is already an act of intent; only the KEY is
+    confirmed (DL-187). A modal in front of the typed form would train the
+    operator to press through it."""
+    text = "insert_job: tk_run\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "tk_run" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot, lambda: str(table.get_cell("tk_run", "status")) == "RUNNING"
+                )
+
+                console = app.query_one("#console", RichLog)
+                cmdline = app.query_one("#cmdline", Input)
+                cmdline.focus()
+                cmdline.value = "KILLJOB tk_run"
+                await pilot.press("enter")
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any("> KILLJOB tk_run: applied @ #" in ln.text for ln in console.lines),
+                )
+                assert not isinstance(app.screen, ConfirmScreen)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_escape_clears_the_console_line_and_returns_to_the_table(short_root: Path) -> None:
+    """F2: an abandoned command line must not sit there waiting for a stray
+    Enter. Escape clears it and hands focus back to the table."""
+    text = "insert_job: ec_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "ec_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                console = app.query_one("#console", RichLog)
+                cmdline = app.query_one("#cmdline", _ConsoleInput)
+                echoes_before = sum(1 for ln in console.lines if ln.text.startswith("> "))
+
+                await pilot.press("colon")
+                await pilot.pause()
+                assert app.focused is cmdline
+                await pilot.press("K", "I", "L", "L")
+                await pilot.pause()
+                assert cmdline.value == "KILL"
+
+                await pilot.press("escape")
+                await pilot.pause()
+                assert cmdline.value == ""
+                assert app.focused is table
+
+                await pilot.press("enter")
+                await pilot.pause()
+                assert sum(1 for ln in console.lines if ln.text.startswith("> ")) == echoes_before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_quit_confirms_when_the_app_owns_the_run(short_root: Path) -> None:
+    """`run --ui` owns the engine, so `q` stops the run -- confirmed first.
+    Escape leaves the app running; Enter exits."""
+    text = "insert_job: qo_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path, owns_run=True)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "qo_job" in app._rows)
+                app.query_one("#jobs", DataTable).focus()
+
+                await pilot.press("q")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                assert "stop the run?" in str(app.screen.query_one(Static).content)
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+                assert app._exit is False
+
+                await pilot.press("q")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                await pilot.press("enter")
+                await _wait_for_ui(pilot, lambda: app._exit is True)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_quit_detaches_at_once_when_it_does_not_own_the_run(short_root: Path) -> None:
+    """`dsl41 ui` leaves the engine running, so `q` is a detach: confirming
+    it would train the operator to press through the dialog that matters."""
+    text = "insert_job: qd_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "qd_job" in app._rows)
+                app.query_one("#jobs", DataTable).focus()
+                await pilot.press("q")
+                await _wait_for_ui(pilot, lambda: app._exit is True)
+                assert not isinstance(app.screen, ConfirmScreen)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_the_footer_names_the_quit_posture(short_root: Path) -> None:
+    """The label the Footer renders comes from screen.active_bindings, and
+    it must say which of the two quits this app is offering (DL-187)."""
+    text = "insert_job: qf_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            for owns_run, label in ((False, "detach"), (True, "stop run")):
+                app = RunnerApp(server.path, owns_run=owns_run)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await _wait_for_ui(pilot, lambda: "qf_job" in app._rows)
+                    assert app.screen.active_bindings["q"].binding.description == label
+                # the per-instance assignment must not have leaked into the
+                # class-level merge, which every future app instance copies
+                merged = RunnerApp._merged_bindings
+                assert merged is not None
+                assert [b.description for b in merged.key_to_bindings["q"]] == ["quit"]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_q_closes_the_spec_popup(short_root: Path) -> None:
+    """F7: a reader who came to look reaches for the pager's leave key, and
+    `q` must close the popup rather than fall through to the app's quit."""
+    text = "insert_job: qs_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", text, spec_texts={"qs_job": text}
+        )
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "qs_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+
+                await pilot.press("d")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                assert app.screen.query_one("#specbox").border_subtitle == "q/esc close"
+
+                await pilot.press("q")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, SpecScreen))
+                assert app._exit is False
         finally:
             await _teardown(engine, server, loop_task)
 

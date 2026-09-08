@@ -50,12 +50,24 @@ Normative detail for DL-46, within DL-41's frame:
   filter view, and widget cap at _PAGER_BUFFER_LINES in lockstep; `m`
   maximizes the log PANE (tail + prompt line) so the prompt stays visible
   while zoomed. `m`/`o`/`r` and the resize keys pass through by design.
-- EVENT CONSOLE accepts exactly the ss10 sendevent verbs (job verbs;
+- EVENT CONSOLE (`:`) accepts exactly the ss10 sendevent verbs (job verbs;
   SET_GLOBAL NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an
-  omitted job means the selected row. Key bindings fire the common verbs on
-  the selected job. Every request and its response is echoed to the
-  console; refusals render red and change nothing -- the server already
-  validates against the catalog (vendor parity), the TUI never pre-judges.
+  omitted job means the selected row. Escape clears the typed line and
+  returns focus to the table -- a half-written verb never survives out of
+  sight. Every request and its response is echoed to the console; refusals
+  render red and change nothing -- the server already validates against the
+  catalog (vendor parity), the TUI never pre-judges.
+- SAFETY (DL-187): the verb keys live on the JOBS TABLE, not on the app, so
+  they fire only while the table has focus and the Footer offers them only
+  there -- `k` in the console log or the explain pane is dead, not a kill.
+  KILLJOB and FORCE_STARTJOB from a KEY open a confirm first (a typed
+  KILLJOB is already an act of intent; `k` is one key from every navigation
+  key), naming the target's status, the revision, and -- for a box -- the
+  members it reaches. That revision is FROZEN before the modal opens: a job
+  that moved while the operator read is refused by DL-90, never re-read
+  behind their back. Quit follows POSTURE: a detached viewer leaves the
+  engine running and exits at once ("detach"); `run --ui` owns the engine,
+  so quitting stops the run and is confirmed first ("stop run").
 - TRIGGERS VIEW (`t`, DL-68): "what fires next" -- the ss10 `timers` verb
   (pending oracle timers merged with each scheduled job's next calendar
   tick, due-ordered by the server) re-queried on a 2s interval while open,
@@ -292,12 +304,15 @@ class _UTCHeader(Header):
 class SpecScreen(ModalScreen[None]):
     """Job-details popup: runtime facts + the `spec` verb's JIL block --
     the post-placeholder source the RUNNING engine loaded, not whatever
-    the file on disk says now. Escape/enter/d closes."""
+    the file on disk says now. Escape/enter/d/q closes -- `q` because a
+    reader who came here to look reaches for the pager's leave key, and it
+    must never fall through to the app's quit (DL-187)."""
 
     BINDINGS = [
         Binding("escape", "dismiss", "close"),
         Binding("enter", "dismiss", "close", show=False),
         Binding("d", "dismiss", "close", show=False),
+        Binding("q", "dismiss", "close", show=False),
     ]
     CSS = """
     SpecScreen { align: center middle; }
@@ -319,7 +334,78 @@ class SpecScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         box = self.query_one("#specbox")
         box.border_title = self._title
+        box.border_subtitle = "q/esc close"
         box.focus()
+
+
+#: names listed in a box confirm before the tail is summed; a blast radius
+#: that fills the screen is not read, and the count carries the rest
+_CONFIRM_MEMBER_CAP = 8
+
+
+def confirm_body(
+    verb: str, target: str, status: str, revision: int | None, members: Sequence[str]
+) -> str:
+    """The ConfirmScreen text for one job verb: what is about to be sent,
+    the state it is being sent AGAINST, and -- for a box -- who else it
+    reaches. Pure so the blast radius is testable without a terminal."""
+    lines = [
+        f"{verb} {target}",
+        f"now {status or '?'} at revision {revision if revision is not None else '?'}",
+    ]
+    if members:
+        shown = ", ".join(members[:_CONFIRM_MEMBER_CAP])
+        extra = len(members) - _CONFIRM_MEMBER_CAP
+        lines.append(
+            f"box: reaches {len(members)} member(s) -- {shown}"
+            + (f" and {extra} more" if extra > 0 else "")
+        )
+    return "\n".join(lines)
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """A yes/no gate in front of a destructive KEY (DL-187).
+
+    Typed console commands are NOT gated: writing out KILLJOB is already an
+    act of intent, while `k` sits one keystroke from every navigation key.
+    Enter or `y` confirms; escape, `n` and `q` cancel -- `q` because the key
+    that leaves every other view must not be the key that agrees here."""
+
+    BINDINGS = [
+        Binding("enter", "confirm", "confirm"),
+        Binding("y", "confirm", "yes", show=False),
+        Binding("escape", "cancel", "cancel"),
+        Binding("n", "cancel", "no", show=False),
+        Binding("q", "cancel", "no", show=False),
+    ]
+    CSS = """
+    ConfirmScreen { align: center middle; }
+    #confirmbox {
+        width: 70%; max-width: 90; height: auto; max-height: 60%;
+        border: round $warning; background: $surface; padding: 1 2;
+    }
+    """
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="confirmbox"):
+            yield Static(self._body)
+
+    def on_mount(self) -> None:
+        box = self.query_one("#confirmbox")
+        box.border_title = self._title
+        box.border_subtitle = "enter/y confirm -- esc/n/q cancel"
+        box.focus()
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 def format_due(due: datetime, now: datetime) -> str:
@@ -485,6 +571,7 @@ class TriggersScreen(ModalScreen[None]):
         for label in self._COLUMNS:
             table.add_column(label, key=label)
         table.border_title = "triggers"
+        table.border_subtitle = "q/esc/t close"
         table.focus()
         self._table_sync = _TableSync()
         self.action_refresh_now()
@@ -530,6 +617,32 @@ class TriggersScreen(ModalScreen[None]):
         table.border_title = f"triggers ({len(rows)})"
 
 
+class _JobsTable(DataTable):
+    """The jobs table, and the ONLY place the operator verbs are bound
+    (DL-187).
+
+    They were app bindings, which meant `k` killed the selected job from
+    anywhere the app's chain was reachable -- the console log and the
+    explain scroll are both focusable, and neither shadows a thing. A widget
+    binding fires only while this table has focus, and the Footer (which
+    renders screen.active_bindings, walking the focus chain) offers the
+    verbs only there. Same discipline as the pager: focus is the mode."""
+
+    BINDINGS = [
+        Binding("s", "app.send('STARTJOB')", "start"),
+        # visible: FORCE is the rerun verb -- plain STARTJOB is SEM-10-gated
+        # on box members and its refusal used to be silent (DL-64)
+        Binding("f", "app.send('FORCE_STARTJOB')", "force"),
+        Binding("k", "app.send('KILLJOB')", "kill"),
+        Binding("i", "app.send('ON_ICE')", "ice", show=False),
+        Binding("I", "app.send('OFF_ICE')", "off-ice", show=False),
+        Binding("h", "app.send('ON_HOLD')", "hold", show=False),
+        Binding("H", "app.send('OFF_HOLD')", "off-hold", show=False),
+        Binding("n", "app.send('ON_NOEXEC')", "noexec", show=False),
+        Binding("N", "app.send('OFF_NOEXEC')", "off-noexec", show=False),
+    ]
+
+
 class _FilterInput(Input):
     """The `/` filter line. Escape clears and hides it; Enter (Input.Submitted,
     handled by the app) keeps the filter applied and returns to the table."""
@@ -540,6 +653,19 @@ class _FilterInput(Input):
         app = self.app
         assert isinstance(app, RunnerApp)
         app.clear_filter()
+
+
+class _ConsoleInput(Input):
+    """The `:` console line. Escape clears the half-typed command and hands
+    focus back to the jobs table -- mirroring _FilterInput, and for the same
+    reason: a line the operator abandoned must not sit there waiting for a
+    stray Enter (DL-187)."""
+
+    BINDINGS = [Binding("escape", "cancel_command", "cancel")]
+
+    def action_cancel_command(self) -> None:
+        self.value = ""
+        self.app.query_one("#jobs", DataTable).focus()
 
 
 def compile_search(pattern: str) -> re.Pattern[str] | str:
@@ -1016,19 +1142,12 @@ class RunnerApp(App[None]):
     #console { height: 1fr; border: round $secondary; }
     """
 
+    #: NO `send(...)` action belongs here: the operator verbs live on
+    #: _JobsTable, where focus gates them (DL-187). A verb bound at app
+    #: level fires from every focusable widget in the app.
     BINDINGS = [
+        # the label is posture-dependent and set per instance in __init__
         Binding("q", "quit", "quit"),
-        Binding("s", "send('STARTJOB')", "start"),
-        # visible: FORCE is the rerun verb -- plain STARTJOB is SEM-10-gated
-        # on box members and its refusal used to be silent (DL-64)
-        Binding("f", "send('FORCE_STARTJOB')", "force"),
-        Binding("k", "send('KILLJOB')", "kill"),
-        Binding("i", "send('ON_ICE')", "ice", show=False),
-        Binding("I", "send('OFF_ICE')", "off-ice", show=False),
-        Binding("h", "send('ON_HOLD')", "hold", show=False),
-        Binding("H", "send('OFF_HOLD')", "off-hold", show=False),
-        Binding("n", "send('ON_NOEXEC')", "noexec", show=False),
-        Binding("N", "send('OFF_NOEXEC')", "off-noexec", show=False),
         Binding("d", "details", "details"),
         Binding("t", "triggers", "triggers"),
         Binding("m", "maximize_log", "zoom log"),
@@ -1050,9 +1169,22 @@ class RunnerApp(App[None]):
         Binding("{", "resize('table', -1)", "table-", show=False),
     ]
 
-    def __init__(self, socket_path: Path) -> None:
+    def __init__(self, socket_path: Path, owns_run: bool = False) -> None:
         super().__init__()
         self.socket_path = Path(socket_path)
+        #: True under `dsl41 run --ui`, where quitting the app STOPS the run;
+        #: False for `dsl41 ui`, where quitting detaches a viewer and the
+        #: engine keeps running (DL-187)
+        self.owns_run = bool(owns_run)
+        # replace the whole per-key list rather than BindingsMap.bind: bind
+        # appends, and active_bindings keeps the FIRST binding for a key, so
+        # the appended label would never show. copy() shares the lists with
+        # the class-level merge, so appending would also leak into every
+        # other instance; assigning touches only this app's dict copy.
+        self._bindings.key_to_bindings["q"] = [
+            Binding("q", "quit", "stop run" if self.owns_run else "detach")
+        ]
+        self._quit_pending = False
         self.sub_title = str(self.socket_path)
         self._client = ControlClient(self.socket_path)
         self._selected: str | None = None
@@ -1099,7 +1231,7 @@ class RunnerApp(App[None]):
                 yield _FilterInput(
                     placeholder="filter: substring(s) -- Enter keeps, Esc clears", id="filterline"
                 )
-                yield DataTable(id="jobs")
+                yield _JobsTable(id="jobs")
             with Vertical(id="side"):
                 with VerticalScroll(id="explain-box"):
                     yield Static(id="explain")
@@ -1108,7 +1240,7 @@ class RunnerApp(App[None]):
                     yield _LogSearchInput(id="logsearch")
         with Vertical(id="consolebox"):
             yield RichLog(id="console", markup=False, wrap=True)
-            yield Input(
+            yield _ConsoleInput(
                 placeholder="STARTJOB [job] | KILLJOB [job] | SET_GLOBAL N=v"
                 " | CHANGE_STATUS [job] STATUS [exit] -- empty job = selected row",
                 id="cmdline",
@@ -1663,12 +1795,92 @@ class RunnerApp(App[None]):
             self.query_one("#tablecol").styles.width = f"{self._table_share}fr"
             self.query_one("#side").styles.width = f"{self._SHARE_TOTAL - self._table_share}fr"
 
+    # ------------------------------------------------- quit / send (DL-187)
+
+    _QUIT_BODY = "stop the run?\n\nlive jobs are cancelled; wrappers record the kills"
+
+    async def action_quit(self) -> None:
+        """Quit means two different things by posture.
+
+        A detached viewer (`dsl41 ui`) leaves the engine running, so `q`
+        exits at once -- confirming a detach would train the operator to
+        press through the dialog that matters. `run --ui` OWNS the engine,
+        so the same key stops the run, and that is confirmed. Ctrl+Q and the
+        command palette's Quit both route here, so one override covers all
+        three doors."""
+        if not self.owns_run:
+            self.exit()
+            return
+        if self._quit_pending:
+            return  # ctrl+q is a priority binding: it reaches through the modal
+        self._quit_pending = True
+
+        def decided(confirmed: bool | None) -> None:
+            self._quit_pending = False
+            if confirmed:
+                self.exit()
+
+        self.push_screen(ConfirmScreen("stop run", self._QUIT_BODY), callback=decided)
+
+    #: verbs a KEY press confirms first (DL-187): the two that destroy work
+    #: in flight. Everything else is a flag flip a second key press undoes.
+    _CONFIRM_VERBS = frozenset({"KILLJOB", "FORCE_STARTJOB"})
+
     def action_send(self, verb: str) -> None:
         request = parse_console_command(verb, self._selected)
         if isinstance(request, str):
             self._console_write(Text(request, style="red"))
             return
+        if request.get("verb") in self._CONFIRM_VERBS:
+            self.run_worker(self._confirm_send(request), group="send", exclusive=False)
+            return
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
+
+    async def _confirm_send(self, request: dict[str, Any]) -> None:
+        """Gate a destructive key press behind ConfirmScreen (DL-187).
+
+        The precondition is read BEFORE the modal opens and carried through
+        the confirm, so the operator agrees to the revision they were shown:
+        a job that moved while they read is refused by DL-90, never killed
+        at whatever revision it had reached by the time they said yes."""
+        payload = dict(request.get("payload") or {})
+        verb = str(request.get("verb"))
+        target = str(payload.get("job") or payload.get("name") or "")
+        label = f"> {verb} {target}".rstrip()
+        # snapshot facts first, BEFORE any await: status, blast radius and the
+        # revision must describe one instant, not straddle a refresh
+        row = self._jobs_snapshot.get(target) or {}
+        members = self._descendants(target)
+        frozen: tuple[str, int, int] | None = None
+        try:
+            frozen = await self._precondition(addressed_key(verb, payload))
+        except (EngineError, ControlClientError):
+            frozen = None  # _do_sendevent re-reads and reports the fault in one place
+        body = confirm_body(
+            verb,
+            target,
+            str(row.get("status") or "?"),
+            frozen[2] if frozen is not None else None,
+            members,
+        )
+        if not await self.push_screen_wait(ConfirmScreen("confirm", body)):
+            self._console_write(Text(f"{label}: cancelled", style="dim"))
+            return
+        await self._do_sendevent(request, frozen=frozen)
+
+    def _descendants(self, name: str) -> list[str]:
+        """Every job beneath a box, depth-first in tree order -- the blast
+        radius a box verb reaches (DL-65), not just its direct members."""
+        kids = self._children()
+        out: list[str] = []
+
+        def walk(box: str) -> None:
+            for child in kids.get(box, []):
+                out.append(child)
+                walk(child)
+
+        walk(name)
+        return out
 
     def action_focus_console(self) -> None:
         if self.screen.maximized is not None:
@@ -1743,7 +1955,9 @@ class RunnerApp(App[None]):
             return
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
-    async def _do_sendevent(self, request: dict[str, Any]) -> None:
+    async def _do_sendevent(
+        self, request: dict[str, Any], frozen: tuple[str, int, int] | None = None
+    ) -> None:
         """Complete the ss6 envelope and send it (DL-90).
 
         `expect` comes from `_jobs_snapshot` -- the revision this table was
@@ -1752,7 +1966,11 @@ class RunnerApp(App[None]):
         job moved between the refresh they read and the key they pressed,
         their command is refused and they are told, instead of acting on a
         picture that had already gone stale. Anything the table does not
-        hold (a global, a `JOB^INST` ghost) is read first."""
+        hold (a global, a `JOB^INST` ghost) is read first.
+
+        `frozen` is that same tuple read EARLIER, before a confirm modal
+        opened (DL-187): the revision the operator agreed to, not the one
+        the estate reached while they read."""
         payload = dict(request.get("payload") or {})
         target = payload.get("job") or payload.get("name") or ""
         label = f"> {request.get('verb')} {target}".rstrip()
@@ -1762,7 +1980,9 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"{label}: {exc}", style="red"))
             return
         try:
-            baseline, epoch, revision = await self._precondition(key)
+            baseline, epoch, revision = (
+                frozen if frozen is not None else await self._precondition(key)
+            )
             response = await self._client.request(
                 command(
                     str(request.get("verb")),
