@@ -11347,3 +11347,41 @@ relitigate an entry; append a new one.
   Evidence, loading limits, paired pilot results, and verification are in
   docs/agent-harness-review.md. No global configuration or compiler source
   changes are part of this decision.
+- DL-187 operator TUI review follow-up (2026-09-08; the reconciled operator
+  UX review, two independent reviewers, ten findings; amends DL-46 items 5,
+  6, and 10). (1) Verb keys live on the jobs table, not the app: s, f, k,
+  i/I, h/H, n/N fire only while the table has focus. The console log, the
+  explain pane, and every modal are dead to them. `j` stays unbound and
+  `k` stays KILLJOB on the table; the vim habit is answered by item 2, not
+  by a remap. (2) KILLJOB and FORCE_STARTJOB from a key confirm first. The
+  modal shows the target, its status and revision, and a box's members.
+  The revision is frozen when the modal opens; a job that moves while the
+  operator reads is refused by the DL-90 guard, never re-read. Console-typed
+  commands stay unconfirmed: typing the verb is the intent. Amends DL-46
+  item 6. (3) Escape in the `:` console clears the line and returns focus
+  to the table, as the filter line and the pager prompts already do.
+  (4) Posture is on screen. `RunnerApp(owns_run=)`: `run --ui` labels `q`
+  "stop run" and confirms; `dsl41 ui` labels it "detach" and quits at once.
+  Ctrl+Q and the palette Quit take the same path. Amends DL-46 item 5.
+  (5) A TUI crash is an exit code. Textual's fatal path returns normally
+  with return_code 1; `dsl41 ui` exits with it, and `run --ui` reports
+  "TUI failed" and exits 1 instead of reading the crash as an operator
+  stop. Amends DL-46 item 10, whose fix caught only a raised exception.
+  (6) A refused query is visible. An ok:false status, trace, or timers
+  answer writes a red console line once per distinct error, marks the
+  subtitle, and leaves the last good table in place; a later good answer
+  clears it. "nothing fires next" no longer covers "the read failed".
+  (7) Help is one key. F1, and `?` outside the pager (which keeps it for
+  reverse search), toggles Textual's help panel; each pane carries a HELP
+  string, the console's lists every sendevent verb including DISARM, and
+  the unknown-verb error enumerates them. (8) CHANGE_STATUS: the
+  status-first shorthand applies only when the second token is not a
+  status, so `CHANGE_STATUS SUCCESS FAILURE` is the explicit form DL-46
+  item 6 documents. (9) The console echo carries the whole request (a
+  global's value, a status, an exit code). (10) A log-tail read fault
+  other than a missing file writes one red console line per distinct
+  error. (11) The details popup closes on `q` too; popups name their
+  close keys.
+  DECLINED: remapping `k` to scroll (item 1); confirming console-typed
+  commands; a console history; an environment fallback for `--socket`.
+  Reopen on operator evidence, not on taste.

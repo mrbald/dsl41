@@ -913,11 +913,19 @@ box_name (fold a box with space, all with z; a folded box shows its
 hidden count and a red problem tally), `/` filters by name, `v` cycles
 all → problems → active — filtered and non-all views flatten so a match
 never hides inside a fold. The console focuses with `:`.
+Verb keys act only while the jobs table has focus; KILLJOB and
+FORCE_STARTJOB from a key confirm first, showing the target, its box
+members, and the revision the request will name, frozen when the modal
+opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
+A refused query is reported in the console and the subtitle, never shown
+as an empty estate.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal, and
 that terminal owns the run. `dsl41 ui --socket <path>` attaches the same app
 to an engine already running, from another terminal; quitting detaches the
-viewer and leaves the run alone.
+viewer and leaves the run alone. The footer says which: `q` reads "stop
+run" and confirms under `run --ui`, "detach" under `dsl41 ui`. A crashed
+TUI exits non-zero in both postures (DL-187).
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web
 posture (E3): textual-serve ships no auth. Deploy it behind a reverse
 proxy or SSH tunnel. This posture is documented in README deployment

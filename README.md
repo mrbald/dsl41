@@ -241,7 +241,7 @@ dsl41 host list -S ./run1/control.sock          # the routing table, with revs
 dsl41 host drain local -S ./run1/control.sock   # stop routing new work here
 dsl41 host activate local -S ./run1/control.sock    # route again; re-dispatch held
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
-dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both
+dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both; q stops it
 dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in seconds
 dsl41 rehearse jobs.jil --check-cadence         # run counts vs cadence bounds; exit 3 on deviation
 dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays (dynamic L022)
@@ -258,7 +258,9 @@ log tail (`m`) turns it into a less-style pager — `/` search, `&` filter,
 `n`/`N`, `F` follow — and the operator verbs are unreachable while paging.
 `t` opens a read-only triggers view — every pending timer, calendar tick,
 and live filewatch with countdowns — and the jobs table marks the armed
-latch (SEM-32) as flag `A`.
+latch (SEM-32) as flag `A`. Verb keys act only while the jobs table has
+focus; kill and force ask first, naming the box members and the revision
+they will act on. F1 opens the help panel.
 
 `host drain` is the maintenance verb: new work stops being dispatched to
 that execution host and work already running finishes. Held jobs are not
@@ -876,11 +878,14 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
 - tests/test_runner_tui.py — phase-11d TUI (skips without the [ui] extra): the
   sendevent console parser, ControlClient against a real ControlServer (round trip,
   reconnect, subscribe), the ss13.6 pilot smokes (table, explain atoms, pending
-  timers, log tail, key-driven STARTJOB), and the DL-67 log-pager suite (search,
-  line filter, follow, verb-shadowing with its binding-drift guard)
-- tests/test_runner_serve.py — phase-11e `serve` CLI: missing-socket and
+  timers, log tail, key-driven STARTJOB), the DL-67 log-pager suite (search,
+  line filter, follow, verb-shadowing with its binding-drift guard), and the
+  DL-187 safety suite (table-scoped verb keys, kill/force confirmation, console
+  escape, quit posture, help panel, refused-query reporting)
+- tests/test_runner_serve.py — phase-11e `serve` and `ui` CLI: missing-socket and
   missing-extra exit-2 paths, the constructed textual-serve command (a socket
-  path with a space is quoted), default loopback bind, bind-failure exit 2 — the
+  path with a space is quoted), default loopback bind, bind-failure exit 2, the
+  DL-187 exit-code propagation of a crashed TUI under `ui` and `run --ui` — the
   real textual-serve Server is always monkeypatched (ss13.6 posture, thinner
   still: a CLI wrapper, not a pilot)
 - tests/test_runner_supervisor.py — phase-11f supervisor tier: the frozen ss5
