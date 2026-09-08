@@ -52,7 +52,8 @@ Normative detail for DL-46, within DL-41's frame:
   scrolling up pauses ([paused] in the title), `F`/`G`/End resume. Buffer,
   filter view, and widget cap at _PAGER_BUFFER_LINES in lockstep; `m`
   maximizes the log PANE (tail + prompt line) so the prompt stays visible
-  while zoomed. `m`/`o`/`r` and the resize keys pass through by design.
+  while zoomed. `m`/`o`/`r`, `F1`, and the resize keys pass through by
+  design.
 - EVENT CONSOLE (`:`) accepts exactly the ss10 sendevent verbs (job verbs;
   SET_GLOBAL NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an
   omitted job means the selected row. Escape clears the typed line and
@@ -76,10 +77,11 @@ Normative detail for DL-46, within DL-41's frame:
   engine running and exits at once ("detach"); `run --ui` owns the engine,
   so quitting stops the run and is confirmed first ("stop run").
 - HELP (`F1`, and `?` outside the pager) toggles Textual's own context help
-  panel. Every pane and popup carries a short `HELP` string, read off the
-  focused widget's ancestors; the console's own HELP lists every sendevent
-  verb, and an unknown one typed at `:` is answered with the same sorted
-  list (DL-187 item 7).
+  panel. Every pane and popup WITH KEYS OF ITS OWN carries a short `HELP`
+  string, read off the focused widget's ancestors (the event console's
+  RichLog has none to explain and gets none); the console's own HELP lists
+  every sendevent verb, and an unknown one typed at `:` is answered with
+  the same sorted list (DL-187 item 7).
 - TRIGGERS VIEW (`t`, DL-68): "what fires next" -- the ss10 `timers` verb
   (pending oracle timers merged with each scheduled job's next calendar
   tick, due-ordered by the server) re-queried on a 2s interval while open,
@@ -89,8 +91,9 @@ Normative detail for DL-46, within DL-41's frame:
   later unit serves one) render generically. READ-ONLY: every operator verb
   is shadowed to the bell (DL-67 discipline); `t`/`q`/escape close. The
   jobs table's flags column carries `A` for the same latch. An ok:false
-  `timers` answer leaves the rows as they were and names the refusal on
-  the border title instead (DL-187 item 6).
+  `timers` answer leaves the rows as they were, names the refusal on the
+  border title, and marks the app subtitle exactly like a status or trace
+  refusal does (DL-187 item 6).
 - JOB DETAILS POPUP (`d` / Enter on a row): the ss10 `spec` verb's
   preserve-rendered JIL block -- the post-placeholder source THIS engine
   loaded -- topped with the status facts, the `deps` verb's needs/blocks
@@ -213,6 +216,14 @@ _COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
 #: with every cell of every row queued each refresh that is O(cells x rows) --
 #: ~2M rich measures, ~25s of blocked loop, at a 519-job estate.
 _COLUMN_WIDTHS = {"status": 10, "at": 8, "run": 4, "exit": 4, "flags": 5, "alarms": 6}
+#: every first token `:` accepts, sorted -- what an unknown verb's error
+#: enumerates, and what the console's own HELP lists (DL-187 item 7). Above
+#: the widget classes so `_ConsoleInput.HELP` can build its verb list from
+#: this ONE source instead of hand-copying it out of step.
+_CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
+#: the job-verb half of that list, for the console's HELP prose (the other
+#: two tokens get their own sentence, naming their argument shape instead)
+_JOB_VERB_PROSE = ", ".join(v for v in _CONSOLE_VERBS if v not in ("SET_GLOBAL", "CHANGE_STATUS"))
 
 
 def _cell_sig(value: Any) -> tuple[str, str]:
@@ -315,6 +326,16 @@ class _UTCHeader(Header):
         yield _UTCHeaderClock()
 
 
+#: spliced with `*_HELP_BINDINGS` into every modal's BINDINGS (DL-187 item
+#: 7): a modal chain blocks app bindings (screen.py:449), so help needs to
+#: stay reachable from each modal on its own -- one shared pair instead of
+#: three copies of the same two lines and comment.
+_HELP_BINDINGS = (
+    Binding("f1", "app.toggle_help_panel", "help", show=False),
+    Binding("question_mark", "app.toggle_help_panel", "help", show=False),
+)
+
+
 class SpecScreen(ModalScreen[None]):
     """Job-details popup: runtime facts + the `spec` verb's JIL block --
     the post-placeholder source the RUNNING engine loaded, not whatever
@@ -333,10 +354,7 @@ class SpecScreen(ModalScreen[None]):
         Binding("enter", "dismiss", "close", show=False),
         Binding("d", "dismiss", "close", show=False),
         Binding("q", "dismiss", "close", show=False),
-        # a modal chain blocks app bindings (screen.py:449); help (DL-187
-        # item 7) needs to stay reachable from here too
-        Binding("f1", "app.toggle_help_panel", "help", show=False),
-        Binding("question_mark", "app.toggle_help_panel", "help", show=False),
+        *_HELP_BINDINGS,
     ]
     CSS = """
     SpecScreen { align: center middle; }
@@ -395,14 +413,17 @@ class ConfirmScreen(ModalScreen[bool]):
     Enter or `y` confirms; escape, `n` and `q` cancel -- `q` because the key
     that leaves every other view must not be the key that agrees here."""
 
+    HELP = """
+    Enter or y confirms; escape, n, or q cancels. Nothing is sent until
+    confirmed, and then only against the state and revision named above.
+    """
     BINDINGS = [
         Binding("enter", "confirm", "confirm"),
         Binding("y", "confirm", "yes", show=False),
         Binding("escape", "cancel", "cancel"),
         Binding("n", "cancel", "no", show=False),
         Binding("q", "cancel", "no", show=False),
-        Binding("f1", "app.toggle_help_panel", "help", show=False),
-        Binding("question_mark", "app.toggle_help_panel", "help", show=False),
+        *_HELP_BINDINGS,
     ]
     CSS = """
     ConfirmScreen { align: center middle; }
@@ -562,10 +583,7 @@ class TriggersScreen(ModalScreen[None]):
         Binding("q", "dismiss", "close", show=False),
         Binding("t", "dismiss", "close", show=False),
         Binding("r", "refresh_now", "refresh", show=False),
-        # a modal chain blocks app bindings (screen.py:449); help (DL-187
-        # item 7) needs to stay reachable from here too
-        Binding("f1", "app.toggle_help_panel", "help", show=False),
-        Binding("question_mark", "app.toggle_help_panel", "help", show=False),
+        *_HELP_BINDINGS,
         # operator verbs and pane/navigation keys: bell, exactly like the
         # log pager -- NOT check_action=False, which would let the key fall
         # through to the app binding it exists to shadow (DL-67)
@@ -611,11 +629,6 @@ class TriggersScreen(ModalScreen[None]):
         table.border_subtitle = "q/esc/t close"
         table.focus()
         self._table_sync = _TableSync()
-        #: DL-187 item 6: this screen's OWN dedupe memo for an ok:false
-        #: `timers` answer -- kept separate from RunnerApp._query_fault so
-        #: this screen's polling and the app's status/trace polling cannot
-        #: clobber each other's refused/recovered state (review MAJOR)
-        self._timers_fault: str | None = None
         self.action_refresh_now()
         self.set_interval(2.0, self.action_refresh_now)
 
@@ -639,18 +652,20 @@ class TriggersScreen(ModalScreen[None]):
         except NoMatches:
             return  # a worker resuming after the await can outlive the screen
         if not response.get("ok"):
-            # DL-187 item 6: the last good rows stay; the refusal is named
-            # on the border, and the console line is the same wording
-            # status/trace use -- deduped against THIS screen's own memo,
-            # never the app's, so a status fault elsewhere cannot mask this
-            # or be erased by this screen's next good timers answer
+            # DL-187 item 6 (P1-1): the last good rows stay; the refusal is
+            # named on the border AND, through the app's keyed memo, the
+            # subtitle -- `timers` is one channel of the same dict as
+            # status/trace, so it gets the identical console line and
+            # subtitle marking without a screen-local memo of its own
             error = str(response.get("error", "")).strip()
-            table.border_title = f"triggers (refused: {error})"
-            if error != self._timers_fault:
-                self._timers_fault = error
-                app._write_query_refusal("timers", error)
+            # P1-3: a Text title -- border_title strings parse as rich
+            # markup (runner_tui.py's own precedent, the jobs table's
+            # title), and this error string is the SERVER's, not this
+            # module's, so it may carry brackets or other markup by accident
+            table.border_title = Text(f"triggers (refused: {error})")
+            app._set_query_fault("timers", error)
             return
-        self._timers_fault = None
+        app._set_query_fault("timers", None)
         timers = response.get("timers", [])
         rows = assemble_trigger_rows(
             timers, app._jobs_snapshot, datetime.now(UTC).replace(tzinfo=None)
@@ -724,10 +739,9 @@ class _ConsoleInput(Input):
     reason: a line the operator abandoned must not sit there waiting for a
     stray Enter (DL-187)."""
 
-    HELP = """
+    HELP = f"""
     Type a sendevent verb; an omitted job means the selected row:
-    STARTJOB, FORCE_STARTJOB, KILLJOB, ON_ICE, OFF_ICE, ON_HOLD, OFF_HOLD,
-    ON_NOEXEC, OFF_NOEXEC, DISARM.
+    {_JOB_VERB_PROSE}.
 
     SET_GLOBAL NAME=value sets a global. CHANGE_STATUS STATUS [exit] acts
     on the selected job; CHANGE_STATUS job STATUS [exit] names one. Escape
@@ -1144,11 +1158,6 @@ def _transport_line(label: str, exc: ControlClientError) -> Text:
     )
 
 
-#: every first token `:` accepts, sorted -- what an unknown verb's error
-#: enumerates, and what the console's own HELP lists (DL-187 item 7)
-_CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
-
-
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
     """Parse an event-console line into the VERB HALF of a sendevent request,
     or return an error string. Grammar (ss11): `<JOB_VERB> [job]`,
@@ -1311,7 +1320,6 @@ class RunnerApp(App[None]):
         self._bindings.key_to_bindings["q"] = [
             Binding("q", "quit", "stop run" if self.owns_run else "detach")
         ]
-        self._quit_pending = False
         self.sub_title = str(self.socket_path)
         self._client = ControlClient(self.socket_path)
         self._selected: str | None = None
@@ -1348,11 +1356,17 @@ class RunnerApp(App[None]):
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
-        #: DL-187 item 6: "<verb>: <error>" for the last ok:false
-        #: status/trace/timers answer, or None while queries are clean
-        self._query_fault: str | None = None
+        #: DL-187 item 6 (P1-1): verb -> error for each of status/trace/
+        #: timers currently answering ok:false; empty while queries are
+        #: clean. Keyed so one verb's recovery cannot erase another's still-
+        #: live refusal (review MAJOR) -- a single shared slot did exactly
+        #: that when TriggersScreen's `timers` poll and this app's own
+        #: status/trace poll disagreed.
+        self._query_faults: dict[str, str] = {}
         #: DL-187 item 10: (path, error string) of the last log-tail read
-        #: fault reported, so a repeat of the SAME fault stays quiet
+        #: fault reported, so a repeat of the SAME fault stays quiet. A
+        #: local filesystem read, not a protocol answer, so it keeps its
+        #: own shape and clear rule rather than joining `_query_faults`.
         self._tail_fault: tuple[str, str] | None = None
 
     # ------------------------------------------------------------- layout
@@ -1418,15 +1432,18 @@ class RunnerApp(App[None]):
                     self._set_connected(False, str(exc))
                     return
                 self._set_connected(True)
-                # DL-187 item 6: an ok:false status or trace answer is a
-                # query refusal, distinct from a dead socket -- the last
-                # good table stays, but the operator is told the read failed
-                fault: str | None = None
-                if not status.get("ok"):
-                    fault = f"status: {status.get('error', '')}"
-                elif not trace.get("ok"):
-                    fault = f"trace: {trace.get('error', '')}"
-                self._set_query_fault(fault)
+                # DL-187 item 6 (P1-1): an ok:false status or trace answer is
+                # a query refusal, distinct from a dead socket -- the last
+                # good table stays, but the operator is told the read
+                # failed. Each verb is set independently: status recovering
+                # must not silence a trace that is still refusing, or the
+                # reverse.
+                self._set_query_fault(
+                    "status", None if status.get("ok") else str(status.get("error", "")).strip()
+                )
+                self._set_query_fault(
+                    "trace", None if trace.get("ok") else str(trace.get("error", "")).strip()
+                )
                 if trace.get("ok"):
                     last_seq = trace.get("last_seq")
                     if isinstance(last_seq, int) and last_seq < self._trace_seq:
@@ -1456,7 +1473,7 @@ class RunnerApp(App[None]):
         base = str(self.socket_path)
         if self._connected is False:
             base += " (disconnected)"
-        if self._query_fault is not None:
+        if self._query_faults:
             base += " (refused)"
         if self._spec_drift:
             base += "  [SPEC DRIFT: estate files changed on disk]"
@@ -1472,35 +1489,28 @@ class RunnerApp(App[None]):
         else:
             self._console_write(Text(f"control socket unreachable: {detail}", style="red"))
 
-    def _set_query_fault(self, fault: str | None) -> None:
-        """DL-187 item 6: a status or trace answer that came back ok:false
-        -- distinct from a dead socket, and distinct enough from "nothing
-        fires next" that it needs its own line. `fault` is "<verb>:
-        <error>"; on change this writes the red refusal or, moving back to
-        None, the green recovery.
+    def _set_query_fault(self, verb: str, error: str | None) -> None:
+        """DL-187 item 6 (P1-1): an ok:false answer from `status`, `trace`,
+        or `timers` -- distinct from a dead socket, and distinct enough
+        from "nothing fires next" that it needs its own line. Keyed by
+        verb, so one verb's recovery cannot erase another's still-live
+        refusal (review MAJOR: a single shared slot let a good `timers`
+        answer erase a live `status` refusal, or the reverse) -- the
+        subtitle only cares whether the map holds ANYTHING, which gives
+        every caller, including TriggersScreen, one shared predicate for
+        free.
 
-        Scoped to status/trace only: TriggersScreen keeps its OWN dedupe
-        memo for `timers` (reusing `_write_query_refusal` for the matching
-        console wording) rather than sharing this slot -- a status fault
-        and a timers fault are different facts, and a shared slot let one
-        screen's recovery erase the other's still-live refusal (review
-        MAJOR)."""
-        if fault == self._query_fault:
+        On change this writes the red refusal for `verb`, or, when `verb`
+        clears, its own green recovery line."""
+        if error == self._query_faults.get(verb):
             return
-        self._query_fault = fault
+        if error is None:
+            del self._query_faults[verb]
+            self._console_write(Text(f"{verb} query ok again", style="green"))
+        else:
+            self._query_faults[verb] = error
+            self._console_write(Text(f"{verb} query refused: {error}", style="red"))
         self._refresh_subtitle()
-        if fault is None:
-            self._console_write(Text("queries ok again", style="green"))
-            return
-        verb, _, error = fault.partition(": ")
-        self._write_query_refusal(verb, error)
-
-    def _write_query_refusal(self, verb: str, error: str) -> None:
-        """The DL-187 item 6 console line for one ok:false query answer,
-        factored out of `_set_query_fault` so TriggersScreen can write the
-        identical wording for `timers` without sharing that method's
-        stateful subtitle/recovery bookkeeping."""
-        self._console_write(Text(f"{verb} query refused: {error}", style="red"))
 
     def _set_drift(self, drift: bool) -> None:
         """DL-65 daemon-reload-hint analog, inverted: there is no reload --
@@ -2016,7 +2026,24 @@ class RunnerApp(App[None]):
 
     _QUIT_BODY = "stop the run?\n\nlive jobs are cancelled; wrappers record the kills"
 
-    async def action_quit(self) -> None:
+    async def _confirm(self, title: str, body: str) -> bool:
+        """The one confirm idiom: every destructive action shares this
+        instead of each hand-rolling its own push/callback/re-entry-guard
+        triple. A confirm already open wins -- a ctrl+q or key that reaches
+        through it is ignored rather than stacking a second dialog, which
+        replaces the quit-only `_quit_pending` flag with a check any caller
+        can share (and one with no stuck-on-teardown path: it reads screen
+        state instead of a flag nothing else clears)."""
+        if isinstance(self.screen, ConfirmScreen):
+            return False
+        # the plain assignment lets mypy bind push_screen_wait's type var
+        # from the argument (ConfirmScreen is a ModalScreen[bool]) instead
+        # of from the surrounding bool(...), which it would otherwise widen
+        # to Screen[object] and reject ConfirmScreen against
+        confirmed = await self.push_screen_wait(ConfirmScreen(title, body))
+        return bool(confirmed)
+
+    def action_quit(self) -> None:  # type: ignore[override]
         """Quit means two different things by posture.
 
         A detached viewer (`dsl41 ui`) leaves the engine running, so `q`
@@ -2024,20 +2051,20 @@ class RunnerApp(App[None]):
         press through the dialog that matters. `run --ui` OWNS the engine,
         so the same key stops the run, and that is confirmed. Ctrl+Q and the
         command palette's Quit both route here, so one override covers all
-        three doors."""
+        three doors.
+
+        Sync, not async: textual's action dispatch accepts either shape (an
+        action returning a plain value or a coroutine) at runtime, but its
+        own stub types `App.action_quit` as async, which is what the
+        `type: ignore[override]` above answers."""
         if not self.owns_run:
             self.exit()
             return
-        if self._quit_pending:
-            return  # ctrl+q is a priority binding: it reaches through the modal
-        self._quit_pending = True
+        self.run_worker(self._confirm_quit(), group="quit", exclusive=False)
 
-        def decided(confirmed: bool | None) -> None:
-            self._quit_pending = False
-            if confirmed:
-                self.exit()
-
-        self.push_screen(ConfirmScreen("stop run", self._QUIT_BODY), callback=decided)
+    async def _confirm_quit(self) -> None:
+        if await self._confirm("stop run", self._QUIT_BODY):
+            self.exit()
 
     #: verbs a KEY press confirms first (DL-187): the two that destroy work
     #: in flight. Everything else is a flag flip a second key press undoes.
@@ -2063,7 +2090,7 @@ class RunnerApp(App[None]):
         payload = dict(request.get("payload") or {})
         verb = str(request.get("verb"))
         target = str(payload.get("job") or payload.get("name") or "")
-        label = f"> {verb} {target}".rstrip()
+        label = echo_label(request)  # the one place a request is spelled (DL-187 item 9)
         # snapshot facts first, BEFORE any await: status, blast radius and the
         # revision must describe one instant, not straddle a refresh
         row = self._jobs_snapshot.get(target) or {}
@@ -2080,7 +2107,7 @@ class RunnerApp(App[None]):
             frozen[2] if frozen is not None else None,
             members,
         )
-        if not await self.push_screen_wait(ConfirmScreen("confirm", body)):
+        if not await self._confirm("confirm", body):
             self._console_write(Text(f"{label}: cancelled", style="dim"))
             return
         await self._do_sendevent(request, frozen=frozen)

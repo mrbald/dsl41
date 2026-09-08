@@ -133,14 +133,20 @@ def test_serve_bind_failure_exits_2(tmp_path, monkeypatch) -> None:
 class _FakeTuiModule:
     """Stand-in for the module `import_tui_or_exit_2` returns: its
     `RunnerApp.run()` sets `return_code` the way textual's real fatal-error
-    path does, with no need for textual to be installed."""
+    path does, with no need for textual to be installed. `captured`, when
+    given, records the constructor's kwargs (P1-2): `dsl41 ui` passes no
+    `owns_run`, and a test that never checks that is blind to a dropped or
+    mistyped `owns_run=True` at the OTHER front door leaving the whole
+    suite green (review MAJOR 2)."""
 
-    def __init__(self, final_return_code: int | None) -> None:
+    def __init__(self, final_return_code: int | None, captured: dict | None = None) -> None:
         final = final_return_code
+        sink = captured if captured is not None else {}
 
         class RunnerApp:
             def __init__(self, socket_path, **kw):
                 self.return_code = None
+                sink["kwargs"] = kw
 
             def run(self):
                 self.return_code = final
@@ -151,9 +157,13 @@ class _FakeTuiModule:
 def test_ui_exits_with_the_tui_return_code_on_a_fatal_error(tmp_path, monkeypatch) -> None:
     sock = tmp_path / "control.sock"
     sock.touch()
-    monkeypatch.setattr("dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(1))
+    captured: dict = {}
+    monkeypatch.setattr(
+        "dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(1, captured)
+    )
     result = cli_runner.invoke(app, ["ui", "--socket", str(sock)])
     assert result.exit_code == 1
+    assert captured["kwargs"].get("owns_run") in (None, False)
 
 
 def test_ui_exits_0_when_the_tui_return_code_is_none(tmp_path, monkeypatch) -> None:
@@ -161,9 +171,13 @@ def test_ui_exits_0_when_the_tui_return_code_is_none(tmp_path, monkeypatch) -> N
     `None`) is unaffected by the new check."""
     sock = tmp_path / "control.sock"
     sock.touch()
-    monkeypatch.setattr("dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(None))
+    captured: dict = {}
+    monkeypatch.setattr(
+        "dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(None, captured)
+    )
     result = cli_runner.invoke(app, ["ui", "--socket", str(sock)])
     assert result.exit_code == 0
+    assert captured["kwargs"].get("owns_run") in (None, False)
 
 
 # ---------------------------------------------------------- `run --ui` front door
@@ -180,7 +194,14 @@ _MINIMAL_JIL = "insert_job: cc_job\njob_type: c\ncommand: x\n"
 @pytest.fixture
 def short_root():
     """A short-path base directory for AF_UNIX control sockets (see
-    test_runner_tui.py's fixture of the same name/docstring)."""
+    test_runner_tui.py's fixture of the same name/docstring). The platform
+    guard (NIT 12) matches test_runner_tui.py's module-level one
+    (line 73): `mkdtemp(dir="/tmp")` is POSIX-specific, and running it
+    before any check errors on a non-POSIX host instead of skipping --
+    `_skip_unless_posix_textual` below only runs INSIDE a test, after this
+    fixture has already set up."""
+    if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
+        pytest.skip("unix-domain control sockets are POSIX-only")
     d = tempfile.mkdtemp(prefix="dsl41srv-", dir="/tmp")
     try:
         yield Path(d)
@@ -188,14 +209,20 @@ def short_root():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _fake_runner_app(final_return_code: int | None):
+def _fake_runner_app(final_return_code: int | None, captured: dict | None = None):
     """A `runner_tui.RunnerApp` stand-in whose `run_async` returns normally
     with `return_code` set -- the textual fatal-error shape `_serve_run`
-    must treat as a crash, not a quit (F3)."""
+    must treat as a crash, not a quit (F3). `captured`, when given, records
+    the constructor's kwargs (P1-2): `run --ui` passes `owns_run=True`, and
+    nothing asserted that until now (review MAJOR 2) -- deleting or
+    mistyping it would leave the whole suite green while `run --ui`
+    silently reverted to quit-without-confirm."""
 
     class FakeRunnerApp:
         def __init__(self, socket_path, **kw):
             self.return_code = None
+            if captured is not None:
+                captured["kwargs"] = kw
 
         async def run_async(self):
             self.return_code = final_return_code
@@ -219,10 +246,12 @@ def test_run_ui_tui_failure_is_not_an_operator_stop(short_root, monkeypatch) -> 
     jil_path = short_root / "estate.jil"
     jil_path.write_text(_MINIMAL_JIL)
     run_root = short_root / "run"
-    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(1))
+    captured: dict = {}
+    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(1, captured))
     result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
     assert result.exit_code == 1
     assert "TUI failed: exit code 1" in result.output
+    assert captured["kwargs"].get("owns_run") is True
 
 
 def test_run_ui_operator_stop_when_the_tui_return_code_is_none(short_root, monkeypatch) -> None:
@@ -232,7 +261,9 @@ def test_run_ui_operator_stop_when_the_tui_return_code_is_none(short_root, monke
     jil_path = short_root / "estate.jil"
     jil_path.write_text(_MINIMAL_JIL)
     run_root = short_root / "run"
-    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(None))
+    captured: dict = {}
+    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(None, captured))
     result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
     assert result.exit_code == 0
     assert "stopping:" in result.output
+    assert captured["kwargs"].get("owns_run") is True

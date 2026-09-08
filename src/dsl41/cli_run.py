@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import typer
 
@@ -37,6 +37,7 @@ from dsl41.ir import CatalogIR
 from dsl41.period import root_is_unused
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Iterable, Sequence
     from datetime import datetime
 
@@ -388,6 +389,36 @@ def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "
     return running
 
 
+def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task"]:
+    """Construct the `--ui` TUI and start it as a task in this terminal,
+    this loop -- still a client of the control socket ONLY (ss11). The
+    guarded import stays local: the core package's three runtime deps are
+    unaffected when `--ui` is not passed."""
+    import asyncio
+
+    from dsl41.runner_tui import RunnerApp
+
+    tui = RunnerApp(server_path, owns_run=owns_run)
+    return tui, asyncio.ensure_future(tui.run_async())
+
+
+def _tui_failure(tui: Any, ui_task: "asyncio.Task | None", done: "set[asyncio.Task]") -> str | None:
+    """F3 (DL-46 item 10): a raised exception is a crash. Otherwise a
+    nonzero `return_code` is textual's fatal-error path returning normally
+    from `run_async` (app.py's `_handle_exception`) -- a crash too, not a
+    quit; `App.exit()`'s own default is return_code 0, so a nonzero value
+    here is never an operator stop. None when the TUI task never finished,
+    or finished clean."""
+    if ui_task is None or ui_task not in done or ui_task.cancelled():
+        return None
+    tui_exc = ui_task.exception()
+    if tui_exc is not None:
+        return repr(tui_exc)
+    if tui is not None and tui.return_code:
+        return f"exit code {tui.return_code}"
+    return None
+
+
 async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
@@ -662,25 +693,11 @@ async def _serve_run(
         ui_task: asyncio.Task | None = None
         tui = None
         if ui:
-            from dsl41.runner_tui import RunnerApp
-
-            # same terminal, same loop, still a client of the socket ONLY (ss11)
-            tui = RunnerApp(server.path, owns_run=True)
-            ui_task = asyncio.ensure_future(tui.run_async())
+            tui, ui_task = _attach_tui(server.path, owns_run=True)
         waiters = {loop_task, stop_task} | ({ui_task} if ui_task is not None else set())
         done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         stop_task.cancel()
-        tui_failure: str | None = None
-        if ui_task is not None and ui_task in done and not ui_task.cancelled():
-            tui_exc = ui_task.exception()  # a TUI crash is not an operator stop
-            if tui_exc is not None:
-                tui_failure = repr(tui_exc)
-            elif tui is not None and tui.return_code:
-                # textual's fatal-error path returns normally from run_async
-                # with return_code set (app.py _handle_exception): that is a
-                # crash too, not a quit -- and app.py's own exit() default is
-                # return_code 0, so a nonzero value here is never a quit
-                tui_failure = f"exit code {tui.return_code}"
+        tui_failure = _tui_failure(tui, ui_task, done)
         if tui is not None and ui_task is not None and ui_task not in done:
             tui.exit()  # engine crash or signal: detach the viewer first
             with contextlib.suppress(Exception):

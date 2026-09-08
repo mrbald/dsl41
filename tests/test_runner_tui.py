@@ -893,11 +893,59 @@ def test_pilot_f1_and_question_mark_toggle_the_help_panel(short_root: Path) -> N
     asyncio.run(scenario())
 
 
-def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: Path) -> None:
-    """F4 (DL-187 item 6): an ok:false status answer is a query refusal,
-    distinct from a dead socket -- the last good table stays, the console
-    gets ONE red line even across two refused passes, the subtitle carries
-    "refused", and a later ok pass clears it with a green line."""
+def test_pilot_f1_reaches_the_maximized_pager_and_the_triggers_screen(short_root: Path) -> None:
+    """P1-6: help must be reachable from inside a maximized pane and from
+    inside a modal, not just the default screen with the table focused --
+    a modal chain blocks app bindings (screen.py:449), which is why every
+    modal binds F1 to app.toggle_help_panel itself (DL-187 item 7), and
+    HelpPanel's `-textual-system` class survives Screen.arrange's maximize
+    filter (MINOR 5, checked)."""
+    text = "insert_job: hm_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "hm_job" in app._rows)
+
+                def panel_present() -> bool:
+                    return bool(app.screen.query(HelpPanel))
+
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                await pilot.pause()
+                await pilot.press("m")
+                await pilot.pause()
+                assert app.screen.maximized is not None  # the log pane, zoomed
+
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, panel_present)
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: not panel_present())
+                await pilot.press("m")  # restore before opening the modal
+                await pilot.pause()
+
+                await pilot.press("t")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, panel_present)
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: not panel_present())
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("verb", ["status", "trace"])
+def test_pilot_a_refused_query_is_visible_once_and_recovers(verb: str, short_root: Path) -> None:
+    """F4 (DL-187 item 6): an ok:false status OR trace answer is a query
+    refusal, distinct from a dead socket -- the last good table stays, the
+    console gets ONE red line even across two refused passes, the subtitle
+    carries "refused", and a later ok pass clears it with a green line.
+    Parametrized (P1-7): the keyed `_query_faults` memo (P1-1) tracks each
+    verb independently and must behave the same way for both."""
     text = "insert_job: qf_job\njob_type: c\ncommand: x\nmachine: m1\n"
 
     async def scenario() -> None:
@@ -911,7 +959,7 @@ def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: P
                 state = {"refuse": True}
 
                 async def flaky(request):
-                    if state["refuse"] and request.get("cmd") == "status":
+                    if state["refuse"] and request.get("cmd") == verb:
                         return {"ok": False, "error": "boom"}
                     return await inner(request)
 
@@ -919,11 +967,12 @@ def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: P
                 console = app.query_one("#console", RichLog)
 
                 def refusals() -> int:
-                    return sum(1 for ln in console.lines if "status query refused: boom" in ln.text)
+                    needle = f"{verb} query refused: boom"
+                    return sum(1 for ln in console.lines if needle in ln.text)
 
                 await app._refresh()
                 await _wait_for_ui(pilot, lambda: refusals() == 1)
-                assert app._query_fault == "status: boom"
+                assert app._query_faults[verb] == "boom"
                 assert "(refused)" in app.sub_title
 
                 await app._refresh()  # a second refused pass must not repeat the line
@@ -932,9 +981,9 @@ def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: P
 
                 state["refuse"] = False
                 await app._refresh()
-                await _wait_for_ui(pilot, lambda: app._query_fault is None)
+                await _wait_for_ui(pilot, lambda: verb not in app._query_faults)
                 assert "(refused)" not in app.sub_title
-                assert any(ln.text == "queries ok again" for ln in console.lines)
+                assert any(ln.text == f"{verb} query ok again" for ln in console.lines)
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -942,11 +991,11 @@ def test_pilot_a_refused_status_query_is_visible_once_and_recovers(short_root: P
 
 
 def test_pilot_a_timers_refusal_does_not_erase_a_live_status_refusal(short_root: Path) -> None:
-    """Regression (review MAJOR): TriggersScreen's own `timers` polling and
-    RunnerApp's status/trace polling used to share ONE fault slot, so a
-    good `timers` answer while `status` was still refusing would falsely
-    clear the app's "(refused)" subtitle and print a false "queries ok
-    again" -- the two are different facts and must not stomp each other."""
+    """Regression (review MAJOR): a single shared fault slot let one verb's
+    recovery erase another's still-live refusal. The keyed `_query_faults`
+    memo (P1-1) tracks status/trace/timers independently -- a good
+    `timers` answer while `status` is still refusing must not clear the
+    app's "(refused)" subtitle or write a false "status query ok again"."""
     text = "insert_job: xq_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
 
     async def scenario() -> None:
@@ -974,7 +1023,7 @@ def test_pilot_a_timers_refusal_does_not_erase_a_live_status_refusal(short_root:
 
                 app._client.request = refuse_status
                 await app._refresh()
-                await _wait_for_ui(pilot, lambda: app._query_fault == "status: status down")
+                await _wait_for_ui(pilot, lambda: app._query_faults.get("status") == "status down")
                 assert "(refused)" in app.sub_title
 
                 await pilot.press("t")
@@ -985,8 +1034,9 @@ def test_pilot_a_timers_refusal_does_not_erase_a_live_status_refusal(short_root:
                 await pilot.pause()
 
                 # the still-live status refusal must survive an unrelated
-                # screen's successful, independent query
-                assert app._query_fault == "status: status down"
+                # verb's successful, independent query
+                assert app._query_faults.get("status") == "status down"
+                assert "timers" not in app._query_faults
                 assert "(refused)" in app.sub_title
         finally:
             await _teardown(engine, server, loop_task)
@@ -1677,8 +1727,8 @@ def test_pilot_log_tail_open_fault_dedupes_even_while_stat_keeps_succeeding(
                 # open() against the SAME unread bytes (a real spam vector)
                 _append_log(app, "lo_run", ["line 1"])
                 await _wait_for_ui(pilot, lambda: faults() == 1)
-                await asyncio.sleep(1.5)  # several more 0.5s ticks, stat still succeeding
-                await pilot.pause()
+                for _ in range(10):  # pump several more 0.5s ticks, not a fixed wall-clock wait
+                    await pilot.pause()
                 assert faults() == 1  # still one line, not a flood
         finally:
             await _teardown(engine, server, loop_task)
@@ -1988,8 +2038,9 @@ def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Pa
 
 def test_pilot_triggers_title_names_a_refused_timers_answer(short_root: Path) -> None:
     """F4 (DL-187 item 6): an ok:false `timers` answer leaves the last good
-    rows in place and names the refusal on the border title, routing the
-    same console line status/trace use through the app's own helper."""
+    rows in place, names the refusal on the border title, and -- through
+    the app's own keyed `_query_faults` memo (P1-1) -- marks the app
+    subtitle and writes the same console line status/trace use."""
     text = "insert_job: tf_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
 
     async def scenario() -> None:
@@ -2028,10 +2079,13 @@ def test_pilot_triggers_title_names_a_refused_timers_answer(short_root: Path) ->
 
                 assert "refused: no timers for you" in str(trig.border_title)
                 assert trig.row_count == 1  # the last good row stayed
-                assert screen._timers_fault == "no timers for you"
-                # this screen's own memo, never the app's status/trace slot --
-                # a timers refusal here must not paint the app subtitle too
-                assert app._query_fault is None
+                # P1-1: `timers` is a channel of the same keyed memo as
+                # status/trace, so it marks the subtitle too -- DL-187 item 6
+                # says "marks the subtitle" for every refused verb, not just
+                # status/trace (review MAJOR: the earlier per-screen-only
+                # memo satisfied the console line but missed the subtitle)
+                assert app._query_faults.get("timers") == "no timers for you"
+                assert "(refused)" in app.sub_title
                 console = app.query_one("#console", RichLog)
                 assert any(
                     "timers query refused: no timers for you" in ln.text for ln in console.lines
@@ -2042,7 +2096,7 @@ def test_pilot_triggers_title_names_a_refused_timers_answer(short_root: Path) ->
     asyncio.run(scenario())
 
 
-# --------------------------------- 4. safety: focus scope, confirm, posture
+# --------------------------------- 7. safety: focus scope, confirm, posture
 
 
 _VERB_KEYS = {"s", "f", "k", "i", "I", "h", "H", "n", "N"}
