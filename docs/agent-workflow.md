@@ -39,11 +39,15 @@ Before marking an implementation complete, run the full local gates:
 ```sh
 uv run ruff check src tests
 uv run ruff format --check src tests scripts examples
-uv run mypy src
+uv run mypy src tests/uc_oracle.py
 uv run python scripts/arch_check.py
 uv run coverage run -m pytest -q
 uv run coverage report
 ```
+
+The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
+annotated executable spec that left the package with DL-189, and nothing
+else held it to the type gate (DL-193).
 
 The coverage invocation runs the full suite once.
 The coverage report enforces the scoped branch-coverage requirement.

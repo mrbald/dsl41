@@ -462,25 +462,18 @@ def _refuse_undeliverable_viz_flags(*, fixed_scale: bool) -> None:
     --include-singletons (it always lays out with ELK, and always carries
     every standalone job -- search must find them), and since DL-190 for
     --collapse-threshold too: the page folds the over-threshold boxes before
-    its first layout, the report's own rule. The one it cannot honor is
-    below."""
-    undeliverable = [
-        (flag, reason)
-        for flag, reason, passed in (
-            (
-                "--fixed-scale",
-                "the canvas fits its layout to the viewport and the operator zooms from"
-                " there, so there is no emitted scale to fix",
-                fixed_scale,
-            ),
-        )
-        if passed
-    ]
-    if undeliverable:
-        for flag, reason in undeliverable:
-            typer.echo(f"{flag} cannot shape --format explore: {reason}.", err=True)
-        typer.echo("Drop the option, or use --format html for a shaped offline page.", err=True)
-        raise typer.Exit(2)
+    its first layout, the report's own rule. That leaves ONE, so it is
+    stated once rather than kept as a table of one row (DL-193);
+    `_refuse_removed_viz_flags` above earns its table with three."""
+    if not fixed_scale:
+        return
+    typer.echo(
+        "--fixed-scale cannot shape --format explore: the canvas fits its layout to the"
+        " viewport and the operator zooms from there, so there is no emitted scale to fix.",
+        err=True,
+    )
+    typer.echo("Drop the option, or use --format html for a shaped offline page.", err=True)
+    raise typer.Exit(2)
 
 
 def viz(
@@ -504,7 +497,7 @@ def viz(
         "--collapse-threshold",
         help="Boxes with more direct members than this render as one node; "
         "under --format explore they start collapsed (none without the flag).",
-        show_default="12",
+        show_default="12; no folds under --format explore",
     ),
     direction: str = typer.Option(
         "auto",
@@ -550,7 +543,11 @@ def viz(
     if output_format is VizFormat.explore:
         _refuse_undeliverable_viz_flags(fixed_scale=fixed_scale)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
+    # One name for the option all the way down. The report's default of 12 is
+    # the four Mermaid formats'; `--format explore` keeps None, which means
+    # "fold nothing" -- the page opens on the whole graph (DL-71, DL-190).
+    if output_format is not VizFormat.explore and collapse_threshold is None:
+        collapse_threshold = DEFAULT_COLLAPSE_THRESHOLD
     title = ", ".join(f.name for f in files)
     if output_format is VizFormat.explore:
         from dsl41.viz_explore import to_explore_html
@@ -559,8 +556,6 @@ def viz(
             catalog,
             title=title,
             direction=direction,  # type: ignore[arg-type]  # validated above
-            # None, not the report's 12: the page opens on the whole graph
-            # unless the operator asks for folds (DL-71, DL-190)
             collapse_threshold=collapse_threshold,
         )
     elif output_format is VizFormat.html:
@@ -569,7 +564,7 @@ def viz(
         report = to_html(
             catalog,
             title=title,
-            collapse_threshold=threshold,
+            collapse_threshold=collapse_threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
         )
@@ -579,13 +574,13 @@ def viz(
         report = to_html_chart(
             catalog,
             title=title,
-            collapse_threshold=threshold,
+            collapse_threshold=collapse_threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
         )
     elif output_format is VizFormat.chart:
         report = to_mermaid(
             catalog,
-            collapse_threshold=threshold,
+            collapse_threshold=collapse_threshold,
             direction="LR" if direction == "auto" else direction,  # type: ignore[arg-type]
             elk=elk,
             fixed_scale=fixed_scale,
@@ -594,7 +589,7 @@ def viz(
         report = to_markdown(
             catalog,
             title=title,
-            collapse_threshold=threshold,
+            collapse_threshold=collapse_threshold,
             direction=direction,  # type: ignore[arg-type]  # validated above
             include_singletons=include_singletons,
             elk=elk,

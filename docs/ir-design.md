@@ -412,10 +412,18 @@ class Oracle:                             # one concrete interpreter, no protoco
 - IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
   indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.2"`. One
   catalog is one file. The output is deterministic (diff-able in git).
+- `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
+  round-trip test in `tests/test_ir.py` is what makes it a claim rather than a promise
+  (DL-193). No CLI verb reads or writes an IR-F file: `dsl41 run` consumes JIL bytes only,
+  because JIL is the input of record (DL-51) and the run root stores the byte-exact
+  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge — `to_jil()` renders a
+  module to JIL, and a decompiled module writes it on stdout.
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
 - Hashing: `catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
-  short-circuit, and the migration report uses it to pin the verified content.
+  short-circuit, and the migration report uses it to pin the verified content. `equiv` and
+  `period` canonicalise differently and on purpose, so each takes its own hash over its own
+  projection rather than over `dump_catalog`'s output.
 
 ## 9. Linter architecture (findings, not treatments)
 

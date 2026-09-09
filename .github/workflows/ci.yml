@@ -32,7 +32,10 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests scripts examples
-      - run: uv run mypy src
+      # DL-193: tests/uc_oracle.py is named because it is a fully annotated
+      # executable spec (stonebranch Part IV) that left src/ with DL-189, and
+      # nothing else held it to the type gate afterwards.
+      - run: uv run mypy src tests/uc_oracle.py
       # DL-75: blocking checks only decide the exit code (duplicate bodies,
       # new private cross-module imports in src/, unresolvable citations, an
       # IR-F shape change without an IR_VERSION bump). The "review due" escalation

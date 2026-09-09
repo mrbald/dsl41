@@ -28,24 +28,23 @@ not exist" and "gap" below against this list:
 - retention floors and `estate prune`, and the archive class that closed
   E20 (DL-135, DL-144);
 - run history, `dsl41 runs` (DL-113), made boundary-aware (DL-136, DL-141);
-- the capacity decomposition this document argued for (DL-120; removed
-  §8b.4, DL-189);
+- the capacity decomposition this document argued for (DL-120; removed at
+  DL-189);
 - the access perimeter — three tiers and local peer authentication —
   which closes most of §8 (DL-146…DL-148, `docs/access-model.md`).
 
 What is still a plan: follower mode and `standby check` (§4) and the
 multi-executor rig (§4a.5). The store-backed term and the store-era seal
-(removed §8a.2 stage 5) went with the withdrawn HA plan (DL-189).
+went with the withdrawn HA plan (DL-189).
 
 **Peer-reviewed 2026-08-18** (four rounds, converged). Round 4 acted on the
 repo owner's objection that rolling the run root is clumsy and
 counter-intuitive: the conclusion that the run root is not the period
-boundary was the result (removed §8a.0, DL-189), superseding this document's
+boundary was the result (removed at DL-189), superseding this document's
 original framing of the run root as the period boundary. Four claims were
-withdrawn during review: "a seal does not require a quiesced estate" (removed
-§1.3, DL-189), the per-job release window (removed §2.2, DL-189), "only the
-last stage waits on the store" (removed §8a.1, DL-189), and the IR-G analogy
-(removed §1.1, DL-189). The sweep gained four findings (G7–G10) and the
+withdrawn during review: "a seal does not require a quiesced estate", the
+per-job release window, "only the last stage waits on the store", and the
+IR-G analogy (removed at DL-189). The sweep gained four findings and the
 capacity fix gained its shape.
 
 ## 0. The finding this document starts from
@@ -175,7 +174,7 @@ the run-root lock, and the store is still what a second host would need.*)
 
 **That separation is what protects the simple setup.** The flock is kernel-
 released when the holder dies, `kill -9` included, with no expiry to renew —
-it is explicitly *"not a lease"* (removed §1, DL-189). A store-backed term has no such property:
+it is explicitly *"not a lease"* (removed at DL-189). A store-backed term has no such property:
 a dead engine's row still claims leadership, so it needs a lease or an explicit
 promotion (§4). Making the store the only substrate would trade instant local
 crash recovery for a timeout, on the deployment that needs it least.
@@ -310,7 +309,7 @@ C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
 | B1 | initial JIL release | fresh run root | native genesis opens period 1; no opening seal | — |
 | B2 | incremental change (add / remove / modify) | full quiesce, all state lost | seal → classified diff → open under C2 | — (DL-131, DL-133) |
 | B3 | emergency hotfix, mid-cycle | not supportable without losing the night | the R-gate over the transitive closure; refuse only while something in it is live | — (DL-131). Tethered mode still drains: a transition is a restart |
-| B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (removed §2, DL-189) | — |
+| B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (removed at DL-189) | — |
 | B5 | calendar / holiday change | a catalog change, but easy to think of as config | it *is* a catalog change: firing dates move | say so in the runbook |
 | B6 | properties / placeholder change | changes post-placeholder JIL, so changes the hash | same as B2 — this surprises people | say so in the runbook |
 | B7 | affinity role remap | — | route-table change under epoch/CAS; visible to later runs only (CM-18) | the withdrawn HA plan, DL-189 |
@@ -321,7 +320,7 @@ C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
 | --- | --- | --- | --- | --- |
 | C1 | ordinary night | frozen | unchanged | — |
 | C2 | closing the books | does not exist | the seal, at the estate's own cutoff, in the estate's own zone (SEM-35) | `dsl41 seal` ships (DL-134). The operator chooses each boundary: automatic sealing on a timer is a period-model §12 non-goal. The cadence question is E16 |
-| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance. It is a **projection**: `unresolved` derives from the carried host and execution rows and is regenerated in the new period, never copied into the seal (period-model §3.3; removed §1.3, DL-189) | E13 |
+| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance. It is a **projection**: `unresolved` derives from the carried host and execution rows and is regenerated in the new period, never copied into the seal (period-model §3.3; removed at DL-189) | E13 |
 | C4 | missed ticks over downtime | E9 skip-and-report, journaled | unchanged | — |
 | C5 | deliberate catch-up after downtime | explicit `FORCE_STARTJOB`s | unchanged; the seal makes "what did we skip" answerable from the `drop` records in one period | — |
 
@@ -369,7 +368,7 @@ policy decision is not an engine input (`access-model.md` §6). The admission
 stands when the receipt write fails. `supervise shutdown` goes to the
 owner-only supervisor socket and emits no perimeter receipt at all.
 There is no acknowledgement latch, and the accountant's rule is not enforced
-mechanically. `unresolved` is not carried at all — it is derived (removed §1.3, DL-189).
+mechanically. `unresolved` is not carried at all — it is derived (removed at DL-189).
 
 ### F. Failover
 
@@ -454,7 +453,7 @@ frequency at which an operator asks it. `dsl41 runs` is the answer and it
 ships (DL-113); the rest of this section is what it was designed against, and
 the amendment at the end of §6a.1 says where the build differs.
 
-**The carry is the precondition.** Once `run_number` survives a re-baseline (removed §2, DL-189),
+**The carry is the precondition.** Once `run_number` survives a re-baseline (removed at DL-189),
 `(estate, job, run_number)` is a stable primary key for the life of the estate,
 and the spool path becomes globally unique. Run history is not a separate feature
 from the period model; it is the second thing the period model makes possible.
@@ -464,7 +463,7 @@ from the period model; it is the second thing the period model makes possible.
 The ledger already holds every fact. So the run table is a **projection**, on the
 same rule as IR-G: regenerate it, never edit it, and never treat it as the
 source of a truth the inputs disagree with. *(Not "and as the seal itself" —
-the removed §1.1 rule 1 (DL-189) settles that the other way: a seal IS used
+the rule removed at DL-189 settles that the other way: a seal IS used
 as authority, and what keeps it honest is reproduction rather than
 derivation.)*
 
@@ -619,8 +618,8 @@ committed within `retry_horizon_us` of the last admitted externally requested
 attempt warns and needs `--force-seal`, and the override is recorded
 (period-model §9; `retry_horizon_us` on `RuntimeProfile` in
 `src/dsl41/period.py`, default 60 s). The index itself is log-local and a new
-period opens with a new one, so nothing sweeps it. What the removed §1.3
-(DL-189) was guarding against — pruning dedup state while a retry can still
+period opens with a new one, so nothing sweeps it. What the text removed at
+DL-189 was guarding against — pruning dedup state while a retry can still
 arrive — is answered by the gate rather than by a clock.
 
 What may never be deleted is not a business decision and is itemized:
@@ -690,10 +689,6 @@ host row, `force_seal` and `forced_gate` on the `seal` record.
 Whether four-eyes is required on break-glass remains the client's control
 framework's call, not dsl41's.
 
-## 8b.2 The state-inventory sweep (stub)
-
-G1–G11 were resolved; the sweep text and the seal programme (§8a–§8b) were removed at DL-189 and remain in git history before that entry.
-
 ## 9. Obligations
 
 *Superseded.* The CM-24…CM-38 rows drafted here became `period-model.md` §13's
@@ -724,7 +719,7 @@ and **the local multi-executor rig is a third proving tier** (§4a.5).
 Continuing the runner E-series (`runner-design.md` §15, extended by
 the withdrawn HA plan (DL-189) to E15).
 
-- **E16** — seal cadence. *(Reframed. The removed §8a.5 (DL-189) called this
+- **E16** — seal cadence. *(Reframed. The text removed at DL-189 called this
   store-era only, on the reading that a period ends when a run root does.
   Period-model §1.1 removed
   that: one root holds many periods, so a daily seal is available on the file

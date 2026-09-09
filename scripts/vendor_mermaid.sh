@@ -18,8 +18,8 @@
 #                                  page, DL-190. Its cues draw on a canvas
 #                                  layer of its own: no CSS, no customized
 #                                  built-in elements, so no WebKit caveat.
-#                                  Upstream calls itself unmaintained;
-#                                  re-check at the next cytoscape major)
+#                                  Its maintenance status and the re-check
+#                                  trigger: src/dsl41/_vendor/README.md)
 #   @ungap/custom-elements 1.3.0  (ISC; dist min.js copied byte-exact. The
 #                                  context-menus plugin builds its menu from
 #                                  CUSTOMIZED BUILT-IN elements, which WebKit
