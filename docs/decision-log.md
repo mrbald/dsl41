@@ -11513,3 +11513,136 @@ relitigate an entry; append a new one.
   and T2+tests, each running the full gates and its own adversarial
   review subagent before committing (the DL-179 precedent for
   behavior-preserving, self-verifying slices).
+- DL-190 the explore page collapses boxes, and its focus items trace
+  through them (2026-09-09; `viz --format explore`; two rulings recorded
+  below, then built, tested in three engines and reviewed).
+  THE ASK. Collapse and expand for the explore page's boxes, and a fan-in
+  that does not stop at a member's own condition: a member's parent box
+  gates it, so the box's producers are upstream of the member and should
+  be traced automatically, behind a mode, for fan-in at least.
+  RULING 1, the mechanism: vendor cytoscape-expand-collapse 4.1.1 (MIT,
+  iVis@Bilkent; peer dependency cytoscape ^3.3.0 and nothing else) into
+  bundle #2 rather than hand-roll the fold in the template -- DL-77's own
+  call for the menu, applied again: a pinned 31 KB payload is less to own
+  than 200 lines of meta-edge bookkeeping. The bundle grows from 1,943,787
+  to 1,975,909 bytes; the banner names the extension; THIRD_PARTY_LICENSES
+  gains entry 8 and the MIT header names it; `_vendor/README.md` and the
+  template header carry the row; `scripts/vendor_mermaid.sh` pins the
+  version and gates `expandCollapse` in the output; the size floor in
+  `tests/test_viz_explore.py` moves above the old bundle so a rebuild that
+  loses the extension fails in pytest, not in a browser. The mermaid
+  bundles rebuilt byte-identical under the same esbuild pin.
+  RULING 2, the scope: one toggle, "trace through boxes", both directions,
+  default on. The semantics come from the dossier, not from the graph:
+  * fan-in step (SEM-10): a member starts only when its box is RUNNING and
+    its own conditions hold, so one step upstream of a set is its
+    producers, plus every enclosing box, plus what gates those boxes.
+    Siblings are never added -- they gate nothing of the member's start.
+  * fan-out step (SEM-10 + SEM-11): a box's start releases its members, and
+    a member's completion is a vote in every enclosing box's fold, so one
+    step downstream is the consumers, plus the node's children, plus the
+    enclosing boxes' consumers. A `box_success`/`box_failure` that names a
+    member is already an explicit M15 edge (ir-design ss5 pass 5) and needs
+    nothing here.
+  * the "tree" items are the closure of a step; the "direct" items are one
+    step; "neighbours" is one step each way. Off, every item reads the
+    condition edges alone, as DL-71 built it. `#stats` names which rule
+    drew the picture ("fan-in tree, via boxes" / ", edges only").
+  Computed in the page over `parent`, NEVER emitted as edges: a box->member
+  edge for the start gate and a member->box edge for the completion fold
+  would form a cycle, and a fan-in over it would pull every sibling in.
+  ir-design ss5 pass 7 keeps box-override edges out of flow analysis for
+  the same reason; the lens follows the graph's own discipline.
+  THE PAGE. A collapsed box is one node standing for its members, labelled
+  `NAME (n)`; its members and their inner edges leave the graph (remembered
+  on the node) and every border-crossing edge is re-pointed at the box as a
+  meta-edge that keeps its own via/class/assumption and names the member it
+  really joins in the details panel ("stands for Q -> M"). Controls: the
+  extension's corner cue, a double-click on the box, "collapse this box" /
+  "expand this box" in the menu (present only when the extension is up),
+  "collapse all boxes" / "expand all boxes" in the menu and as two toolbar
+  buttons. Search expands a collapsed box that hides a hit before it
+  highlights -- a search that cannot find a collapsed node is a lying
+  search (the DL-71 rule for hidden nodes, extended). The nesting class
+  (the taxi exception, DL-77) is re-derived after every collapse and
+  expand, because a meta-edge can land on a box's own ancestor. `#stats`
+  totals are the emitted graph's, fixed at load, so a collapse never reads
+  as a loss; the line adds "k boxes collapsed".
+  --collapse-threshold IS DELIVERABLE for this format now (DL-75's rule:
+  refuse only what the format cannot deliver). The emitter marks a
+  top-level box with more direct members than the threshold -- the report's
+  own `_anchors` rule; a nested box goes with its parent -- and the page
+  folds the marked boxes, deepest first, before its first layout. Without
+  the flag nothing folds: the page opens on the whole graph as DL-71 built
+  it, and the report's default of 12 is not borrowed. The one refusal left
+  under this format is --fixed-scale.
+  DL-77 HOLDS UNAMENDED. The extension registers below everything
+  essential, guarded like the menu, its loss named in `#stats` and the two
+  toolbar buttons that need it disabled. The first layout runs over the
+  WHOLE graph, marked boxes expanded, so every member owns an ELK position
+  before anything folds; the emitter's folds then run from that layout's
+  stop handler once the extension is up, and a second layout draws the
+  folded picture. `#stats` stays "laying out" until the second layout
+  stops, so the page's readiness signal means the folded picture.
+  VERIFIED before the tests were written: chromium, webkit and firefox,
+  the same fixture, identical sets -- fan-in tree of a member = {member,
+  its producer, its box, the box's producer}; fan-out tree of the box = the
+  box, its consumer, every member, and the members' consumers; off, the
+  edge-only sets; with the box collapsed, five nodes, two meta-edges, the
+  consumer's fan-in reaching the box's producers through them. No page
+  errors in any engine.
+  THE REVIEW: a fresh-context Opus review of the core commit
+  (record: reviews/2026-09-09-dl190-review.md in the owner's store) found
+  21 items, two blockers and three majors, all of which changed the tree:
+  * blocker: this entry was missing while eight files cited it. Written.
+  * blocker: a box folded by --collapse-threshold before any layout kept
+    its members at cytoscape's default grid, and a search that expanded it
+    restored them as one pile. The first layout now precedes the folds
+    (above), and a search that expands a box re-lays out before it fits
+    its hits, the way every other expand path does.
+  * major: the via-boxes fan-in took a box's incomers wholesale, so a
+    box_success naming a sibling (M15) made the sibling upstream of a
+    member, and an M16 outside reference was shown as a SEM-10 start gate.
+    Override edges now leave the box gate, and both tree closures keep HOW
+    a box was reached: as an ancestor it contributes its start gate and its
+    own ancestors; as a producer (a consumer's condition names it) every
+    incoming edge, overrides included, is upstream of its completion; as
+    a box reached downstream through an override it is being folded, not
+    started, and its members are not released. Proven on the fixture
+    `box_success: s(job_a)`: job_b's fan-in is {box_a, job_b}, X's (on
+    s(box_a)) is {X, box_a, job_a}, job_a's fan-out is {job_a, box_a, X}
+    and never job_b.
+  * major: the details panel's members row under-reported a nested box
+    collapsed inside an expanded one; it now counts every collapsed box
+    beneath. Major: README (below).
+  Minor folds: the member count is cached on the box at collapse time (the
+  style engine asks per frame); the unreachable deepest-first fold order
+  went (the emitter marks top-level boxes only); the box menu items are
+  inserted beside "hide" rather than at a counted index; the upstream's
+  own "unmaintained" notice is recorded in the vendor notes with the
+  re-check trigger (the next cytoscape major); the banner window and a
+  whitespace-pinned assertion were tightened.
+  DECLINED, each with its reason: "direct" fan-in reaches two hops (the
+  enclosing box is a rendering necessity and its gate is the implicit edge
+  this entry exists for); an expand after a focus reveals members the
+  focus had excluded (the operator asked to see them); re-classifying
+  nesting once per box inside collapseAll (63 boxes by 426 edges on the
+  bank estate, sub-millisecond each); parallel meta-edges between one pair
+  (each stands for one real edge with its own annotations, and merging
+  would lose them); the toggle has no change listener (like the re-layout
+  toggle it applies at the next focus, and its tooltip now says so).
+  The forced-throw proof DL-77 made by hand is a browser test here: with
+  the registration made to throw, the layout completes, #stats names the
+  loss, the buttons are inert, the menu carries no box items, search works
+  and no error escapes.
+  THE GATE: 3617 passed, 6 skipped, 2 xfailed; the opt-in browser suite
+  84 passed in chromium, webkit and firefox; branch coverage 100% on the
+  concurrency tier; ruff, ruff format --check, mypy and arch_check clean
+  (arch_check reports the DL-75 review due on line count, 2,639 lines
+  since arch-review/2026-09-08T233613Z: DL-189's window plus this one; it
+  stays owed). COMMITS: 9d4d910 the core (main session), 0d86eb5 the tests
+  (Sonnet, its own adversarial pass, 16 browser + 3 emitter tests), then
+  the review fold and this entry. Allocation: the core and the review
+  fold by the main session; tests by a Sonnet agent from a verified
+  expectation table; one fresh-context Opus reviewer over the core
+  commit, whose findings the main session ruled on above.

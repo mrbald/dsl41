@@ -109,7 +109,8 @@ dsl41 viz --format explore jobs.jil -o lens.html   # navigation page, offline
 `chart`, `html`, `html-chart`, `explore` (DL-75, DL-76). The shaping options
 (`--collapse-threshold`, `--direction`, `--include-singletons`, `--elk`,
 `--fixed-scale`) apply wherever the chosen format can deliver their effect,
-and exit 2 naming the reason where it cannot.
+and exit 2 naming the reason where it cannot (`explore` delivers all but
+`--fixed-scale`, DL-190).
 
 The report shows each independent workflow as its own chart (largest first).
 A legend and appendices list everything that the charts omit: standalone
@@ -130,19 +131,26 @@ pan/zoom, offline, straight from `file://`. `--format html-chart` writes
 that same page holding the whole-graph chart alone, with the legend and
 without the appendices — the terminal-artifact counterpart to `chart`,
 which is bare pipeable text. `--format explore` writes a different kind of
-page (~2 MB: cytoscape + ELK + a customElements polyfill embedded — see
-THIRD_PARTY_LICENSES): the whole graph as an interactive map — substring
-search, click for full edge annotations, and a right-click menu that focuses
-a job's fan-in/fan-out (direct, tree, or both) by hiding everything else and
-re-laying-out what remains. Edges route orthogonally along the layout axis, so
-the picture keeps the layering ELK computed. Chrome, Safari and Firefox all
-drive the page, and CI runs it in all three on every push
-(tests/test_viz_explore_browser.py): Safari needs a polyfill for the menu
-plugin's customized built-in elements, vendored into the page (DL-77), and if
-a browser still refuses the menu, the page says so in its status line and
-every other control keeps working. It is a
-navigation lens for bank-scale estates; the report stays the artifact of
-record with the appendices.
+page (~2 MB: cytoscape + ELK + an expand-collapse extension + a
+customElements polyfill embedded — see THIRD_PARTY_LICENSES): the whole
+graph as an interactive map — substring search, click for full edge
+annotations, boxes that collapse to one node and expand again (double-click,
+the corner cue, the menu, or two toolbar buttons; `--collapse-threshold`
+folds the over-threshold top-level boxes before the first layout, none
+without it), and a right-click menu that focuses a job's fan-in/fan-out
+(direct, tree, or both) by hiding everything else and re-laying-out what
+remains. "Trace through boxes" (on by default) makes those focuses follow
+the dossier: a member's fan-in adds every enclosing box and what gates it
+(SEM-10), its fan-out adds what an enclosing box's completion releases
+(SEM-11); off, they follow the condition edges alone (DL-190). Edges route
+orthogonally along the layout axis, so the picture keeps the layering ELK
+computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
+all three on every push (tests/test_viz_explore_browser.py): Safari needs a
+polyfill for the menu plugin's customized built-in elements, vendored into
+the page (DL-77), and if a browser refuses the menu or the collapse
+extension, the page says so in its status line and every other control
+keeps working. It is a navigation lens for bank-scale estates; the report
+stays the artifact of record with the appendices.
 
 ### Migration report
 
