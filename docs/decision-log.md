@@ -11436,3 +11436,80 @@ relitigate an entry; append a new one.
   clean; size baseline re-armed. No second adversarial pass on the
   rework -- behavior-preserving folds the suite pins plus test
   additions (the DL-179 allocation precedent). Tag arch-review/2026-09-08T233613Z.
+- DL-189 the decommission review: four cuts, one test gap, eleven scope
+  rows deferred (2026-09-09; a pair review, Codex gpt-6-astra at xhigh and
+  Claude Fable 5.1 at xhigh, converged in three of five rounds; head
+  1df4cf9 at review time).
+  THE QUESTION. DL-187's round asked what the operator surface was missing.
+  This round asked the opposite: what the tree carries that it does not
+  need. Both reviewers wrote independent lists from the same brief,
+  exchanged them, and agreed on every fact in round 2; round 3 signed off
+  the reconciled record. Preferences still differ on the scope rows and
+  are recorded as such.
+  ACTED, tactical -- the four cuts both reviewers verified:
+  * T1: `docs/ops-model.md` §1–§3 and §8a–§8b are removed (866 lines).
+    The document's own status block marked them superseded by
+    period-model. §5 stays with its citation-index row; §8b.2 keeps a
+    stub so the G1–G11 tokens resolve; period-model.md's opening sentence
+    no longer says those sections are kept as the argument.
+  * T2: `uc_oracle.py` moves from `src/dsl41/` to `tests/`. Nothing in the
+    shipped package imported it. It is the UC-side twin that runs the
+    P-Mxx pairs and stays the executable spec of stonebranch Part IV;
+    ir-design ss7 requires both interpreters, not their location.
+  * T3: the lead half of `runner_ledger.check_state_machine_version`
+    stops reading an absent `state_machine_version` as v1. AMENDS DL-165,
+    which kept that split on purpose. The courtesy was unreachable from
+    disk: `read_journal` runs `check_segment_record` unconditionally
+    since DL-138 and `runner_startup` reads the journal before it gates,
+    so no on-disk segment could reach a lead gate reading absent-as-v1.
+    Both modes refuse absent now; `mode` survives only to pick that
+    half's message, and both pinned messages are byte-identical. The test
+    DL-165 names keeps its name for the citation gate and asserts the
+    agreement instead of the split.
+  * T4: `docs/ha-deployment.md` is deleted (420 lines) and README's
+    "phase 12 is under construction" is narrowed. The concurrency half of
+    phase 12 is built (DL-103); the remote relay and the shared store are
+    designed in concurrency-model ss7 and not built (DL-97). Every
+    citation of the plan now names this entry, and the S8 stage tokens
+    keep their citation-index row pointing here. The plan's text survives
+    in git history before this entry.
+  CONVERTED, not a removal. Four options that no CLI test passed --
+  `sendevent --exit-code`, `seal --next-as-machine`,
+  `seal --next-timezone-map`, `estate prune --older-than-days` -- are
+  documented and load-bearing (`--exit-code` feeds exit-code conditions;
+  the `--next-*` flags and `--older-than-days` are in the deployment
+  runbook and the nightbank runbook). Each gained a CLI test.
+  DEFERRED, strategic. Facts agreed, nothing changed: pruning
+  (`retention.py`, 2.6k src / 3.2k tests, a leaf), the physical roll
+  (`estate.py`, a leaf), web `serve` (42 lines and one optional
+  dependency), the explore page with its 1.95 MB bundle and three-browser
+  CI job, decompiler folding (DL-38; DL-51 makes the Python master the
+  edit surface), the access perimeter (group-open 0710/0660 operation),
+  the host routing table (six local consumers; only `evict` is a narrow
+  option, and generation/self-fence handling stays), the detached
+  supervisor tier, the whole period model (11.8k src / 18.3k dedicated
+  test lines; the WAL layout IS the period model), and the TUI. One
+  question gates the large rows: is the runner a production scheduler or
+  a finite rehearsal tool? The default recorded here is production
+  scheduler, so all of them stay. Removing the attest layer alone was
+  rejected: `prove_derived` is the refusal `dsl41 journal` asks before it
+  crosses a boundary (DL-142), and a documented refusal is out of bounds.
+  KEPT ON PURPOSE, having looked removable: the DL-138 refuse-by-name
+  tables (protocol-evolution §6: a tombstone, never a deleted reader),
+  placeholders and `--properties` (the nightbank launcher passes `-p`),
+  `journal` beside `runs`, the three subprocess drivers and two harnesses
+  under tests/, the `# PENDING` switches and the live-instance runbook,
+  `--permit-unknown`, the mermaid and ELK bundles (the offline report),
+  `rehearse_check.py` (nine days old, field feedback), and
+  `docs/agent-harness-review.md` (DL-186 delegates its evidence there).
+  THE GATE: 3613 passed, 6 skipped, 2 xfailed; branch coverage 100% on the
+  concurrency tier; ruff, ruff format --check, mypy and arch_check clean.
+  arch_check reports an architecture review due on line count (1,694 lines
+  since arch-review/2026-09-08T233613Z, about 1,290 of them deleted
+  documentation); it is owed and was not run in this window.
+  COMMITS: T3 0439ff0, T1 5dc9bd6, T4 9b74d2e, T2 bba52ea, the four CLI
+  tests ee870b1. Allocation: the main session wrote T3 and read every diff
+  against the reconciled record; two Sonnet agents in worktrees did T1+T4
+  and T2+tests, each running the full gates and its own adversarial
+  review subagent before committing (the DL-179 precedent for
+  behavior-preserving, self-verifying slices).
