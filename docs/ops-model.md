@@ -1,8 +1,9 @@
 # Operations model — periods, the seal, and the carry
 
-`docs/ha-deployment.md` answers *where the engine runs*. This document answers
-*what an operator does to it, on an ordinary Tuesday and on a bad one*. It is
-the same estate, read from the other side.
+This document answers *what an operator does to it, on an ordinary Tuesday
+and on a bad one*. A companion document once answered *where the engine
+runs*; it was withdrawn (DL-189), and the surviving multihost design is
+`docs/concurrency-model.md` §7.
 
 Status: **plan, not frozen — and the ops view only.** The *mechanism* this
 document proposed — the period, the seal, the carry, the lineage fence, the
@@ -32,9 +33,9 @@ not exist" and "gap" below against this list:
 - the access perimeter — three tiers and local peer authentication —
   which closes most of §8 (DL-146…DL-148, `docs/access-model.md`).
 
-What is still a plan: follower mode and `standby check` (§4), the store-backed
-term, the multi-executor rig (§4a.5), and the store-era seal (removed §8a.2
-stage 5, DL-189).
+What is still a plan: follower mode and `standby check` (§4) and the
+multi-executor rig (§4a.5). The store-backed term and the store-era seal
+(removed §8a.2 stage 5) went with the withdrawn HA plan (DL-189).
 
 **Peer-reviewed 2026-08-18** (four rounds, converged). Round 4 acted on the
 repo owner's objection that rolling the run root is clumsy and
@@ -98,7 +99,7 @@ estate is.*)
 
 ## 4. Leadership is an ops act, not only an election
 
-`ha-deployment.md` §2 allocates the term by appending it:
+The withdrawn HA plan (DL-189) allocated the term by appending it:
 
 ```sql
 UPDATE estate_control SET epoch = epoch + 1, leader_id = :incarnation
@@ -135,8 +136,8 @@ supplies it: **BCM already decides which site is live.** So:
   Green or red, per pair, without taking leadership.
 
 A follower that also **replays continuously** would collapse takeover time to
-near zero. It is not proposed here. `ha-deployment.md` §6 declines snapshots
-until a *measured* takeover time demands them, and the same discipline applies:
+near zero. It is not proposed here. The withdrawn HA plan (DL-189) declined
+snapshots until a *measured* takeover time demanded them, and the same discipline applies:
 seal frequency is already the knob. Seal daily and cold replay covers one day of
 inputs. If measurement says that misses the cutoff, the warm follower is the
 escalation, and it is a smaller step once the follower state exists at all.
@@ -259,12 +260,13 @@ The isomorphism is over decisions, not over disasters. Saying otherwise would be
 the more dangerous error:
 
 - **One box is correlated failure.** Both engines die with the box. Co-tenancy
-  and a test rig — never a resilience story. The pair in `ha-deployment.md` §1 is
-  what supplies resilience.
+  and a test rig — never a resilience story. A genuine multihost pair, designed
+  in the withdrawn HA plan (DL-189), is what would supply resilience.
 - **One clock.** `T_skew` in §8's eviction bound is inert locally and real over
   the wire.
 - **One filesystem.** A quarantined local executor is still inspectable; a dark
-  remote one is not, which is the whole of `ha-deployment.md` §5.
+  remote one is not — that was the whole argument of the withdrawn HA plan
+  (DL-189).
 - **No partition.** The hardest class — E12, split brain, STONITH — is precisely
   the one the local rig cannot produce.
 
@@ -311,7 +313,7 @@ C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
 | B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (removed §2, DL-189) | — |
 | B5 | calendar / holiday change | a catalog change, but easy to think of as config | it *is* a catalog change: firing dates move | say so in the runbook |
 | B6 | properties / placeholder change | changes post-placeholder JIL, so changes the hash | same as B2 — this surprises people | say so in the runbook |
-| B7 | affinity role remap | — | route-table change under epoch/CAS; visible to later runs only (CM-18) | `ha-deployment.md` S8b |
+| B7 | affinity role remap | — | route-table change under epoch/CAS; visible to later runs only (CM-18) | the withdrawn HA plan, DL-189 |
 
 ### C. Running the cycle
 
@@ -351,7 +353,7 @@ identically, and never an edit to what is already written.
 | E7 | evict an executor | `host evict` | no | gated on §8's three preconditions |
 | E8 | **break glass**: `evict --force` | `host evict --force` | no | the one path that can double-run; authenticated when the access map is armed, attributed otherwise (§8) |
 | E9 | **break glass**: supervisor shutdown | `supervise shutdown` | no | needs no live leaseholder: an expired lease, or an unexpired one whose holder's connection is gone, is grantable (DL-79) |
-| E10 | resolve an unknown outcome | operator STATUS with evidence | no | `ha-deployment.md` §5, CM-22 |
+| E10 | resolve an unknown outcome | operator STATUS with evidence | no | the withdrawn HA plan, DL-189; CM-22 |
 | E11 | bulk-resolve at cutoff | over the cutoff report | no | E13 |
 
 **Break-glass must survive the seal.** An incident that can be conflated away is
@@ -711,15 +713,16 @@ capacity decomposition, the classification tiers, `catalog_hash` v2, the retry
 horizon as a profile field, armed latches crossing a release, the SPAWN
 idempotency protocol and the FW spool — DL-114…DL-136, with run history under
 DL-113. Adoption was on that list and is retired unbuilt
-(DL-138). Still proposed: the ha-deployment set (topology, leadership, RPO=0,
-affinity, uncertainty, no-auto-reroute). Two from this document survive on
+(DL-138). Withdrawn rather than adopted: the HA plan's set (topology,
+leadership, RPO=0, affinity, uncertainty, no-auto-reroute), DL-189. Two from
+this document survive on
 their own: **run-root exclusion and estate leadership are two mutexes** (§4a)
 and **the local multi-executor rig is a third proving tier** (§4a.5).
 
 ## 11. Open questions
 
 Continuing the runner E-series (`runner-design.md` §15, extended by
-`ha-deployment.md` §11 to E15).
+the withdrawn HA plan (DL-189) to E15).
 
 - **E16** — seal cadence. *(Reframed. The removed §8a.5 (DL-189) called this
   store-era only, on the reading that a period ends when a run root does.

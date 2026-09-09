@@ -282,8 +282,8 @@ verb.
 `RuntimeState` route storage and no `route:` namespace; the shipped table is
 the one implicit row period-model §3.3 describes, projected from the single
 local executor at revision 0. The unit that adds the storage builds this
-(`docs/ha-deployment.md` §4, S8b); the wire is written here first so that
-unit implements a shape rather than inventing one.
+(designed in the withdrawn HA plan (DL-189), S8b); the wire is written here
+first so that unit implements a shape rather than inventing one.
 
 A **separate `cmd`** because the verb sets are separate things. Each
 `sendevent` verb names one oracle `EventKind`; a host verb deliberately

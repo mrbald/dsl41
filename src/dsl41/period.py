@@ -311,8 +311,8 @@ class RuntimeProfile(BaseModel):
     Deliberately NOT here: `artifact_format_version` (it lives on the
     manifest that carries this profile -- two version fields with no
     equality rule are two authorities) and the role->executor route table
-    (`ha-deployment.md` ss4 makes a remap carried state revised under
-    epoch/CAS, and a remap is not a re-baseline)."""
+    (the withdrawn HA plan's ss4, DL-189, made a remap carried state revised
+    under epoch/CAS, and a remap is not a re-baseline)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

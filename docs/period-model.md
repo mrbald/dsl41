@@ -625,11 +625,12 @@ unreachable cannot be told from one whose root is paused. Overriding it is
 `segment` record's `reclaimed` field with the claimed actor — loud, durable,
 attributable, and the one path here that can fork a lineage.
 
-**When the shared store arrives** (`ha-deployment.md` S8a) it **replaces** both
-this anchor and root leadership as the sole authority: one transaction consumes
-`expected_head_digest`, advances the head and allocates the term. Keeping the
-file anchor beside the store would be two leadership truths, and
-`ha-deployment.md` §2's ACQUIRE gains a lineage-head predicate at that point.
+**When the shared store arrives** (the withdrawn HA plan's S8a, DL-189) it
+**replaces** both this anchor and root leadership as the sole authority: one
+transaction consumes `expected_head_digest`, advances the head and allocates
+the term. Keeping the file anchor beside the store would be two leadership
+truths, and the withdrawn HA plan's §2 ACQUIRE (DL-189) gains a lineage-head
+predicate at that point.
 
 ## 2. Records
 
@@ -730,9 +731,9 @@ against the committed `next_period` at resume (PR-22). Identical JIL launched
 `catalog_hash` and different UTC ticks; without `runtime_hash` classification
 would report nothing changed.
 
-**Not** in `runtime_hash`: the affinity route table. `ha-deployment.md` §4
-makes role→executor a mutable authoritative row revised under epoch/CAS, and
-says a remap is *not* a re-baseline. It is carried state (§3.3), not period
+**Not** in `runtime_hash`: the affinity route table. The withdrawn HA plan's
+§4 (DL-189) makes role→executor a mutable authoritative row revised under
+epoch/CAS, and says a remap is *not* a re-baseline. It is carried state (§3.3), not period
 identity. Draft 2 put it in the hash and contradicted the HA plan.
 
 A period's semantics are `(catalog_hash, runtime_hash, state_machine_version)`.
@@ -875,7 +876,8 @@ from a list kept beside it, so a field added here is compared for free.
 `concurrency-model.md` §4 step 7 requires the decision, revisions, outbox
 entries and `applied_index` to commit **atomically**, and before DL-118 the
 code did not: `result` and each `effect` were separate `_write` calls, each
-fsyncing on its own (`ha-deployment.md` §2 recorded the violation). This is the file-substrate answer:
+fsyncing on its own (the withdrawn HA plan's §2, DL-189, recorded the
+violation). This is the file-substrate answer:
 one line, one fsync, on the argument `Journal.admit` already makes for the input
 side. Without it a real window is invisible to every precondition: the result
 is fsynced, the process dies before the KILL effect is written, recovery finds
@@ -884,8 +886,9 @@ still alive.
 
 `effects` is emitted in **admission order** — `Outbox` treats insertion order as
 admission order, and a SPAWN must precede a later KILL for the same run. Every
-effect carries `{executor_id, generation}` from birth: `ha-deployment.md` §4
-resolves affinity **inside** the effect-intent transaction and forbids a remap
+effect carries `{executor_id, generation}` from birth: the withdrawn HA
+plan's §4 (DL-189) resolves affinity **inside** the effect-intent transaction
+and forbids a remap
 from moving an existing effect, and an effect without a generation cannot prove
 at dispatch that it did not read a newer one (PR-16). **Every SPAWN effect also
 carries `run_id`, minted in the same transaction.** Before DL-118 the adapter
@@ -1163,7 +1166,7 @@ that.
 | `jobs` (incl. `reservations`, `waiter_seq`) | authoritative rows |
 | `globals` | authoritative rows |
 | `hosts`, with `last_contact` **omitted from the shape** and `deadman_us` **present and null** | durable routing state (`concurrency-model.md` §8) — see the not-carried row for the two exclusions. **An evicted host's return is not this spec's.** Draft 19 named an admitted `host{verb: register}` input for it, and naming it was the mistake: a returning host must present its generation, prove it self-fenced (CM-12), and be reconciled against two frozen rules — a stale generation is refused, ordinary re-registration preserves operator state — and none of that has a producer before the relay exists (DL-97). On one host today an evicted row is a dead end: `evict local` leaves `local` routing nothing and nothing brings it back, because the un-evict is the relay's act. So this spec records **nothing** for a host's return, carries an evicted row as it stands, and leaves the register record, its proof and its transition table to the HA track where the relay is built. Registration stays unjournaled here: the genesis seed is identical on every replay, and a deadman refresh is unprojected (PR-24c) |
-| `routes` | the role→executor table, authoritative under CAS (`ha-deployment.md` §4); today one row — and a **row like the other three**: `RouteRuntime {executor_id, state_rev}`, frozen, owned by `RuntimeState`, projected on the same rule, read through a v3 `routes [roles]` verb answering `{present, executor_id, state_rev}` per role, addressed by the fourth `expect` namespace `route:<role>` — **the storage and that verb are specified and unbuilt (§2.2)**, so today the table is projected as one row whose role IS the local executor's id, at revision 0, and the seal carries it in the frozen shape. **A route names an executor and nothing else.** Drafts 15–18 gave the route a `generation` and then spent four rounds on what a route whose generation had gone stale meant — and the answer was always "the evicted-host case", which §8 defines and the HA track builds, and which this spec has no business re-defining. So the generation is **not** on the route: at effect birth `executor_id` comes from the route and `generation` from the host row's **current** value, exactly as `plan_effects` binds today; a stale route cannot exist; an evicted host routes nothing, so an effect born for one is held pending by the routing gate as today; and §8's re-drive-as-new-run stays where it is, unbuilt until HA's relay, named here as out of scope. **A remap is an admitted input** on the `host` record's pattern (DL-94): `host: {verb: "route", id: <role>, executor_id}`, applied to the owner, no oracle event, rejected if `executor_id` names no host row. A→B→A moves the revision twice and the seal carries it (PR-16b) |
+| `routes` | the role→executor table, authoritative under CAS (the withdrawn HA plan's §4, DL-189); today one row — and a **row like the other three**: `RouteRuntime {executor_id, state_rev}`, frozen, owned by `RuntimeState`, projected on the same rule, read through a v3 `routes [roles]` verb answering `{present, executor_id, state_rev}` per role, addressed by the fourth `expect` namespace `route:<role>` — **the storage and that verb are specified and unbuilt (§2.2)**, so today the table is projected as one row whose role IS the local executor's id, at revision 0, and the seal carries it in the frozen shape. **A route names an executor and nothing else.** Drafts 15–18 gave the route a `generation` and then spent four rounds on what a route whose generation had gone stale meant — and the answer was always "the evicted-host case", which §8 defines and the HA track builds, and which this spec has no business re-defining. So the generation is **not** on the route: at effect birth `executor_id` comes from the route and `generation` from the host row's **current** value, exactly as `plan_effects` binds today; a stale route cannot exist; an evicted host routes nothing, so an effect born for one is held pending by the routing gate as today; and §8's re-drive-as-new-run stays where it is, unbuilt until HA's relay, named here as out of scope. **A remap is an admitted input** on the `host` record's pattern (DL-94): `host: {verb: "route", id: <role>, executor_id}`, applied to the owner, no oracle event, rejected if `executor_id` names no host row. A→B→A moves the revision twice and the seal carries it (PR-16b) |
 | `timers` + `timer_seq` | an armed deadline is state no status field records; the token carries cross-job firing order |
 | `consumed` | irreversible depletion (DL-50) that no row holds — §5. **Keys survive their resource**: a `consumed["r:FUEL"]` whose resource C2 removes is retained as a ghost bucket, and if C3 reintroduces `FUEL` its consumption is still spent — a loader that rebuilt capacity from the catalog alone would silently refund it on reintroduction (PR-19a) |
 | `enqueue_counter` | the waiter-rank allocator's high-water mark |
@@ -2681,7 +2684,7 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 | `concurrency-model.md` §5 | DL-96's "`run_id` is not bound before the attempt" deviation is lifted |
 | `runner-design.md` §7 | record kinds; resume from a seal; the ladder re-drives a live wrapper under a terminal row regardless of KILL effect state (PR-33) |
 | `deployment-runbook.md` §6/§7 | seal→swap→open in place; "latches die" false; upgrade keeps state |
-| `ha-deployment.md` §2/§4 | ACQUIRE gains a lineage-head predicate; the store replaces the anchor; routes are carried state |
+| the withdrawn HA plan (DL-189) | this amendment (ACQUIRE gains a lineage-head predicate; the store replaces the anchor; routes are carried state) named a document that was withdrawn before receiving it; the requirement itself stands wherever a shared store is eventually built |
 | `runner_ledger.py` | `LeaderLock` generalized to the anchor |
 | `capacity.py`, `oracle_state.py` | §5 |
 | `runner_supervisor.py` | completed-run tombstones (PR-36) |
@@ -2713,4 +2716,5 @@ before any seal (PR-45); a lost `seal` response on both sides of the record
 - ~~**PR-Q4**~~ — closed in §11: audit runs the interpreter that produced the
   period, and old versions stay installable.
 - **PR-Q5** — the anchor in a paired-site deployment: single-site until the
-  store, and `ha-deployment.md` must say so where it cites this.
+  store; the plan that would have cited this, the HA plan, was withdrawn
+  (DL-189).

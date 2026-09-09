@@ -1086,7 +1086,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
 | CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (S7a/S7b, DL-108/DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 82-job night, covering failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain — every fault one host can suffer, each asserted to actually fire. S7c (DL-112) adds the half no interpreter can hold: the mutex is refused between two OS processes, and an engine that loses its lock file stops before the work rather than after it. The remaining half is §0's "host reroute", which needs a host to reroute TO; it closes with the relay (DL-97/DL-103), not before |
 
-CM-01–CM-14 are this document's. `docs/ha-deployment.md` §7 drafts
+CM-01–CM-14 are this document's. The withdrawn HA plan (DL-189) drafted
 CM-15–CM-23 for the second host and the second site. One of them landed
 early: CM-17 — a decision and the effects it implies commit together or
 not at all — is held on the file substrate by DL-118's single `decision`

@@ -208,7 +208,7 @@ class RouteRuntime(BaseModel):
     generation -- at effect birth `executor_id` comes from the route and
     `generation` from the host row's CURRENT value, so a stale route
     cannot exist and an evicted host's work is the concurrency model's
-    ss8 case, not a route state (`ha-deployment.md` ss4)."""
+    ss8 case, not a route state (the withdrawn HA plan's ss4, DL-189)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

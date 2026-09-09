@@ -38,12 +38,12 @@ resume — spool contract frozen in
 11c (calendar scheduler, preflight, control socket — protocol frozen in
 [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md)
 — headless CLI), 11d (Textual TUI), 11e (`serve` via textual-serve), and
-11f (the detached supervisor tier). Phase 12 — mandatory optimistic
-concurrency and multihost execution — is under construction. The
-concurrency contract is frozen in
-[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md);
-the multihost deployment shape is a plan, not a frozen contract, in
-[docs/ha-deployment.md](https://github.com/mrbald/dsl41/blob/main/docs/ha-deployment.md).
+11f (the detached supervisor tier). Phase 12's optimistic-concurrency half
+is frozen and built (DL-103 closed S6); the contract is
+[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md).
+The remote relay and shared store that multihost execution needs are
+designed in that document's §7 and not built; the HA deployment plan that
+proposed them was withdrawn (DL-189).
 The evolution contract for every versioned protocol and durable artifact is
 [docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md);
 the access perimeter is
