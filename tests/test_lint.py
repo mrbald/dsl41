@@ -623,10 +623,14 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     assert counts == Counter(
         {
             "L001": 6,
-            "L011": 3,
+            # +2 at DL-192: viz_locks.jil's lk_x1/lk_x3 hold a resource and
+            # nothing else -- a requirement is not wiring
+            "L011": 5,
             "L015": 2,
             "L008": 2,
-            "L012": 5,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
+            # +6 at DL-192: viz_locks.jil states five mutex pairs (one of
+            # them a complete clique's three) and one self-exclusion
+            "L012": 11,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
             "L002": 3,
             "L005": 2,
             "L009": 1,
@@ -639,7 +643,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))
-    assert dangling == ["commented", "dead_scheduler", "glob_shell"]
+    assert dangling == ["commented", "dead_scheduler", "glob_shell", "lk_x1", "lk_x3"]
     (stale,) = report.by_code("L009")
     assert stale.jobs == ["consumer_stale"]  # the fixture's documented purpose
 

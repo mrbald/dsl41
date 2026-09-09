@@ -1,0 +1,89 @@
+/* Locks for the explore page (DL-192): both kinds, every shape. R_ONE is a
+   one-unit semaphore two jobs draw on (lk_x2 with FREE=N, so it never frees);
+   R_BIG is a three-unit pool lk_x3 draws two units of; R_UNUSED is declared
+   and nothing consumes it, so no hub is drawn and the summary counts it.
+   Mutex: lk_a names n(lk_b) one way, lk_c and lk_d name each other, lk_e/
+   lk_f/lk_g state all three pairs (a complete clique), and lk_h excludes
+   itself. lk_x2 and lk_d sit inside lk_box so a collapse hides a member and
+   the owning-box rows have something to say. Names are prefixed: the corpus
+   lowers into ONE catalog. Synthetic. */
+insert_resource: R_ONE
+res_type: R
+amount: 1
+
+insert_resource: R_BIG
+res_type: R
+amount: 3
+
+insert_resource: R_UNUSED
+res_type: R
+amount: 2
+
+insert_job: lk_box
+job_type: b
+
+insert_job: lk_x1
+job_type: c
+command: /opt/lk_x1.sh
+machine: m1
+resources: (R_ONE, QUANTITY=1)
+
+insert_job: lk_x2
+job_type: c
+box_name: lk_box
+command: /opt/lk_x2.sh
+machine: m1
+resources: (R_ONE, QUANTITY=1, FREE=N)
+
+insert_job: lk_x3
+job_type: c
+command: /opt/lk_x3.sh
+machine: m1
+resources: (R_BIG, QUANTITY=2, FREE=A)
+
+insert_job: lk_a
+job_type: c
+command: /opt/lk_a.sh
+machine: m1
+condition: n(lk_b)
+
+insert_job: lk_b
+job_type: c
+command: /opt/lk_b.sh
+machine: m1
+
+insert_job: lk_c
+job_type: c
+command: /opt/lk_c.sh
+machine: m1
+condition: n(lk_d)
+
+insert_job: lk_d
+job_type: c
+box_name: lk_box
+command: /opt/lk_d.sh
+machine: m1
+condition: n(lk_c)
+
+insert_job: lk_e
+job_type: c
+command: /opt/lk_e.sh
+machine: m1
+condition: n(lk_f) & n(lk_g)
+
+insert_job: lk_f
+job_type: c
+command: /opt/lk_f.sh
+machine: m1
+condition: n(lk_g)
+
+insert_job: lk_g
+job_type: c
+command: /opt/lk_g.sh
+machine: m1
+
+insert_job: lk_h
+job_type: c
+command: /opt/lk_h.sh
+machine: m1
+condition: n(lk_h)

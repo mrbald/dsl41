@@ -68,6 +68,17 @@ def _corpus_elements(name: str) -> dict[str, list[dict[str, object]]]:
     return _elements(catalog, derive_graph(catalog))
 
 
+def _flow_edges(els: dict[str, list[dict[str, object]]]) -> list[dict[str, object]]:
+    """The derived edges alone. Lock links share the `edges` list (cytoscape
+    has one), carry no derivation, and are never one of `graph.edges` (DL-192)."""
+    return [e for e in els["edges"] if "lock" not in str(e["classes"]).split()]
+
+
+def _flow_nodes(els: dict[str, list[dict[str, object]]]) -> list[dict[str, object]]:
+    """The catalog and EXT nodes alone: a lock hub is neither (DL-192)."""
+    return [n for n in els["nodes"] if "lock" not in str(n["classes"]).split()]
+
+
 def _node(els: dict[str, list[dict[str, object]]], node_id: str) -> dict[str, object]:
     matches = [n for n in els["nodes"] if n["data"]["id"] == node_id]  # type: ignore[index]
     assert len(matches) == 1
@@ -171,7 +182,7 @@ def _branches(els: dict[str, list[dict[str, object]]], target: str) -> dict[str,
     """producer id -> the branch label of its edge into `target`."""
     return {
         e["data"]["source"]: e["data"]["branch"]  # type: ignore[index,misc]
-        for e in els["edges"]
+        for e in _flow_edges(els)
         if e["data"]["target"] == target  # type: ignore[index]
     }
 
@@ -233,11 +244,12 @@ def test_elements_edge_class_is_the_style_class() -> None:
     catalog = corpus_catalog()
     graph = derive_graph(catalog)
     els = _elements(catalog, graph)
-    classes = [str(e["classes"]).split() for e in els["edges"]]
+    flow = _flow_edges(els)
+    classes = [str(e["classes"]).split() for e in flow]
     assert [c[0] for c in classes] == [e.cls for e in graph.edges]
     assert [c[1:] == ["any"] for c in classes] == [
         e["data"]["branch"] is not None
-        for e in els["edges"]  # type: ignore[index]
+        for e in flow  # type: ignore[index]
     ]
 
 
@@ -245,13 +257,16 @@ def test_elements_cover_every_node_and_edge() -> None:
     catalog = corpus_catalog()
     graph = derive_graph(catalog)
     els = _elements(catalog, graph)
-    catalog_ids = [n["data"]["id"] for n in els["nodes"][: len(graph.nodes)]]  # type: ignore[index]
+    nodes = _flow_nodes(els)  # lock hubs come after these and are neither (DL-192)
+    catalog_ids = [n["data"]["id"] for n in nodes[: len(graph.nodes)]]  # type: ignore[index]
     assert catalog_ids == graph.nodes  # catalog nodes first, source order
-    assert len(els["edges"]) == len(graph.edges)
-    ext = els["nodes"][len(graph.nodes) :]
-    assert all("ext" in n["classes"] for n in ext)  # type: ignore[operator]
+    assert len(_flow_edges(els)) == len(graph.edges)
+    ext = nodes[len(graph.nodes) :]
+    assert all("ext" in str(n["classes"]) for n in ext)
     endpoints = {e.src for e in graph.edges} | {e.dst for e in graph.edges}
-    assert {n["data"]["id"] for n in ext} == endpoints - set(graph.nodes)  # type: ignore[index]
+    # a mutex member no job defines is EXT too, and belongs to no edge
+    danglers = {m for group in graph.mutex_groups for m in group} - set(graph.nodes)
+    assert {n["data"]["id"] for n in ext} == (endpoints | danglers) - set(graph.nodes)  # type: ignore[index]
 
 
 def test_elements_edge_ids_never_collide_with_job_names() -> None:
@@ -331,7 +346,7 @@ def test_elements_or_join_marks_each_alternative_with_its_branch() -> None:
     assert _branches(els, "fold_or_join") == {"fold_or_m1": "|1", "fold_or_m2": "|2"}
     labels = {
         e["data"]["source"]: (e["data"]["label"], e["classes"])  # type: ignore[index]
-        for e in els["edges"]
+        for e in _flow_edges(els)
         if e["data"]["target"] == "fold_or_join"  # type: ignore[index]
     }
     assert labels["fold_or_m1"] == ("|1", "assumed any")  # empty thinned label -> suffix alone
@@ -396,7 +411,11 @@ def test_elements_complex_shape_labels_no_branch_at_all() -> None:
     # labels nothing and the badge sends the reader to the tree and the text
     els = _cond_elements()
     assert _branches(els, "CPX") == {"A": None, "B": None, "C": None, "D": None}
-    assert all("any" not in e["classes"] for e in els["edges"] if e["data"]["target"] == "CPX")  # type: ignore[index,operator]
+    assert all(
+        "any" not in str(e["classes"])
+        for e in _flow_edges(els)
+        if e["data"]["target"] == "CPX"  # type: ignore[index]
+    )
 
 
 def test_elements_lock_inside_an_or_keeps_its_branch_without_an_edge() -> None:
@@ -419,15 +438,194 @@ def test_elements_every_corpus_edge_matches_the_atom_it_derives_from() -> None:
     for path in LOWERABLE_CORPUS:
         catalog = catalog_of(path.read_text(encoding="utf-8"))
         graph = derive_graph(catalog)
-        assert len(_elements(catalog, graph)["edges"]) == len(graph.edges), path.name
+        assert len(_flow_edges(_elements(catalog, graph))) == len(graph.edges), path.name
     catalog = corpus_catalog()
     els = _elements(catalog, derive_graph(catalog))
     named: list[str] = []
     for node in els["nodes"]:
         for tree in node["data"].get("cond_tree", {}).values():  # type: ignore[union-attr]
             named.extend(str(leaf["edge"]) for leaf in _leaves(tree) if leaf["edge"])
-    assert sorted(named) == sorted(str(e["data"]["id"]) for e in els["edges"])  # type: ignore[index]
+    assert sorted(named) == sorted(str(e["data"]["id"]) for e in _flow_edges(els))  # type: ignore[index]
     assert len(named) == len(set(named))  # each edge named by exactly one leaf
+
+
+# --------------------------------------------------------------- locks (DL-192)
+
+
+def _locks(els: dict[str, list[dict[str, object]]]) -> dict[str, dict[str, object]]:
+    """The lock hubs by id."""
+    return {
+        str(n["data"]["id"]): n["data"]  # type: ignore[index,misc]
+        for n in els["nodes"]
+        if "lock" in str(n["classes"]).split()
+    }
+
+
+def _lock_links(els: dict[str, list[dict[str, object]]]) -> list[dict[str, object]]:
+    return [e for e in els["edges"] if "lock" in str(e["classes"]).split()]
+
+
+def test_elements_draw_one_hub_per_consumed_resource() -> None:
+    # DL-192: resources are not in IR-G, so the emitter reads them off IR-F.
+    # R_UNUSED is declared and consumed by nobody: no hub, and the summary
+    # counts it instead (below).
+    els = _corpus_elements("viz_locks.jil")
+    hubs = _locks(els)
+    assert [h for h in hubs if h.startswith("lock:r:")] == ["lock:r:R_ONE", "lock:r:R_BIG"]
+    one = hubs["lock:r:R_ONE"]
+    assert one["label"] == "\N{LOCK} R_ONE (1)"
+    assert one["capacity"] == 1
+    assert one["members"] == [
+        {
+            "id": "lk_x1",
+            "job": "lk_x1",
+            "boxes": [],
+            "quantity": 1,
+            "free": None,
+            "policy": "completion",
+        },
+        {
+            "id": "lk_x2",
+            "job": "lk_x2",
+            "boxes": ["lk_box"],
+            "quantity": 1,
+            "free": "N",
+            "policy": "never",  # FREE=N: the units are never given back (DL-50)
+        },
+    ]
+    assert hubs["lock:r:R_BIG"]["label"] == "\N{LOCK} R_BIG (3)"
+
+
+def test_elements_resource_link_label_thins_like_an_edge_label() -> None:
+    # quantity only when it is more than one unit, FREE only when stated
+    els = _corpus_elements("viz_locks.jil")
+    labels = {
+        str(e["data"]["target"]): e["data"]["label"]  # type: ignore[index,misc]
+        for e in _lock_links(els)
+        if e["data"]["lock"] == "resource"  # type: ignore[index]
+    }
+    assert labels == {"lk_x1": "", "lk_x2": "N", "lk_x3": "2 A"}
+
+
+def test_elements_unsized_resource_hub_says_so() -> None:
+    # two ways to have no capacity, one reading: an undeclared resource
+    # (L016's finding) and a malformed `amount` (preflight's, DL-50)
+    text = (
+        "insert_resource: BAD\nres_type: R\namount: many\n\n"
+        "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (BAD, QUANTITY=1) and (NOWHERE, QUANTITY=1)\n"
+    )
+    catalog = catalog_of(text)
+    hubs = _locks(_elements(catalog, derive_graph(catalog)))
+    assert hubs["lock:r:BAD"]["label"] == "\N{LOCK} BAD (?)"
+    assert hubs["lock:r:BAD"]["capacity"] is None
+    assert hubs["lock:r:NOWHERE"]["label"] == "\N{LOCK} NOWHERE (?)"
+
+
+def test_elements_mutex_pair_tees_the_end_that_waits() -> None:
+    # a pair forms from ONE reference, so one-way is the common case:
+    # lk_a names n(lk_b) and waits; lk_c and lk_d name each other
+    els = _corpus_elements("viz_locks.jil")
+    pairs = {
+        (str(e["data"]["source"]), str(e["data"]["target"])): e["data"]  # type: ignore[index]
+        for e in _lock_links(els)
+        if "pair" in str(e["classes"]).split()
+    }
+    one_way = pairs[("lk_a", "lk_b")]
+    assert (one_way["source_tee"], one_way["target_tee"]) == (True, False)
+    assert one_way["directions"] == ["lk_a waits while lk_b runs"]
+    assert one_way["how"] == "one-way"
+    mutual = pairs[("lk_c", "lk_d")]
+    assert (mutual["source_tee"], mutual["target_tee"]) == (True, True)
+    assert mutual["directions"] == [
+        "lk_c waits while lk_d runs",
+        "lk_d waits while lk_c runs",
+    ]
+    assert mutual["how"] == "mutual"
+
+
+def test_elements_complete_clique_is_one_hub_with_a_row_per_member() -> None:
+    # DL-35 item 6, kept: only a COMPLETE clique collapses to a hub, and the
+    # tee marks the members that wait (lk_g names nobody, so its end is bare)
+    els = _corpus_elements("viz_locks.jil")
+    hub = _locks(els)["lock:m:lk_e+lk_f+lk_g"]
+    assert hub["label"] == "\N{LOCK} mutex"
+    assert hub["capacity"] is None
+    assert [m["how"] for m in hub["members"]] == [  # type: ignore[index,union-attr]
+        "waits while lk_f, lk_g run",
+        "waits while lk_g runs; lk_e waits while it runs",
+        "lk_e, lk_f wait while it runs",
+    ]
+    tees = {
+        str(e["data"]["target"]): e["data"]["target_tee"]  # type: ignore[index,misc]
+        for e in _lock_links(els)
+        if e["data"]["source"] == "lock:m:lk_e+lk_f+lk_g"  # type: ignore[index]
+    }
+    assert tees == {"lk_e": True, "lk_f": True, "lk_g": False}
+
+
+def test_elements_self_mutex_is_a_badge_and_never_a_node() -> None:
+    els = _corpus_elements("viz_locks.jil")
+    assert _node(els, "lk_h")["data"]["self_lock"] is True  # type: ignore[index]
+    assert "self_lock" not in _node(els, "lk_a")["data"]  # type: ignore[operator]
+    assert not any("lk_h" in hub for hub in _locks(els))
+    ends = {str(e["data"]["source"]) for e in _lock_links(els)}  # type: ignore[index]
+    ends |= {str(e["data"]["target"]) for e in _lock_links(els)}  # type: ignore[index]
+    assert "lk_h" not in ends
+
+
+def test_elements_m07_corpus_file_keeps_the_report_shapes() -> None:
+    # the M07 fixture: one mutual pair, one self-exclusion, and the s() edge
+    # beside them untouched by any of it
+    els = _corpus_elements("m07_mutex.jil")
+    links = _lock_links(els)
+    assert [
+        (str(e["data"]["source"]), str(e["data"]["target"]))  # type: ignore[index]
+        for e in links
+    ] == [("mutex_a", "mutex_b")]
+    assert links[0]["data"]["how"] == "mutual"  # type: ignore[index]
+    assert _node(els, "mutex_serial")["data"]["self_lock"] is True  # type: ignore[index]
+    assert len(_flow_edges(els)) == 1  # s(mutex_feeder) is still an ordinary edge
+
+
+def test_elements_dangling_mutex_target_becomes_an_ext_node() -> None:
+    # a bare n() naming a job nothing defines: L001 owns the finding, and the
+    # page draws the reference rather than dropping it (DL-35a's rule)
+    catalog = catalog_of(
+        "insert_job: j2\njob_type: c\ncommand: x\nmachine: m1\ncondition: n(ghost)\n"
+    )
+    els = _elements(catalog, derive_graph(catalog))
+    assert _node(els, "ghost")["classes"] == "ext"
+    (link,) = _lock_links(els)
+    assert (link["data"]["source"], link["data"]["target"]) == ("ghost", "j2")  # type: ignore[index]
+    assert link["data"]["target_tee"] is True  # type: ignore[index]  # j2 is the one that waits
+
+
+def test_elements_lock_ids_never_collide_with_a_job_named_like_one() -> None:
+    # cytoscape ids are one namespace over every element, and `lock:r:R` is a
+    # legal job name -- the hub widens with the same underscore idiom an EXT
+    # node and an edge id use
+    text = (
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_job: lock:r:R\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1)\n"
+    )
+    catalog = catalog_of(text)
+    els = _elements(catalog, derive_graph(catalog))
+    ids = [n["data"]["id"] for n in els["nodes"]]  # type: ignore[index]
+    ids += [e["data"]["id"] for e in els["edges"]]  # type: ignore[index]
+    assert ids == ["lock:r:R", "_lock:r:R", "lock:e:0"]
+    assert len(ids) == len(set(ids))
+
+
+def test_elements_whole_corpus_draws_both_lock_kinds() -> None:
+    catalog = corpus_catalog()
+    els = _elements(catalog, derive_graph(catalog))
+    assert {str(data["lock"]) for data in _locks(els).values()} == {"resource", "mutex"}
+    # every lock link joins elements the page actually has
+    ids = {str(n["data"]["id"]) for n in els["nodes"]}  # type: ignore[index]
+    for link in _lock_links(els):
+        assert str(link["data"]["source"]) in ids  # type: ignore[index]
+        assert str(link["data"]["target"]) in ids  # type: ignore[index]
 
 
 def test_elements_are_deterministic_across_hash_seeds() -> None:
@@ -603,6 +801,51 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     # Enter with exactly one hit selects the node and opens its details
     assert "if (hits.length === 1) {" in page
     assert "showNodeDetails(hits[0]);" in page
+
+
+def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
+    # DL-192: hubs + stated pairs + self badges, and the resources nothing
+    # consumes counted as a stated omission. `edges` stays the DEPENDENCY
+    # count -- a lock link is not a dependency.
+    catalog = catalog_of((CORPUS_DIR / "viz_locks.jil").read_text(encoding="utf-8"))
+    page = to_explore_html(catalog, title="locks")
+    # 2 resource hubs + 1 clique hub + 2 pairs + 1 self badge; no dependencies
+    assert "12 jobs \N{MIDDLE DOT} 0 edges \N{MIDDLE DOT} 1 boxes" in page
+    assert "\N{MIDDLE DOT} 6 locks \N{MIDDLE DOT} 1 unused" in page
+    # nothing unused -> nothing said (read the summary span: the vendored
+    # bundle has the word "unused" in it somewhere, as it has most words)
+    plain = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    summary = re.search(r'<span class="summary">(.*?)</span>', plain)
+    assert summary is not None
+    assert (
+        summary.group(1)
+        == "1 jobs \N{MIDDLE DOT} 0 edges \N{MIDDLE DOT} 0 boxes \N{MIDDLE DOT} 0 locks"
+    )
+
+
+def test_to_explore_html_carries_the_lock_grammar() -> None:
+    # DL-192, the page half: locks are excluded from the layout and placed on
+    # their members, they are never a step in a fan-in or fan-out, they have
+    # their own toggle, and the tee is driven by the emitted data.
+    page = to_explore_html(catalog_of((CORPUS_DIR / "viz_locks.jil").read_text(encoding="utf-8")))
+    assert 'function flow(elements) { return elements.not(".lock"); }' in page
+    assert "function placeLocks()" in page
+    assert page.count("placeLocks();") >= 3  # initial, re-layout, fit-only
+    assert "var initial = flow(cy.elements()).layout(elkLayout());" in page
+    assert 'var layout = flow(cy.elements(":visible")).layout(elkLayout());' in page
+    # the trace functions read the flow edges alone
+    assert 'var next = flow(nodes.incomers("edge")).sources();' in page
+    assert 'var own = flow(n.incomers("edge"));' in page
+    assert 'return flow(boxes.incomers("edge")).filter(' in page
+    # a focused job keeps its own hubs as context, never a hub's other members
+    assert 'keep.connectedEdges(".lock").connectedNodes().filter(".lock")' in page
+    # the toggle, the tee, the octagon and the menu item
+    assert 'id="locks"' in page and '".lockoff"' in page
+    assert '{ selector: "edge.lock[?source_tee]", style: {' in page
+    assert '"target-arrow-shape": "tee"' in page
+    assert 'shape: "octagon"' in page
+    assert '{ id: "focus-lock", content: "focus lock", selector: "node.lock",' in page
+    assert "dotted gray = lock" in page
 
 
 def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:

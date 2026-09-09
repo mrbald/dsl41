@@ -209,7 +209,8 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     (DL-151) added the l20_* set (the M19 iced-consumer rule L020);
     l021_multifire.jil (DL-180) the l21_* set (the multi-fire rule L021);
     l022_stranded.jil (DL-181) the l22_* set (the stranded-consumer rule
-    L022)."""
+    L022); viz_locks.jil (DL-192) the lk_* set (both lock kinds, drawn on
+    the explore page)."""
     files = [parse_file(p) for p in LOWERABLE_CORPUS]
     catalog = lower_catalog(files)
     assert set(catalog.jobs) == {
@@ -280,6 +281,18 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "l22_prod2",
         "l22_tail",
         "l22_watched",
+        "lk_a",
+        "lk_b",
+        "lk_box",
+        "lk_c",
+        "lk_d",
+        "lk_e",
+        "lk_f",
+        "lk_g",
+        "lk_h",
+        "lk_x1",
+        "lk_x2",
+        "lk_x3",
         "long_lists",
         "mutex_a",
         "mutex_b",

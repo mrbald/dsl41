@@ -40,6 +40,7 @@ pytest.importorskip(
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import corpus_catalog
+from test_viz import CORPUS_DIR
 from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT
 
 from dsl41.ir import lower_source
@@ -1076,3 +1077,228 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
 def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> None:
     _ready(driven_cond)
     assert driven_cond.errors == [], f"{driven_cond.engine}: {driven_cond.errors}"
+
+
+# ------------------------------------------------------------- DL-192: locks
+#
+# `driven_locks` shares one page per engine across this block, like the two
+# above. Only the last two tests mutate the graph, and each restores it.
+
+
+@pytest.fixture(scope="module")
+def locks_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """tests/corpus/viz_locks.jil: both lock kinds and every shape -- two
+    resource semaphores (one shared, one a pool), a declared resource nobody
+    consumes, a one-way pair, a mutual pair, a complete clique, a
+    self-exclusion, and a box holding one member of each kind."""
+    path = tmp_path_factory.mktemp("explore-locks") / "locks.html"
+    catalog = lower_source((CORPUS_DIR / "viz_locks.jil").read_text(encoding="utf-8"))
+    path.write_text(to_explore_html(catalog, title="locks"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_locks(request: pytest.FixtureRequest, locks_page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, locks_page_url)
+
+
+def _hub_inside_members(d: Driven, hub_id: str) -> dict[str, Any]:
+    """Where a hub sits against the bounding box of the members that are
+    actually drawn."""
+    result: dict[str, Any] = d.page.evaluate(
+        """(id) => {
+          const hub = cy.$id(id), p = hub.position();
+          const ms = (hub.data('members') || []).map(m => cy.$id(m.id))
+            .filter(n => n.nonempty() && n.visible());
+          const xs = ms.map(n => n.position('x')), ys = ms.map(n => n.position('y'));
+          return {
+            members: ms.map(n => n.id()),
+            inside: p.x >= Math.min(...xs) - 1 && p.x <= Math.max(...xs) + 1
+                 && p.y >= Math.min(...ys) - 1 && p.y <= Math.max(...ys) + 1
+          };
+        }""",
+        hub_id,
+    )
+    return result
+
+
+def test_lock_hubs_sit_on_their_members(driven_locks: Driven) -> None:
+    """A lock is a fact ABOUT jobs, so it is left out of the layout and put
+    at the centroid of the members that are drawn -- inside their bounding
+    box, by construction."""
+    _ready(driven_locks)
+    for hub in ("lock:r:R_ONE", "lock:r:R_BIG", "lock:m:lk_e+lk_f+lk_g"):
+        placed = _hub_inside_members(driven_locks, hub)
+        assert placed["members"], (driven_locks.engine, hub)
+        assert placed["inside"], (driven_locks.engine, hub, placed)
+
+
+def test_lock_links_are_dotted_and_the_tee_marks_the_waiter(driven_locks: Driven) -> None:
+    _ready(driven_locks)
+    styles = driven_locks.page.evaluate(
+        "() => Object.fromEntries(cy.edges('.lock').map(e => ["
+        "e.data('source') + '>' + e.data('target'),"
+        " [e.style('line-style'), e.style('source-arrow-shape'), e.style('target-arrow-shape')]]))"
+    )
+    assert styles["lk_a>lk_b"] == ["dotted", "tee", "none"], driven_locks.engine
+    assert styles["lk_c>lk_d"] == ["dotted", "tee", "tee"], driven_locks.engine
+    assert styles["lock:r:R_ONE>lk_x1"] == ["dotted", "none", "none"], driven_locks.engine
+    # the self-exclusion is a badge on the job, not a node and not a link
+    assert driven_locks.page.evaluate("() => nodeLabel(cy.$id('lk_h'))") == "lk_h \U0001f512"
+
+
+def test_lock_hub_details_name_every_member(driven_locks: Driven) -> None:
+    _ready(driven_locks)
+    driven_locks.page.evaluate("() => { cy.$id('lock:r:R_ONE').emit('tap'); }")
+    driven_locks.page.wait_for_timeout(200)
+    rows = driven_locks.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr')).map("
+        "tr => [tr.querySelector('th').textContent, tr.querySelector('td').textContent])"
+    )
+    assert rows[0] == ["kind", "resource semaphore"], (driven_locks.engine, rows)
+    assert rows[1] == ["capacity", "1 unit"], (driven_locks.engine, rows)
+    members = [value for label, value in rows if label == "member"]
+    assert members == [
+        "lk_x1 · 1 unit, released on completion",
+        "lk_x2 · in box lk_box · 1 unit, never released",
+    ], (driven_locks.engine, members)
+    assert driven_locks.page.inner_text("#d-title") == "R_ONE"
+
+    driven_locks.page.evaluate("() => { cy.$id('lock:m:lk_e+lk_f+lk_g').emit('tap'); }")
+    driven_locks.page.wait_for_timeout(200)
+    rows = driven_locks.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr')).map("
+        "tr => [tr.querySelector('th').textContent, tr.querySelector('td').textContent])"
+    )
+    assert rows[0] == ["kind", "mutual exclusion"], (driven_locks.engine, rows)
+    assert [value for label, value in rows if label == "member"] == [
+        "lk_e · waits while lk_f, lk_g run",
+        "lk_f · waits while lk_g runs; lk_e waits while it runs",
+        "lk_g · lk_e, lk_f wait while it runs",
+    ], driven_locks.engine
+    _click(driven_locks, "#d-close")
+
+
+def test_pair_link_details_give_both_directions(driven_locks: Driven) -> None:
+    _ready(driven_locks)
+    driven_locks.page.evaluate(
+        "() => { cy.edges('.lock').filter(e => e.data('source') === 'lk_c')[0].emit('tap'); }"
+    )
+    driven_locks.page.wait_for_timeout(200)
+    rows = _detail_rows(driven_locks)
+    assert rows["kind"] == "mutual exclusion"
+    waits = driven_locks.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr'))"
+        ".filter(tr => tr.querySelector('th').textContent === 'waits')"
+        ".map(tr => tr.querySelector('td').textContent)"
+    )
+    assert waits == [
+        "lk_c waits while lk_d runs",
+        "lk_d waits while lk_c runs",
+    ], (driven_locks.engine, waits)
+    _click(driven_locks, "#d-close")
+
+
+def test_the_locks_toggle_hides_and_restores_every_lock_element(driven_locks: Driven) -> None:
+    _ready(driven_locks)
+    before = driven_locks.page.evaluate("() => cy.elements('.lock').length")
+    assert before > 0
+    driven_locks.page.uncheck("#locks")
+    driven_locks.page.wait_for_timeout(300)
+    assert driven_locks.page.evaluate("() => cy.elements('.lock:visible').length") == 0
+    # ...and the jobs are all still there: the toggle hides locks alone
+    assert driven_locks.page.evaluate("() => cy.nodes(':visible').length") == 12
+    driven_locks.page.check("#locks")
+    driven_locks.page.wait_for_timeout(300)
+    assert driven_locks.page.evaluate("() => cy.elements('.lock:visible').length") == before
+
+
+def test_a_lock_is_never_a_step_in_a_fan_in_or_a_fan_out(driven_locks: Driven) -> None:
+    """Two jobs sharing a semaphore are not upstream of each other: a lock
+    orders nothing (M07/DL-21), so the trace walks the flow edges alone."""
+    _ready(driven_locks)
+    assert _tree_ids(driven_locks, "lk_x2", "fanInTree") == ["lk_box", "lk_x2"]
+    assert _tree_ids(driven_locks, "lk_x1", "fanInTree") == ["lk_x1"]
+    assert _tree_ids(driven_locks, "lk_x1", "fanOutTree") == ["lk_x1"]
+    assert _tree_ids(driven_locks, "lk_a", "fanOutTree") == ["lk_a"]
+
+
+def test_a_focused_job_keeps_its_own_hub_and_not_the_other_members(
+    driven_locks: Driven,
+) -> None:
+    """The hub is context for the job in focus; the jobs on its other side
+    are not what was asked for."""
+    _ready(driven_locks)
+    driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
+    _show_all(driven_locks)
+
+
+def test_focus_lock_menu_item_shows_the_hub_and_every_member(driven_locks: Driven) -> None:
+    """A real right-click on a hub, then the item -- the DL-77 technique."""
+    _ready(driven_locks)
+    _show_all(driven_locks)
+    point = _client_point(driven_locks, "lock:r:R_ONE")
+    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
+    driven_locks.page.wait_for_timeout(500)
+    _click(driven_locks, "#focus-lock")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_locks) == [
+        "lk_box",  # lk_x2's own box comes with it: a member without it cannot render
+        "lk_x1",
+        "lk_x2",
+        "lock:r:R_ONE",
+    ], driven_locks.engine
+    _show_all(driven_locks)
+
+
+def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
+    driven_locks: Driven,
+) -> None:
+    """lk_x2 and lk_d sit in lk_box. Folding it re-points their lock links at
+    the box, and each one still says which member it really joins -- and the
+    hub follows its members, sitting beside the box when they are all in it.
+    Expands again before returning."""
+    _ready(driven_locks)
+    driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    folded = sorted(
+        driven_locks.page.evaluate(
+            "() => cy.edges('.lock.cy-expand-collapse-meta-edge')"
+            ".map(e => e.data('source') + '>' + e.data('target'))"
+        )
+    )
+    assert folded == ["lk_c>lk_box", "lock:r:R_ONE>lk_box"], driven_locks.engine
+    driven_locks.page.evaluate(
+        "() => { cy.edges('.lock.cy-expand-collapse-meta-edge')"
+        ".filter(e => e.data('source') === 'lock:r:R_ONE')[0].emit('tap'); }"
+    )
+    driven_locks.page.wait_for_timeout(200)
+    rows = _detail_rows(driven_locks)
+    assert rows["stands for"] == "lock:r:R_ONE — lk_x2 (inside a collapsed box)", (
+        driven_locks.engine,
+        rows,
+    )
+    assert rows["release"] == "never released", rows
+    _click(driven_locks, "#d-close")
+
+    # the panel says where a folded member went
+    driven_locks.page.evaluate("() => { cy.$id('lock:r:R_ONE').emit('tap'); }")
+    driven_locks.page.wait_for_timeout(200)
+    members = driven_locks.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr'))"
+        ".filter(tr => tr.querySelector('th').textContent === 'member')"
+        ".map(tr => tr.querySelector('td').textContent)"
+    )
+    assert members[1].endswith("folded into lk_box"), (driven_locks.engine, members)
+    _click(driven_locks, "#d-close")
+
+    driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    assert driven_locks.page.evaluate("() => cy.$id('lk_x2').length") == 1
+
+
+def test_no_uncaught_page_errors_on_the_locks_page(driven_locks: Driven) -> None:
+    _ready(driven_locks)
+    assert driven_locks.errors == [], f"{driven_locks.engine}: {driven_locks.errors}"

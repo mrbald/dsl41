@@ -765,6 +765,12 @@ def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
         ["etl:load", "etl:probe"],  # names_colon_join.jil (DL-39)
         ["l21_daily", "l21_guard"],  # l021_multifire.jil (DL-180)
         ["l21_fixed", "l21_guard"],
+        ["lk_a", "lk_b"],  # viz_locks.jil (DL-192): one-way pair,
+        ["lk_c", "lk_d"],  # mutual pair,
+        ["lk_e", "lk_f"],  # then the three pairs of one complete clique,
+        ["lk_e", "lk_g"],
+        ["lk_f", "lk_g"],
+        ["lk_h"],  # and a self-exclusion
         ["mutex_a", "mutex_b"],
         ["mutex_serial"],
     ]
