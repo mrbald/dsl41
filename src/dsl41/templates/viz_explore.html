@@ -465,10 +465,70 @@ function memberAnchor(member) {
   return null;
 }
 
-/* Every visible hub at the centroid of its drawn members. A hub whose
-   members all sit inside ONE box (folded, or the box itself is the member)
-   sits beside that box rather than on top of its title. */
+/* The centroid of a group's members is usually a point one of them already
+   occupies -- ELK lays a group's members near each other -- and with ONE
+   drawn member it is that member exactly, which also collapses `cy.fit`'s
+   box to a point. So the centroid is only the starting guess: the hub then
+   walks a fixed spiral until its own box touches no drawn node and no hub
+   already placed. Deterministic, because the offsets and the element order
+   are; bounded, because a drawn hub in an imperfect spot beats one left on
+   top of a job. */
+var LOCK_GAP = 12;    /* padding around the hub's box */
+var LOCK_STEP = 34;   /* one ring of the spiral */
+var LOCK_RINGS = 8;
+var LOCK_DIRS = [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1]];
+
+function boxesOverlap(a, b) {
+  return a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2;
+}
+
+function hubBox(hub, pos) {
+  var w = hub.width() / 2 + LOCK_GAP, h = hub.height() / 2 + LOCK_GAP;
+  return { x1: pos.x - w, x2: pos.x + w, y1: pos.y - h, y2: pos.y + h };
+}
+
+function spiral(hub, start, obstacles) {
+  var candidate = null;
+  for (var ring = 0; ring <= LOCK_RINGS; ring++) {
+    for (var d = 0; d < LOCK_DIRS.length; d++) {
+      candidate = {
+        x: start.x + LOCK_DIRS[d][0] * ring * LOCK_STEP,
+        y: start.y + LOCK_DIRS[d][1] * ring * LOCK_STEP
+      };
+      var box = hubBox(hub, candidate), clear = true;
+      for (var k = 0; k < obstacles.length; k++) {
+        if (boxesOverlap(box, obstacles[k])) { clear = false; break; }
+      }
+      if (clear) return candidate;
+      if (ring === 0) break;  /* every direction is the same point at radius 0 */
+    }
+  }
+  return null;  /* the ring budget is spent */
+}
+
+/* Two passes, strict first. A job must never be covered; a compound box is
+   avoided WHOLE while there is room, because a hub inside one reads as a
+   lock on its members -- but a box can be a whole region wide, and no
+   bounded spiral escapes that, so the second pass keeps only its title band
+   (the interior belongs to its members, who are obstacles of their own).
+   The centroid stands if even that fails: a hub drawn somewhere beats one
+   drawn nowhere. */
+function freeSpot(hub, start, strict, relaxed) {
+  return spiral(hub, start, strict) || spiral(hub, start, relaxed) || start;
+}
+
+var LOCK_TITLE_BAND = 26;  /* a box's own label sits along its top edge */
+
+/* Every hub on its drawn members and clear of everything else. */
 function placeLocks() {
+  var strict = [], relaxed = [];
+  cy.nodes(":visible").not(".lock").forEach(function (n) {
+    var bb = n.boundingBox();
+    strict.push(bb);
+    relaxed.push(n.isParent()
+      ? { x1: bb.x1, x2: bb.x2, y1: bb.y1, y2: bb.y1 + LOCK_TITLE_BAND }
+      : bb);
+  });
   cy.nodes(".lock").forEach(function (hub) {
     var anchors = [];
     (hub.data("members") || []).forEach(function (member) {
@@ -484,10 +544,17 @@ function placeLocks() {
     });
     var ids = Object.keys(distinct);
     var pos = { x: x / anchors.length, y: y / anchors.length };
-    if (ids.length === 1 && distinct[ids[0]].data("kind") === "BOX") {
-      pos.x += distinct[ids[0]].width() / 2 + 40;
+    if (ids.length === 1) {
+      /* one anchor -- a lone member, or the box that hides them all: start
+         beside it, never on it */
+      pos.x += distinct[ids[0]].width() / 2 + hub.width() / 2 + LOCK_GAP;
     }
+    pos = freeSpot(hub, pos, strict, relaxed);
     hub.position(pos);
+    if (hub.visible()) {
+      strict.push(hubBox(hub, pos));  /* hubs clear each other too */
+      relaxed.push(hubBox(hub, pos));
+    }
   });
 }
 
@@ -500,14 +567,30 @@ var lostFeature = "";
 
 /* The totals are the emitted graph's, fixed at load: a collapse takes a
    box's members and their inner edges out of the graph and re-points the
-   border-crossing edges at the box, so live counts would read as a loss. */
-var TOTAL_NODES = elements.nodes.length, TOTAL_EDGES = elements.edges.length;
+   border-crossing edges at the box, so live counts would read as a loss.
+   Nodes and edges count the DEPENDENCY graph, as the header summary does:
+   the two halves of the header must mean one thing by "edges". The lock
+   count is the summary's arithmetic too -- a hub, a stated pair, a badge --
+   and it is the TOTAL: a live one read differently in webkit right after a
+   focus, whose style recalculation lags the layoutstop that reads it. */
+function hasClass(element, name) {
+  return String(element.classes).split(" ").indexOf(name) !== -1;
+}
+function isLock(element) { return hasClass(element, "lock"); }
+
+var TOTAL_NODES = elements.nodes.filter(function (n) { return !isLock(n); }).length;
+var TOTAL_EDGES = elements.edges.filter(function (e) { return !isLock(e); }).length;
+var TOTAL_LOCKS = elements.nodes.filter(isLock).length
+  + elements.edges.filter(function (e) { return hasClass(e, "pair"); }).length
+  + elements.nodes.filter(function (n) { return n.data.self_lock; }).length;
 
 function updateStats(suffix) {
   var collapsed = cy.nodes(".cy-expand-collapse-collapsed-node").length;
-  var vn = cy.nodes(":visible").length, ve = cy.edges(":visible").length;
+  var vn = cy.nodes(":visible").not(".lock").length;
+  var ve = cy.edges(":visible").not(".lock").length;
   stats.textContent = "visible " + vn + " / " + TOTAL_NODES + " nodes · "
     + ve + " / " + TOTAL_EDGES + " edges"
+    + (TOTAL_LOCKS ? " · " + TOTAL_LOCKS + " locks" : "")
     + (collapsed ? " · " + collapsed + (collapsed === 1 ? " box" : " boxes") + " collapsed" : "")
     + (suffix ? " · " + suffix : "") + lostFeature;
 }
@@ -531,6 +614,10 @@ function relayoutOrFit(suffix, after) {
     var layout = flow(cy.elements(":visible")).layout(elkLayout());
     layout.on("layoutstop", function () {
       placeLocks();
+      /* ELK fitted the elements it laid out, and the hubs are not among
+         them: fit again over everything drawn, or a focus whose flow half
+         is one node zooms to it and leaves the hub off-screen */
+      cy.fit(cy.nodes(":visible"), 40);
       updateStats(suffix);
       if (after) after();
     });
@@ -755,6 +842,17 @@ var POLICY_WORDS = {
   never: "never released"
 };
 
+/* What one job draws on one resource, in words. A threshold (res_type T)
+   is a LEVEL CHECK: it holds nothing, so it has no release to state --
+   `capacity.requirement_demand` owns that distinction, and the panel used
+   to report a gate as held units released on completion. */
+function demandWords(d) {
+  if (d.mode === "gate") {
+    return "threshold gate: needs " + d.quantity + " free, holds nothing";
+  }
+  return d.quantity + (d.quantity === 1 ? " unit, " : " units, ") + POLICY_WORDS[d.policy];
+}
+
 /* One member's line: who, where, what it draws or how it waits, and -- when
    the canvas is not showing it -- why not. */
 function memberLine(m) {
@@ -763,9 +861,7 @@ function memberLine(m) {
     parts.push("in box " + boxes[0]
       + (boxes.length > 1 ? " (top " + boxes[boxes.length - 1] + ")" : ""));
   }
-  if (m.quantity) {
-    parts.push(m.quantity + (m.quantity === 1 ? " unit, " : " units, ") + POLICY_WORDS[m.policy]);
-  }
+  if (m.quantity) parts.push(demandWords(m));
   if (m.how) parts.push(m.how);
   var el = cy.$id(m.id);
   if (el.empty()) {
@@ -808,8 +904,7 @@ function showLockEdgeDetails(e) {
   var rows = [
     ["kind", d.lock === "resource" ? "resource semaphore" : "mutual exclusion"],
     ["resource", d.resource],
-    ["quantity", d.quantity ? String(d.quantity) : null],
-    ["release", d.policy ? POLICY_WORDS[d.policy] : null]
+    ["demand", d.quantity ? demandWords(d) : null]
   ];
   if (d.directions) {
     d.directions.forEach(function (line) { rows.push(["waits", line]); });
@@ -946,6 +1041,7 @@ var initialDone = false, foldedInitial = false, ecFailed = false;
 
 function finishInitial() {
   placeLocks();
+  cy.fit(cy.nodes(":visible"), 40);  /* the hubs were placed after the layout */
   updateEdgeLabels();
   updateStats();
 }

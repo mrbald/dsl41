@@ -29,7 +29,7 @@ from dsl41.oracle_state import CapacityReservation, ReleasePolicy
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from dsl41.ir import CatalogIR, JobIR
+    from dsl41.ir import CatalogIR, JobIR, ResourceIR
     from dsl41.oracle_state import JobRuntime
 
 #: Sorts a waiter whose priority nothing declares -- and one whose job the
@@ -86,11 +86,8 @@ class CapacityPool:
             if key not in self._bucket_cap:
                 continue  # unsized -> not modelled here (preflight refuses run)
             resource = self.catalog.resources.get(ref.name)
-            res_type = (resource.res_type or "").strip().upper() if resource else ""
-            if res_type == "T":
-                raw.append((key, ref.quantity, "gate", None))
-            else:
-                raw.append((key, ref.quantity, "acquire", release_policy(res_type, ref.free)))
+            mode, policy = requirement_demand(resource_type(resource), ref.free)
+            raw.append((key, ref.quantity, mode, policy))
         # Coalesce duplicate bucket keys (a job listing one resource twice):
         # SUM the demand so can_admit's per-entry test and the reservation's sum
         # agree -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while
@@ -99,9 +96,7 @@ class CapacityPool:
         merged: dict[str, tuple[int, str, ReleasePolicy | None]] = {}
         for key, units, mode, policy in raw:
             if key in merged:
-                u0, m0, p0 = merged[key]
-                mode = "acquire" if "acquire" in (m0, mode) else "gate"
-                merged[key] = (u0 + units, mode, _merge_policy(p0, policy))
+                merged[key] = merge_requirements(merged[key], (units, mode, policy))
             else:
                 merged[key] = (units, mode, policy)
         return [(key, units, mode, policy) for key, (units, mode, policy) in merged.items()]
@@ -187,6 +182,46 @@ def _safe_units(accessor: object) -> int | None:
         return None
     assert value is None or isinstance(value, int)
     return value
+
+
+def resource_type(resource: ResourceIR | None) -> str:
+    """A resource's `res_type` as every reader compares it: stripped and
+    upper-cased, "" when the resource is undeclared or states none."""
+    return (resource.res_type or "").strip().upper() if resource is not None else ""
+
+
+def requirement_demand(res_type: str, free: str | None) -> tuple[str, ReleasePolicy | None]:
+    """What one `resources:` group DEMANDS: the mode and, when it holds units,
+    the policy that gives them back.
+
+    'gate' is a threshold (SEM `res_type: T`): a level check that holds
+    nothing and so releases nothing, which is why it has no policy.
+    'acquire' holds `QUANTITY` units until `release_policy` says otherwise.
+
+    PUBLIC because the explore page states the same demand in words
+    (DL-192), and the T branch is half the rule: reusing `release_policy`
+    alone reported a threshold gate as held units released on completion."""
+    if res_type == "T":
+        return "gate", None
+    return "acquire", release_policy(res_type, free)
+
+
+def merge_requirements(
+    left: tuple[int, str, ReleasePolicy | None], right: tuple[int, str, ReleasePolicy | None]
+) -> tuple[int, str, ReleasePolicy | None]:
+    """Coalesce two requirements on ONE bucket -- a job listing the same
+    resource twice. The demand SUMS (two `(LOCK, QUANTITY=2)` groups want
+    four units, not two), a bucket any group holds is held, and the release
+    policy merges to the most restrictive so asymmetric FREE never frees
+    early. PUBLIC with `requirement_demand`: the page draws one link and one
+    row per (job, resource) and must agree with what the pool reserves."""
+    units, mode, policy = left
+    other_units, other_mode, other_policy = right
+    return (
+        units + other_units,
+        "acquire" if "acquire" in (mode, other_mode) else "gate",
+        _merge_policy(policy, other_policy),
+    )
 
 
 def release_policy(res_type: str, free: str | None) -> ReleasePolicy:

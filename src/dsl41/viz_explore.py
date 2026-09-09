@@ -60,7 +60,7 @@ from collections.abc import Callable, Iterator
 from importlib.resources import files
 from typing import Literal, NamedTuple, cast
 
-from dsl41.capacity import release_policy
+from dsl41.capacity import merge_requirements, requirement_demand, resource_type
 from dsl41.conditions import And, Atom, Cond, Or, Paren, iter_atoms
 from dsl41.derive import (
     BoxTree,
@@ -75,6 +75,7 @@ from dsl41.derive import (
 # only `--format explore` pays for the decompiler surface (review NIT)
 from dsl41.dsl import cond_to_source
 from dsl41.ir import CatalogIR, ResourceRef
+from dsl41.oracle_state import ReleasePolicy
 from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule, mutex_plan
 from dsl41.viz_html import substitute
 
@@ -260,14 +261,6 @@ def _take_edge(queue: list[int], graph: DerivedGraph, atom: Atom, where: str) ->
 
 _LOCK_GLYPH = "\N{LOCK}"
 
-#: How a release policy reads in the details panel. `capacity.release_policy`
-#: owns the table that PICKS one (DL-50); this only spells the answer.
-_POLICY_WORDS = {
-    "completion": "released on completion",
-    "success": "released on success",
-    "never": "never released",
-}
-
 
 def _box_chain(tree: BoxTree, name: str) -> list[str]:
     """This job's enclosing boxes, innermost first. The page resolves a lock
@@ -291,30 +284,52 @@ def _lock_id(kind: str, name: str, taken: set[str]) -> str:
     return candidate
 
 
-def _link_label(ref: ResourceRef) -> str:
-    """What one requirement draws: the quantity when it is more than one
-    unit, plus the FREE letter when the job states one. Both silent in the
-    ordinary case -- one unit, engine default -- like the DL-35 thinning."""
-    parts = [str(ref.quantity)] if ref.quantity > 1 else []
-    if ref.free is not None:
-        parts.append(ref.free)
+def _link_label(quantity: int, refs: list[ResourceRef]) -> str:
+    """What one job draws on one resource: the quantity when it is more than
+    one unit, plus the FREE letter when the job states one and only one.
+    Both silent in the ordinary case -- one unit, engine default -- like the
+    DL-35 thinning. Two groups on one resource state one summed quantity and
+    no single letter; the panel gives the merged policy in words."""
+    parts = [str(quantity)] if quantity > 1 else []
+    if len(refs) == 1 and refs[0].free is not None:
+        parts.append(refs[0].free)
     return " ".join(parts)
+
+
+def _demand(catalog: CatalogIR, refs: list[ResourceRef]) -> tuple[int, str, str | None]:
+    """One job's whole demand on ONE resource: (units, mode, policy).
+
+    A job may list the same resource twice, and the pool coalesces those --
+    the demand SUMS and the policies merge to the most restrictive
+    (`capacity.merge_requirements`). Two links drawn on top of each other
+    and two rows reading "1 unit" would say something the runner does not
+    do. The T branch is `capacity.requirement_demand`'s too: a threshold
+    holds nothing, so it has no release policy to state."""
+    res_type = resource_type(catalog.resources.get(refs[0].name))
+    total: tuple[int, str, ReleasePolicy | None] | None = None
+    for ref in refs:
+        mode, policy = requirement_demand(res_type, ref.free)
+        entry = (ref.quantity, mode, policy)
+        total = entry if total is None else merge_requirements(total, entry)
+    assert total is not None  # a resource is in `consumers` only if a ref made it
+    return total
 
 
 def _resource_locks(
     catalog: CatalogIR, graph: DerivedGraph, taken: set[str]
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """One hub per CONSUMED resource, in first-consumption order, plus one
-    undirected link per requirement. A resource nothing consumes is not
-    drawn -- the summary counts those, so the omission is stated, not
-    silent."""
-    consumers: dict[str, list[tuple[str, ResourceRef]]] = {}
+    undirected link per (job, resource) -- not per requirement group, which
+    would draw a job that lists one resource twice as two coincident links.
+    A resource nothing consumes is not drawn: the summary counts those, so
+    the omission is stated, not silent."""
+    consumers: dict[str, dict[str, list[ResourceRef]]] = {}
     for name, job in catalog.jobs.items():
         for ref in job.resources:
-            consumers.setdefault(ref.name, []).append((name, ref))
+            consumers.setdefault(ref.name, {}).setdefault(name, []).append(ref)
     nodes: list[dict[str, object]] = []
     links: list[dict[str, object]] = []
-    for res_name, refs in consumers.items():
+    for res_name, by_job in consumers.items():
         resource = catalog.resources.get(res_name)
         try:
             capacity = resource.capacity_units() if resource is not None else None
@@ -322,18 +337,18 @@ def _resource_locks(
             # a malformed `amount` is preflight's loud refusal (DL-50), never a
             # crash in a lens: the hub reads unsized, like an undeclared one
             capacity = None
-        res_type = (resource.res_type or "").strip().upper() if resource is not None else ""
         hub = _lock_id("r", res_name, taken)
         members: list[dict[str, object]] = []
-        for job_name, ref in refs:
-            policy = release_policy(res_type, ref.free)
+        for job_name, refs in by_job.items():
+            quantity, mode, policy = _demand(catalog, refs)
             members.append(
                 {
                     "id": job_name,
                     "job": job_name,
                     "boxes": _box_chain(graph.box_tree, job_name),
-                    "quantity": ref.quantity,
-                    "free": ref.free,
+                    "quantity": quantity,
+                    "free": refs[0].free if len(refs) == 1 else None,
+                    "mode": mode,
                     "policy": policy,
                 }
             )
@@ -344,10 +359,11 @@ def _resource_locks(
                         "target": job_name,
                         "lock": "resource",
                         "resource": res_name,
-                        "quantity": ref.quantity,
-                        "free": ref.free,
+                        "quantity": quantity,
+                        "free": refs[0].free if len(refs) == 1 else None,
+                        "mode": mode,
                         "policy": policy,
-                        "label": _link_label(ref),
+                        "label": _link_label(quantity, refs),
                     },
                     "classes": "lock resource member",
                 }
@@ -483,7 +499,7 @@ def _lock_elements(
     return res_nodes + mutex_nodes, links
 
 
-def unused_resources(catalog: CatalogIR) -> list[str]:
+def _unused_resources(catalog: CatalogIR) -> list[str]:
     """Declared `insert_resource` records no job draws on, in catalog order.
     The page draws no hub for them -- nothing would join it -- so the
     summary counts them instead (DL-07's spirit: state the omission)."""
@@ -789,7 +805,7 @@ def to_explore_html(
         + sum(1 for e in elements["edges"] if "pair" in str(e["classes"]).split())
         + sum(1 for n in elements["nodes"] if cast("dict[str, object]", n["data"]).get("self_lock"))
     )
-    unused = len(unused_resources(catalog))
+    unused = len(_unused_resources(catalog))
     # the DEPENDENCY edges: lock links share the element list and are not
     # dependencies -- the locks count below carries them
     flow_edges = sum(1 for e in elements["edges"] if "lock" not in str(e["classes"]).split())
