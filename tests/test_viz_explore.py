@@ -85,6 +85,38 @@ def test_elements_nodes_carry_meta_and_box_parent() -> None:
     assert member["data"]["detail"] == "sleep 15"  # type: ignore[index]
 
 
+#: A box nested inside a box (B holds M, N, IB; IB holds IM) -- the shape
+#: DL-190's `collapse_threshold` marking rule needs to prove itself against:
+#: a nested box can be over the threshold too, and must never be marked
+#: itself. test_viz_explore_browser.py imports this one (unlike S_EDGE_TEXT
+#: above, which predates this module and stayed duplicated per file) --
+#: one module owns the text, the other builds pages from it.
+_NESTED_BOX_TEXT = (
+    "insert_job: P\njob_type: c\ncommand: p\nmachine: m1\n\n"
+    "insert_job: Q\njob_type: c\ncommand: q\nmachine: m1\n\n"
+    "insert_job: B\njob_type: b\ncondition: s(P)\n\n"
+    "insert_job: M\njob_type: c\nbox_name: B\ncondition: s(Q)\ncommand: m\nmachine: m1\n\n"
+    "insert_job: N\njob_type: c\nbox_name: B\ncommand: n\nmachine: m1\n\n"
+    "insert_job: IB\njob_type: b\nbox_name: B\n\n"
+    "insert_job: IM\njob_type: c\nbox_name: IB\ncommand: im\nmachine: m1\n\n"
+    "insert_job: C\njob_type: c\ncondition: s(B)\ncommand: c\nmachine: m1\n\n"
+    "insert_job: D\njob_type: c\ncondition: s(M)\ncommand: d\nmachine: m1\n"
+)
+
+
+def test_elements_collapse_threshold_never_marks_a_nested_box() -> None:
+    # DL-190: the rule is TOP-LEVEL boxes only. B has 3 direct members (M, N,
+    # IB) -- over a threshold of 0, and gets marked. IB has 1 direct member
+    # (IM) -- also over 0, but IB's own parent is B, not None, so the
+    # emitter must never mark it: a nested box goes with its parent.
+    catalog = catalog_of(_NESTED_BOX_TEXT)
+    els = _elements(catalog, derive_graph(catalog), collapse_threshold=0)
+    by_id = {n["data"]["id"]: n["data"] for n in els["nodes"]}  # type: ignore[index]
+    assert by_id["B"].get("collapsed") is True
+    assert "collapsed" not in by_id["IB"]
+    assert "collapsed" not in by_id["IM"]  # not a box at all
+
+
 def test_elements_synthesize_ext_nodes_for_undefined_and_external() -> None:
     els = _corpus_elements("sem06_dangling.jil")
     assert _node(els, "THIS_JOB_DOES_NOT_EXIST")["classes"] == "ext"
@@ -320,6 +352,25 @@ def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
     names = [n["data"]["id"] for n in _page_elements(page)["nodes"]]  # type: ignore[index]
     assert names == ["EVIL__DSL41_CUSTOM_ELEMENTS_JS__X"]  # JSON intact, name verbatim
     assert "Explore: x__DSL41_ELEMENTS_JSON__.jil</title>" in page
+
+
+def test_to_explore_html_wires_the_trace_toggle_and_step_functions() -> None:
+    # DL-190: the trace-through-boxes control, the two collapse toolbar
+    # buttons, and the two step functions the focus items read closure() over
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    assert 'id="trace-boxes"' in page
+    assert 'id="collapse-all"' in page
+    assert 'id="expand-all"' in page
+    assert "function fanInStep(nodes)" in page
+    assert "function fanOutStep(nodes)" in page
+
+
+def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:
+    # None is the CLI's own default for --format explore (cli_compile.py):
+    # the page must open on the whole graph, not the report's 12
+    catalog = catalog_of(_NESTED_BOX_TEXT)
+    page = to_explore_html(catalog, collapse_threshold=None)
+    assert '"collapsed"' not in page
 
 
 def test_to_explore_html_maps_direction_to_elk() -> None:

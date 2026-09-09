@@ -12,9 +12,8 @@ It is a smoke test, not a rendering test: it asks whether each control is wired
 and does its job, never how the picture looks.
 
 Opt-in, and skipped -- never failed -- when it is not: driving three engines
-costs ~50s, roughly the whole rest of the suite, and the browsers are a separate
-~200MB install, so a plain `pytest -q` must neither slow down nor start needing
-them. DSL41_BROWSER_TESTS=1 turns it on; .github/workflows/ci.yml's explore-page
+costs well under two minutes, and the browsers are a separate ~200MB install,
+so a plain `pytest -q` must neither slow down nor start needing them. DSL41_BROWSER_TESTS=1 turns it on; .github/workflows/ci.yml's explore-page
 job sets it, which is where these run on every push (playwright itself is a
 dev-only dependency -- the package keeps its three runtime deps).
 """
@@ -41,7 +40,9 @@ pytest.importorskip(
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import corpus_catalog
+from test_viz_explore import _NESTED_BOX_TEXT
 
+from dsl41.ir import lower_source
 from dsl41.viz_explore import to_explore_html
 
 ENGINES = ("chromium", "webkit", "firefox")
@@ -82,25 +83,78 @@ def page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
     return path.as_uri()
 
 
-@pytest.fixture(scope="module", params=ENGINES)
-def driven(request: pytest.FixtureRequest, page_url: str) -> Any:
+@pytest.fixture(scope="module")
+def _playwright() -> Any:
+    """One Playwright driver for the whole module. `driven`, `driven_trace`
+    and `driven_folded` are all module-scoped and independently parametrized,
+    so pytest keeps more than one alive at once (a later test in the file
+    can still need an earlier fixture's engine) -- a second, nested
+    `sync_playwright()` while an outer one is still open raises "Sync API
+    inside the asyncio loop", not a graph assertion failure, so the fixtures
+    below share this one instance and each launches (and closes) its own
+    browser."""
     with sync_playwright() as pw:
-        try:
-            browser = getattr(pw, request.param).launch()
-        except PlaywrightError as exc:  # pragma: no cover -- environment, not logic
-            if "Executable doesn't exist" not in str(exc):
-                raise
-            pytest.skip(
-                f"the {request.param} binary is absent; `playwright install {request.param}`"
-            )
-        page = browser.new_page(viewport={"width": 1600, "height": 1000})
-        d = Driven(engine=request.param, page=page)
-        page.on("pageerror", lambda err: d.errors.append(str(err)))
-        page.goto(page_url)
-        try:
-            yield d
-        finally:
-            browser.close()
+        yield pw
+
+
+def _open_driven(pw: Any, engine: str, url: str) -> Any:
+    """`driven`, `driven_trace` and `driven_folded`'s shared body: launch one
+    engine from the module's Playwright instance and load one page into it."""
+    try:
+        browser = getattr(pw, engine).launch()
+    except PlaywrightError as exc:  # pragma: no cover -- environment, not logic
+        if "Executable doesn't exist" not in str(exc):
+            raise
+        pytest.skip(f"the {engine} binary is absent; `playwright install {engine}`")
+    page = browser.new_page(viewport={"width": 1600, "height": 1000})
+    d = Driven(engine=engine, page=page)
+    page.on("pageerror", lambda err: d.errors.append(str(err)))
+    page.goto(url)
+    try:
+        yield d
+    finally:
+        browser.close()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven(request: pytest.FixtureRequest, page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, page_url)
+
+
+@pytest.fixture(scope="module")
+def trace_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """DL-190: boxes nested two deep (B holds M, N, IB; IB holds IM), a
+    box-gated consumer (C, on s(B)) and a member-gated one (D, on s(M)) --
+    the shape the fan-in/fan-out-through-boxes rules and box collapse need,
+    which the corpus page (no boxes nested past one level) cannot exercise.
+    `_NESTED_BOX_TEXT` is test_viz_explore.py's own fixture, unmodified."""
+    catalog = lower_source(_NESTED_BOX_TEXT)
+    path = tmp_path_factory.mktemp("explore-trace") / "trace.html"
+    path.write_text(to_explore_html(catalog, title="trace"), encoding="utf-8")
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module")
+def folded_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Same catalog, `--collapse-threshold 1`: B has 3 direct members and
+    folds before the first layout; IB has 1 (not MORE than 1) and is nested
+    besides, so it never folds on its own."""
+    catalog = lower_source(_NESTED_BOX_TEXT)
+    path = tmp_path_factory.mktemp("explore-folded") / "folded.html"
+    path.write_text(
+        to_explore_html(catalog, title="folded", collapse_threshold=1), encoding="utf-8"
+    )
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_trace(request: pytest.FixtureRequest, trace_page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, trace_page_url)
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_folded(request: pytest.FixtureRequest, folded_page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, folded_page_url)
 
 
 # --------------------------------------------------------------------- helpers
@@ -170,6 +224,32 @@ def _client_point(d: Driven, node_id: str) -> dict[str, float]:
         node_id,
     )
     return point
+
+
+def _visible_ids(d: Driven) -> list[str]:
+    ids: list[str] = d.page.evaluate("() => cy.nodes(':visible').map(n => n.id())")
+    return sorted(ids)
+
+
+def _tree_ids(d: Driven, node_id: str, step: str) -> list[str]:
+    """The DL-190 focus-item tree: `closure(cy.$id(node_id), step).map(id).sort()`,
+    ids only -- `step` is a page-global step function's own name (`fanInStep`
+    or `fanOutStep`), a fixed set of literals this module controls, never
+    test input, so splicing it into the expression is safe."""
+    ids: list[str] = d.page.evaluate(
+        f"() => closure(cy.$id('{node_id}'), {step}).map(n => n.id()).sort()"
+    )
+    return ids
+
+
+def _detail_rows(d: Driven) -> dict[str, str]:
+    """#d-rows as a dict, keyed by the th label -- the panel omits empty
+    rows (showDetails), so a key's absence is itself informative."""
+    rows: list[list[str]] = d.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr')).map("
+        "tr => [tr.querySelector('th').textContent, tr.querySelector('td').textContent])"
+    )
+    return dict(rows)
 
 
 # ----------------------------------------------------------------------- tests
@@ -349,3 +429,265 @@ def test_no_uncaught_page_errors(driven: Driven) -> None:
     throwing is not working -- and DL-77's throw was silent."""
     _ready(driven)
     assert driven.errors == [], f"{driven.engine}: {driven.errors}"
+
+
+# ---------------------------------------------------- DL-190: collapse and trace
+#
+# `driven_trace` shares one `trace_page_url` load per engine across every test
+# below that takes it, module-scoped and run in file order (pyproject.toml
+# carries no pytest-randomly or similar, and there is no conftest.py to add
+# one). Several of these tests build on the graph state the previous one left, the
+# same way the corpus tests above lean on `_show_all` -- documented at each
+# such test, and each mutating test either restores the base state itself or
+# hands off to a test that expects exactly what it left behind.
+
+
+def test_canvas_layers_include_the_expand_collapse_cue(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    # cytoscape's own three canvas layers, plus expand-collapse's corner-cue
+    # overlay -- its absence is this extension failing to attach at all
+    assert driven_trace.page.evaluate("() => document.querySelectorAll('#cy canvas').length") == 4
+
+
+def test_fan_in_tree_of_m_traces_through_its_box(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    assert _tree_ids(driven_trace, "M", "fanInStep") == ["B", "M", "P", "Q"]
+
+
+def test_fan_out_tree_of_m_traces_through_its_box(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    assert _tree_ids(driven_trace, "M", "fanOutStep") == ["C", "D", "M"]
+
+
+def test_fan_out_tree_of_b_reaches_every_member_and_release(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    assert _tree_ids(driven_trace, "B", "fanOutStep") == ["B", "C", "D", "IB", "IM", "M", "N"]
+
+
+def test_fan_in_tree_of_im_reaches_both_enclosing_boxes(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    assert _tree_ids(driven_trace, "IM", "fanInStep") == ["B", "IB", "IM", "P"]
+
+
+def test_trace_boxes_off_drops_box_gating_from_fan_in_and_fan_out(driven_trace: Driven) -> None:
+    """The toggle read directly (`viaBoxes()` reads `.checked` live, no change
+    event needed) -- restored to checked after, in a `finally`, so a failed
+    assertion here cannot leave every later test in this block silently
+    computing edges-only trees instead of the through-boxes ones they claim."""
+    _ready(driven_trace)
+    driven_trace.page.evaluate("() => { document.getElementById('trace-boxes').checked = false; }")
+    try:
+        assert _tree_ids(driven_trace, "M", "fanInStep") == ["M", "Q"]
+        assert _tree_ids(driven_trace, "B", "fanOutStep") == ["B", "C"]
+    finally:
+        driven_trace.page.evaluate(
+            "() => { document.getElementById('trace-boxes').checked = true; }"
+        )
+
+
+def test_context_menu_lists_the_box_items_in_declared_order(driven_trace: Driven) -> None:
+    """`collapse`/`expand` sit only where their selector matches the clicked
+    node (a plain box shows `collapse`, not `expand`), but the DOM holds
+    every configured item regardless -- non-matching ones are `display:
+    none`, not absent -- so querying all thirteen ids finds them all, in the
+    order menuItems.splice/.push builds them."""
+    _ready(driven_trace)
+    point = _client_point(driven_trace, "B")
+    driven_trace.page.mouse.click(point["x"], point["y"], button="right")
+    driven_trace.page.wait_for_timeout(500)
+    try:
+        items = driven_trace.page.evaluate(
+            "() => Array.from(document.querySelectorAll("
+            "'#fan-in,#fan-out,#fan-in-tree,#fan-out-tree,#both-trees,#neighbours,#hide,"
+            "#collapse,#expand,#menu-show-all,#menu-fit,#menu-collapse-all,#menu-expand-all'"
+            ")).map(e => e.id)"
+        )
+        assert items == [
+            "fan-in",
+            "fan-out",
+            "fan-in-tree",
+            "fan-out-tree",
+            "both-trees",
+            "neighbours",
+            "hide",
+            "collapse",
+            "expand",
+            "menu-show-all",
+            "menu-fit",
+            "menu-collapse-all",
+            "menu-expand-all",
+        ], driven_trace.engine
+    finally:
+        driven_trace.page.mouse.click(10, 10)  # dismiss: an outside click, nothing under test
+        driven_trace.page.wait_for_timeout(200)
+
+
+def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven) -> None:
+    """Leaves B collapsed: the next two tests continue from this state."""
+    _ready(driven_trace)
+    driven_trace.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+
+    assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
+    meta_ends = sorted(
+        driven_trace.page.evaluate(
+            "() => cy.edges('.cy-expand-collapse-meta-edge')"
+            ".map(e => e.source().id() + '>' + e.target().id())"
+        )
+    )
+    assert meta_ends == ["B>D", "Q>B"], driven_trace.engine
+    assert driven_trace.page.evaluate("() => nodeLabel(cy.$id('B'))") == "B (4)", (
+        driven_trace.engine
+    )
+    stats = driven_trace.page.inner_text("#stats")
+    assert "visible 5 / 9 nodes · 4 / 4 edges · 1 box collapsed" in stats, (
+        driven_trace.engine,
+        stats,
+    )
+    assert _tree_ids(driven_trace, "C", "fanInStep") == ["B", "C", "P", "Q"]
+
+
+def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: Driven) -> None:
+    """Continues from the dbltap test above -- B is still collapsed. Tapping
+    only opens the panel, so this leaves the collapse untouched for the
+    search test after it."""
+    _ready(driven_trace)
+    stats = driven_trace.page.inner_text("#stats")
+    assert "1 box collapsed" in stats, (
+        f"{driven_trace.engine}: expected B still collapsed from the prior test, got {stats!r}"
+    )
+
+    driven_trace.page.evaluate(
+        "() => { cy.edges('.cy-expand-collapse-meta-edge')"
+        ".filter(e => e.source().id() === 'Q')[0].emit('tap'); }"
+    )
+    driven_trace.page.wait_for_timeout(200)
+    rows = _detail_rows(driven_trace)
+    assert rows["stands for"] == "Q → M (inside a collapsed box)", (driven_trace.engine, rows)
+    assert rows["via"] == "success", (driven_trace.engine, rows)
+    _click(driven_trace, "#d-close")
+
+    driven_trace.page.evaluate("() => { cy.$id('B').emit('tap'); }")
+    driven_trace.page.wait_for_timeout(200)
+    rows = _detail_rows(driven_trace)
+    assert rows["members"] == "4 (collapsed)", (driven_trace.engine, rows)
+    _click(driven_trace, "#d-close")
+
+
+def test_search_expands_a_collapsed_box_to_find_the_hit(driven_trace: Driven) -> None:
+    """Continues from the collapsed B left above -- asserted, not just
+    assumed, so a reordering fails here with a clear diagnosis instead of
+    passing vacuously (a search on an already-expanded page would also find
+    IM). Restores the page to fully expanded and the search box empty -- the
+    base state the remaining tests in this block assume. Also re-fits the
+    view: the search's own `cy.fit(hits, 60)` zooms tight around the one
+    hit, which can leave other nodes' rendered position outside the fixed
+    1600x1000 viewport -- fine for the id-only assertions elsewhere, but the
+    next tests click real screen points and need everything back on screen."""
+    _ready(driven_trace)
+    stats = driven_trace.page.inner_text("#stats")
+    assert "1 box collapsed" in stats, (
+        f"{driven_trace.engine}: expected B still collapsed from the dbltap test, got {stats!r}"
+    )
+    driven_trace.page.fill("#search", "IM")
+    driven_trace.page.press("#search", "Enter")
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_trace) == [
+        "B",
+        "C",
+        "D",
+        "IB",
+        "IM",
+        "M",
+        "N",
+        "P",
+        "Q",
+    ], driven_trace.engine
+    assert driven_trace.page.inner_text("#stats").endswith("1 hit"), (
+        driven_trace.engine,
+        driven_trace.page.inner_text("#stats"),
+    )
+    driven_trace.page.fill("#search", "")
+    driven_trace.page.press("#search", "Enter")
+    _show_all(driven_trace)
+
+
+def test_context_menu_collapse_then_a_mouse_dblclick_expand(driven_trace: Driven) -> None:
+    """Real controls, not page globals: a genuine right-click plus the
+    `#collapse` menu item (the technique
+    test_context_menu_opens_on_right_click_and_an_item_narrows_the_graph
+    above uses for the DL-77 defect), then a genuine mouse double-click to
+    expand -- `cy.$id('B').emit('dbltap')` above proves the toggle wires up,
+    this proves a real double-click reaches it too. Starts and ends fully
+    expanded."""
+    _ready(driven_trace)
+    point = _client_point(driven_trace, "B")
+    driven_trace.page.mouse.click(point["x"], point["y"], button="right")
+    driven_trace.page.wait_for_timeout(500)
+    _click(driven_trace, "#collapse")
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
+
+    point = _client_point(driven_trace, "B")  # collapse moved it; re-read
+    driven_trace.page.mouse.dblclick(point["x"], point["y"])
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_trace) == [
+        "B",
+        "C",
+        "D",
+        "IB",
+        "IM",
+        "M",
+        "N",
+        "P",
+        "Q",
+    ], driven_trace.engine
+
+
+def test_collapse_all_and_expand_all_toolbar_buttons(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    _click(driven_trace, "#collapse-all")
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
+
+    _click(driven_trace, "#expand-all")
+    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_trace) == [
+        "B",
+        "C",
+        "D",
+        "IB",
+        "IM",
+        "M",
+        "N",
+        "P",
+        "Q",
+    ], driven_trace.engine
+
+
+def test_no_uncaught_page_errors_on_the_trace_page(driven_trace: Driven) -> None:
+    _ready(driven_trace)
+    assert driven_trace.errors == [], f"{driven_trace.engine}: {driven_trace.errors}"
+
+
+def test_folded_page_starts_with_box_b_already_collapsed(driven_folded: Driven) -> None:
+    """--collapse-threshold 1 (folded_page_url): B (3 direct members) folds;
+    IB (1 member, and nested under B besides) does not fold on its own --
+    the emitter-level rule test_elements_collapse_threshold_never_marks_a_
+    nested_box in test_viz_explore.py pins. This pins the RESULT once the
+    page is ready: that B really is collapsed, not merely marked, once the
+    page's own initial-fold step has had a chance to run (the production
+    code's docstring, not this test, is what claims the fold happens before
+    the first layout)."""
+    _ready(driven_folded)
+    assert _visible_ids(driven_folded) == ["B", "C", "D", "P", "Q"], driven_folded.engine
+    stats = driven_folded.page.inner_text("#stats")
+    assert "visible 5 / 9 nodes · 4 / 4 edges · 1 box collapsed" in stats, (
+        driven_folded.engine,
+        stats,
+    )
+
+
+def test_no_uncaught_page_errors_on_the_folded_page(driven_folded: Driven) -> None:
+    _ready(driven_folded)
+    assert driven_folded.errors == [], f"{driven_folded.engine}: {driven_folded.errors}"
