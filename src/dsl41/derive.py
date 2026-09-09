@@ -255,7 +255,7 @@ class DerivedGraph(BaseModel):
     #: included. mutex_groups sorts each pair and loses who references whom;
     #: L021 needs the direction (the referencing job is the one every target
     #: completion WAKES), and re-deriving it there would restate
-    #: _is_mutex_ref the way DL-162 forbids for is_start_gate.
+    #: is_mutex_atom the way DL-162 forbids for is_start_gate.
     bare_notrunning: dict[str, list[str]] = {}
     or_shapes: list[OrShape] = []  # M12 classifier output
     box_tree: BoxTree = BoxTree()
@@ -288,19 +288,29 @@ def _extract_refs(catalog: CatalogIR) -> list[_RawRef]:
     return refs
 
 
-def _is_mutex_ref(ref: _RawRef) -> bool:
+def is_mutex_atom(
+    origin: Literal["condition", "box_success", "box_failure"],
+    atom: StatusAtom | ExitCodeAtom | GlobalAtom,
+) -> bool:
     """Pass 2 predicate: local UNQUALIFIED n() in `condition` is a mutex
     candidate, not an edge (M07 / dossier R6: translating them as edges
     creates false ordering). A lookback-qualified n() stays an edge (M03):
     the instantaneous mutual-exclusion reading applies only to the bare
     form, and mutex_groups cannot carry the qualifier -- dropping it would
-    be silent loss (DL-12)."""
+    be silent loss (DL-12).
+
+    PUBLIC because it answers "does this atom become an edge?", which a
+    reader that walks a condition tree BESIDE the edges has to ask too: the
+    explore page maps every edge back to the atom it came from and needs to
+    know which atoms deliberately have none (DL-191). Re-deriving it there
+    would restate this predicate the way DL-162 forbids for is_start_gate.
+    Takes the two facts it reads, not the pass-1 `_RawRef` around them."""
     return (
-        ref.origin == "condition"
-        and isinstance(ref.atom, StatusAtom)
-        and ref.atom.status == "NOTRUNNING"
-        and ref.atom.job.instance is None
-        and ref.atom.lookback is None
+        origin == "condition"
+        and isinstance(atom, StatusAtom)
+        and atom.status == "NOTRUNNING"
+        and atom.job.instance is None
+        and atom.lookback is None
     )
 
 
@@ -311,7 +321,7 @@ def _bare_notrunning(refs: list[_RawRef]) -> dict[str, list[str]]:
     agreement by construction (arch-review 2026-08-28)."""
     out: dict[str, set[str]] = {}
     for ref in refs:
-        if _is_mutex_ref(ref):
+        if is_mutex_atom(ref.origin, ref.atom):
             assert isinstance(ref.atom, StatusAtom)
             out.setdefault(ref.dst, set()).add(ref.atom.job.name)
     return {dst: sorted(targets) for dst, targets in sorted(out.items())}
@@ -349,7 +359,11 @@ def _condition_pred_map(catalog: CatalogIR, refs: list[_RawRef]) -> dict[str, se
     atoms excluded -- SET_GLOBAL events carry no cadence)."""
     preds: dict[str, set[str]] = {name: set() for name in catalog.jobs}
     for ref in refs:
-        if ref.origin != "condition" or _is_mutex_ref(ref) or isinstance(ref.atom, GlobalAtom):
+        if (
+            ref.origin != "condition"
+            or is_mutex_atom(ref.origin, ref.atom)
+            or isinstance(ref.atom, GlobalAtom)
+        ):
             continue
         if ref.atom.job.instance is None:
             preds[ref.dst].add(ref.atom.job.name)
@@ -967,7 +981,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
     edges = [
         _edge_for_ref(ref, catalog, tree, cadence, boundary)  # passes 3 + 5
         for ref in refs
-        if not _is_mutex_ref(ref)
+        if not is_mutex_atom(ref.origin, ref.atom)
     ]
     or_shapes = _or_shapes(catalog, cond_preds)  # pass 4 (ancestors computed inside)
     redesign_flags = [

@@ -50,6 +50,19 @@
              cursor: pointer; padding: 0; }
   .hint { color: #9ca3af; font-size: 0.8rem; }
 
+  /* the condition tree in the details panel (DL-191) */
+  #d-tree { margin-top: 0.5rem; font-size: 0.85rem; }
+  #d-tree .attr { color: #6b7280; margin-top: 0.45rem; }
+  #d-tree ul { list-style: none; margin: 0.1rem 0 0; padding-left: 0.9rem; }
+  #d-tree li { margin: 0.1rem 0; }
+  #d-tree .op { color: #6b7280; }
+  #d-tree .off { color: #9ca3af; }
+  #d-tree .swatch { display: inline-block; width: 0.6rem; height: 0.6rem;
+             border-radius: 2px; margin-right: 0.3rem; vertical-align: middle; }
+  #d-tree button.leaf { border: 0; background: none; padding: 0; font: inherit;
+             color: #1d4ed8; cursor: pointer; text-align: left; }
+  #d-tree button.leaf:hover { text-decoration: underline; }
+
   /* begin cytoscape-context-menus 4.1.0 CSS -- inlined (re-indented;
      content drift-checked against the npm package line-by-line by
      scripts/vendor_mermaid.sh; the submenu indicator asset is never
@@ -127,6 +140,8 @@
     <span class="hint">right-click a node to focus / hide &middot; click for
     details &middot; double-click a box, or its corner cue, to collapse or
     expand it &middot; drag pans, wheel zooms</span>
+    <span class="hint">all incoming arrows must hold (AND) unless the job
+    carries &#8744; &middot; a bare n() is a lock and draws no arrow</span>
   </div>
 </header>
 <div id="wrap">
@@ -135,6 +150,7 @@
     <button type="button" id="d-close" title="close">&#10005;</button>
     <h2 id="d-title"></h2>
     <table><tbody id="d-rows"></tbody></table>
+    <div id="d-tree"></div>
   </aside>
 </div>
 <!-- customElements polyfill FIRST: cytoscape-context-menus builds its menu
@@ -192,11 +208,35 @@ function foldedMembers(box) {
   return ec ? ec.getCollapsedChildrenRecursively(box).nodes().length : 0;
 }
 
+/* The shapes of this node's own conditions -- one per condition-bearing
+   attribute, so a box's box_success counts as much as a job's condition. */
+function condShapes(ele) {
+  var shapes = ele.data("cond_shape") || {};
+  return Object.keys(shapes).map(function (key) { return shapes[key]; });
+}
+
+/* The badge (DL-191): the page's default reading is that every incoming
+   arrow must hold, so only a departure from it is announced. A shape the
+   canvas draws as branches gets the OR sign; one too deep to draw gets the
+   starred form, and the panel's tree and text are then the honest reading.
+   Read off the node's OWN data: a collapsed box shows its own condition's
+   badge and never merges its members'. */
+function condBadge(ele) {
+  var shapes = condShapes(ele);
+  if (shapes.indexOf("complex") !== -1) return " \u2228*";
+  for (var i = 0; i < shapes.length; i++) {
+    if (shapes[i] === "any" || shapes[i] === "all-of-any" || shapes[i] === "any-of-all") {
+      return " \u2228";
+    }
+  }
+  return "";
+}
+
 function nodeLabel(ele) {
   if (ec && ele.hasClass("cy-expand-collapse-collapsed-node")) {
-    return ele.data("label") + " (" + foldedMembers(ele) + ")";
+    return ele.data("label") + " (" + foldedMembers(ele) + ")" + condBadge(ele);
   }
-  return ele.data("label");
+  return ele.data("label") + condBadge(ele);
 }
 
 /* every member under a box, expanded or not: the visible descendants plus
@@ -209,11 +249,21 @@ function memberCount(box) {
   return count;
 }
 
-var cy = cytoscape({
-  container: document.getElementById("cy"),
-  elements: elements,
-  boxSelectionEnabled: false,
-  style: [
+/* Six-step branch ramp (DL-191). Colour is the REDUNDANT channel, as it is
+   everywhere else in this grammar: the branch suffix on the label and the
+   hollow arrowhead carry the fact, and the paint only groups one tapped
+   node's alternatives. Okabe-Ito derived, so the six stay apart under the
+   common colour-vision deficiencies; a seventh branch wraps around. */
+var BRANCH_COLORS = ["#0072b2", "#d55e00", "#009e73", "#cc79a7", "#7c3aed", "#a16207"];
+var BRANCH_CLASSES = BRANCH_COLORS.map(function (c, i) { return "br-" + i; }).join(" ");
+function branchStyles() {
+  return BRANCH_COLORS.map(function (color, i) {
+    return { selector: "edge.br-" + i,
+             style: { "line-color": color, "target-arrow-color": color, color: color } };
+  });
+}
+
+var STYLE_BASE = [
     { selector: "node", style: {
         shape: "round-rectangle",
         width: function (ele) {
@@ -296,24 +346,44 @@ var cy = cytoscape({
         "text-opacity": 0,
         "text-background-opacity": 0
     } },
+    { selector: "edge.any", style: {  /* one alternative of an OR, not a requirement */
+        "target-arrow-fill": "hollow"  /* the line-style channel stays cls's */
+    } }
+  ];
+
+/* BELOW the branch ramp on purpose: a meta-edge stands for several edges at
+   once, so it must show no single branch's paint, label or hollow head. */
+var STYLE_TAIL = [
     { selector: "edge.cy-expand-collapse-meta-edge", style: {  /* stands for every edge that crossed a collapsed box's border */
         label: "",
         "line-style": "solid",
         width: 2,
         "line-color": "#5b21b6",
-        "target-arrow-color": "#5b21b6"
+        "target-arrow-color": "#5b21b6",
+        "target-arrow-fill": "filled"
     } },
     { selector: ".hidden", style: { display: "none" } },
     { selector: "node.hit", style: {
         "border-width": 3,
         "border-color": "#1d4ed8"
     } },
+    { selector: "edge.leaf-hover", style: {  /* the tree leaf under the pointer */
+        "overlay-color": "#1d4ed8",
+        "overlay-opacity": 0.25,
+        "overlay-padding": 4
+    } },
     { selector: ":selected", style: {
         "overlay-color": "#1d4ed8",
         "overlay-opacity": 0.15,
         "overlay-padding": 4
     } }
-  ]
+  ];
+
+var cy = cytoscape({
+  container: document.getElementById("cy"),
+  elements: elements,
+  boxSelectionEnabled: false,
+  style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)
 });
 
 /* An edge between a node and one of its own ancestors has overlapping
@@ -409,10 +479,13 @@ function showAll() {
 var details = document.getElementById("details");
 var dTitle = document.getElementById("d-title");
 var dRows = document.getElementById("d-rows");
+var dTree = document.getElementById("d-tree");
 
 function showDetails(title, rows) {
   dTitle.textContent = title;
   dRows.replaceChildren();
+  dTree.replaceChildren();
+  cy.edges().removeClass("leaf-hover");  /* the pointer left with the panel */
   rows.forEach(function (row) {
     if (row[1] === null || row[1] === undefined || row[1] === "") return;
     var tr = document.createElement("tr");
@@ -437,8 +510,138 @@ document.getElementById("d-close").addEventListener("click", function () {
   details.hidden = true;
 });
 
-cy.on("tap", "node", function (evt) {
-  var n = evt.target, d = n.data();
+/* ------------------------------------------- condition structure (DL-191) */
+
+/* Every leaf of one node's cond_tree, all its attributes together. */
+function eachLeaf(trees, fn) {
+  Object.keys(trees || {}).forEach(function (attr) { walkLeaves(trees[attr], fn); });
+}
+function walkLeaves(node, fn) {
+  if (node.op) node.items.forEach(function (item) { walkLeaves(item, fn); });
+  else fn(node);
+}
+
+/* The branch values this node's reading involves, sorted so a branch keeps
+   its colour across taps: the ones its incoming arrows carry, plus the ones
+   only the tree can show -- a lock draws no arrow, and an arrow can be
+   hidden by a focus or folded into a box. */
+function branchOrder(n) {
+  var values = [];
+  function add(b) { if (b && values.indexOf(b) === -1) values.push(b); }
+  n.incomers("edge").forEach(function (e) {
+    if (!e.hasClass("cy-expand-collapse-meta-edge")) add(e.data("branch"));
+  });
+  eachLeaf(n.data("cond_tree"), function (leaf) { add(leaf.branch); });
+  return values.sort();
+}
+
+function clearBranchPaint() { cy.edges().removeClass(BRANCH_CLASSES); }
+
+/* Paint the tapped node's alternatives, one colour per branch; a meta-edge
+   stands for several edges and takes none of them. */
+function paintBranches(n) {
+  clearBranchPaint();
+  var order = branchOrder(n);
+  n.incomers("edge").forEach(function (e) {
+    var b = e.data("branch");
+    if (!b || e.hasClass("cy-expand-collapse-meta-edge")) return;
+    e.addClass("br-" + (order.indexOf(b) % BRANCH_COLORS.length));
+  });
+  return order;
+}
+
+/* A branch group's own value: every leaf under it carries the same one. */
+function branchOf(node) {
+  var found = null;
+  walkLeaves(node, function (leaf) { if (found === null) found = leaf.branch; });
+  return found;
+}
+
+function swatchFor(branch, order) {
+  var swatch = document.createElement("span");
+  swatch.className = "swatch";
+  swatch.style.background = BRANCH_COLORS[order.indexOf(branch) % BRANCH_COLORS.length];
+  swatch.title = "branch " + branch;
+  return swatch;
+}
+
+function withNote(content, note) {
+  var span = document.createElement("span");
+  span.appendChild(content);
+  var why = document.createElement("span");
+  why.className = "off";
+  why.textContent = " " + note;
+  span.appendChild(why);
+  return span;
+}
+
+/* A leaf names its own arrow when there is one to name -- hover highlights
+   it, a click selects it -- and says why when there is not: a bare local
+   n() is a lock (M07: never an edge), and an arrow can be hidden or folded
+   away. Never a dead link to an element that is not there. */
+function leafContent(leaf) {
+  var code = document.createElement("code");
+  code.textContent = leaf.atom;
+  if (leaf.lock) return withNote(code, "(lock, no arrow)");
+  var edge = leaf.edge ? cy.$id(leaf.edge) : cy.collection();
+  if (edge.empty() || !edge.visible()) return withNote(code, "(not on canvas)");
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "leaf";
+  button.appendChild(code);
+  button.addEventListener("mouseenter", function () { edge.addClass("leaf-hover"); });
+  button.addEventListener("mouseleave", function () { edge.removeClass("leaf-hover"); });
+  button.addEventListener("click", function () {
+    cy.elements().unselect();
+    edge.select();
+  });
+  if (edge.hasClass("cy-expand-collapse-meta-edge")) {
+    /* a fold re-points this arrow at the box and keeps its id: it IS on the
+       canvas, standing for several edges, so name where it went rather than
+       call it missing */
+    return withNote(button, "(folded: " + edge.data("source") + " \u2192 "
+      + edge.data("target") + ")");
+  }
+  return button;
+}
+
+function renderCondNode(node, ul, order, branch) {
+  var li = document.createElement("li");
+  if (branch) li.appendChild(swatchFor(branch, order));
+  if (node.op) {
+    var lead = document.createElement("span");
+    lead.className = "op";
+    lead.textContent = node.op === "and" ? "all of:" : "any of:";
+    li.appendChild(lead);
+    var sub = document.createElement("ul");
+    node.items.forEach(function (item) {
+      renderCondNode(item, sub, order, node.op === "or" ? branchOf(item) : null);
+    });
+    li.appendChild(sub);
+  } else {
+    li.appendChild(leafContent(node));
+  }
+  ul.appendChild(li);
+}
+
+/* One list per condition-bearing attribute, groups labelled "all of" /
+   "any of", each branch under an OR carrying the swatch its arrows carry
+   on the canvas. */
+function renderCondTrees(n, order) {
+  var trees = n.data("cond_tree") || {};
+  Object.keys(trees).forEach(function (attr) {
+    var head = document.createElement("div");
+    head.className = "attr";
+    head.textContent = attr;
+    dTree.appendChild(head);
+    var list = document.createElement("ul");
+    renderCondNode(trees[attr], list, order, null);
+    dTree.appendChild(list);
+  });
+}
+
+function showNodeDetails(n) {
+  var d = n.data();
   var members = null;
   if (d.kind === "BOX") {
     var collapsed = n.hasClass("cy-expand-collapse-collapsed-node");
@@ -449,9 +652,15 @@ cy.on("tap", "node", function (evt) {
     ["members", members],
     ["schedule", d.schedule],
     ["command / watched file", d.detail, "code"],
-    ["owning box", d.parent]
+    ["owning box", d.parent],
+    ["condition", d.condition, "code"],
+    ["box_success", d.box_success, "code"],
+    ["box_failure", d.box_failure, "code"]
   ]);
-});
+  renderCondTrees(n, paintBranches(n));
+}
+
+cy.on("tap", "node", function (evt) { showNodeDetails(evt.target); });
 
 /* an end the expand-collapse extension remembers is a node; a plain id
    is accepted too, so a future build that stores ids reads the same */
@@ -459,6 +668,7 @@ function endId(end) { return end && typeof end.id === "function" ? end.id() : St
 
 cy.on("tap", "edge", function (evt) {
   var e = evt.target, d = e.data();
+  clearBranchPaint();  /* the paint belongs to the node tap that made it */
   /* a meta-edge IS the original edge, re-pointed at a collapsed box; its
      annotations are its own, and the row names the member it really joins */
   var ends = e.hasClass("cy-expand-collapse-meta-edge") ? d.originalEnds : null;
@@ -473,7 +683,10 @@ cy.on("tap", "edge", function (evt) {
 });
 
 cy.on("tap", function (evt) {
-  if (evt.target === cy) details.hidden = true;
+  if (evt.target !== cy) return;
+  details.hidden = true;
+  dTree.replaceChildren();
+  clearBranchPaint();
 });
 
 /* ----------------------------------------------------------------- toolbar */
@@ -510,6 +723,13 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
     hits.union(hits.ancestors()).removeClass("hidden");
     hits.addClass("hit");
   });
+  /* one hit is unambiguous: select it and open its details, so Enter alone
+     answers "what gates this job?" without reaching for the mouse (DL-191) */
+  if (hits.length === 1) {
+    cy.elements().unselect();
+    hits.select();
+    showNodeDetails(hits[0]);
+  }
   var found = hits.length + " hit" + (hits.length === 1 ? "" : "s");
   if (expanded) {
     /* the members just restored sit where the box's last layout left them,
@@ -585,11 +805,17 @@ try {
     box.scratch("_dsl41", { members: ec.getCollapsedChildrenRecursively(box).nodes().length });
     classifyNesting();
     refreshEdgeLabels();
+    /* the collapse copies the folded edge's classes onto the meta-edge,
+       branch paint included -- and a meta-edge stands for several edges, so
+       it must show no branch's colour. The picture the paint described is
+       gone either way; the next node tap paints the new one. */
+    clearBranchPaint();
   });
   cy.on("expandcollapse.afterexpand", function (evt) {
     evt.target.removeScratch("_dsl41");
     classifyNesting();
     refreshEdgeLabels();
+    clearBranchPaint();
   });
   foldMarked();  /* the initial folds, if the first layout already stopped */
 } catch (err) {
