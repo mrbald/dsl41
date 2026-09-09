@@ -240,6 +240,10 @@ jil_text = b.to_jil()   # JIL text, byte-for-byte what the front end accepts
 catalog = b.build()     # ...or parse+lower it through the real pipeline
 ```
 
+`build()` is the in-process catalog every phase and the engine consume;
+`to_jil()` is the durable form. `dsl41 run` and the run root take JIL bytes
+only (DL-194): `python catalog.py > jobs.jil && dsl41 run jobs.jil --run-root ./run1`.
+
 `job()` keyword names are JIL attribute names. `sequence()` wires s()-chains,
 and `parallel()` wires a fan-out and fan-in. Both refuse to merge into an
 existing condition (DL-17: no silent loss). There is no second lowering path.

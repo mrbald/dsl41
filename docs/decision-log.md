@@ -12057,3 +12057,35 @@ relitigate an entry; append a new one.
   concurrency tier; ruff, ruff format --check, mypy (now including
   `tests/uc_oracle.py`) and arch_check clean. arch_check still reports the
   review due on line count; this entry is the answer to it.
+- DL-194 JIL stays the durable and exchange form; IR-F is the in-process
+  interface (2026-09-09). The question reopened: should the Python DSL emit
+  IR-F that runs directly or converts to JIL, with JIL as an adapter? The
+  answer is that the runtime already works that way and the durable form
+  does not, on purpose.
+  WHAT IS PRIMARY WHERE. `Engine`, `Oracle`, `play_once`, lint, derive,
+  viz, equiv and the UC backend all take a `CatalogIR`. JIL touches two
+  places only: the CLI door (parse, placeholders, lower) and the run root's
+  stored bundle. The DSL's `build()` returns the playable catalog in
+  process; `to_jil()` returns the durable one.
+  WHY THE DSL EMITS JIL AND RE-PARSES IT (DL-17, unchanged). One lowering
+  door: the DL-07 allow-list, the line discipline and every validation run
+  once, and what the builder produces is byte for byte what the front end
+  accepts. A DSL that constructed IR-F directly would be a second
+  constructor that must enforce the same invariants and would drift.
+  WHY THE RUN ROOT STORES JIL BYTES, NOT IR (DL-51, DL-130, unchanged).
+  JIL is what production runs, and the tool's claim is to run it
+  faithfully or refuse; a stored IR would be this tool's reading of the
+  estate rather than the estate. IR-F carries a version (0.1 to 0.2
+  already, with an arch_check gate on shape changes) while seals, lineage
+  and the closed book must reopen years later; JIL bytes never go stale
+  and each period is re-lowered by the build that opens it. F1 fidelity,
+  canonical form and source spans on every diagnostic all come from the
+  bytes.
+  DECLINED. IR-F JSON as a CLI input for the offline verbs: a second input
+  dialect on every door, version checks, and diagnostics without spans.
+  IR-F JSON as the stored bundle: a period-model amendment, and IR_VERSION
+  would become a durability contract with migrations. Re-find trigger: an
+  estate authored in the DSL that never exists in AutoSys and needs a
+  definition file other than JIL; even then, store the rendered JIL.
+  RECORDED IN: README's DSL section (the two forms, named), ir-design §8
+  (DL-193's amendment stands).
