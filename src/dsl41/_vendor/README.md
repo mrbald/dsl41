@@ -34,7 +34,10 @@ the script and by `tests/test_viz_html.py` / `tests/test_viz_explore.py`:
 - the cytoscape bundle's IIFE global is `cyBundle` (`cyBundle.default` is
   the constructor with all three extensions registered -- `expandCollapse`
   is the third since DL-190, and its cues draw on a canvas layer of their
-  own: no stylesheet to inline, no customized built-ins); cytoscape-elk drives
+  own: no stylesheet to inline, no customized built-ins. Its upstream README
+  declares the project unmaintained; a 31 KB pinned payload is carried on
+  that basis, and the next cytoscape major bump is the point to re-check
+  it); cytoscape-elk drives
   elkjs's bundled synchronous shim on the main thread — no Worker, no
   fetch — and the context-menus CSS is inlined in
   `templates/viz_explore.html` (drift-checked by the script);

@@ -41,8 +41,8 @@ def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
     assert len(payload) > 1_960_000
     assert b"</script" not in payload  # inline-safety: embedded without escaping
     assert payload.startswith(b"/*!")  # attribution banner from vendor_mermaid.sh
-    assert b"EPL-2.0" in payload[:500]
-    assert b"cytoscape-expand-collapse 4.1.1 (MIT)" in payload[:500]  # DL-190
+    assert b"EPL-2.0" in payload[:400]
+    assert b"cytoscape-expand-collapse 4.1.1 (MIT)" in payload[:400]  # DL-190
     assert b"var cyBundle" in payload[:600]  # the IIFE global the page JS expects
     assert b"expandCollapse" in payload  # the core extension name the page calls
 
@@ -311,12 +311,13 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     assert 'lostFeature += " \N{MIDDLE DOT} context menu unavailable in this browser";' in page
     assert 'lostFeature += " \N{MIDDLE DOT} box collapse unavailable in this browser";' in page
     assert page.count("+ lostFeature;") == 1  # every updateStats keeps it
-    # the expand-collapse extension is guarded the same way. It sits ABOVE the
-    # initial layout on purpose -- the emitter's initial folds must land before
-    # the first picture (DL-190 amends DL-77's letter: the guard is the rule,
-    # the position was its proxy) -- so the guard is what the test pins
-    assert "try {\n  cy.expandCollapse({" in page
-    assert page.index("cy.expandCollapse({") < page.index("initial.run();")
+    # the expand-collapse extension (DL-190) is guarded the same way and sits
+    # below the initial layout like the menu; the initial folds run from the
+    # layout's own stop handler once the extension is up, so nothing
+    # essential waits on it
+    ec_registration = page.index("cy.expandCollapse({")
+    assert "try {" in page[ec_registration - 60 : ec_registration]
+    assert page.index("initial.run();") < ec_registration < registration
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
@@ -336,7 +337,8 @@ def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
     # re-classified after every collapse/expand (DL-190): a collapse re-points
     # a member's edges at its box, so a meta-edge can land on a box's ancestor
     assert 'edge.toggleClass("nesting", nested)' in page
-    assert 'cy.on("expandcollapse.aftercollapse expandcollapse.afterexpand"' in page
+    assert 'cy.on("expandcollapse.aftercollapse", function (evt) {' in page
+    assert 'cy.on("expandcollapse.afterexpand", function (evt) {' in page
 
 
 def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
@@ -363,6 +365,13 @@ def test_to_explore_html_wires_the_trace_toggle_and_step_functions() -> None:
     assert 'id="expand-all"' in page
     assert "function fanInStep(nodes)" in page
     assert "function fanOutStep(nodes)" in page
+    # ...and the two tree closures the tree items call, which keep how a box
+    # was reached (a box override is a completion predicate, not a start gate)
+    assert "function fanInTree(start)" in page
+    assert "function fanOutTree(start)" in page
+    assert 'focusOn(fanInTree(n), howLabel("fan-in tree"))' in page
+    assert 'focusOn(fanOutTree(n), howLabel("fan-out tree"))' in page
+    assert "function isOverride(edge)" in page
 
 
 def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:

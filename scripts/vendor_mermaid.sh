@@ -17,7 +17,9 @@
 #   cytoscape-expand-collapse 4.1.1 (MIT; box collapse/expand on the explore
 #                                  page, DL-190. Its cues draw on a canvas
 #                                  layer of its own: no CSS, no customized
-#                                  built-in elements, so no WebKit caveat)
+#                                  built-in elements, so no WebKit caveat.
+#                                  Upstream calls itself unmaintained;
+#                                  re-check at the next cytoscape major)
 #   @ungap/custom-elements 1.3.0  (ISC; dist min.js copied byte-exact. The
 #                                  context-menus plugin builds its menu from
 #                                  CUSTOMIZED BUILT-IN elements, which WebKit

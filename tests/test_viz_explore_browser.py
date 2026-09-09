@@ -231,14 +231,13 @@ def _visible_ids(d: Driven) -> list[str]:
     return sorted(ids)
 
 
-def _tree_ids(d: Driven, node_id: str, step: str) -> list[str]:
-    """The DL-190 focus-item tree: `closure(cy.$id(node_id), step).map(id).sort()`,
-    ids only -- `step` is a page-global step function's own name (`fanInStep`
-    or `fanOutStep`), a fixed set of literals this module controls, never
-    test input, so splicing it into the expression is safe."""
-    ids: list[str] = d.page.evaluate(
-        f"() => closure(cy.$id('{node_id}'), {step}).map(n => n.id()).sort()"
-    )
+def _tree_ids(d: Driven, node_id: str, tree: str) -> list[str]:
+    """The DL-190 focus-item tree: `tree(cy.$id(node_id)).map(id).sort()`, ids
+    only -- `tree` is a page-global tree function's own name (`fanInTree` or
+    `fanOutTree`, the ones the menu's tree items call), a fixed set of
+    literals this module controls, never test input, so splicing it into the
+    expression is safe."""
+    ids: list[str] = d.page.evaluate(f"() => {tree}(cy.$id('{node_id}')).map(n => n.id()).sort()")
     return ids
 
 
@@ -451,22 +450,22 @@ def test_canvas_layers_include_the_expand_collapse_cue(driven_trace: Driven) -> 
 
 def test_fan_in_tree_of_m_traces_through_its_box(driven_trace: Driven) -> None:
     _ready(driven_trace)
-    assert _tree_ids(driven_trace, "M", "fanInStep") == ["B", "M", "P", "Q"]
+    assert _tree_ids(driven_trace, "M", "fanInTree") == ["B", "M", "P", "Q"]
 
 
 def test_fan_out_tree_of_m_traces_through_its_box(driven_trace: Driven) -> None:
     _ready(driven_trace)
-    assert _tree_ids(driven_trace, "M", "fanOutStep") == ["C", "D", "M"]
+    assert _tree_ids(driven_trace, "M", "fanOutTree") == ["C", "D", "M"]
 
 
 def test_fan_out_tree_of_b_reaches_every_member_and_release(driven_trace: Driven) -> None:
     _ready(driven_trace)
-    assert _tree_ids(driven_trace, "B", "fanOutStep") == ["B", "C", "D", "IB", "IM", "M", "N"]
+    assert _tree_ids(driven_trace, "B", "fanOutTree") == ["B", "C", "D", "IB", "IM", "M", "N"]
 
 
 def test_fan_in_tree_of_im_reaches_both_enclosing_boxes(driven_trace: Driven) -> None:
     _ready(driven_trace)
-    assert _tree_ids(driven_trace, "IM", "fanInStep") == ["B", "IB", "IM", "P"]
+    assert _tree_ids(driven_trace, "IM", "fanInTree") == ["B", "IB", "IM", "P"]
 
 
 def test_trace_boxes_off_drops_box_gating_from_fan_in_and_fan_out(driven_trace: Driven) -> None:
@@ -477,8 +476,8 @@ def test_trace_boxes_off_drops_box_gating_from_fan_in_and_fan_out(driven_trace: 
     _ready(driven_trace)
     driven_trace.page.evaluate("() => { document.getElementById('trace-boxes').checked = false; }")
     try:
-        assert _tree_ids(driven_trace, "M", "fanInStep") == ["M", "Q"]
-        assert _tree_ids(driven_trace, "B", "fanOutStep") == ["B", "C"]
+        assert _tree_ids(driven_trace, "M", "fanInTree") == ["M", "Q"]
+        assert _tree_ids(driven_trace, "B", "fanOutTree") == ["B", "C"]
     finally:
         driven_trace.page.evaluate(
             "() => { document.getElementById('trace-boxes').checked = true; }"
@@ -544,7 +543,7 @@ def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven)
         driven_trace.engine,
         stats,
     )
-    assert _tree_ids(driven_trace, "C", "fanInStep") == ["B", "C", "P", "Q"]
+    assert _tree_ids(driven_trace, "C", "fanInTree") == ["B", "C", "P", "Q"]
 
 
 def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: Driven) -> None:
@@ -691,3 +690,138 @@ def test_folded_page_starts_with_box_b_already_collapsed(driven_folded: Driven) 
 def test_no_uncaught_page_errors_on_the_folded_page(driven_folded: Driven) -> None:
     _ready(driven_folded)
     assert driven_folded.errors == [], f"{driven_folded.engine}: {driven_folded.errors}"
+
+
+# ------------------------------------------- the box gate, overrides and the guard
+
+_OVERRIDE_JIL = """insert_job: box_a
+job_type: b
+box_success: s(job_a)
+
+insert_job: job_a
+job_type: c
+box_name: box_a
+command: a
+machine: m1
+
+insert_job: job_b
+job_type: c
+box_name: box_a
+command: b
+machine: m1
+
+insert_job: X
+job_type: c
+condition: s(box_a)
+command: x
+machine: m1
+"""
+
+
+@pytest.fixture(scope="module")
+def override_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """A box whose box_success names a member (an M15 edge job_a -> box_a),
+    and an outside consumer of the box."""
+    path = tmp_path_factory.mktemp("explore-override") / "override.html"
+    path.write_text(to_explore_html(lower_source(_OVERRIDE_JIL), title="override"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module")
+def broken_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """The trace page with the expand-collapse registration forced to throw --
+    DL-77's own proof technique for a guard, applied to the DL-190 guard."""
+    page = to_explore_html(lower_source(_NESTED_BOX_TEXT), title="broken")
+    assert page.count("cy.expandCollapse({") == 1
+    path = tmp_path_factory.mktemp("explore-broken") / "broken.html"
+    path.write_text(page.replace("cy.expandCollapse({", "cy.expandCollapseMissing({"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_override(
+    request: pytest.FixtureRequest, override_page_url: str, _playwright: Any
+) -> Any:
+    yield from _open_driven(_playwright, request.param, override_page_url)
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_broken(request: pytest.FixtureRequest, broken_page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, broken_page_url)
+
+
+def test_the_box_gate_leaves_a_box_override_out_of_a_members_fan_in(
+    driven_override: Driven,
+) -> None:
+    """SEM-12: box_success names job_a, so job_a -> box_a is a completion
+    predicate (M15), not a start gate. Through boxes, job_b's fan-in is its
+    box and what gates the box -- nothing gates it here -- and never its
+    sibling. A consumer of the box (X, on s(box_a)) waits for the box's
+    COMPLETION, so for X the override producer is upstream."""
+    _ready(driven_override)
+    assert _tree_ids(driven_override, "job_b", "fanInTree") == ["box_a", "job_b"]
+    assert _tree_ids(driven_override, "X", "fanInTree") == ["X", "box_a", "job_a"]
+
+
+def test_fan_out_through_an_override_does_not_release_the_siblings(driven_override: Driven) -> None:
+    """job_a's completion folds box_a (SEM-12) and so reaches X; it does not
+    START box_a, so job_b is not downstream of job_a. Picking the box itself
+    is its start, and every member is downstream of that."""
+    _ready(driven_override)
+    assert _tree_ids(driven_override, "job_a", "fanOutTree") == ["X", "box_a", "job_a"]
+    assert _tree_ids(driven_override, "box_a", "fanOutTree") == ["X", "box_a", "job_a", "job_b"]
+
+
+def test_search_into_a_folded_box_restores_members_a_layout_placed(driven_folded: Driven) -> None:
+    """The review's blocker: a box folded before its members ever had a layout
+    restores them on cytoscape's default grid. The first layout now runs over
+    the whole graph before the emitter's folds, and a search that expands a
+    box re-lays out, so the nine nodes come back at distinct positions (a box
+    holding one member shares that member's centre, hence eight)."""
+    d = driven_folded
+    _ready(d)
+    if not d.page.evaluate("() => ec !== null && ec.isExpandable(cy.$id('B'))"):
+        d.page.evaluate("() => { ec.collapse(cy.$id('B'), { layoutBy: null }); }")
+    assert d.page.evaluate("() => cy.$id('IM').length") == 0  # IM is inside the folded box
+    d.page.fill("#search", "IM")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_function(
+        "() => cy.$id('IM').length === 1"
+        " && document.getElementById('stats').textContent.includes('1 hit')",
+        timeout=_LAYOUT_TIMEOUT_MS,
+    )
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.nodes().length") == 9
+    distinct = d.page.evaluate(
+        "() => new Set(cy.nodes().map(n => Math.round(n.position('x')) + ','"
+        " + Math.round(n.position('y')))).size"
+    )
+    assert distinct >= 8, distinct
+
+
+def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) -> None:
+    """DL-77's rule, proven the way DL-77 proved it: with the registration
+    forced to throw, the layout still completes, #stats names the loss, the
+    two buttons that need the extension go inert, the menu carries no box
+    items, and search still works. No uncaught error escapes the guard."""
+    d = driven_broken
+    _ready(d)
+    assert "box collapse unavailable in this browser" in d.page.inner_text("#stats")
+    assert d.page.evaluate("() => ec === null")
+    assert d.page.evaluate(
+        "() => document.getElementById('collapse-all').disabled"
+        " && document.getElementById('expand-all').disabled"
+    )
+    menu_ids = d.page.evaluate(
+        "() => Array.from(document.querySelectorAll('.cy-context-menus-cxt-menuitem'))"
+        ".map(e => e.id)"
+    )
+    assert "fan-in-tree" in menu_ids
+    assert not {"collapse", "expand", "menu-collapse-all", "menu-expand-all"} & set(menu_ids)
+    d.page.fill("#search", "IM")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_function(
+        "() => document.getElementById('stats').textContent.includes('1 hit')",
+        timeout=_CLICK_TIMEOUT_MS,
+    )
+    assert d.errors == [], d.errors

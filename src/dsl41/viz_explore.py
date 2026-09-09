@@ -14,7 +14,10 @@ DL-70's report page) and re-layouts the visible subset on focus.
 Emission decisions (each with a test):
 - Nodes carry id/label plus kind/schedule/detail read off IR-F through
   viz's display-facts helpers, and `parent` from box_tree.parent -- boxes
-  become cytoscape compound nodes.
+  become cytoscape compound nodes. With a collapse threshold, a top-level
+  box with more direct members than it carries `collapsed: true`, the
+  report's own rule; the page folds those before its first picture
+  (DL-190).
 - Edge endpoints outside the catalog (undefined producers, externals
   "name^INST", global variable names) synthesize EXT nodes, class `ext`
   plus `global` when some referencing edge has via=="global"; locality is
@@ -181,11 +184,11 @@ def to_explore_html(
     collapse_threshold: int | None = None,
 ) -> str:
     """One self-contained offline HTML page: the whole graph, always ELK,
-    always natural scale, singletons always present (search must find
-    them). Boxes open expanded and the operator collapses and expands them
-    on the page; `collapse_threshold` folds the report's over-threshold
-    top-level boxes before the first layout (DL-190; None folds nothing).
-    --direction maps auto/LR -> RIGHT, TD -> DOWN."""
+    fitted to the viewport and zoomed from there, singletons always present
+    (search must find them). Boxes open expanded and the operator collapses
+    and expands them on the page; `collapse_threshold` folds the report's
+    over-threshold top-level boxes before the first picture (DL-190; None
+    folds nothing). --direction maps auto/LR -> RIGHT, TD -> DOWN."""
     if graph is None:
         graph = derive_graph(catalog)
     elements = _elements(catalog, graph, collapse_threshold=collapse_threshold)
