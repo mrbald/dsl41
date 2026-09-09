@@ -136,12 +136,15 @@
     <button type="button" id="expand-all">expand boxes</button>
     <label><input type="checkbox" id="relayout" checked> re-layout on focus</label>
     <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input type="checkbox" id="trace-boxes" checked> trace through boxes</label>
+    <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input type="checkbox" id="locks" checked> locks</label>
     <span id="stats">laying out&hellip;</span>
     <span class="hint">right-click a node to focus / hide &middot; click for
     details &middot; double-click a box, or its corner cue, to collapse or
     expand it &middot; drag pans, wheel zooms</span>
     <span class="hint">all incoming arrows must hold (AND) unless the job
     carries &#8744; &middot; a bare n() is a lock and draws no arrow</span>
+    <span class="hint">dotted gray = lock &middot; the tee marks the job that
+    waits</span>
   </div>
 </header>
 <div id="wrap">
@@ -232,11 +235,15 @@ function condBadge(ele) {
   return "";
 }
 
+/* A job that excludes ITSELF (n(own name), M07) wears the lock glyph: one
+   run at a time, and there is no second node to draw a link to (DL-35). */
+function lockBadge(ele) { return ele.data("self_lock") ? " \uD83D\uDD12" : ""; }
+
 function nodeLabel(ele) {
   if (ec && ele.hasClass("cy-expand-collapse-collapsed-node")) {
-    return ele.data("label") + " (" + foldedMembers(ele) + ")" + condBadge(ele);
+    return ele.data("label") + " (" + foldedMembers(ele) + ")" + condBadge(ele) + lockBadge(ele);
   }
-  return ele.data("label") + condBadge(ele);
+  return ele.data("label") + condBadge(ele) + lockBadge(ele);
 }
 
 /* every member under a box, expanded or not: the visible descendants plus
@@ -362,7 +369,39 @@ var STYLE_TAIL = [
         "target-arrow-color": "#5b21b6",
         "target-arrow-fill": "filled"
     } },
+    /* Locks (DL-192), BELOW the meta-edge rule: a lock link that a collapse
+       re-points at a box is still a lock, and must not read as a dependency.
+       Octagon and dotted gray keep them apart from FW diamonds, EXT dashed
+       round-rectangles and global rhomboids. */
+    { selector: "node.lock", style: {
+        shape: "octagon",
+        height: 30,
+        "background-color": "#f3f4f6",
+        "border-color": "#6b7280",
+        "border-style": "dashed",
+        color: "#374151",
+        "font-weight": "normal"
+    } },
+    { selector: "edge.lock", style: {
+        "curve-style": "straight",
+        "line-style": "dotted",
+        "line-color": "#6b7280",
+        width: 1.5,
+        "source-arrow-shape": "none",
+        "target-arrow-shape": "none",  /* a lock orders nothing: no arrowheads */
+        color: "#4b5563"
+    } },
+    /* the tee marks the end that WAITS while the other runs */
+    { selector: "edge.lock[?source_tee]", style: {
+        "source-arrow-shape": "tee",
+        "source-arrow-color": "#6b7280"
+    } },
+    { selector: "edge.lock[?target_tee]", style: {
+        "target-arrow-shape": "tee",
+        "target-arrow-color": "#6b7280"
+    } },
     { selector: ".hidden", style: { display: "none" } },
+    { selector: ".lockoff", style: { display: "none" } },  /* the locks toggle, independent of focus */
     { selector: "node.hit", style: {
         "border-width": 3,
         "border-color": "#1d4ed8"
@@ -393,13 +432,59 @@ var cy = cytoscape({
    collapse rewires a member's edges onto its box, so a meta-edge can land on
    a box's own ancestor. */
 function classifyNesting() {
-  cy.edges().forEach(function (edge) {
+  cy.edges().not(".lock").forEach(function (edge) {  /* a lock link routes straight */
     var src = edge.source(), dst = edge.target();
     var nested = src.ancestors().anySame(dst) || dst.ancestors().anySame(src);
     edge.toggleClass("nesting", nested);
   });
 }
 classifyNesting();
+
+/* ------------------------------------------------------------ locks (DL-192) */
+
+/* Lock elements are excluded from every ELK run. A lock is a fact ABOUT
+   jobs, not a step between them: laid out, a hub would be given a layer of
+   its own and push the real dependency picture apart. They are placed on
+   their members instead, after each layout. */
+function flow(elements) { return elements.not(".lock"); }
+
+/* Where a lock member is DRAWN right now: itself, or the innermost of its
+   enclosing boxes the graph still has -- a collapse takes the member out and
+   leaves the box standing. Null when nothing of it is on the canvas. */
+function memberAnchor(member) {
+  var chain = [member.id].concat(member.boxes || []);
+  for (var i = 0; i < chain.length; i++) {
+    var el = cy.$id(chain[i]);
+    if (el.nonempty() && el.visible()) return el;
+  }
+  return null;
+}
+
+/* Every visible hub at the centroid of its drawn members. A hub whose
+   members all sit inside ONE box (folded, or the box itself is the member)
+   sits beside that box rather than on top of its title. */
+function placeLocks() {
+  cy.nodes(".lock").forEach(function (hub) {
+    var anchors = [];
+    (hub.data("members") || []).forEach(function (member) {
+      var anchor = memberAnchor(member);
+      if (anchor) anchors.push(anchor);
+    });
+    if (!anchors.length) return;  /* nothing of it is drawn: leave it be */
+    var x = 0, y = 0, distinct = {};
+    anchors.forEach(function (a) {
+      x += a.position("x");
+      y += a.position("y");
+      distinct[a.id()] = a;
+    });
+    var ids = Object.keys(distinct);
+    var pos = { x: x / anchors.length, y: y / anchors.length };
+    if (ids.length === 1 && distinct[ids[0]].data("kind") === "BOX") {
+      pos.x += distinct[ids[0]].width() / 2 + 40;
+    }
+    hub.position(pos);
+  });
+}
 
 var stats = document.getElementById("stats");
 var relayoutToggle = document.getElementById("relayout");
@@ -438,14 +523,15 @@ function refreshEdgeLabels() { labelsShown = null; updateEdgeLabels(); }
 
 function relayoutOrFit(suffix, after) {
   if (relayoutToggle.checked) {
-    var visible = cy.elements(":visible");
-    var layout = visible.layout(elkLayout());
+    var layout = flow(cy.elements(":visible")).layout(elkLayout());
     layout.on("layoutstop", function () {
+      placeLocks();
       updateStats(suffix);
       if (after) after();
     });
     layout.run();
   } else {
+    placeLocks();  /* the members did not move, but which of them are drawn can */
     cy.fit(cy.nodes(":visible"), 40);
     if (after) after();
   }
@@ -459,6 +545,10 @@ function relayoutOrFit(suffix, after) {
    from the edges alone. */
 function focusOn(keep, how) {
   keep = keep.union(keep.ancestors());
+  /* a focused job keeps its own locks as CONTEXT: the hubs its lock links
+     reach, never a hub's other members -- those are not what was asked for,
+     and a lock orders nothing that a fan-in would follow (DL-192) */
+  keep = keep.union(keep.connectedEdges(".lock").connectedNodes().filter(".lock"));
   cy.batch(function () {
     cy.nodes().addClass("hidden");
     keep.removeClass("hidden");
@@ -640,6 +730,83 @@ function renderCondTrees(n, order) {
   });
 }
 
+/* A release policy in words. `capacity.release_policy` PICKS one (DL-50);
+   this only spells it. */
+var POLICY_WORDS = {
+  completion: "released on completion",
+  success: "released on success",
+  never: "never released"
+};
+
+/* One member's line: who, where, what it draws or how it waits, and -- when
+   the canvas is not showing it -- why not. */
+function memberLine(m) {
+  var parts = [m.job], boxes = m.boxes || [];
+  if (boxes.length) {
+    parts.push("in box " + boxes[0]
+      + (boxes.length > 1 ? " (top " + boxes[boxes.length - 1] + ")" : ""));
+  }
+  if (m.quantity) {
+    parts.push(m.quantity + (m.quantity === 1 ? " unit, " : " units, ") + POLICY_WORDS[m.policy]);
+  }
+  if (m.how) parts.push(m.how);
+  var el = cy.$id(m.id);
+  if (el.empty()) {
+    var anchor = memberAnchor(m);
+    parts.push(anchor ? "folded into " + anchor.id() : "not on canvas");
+  } else if (!el.visible()) {
+    parts.push("not on canvas");
+  }
+  return parts.join(" \u00b7 ");
+}
+
+function lockTitle(hub) {
+  var d = hub.data();
+  if (d.resource) return d.resource;
+  return (d.members || []).map(function (m) { return m.job; }).join(" \u00d7 ");
+}
+
+function showLockDetails(hub) {
+  var d = hub.data();
+  clearBranchPaint();
+  var rows = [
+    ["kind", d.lock === "resource" ? "resource semaphore" : "mutual exclusion"],
+    ["capacity", d.lock !== "resource" ? null : (d.capacity === null
+      || d.capacity === undefined ? "not declared"
+      : d.capacity + (d.capacity === 1 ? " unit" : " units"))]
+  ];
+  (d.members || []).forEach(function (m) { rows.push(["member", memberLine(m)]); });
+  showDetails(lockTitle(hub), rows);
+}
+
+function lockEndName(el) {
+  var d = el.data();
+  if (d.resource) return d.resource;
+  return el.hasClass("lock") ? "mutex" : el.id();
+}
+
+function showLockEdgeDetails(e) {
+  var d = e.data();
+  clearBranchPaint();
+  var rows = [
+    ["kind", d.lock === "resource" ? "resource semaphore" : "mutual exclusion"],
+    ["resource", d.resource],
+    ["quantity", d.quantity ? String(d.quantity) : null],
+    ["release", d.policy ? POLICY_WORDS[d.policy] : null]
+  ];
+  if (d.directions) {
+    d.directions.forEach(function (line) { rows.push(["waits", line]); });
+  } else if (d.how) {
+    rows.push(["waits", d.how]);
+  }
+  /* a collapse re-points a lock link at the box and keeps its id: say which
+     member it really joins, the same fact the meta-edge row carries */
+  var ends = e.hasClass("cy-expand-collapse-meta-edge") ? d.originalEnds : null;
+  rows.push(["stands for", ends
+    ? endId(ends.source) + " \u2014 " + endId(ends.target) + " (inside a collapsed box)" : null]);
+  showDetails(lockEndName(e.source()) + " \u2014 " + lockEndName(e.target()), rows);
+}
+
 function showNodeDetails(n) {
   var d = n.data();
   var members = null;
@@ -660,7 +827,11 @@ function showNodeDetails(n) {
   renderCondTrees(n, paintBranches(n));
 }
 
-cy.on("tap", "node", function (evt) { showNodeDetails(evt.target); });
+cy.on("tap", "node", function (evt) {
+  var n = evt.target;
+  if (n.hasClass("lock")) showLockDetails(n);
+  else showNodeDetails(n);
+});
 
 /* an end the expand-collapse extension remembers is a node; a plain id
    is accepted too, so a future build that stores ids reads the same */
@@ -668,6 +839,7 @@ function endId(end) { return end && typeof end.id === "function" ? end.id() : St
 
 cy.on("tap", "edge", function (evt) {
   var e = evt.target, d = e.data();
+  if (e.hasClass("lock")) { showLockEdgeDetails(e); return; }
   clearBranchPaint();  /* the paint belongs to the node tap that made it */
   /* a meta-edge IS the original edge, re-pointed at a collapsed box; its
      annotations are its own, and the row names the member it really joins */
@@ -754,6 +926,7 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
 var initialDone = false, foldedInitial = false, ecFailed = false;
 
 function finishInitial() {
+  placeLocks();
   updateEdgeLabels();
   updateStats();
 }
@@ -766,12 +939,12 @@ function foldMarked() {
   });
   if (marked.empty()) { finishInitial(); return; }
   marked.forEach(function (box) { ec.collapse(box, { layoutBy: null }); });
-  var again = cy.elements(":visible").layout(elkLayout());
+  var again = flow(cy.elements(":visible")).layout(elkLayout());
   again.on("layoutstop", finishInitial);
   again.run();
 }
 
-var initial = cy.elements().layout(elkLayout());
+var initial = flow(cy.elements()).layout(elkLayout());
 initial.on("layoutstop", function () {
   initialDone = true;
   if (ecFailed || cy.nodes("node.box[?collapsed]").empty()) finishInitial();
@@ -843,6 +1016,15 @@ document.getElementById("expand-all").addEventListener("click", function () {
 
 /* ------------------------------------------------------ tracing through boxes */
 
+/* The locks toggle hides lock elements with a class of their OWN, so it
+   composes with focus hiding instead of fighting it: a focus that hid a job
+   and a toggle that hid its lock are two independent facts. */
+var locksToggle = document.getElementById("locks");
+locksToggle.addEventListener("change", function () {
+  cy.elements(".lock").toggleClass("lockoff", !locksToggle.checked);
+  updateStats();
+});
+
 var traceToggle = document.getElementById("trace-boxes");
 function viaBoxes() { return traceToggle.checked; }
 function howLabel(what) { return what + (viaBoxes() ? ", via boxes" : ", edges only"); }
@@ -862,7 +1044,7 @@ function isOverride(edge) {
    conditions became, which is right -- a member's producer gates that
    member, and the collapsed node stands for it. */
 function boxGate(boxes) {
-  return boxes.incomers("edge").filter(function (e) { return !isOverride(e); }).sources();
+  return flow(boxes.incomers("edge")).filter(function (e) { return !isOverride(e); }).sources();
 }
 
 /* One step upstream. Edges only: the producers this node's own condition
@@ -875,7 +1057,7 @@ function boxGate(boxes) {
    edge for the start gate and a member->box edge for the completion fold
    would be a cycle, and a fan-in over it would pull every sibling in. */
 function fanInStep(nodes) {
-  var next = nodes.incomers("node");
+  var next = flow(nodes.incomers("edge")).sources();
   if (viaBoxes()) {
     var boxes = nodes.ancestors();
     next = next.union(boxes).union(boxGate(boxes));
@@ -889,9 +1071,9 @@ function fanInStep(nodes) {
    the box's consumers are downstream of the member. The picked node's own
    children count as released -- picking a box means its start. */
 function fanOutStep(nodes) {
-  var next = nodes.outgoers("node");
+  var next = flow(nodes.outgoers("edge")).targets();
   if (viaBoxes()) {
-    next = next.union(nodes.children()).union(nodes.ancestors().outgoers("node"));
+    next = next.union(nodes.children()).union(flow(nodes.ancestors().outgoers("edge")).targets());
   }
   return next;
 }
@@ -909,7 +1091,7 @@ function fanInTree(start) {
   while (frontier.nonempty()) {
     var next = cy.collection(), requeue = cy.collection();
     frontier.forEach(function (n) {
-      var own = n.incomers("edge");
+      var own = flow(n.incomers("edge"));
       if (gateOnly.has(n)) own = own.filter(function (e) { return !isOverride(e); });
       own.forEach(function (e) {
         var s = e.source();
@@ -944,7 +1126,7 @@ function fanOutTree(start) {
   while (frontier.nonempty()) {
     var next = cy.collection(), requeue = cy.collection();
     frontier.forEach(function (n) {
-      n.outgoers("edge").forEach(function (e) {
+      flow(n.outgoers("edge")).forEach(function (e) {
         var t = e.target();
         if (isOverride(e)) {
           if (!seen.has(t) && !next.has(t)) foldedOnly = foldedOnly.union(t);
@@ -956,7 +1138,7 @@ function fanOutTree(start) {
       });
       if (viaBoxes()) {
         if (!foldedOnly.has(n)) next = next.union(n.children());
-        next = next.union(n.ancestors().outgoers("node"));
+        next = next.union(flow(n.ancestors().outgoers("edge")).targets());
       }
     });
     frontier = next.difference(seen).union(requeue);
@@ -1002,6 +1184,15 @@ var menuItems = [
     onClickFunction: function (evt) {
       var n = target(evt);
       focusOn(n.union(fanInStep(n)).union(fanOutStep(n)), howLabel("neighbours"));
+    }, hasTrailingDivider: true },
+  { id: "focus-lock", content: "focus lock", selector: "node.lock",
+    onClickFunction: function (evt) {
+      var hub = target(evt), keep = hub;
+      (hub.data("members") || []).forEach(function (m) {
+        var el = cy.$id(m.id);
+        if (el.nonempty()) keep = keep.union(el);
+      });
+      focusOn(keep, "lock");
     }, hasTrailingDivider: true },
   { id: "hide", content: "hide this node", selector: "node",
     onClickFunction: function (evt) {

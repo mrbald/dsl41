@@ -90,7 +90,7 @@ class CapacityPool:
             if res_type == "T":
                 raw.append((key, ref.quantity, "gate", None))
             else:
-                raw.append((key, ref.quantity, "acquire", _release_policy(res_type, ref.free)))
+                raw.append((key, ref.quantity, "acquire", release_policy(res_type, ref.free)))
         # Coalesce duplicate bucket keys (a job listing one resource twice):
         # SUM the demand so can_admit's per-entry test and the reservation's sum
         # agree -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while
@@ -189,10 +189,14 @@ def _safe_units(accessor: object) -> int | None:
     return value
 
 
-def _release_policy(res_type: str, free: str | None) -> ReleasePolicy:
+def release_policy(res_type: str, free: str | None) -> ReleasePolicy:
     """DL-50: per-request release policy. FREE overrides the res_type default.
     Returns 'completion' (release on any terminal), 'success' (only on SUCCESS),
-    or 'never'. res_type is upper-cased; '' (absent) reads as renewable."""
+    or 'never'. res_type is upper-cased; '' (absent) reads as renewable.
+
+    PUBLIC because the explore page states the same policy per lock member
+    (DL-192), and a second copy of this table would drift from the pool's
+    (DL-72). One owner, two readers."""
     if free == "Y":
         return "success"
     if free == "N":

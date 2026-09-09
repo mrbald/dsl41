@@ -34,6 +34,11 @@ Emission decisions (each with a test):
   no arrow at all. Every edge is matched back to the atom it derives from,
   and an unmatched edge or atom raises rather than drawing a condition the
   page cannot account for.
+- Locks are elements of their own (DL-192), excluded from the layout and
+  placed on their members: a resource semaphore is one hub per CONSUMED
+  `insert_resource` (resources are not in IR-G, so they are read off IR-F,
+  the DL-73 display-facts stance), and a mutex keeps the report's grammar
+  through `viz.mutex_plan` -- pair link, complete-clique hub, self badge.
 - The elements JSON embeds with DL-70's rule: every "<" becomes \\u003c
   (valid JSON, neutralizes </script and <!-- in one rule).
 - Template substitution is single-pass unique-marker (viz_html.substitute):
@@ -49,12 +54,14 @@ from __future__ import annotations
 
 import html
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib.resources import files
 from typing import Literal, cast
 
+from dsl41.capacity import release_policy
 from dsl41.conditions import And, Atom, Cond, Or, Paren, iter_atoms
 from dsl41.derive import (
+    BoxTree,
     DerivedEdge,
     DerivedGraph,
     derive_graph,
@@ -62,8 +69,8 @@ from dsl41.derive import (
     local_producer,
 )
 from dsl41.dsl import cond_to_source
-from dsl41.ir import CatalogIR
-from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule
+from dsl41.ir import CatalogIR, ResourceRef
+from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule, mutex_plan
 from dsl41.viz_html import substitute
 
 _KIND_CLASS = {"BOX": "box", "FW": "fw"}  # anything else renders as a command
@@ -206,6 +213,252 @@ def _take_edge(queue: list[int], graph: DerivedGraph, atom: Atom, where: str) ->
     raise ValueError(f"{where}: no derived edge for atom {cond_to_source(atom)!r}")
 
 
+# ----------------------------------------------------------------- locks (DL-192)
+#
+# Two kinds of lock exist and the page drew neither. A MUTEX is derive's M07
+# record: a bare local n() in `condition` is an exclusion, not an edge, so it
+# was on the canvas nowhere at all. A RESOURCE semaphore is `insert_resource`
+# plus the `resources:` requirements that draw on it; resources are not in
+# IR-G, so the emitter reads them off IR-F -- the DL-73 display-facts stance,
+# the same one job kind and schedule already take.
+#
+# The mutex shapes are the report's, decided by `viz.mutex_plan` and not by a
+# second rule here: pairs are what the JIL states, a COMPLETE clique of three
+# or more is one hub, and a self-mutex is a badge (DL-35 item 6).
+
+_LOCK_GLYPH = "\N{LOCK}"
+
+#: How a release policy reads in the details panel. `capacity.release_policy`
+#: owns the table that PICKS one (DL-50); this only spells the answer.
+_POLICY_WORDS = {
+    "completion": "released on completion",
+    "success": "released on success",
+    "never": "never released",
+}
+
+
+def _box_chain(tree: BoxTree, name: str) -> list[str]:
+    """This job's enclosing boxes, innermost first. The page resolves a lock
+    member to the first of [member, *chain] the graph still has: a collapse
+    takes the member out and leaves its box standing."""
+    chain: list[str] = []
+    current = tree.parent.get(name)
+    while current is not None:
+        chain.append(current)
+        current = tree.parent.get(current)
+    return chain
+
+
+def _lock_id(kind: str, name: str, taken: set[str]) -> str:
+    """A namespaced lock id, widened until free. A job may legally be named
+    `lock:m:A+B`, and cytoscape ids are one namespace over every element."""
+    candidate = f"lock:{kind}:{name}"
+    while candidate in taken:
+        candidate = "_" + candidate
+    taken.add(candidate)
+    return candidate
+
+
+def _link_label(ref: ResourceRef) -> str:
+    """What one requirement draws: the quantity when it is more than one
+    unit, plus the FREE letter when the job states one. Both silent in the
+    ordinary case -- one unit, engine default -- like the DL-35 thinning."""
+    parts = [str(ref.quantity)] if ref.quantity > 1 else []
+    if ref.free is not None:
+        parts.append(ref.free)
+    return " ".join(parts)
+
+
+def _resource_locks(
+    catalog: CatalogIR, graph: DerivedGraph, taken: set[str]
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """One hub per CONSUMED resource, in first-consumption order, plus one
+    undirected link per requirement. A resource nothing consumes is not
+    drawn -- the summary counts those, so the omission is stated, not
+    silent."""
+    consumers: dict[str, list[tuple[str, ResourceRef]]] = {}
+    for name, job in catalog.jobs.items():
+        for ref in job.resources:
+            consumers.setdefault(ref.name, []).append((name, ref))
+    nodes: list[dict[str, object]] = []
+    links: list[dict[str, object]] = []
+    for res_name, refs in consumers.items():
+        resource = catalog.resources.get(res_name)
+        try:
+            capacity = resource.capacity_units() if resource is not None else None
+        except ValueError:
+            # a malformed `amount` is preflight's loud refusal (DL-50), never a
+            # crash in a lens: the hub reads unsized, like an undeclared one
+            capacity = None
+        res_type = (resource.res_type or "").strip().upper() if resource is not None else ""
+        hub = _lock_id("r", res_name, taken)
+        members: list[dict[str, object]] = []
+        for job_name, ref in refs:
+            policy = release_policy(res_type, ref.free)
+            members.append(
+                {
+                    "id": job_name,
+                    "job": job_name,
+                    "boxes": _box_chain(graph.box_tree, job_name),
+                    "quantity": ref.quantity,
+                    "free": ref.free,
+                    "policy": policy,
+                }
+            )
+            links.append(
+                {
+                    "data": {
+                        "source": hub,
+                        "target": job_name,
+                        "lock": "resource",
+                        "resource": res_name,
+                        "quantity": ref.quantity,
+                        "free": ref.free,
+                        "policy": policy,
+                        "label": _link_label(ref),
+                    },
+                    "classes": "lock resource member",
+                }
+            )
+        nodes.append(
+            {
+                "data": {
+                    "id": hub,
+                    "label": f"{_LOCK_GLYPH} {res_name} ({capacity if capacity is not None else '?'})",
+                    "kind": "LOCK",
+                    "lock": "resource",
+                    "resource": res_name,
+                    "capacity": capacity,
+                    "members": members,
+                },
+                "classes": "lock resource",
+            }
+        )
+    return nodes, links
+
+
+def _mutex_how(member: str, others: list[str], names: Callable[[str, str], bool]) -> str:
+    """One clique member's side of the exclusion, in words. `mutual` only
+    when every direction is stated both ways -- a clique is complete in
+    PAIRS, and a pair forms from one reference (DL-35 item 6)."""
+    waits = [other for other in others if names(member, other)]
+    blocked = [other for other in others if names(other, member)]
+    if waits == others and blocked == others:
+        return "mutual"
+    parts: list[str] = []
+    if waits:
+        parts.append("waits while " + ", ".join(waits) + (" run" if len(waits) > 1 else " runs"))
+    if blocked:
+        verb = " wait" if len(blocked) > 1 else " waits"
+        parts.append(", ".join(blocked) + verb + " while it runs")
+    return "; ".join(parts)
+
+
+def _mutex_locks(
+    graph: DerivedGraph,
+    plan: tuple[set[str], list[list[str]], list[tuple[str, str]]],
+    node_id: Callable[[str], str],
+    taken: set[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """The pair links and clique hubs of `viz.mutex_plan`. The tee marks the
+    end that WAITS: `bare_notrunning` keeps who names whom, which the
+    undirected `mutex_groups` projection cannot (a pair forms from ONE
+    reference, so one-way is the common case)."""
+    _, cliques, pairs = plan
+    bare = graph.bare_notrunning
+
+    def names(a: str, b: str) -> bool:
+        return b in bare.get(a, [])
+
+    nodes: list[dict[str, object]] = []
+    links: list[dict[str, object]] = []
+    for a, b in pairs:
+        directions = [f"{x} waits while {y} runs" for x, y in ((a, b), (b, a)) if names(x, y)]
+        links.append(
+            {
+                "data": {
+                    "source": node_id(a),
+                    "target": node_id(b),
+                    "lock": "mutex",
+                    "source_tee": names(a, b),
+                    "target_tee": names(b, a),
+                    "directions": directions,
+                    "how": "mutual" if len(directions) == 2 else "one-way",
+                    "label": "",
+                },
+                "classes": "lock mutex pair",
+            }
+        )
+    for clique in cliques:
+        hub = _lock_id("m", "+".join(clique), taken)
+        members: list[dict[str, object]] = []
+        for member in clique:
+            others = [other for other in clique if other != member]
+            how = _mutex_how(member, others, names)
+            members.append(
+                {
+                    "id": node_id(member),
+                    "job": member,
+                    "boxes": _box_chain(graph.box_tree, member),
+                    "how": how,
+                }
+            )
+            links.append(
+                {
+                    "data": {
+                        "source": hub,
+                        "target": node_id(member),
+                        "lock": "mutex",
+                        "target_tee": any(names(member, other) for other in others),
+                        "how": how,
+                        "label": "",
+                    },
+                    "classes": "lock mutex member",
+                }
+            )
+        nodes.append(
+            {
+                "data": {
+                    "id": hub,
+                    "label": f"{_LOCK_GLYPH} mutex",
+                    "kind": "LOCK",
+                    "lock": "mutex",
+                    "capacity": None,
+                    "members": members,
+                },
+                "classes": "lock mutex",
+            }
+        )
+    return nodes, links
+
+
+def _lock_elements(
+    catalog: CatalogIR,
+    graph: DerivedGraph,
+    plan: tuple[set[str], list[list[str]], list[tuple[str, str]]],
+    node_id: Callable[[str], str],
+    taken: set[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Every lock node and link: resources first, then mutex. Link ids are
+    minted last, in the same namespace as everything else."""
+    res_nodes, res_links = _resource_locks(catalog, graph, taken)
+    mutex_nodes, mutex_links = _mutex_locks(graph, plan, node_id, taken)
+    links = res_links + mutex_links
+    for i, link in enumerate(links):
+        data = link["data"]
+        assert isinstance(data, dict)
+        data["id"] = _lock_id("e", str(i), taken)
+    return res_nodes + mutex_nodes, links
+
+
+def unused_resources(catalog: CatalogIR) -> list[str]:
+    """Declared `insert_resource` records no job draws on, in catalog order.
+    The page draws no hub for them -- nothing would join it -- so the
+    summary counts them instead (DL-07's spirit: state the omission)."""
+    consumed = {ref.name for job in catalog.jobs.values() for ref in job.resources}
+    return [name for name in catalog.resources if name not in consumed]
+
+
 def _condition_facts(
     catalog: CatalogIR, graph: DerivedGraph, edge_ids: list[str]
 ) -> tuple[dict[str, dict[str, object]], dict[int, str]]:
@@ -306,8 +559,18 @@ def _elements(
             data["collapsed"] = True
         nodes.append({"data": data, "classes": _KIND_CLASS.get(kind, "cmd")})
 
-    ext_nodes, ext_id = _ext_nodes(catalog, graph, {name for name in catalog_data})
+    # The mutex plan decides the lock shapes AND which n() targets dangle:
+    # a dangling one becomes an EXT node exactly as a dangling producer does
+    # (DL-35a's rule, carried to this page).
+    plan = mutex_plan(graph, None)
+    self_locked, cliques, pairs = plan
+    lock_members = {n for clique in cliques for n in clique} | {n for p in pairs for n in p}
+    dangling = [n for n in sorted(lock_members) if n not in catalog.jobs]
+    taken_ids = {name for name in catalog_data}
+    ext_nodes, ext_id = _ext_nodes(catalog, graph, taken_ids, dangling)
     nodes.extend(ext_nodes)
+    for name in self_locked:
+        catalog_data[name]["self_lock"] = True
 
     # cytoscape ids are unique across ALL elements and node ids are raw job
     # names, so a job literally named "e0" would silently swallow an edge at
@@ -328,17 +591,27 @@ def _elements(
     facts, branch_of = _condition_facts(catalog, graph, edge_ids)
     for name, data in catalog_data.items():
         data.update(facts[name])
+
+    def node_id(name: str) -> str:
+        return name if name in catalog.jobs else ext_id[name]
+
+    lock_nodes, lock_links = _lock_elements(
+        catalog, graph, plan, node_id, taken_ids | set(edge_ids)
+    )
     return {
-        "nodes": nodes,
-        "edges": _edge_elements(catalog, graph, edge_ids, branch_of, ext_id),
+        "nodes": nodes + lock_nodes,
+        "edges": _edge_elements(catalog, graph, edge_ids, branch_of, ext_id) + lock_links,
     }
 
 
 def _ext_nodes(
-    catalog: CatalogIR, graph: DerivedGraph, taken_ids: set[str]
+    catalog: CatalogIR, graph: DerivedGraph, taken_ids: set[str], dangling: list[str]
 ) -> tuple[list[dict[str, object]], dict[str, str]]:
     """The endpoints outside the catalog, in first-reference order, plus the
-    cytoscape id each display name was assigned.
+    cytoscape id each display name was assigned. `dangling` carries the lock
+    members no job defines (DL-192), appended after the edge endpoints: a
+    dangling n() target is as real a reference as a dangling producer, and
+    L001 owns the finding either way.
 
     Producer locality is decided off the atom's `instance` fact
     (`derive.local_producer`), never off `edge.src`'s membership in
@@ -370,6 +643,16 @@ def _ext_nodes(
             ext_id[endpoint] = candidate
         if edge.via == "global":
             ext_global[endpoint] = True
+    for endpoint in dangling:
+        if endpoint in ext_global:
+            continue  # already an EXT node: one element, both references
+        ext_order.append(endpoint)
+        ext_global[endpoint] = False
+        candidate = endpoint
+        while candidate in taken_ids:
+            candidate = "_" + candidate
+        taken_ids.add(candidate)
+        ext_id[endpoint] = candidate
     nodes: list[dict[str, object]] = [
         {
             "data": {
@@ -452,9 +735,22 @@ def to_explore_html(
         graph = derive_graph(catalog)
     elements = _elements(catalog, graph, collapse_threshold=collapse_threshold)
     boxes = sum(1 for n in elements["nodes"] if n["classes"] == "box")
+    # every lock the page DRAWS: one per hub, one per stated pair, one per
+    # self badge. The report counts stated exclusions instead (mutex_groups),
+    # so a clique of three reads as 3 there and as 1 hub here.
+    locks = (
+        sum(1 for n in elements["nodes"] if "lock" in str(n["classes"]).split())
+        + sum(1 for e in elements["edges"] if "pair" in str(e["classes"]).split())
+        + sum(1 for n in elements["nodes"] if cast("dict[str, object]", n["data"]).get("self_lock"))
+    )
+    unused = len(unused_resources(catalog))
+    # the DEPENDENCY edges: lock links share the element list and are not
+    # dependencies -- the locks count below carries them
+    flow_edges = sum(1 for e in elements["edges"] if "lock" not in str(e["classes"]).split())
     summary = (
-        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(elements['edges'])} edges"
-        f" \N{MIDDLE DOT} {boxes} boxes"
+        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {flow_edges} edges"
+        f" \N{MIDDLE DOT} {boxes} boxes \N{MIDDLE DOT} {locks} locks"
+        + (f" \N{MIDDLE DOT} {unused} unused" if unused else "")
     )
     payload = json.dumps(elements).replace("<", "\\u003c")
 

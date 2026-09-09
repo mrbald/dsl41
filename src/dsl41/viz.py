@@ -396,12 +396,14 @@ def _auto_direction(comp: list[str], graph: DerivedGraph) -> Direction:
 # ------------------------------------------------------------------ mutex plan
 
 
-def _mutex_plan(
+def mutex_plan(
     graph: DerivedGraph, members: set[str] | None
 ) -> tuple[set[str], list[list[str]], list[tuple[str, str]]]:
     """(self-locked nodes, complete cliques >=3, remaining pairs), filtered
     to `members` when given. Cliques must be COMPLETE (all k(k-1)/2 pairs
     stated) -- the hub encoding never claims an exclusion the JIL doesn't.
+    PUBLIC since DL-192: the explore page draws the same three shapes and
+    must decide completeness the same way, not with a second rule.
     A member missing from the catalog (dangling n(), L001's finding) counts
     as in scope wherever its partner is, like edge pseudo-sources (DL-35a).
     Assumes derive's invariants: each pair sorted, groups deduped."""
@@ -517,7 +519,7 @@ def _render_chart(
     holders are."""
     ids = _Ids()
     anchor, collapsed = _anchors(graph.box_tree, collapse_threshold)
-    self_locked, cliques, mutex_pairs = _mutex_plan(graph, members)
+    self_locked, cliques, mutex_pairs = mutex_plan(graph, members)
 
     def in_scope(name: str) -> bool:
         return members is None or name in members

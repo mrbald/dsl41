@@ -364,11 +364,11 @@ def _node_values(side: Baseline) -> dict[str, Any]:
         values[XINST + name] = (xinst.xtype, tuple(sorted(xinst.attrs.items())))
     for name, resource in catalog.resources.items():
         # amount, res_type, and the release-policy default -- which IS
-        # res_type (`capacity._release_policy`: D depletes, anything else
+        # res_type (`capacity.release_policy`: D depletes, anything else
         # renews), so the pair says all three things ss10.2 names
         values[RESOURCE + name] = (
             _capacity(resource.capacity_units),
-            # exactly as `capacity._release_policy` reads it: stripped and
+            # exactly as `capacity.release_policy` reads it: stripped and
             # upper-cased, so `r` and `R` are one renewable policy
             (resource.res_type or "").strip().upper() or None,
         )
