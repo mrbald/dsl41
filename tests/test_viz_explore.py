@@ -17,14 +17,14 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from test_viz import CORPUS_DIR, LOWERABLE_CORPUS, catalog_of, corpus_catalog, runner
 from test_viz_html import _vendor_bytes
 
 from dsl41.cli import app
 from dsl41.derive import derive_graph
-from dsl41.viz_explore import _elements, to_explore_html
+from dsl41.viz_explore import _elements, _flatten, _shape, to_explore_html
 
 # ------------------------------------------------------------ vendor integrity
 
@@ -169,12 +169,13 @@ def _cond_elements() -> dict[str, list[dict[str, object]]]:
     return _elements(catalog, derive_graph(catalog))
 
 
-def _shapes(els: dict[str, list[dict[str, object]]]) -> dict[str, dict[str, str]]:
-    """node id -> its cond_shape mapping, catalog nodes only."""
+def _badges(els: dict[str, list[dict[str, object]]]) -> dict[str, str]:
+    """node id -> the badge its label wears, catalog nodes only. The six-value
+    shape stays in the emitter (DL-193); what crosses is this."""
     return {
-        n["data"]["id"]: n["data"]["cond_shape"]  # type: ignore[index,misc]
+        n["data"]["id"]: n["data"]["cond_badge"]  # type: ignore[index,misc]
         for n in els["nodes"]
-        if "cond_shape" in n["data"]  # type: ignore[operator]
+        if "cond_badge" in n["data"]  # type: ignore[operator]
     }
 
 
@@ -332,17 +333,18 @@ def test_elements_carry_the_condition_text_of_every_bearing_attribute() -> None:
     assert gate["box_success"] == "s(gate_outside_job)"  # type: ignore[index]
     assert gate["box_failure"] == "v(ABORT_FLAG) = 1"  # type: ignore[index]
     # both of those edges are M16 -- the attribute they came from is read off
-    # the walk, never guessed from the mapping row
-    assert gate["cond_shape"] == {"box_success": "single", "box_failure": "single"}  # type: ignore[index]
+    # the walk, never guessed from the mapping row. Two single readings badge
+    # nothing: every incoming arrow must hold, which is the default.
+    assert gate["cond_badge"] == ""  # type: ignore[index]
     member = _node(els, "gate_member_a")["data"]
-    assert member["condition"] is None and member["cond_shape"] == {}  # type: ignore[index]
+    assert member["condition"] is None and member["cond_badge"] == ""  # type: ignore[index]
 
 
 def test_elements_or_join_marks_each_alternative_with_its_branch() -> None:
     # the corpus OR join (DL-38's T-003): a flat any, one branch per operand,
     # every arrow labelled with it and classed `any`
     els = _corpus_elements("fold_t003_or_join.jil")
-    assert _shapes(els)["fold_or_join"] == {"condition": "any"}
+    assert _badges(els)["fold_or_join"] == " \N{LOGICAL OR}"
     assert _branches(els, "fold_or_join") == {"fold_or_m1": "|1", "fold_or_m2": "|2"}
     labels = {
         e["data"]["source"]: (e["data"]["label"], e["classes"])  # type: ignore[index]
@@ -355,34 +357,35 @@ def test_elements_or_join_marks_each_alternative_with_its_branch() -> None:
     tree = _node(els, "fold_or_join")["data"]["cond_tree"]["condition"]  # type: ignore[index,call-overload]
     assert tree["op"] == "or"
     assert [leaf["atom"] for leaf in _leaves(tree)] == ["s(fold_or_m1)", "s(fold_or_m2)"]
-    assert all(leaf["lock"] is False and leaf["edge"] for leaf in _leaves(tree))
+    assert all(leaf["edge"] for leaf in _leaves(tree))  # every alternative is an arrow
 
 
 def test_elements_bare_notrunning_atoms_are_lock_leaves_with_no_edge() -> None:
     # M07: a bare local n() is a mutex record, not an edge -- it was invisible
     # on the page entirely. Now it is a leaf that says why it has no arrow.
     els = _corpus_elements("m07_mutex.jil")
-    assert _shapes(els)["mutex_b"] == {"condition": "all"}
+    assert _badges(els)["mutex_b"] == ""  # an AND of a lock and an arrow
     leaves = _leaves(_node(els, "mutex_b")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
-    assert [(leaf["atom"], leaf["lock"], leaf["edge"]) for leaf in leaves] == [
-        ("n(mutex_a)", True, None),
-        ("s(mutex_feeder)", False, "e0"),
+    # no edge id IS the lock: the leaf states the fact once (DL-193)
+    assert [(leaf["atom"], leaf["edge"]) for leaf in leaves] == [
+        ("n(mutex_a)", None),
+        ("s(mutex_feeder)", "e0"),
     ]
     serial = _leaves(_node(els, "mutex_serial")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
-    assert serial == [
-        {
-            "atom": "n(mutex_serial)",
-            "edge": None,
-            "branch": None,
-            "branch_key": None,
-            "lock": True,
-        }
-    ]
+    assert serial == [{"atom": "n(mutex_serial)", "edge": None, "branch": None}]
 
 
-def test_elements_classify_every_drawable_shape() -> None:
-    shapes = _shapes(_cond_elements())
-    assert {name: shape["condition"] for name, shape in shapes.items() if shape} == {
+def test_shape_classifies_every_drawable_reading() -> None:
+    """The six-value vocabulary stays on the emitter's side of the boundary
+    (DL-193): it picks the branch labels and the canvas suffix here. What the
+    page is handed is the badge below."""
+    catalog = catalog_of(_COND_TEXT)
+    assert {
+        name: _shape(_flatten(cond))
+        for name, job in catalog.jobs.items()
+        for origin, cond, _span in job.iter_conditions()
+        if origin == "condition"
+    } == {
         "AOA": "all-of-any",
         "TWO": "all-of-any",
         "ANY": "any",
@@ -394,6 +397,32 @@ def test_elements_classify_every_drawable_shape() -> None:
         "BOX": "any",
         "MEM": "any",
         "OUT": "any",
+    }
+
+
+def test_elements_badge_the_or_readings_and_only_those() -> None:
+    # the three-value badge the page prints: an OR the canvas draws as
+    # branches, the starred form for one too deep to draw, and nothing at all
+    # for the default reading (every incoming arrow must hold)
+    OR, DEEP = " \N{LOGICAL OR}", " \N{LOGICAL OR}*"
+    assert _badges(_cond_elements()) == {
+        "A": "",
+        "B": "",
+        "C": "",
+        "D": "",
+        "E": "",
+        "AOA": OR,
+        "TWO": OR,
+        "ANY": OR,
+        "AOFA": OR,
+        "CPX": DEEP,
+        "LOCK": OR,
+        "PLAIN": "",
+        "FLAT": "",
+        "BOX": OR,
+        "MEM": OR,
+        "MEM2": "",
+        "OUT": OR,
     }
 
 
@@ -435,20 +464,8 @@ def test_elements_lock_inside_an_or_keeps_its_branch_without_an_edge() -> None:
     assert _branches(els, "LOCK") == {"B": "|2"}
     leaves = _leaves(_node(els, "LOCK")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
     assert leaves == [
-        {
-            "atom": "n(A)",
-            "edge": None,
-            "branch": "|1",
-            "branch_key": "condition:|1",
-            "lock": True,
-        },
-        {
-            "atom": "s(B)",
-            "edge": leaves[1]["edge"],
-            "branch": "|2",
-            "branch_key": "condition:|2",
-            "lock": False,
-        },
+        {"atom": "n(A)", "edge": None, "branch": "|1"},
+        {"atom": "s(B)", "edge": leaves[1]["edge"], "branch": "|2"},
     ]
 
 
@@ -467,26 +484,24 @@ def test_elements_two_or_attributes_never_share_a_branch_identity() -> None:
     catalog = catalog_of(text)
     els = _elements(catalog, derive_graph(catalog))
     keyed = {
-        str(e["data"]["source"]): (e["data"]["attr"], e["data"]["branch"], e["data"]["branch_key"])  # type: ignore[index]
+        str(e["data"]["source"]): (e["data"]["attr"], e["data"]["branch"])  # type: ignore[index]
         for e in _flow_edges(els)
     }
     assert keyed == {
-        "A": ("condition", "|1", "condition:|1"),
-        "B": ("condition", "|2", "condition:|2"),
-        "C": ("box_success", "|1", "box_success:|1"),
-        "D": ("box_success", "|2", "box_success:|2"),
+        "A": ("condition", "|1"),
+        "B": ("condition", "|2"),
+        "C": ("box_success", "|1"),
+        "D": ("box_success", "|2"),
     }
-    # ...and the tree leaves carry the same identity, so the panel's swatches
-    # and the canvas paint agree
+    # ...and the tree states each attribute's branches under that attribute,
+    # so the page composes the same identity for the swatch and the paint
     trees = _node(els, "BX")["data"]["cond_tree"]  # type: ignore[index]
-    keys = {
-        attr: [leaf["branch_key"] for leaf in _leaves(tree)]
+    branches = {
+        attr: [leaf["branch"] for leaf in _leaves(tree)]
         for attr, tree in trees.items()  # type: ignore[union-attr]
     }
-    assert keys == {
-        "condition": ["condition:|1", "condition:|2"],
-        "box_success": ["box_success:|1", "box_success:|2"],
-    }
+    assert branches == {"condition": ["|1", "|2"], "box_success": ["|1", "|2"]}
+    assert "function branchKey(attr, branch)" in to_explore_html(catalog)
 
 
 def test_elements_canvas_suffix_only_where_it_groups_arrows() -> None:
@@ -560,24 +575,15 @@ def test_elements_draw_one_hub_per_consumed_resource() -> None:
     one = hubs["lock:r:R_ONE"]
     assert one["label"] == "\N{LOCK} R_ONE (1)"
     assert one["capacity"] == 1
+    # one sentence per member, worded here and printed by the page (DL-193)
     assert one["members"] == [
-        {
-            "id": "lk_x1",
-            "job": "lk_x1",
-            "boxes": [],
-            "quantity": 1,
-            "free": None,
-            "mode": "acquire",
-            "policy": "completion",
-        },
+        {"id": "lk_x1", "job": "lk_x1", "boxes": [], "how": "1 unit, released on completion"},
         {
             "id": "lk_x2",
             "job": "lk_x2",
             "boxes": ["lk_box"],
-            "quantity": 1,
-            "free": "N",
-            "mode": "acquire",
-            "policy": "never",  # FREE=N: the units are never given back (DL-50)
+            # FREE=N: the units are never given back (DL-50)
+            "how": "1 unit, never released",
         },
     ]
     assert hubs["lock:r:R_BIG"]["label"] == "\N{LOCK} R_BIG (3)"
@@ -623,14 +629,12 @@ def test_elements_mutex_pair_tees_the_end_that_waits() -> None:
     one_way = pairs[("lk_a", "lk_b")]
     assert (one_way["source_tee"], one_way["target_tee"]) == (True, False)
     assert one_way["directions"] == ["lk_a waits while lk_b runs"]
-    assert one_way["how"] == "one-way"
     mutual = pairs[("lk_c", "lk_d")]
     assert (mutual["source_tee"], mutual["target_tee"]) == (True, True)
     assert mutual["directions"] == [
         "lk_c waits while lk_d runs",
         "lk_d waits while lk_c runs",
     ]
-    assert mutual["how"] == "mutual"
 
 
 def test_elements_complete_clique_is_one_hub_with_a_row_per_member() -> None:
@@ -660,11 +664,9 @@ def test_elements_threshold_resource_holds_nothing() -> None:
     held units released on completion."""
     els = _corpus_elements("viz_locks.jil")
     (member,) = _locks(els)["lock:r:R_GATE"]["members"]  # type: ignore[misc]
-    assert member["mode"] == "gate"
-    assert member["policy"] is None
-    assert member["quantity"] == 2
+    assert member["how"] == "threshold gate: needs 2 free, holds nothing"
     (link,) = [e for e in _lock_links(els) if e["data"]["target"] == "lk_x4"]  # type: ignore[index]
-    assert link["data"]["mode"] == "gate" and link["data"]["policy"] is None  # type: ignore[index]
+    assert link["data"]["demand"] == member["how"]  # type: ignore[index]
 
 
 def test_elements_coalesce_one_job_two_groups_on_one_resource() -> None:
@@ -674,19 +676,17 @@ def test_elements_coalesce_one_job_two_groups_on_one_resource() -> None:
     is the one owner of that arithmetic."""
     els = _corpus_elements("viz_locks.jil")
     big = [m for m in _locks(els)["lock:r:R_BIG"]["members"] if m["job"] == "lk_x5"]  # type: ignore[union-attr,index]
+    # (R_BIG, QUANTITY=1) and (R_BIG, QUANTITY=2) are three units, once
     assert big == [
         {
             "id": "lk_x5",
             "job": "lk_x5",
             "boxes": [],
-            "quantity": 3,  # (R_BIG, QUANTITY=1) and (R_BIG, QUANTITY=2)
-            "free": None,
-            "mode": "acquire",
-            "policy": "completion",
+            "how": "3 units, released on completion",
         }
     ]
     links = [e for e in _lock_links(els) if e["data"]["target"] == "lk_x5"]  # type: ignore[index]
-    assert len(links) == 1 and links[0]["data"]["quantity"] == 3  # type: ignore[index]
+    assert len(links) == 1 and links[0]["data"]["label"] == "3"  # type: ignore[index]
 
 
 def test_elements_merge_the_most_restrictive_release_of_two_groups() -> None:
@@ -698,8 +698,7 @@ def test_elements_merge_the_most_restrictive_release_of_two_groups() -> None:
     )
     catalog = catalog_of(text)
     (member,) = _locks(_elements(catalog, derive_graph(catalog)))["lock:r:R"]["members"]  # type: ignore[misc]
-    assert member["quantity"] == 2
-    assert member["policy"] == "never"
+    assert member["how"] == "2 units, never released"
 
 
 def test_elements_incomplete_mutex_component_stays_pairwise() -> None:
@@ -736,7 +735,10 @@ def test_elements_m07_corpus_file_keeps_the_report_shapes() -> None:
         (str(e["data"]["source"]), str(e["data"]["target"]))  # type: ignore[index]
         for e in links
     ] == [("mutex_a", "mutex_b")]
-    assert links[0]["data"]["how"] == "mutual"  # type: ignore[index]
+    assert links[0]["data"]["directions"] == [  # type: ignore[index]
+        "mutex_a waits while mutex_b runs",
+        "mutex_b waits while mutex_a runs",
+    ]
     assert _node(els, "mutex_serial")["data"]["self_lock"] is True  # type: ignore[index]
     assert len(_flow_edges(els)) == 1  # s(mutex_feeder) is still an ordinary edge
 
@@ -812,18 +814,34 @@ def test_elements_are_deterministic_across_hash_seeds() -> None:
 _GRAPH_DATA = re.compile(r'<script id="graph-data" type="application/json">(.*?)</script>', re.S)
 
 
-def _page_elements(page: str) -> dict[str, list[dict[str, object]]]:
+def _page_payload(page: str) -> dict[str, Any]:
     raw = _GRAPH_DATA.search(page)
     assert raw is not None
     assert "<" not in raw.group(1)  # the escaping invariant the embedding rests on
-    result: dict[str, list[dict[str, object]]] = json.loads(raw.group(1))
+    result: dict[str, Any] = json.loads(raw.group(1))
     return result
+
+
+def _page_elements(page: str) -> dict[str, list[dict[str, object]]]:
+    """The elements half of the payload: the header totals ride beside them
+    (DL-193)."""
+    payload = _page_payload(page)
+    return {"nodes": payload["nodes"], "edges": payload["edges"]}
 
 
 def test_to_explore_html_escapes_the_json_but_round_trips_elements() -> None:
     catalog = corpus_catalog()
     graph = derive_graph(catalog)
-    assert _page_elements(to_explore_html(catalog, graph)) == _elements(catalog, graph)
+    page = to_explore_html(catalog, graph)
+    els = _elements(catalog, graph)
+    assert _page_elements(page) == els
+    # and the totals travel with them: the page recomputed this arithmetic in
+    # JavaScript, over the same arrays, and the two were kept equal by hand
+    totals = _page_payload(page)["totals"]
+    assert totals["nodes"] == sum(
+        1 for n in els["nodes"] if "lock" not in str(n["classes"]).split()
+    )
+    assert totals["edges"] == len(_flow_edges(els))
 
 
 def test_to_explore_html_embeds_each_vendor_payload_exactly_once() -> None:
@@ -933,9 +951,11 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     # reading. The browser module drives all of it; this pins the wiring.
     page = to_explore_html(catalog_of(_COND_TEXT))
     # the page source carries the JS escapes, not the characters
-    assert r'return " \u2228*";' in page  # complex: read the tree and the text
-    assert r'return " \u2228";' in page  # an OR the canvas draws as branches
-    assert "function condBadge(ele)" in page and "nodeLabel(ele).length" in page
+    # the badge is emitted, and the page source carries the JSON escape
+    assert r'"cond_badge": " \u2228*"' in page  # complex: read the tree and the text
+    assert r'"cond_badge": " \u2228"' in page  # an OR the canvas draws as branches
+    assert 'function condBadge(ele) { return ele.data("cond_badge") || ""; }' in page
+    assert "nodeLabel(ele).length" in page
     assert "all incoming arrows must hold (AND) unless the job" in page
     assert "a bare n() is a lock and draws no arrow" in page
     assert '{ selector: "edge.any", style: {' in page
@@ -975,6 +995,15 @@ def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
     # dependency edges lk_seed fans out
     assert "18 jobs \N{MIDDLE DOT} 5 edges \N{MIDDLE DOT} 1 boxes" in page
     assert "\N{MIDDLE DOT} 9 locks \N{MIDDLE DOT} 1 unused" in page
+    # #stats reads the same arithmetic out of the payload; only "nodes" differs
+    # from the header's "jobs", and on purpose -- it counts the EXT nodes too
+    assert _page_payload(page)["totals"] == {
+        "nodes": 18,  # this fixture has no EXT endpoint, so the two words agree
+        "edges": 5,
+        "boxes": 1,
+        "locks": 9,
+        "unused": 1,
+    }
     # nothing unused -> nothing said (read the summary span: the vendored
     # bundle has the word "unused" in it somewhere, as it has most words)
     plain = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
@@ -1008,11 +1037,10 @@ def test_to_explore_html_carries_the_lock_grammar() -> None:
     assert "dotted gray = lock" in page
     # a threshold gate holds nothing, and both halves of the header count the
     # dependency graph by "edges"
-    assert '"threshold gate: needs " + d.quantity + " free, holds nothing"' in page
-    assert (
-        "var TOTAL_EDGES = elements.edges.filter(function (e) { return !isLock(e); }).length;"
-        in page
-    )
+    # the demand is worded in the emitter and printed by the page (DL-193)
+    assert '["demand", d.demand]' in page
+    assert '"demand": "threshold gate: needs 2 free, holds nothing"' in page
+    assert "var TOTAL_EDGES = payload.totals.edges;" in page
 
 
 def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:

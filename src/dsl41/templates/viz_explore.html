@@ -194,7 +194,9 @@ function elkLayout(extra) {
   return opts;
 }
 
-var elements = JSON.parse(document.getElementById("graph-data").textContent);
+/* The emitted payload: the elements, and the header totals computed with
+   them (DL-193). */
+var payload = JSON.parse(document.getElementById("graph-data").textContent);
 
 /* The expand-collapse api, once the (optional, guarded) extension is up;
    null means the page runs without box folding. Declared here because the
@@ -211,29 +213,13 @@ function foldedMembers(box) {
   return ec ? ec.getCollapsedChildrenRecursively(box).nodes().length : 0;
 }
 
-/* The shapes of this node's own conditions -- one per condition-bearing
-   attribute, so a box's box_success counts as much as a job's condition. */
-function condShapes(ele) {
-  var shapes = ele.data("cond_shape") || {};
-  return Object.keys(shapes).map(function (key) { return shapes[key]; });
-}
-
 /* The badge (DL-191): the page's default reading is that every incoming
-   arrow must hold, so only a departure from it is announced. A shape the
-   canvas draws as branches gets the OR sign; one too deep to draw gets the
-   starred form, and the panel's tree and text are then the honest reading.
-   Read off the node's OWN data: a collapsed box shows its own condition's
-   badge and never merges its members'. */
-function condBadge(ele) {
-  var shapes = condShapes(ele);
-  if (shapes.indexOf("complex") !== -1) return " \u2228*";
-  for (var i = 0; i < shapes.length; i++) {
-    if (shapes[i] === "any" || shapes[i] === "all-of-any" || shapes[i] === "any-of-all") {
-      return " \u2228";
-    }
-  }
-  return "";
-}
+   arrow must hold, so only a departure from it is announced. The emitter
+   classifies the shape -- six values, which decide the branch labels there
+   -- and hands over the three-value badge this layer prints (DL-193). Read
+   off the node's OWN data: a collapsed box shows its own condition's badge
+   and never merges its members'. */
+function condBadge(ele) { return ele.data("cond_badge") || ""; }
 
 /* A job that excludes ITSELF (n(own name), M07) wears the lock glyph: one
    run at a time, and there is no second node to draw a link to (DL-35). */
@@ -425,7 +411,7 @@ var STYLE_TAIL = [
 
 var cy = cytoscape({
   container: document.getElementById("cy"),
-  elements: elements,
+  elements: { nodes: payload.nodes, edges: payload.edges },
   boxSelectionEnabled: false,
   style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)
 });
@@ -568,21 +554,14 @@ var lostFeature = "";
 /* The totals are the emitted graph's, fixed at load: a collapse takes a
    box's members and their inner edges out of the graph and re-points the
    border-crossing edges at the box, so live counts would read as a loss.
-   Nodes and edges count the DEPENDENCY graph, as the header summary does:
-   the two halves of the header must mean one thing by "edges". The lock
-   count is the summary's arithmetic too -- a hub, a stated pair, a badge --
-   and it is the TOTAL: a live one read differently in webkit right after a
-   focus, whose style recalculation lags the layoutstop that reads it. */
-function hasClass(element, name) {
-  return String(element.classes).split(" ").indexOf(name) !== -1;
-}
-function isLock(element) { return hasClass(element, "lock"); }
-
-var TOTAL_NODES = elements.nodes.filter(function (n) { return !isLock(n); }).length;
-var TOTAL_EDGES = elements.edges.filter(function (e) { return !isLock(e); }).length;
-var TOTAL_LOCKS = elements.nodes.filter(isLock).length
-  + elements.edges.filter(function (e) { return hasClass(e, "pair"); }).length
-  + elements.nodes.filter(function (n) { return n.data.self_lock; }).length;
+   The emitter counts them with the elements and sends them along (DL-193):
+   the header's two halves shared one arithmetic written twice, in two
+   languages, over the same arrays. The lock count is the TOTAL for a second
+   reason: a live one read differently in webkit right after a focus, whose
+   style recalculation lags the layoutstop that reads it. */
+var TOTAL_NODES = payload.totals.nodes;
+var TOTAL_EDGES = payload.totals.edges;
+var TOTAL_LOCKS = payload.totals.locks;
 
 function updateStats(suffix) {
   var collapsed = cy.nodes(".cy-expand-collapse-collapsed-node").length;
@@ -694,28 +673,32 @@ document.getElementById("d-close").addEventListener("click", function () {
 
 /* ------------------------------------------- condition structure (DL-191) */
 
-/* Every leaf of one node's cond_tree, all its attributes together. */
-function eachLeaf(trees, fn) {
-  Object.keys(trees || {}).forEach(function (attr) { walkLeaves(trees[attr], fn); });
-}
 function walkLeaves(node, fn) {
   if (node.op) node.items.forEach(function (item) { walkLeaves(item, fn); });
   else fn(node);
 }
 
+/* The identity an alternation is grouped, painted and swatched by: the
+   attribute AND the branch, because the branch number restarts per
+   attribute -- a box whose condition and box_success are both ORs states
+   two alternations that both begin at `|1`, and painting them alike would
+   say they were alternatives of one another (DL-191). Composed here from
+   the two facts the payload carries (DL-193). */
+function branchKey(attr, branch) { return branch ? attr + ":" + branch : null; }
+
 /* The alternations this node's reading involves, in the order the TREE
    states them -- so a branch keeps its colour across taps, and `|10` does
-   not sort between `|1` and `|2`. Keyed by `branch_key` (attribute plus
-   branch): a box whose condition and box_success are both ORs states two
-   different alternations that both number themselves from one. The tree
-   comes first because it is complete: a lock draws no arrow, and an arrow
-   can be hidden by a focus or folded into a box. */
+   not sort between `|1` and `|2`. The tree is the whole order: the emitter
+   matches every edge to an atom of this node's own conditions and RAISES
+   rather than emit one it could not, so no arrow can carry a branch that no
+   leaf states (DL-193). */
 function branchOrder(n) {
-  var values = [];
-  function add(key) { if (key && values.indexOf(key) === -1) values.push(key); }
-  eachLeaf(n.data("cond_tree"), function (leaf) { add(leaf.branch_key); });
-  n.incomers("edge").forEach(function (e) {
-    if (!e.hasClass("cy-expand-collapse-meta-edge")) add(e.data("branch_key"));
+  var values = [], trees = n.data("cond_tree") || {};
+  Object.keys(trees).forEach(function (attr) {
+    walkLeaves(trees[attr], function (leaf) {
+      var key = branchKey(attr, leaf.branch);
+      if (key && values.indexOf(key) === -1) values.push(key);
+    });
   });
   return values;
 }
@@ -728,7 +711,7 @@ function paintBranches(n) {
   clearBranchPaint();
   var order = branchOrder(n);
   n.incomers("edge").forEach(function (e) {
-    var key = e.data("branch_key");
+    var key = branchKey(e.data("attr"), e.data("branch"));
     if (!key || e.hasClass("cy-expand-collapse-meta-edge")) return;
     e.addClass("br-" + (order.indexOf(key) % BRANCH_COLORS.length));
   });
@@ -736,17 +719,17 @@ function paintBranches(n) {
 }
 
 /* A branch group's own first leaf: every leaf under it carries the same
-   branch, and the leaf holds both the human label and the grouping key. */
+   branch, which is the human label, and the attribute completes the key. */
 function branchOf(node) {
   var found = null;
   walkLeaves(node, function (leaf) { if (found === null && leaf.branch) found = leaf; });
   return found;
 }
 
-function swatchFor(leaf, order) {
+function swatchFor(attr, leaf, order) {
   var swatch = document.createElement("span");
   swatch.className = "swatch";
-  var at = order.indexOf(leaf.branch_key);
+  var at = order.indexOf(branchKey(attr, leaf.branch));
   swatch.style.background = BRANCH_COLORS[at % BRANCH_COLORS.length];
   swatch.title = "branch " + leaf.branch;
   return swatch;
@@ -769,8 +752,10 @@ function withNote(content, note) {
 function leafContent(leaf) {
   var code = document.createElement("code");
   code.textContent = leaf.atom;
-  if (leaf.lock) return withNote(code, "(lock, no arrow)");
-  var edge = leaf.edge ? cy.$id(leaf.edge) : cy.collection();
+  /* no edge id at all is the lock: a bare local n() is a mutex record and
+     never an arrow (M07), which is why the emitter has none to name */
+  if (!leaf.edge) return withNote(code, "(lock, no arrow)");
+  var edge = cy.$id(leaf.edge);
   if (edge.empty() || !edge.visible()) return withNote(code, "(not on canvas)");
   var button = document.createElement("button");
   button.type = "button";
@@ -799,9 +784,9 @@ function leafContent(leaf) {
   return button;
 }
 
-function renderCondNode(node, ul, order, branch) {
+function renderCondNode(node, ul, order, attr, branch) {
   var li = document.createElement("li");
-  if (branch) li.appendChild(swatchFor(branch, order));  /* branch: a leaf */
+  if (branch) li.appendChild(swatchFor(attr, branch, order));  /* branch: a leaf */
   if (node.op) {
     var lead = document.createElement("span");
     lead.className = "op";
@@ -809,7 +794,7 @@ function renderCondNode(node, ul, order, branch) {
     li.appendChild(lead);
     var sub = document.createElement("ul");
     node.items.forEach(function (item) {
-      renderCondNode(item, sub, order, node.op === "or" ? branchOf(item) : null);
+      renderCondNode(item, sub, order, attr, node.op === "or" ? branchOf(item) : null);
     });
     li.appendChild(sub);
   } else {
@@ -829,39 +814,23 @@ function renderCondTrees(n, order) {
     head.textContent = attr;
     dTree.appendChild(head);
     var list = document.createElement("ul");
-    renderCondNode(trees[attr], list, order, null);
+    renderCondNode(trees[attr], list, order, attr, null);
     dTree.appendChild(list);
   });
 }
 
-/* A release policy in words. `capacity.release_policy` PICKS one (DL-50);
-   this only spells it. */
-var POLICY_WORDS = {
-  completion: "released on completion",
-  success: "released on success",
-  never: "never released"
-};
-
-/* What one job draws on one resource, in words. A threshold (res_type T)
-   is a LEVEL CHECK: it holds nothing, so it has no release to state --
-   `capacity.requirement_demand` owns that distinction, and the panel used
-   to report a gate as held units released on completion. */
-function demandWords(d) {
-  if (d.mode === "gate") {
-    return "threshold gate: needs " + d.quantity + " free, holds nothing";
-  }
-  return d.quantity + (d.quantity === 1 ? " unit, " : " units, ") + POLICY_WORDS[d.policy];
-}
-
 /* One member's line: who, where, what it draws or how it waits, and -- when
-   the canvas is not showing it -- why not. */
+   the canvas is not showing it -- why not. `how` is one sentence for both
+   kinds of lock, built where the rule that words it lives: the mutex
+   direction by `_mutex_how`, the resource demand by `_resource_how` off
+   `capacity.requirement_demand`'s answer. The page had a `ReleasePolicy`
+   value table of its own for the resource half (DL-193). */
 function memberLine(m) {
   var parts = [m.job], boxes = m.boxes || [];
   if (boxes.length) {
     parts.push("in box " + boxes[0]
       + (boxes.length > 1 ? " (top " + boxes[boxes.length - 1] + ")" : ""));
   }
-  if (m.quantity) parts.push(demandWords(m));
   if (m.how) parts.push(m.how);
   var el = cy.$id(m.id);
   if (el.empty()) {
@@ -904,7 +873,7 @@ function showLockEdgeDetails(e) {
   var rows = [
     ["kind", d.lock === "resource" ? "resource semaphore" : "mutual exclusion"],
     ["resource", d.resource],
-    ["demand", d.quantity ? demandWords(d) : null]
+    ["demand", d.demand]
   ];
   if (d.directions) {
     d.directions.forEach(function (line) { rows.push(["waits", line]); });

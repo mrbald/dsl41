@@ -27,20 +27,24 @@ Emission decisions (each with a test):
 - Edges carry via/lookback/cls/mapping_row/assumption; cls doubles as the
   style class (exact/assumed/redesign); the canvas label reuses
   viz.edge_label, so the DL-35 thinning grammar is re-expressed, not forked.
-- Nodes also carry the condition TEXT (condition/box_success/box_failure)
-  and its structure -- cond_shape and cond_tree, keyed by attribute -- and
-  every edge carries the `attr` it derives from, an edge under an OR its
-  `branch` and the `branch_key` that keeps two attributes' branches apart
-  (DL-191). Incoming arrows are an
-  AND unless the branch says otherwise; a bare local n() is a lock and has
-  no arrow at all. Every edge is matched back to the atom it derives from,
-  and an unmatched edge or atom raises rather than drawing a condition the
-  page cannot account for.
+- Nodes also carry the condition TEXT (condition/box_success/box_failure),
+  the `cond_badge` its label wears and the `cond_tree` the panel renders,
+  and every edge carries the `attr` it derives from plus, under an OR, its
+  `branch` (DL-191). The page composes the identity it groups and paints by
+  from those two, because the branch number restarts per attribute.
+  Incoming arrows are an AND unless the branch says otherwise; a bare local
+  n() is a lock and has no arrow at all -- its leaf carries no edge id.
+  Every edge is matched back to the atom it derives from, and an unmatched
+  edge or atom raises rather than drawing a condition the page cannot
+  account for.
 - Locks are elements of their own (DL-192), excluded from the layout and
   placed on their members: a resource semaphore is one hub per CONSUMED
   `insert_resource` (resources are not in IR-G, so they are read off IR-F,
   the DL-73 display-facts stance), and a mutex keeps the report's grammar
   through `viz.mutex_plan` -- pair link, complete-clique hub, self badge.
+- The payload carries the header `totals` beside the elements: the same
+  numbers were computed on both sides of the boundary and kept equal by
+  hand (DL-193).
 - The elements JSON embeds with DL-70's rule: every "<" becomes \\u003c
   (valid JSON, neutralizes </script and <!-- in one rule).
 - Template substitution is single-pass unique-marker (viz_html.substitute):
@@ -60,7 +64,7 @@ from collections.abc import Callable, Iterator
 from importlib.resources import files
 from typing import Literal, NamedTuple, cast
 
-from dsl41.capacity import merge_requirements, requirement_demand, resource_type
+from dsl41.capacity import job_demand, resource_type
 from dsl41.conditions import And, Atom, Cond, Or, Paren, iter_atoms
 from dsl41.derive import (
     BoxTree,
@@ -196,6 +200,28 @@ def _branch_labels(cond: Cond, shape: CondShape) -> list[str | None]:
     return [None] * _atom_count(cond)
 
 
+#: The shapes whose reading is an OR the canvas draws as branches. `single`
+#: and `all` are the page's default reading (every arrow must hold), and
+#: `complex` is too deep to draw.
+_OR_SHAPES = frozenset({"any", "all-of-any", "any-of-all"})
+
+
+def _cond_badge(shapes: dict[str, CondShape]) -> str:
+    """What one node's LABEL says about its conditions, over all of them.
+
+    The page's default reading is that every incoming arrow must hold, so
+    only a departure from it is announced: an OR the canvas draws as branches
+    gets the sign, and one too deep to draw gets the starred form, which
+    sends the reader to the panel's tree and text (DL-191). The six-value
+    shape stays here, where it decides the branch labels; the page is handed
+    the three-value badge it actually prints (DL-193)."""
+    if "complex" in shapes.values():
+        return " \N{LOGICAL OR}*"
+    if any(shape in _OR_SHAPES for shape in shapes.values()):
+        return " \N{LOGICAL OR}"
+    return ""
+
+
 def _canvas_suffix(shape: CondShape, branch: str) -> str:
     """What the EDGE LABEL says about a branch, which is less than the branch
     itself. The hollow arrowhead already says "one alternative", so a suffix
@@ -214,12 +240,14 @@ def _canvas_suffix(shape: CondShape, branch: str) -> str:
 
 class _EdgeCond(NamedTuple):
     """What one edge's own atom says about it: the attribute it came from,
-    the branch of that attribute's OR it is (None outside one), the key that
-    keeps two attributes' branches apart, and the canvas label's suffix."""
+    the branch of that attribute's OR it is (None outside one), and the
+    canvas label's suffix. The identity the page groups and paints by is the
+    attribute and the branch TOGETHER -- the branch number restarts per
+    attribute -- and the page composes it from these two rather than being
+    handed the same fact a third time (DL-193)."""
 
     attr: str
     branch: str | None
-    branch_key: str | None
     suffix: str
 
 
@@ -244,6 +272,21 @@ def _take_edge(queue: list[int], graph: DerivedGraph, atom: Atom, where: str) ->
         if graph.edges[index].atom == atom:
             return queue.pop(position)
     raise ValueError(f"{where}: no derived edge for atom {cond_to_source(atom)!r}")
+
+
+def _free_id(candidate: str, taken: set[str]) -> str:
+    """An id widened with a leading underscore until it is free, then claimed.
+
+    cytoscape has ONE id namespace over every element, and every id this
+    emitter mints is derived from something a JIL author chose: a job may
+    legally be named `e0`, `lock:r:R` or a foreign producer's display form
+    `foo^PRD`. One rule for all of them (DL-193) -- distinct tails keep
+    widened ids distinct from each other, and one `taken` set threaded
+    through keeps nodes, edges, EXT nodes and locks apart."""
+    while candidate in taken:
+        candidate = "_" + candidate
+    taken.add(candidate)
+    return candidate
 
 
 # ----------------------------------------------------------------- locks (DL-192)
@@ -275,13 +318,10 @@ def _box_chain(tree: BoxTree, name: str) -> list[str]:
 
 
 def _lock_id(kind: str, name: str, taken: set[str]) -> str:
-    """A namespaced lock id, widened until free. A job may legally be named
-    `lock:m:A+B`, and cytoscape ids are one namespace over every element."""
-    candidate = f"lock:{kind}:{name}"
-    while candidate in taken:
-        candidate = "_" + candidate
-    taken.add(candidate)
-    return candidate
+    """A namespaced lock id. A job may legally be named `lock:m:A+B`, and
+    cytoscape ids are one namespace over every element, so the namespacing
+    alone does not make it free -- `_free_id` finishes the job."""
+    return _free_id(f"lock:{kind}:{name}", taken)
 
 
 def _link_label(quantity: int, refs: list[ResourceRef]) -> str:
@@ -296,23 +336,27 @@ def _link_label(quantity: int, refs: list[ResourceRef]) -> str:
     return " ".join(parts)
 
 
-def _demand(catalog: CatalogIR, refs: list[ResourceRef]) -> tuple[int, str, str | None]:
-    """One job's whole demand on ONE resource: (units, mode, policy).
+#: A release policy in words. `capacity.release_policy` PICKS one (DL-50);
+#: this only spells it, on the same side of the boundary as `_mutex_how`.
+_POLICY_WORDS = {
+    "completion": "released on completion",
+    "success": "released on success",
+    "never": "never released",
+}
 
-    A job may list the same resource twice, and the pool coalesces those --
-    the demand SUMS and the policies merge to the most restrictive
-    (`capacity.merge_requirements`). Two links drawn on top of each other
-    and two rows reading "1 unit" would say something the runner does not
-    do. The T branch is `capacity.requirement_demand`'s too: a threshold
-    holds nothing, so it has no release policy to state."""
-    res_type = resource_type(catalog.resources.get(refs[0].name))
-    total: tuple[int, str, ReleasePolicy | None] | None = None
-    for ref in refs:
-        mode, policy = requirement_demand(res_type, ref.free)
-        entry = (ref.quantity, mode, policy)
-        total = entry if total is None else merge_requirements(total, entry)
-    assert total is not None  # a resource is in `consumers` only if a ref made it
-    return total
+
+def _resource_how(units: int, mode: str, policy: ReleasePolicy | None) -> str:
+    """What one job draws on one resource, in words -- the resource half of a
+    lock member's sentence, beside the mutex half `_mutex_how` states.
+
+    A threshold (`res_type: T`) is a LEVEL CHECK: it holds nothing, so it has
+    no release to state. `capacity.requirement_demand` owns that distinction
+    and this only spells its answer, on the emitter's side of the boundary:
+    the page prints the sentence and keeps no value table of its own."""
+    if mode == "gate":
+        return f"threshold gate: needs {units} free, holds nothing"
+    assert policy is not None  # 'acquire' always carries one (requirement_demand)
+    return f"{units} unit{'' if units == 1 else 's'}, {_POLICY_WORDS[policy]}"
 
 
 def _resource_locks(
@@ -339,17 +383,16 @@ def _resource_locks(
             capacity = None
         hub = _lock_id("r", res_name, taken)
         members: list[dict[str, object]] = []
+        res_type = resource_type(resource)
         for job_name, refs in by_job.items():
-            quantity, mode, policy = _demand(catalog, refs)
+            quantity, mode, policy = job_demand(res_type, refs)
+            how = _resource_how(quantity, mode, policy)
             members.append(
                 {
                     "id": job_name,
                     "job": job_name,
                     "boxes": _box_chain(graph.box_tree, job_name),
-                    "quantity": quantity,
-                    "free": refs[0].free if len(refs) == 1 else None,
-                    "mode": mode,
-                    "policy": policy,
+                    "how": how,
                 }
             )
             links.append(
@@ -359,10 +402,7 @@ def _resource_locks(
                         "target": job_name,
                         "lock": "resource",
                         "resource": res_name,
-                        "quantity": quantity,
-                        "free": refs[0].free if len(refs) == 1 else None,
-                        "mode": mode,
-                        "policy": policy,
+                        "demand": how,
                         "label": _link_label(quantity, refs),
                     },
                     "classes": "lock resource member",
@@ -431,7 +471,6 @@ def _mutex_locks(
                     "source_tee": names(a, b),
                     "target_tee": names(b, a),
                     "directions": directions,
-                    "how": "mutual" if len(directions) == 2 else "one-way",
                     "label": "",
                 },
                 "classes": "lock mutex pair",
@@ -542,18 +581,18 @@ def _condition_facts(
             shape = _shape(flat)
             leaves: list[dict[str, object]] = []
             for atom, branch in zip(iter_atoms(flat), _branch_labels(flat, shape), strict=True):
-                lock = is_mutex_atom(origin, atom)
-                at = None if lock else _take_edge(queue, graph, atom, f"{name} {origin}")
-                # the branch NUMBER restarts per attribute, so the identity the
-                # page groups and paints by carries the attribute too: a box
-                # whose condition and box_success are both ORs states two
-                # different alternations, not one twice (review MAJOR)
-                key = None if branch is None else f"{origin}:{branch}"
+                # a bare local n() is a mutex record and never an edge (M07),
+                # so its leaf carries no edge id -- which is the whole of that
+                # fact, and the page reads it there (DL-193)
+                at = (
+                    None
+                    if is_mutex_atom(origin, atom)
+                    else _take_edge(queue, graph, atom, f"{name} {origin}")
+                )
                 if at is not None:
                     edge_cond[at] = _EdgeCond(
                         attr=origin,
                         branch=branch,
-                        branch_key=key,
                         suffix="" if branch is None else _canvas_suffix(shape, branch),
                     )
                 leaves.append(
@@ -561,14 +600,12 @@ def _condition_facts(
                         "atom": cond_to_source(atom),
                         "edge": None if at is None else edge_ids[at],
                         "branch": branch,
-                        "branch_key": key,
-                        "lock": lock,
                     }
                 )
             data[origin] = cond_to_source(cond)
             shapes[origin] = shape
             trees[origin] = _cond_tree(flat, iter(leaves))
-        data["cond_shape"] = shapes
+        data["cond_badge"] = _cond_badge(shapes)
         data["cond_tree"] = trees
         facts[name] = data
     unmatched = [index for queue in queues.values() for index in queue]
@@ -632,22 +669,12 @@ def _elements(
     for name in self_locked:
         catalog_data[name]["self_lock"] = True
 
-    # cytoscape ids are unique across ALL elements and node ids are raw job
-    # names, so a job literally named "e0" would silently swallow an edge at
-    # cytoscape init (review finding) -- prefix until the id is free; distinct
-    # tails keep prefixed ids distinct from each other.
-    node_ids = {node["data"]["id"] for node in nodes}  # type: ignore[index]
-
-    def edge_id(i: int) -> str:
-        candidate = f"e{i}"
-        while candidate in node_ids:
-            candidate = "_" + candidate
-        return candidate
-
     # The condition structure (DL-191) needs the edge ids, so they are
     # assigned before the edges are built; every node the catalog defines
-    # then carries its own condition texts, shapes and trees.
-    edge_ids = [edge_id(i) for i in range(len(graph.edges))]
+    # then carries its own condition texts, badge and trees. `taken_ids`
+    # already holds every node id, its own and the EXT ones, and every id
+    # minted from here on joins it.
+    edge_ids = [_free_id(f"e{i}", taken_ids) for i in range(len(graph.edges))]
     facts, edge_cond = _condition_facts(catalog, graph, edge_ids)
     for name, data in catalog_data.items():
         data.update(facts[name])
@@ -655,9 +682,7 @@ def _elements(
     def node_id(name: str) -> str:
         return name if name in catalog.jobs else ext_id[name]
 
-    lock_nodes, lock_links = _lock_elements(
-        catalog, graph, plan, node_id, taken_ids | set(edge_ids)
-    )
+    lock_nodes, lock_links = _lock_elements(catalog, graph, plan, node_id, taken_ids)
     return {
         "nodes": nodes + lock_nodes,
         "edges": _edge_elements(catalog, graph, edge_ids, edge_cond, ext_id) + lock_links,
@@ -685,34 +710,26 @@ def _ext_nodes(
     ext_order: list[str] = []
     ext_global: dict[str, bool] = {}
     ext_id: dict[str, str] = {}  # display name -> assigned cytoscape id
+
+    def register(endpoint: str) -> None:
+        """One EXT node, once. The id is widened because a foreign producer's
+        raw display form can equal a local job's own id (DL-176's own fixture
+        has a local `foo^PRD`)."""
+        ext_order.append(endpoint)
+        ext_global[endpoint] = False
+        ext_id[endpoint] = _free_id(endpoint, taken_ids)
+
     for edge in graph.edges:
         if local_producer(edge, catalog) is not None:
             continue
         endpoint = edge.src
         if endpoint not in ext_global:
-            ext_order.append(endpoint)
-            ext_global[endpoint] = False
-            # the same collision one level down: a foreign producer's raw
-            # display form can equal a local job's own id (DL-176's own
-            # fixture has a local `foo^PRD`) -- widen with a leading
-            # underscore until free, the same idiom `edge_id` uses.
-            candidate = endpoint
-            while candidate in taken_ids:
-                candidate = "_" + candidate
-            taken_ids.add(candidate)
-            ext_id[endpoint] = candidate
+            register(endpoint)
         if edge.via == "global":
             ext_global[endpoint] = True
     for endpoint in dangling:
-        if endpoint in ext_global:
-            continue  # already an EXT node: one element, both references
-        ext_order.append(endpoint)
-        ext_global[endpoint] = False
-        candidate = endpoint
-        while candidate in taken_ids:
-            candidate = "_" + candidate
-        taken_ids.add(candidate)
-        ext_id[endpoint] = candidate
+        if endpoint not in ext_global:  # already an EXT node: one element, both references
+            register(endpoint)
     nodes: list[dict[str, object]] = [
         {
             "data": {
@@ -768,7 +785,6 @@ def _edge_elements(
                     "assumption": edge.assumption,
                     "attr": cond.attr,
                     "branch": cond.branch,
-                    "branch_key": cond.branch_key,
                     "label": label,
                 },
                 # cls stays the style class; `any` is the second, orthogonal
@@ -777,6 +793,42 @@ def _edge_elements(
             }
         )
     return edges
+
+
+def _totals(catalog: CatalogIR, elements: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """The header's arithmetic, done once for both halves of it (DL-193).
+
+    The page shows the same numbers in `#stats` and used to recompute them
+    over the same arrays in JavaScript, with a class-string parser of its
+    own for the job; the two were kept equal by hand and had already drifted
+    once. They are emitted with the elements instead.
+
+    `nodes` and `edges` count the DEPENDENCY graph: a lock is a fact ABOUT
+    jobs and the `locks` count carries it. `locks` counts what the page
+    DRAWS -- one per hub, one per stated pair, one per self badge -- while
+    the report counts stated exclusions (`mutex_groups`), so a complete
+    clique of three reads as 3 there and as 1 hub here. One asymmetry is
+    deliberate and not drift: the header says "N jobs" (the catalog's own,
+    EXT excluded) where `#stats` says "N nodes" (EXT included)."""
+
+    def flow(element: dict[str, object]) -> bool:
+        return "lock" not in str(element["classes"]).split()
+
+    return {
+        "nodes": sum(1 for n in elements["nodes"] if flow(n)),
+        "edges": sum(1 for e in elements["edges"] if flow(e)),
+        "boxes": sum(1 for n in elements["nodes"] if n["classes"] == "box"),
+        "locks": (
+            sum(1 for n in elements["nodes"] if not flow(n))
+            + sum(1 for e in elements["edges"] if "pair" in str(e["classes"]).split())
+            + sum(
+                1
+                for n in elements["nodes"]
+                if cast("dict[str, object]", n["data"]).get("self_lock")
+            )
+        ),
+        "unused": len(_unused_resources(catalog)),
+    }
 
 
 def to_explore_html(
@@ -796,25 +848,13 @@ def to_explore_html(
     if graph is None:
         graph = derive_graph(catalog)
     elements = _elements(catalog, graph, collapse_threshold=collapse_threshold)
-    boxes = sum(1 for n in elements["nodes"] if n["classes"] == "box")
-    # every lock the page DRAWS: one per hub, one per stated pair, one per
-    # self badge. The report counts stated exclusions instead (mutex_groups),
-    # so a clique of three reads as 3 there and as 1 hub here.
-    locks = (
-        sum(1 for n in elements["nodes"] if "lock" in str(n["classes"]).split())
-        + sum(1 for e in elements["edges"] if "pair" in str(e["classes"]).split())
-        + sum(1 for n in elements["nodes"] if cast("dict[str, object]", n["data"]).get("self_lock"))
-    )
-    unused = len(_unused_resources(catalog))
-    # the DEPENDENCY edges: lock links share the element list and are not
-    # dependencies -- the locks count below carries them
-    flow_edges = sum(1 for e in elements["edges"] if "lock" not in str(e["classes"]).split())
+    totals = _totals(catalog, elements)
     summary = (
-        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {flow_edges} edges"
-        f" \N{MIDDLE DOT} {boxes} boxes \N{MIDDLE DOT} {locks} locks"
-        + (f" \N{MIDDLE DOT} {unused} unused" if unused else "")
+        f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {totals['edges']} edges"
+        f" \N{MIDDLE DOT} {totals['boxes']} boxes \N{MIDDLE DOT} {totals['locks']} locks"
+        + (f" \N{MIDDLE DOT} {totals['unused']} unused" if totals["unused"] else "")
     )
-    payload = json.dumps(elements).replace("<", "\\u003c")
+    payload = json.dumps({**elements, "totals": totals}).replace("<", "\\u003c")
 
     package = files("dsl41")
     template = (package / "templates" / "viz_explore.html").read_text(encoding="utf-8")
