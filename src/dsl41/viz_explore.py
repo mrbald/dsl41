@@ -29,7 +29,9 @@ Emission decisions (each with a test):
   viz.edge_label, so the DL-35 thinning grammar is re-expressed, not forked.
 - Nodes also carry the condition TEXT (condition/box_success/box_failure)
   and its structure -- cond_shape and cond_tree, keyed by attribute -- and
-  an edge under an OR carries its `branch` (DL-191). Incoming arrows are an
+  every edge carries the `attr` it derives from, an edge under an OR its
+  `branch` and the `branch_key` that keeps two attributes' branches apart
+  (DL-191). Incoming arrows are an
   AND unless the branch says otherwise; a bare local n() is a lock and has
   no arrow at all. Every edge is matched back to the atom it derives from,
   and an unmatched edge or atom raises rather than drawing a condition the
@@ -56,7 +58,7 @@ import html
 import json
 from collections.abc import Callable, Iterator
 from importlib.resources import files
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 from dsl41.capacity import release_policy
 from dsl41.conditions import And, Atom, Cond, Or, Paren, iter_atoms
@@ -68,6 +70,9 @@ from dsl41.derive import (
     is_mutex_atom,
     local_producer,
 )
+
+# module level, not lazy: cli_compile imports THIS module on demand, so
+# only `--format explore` pays for the decompiler surface (review NIT)
 from dsl41.dsl import cond_to_source
 from dsl41.ir import CatalogIR, ResourceRef
 from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule, mutex_plan
@@ -188,6 +193,33 @@ def _branch_labels(cond: Cond, shape: CondShape) -> list[str | None]:
     if shape == "all-of-any":
         return _all_of_any_labels(cast("And", cond))
     return [None] * _atom_count(cond)
+
+
+def _canvas_suffix(shape: CondShape, branch: str) -> str:
+    """What the EDGE LABEL says about a branch, which is less than the branch
+    itself. The hollow arrowhead already says "one alternative", so a suffix
+    earns its place on the canvas only where it GROUPS arrows: an any-of-all
+    shares `|k` across a whole alternative's atoms, and several ORs under one
+    AND name which OR (`|a`, `|b`). A flat any and a single OR under an AND
+    add one label per arrow that groups nothing, and the suffixes collide on
+    the taxi edges' shared column (visual check, DL-191). The full branch
+    stays in the data, the tree, the paint and the panel."""
+    if shape == "any-of-all":
+        return branch
+    if shape == "all-of-any" and not branch.startswith("|"):
+        return "|" + branch.split("|", 1)[0]
+    return ""
+
+
+class _EdgeCond(NamedTuple):
+    """What one edge's own atom says about it: the attribute it came from,
+    the branch of that attribute's OR it is (None outside one), the key that
+    keeps two attributes' branches apart, and the canvas label's suffix."""
+
+    attr: str
+    branch: str | None
+    branch_key: str | None
+    suffix: str
 
 
 def _cond_tree(cond: Cond, leaves: Iterator[dict[str, object]]) -> dict[str, object]:
@@ -461,9 +493,10 @@ def unused_resources(catalog: CatalogIR) -> list[str]:
 
 def _condition_facts(
     catalog: CatalogIR, graph: DerivedGraph, edge_ids: list[str]
-) -> tuple[dict[str, dict[str, object]], dict[int, str]]:
+) -> tuple[dict[str, dict[str, object]], dict[int, _EdgeCond]]:
     """Per catalog job: its condition texts, each one's shape, and the tree
-    the details panel renders. Second return: branch label per edge INDEX.
+    the details panel renders. Second return: per edge INDEX, the attribute
+    and branch facts that edge's own atom carries.
 
     `cond_shape` and `cond_tree` are keyed by ATTRIBUTE rather than scalar,
     because box_success/box_failure atoms derive edges too (M15/M16): a
@@ -482,7 +515,7 @@ def _condition_facts(
     for index, edge in enumerate(graph.edges):
         queues.setdefault(edge.dst, []).append(index)
     facts: dict[str, dict[str, object]] = {}
-    branch_of: dict[int, str] = {}
+    edge_cond: dict[int, _EdgeCond] = {}
     for name, job in catalog.jobs.items():
         queue = queues.get(name, [])
         data: dict[str, object] = {"condition": None, "box_success": None, "box_failure": None}
@@ -495,13 +528,24 @@ def _condition_facts(
             for atom, branch in zip(iter_atoms(flat), _branch_labels(flat, shape), strict=True):
                 lock = is_mutex_atom(origin, atom)
                 at = None if lock else _take_edge(queue, graph, atom, f"{name} {origin}")
-                if at is not None and branch is not None:
-                    branch_of[at] = branch
+                # the branch NUMBER restarts per attribute, so the identity the
+                # page groups and paints by carries the attribute too: a box
+                # whose condition and box_success are both ORs states two
+                # different alternations, not one twice (review MAJOR)
+                key = None if branch is None else f"{origin}:{branch}"
+                if at is not None:
+                    edge_cond[at] = _EdgeCond(
+                        attr=origin,
+                        branch=branch,
+                        branch_key=key,
+                        suffix="" if branch is None else _canvas_suffix(shape, branch),
+                    )
                 leaves.append(
                     {
                         "atom": cond_to_source(atom),
                         "edge": None if at is None else edge_ids[at],
                         "branch": branch,
+                        "branch_key": key,
                         "lock": lock,
                     }
                 )
@@ -518,7 +562,7 @@ def _condition_facts(
             f"{len(unmatched)} derived edge(s) match no condition atom; first"
             f" {stray.src} -> {stray.dst} ({stray.mapping_row})"
         )
-    return facts, branch_of
+    return facts, edge_cond
 
 
 def _elements(
@@ -588,7 +632,7 @@ def _elements(
     # assigned before the edges are built; every node the catalog defines
     # then carries its own condition texts, shapes and trees.
     edge_ids = [edge_id(i) for i in range(len(graph.edges))]
-    facts, branch_of = _condition_facts(catalog, graph, edge_ids)
+    facts, edge_cond = _condition_facts(catalog, graph, edge_ids)
     for name, data in catalog_data.items():
         data.update(facts[name])
 
@@ -600,7 +644,7 @@ def _elements(
     )
     return {
         "nodes": nodes + lock_nodes,
-        "edges": _edge_elements(catalog, graph, edge_ids, branch_of, ext_id) + lock_links,
+        "edges": _edge_elements(catalog, graph, edge_ids, edge_cond, ext_id) + lock_links,
     }
 
 
@@ -673,7 +717,7 @@ def _edge_elements(
     catalog: CatalogIR,
     graph: DerivedGraph,
     edge_ids: list[str],
-    branch_of: dict[int, str],
+    edge_cond: dict[int, _EdgeCond],
     ext_id: dict[str, str],
 ) -> list[dict[str, object]]:
     """One cytoscape edge per derived edge, in derivation order."""
@@ -689,12 +733,12 @@ def _edge_elements(
 
     edges: list[dict[str, object]] = []
     for i, edge in enumerate(graph.edges):
-        branch = branch_of.get(i)
+        cond = edge_cond[i]
         label = edge_label(edge)
-        if branch is not None:
-            # the DL-35 thinning grammar, then which OR branch this arrow is:
-            # an empty thinned label leaves the suffix standing alone
-            label = f"{label} {branch}" if label else branch
+        if cond.suffix:
+            # the DL-35 thinning grammar, then which alternation this arrow
+            # belongs to: an empty thinned label leaves the suffix alone
+            label = f"{label} {cond.suffix}" if label else cond.suffix
         edges.append(
             {
                 "data": {
@@ -706,12 +750,14 @@ def _edge_elements(
                     "cls": edge.cls,
                     "mapping_row": edge.mapping_row,
                     "assumption": edge.assumption,
-                    "branch": branch,
+                    "attr": cond.attr,
+                    "branch": cond.branch,
+                    "branch_key": cond.branch_key,
                     "label": label,
                 },
                 # cls stays the style class; `any` is the second, orthogonal
                 # one: this arrow is one alternative, not a requirement
-                "classes": f"{edge.cls} any" if branch is not None else edge.cls,
+                "classes": f"{edge.cls} any" if cond.branch is not None else edge.cls,
             }
         )
     return edges

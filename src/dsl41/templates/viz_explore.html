@@ -257,11 +257,14 @@ function memberCount(box) {
 }
 
 /* Six-step branch ramp (DL-191). Colour is the REDUNDANT channel, as it is
-   everywhere else in this grammar: the branch suffix on the label and the
-   hollow arrowhead carry the fact, and the paint only groups one tapped
-   node's alternatives. Okabe-Ito derived, so the six stay apart under the
-   common colour-vision deficiencies; a seventh branch wraps around. */
-var BRANCH_COLORS = ["#0072b2", "#d55e00", "#009e73", "#cc79a7", "#7c3aed", "#a16207"];
+   everywhere else in this grammar: the hollow arrowhead carries the fact and
+   the paint only groups one tapped node's alternatives. Four are Okabe-Ito
+   (blue, bluish green, reddish purple, sky blue), so they stay apart under
+   the common colour-vision deficiencies; Okabe-Ito's own orange and
+   vermillion are NOT here -- they read as the amber of the `assumed` class,
+   which most edges are on a migrated estate (visual check). Teal and violet
+   fill the two places instead. A seventh branch wraps around. */
+var BRANCH_COLORS = ["#0072b2", "#009e73", "#7c3aed", "#cc79a7", "#0e7490", "#56b4e9"];
 var BRANCH_CLASSES = BRANCH_COLORS.map(function (c, i) { return "br-" + i; }).join(" ");
 function branchStyles() {
   return BRANCH_COLORS.map(function (color, i) {
@@ -358,8 +361,10 @@ var STYLE_BASE = [
     } }
   ];
 
-/* BELOW the branch ramp on purpose: a meta-edge stands for several edges at
-   once, so it must show no single branch's paint, label or hollow head. */
+/* BELOW the branch ramp on purpose. A collapse re-points each crossing edge
+   at the box and keeps it (one meta-edge per original edge), so several of
+   them can share one endpoint pair and overlap: per-branch paint, labels and
+   hollow heads would be unreadable stacked on one line. */
 var STYLE_TAIL = [
     { selector: "edge.cy-expand-collapse-meta-edge", style: {  /* stands for every edge that crossed a collapsed box's border */
         label: "",
@@ -611,47 +616,52 @@ function walkLeaves(node, fn) {
   else fn(node);
 }
 
-/* The branch values this node's reading involves, sorted so a branch keeps
-   its colour across taps: the ones its incoming arrows carry, plus the ones
-   only the tree can show -- a lock draws no arrow, and an arrow can be
-   hidden by a focus or folded into a box. */
+/* The alternations this node's reading involves, in the order the TREE
+   states them -- so a branch keeps its colour across taps, and `|10` does
+   not sort between `|1` and `|2`. Keyed by `branch_key` (attribute plus
+   branch): a box whose condition and box_success are both ORs states two
+   different alternations that both number themselves from one. The tree
+   comes first because it is complete: a lock draws no arrow, and an arrow
+   can be hidden by a focus or folded into a box. */
 function branchOrder(n) {
   var values = [];
-  function add(b) { if (b && values.indexOf(b) === -1) values.push(b); }
+  function add(key) { if (key && values.indexOf(key) === -1) values.push(key); }
+  eachLeaf(n.data("cond_tree"), function (leaf) { add(leaf.branch_key); });
   n.incomers("edge").forEach(function (e) {
-    if (!e.hasClass("cy-expand-collapse-meta-edge")) add(e.data("branch"));
+    if (!e.hasClass("cy-expand-collapse-meta-edge")) add(e.data("branch_key"));
   });
-  eachLeaf(n.data("cond_tree"), function (leaf) { add(leaf.branch); });
-  return values.sort();
+  return values;
 }
 
 function clearBranchPaint() { cy.edges().removeClass(BRANCH_CLASSES); }
 
-/* Paint the tapped node's alternatives, one colour per branch; a meta-edge
-   stands for several edges and takes none of them. */
+/* Paint the tapped node's alternatives, one colour per branch. Meta-edges
+   take none of it: several can overlap on one endpoint pair. */
 function paintBranches(n) {
   clearBranchPaint();
   var order = branchOrder(n);
   n.incomers("edge").forEach(function (e) {
-    var b = e.data("branch");
-    if (!b || e.hasClass("cy-expand-collapse-meta-edge")) return;
-    e.addClass("br-" + (order.indexOf(b) % BRANCH_COLORS.length));
+    var key = e.data("branch_key");
+    if (!key || e.hasClass("cy-expand-collapse-meta-edge")) return;
+    e.addClass("br-" + (order.indexOf(key) % BRANCH_COLORS.length));
   });
   return order;
 }
 
-/* A branch group's own value: every leaf under it carries the same one. */
+/* A branch group's own first leaf: every leaf under it carries the same
+   branch, and the leaf holds both the human label and the grouping key. */
 function branchOf(node) {
   var found = null;
-  walkLeaves(node, function (leaf) { if (found === null) found = leaf.branch; });
+  walkLeaves(node, function (leaf) { if (found === null && leaf.branch) found = leaf; });
   return found;
 }
 
-function swatchFor(branch, order) {
+function swatchFor(leaf, order) {
   var swatch = document.createElement("span");
   swatch.className = "swatch";
-  swatch.style.background = BRANCH_COLORS[order.indexOf(branch) % BRANCH_COLORS.length];
-  swatch.title = "branch " + branch;
+  var at = order.indexOf(leaf.branch_key);
+  swatch.style.background = BRANCH_COLORS[at % BRANCH_COLORS.length];
+  swatch.title = "branch " + leaf.branch;
   return swatch;
 }
 
@@ -679,8 +689,15 @@ function leafContent(leaf) {
   button.type = "button";
   button.className = "leaf";
   button.appendChild(code);
-  button.addEventListener("mouseenter", function () { edge.addClass("leaf-hover"); });
-  button.addEventListener("mouseleave", function () { edge.removeClass("leaf-hover"); });
+  /* the same highlight for the pointer and for the keyboard: the leaf is a
+     real button, so Tab reaches it and focus must answer the same question
+     hover does -- which arrow is this? */
+  function mark() { edge.addClass("leaf-hover"); }
+  function unmark() { edge.removeClass("leaf-hover"); }
+  button.addEventListener("mouseenter", mark);
+  button.addEventListener("mouseleave", unmark);
+  button.addEventListener("focus", mark);
+  button.addEventListener("blur", unmark);
   button.addEventListener("click", function () {
     cy.elements().unselect();
     edge.select();
@@ -697,7 +714,7 @@ function leafContent(leaf) {
 
 function renderCondNode(node, ul, order, branch) {
   var li = document.createElement("li");
-  if (branch) li.appendChild(swatchFor(branch, order));
+  if (branch) li.appendChild(swatchFor(branch, order));  /* branch: a leaf */
   if (node.op) {
     var lead = document.createElement("span");
     lead.className = "op";
@@ -846,6 +863,8 @@ cy.on("tap", "edge", function (evt) {
   var ends = e.hasClass("cy-expand-collapse-meta-edge") ? d.originalEnds : null;
   showDetails(d.source + " → " + d.target, [
     ["stands for", ends ? endId(ends.source) + " → " + endId(ends.target) + " (inside a collapsed box)" : null],
+    ["attribute", d.attr],
+    ["branch", d.branch],
     ["via", d.via],
     ["lookback", d.lookback],
     ["class", d.cls],
@@ -979,9 +998,10 @@ try {
     classifyNesting();
     refreshEdgeLabels();
     /* the collapse copies the folded edge's classes onto the meta-edge,
-       branch paint included -- and a meta-edge stands for several edges, so
-       it must show no branch's colour. The picture the paint described is
-       gone either way; the next node tap paints the new one. */
+       branch paint included -- and meta-edges sharing one endpoint pair
+       overlap, so a branch colour on them reads as noise. The picture the
+       paint described is gone either way; the next node tap paints the
+       new one. */
     clearBranchPaint();
   });
   cy.on("expandcollapse.afterexpand", function (evt) {
