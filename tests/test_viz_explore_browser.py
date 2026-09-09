@@ -564,6 +564,9 @@ def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: D
     rows = _detail_rows(driven_trace)
     assert rows["stands for"] == "Q → M (inside a collapsed box)", (driven_trace.engine, rows)
     assert rows["via"] == "success", (driven_trace.engine, rows)
+    # the fold re-points the edge and keeps its data, `attr` included -- which
+    # is what lets isOverride read the partition off it (DL-193)
+    assert rows["attribute"] == "condition", (driven_trace.engine, rows)
     _click(driven_trace, "#d-close")
 
     driven_trace.page.evaluate("() => { cy.$id('B').emit('tap'); }")
