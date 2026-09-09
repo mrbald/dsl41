@@ -11743,3 +11743,93 @@ relitigate an entry; append a new one.
   concurrency tier; ruff, ruff format --check, mypy and arch_check clean
   (arch_check still reports the DL-75 review due on line count since
   arch-review/2026-09-08T233613Z; it stays owed).
+- DL-192 the explore page draws the locks (2026-09-09; `viz --format
+  explore`; amends DL-35's chart grammar for this page).
+  THE PROBLEM. The page drew no lock of either kind. A MUTEX is derive's M07
+  record: a bare local n() in `condition` is an exclusion and not an edge, so
+  it was on the canvas nowhere. A RESOURCE semaphore -- `insert_resource`
+  plus the `resources:` requirements that draw on it -- was nowhere either,
+  and it is in no artifact this compiler emits: IR-G has no resources, and
+  the report has never charted one.
+  WHERE THE FACTS COME FROM. Mutex from IR-G, resources from IR-F. The
+  emitter reads `job.resources` and `catalog.resources` directly, the same
+  display-facts stance job kind and schedule already take (DL-73); IR-G gains
+  nothing, because a semaphore is not a dependency and derive would have to
+  invent one to carry it.
+  THE MUTEX GRAMMAR IS THE REPORT'S. `viz._mutex_plan` becomes public
+  `viz.mutex_plan`: pairs are what the JIL states, a COMPLETE clique of three
+  or more is one hub, a self-exclusion is a badge (DL-35 item 6, unchanged).
+  A second completeness rule on this page would be a second thing to keep
+  true. A pair is a dotted link between the two jobs; a clique is a hub with
+  one link per member; a self-exclusion is the lock glyph on the job's label,
+  no node and no link. A dangling n() target becomes an EXT node, exactly as
+  a dangling producer does (DL-35a).
+  THE TEE MARKS THE WAITER. A pair forms from ONE reference -- A naming
+  n(B) alone makes the pair -- so one-way is the common case and the
+  undirected `mutex_groups` projection cannot say which. `bare_notrunning`
+  keeps who names whom, and the tee sits at the end of the job that waits;
+  both ends when the naming is mutual. A clique member's end carries the tee
+  when that member names any other.
+  THE RESOURCE GRAMMAR IS NEW. One hub per CONSUMED resource, labelled
+  `NAME (capacity)` with the lock glyph, and one dotted link per requirement.
+  Capacity absent reads `(?)`, which covers both ways to have none: the
+  resource is undeclared (L016's finding) or its `amount` is malformed
+  (preflight's, DL-50). The link label thins like an edge label: the quantity
+  only when it is more than one unit, the FREE letter only when the job
+  states one. A declared resource nothing consumes is drawn nowhere -- no
+  link would reach it -- and the summary counts it instead, so the omission
+  is stated.
+  THE CLICK. A hub's panel gives the kind, the capacity, and one row per
+  member: the job, its owning box and top box, and the how. For a resource
+  that is the quantity and the release policy, computed by
+  `capacity.release_policy` (promoted to public for this) -- never a second
+  copy of the FREE/res_type table, which would drift from the pool's. For a
+  mutex it is the direction in words, "waits while X runs" or "mutual". A
+  pair link's panel gives both directions. A member the canvas is not showing
+  says so: "not on canvas" when a focus hid it, "folded into BOX" when a
+  collapse took it.
+  THE LAYOUT. Lock elements are excluded from every ELK run and placed
+  afterwards, at the centroid of the members that are drawn. A lock is a fact
+  ABOUT jobs, not a step between them: laid out, a hub takes a layer of its
+  own and pushes the dependency picture apart. Placement re-runs after every
+  layout, expand and collapse; a hub whose members are all inside one box
+  sits beside that box rather than on its title.
+  THE TRACE. `fanInStep`, `fanOutStep`, `fanInTree`, `fanOutTree` and
+  `boxGate` read the flow edges alone. Two jobs sharing a semaphore are not
+  upstream of each other, and a mutex partner is not upstream of anything --
+  translating either as ordering is exactly what M07 forbids. A focused job
+  keeps its own lock links and their hubs as CONTEXT, and never a hub's other
+  members: those are not what the operator asked to see. "focus lock" in the
+  hub's menu asks for the whole group instead.
+  THE REST. A "locks" toggle, default on, hides every lock element with a
+  class of its own, so it composes with focus hiding instead of fighting it.
+  The summary counts the locks the page DRAWS -- hubs, stated pairs, self
+  badges -- so a clique of three reads as 3 in the report (stated exclusions)
+  and as 1 hub here; `edges` stays the dependency count. Lock ids are
+  namespaced (`lock:r:NAME`, `lock:m:A+B+C`) and widened with the same
+  underscore idiom as EXT and edge ids: a job may legally be named
+  `lock:r:R`, and cytoscape has one id namespace for every element.
+  THE REPORT IS UNCHANGED, ON PURPOSE. It already carries every mutex, in
+  charts and in the unconditional Locks section (DL-35a). Resources stay
+  uncharted there: the report's charts are dependency charts, a semaphore
+  hub in one would connect components that share nothing but a bucket
+  (DL-35 item 2's own argument against mutex connectivity), and the estate
+  reader who needs the bucket has the lens now.
+  VERIFIED before the tests were written: chromium, webkit and firefox, one
+  page, identical results in all three -- hubs inside their members' bounding
+  box, dotted links with the tee on the waiting end, the panels, the toggle,
+  the trace unaffected, the focus keeping a hub without its other members,
+  and a collapse folding a member's lock link into a meta-edge that still
+  names the member. No page errors in any engine. Also emitted by hand over
+  the bank-scale nightbank estate (520 jobs, 63 boxes): GL_DB's hub lands
+  between the three regional stacks its six consumers sit in, and its panel
+  names each one's owning and top box.
+  THE GATE: 3643 passed, 6 skipped, 2 xfailed; the opt-in browser suite 144
+  passed in chromium, webkit and firefox; branch coverage 100% on the
+  concurrency tier; ruff, ruff format --check, mypy and arch_check clean
+  (arch_check still reports the DL-75 review due on line count since
+  arch-review/2026-09-08T233613Z; it stays owed).
+  tests/corpus/viz_locks.jil is the new synthetic fixture, and the
+  corpus-wide inventories in test_ir, test_derive, test_lint and test_viz
+  move with it -- two more L011 (a resource requirement is not wiring), six
+  more L012, one more subgraph.

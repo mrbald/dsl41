@@ -148,8 +148,13 @@ condition the page draws as branches: each alternative's arrows are hollow,
 labelled `|1`, `|2` and coloured together when the job is clicked, and the
 details panel shows the condition text and its AND/OR tree (DL-191). A bare
 `n()` is a lock, draws no arrow, and now appears in that tree instead of
-nowhere. Edges route orthogonally along the layout axis, so the picture
-keeps the layering ELK computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
+nowhere. Locks are drawn too (DL-192): a mutual exclusion as a dotted link
+whose tee marks the job that waits (a complete clique of three or more as one
+hub), a resource semaphore as a hub per consumed `insert_resource` labelled
+with its capacity, both excluded from the layout, placed on their members,
+never part of a fan-in or fan-out, and switchable off. Edges route
+orthogonally along the layout axis, so the picture keeps the layering ELK
+computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
 all three on every push (tests/test_viz_explore_browser.py): Safari needs a
 polyfill for the menu plugin's customized built-in elements, vendored into
 the page (DL-77), and if a browser refuses the menu or the collapse
@@ -762,13 +767,15 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
 - tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
   EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), condition
   shapes, branch labels and the edge-to-atom match proven over the whole corpus (DL-191),
+  the lock hubs, links, tees and badges of both kinds (DL-192),
   the same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
   customElements polyfill), script order and the guarded context menu (DL-77),
   CLI flag absorption
 - tests/test_viz_explore_browser.py — the same page RUNNING, in chromium, webkit and
   firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
-  re-layout toggle, details panel, context menu, box collapse and the condition badge,
-  branch paint and condition tree all respond, and nothing throws.
+  re-layout toggle, details panel, context menu, box collapse, the condition badge,
+  branch paint and condition tree, and the lock hubs, toggle and focus item all respond,
+  and nothing throws.
   Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still
   needs no browsers; CI's explore-page job is where it runs. Locally:
   `uv run playwright install chromium webkit firefox`, then
