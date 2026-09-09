@@ -27,9 +27,9 @@ from typing import TYPE_CHECKING
 from dsl41.oracle_state import CapacityReservation, ReleasePolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
-    from dsl41.ir import CatalogIR, JobIR, ResourceIR
+    from dsl41.ir import CatalogIR, JobIR, ResourceIR, ResourceRef
     from dsl41.oracle_state import JobRuntime
 
 #: Sorts a waiter whose priority nothing declares -- and one whose job the
@@ -72,34 +72,29 @@ class CapacityPool:
         mode is 'acquire' (holds units) or 'gate' (threshold: check-only, never
         holds). Only buckets the oracle can size appear -- an unsized resource
         or an absent max_load contributes nothing here (preflight refuses the
-        former for execution; the latter is AutoSys's unlimited-load default)."""
-        raw: list[DemandEntry] = []
+        former for execution; the latter is AutoSys's unlimited-load default).
+
+        One entry per bucket: the groups a job states on ONE resource are
+        folded by `job_demand`, which the explore page calls for the same
+        job (DL-193). A machine bucket is stated once and needs no fold."""
+        vector: list[DemandEntry] = []
         spec = job_ir.exec_
         if spec is not None and spec.machine is not None:
             key = f"m:{spec.machine}"
             if key in self._bucket_cap:
                 load = _safe_units(job_ir.job_load_units) or 0  # Qr4: absent -> 0
                 if load > 0:
-                    raw.append((key, load, "acquire", "completion"))
+                    vector.append((key, load, "acquire", "completion"))
+        groups: dict[str, list[ResourceRef]] = {}
         for ref in job_ir.resources:
-            key = f"r:{ref.name}"
+            groups.setdefault(ref.name, []).append(ref)
+        for name, refs in groups.items():
+            key = f"r:{name}"
             if key not in self._bucket_cap:
                 continue  # unsized -> not modelled here (preflight refuses run)
-            resource = self.catalog.resources.get(ref.name)
-            mode, policy = requirement_demand(resource_type(resource), ref.free)
-            raw.append((key, ref.quantity, mode, policy))
-        # Coalesce duplicate bucket keys (a job listing one resource twice):
-        # SUM the demand so can_admit's per-entry test and the reservation's sum
-        # agree -- else two `(LOCK, QUANTITY=2)` entries each pass free>=2 while
-        # the acquire over-commits to 4 (review MINOR). Release policy merges to
-        # the most restrictive so asymmetric FREE never frees early.
-        merged: dict[str, tuple[int, str, ReleasePolicy | None]] = {}
-        for key, units, mode, policy in raw:
-            if key in merged:
-                merged[key] = merge_requirements(merged[key], (units, mode, policy))
-            else:
-                merged[key] = (units, mode, policy)
-        return [(key, units, mode, policy) for key, (units, mode, policy) in merged.items()]
+            units, mode, policy = job_demand(resource_type(self.catalog.resources.get(name)), refs)
+            vector.append((key, units, mode, policy))
+        return vector
 
     def used(self, rows: Mapping[str, JobRuntime], consumed: Mapping[str, int]) -> dict[str, int]:
         """Units unavailable per bucket: those PERMANENTLY spent plus those
@@ -204,6 +199,24 @@ def requirement_demand(res_type: str, free: str | None) -> tuple[str, ReleasePol
     if res_type == "T":
         return "gate", None
     return "acquire", release_policy(res_type, free)
+
+
+def job_demand(res_type: str, refs: Sequence[ResourceRef]) -> tuple[int, str, ReleasePolicy | None]:
+    """One job's WHOLE demand on one resource: the groups it states there,
+    classified by `requirement_demand` and coalesced by `merge_requirements`.
+
+    The fold has one owner because it has two readers (DL-193): the pool
+    reserves what it returns and the explore page draws and words it, and a
+    job that lists one resource twice must not read as two single-unit
+    demands on the page while the pool holds their sum. `refs` is never
+    empty -- both callers group by a name a ref stated."""
+    total: tuple[int, str, ReleasePolicy | None] | None = None
+    for ref in refs:
+        mode, policy = requirement_demand(res_type, ref.free)
+        entry: tuple[int, str, ReleasePolicy | None] = (ref.quantity, mode, policy)
+        total = entry if total is None else merge_requirements(total, entry)
+    assert total is not None
+    return total
 
 
 def merge_requirements(
