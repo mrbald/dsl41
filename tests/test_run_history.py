@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import time
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1145,7 +1146,7 @@ async def _killed_run_then_late_completion(run_root: Path) -> None:
     the wrapper's late `exit 0` STATUS is admitted and REJECTED by the ss4
     stale gate. `_lose_the_decision_for` below supplies the crash: the
     admitted input stays durable, the verdict does not."""
-    jil = parse("insert_job: j1\njob_type: c\ncommand: sleep 2\nmachine: m1\n", file="estate.jil")
+    jil = parse("insert_job: j1\njob_type: c\ncommand: sleep 20\nmachine: m1\n", file="estate.jil")
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
     staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
@@ -1156,10 +1157,19 @@ async def _killed_run_then_late_completion(run_root: Path) -> None:
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
         staged=staged,
     )
-    now = clock.now()
-    engine.inject(Event(at=now, kind="STARTJOB", payload={"job": "j1"}))
-    engine.inject(Event(at=now + timedelta(seconds=0.15), kind="KILLJOB", payload={"job": "j1"}))
+    engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
+    # The kill must find a run to kill. The adapter's `dispatch` record and
+    # the wrapper's spawn.json are written by a real spawn, whose duration a
+    # loaded host stretches past any fixed offset (CI, 2026-09-09: a runner
+    # 3.5x slower than a workstation), and a KILLJOB queued at a fixed offset
+    # that lands first ends a run that never dispatched: no row to fold,
+    # which is not the DL-156 estate. In the real domain a horizon call
+    # blocks on the live task, so the kill is injected from a concurrent
+    # task once spawn.json exists (`_enqueue` wakes the loop); `sleep 20`
+    # keeps the run alive however slow the spawn, and the kill ends it.
+    killer = asyncio.create_task(_kill_once_spawned(engine, clock, run_root, "j1", 1))
     await engine.run_until_quiescent(datetime.max)
+    await killer  # a spawn that never came surfaces here, not as a silent no-kill
     engine.inject(
         Event(
             at=clock.now(),
@@ -1172,6 +1182,29 @@ async def _killed_run_then_late_completion(run_root: Path) -> None:
     await engine.shutdown()
     assert engine.journal is not None
     engine.journal.close()
+
+
+async def _kill_once_spawned(
+    engine: Any,
+    clock: RealClock,
+    run_root: Path,
+    job: str,
+    run_number: int,
+    *,
+    timeout_s: float = 15.0,
+) -> None:
+    """Inject KILLJOB for `job` once the wrapper of its run has durably
+    written spawn.json (runner_wrapper step 2), which the adapter's
+    `dispatch` record precedes -- so the kill always meets a dispatched run.
+    Runs beside the engine's own loop: the journal is not read (its dispatch
+    record is buffered until a later flushing write) and the loop is not
+    stepped (a real-domain horizon call blocks on the live task)."""
+    spawn = run_root / "runs" / f"{job}.{run_number}" / "spawn.json"
+    deadline = time.monotonic() + timeout_s
+    while not spawn.exists():
+        assert time.monotonic() < deadline, f"{job} never spawned within {timeout_s}s"
+        await asyncio.sleep(0.02)
+    engine.inject(Event(at=clock.now(), kind="KILLJOB", payload={"job": job}))
 
 
 def _lose_the_decision_for(run_root: Path, source: str) -> None:
