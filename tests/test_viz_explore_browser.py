@@ -40,7 +40,7 @@ pytest.importorskip(
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import corpus_catalog
-from test_viz_explore import _NESTED_BOX_TEXT
+from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT
 
 from dsl41.ir import lower_source
 from dsl41.viz_explore import to_explore_html
@@ -825,3 +825,254 @@ def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) 
         timeout=_CLICK_TIMEOUT_MS,
     )
     assert d.errors == [], d.errors
+
+
+# ------------------------------------------- DL-191: condition visibility
+#
+# `driven_cond` shares one `cond_page_url` load per engine across the block,
+# module-scoped and run in file order, like the DL-190 block above. Only the
+# collapse test mutates the graph, and it expands again before it returns.
+
+_TREE = "#d-tree"
+
+
+@pytest.fixture(scope="module")
+def cond_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Every condition shape the page has a rule for, plus a box whose own
+    condition is an OR and a member whose branched arrow folds into a
+    meta-edge. `_COND_TEXT` is test_viz_explore.py's own fixture, unmodified
+    -- the emitter tests pin the JSON it produces, these drive the page."""
+    path = tmp_path_factory.mktemp("explore-cond") / "cond.html"
+    path.write_text(to_explore_html(lower_source(_COND_TEXT), title="conditions"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_cond(request: pytest.FixtureRequest, cond_page_url: str, _playwright: Any) -> Any:
+    yield from _open_driven(_playwright, request.param, cond_page_url)
+
+
+def _label(d: Driven, node_id: str) -> str:
+    label: str = d.page.evaluate("(id) => nodeLabel(cy.$id(id))", node_id)
+    return label
+
+
+def _tap(d: Driven, node_id: str) -> None:
+    d.page.evaluate("(id) => { cy.$id(id).emit('tap'); }", node_id)
+    d.page.wait_for_timeout(200)
+
+
+def _painted(d: Driven) -> list[str]:
+    """Every arrow carrying a branch colour, as `source>target:class`."""
+    painted: list[str] = d.page.evaluate(
+        "() => cy.edges().filter(e => e.classes().some(c => c.indexOf('br-') === 0))"
+        ".map(e => e.data('source') + '>' + e.data('target') + ':'"
+        " + e.classes().filter(c => c.indexOf('br-') === 0).join(','))"
+    )
+    return sorted(painted)
+
+
+def test_the_badge_marks_or_shapes_and_only_those(driven_cond: Driven) -> None:
+    """The page's default reading is that every incoming arrow must hold, so
+    only a departure from it is badged: an OR the canvas draws as branches
+    gets the sign, a nesting too deep gets the starred form, a plain AND gets
+    nothing."""
+    _ready(driven_cond)
+    labels = {name: _label(driven_cond, name) for name in ("AOA", "ANY", "CPX", "PLAIN", "BOX")}
+    assert labels == {
+        "AOA": "AOA \u2228",
+        "ANY": "ANY \u2228",
+        "CPX": "CPX \u2228*",
+        "PLAIN": "PLAIN",
+        "BOX": "BOX \u2228",
+    }, driven_cond.engine
+
+
+def test_branch_arrows_are_hollow_and_carry_their_branch_in_the_label(
+    driven_cond: Driven,
+) -> None:
+    """The line-style channel stays the edge class's (exact/assumed/redesign);
+    the arrowhead is the branch channel, and the label names the branch."""
+    _ready(driven_cond)
+    fills = driven_cond.page.evaluate(
+        "() => ({any: Array.from(new Set(cy.edges('.any').map(e => e.style('target-arrow-fill')))),"
+        " rest: Array.from(new Set(cy.edges().filter(e => !e.hasClass('any'))"
+        ".map(e => e.style('target-arrow-fill'))))})"
+    )
+    assert fills == {"any": ["hollow"], "rest": ["filled"]}, driven_cond.engine
+    labels = driven_cond.page.evaluate(
+        "() => Object.fromEntries(cy.edges().filter(e => e.data('target') === 'TWO')"
+        ".map(e => [e.data('source'), e.data('label')]))"
+    )
+    assert labels == {"A": "a|1", "B": "a|2", "C": "b|1", "D": "b|2", "E": ""}, driven_cond.engine
+
+
+def test_details_panel_shows_the_condition_rows_and_the_tree(driven_cond: Driven) -> None:
+    _ready(driven_cond)
+    _tap(driven_cond, "AOA")
+    rows = _detail_rows(driven_cond)
+    assert rows["condition"] == "s(A) & (s(B) | f(C))", (driven_cond.engine, rows)
+    tree = driven_cond.page.inner_text(_TREE)
+    assert tree.split("\n") == ["condition", "all of:", "s(A)", "any of:", "s(B)", "f(C)"], (
+        driven_cond.engine,
+        tree,
+    )
+    # the two branches of the OR carry the two swatches the arrows carry
+    swatches = driven_cond.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-tree .swatch')).map(s => s.title)"
+    )
+    assert swatches == ["branch |1", "branch |2"], driven_cond.engine
+
+
+def test_a_lock_leaf_says_why_it_has_no_arrow(driven_cond: Driven) -> None:
+    """M07: a bare local n() is a mutex record and never an edge, so it used
+    to be invisible on this page entirely."""
+    _ready(driven_cond)
+    _tap(driven_cond, "LOCK")
+    tree = driven_cond.page.inner_text(_TREE)
+    assert tree.split("\n") == [
+        "condition",
+        "any of:",
+        "n(A) (lock, no arrow)",
+        "s(B)",
+    ], (driven_cond.engine, tree)
+    # it is still an alternative: it holds a branch, and only the arrow is missing
+    assert (
+        driven_cond.page.evaluate("() => document.querySelectorAll('#d-tree .swatch').length") == 2
+    ), driven_cond.engine
+
+
+def test_tapping_a_node_paints_its_branches_and_a_blank_tap_clears_them(
+    driven_cond: Driven,
+) -> None:
+    _ready(driven_cond)
+    _tap(driven_cond, "TWO")
+    assert _painted(driven_cond) == [
+        "A>TWO:br-0",
+        "B>TWO:br-1",
+        "C>TWO:br-2",
+        "D>TWO:br-3",
+    ], driven_cond.engine
+    # the next node tap repaints for that node alone...
+    _tap(driven_cond, "AOA")
+    assert _painted(driven_cond) == ["B>AOA:br-0", "C>AOA:br-1"], driven_cond.engine
+    # ...and a tap on the canvas clears the paint and shuts the panel
+    driven_cond.page.evaluate("() => { cy.emit('tap'); }")
+    driven_cond.page.wait_for_timeout(200)
+    assert _painted(driven_cond) == [], driven_cond.engine
+    assert driven_cond.page.get_attribute("#details", "hidden") is not None
+
+
+def test_a_tree_leaf_highlights_its_arrow_on_hover_and_selects_it_on_click(
+    driven_cond: Driven,
+) -> None:
+    """A real pointer, not an emitted event: the leaf is a DOM button and the
+    arrow it names is a canvas element."""
+    _ready(driven_cond)
+    _tap(driven_cond, "AOA")
+    leaves = driven_cond.page.locator("#d-tree button.leaf")
+    assert leaves.count() == 3, driven_cond.engine
+    leaves.nth(1).hover()
+    driven_cond.page.wait_for_timeout(200)
+    assert driven_cond.page.evaluate(
+        "() => cy.edges('.leaf-hover').map(e => e.data('source') + '>' + e.data('target'))"
+    ) == ["B>AOA"], driven_cond.engine
+    driven_cond.page.mouse.move(5, 5)
+    driven_cond.page.wait_for_timeout(200)
+    assert driven_cond.page.evaluate("() => cy.edges('.leaf-hover').length") == 0
+    leaves.nth(1).click()
+    driven_cond.page.wait_for_timeout(200)
+    assert driven_cond.page.evaluate(
+        "() => cy.edges(':selected').map(e => e.data('source') + '>' + e.data('target'))"
+    ) == ["B>AOA"], driven_cond.engine
+    driven_cond.page.evaluate("() => { cy.elements().unselect(); cy.emit('tap'); }")
+
+
+def test_a_leaf_whose_arrow_is_off_the_canvas_says_so(driven_cond: Driven) -> None:
+    """A focus can hide the arrow a leaf names; the leaf then says so instead
+    of offering a link to an element that is not drawn. Restores the page."""
+    _ready(driven_cond)
+    driven_cond.page.evaluate("() => { cy.$id('B').addClass('hidden'); }")
+    driven_cond.page.wait_for_timeout(_SETTLE_MS)
+    _tap(driven_cond, "AOA")
+    tree = driven_cond.page.inner_text(_TREE)
+    assert "s(B) (not on canvas)" in tree, (driven_cond.engine, tree)
+    _show_all(driven_cond)
+    _tap(driven_cond, "AOA")
+    assert "(not on canvas)" not in driven_cond.page.inner_text(_TREE), driven_cond.engine
+
+
+def test_search_enter_with_one_hit_selects_the_node_and_opens_its_details(
+    driven_cond: Driven,
+) -> None:
+    """Keyboard alone answers "what gates this job?": one hit is unambiguous,
+    so Enter selects it and opens the panel. Leaves the search box empty."""
+    _ready(driven_cond)
+    driven_cond.page.evaluate("() => { cy.emit('tap'); }")
+    driven_cond.page.fill("#search", "AOFA")
+    driven_cond.page.press("#search", "Enter")
+    driven_cond.page.wait_for_timeout(_SETTLE_MS)
+    assert driven_cond.page.get_attribute("#details", "hidden") is None, driven_cond.engine
+    assert driven_cond.page.inner_text("#d-title") == "AOFA"
+    assert driven_cond.page.evaluate("() => cy.nodes(':selected').map(n => n.id())") == ["AOFA"]
+    assert _detail_rows(driven_cond)["condition"] == "(s(A) & s(B)) | s(C)"
+    # ...and a search that hits several leaves the panel alone
+    driven_cond.page.evaluate("() => { cy.emit('tap'); }")
+    driven_cond.page.fill("#search", "ME")
+    driven_cond.page.press("#search", "Enter")
+    driven_cond.page.wait_for_timeout(_SETTLE_MS)
+    assert driven_cond.page.get_attribute("#details", "hidden") is not None, driven_cond.engine
+    driven_cond.page.fill("#search", "")
+    driven_cond.page.press("#search", "Enter")
+    _show_all(driven_cond)
+
+
+def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay_neutral(
+    driven_cond: Driven,
+) -> None:
+    """A collapsed box stands for its members, so it shows its OWN condition's
+    badge and never merges theirs, and the meta-edges that stand for several
+    arrows carry no branch label, no hollow head and no branch colour.
+    Expands again before returning."""
+    _ready(driven_cond)
+    _tap(driven_cond, "MEM")  # paint MEM's branches first: the fold must clear them
+    assert _painted(driven_cond) == ["C>MEM:br-0", "D>MEM:br-1"], driven_cond.engine
+    driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
+    driven_cond.page.wait_for_timeout(_SETTLE_MS)
+
+    assert _label(driven_cond, "BOX") == "BOX (2) \u2228", driven_cond.engine
+    assert _painted(driven_cond) == [], driven_cond.engine
+    meta = driven_cond.page.evaluate(
+        "() => cy.edges('.cy-expand-collapse-meta-edge').map(e => [e.data('source')"
+        " + '>' + e.data('target'), e.style('target-arrow-fill'), e.style('label')])"
+    )
+    assert meta, driven_cond.engine
+    assert all(row[1] == "filled" and row[2] == "" for row in meta), (driven_cond.engine, meta)
+
+    _tap(driven_cond, "BOX")
+    rows = _detail_rows(driven_cond)
+    assert rows["members"] == "2 (collapsed)" and rows["condition"] == "s(A) | s(B)", rows
+    assert driven_cond.page.inner_text(_TREE).split("\n") == [
+        "condition",
+        "any of:",
+        "s(A)",
+        "s(B)",
+    ], driven_cond.engine
+
+    # a leaf whose arrow the fold re-pointed says where it went: the arrow IS
+    # on the canvas, standing for several edges rather than for this one
+    _tap(driven_cond, "OUT")
+    assert "s(MEM) (folded: BOX \u2192 OUT)" in driven_cond.page.inner_text(_TREE), (
+        driven_cond.engine,
+        driven_cond.page.inner_text(_TREE),
+    )
+
+    driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
+    driven_cond.page.wait_for_timeout(_SETTLE_MS)
+    assert _label(driven_cond, "BOX") == "BOX \u2228", driven_cond.engine
+    _show_all(driven_cond)
+
+
+def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> None:
+    _ready(driven_cond)
+    assert driven_cond.errors == [], f"{driven_cond.engine}: {driven_cond.errors}"

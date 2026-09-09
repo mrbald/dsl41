@@ -17,8 +17,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
-from test_viz import CORPUS_DIR, catalog_of, corpus_catalog, runner
+from test_viz import CORPUS_DIR, LOWERABLE_CORPUS, catalog_of, corpus_catalog, runner
 from test_viz_html import _vendor_bytes
 
 from dsl41.cli import app
@@ -117,6 +118,73 @@ def test_elements_collapse_threshold_never_marks_a_nested_box() -> None:
     assert "collapsed" not in by_id["IM"]  # not a box at all
 
 
+#: Every condition shape the page has a rule for, in one catalog: an
+#: all-of-any with one OR (AOA) and with two (TWO), a flat any (ANY), an
+#: any-of-all (AOFA), a nesting too deep to draw (CPX), an OR with a lock in
+#: it (LOCK), a plain AND (PLAIN), a nested AND that flattens to one (FLAT),
+#: a BOX whose own condition is an OR, and a member whose branched edge folds
+#: into a meta-edge when the box collapses. test_viz_explore_browser.py
+#: imports this one and drives the page it emits (DL-191).
+_COND_TEXT = (
+    "".join(
+        f"insert_job: {name}\njob_type: c\ncommand: {name.lower()}\nmachine: m1\n\n"
+        for name in ("A", "B", "C", "D", "E")
+    )
+    + "insert_job: AOA\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(A) & (s(B) | f(C))\n\n"
+    "insert_job: TWO\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: (s(A) | s(B)) & (s(C) | s(D)) & s(E)\n\n"
+    "insert_job: ANY\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(A) | s(B) | s(C)\n\n"
+    "insert_job: AOFA\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: (s(A) & s(B)) | s(C)\n\n"
+    "insert_job: CPX\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(A) & (s(B) | (s(C) & s(D)))\n\n"
+    "insert_job: LOCK\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: n(A) | s(B)\n\n"
+    "insert_job: PLAIN\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(A) & s(B)\n\n"
+    "insert_job: FLAT\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(A) & (s(B) & s(C))\n\n"
+    "insert_job: BOX\njob_type: b\ncondition: s(A) | s(B)\n\n"
+    "insert_job: MEM\njob_type: c\nbox_name: BOX\ncommand: m\nmachine: m1\n"
+    "condition: s(C) | s(D)\n\n"
+    "insert_job: MEM2\njob_type: c\nbox_name: BOX\ncommand: m2\nmachine: m1\n\n"
+    "insert_job: OUT\njob_type: c\ncommand: o\nmachine: m1\ncondition: s(MEM) | s(A)\n"
+)
+
+
+def _cond_elements() -> dict[str, list[dict[str, object]]]:
+    catalog = catalog_of(_COND_TEXT)
+    return _elements(catalog, derive_graph(catalog))
+
+
+def _shapes(els: dict[str, list[dict[str, object]]]) -> dict[str, dict[str, str]]:
+    """node id -> its cond_shape mapping, catalog nodes only."""
+    return {
+        n["data"]["id"]: n["data"]["cond_shape"]  # type: ignore[index,misc]
+        for n in els["nodes"]
+        if "cond_shape" in n["data"]  # type: ignore[operator]
+    }
+
+
+def _branches(els: dict[str, list[dict[str, object]]], target: str) -> dict[str, str | None]:
+    """producer id -> the branch label of its edge into `target`."""
+    return {
+        e["data"]["source"]: e["data"]["branch"]  # type: ignore[index,misc]
+        for e in els["edges"]
+        if e["data"]["target"] == target  # type: ignore[index]
+    }
+
+
+def _leaves(tree: object) -> list[dict[str, object]]:
+    """Every leaf of one cond_tree, in order."""
+    node = cast("dict[str, object]", tree)
+    if "op" not in node:
+        return [node]
+    items = cast("list[object]", node["items"])
+    return [leaf for item in items for leaf in _leaves(item)]
+
+
 def test_elements_synthesize_ext_nodes_for_undefined_and_external() -> None:
     els = _corpus_elements("sem06_dangling.jil")
     assert _node(els, "THIS_JOB_DOES_NOT_EXIST")["classes"] == "ext"
@@ -159,10 +227,18 @@ def test_elements_edge_labels_reuse_dl35_thinning_grammar() -> None:
 
 
 def test_elements_edge_class_is_the_style_class() -> None:
+    # cls stays the FIRST class, the style channel it always was; `any` is the
+    # second and orthogonal one -- this arrow is one alternative of an OR
+    # (DL-191), which the arrowhead draws and the line style does not touch
     catalog = corpus_catalog()
     graph = derive_graph(catalog)
     els = _elements(catalog, graph)
-    assert [e["classes"] for e in els["edges"]] == [e.cls for e in graph.edges]
+    classes = [str(e["classes"]).split() for e in els["edges"]]
+    assert [c[0] for c in classes] == [e.cls for e in graph.edges]
+    assert [c[1:] == ["any"] for c in classes] == [
+        e["data"]["branch"] is not None
+        for e in els["edges"]  # type: ignore[index]
+    ]
 
 
 def test_elements_cover_every_node_and_edge() -> None:
@@ -226,6 +302,132 @@ def test_dl176_local_dangler_and_foreign_producer_are_distinct_cytoscape_element
     (ext_edge,) = els["edges"]
     assert ext_edge["data"]["source"] == "_foo^PRD"  # type: ignore[index]  # never "foo^PRD"
     assert ext_edge["data"]["target"] == "bar"  # type: ignore[index]
+
+
+# ------------------------------------------------- condition structure (DL-191)
+
+
+def test_elements_carry_the_condition_text_of_every_bearing_attribute() -> None:
+    # slice 1: the text the panel shows, rendered from the Cond tree, one row
+    # per condition-bearing attribute -- a box override is as visible as a
+    # condition, and a job with neither carries explicit nulls
+    els = _corpus_elements("sem12_external_gate.jil")
+    gate = _node(els, "gate_box")["data"]
+    assert gate["condition"] is None  # type: ignore[index]
+    assert gate["box_success"] == "s(gate_outside_job)"  # type: ignore[index]
+    assert gate["box_failure"] == "v(ABORT_FLAG) = 1"  # type: ignore[index]
+    # both of those edges are M16 -- the attribute they came from is read off
+    # the walk, never guessed from the mapping row
+    assert gate["cond_shape"] == {"box_success": "single", "box_failure": "single"}  # type: ignore[index]
+    member = _node(els, "gate_member_a")["data"]
+    assert member["condition"] is None and member["cond_shape"] == {}  # type: ignore[index]
+
+
+def test_elements_or_join_marks_each_alternative_with_its_branch() -> None:
+    # the corpus OR join (DL-38's T-003): a flat any, one branch per operand,
+    # every arrow labelled with it and classed `any`
+    els = _corpus_elements("fold_t003_or_join.jil")
+    assert _shapes(els)["fold_or_join"] == {"condition": "any"}
+    assert _branches(els, "fold_or_join") == {"fold_or_m1": "|1", "fold_or_m2": "|2"}
+    labels = {
+        e["data"]["source"]: (e["data"]["label"], e["classes"])  # type: ignore[index]
+        for e in els["edges"]
+        if e["data"]["target"] == "fold_or_join"  # type: ignore[index]
+    }
+    assert labels["fold_or_m1"] == ("|1", "assumed any")  # empty thinned label -> suffix alone
+    tree = _node(els, "fold_or_join")["data"]["cond_tree"]["condition"]  # type: ignore[index,call-overload]
+    assert tree["op"] == "or"
+    assert [leaf["atom"] for leaf in _leaves(tree)] == ["s(fold_or_m1)", "s(fold_or_m2)"]
+    assert all(leaf["lock"] is False and leaf["edge"] for leaf in _leaves(tree))
+
+
+def test_elements_bare_notrunning_atoms_are_lock_leaves_with_no_edge() -> None:
+    # M07: a bare local n() is a mutex record, not an edge -- it was invisible
+    # on the page entirely. Now it is a leaf that says why it has no arrow.
+    els = _corpus_elements("m07_mutex.jil")
+    assert _shapes(els)["mutex_b"] == {"condition": "all"}
+    leaves = _leaves(_node(els, "mutex_b")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
+    assert [(leaf["atom"], leaf["lock"], leaf["edge"]) for leaf in leaves] == [
+        ("n(mutex_a)", True, None),
+        ("s(mutex_feeder)", False, "e0"),
+    ]
+    serial = _leaves(_node(els, "mutex_serial")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
+    assert serial == [{"atom": "n(mutex_serial)", "edge": None, "branch": None, "lock": True}]
+
+
+def test_elements_classify_every_drawable_shape() -> None:
+    shapes = _shapes(_cond_elements())
+    assert {name: shape["condition"] for name, shape in shapes.items() if shape} == {
+        "AOA": "all-of-any",
+        "TWO": "all-of-any",
+        "ANY": "any",
+        "AOFA": "any-of-all",
+        "CPX": "complex",
+        "LOCK": "any",
+        "PLAIN": "all",
+        "FLAT": "all",  # `s(A) & (s(B) & s(C))`: one AND, not a nesting
+        "BOX": "any",
+        "MEM": "any",
+        "OUT": "any",
+    }
+
+
+def test_elements_all_of_any_names_each_or_when_there_is_more_than_one() -> None:
+    els = _cond_elements()
+    # one OR: the operand index carries it alone, and the AND operand outside
+    # the OR stays unlabelled -- an unlabelled arrow is an AND arrow
+    assert _branches(els, "AOA") == {"A": None, "B": "|1", "C": "|2"}
+    # two ORs: a letter per OR in operand order, so `a|1` and `b|1` are
+    # different alternations rather than the same one twice
+    assert _branches(els, "TWO") == {"A": "a|1", "B": "a|2", "C": "b|1", "D": "b|2", "E": None}
+
+
+def test_elements_any_of_all_shares_one_branch_across_a_whole_alternative() -> None:
+    # `(s(A) & s(B)) | s(C)`: A and B are one alternative and carry one label
+    els = _cond_elements()
+    assert _branches(els, "AOFA") == {"A": "|1", "B": "|1", "C": "|2"}
+    tree = _node(els, "AOFA")["data"]["cond_tree"]["condition"]  # type: ignore[index,call-overload]
+    assert tree["op"] == "or"
+    assert [item.get("op") for item in tree["items"]] == ["and", None]
+
+
+def test_elements_complex_shape_labels_no_branch_at_all() -> None:
+    # deeper than one alternation: the page cannot draw it honestly, so it
+    # labels nothing and the badge sends the reader to the tree and the text
+    els = _cond_elements()
+    assert _branches(els, "CPX") == {"A": None, "B": None, "C": None, "D": None}
+    assert all("any" not in e["classes"] for e in els["edges"] if e["data"]["target"] == "CPX")  # type: ignore[index,operator]
+
+
+def test_elements_lock_inside_an_or_keeps_its_branch_without_an_edge() -> None:
+    # `n(A) | s(B)`: the lock is the first alternative -- it has a branch and
+    # no arrow, which is exactly why the tree has to show it
+    els = _cond_elements()
+    assert _branches(els, "LOCK") == {"B": "|2"}
+    leaves = _leaves(_node(els, "LOCK")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
+    assert leaves == [
+        {"atom": "n(A)", "edge": None, "branch": "|1", "lock": True},
+        {"atom": "s(B)", "edge": leaves[1]["edge"], "branch": "|2", "lock": False},
+    ]
+
+
+def test_elements_every_corpus_edge_matches_the_atom_it_derives_from() -> None:
+    """No silent loss, over the whole corpus: _elements raises when a derived
+    edge matches no condition atom, or a non-mutex atom no edge. Each file on
+    its own, then all of them as one catalog -- and the tree leaves must name
+    every emitted edge exactly once."""
+    for path in LOWERABLE_CORPUS:
+        catalog = catalog_of(path.read_text(encoding="utf-8"))
+        graph = derive_graph(catalog)
+        assert len(_elements(catalog, graph)["edges"]) == len(graph.edges), path.name
+    catalog = corpus_catalog()
+    els = _elements(catalog, derive_graph(catalog))
+    named: list[str] = []
+    for node in els["nodes"]:
+        for tree in node["data"].get("cond_tree", {}).values():  # type: ignore[union-attr]
+            named.extend(str(leaf["edge"]) for leaf in _leaves(tree) if leaf["edge"])
+    assert sorted(named) == sorted(str(e["data"]["id"]) for e in els["edges"])  # type: ignore[index]
+    assert len(named) == len(set(named))  # each edge named by exactly one leaf
 
 
 def test_elements_are_deterministic_across_hash_seeds() -> None:
@@ -372,6 +574,35 @@ def test_to_explore_html_wires_the_trace_toggle_and_step_functions() -> None:
     assert 'focusOn(fanInTree(n), howLabel("fan-in tree"))' in page
     assert 'focusOn(fanOutTree(n), howLabel("fan-out tree"))' in page
     assert "function isOverride(edge)" in page
+
+
+def test_to_explore_html_carries_the_condition_grammar() -> None:
+    # DL-191, the page half: the badge rule, the hollow arrowhead, the branch
+    # ramp, the tree the panel renders, and the legend that states the default
+    # reading. The browser module drives all of it; this pins the wiring.
+    page = to_explore_html(catalog_of(_COND_TEXT))
+    # the page source carries the JS escapes, not the characters
+    assert r'return " \u2228*";' in page  # complex: read the tree and the text
+    assert r'return " \u2228";' in page  # an OR the canvas draws as branches
+    assert "function condBadge(ele)" in page and "nodeLabel(ele).length" in page
+    assert "all incoming arrows must hold (AND) unless the job" in page
+    assert "a bare n() is a lock and draws no arrow" in page
+    assert '{ selector: "edge.any", style: {' in page
+    assert '"target-arrow-fill": "hollow"' in page
+    # the ramp is six colours, and colour is the redundant channel
+    assert page.count('var BRANCH_COLORS = ["#0072b2", "#d55e00", "#009e73",') == 1
+    assert 'e.addClass("br-" + (order.indexOf(b) % BRANCH_COLORS.length))' in page
+    # ...and a meta-edge takes none of it: its style block sits BELOW the ramp
+    assert page.index("branchStyles()") < page.index('"target-arrow-fill": "filled"')
+    assert page.index('selector: "edge.any"') < page.index("var STYLE_TAIL")
+    # the panel: three text rows and the tree
+    for row in ('["condition", d.condition, "code"]', '["box_success", d.box_success, "code"]'):
+        assert row in page
+    assert "function renderCondTrees(n, order)" in page
+    assert '"(lock, no arrow)"' in page and '"(not on canvas)"' in page
+    # Enter with exactly one hit selects the node and opens its details
+    assert "if (hits.length === 1) {" in page
+    assert "showNodeDetails(hits[0]);" in page
 
 
 def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:
