@@ -25,8 +25,6 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
   backend_uc - UC twin model + edge classification + migration report +
                U3a base CREATE-ONLY record bundle (docs/uc-edge-schema.md;
                rich condition forms PENDING: U3b)
-  uc_oracle  - minimal UC workflow interpreter + trace comparator
-               (the P-Mxx expected-divergence pairs, stonebranch Part IV)
   dsl        - builder surface (job/box/sequence/parallel) + decompiler
   placeholders - non-core `~{$NAME}~` estate templating preprocessor behind
                the `resolve` verb; nothing in the core imports it (DL-19)

@@ -474,12 +474,13 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   implies stays on the Oracle
 - src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
   tier b (per-job state-space enumeration), tier c (oracle trace comparison)
-- src/dsl41/backend_uc.py and src/dsl41/uc_oracle.py — UC backend pair. backend_uc
-  builds the UC twin model, classifies edges, emits the migration report, and
-  serializes the U3a base CREATE-ONLY record bundle
+- src/dsl41/backend_uc.py — UC backend: builds the UC twin model, classifies
+  edges, emits the migration report, and serializes the U3a base CREATE-ONLY
+  record bundle
   ([docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md) — rich
-  condition forms blocked on U3b). uc_oracle is the UC-side twin interpreter that runs
-  the P-Mxx expected-divergence pairs against it. It shares Event/TraceEntry with oracle.py.
+  condition forms blocked on U3b). The UC-side twin interpreter that runs the
+  P-Mxx expected-divergence pairs against it lives at tests/uc_oracle.py since
+  DL-189; it shares Event/TraceEntry with oracle.py.
 - src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
   extracted from corpus-observed patterns only (phase 10, last by design)
 - src/dsl41/placeholders.py — non-core estate templating preprocessor (DL-19):
@@ -906,7 +907,8 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
 - tests/test_backend_uc.py — edge classification, migration report, report + uc CLIs,
   the U3a record bundle (frozen-shape golden test, CREATE-ONLY hygiene, quarantine)
 - tests/test_uc_oracle.py — UCS-entry trace semantics (UCS-01/02/03/09/13) plus the
-  P-Mxx expected-divergence pairs against the UC twin interpreter
+  P-Mxx expected-divergence pairs, driving the UC twin interpreter at
+  tests/uc_oracle.py
 - tests/test_dsl.py — the four corpus-extracted builders, cond_to_source fidelity, and
   the decompile round-trip property
 - tests/test_placeholders.py — the DL-19 templating preprocessor: every format

@@ -1,5 +1,7 @@
 """Minimal Universal Controller workflow interpreter (the oracle's UC twin).
 
+Lives under tests/ since DL-189: nothing in the shipped package imports it.
+
 Completes the tier-c scope from ir-design ss7 ("the expected-divergence
 pairs (P-Mxx) against the minimal UC interpreter") and stonebranch Part IV.
 Interprets the in-memory UcModel that backend_uc.compile_twin produces --

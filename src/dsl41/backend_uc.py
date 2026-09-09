@@ -345,9 +345,9 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
 # ------------------------------------------------ UC twin model (compile target)
 
 # The in-memory UC workflow model. compile_to_uc serializes it to the U3a
-# base record bundle (DL-55), and the minimal UC interpreter (uc_oracle.py)
-# interprets it for the P-Mxx expected-divergence pairs (stonebranch
-# Part IV). Semantics sources are all public [V] entries:
+# base record bundle (DL-55), and the minimal UC interpreter
+# (tests/uc_oracle.py) interprets it for the P-Mxx expected-divergence pairs
+# (stonebranch Part IV). Semantics sources are all public [V] entries:
 # UCS-01 edge conditions, UCS-02 skip propagation, UCS-03 joins, UCS-09
 # mutual exclusion, UCS-13 within-run evaluation.
 
@@ -455,7 +455,7 @@ class InitialStatusRow(NamedTuple):
 #: TOTAL over `ir.InitialStatus`, and the ONE place the fact is written
 #: (DL-152): the twin's exclusions read it, `lint.rule_l020` derives its
 #: skip set from `control` rather than hand-listing two statuses, and
-#: `uc_oracle`'s module prose points here instead of restating it. A new
+#: `tests/uc_oracle.py`'s module prose points here instead of restating it. A new
 #: `InitialStatus` member with no row here fails
 #: `test_every_initial_status_names_a_uc_control`, where it used to be a
 #: KeyError in the middle of a compile.

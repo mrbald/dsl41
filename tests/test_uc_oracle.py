@@ -2,7 +2,7 @@
 
 Normative spec: docs/stonebranch-semantics.md UCS-01/02/03/09/13 + Part IV
 (the P-Mxx pair definitions -- "the honest core of the whole project");
-src/dsl41/uc_oracle.py's module docstring pins every interpreter decision
+tests/uc_oracle.py's module docstring pins every interpreter decision
 (recorded as DL-16); src/dsl41/backend_uc.py's compile_twin docstring pins
 the lowering choices exercised in section 2. docs/decision-log.md DL-16
 (this suite) + DL-13 (edge-triggered re-evaluation and the schedule double
@@ -42,19 +42,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
-from dsl41.ast_jil import parse_file
-from dsl41.backend_uc import UcEdge, UcModel, UcVarCondition, UcWorkflow, compile_twin
-from dsl41.ir import lower_catalog, lower_source
-from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, EventKind, TraceEntry
-from dsl41.uc_oracle import (
+from uc_oracle import (
     Divergence,
     UcOracle,
     UcOracleError,
     first_divergence,
     job_outcomes,
 )
+
+from dsl41.ast_jil import parse_file
+from dsl41.backend_uc import UcEdge, UcModel, UcVarCondition, UcWorkflow, compile_twin
+from dsl41.ir import lower_catalog, lower_source
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import Event, EventKind, TraceEntry
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 
