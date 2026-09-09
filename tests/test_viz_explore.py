@@ -552,7 +552,11 @@ def test_elements_draw_one_hub_per_consumed_resource() -> None:
     # counts it instead (below).
     els = _corpus_elements("viz_locks.jil")
     hubs = _locks(els)
-    assert [h for h in hubs if h.startswith("lock:r:")] == ["lock:r:R_ONE", "lock:r:R_BIG"]
+    assert [h for h in hubs if h.startswith("lock:r:")] == [
+        "lock:r:R_ONE",
+        "lock:r:R_BIG",
+        "lock:r:R_GATE",
+    ]
     one = hubs["lock:r:R_ONE"]
     assert one["label"] == "\N{LOCK} R_ONE (1)"
     assert one["capacity"] == 1
@@ -563,6 +567,7 @@ def test_elements_draw_one_hub_per_consumed_resource() -> None:
             "boxes": [],
             "quantity": 1,
             "free": None,
+            "mode": "acquire",
             "policy": "completion",
         },
         {
@@ -571,6 +576,7 @@ def test_elements_draw_one_hub_per_consumed_resource() -> None:
             "boxes": ["lk_box"],
             "quantity": 1,
             "free": "N",
+            "mode": "acquire",
             "policy": "never",  # FREE=N: the units are never given back (DL-50)
         },
     ]
@@ -585,7 +591,9 @@ def test_elements_resource_link_label_thins_like_an_edge_label() -> None:
         for e in _lock_links(els)
         if e["data"]["lock"] == "resource"  # type: ignore[index]
     }
-    assert labels == {"lk_x1": "", "lk_x2": "N", "lk_x3": "2 A"}
+    # lk_x5 lists R_BIG twice and the two groups coalesce into one link of
+    # three units; a summed quantity states no single FREE letter
+    assert labels == {"lk_x1": "", "lk_x2": "N", "lk_x3": "2 A", "lk_x4": "2", "lk_x5": "3"}
 
 
 def test_elements_unsized_resource_hub_says_so() -> None:
@@ -643,6 +651,70 @@ def test_elements_complete_clique_is_one_hub_with_a_row_per_member() -> None:
         if e["data"]["source"] == "lock:m:lk_e+lk_f+lk_g"  # type: ignore[index]
     }
     assert tees == {"lk_e": True, "lk_f": True, "lk_g": False}
+
+
+def test_elements_threshold_resource_holds_nothing() -> None:
+    """MAJOR from the review: `res_type: T` is a level check. The pool
+    classifies it 'gate' with no release policy BEFORE consulting the FREE
+    table (capacity.requirement_demand), and the panel used to report it as
+    held units released on completion."""
+    els = _corpus_elements("viz_locks.jil")
+    (member,) = _locks(els)["lock:r:R_GATE"]["members"]  # type: ignore[misc]
+    assert member["mode"] == "gate"
+    assert member["policy"] is None
+    assert member["quantity"] == 2
+    (link,) = [e for e in _lock_links(els) if e["data"]["target"] == "lk_x4"]  # type: ignore[index]
+    assert link["data"]["mode"] == "gate" and link["data"]["policy"] is None  # type: ignore[index]
+
+
+def test_elements_coalesce_one_job_two_groups_on_one_resource() -> None:
+    """MINOR from the review: two groups on one bucket drew two links on top
+    of each other and two rows of one unit, while the pool reserves their
+    SUM. One link, one row, the summed demand -- `capacity.merge_requirements`
+    is the one owner of that arithmetic."""
+    els = _corpus_elements("viz_locks.jil")
+    big = [m for m in _locks(els)["lock:r:R_BIG"]["members"] if m["job"] == "lk_x5"]  # type: ignore[union-attr,index]
+    assert big == [
+        {
+            "id": "lk_x5",
+            "job": "lk_x5",
+            "boxes": [],
+            "quantity": 3,  # (R_BIG, QUANTITY=1) and (R_BIG, QUANTITY=2)
+            "free": None,
+            "mode": "acquire",
+            "policy": "completion",
+        }
+    ]
+    links = [e for e in _lock_links(els) if e["data"]["target"] == "lk_x5"]  # type: ignore[index]
+    assert len(links) == 1 and links[0]["data"]["quantity"] == 3  # type: ignore[index]
+
+
+def test_elements_merge_the_most_restrictive_release_of_two_groups() -> None:
+    # asymmetric FREE never frees early: the pool's own merge rule (DL-50)
+    text = (
+        "insert_resource: R\nres_type: R\namount: 4\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (R, QUANTITY=1, FREE=A) and (R, QUANTITY=1, FREE=N)\n"
+    )
+    catalog = catalog_of(text)
+    (member,) = _locks(_elements(catalog, derive_graph(catalog)))["lock:r:R"]["members"]  # type: ignore[misc]
+    assert member["quantity"] == 2
+    assert member["policy"] == "never"
+
+
+def test_elements_incomplete_mutex_component_stays_pairwise() -> None:
+    """DL-35 item 6: a hub claims a COMPLETE clique. lk_p names n(lk_q) and
+    lk_q names n(lk_r), so two of the three pairs are stated and no hub may
+    speak for them."""
+    els = _corpus_elements("viz_locks.jil")
+    assert [h for h in _locks(els) if h.startswith("lock:m:")] == ["lock:m:lk_e+lk_f+lk_g"]
+    pairs = [
+        (str(e["data"]["source"]), str(e["data"]["target"]))  # type: ignore[index]
+        for e in _lock_links(els)
+        if "pair" in str(e["classes"]).split()
+    ]
+    assert ("lk_p", "lk_q") in pairs and ("lk_q", "lk_r") in pairs
+    assert ("lk_p", "lk_r") not in pairs  # never stated, never drawn
 
 
 def test_elements_self_mutex_is_a_badge_and_never_a_node() -> None:
@@ -899,9 +971,10 @@ def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
     # count -- a lock link is not a dependency.
     catalog = catalog_of((CORPUS_DIR / "viz_locks.jil").read_text(encoding="utf-8"))
     page = to_explore_html(catalog, title="locks")
-    # 2 resource hubs + 1 clique hub + 2 pairs + 1 self badge; no dependencies
-    assert "12 jobs \N{MIDDLE DOT} 0 edges \N{MIDDLE DOT} 1 boxes" in page
-    assert "\N{MIDDLE DOT} 6 locks \N{MIDDLE DOT} 1 unused" in page
+    # 3 resource hubs + 1 clique hub + 4 pairs + 1 self badge, beside the five
+    # dependency edges lk_seed fans out
+    assert "18 jobs \N{MIDDLE DOT} 5 edges \N{MIDDLE DOT} 1 boxes" in page
+    assert "\N{MIDDLE DOT} 9 locks \N{MIDDLE DOT} 1 unused" in page
     # nothing unused -> nothing said (read the summary span: the vendored
     # bundle has the word "unused" in it somewhere, as it has most words)
     plain = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
@@ -914,19 +987,16 @@ def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
 
 
 def test_to_explore_html_carries_the_lock_grammar() -> None:
-    # DL-192, the page half: locks are excluded from the layout and placed on
-    # their members, they are never a step in a fan-in or fan-out, they have
-    # their own toggle, and the tee is driven by the emitted data.
+    """DL-192, the page half. The browser block drives all of this for real;
+    what is pinned here is the wiring a skipped browser run would leave
+    unchecked -- the control, the style channels, the menu item -- and not
+    the bodies of the functions behind them."""
     page = to_explore_html(catalog_of((CORPUS_DIR / "viz_locks.jil").read_text(encoding="utf-8")))
+    # locks are outside every layout and placed on their members afterwards
     assert 'function flow(elements) { return elements.not(".lock"); }' in page
     assert "function placeLocks()" in page
+    assert "function freeSpot(hub, start, strict, relaxed)" in page
     assert page.count("placeLocks();") >= 3  # initial, re-layout, fit-only
-    assert "var initial = flow(cy.elements()).layout(elkLayout());" in page
-    assert 'var layout = flow(cy.elements(":visible")).layout(elkLayout());' in page
-    # the trace functions read the flow edges alone
-    assert 'var next = flow(nodes.incomers("edge")).sources();' in page
-    assert 'var own = flow(n.incomers("edge"));' in page
-    assert 'return flow(boxes.incomers("edge")).filter(' in page
     # a focused job keeps its own hubs as context, never a hub's other members
     assert 'keep.connectedEdges(".lock").connectedNodes().filter(".lock")' in page
     # the toggle, the tee, the octagon and the menu item
@@ -936,6 +1006,13 @@ def test_to_explore_html_carries_the_lock_grammar() -> None:
     assert 'shape: "octagon"' in page
     assert '{ id: "focus-lock", content: "focus lock", selector: "node.lock",' in page
     assert "dotted gray = lock" in page
+    # a threshold gate holds nothing, and both halves of the header count the
+    # dependency graph by "edges"
+    assert '"threshold gate: needs " + d.quantity + " free, holds nothing"' in page
+    assert (
+        "var TOTAL_EDGES = elements.edges.filter(function (e) { return !isLock(e); }).length;"
+        in page
+    )
 
 
 def test_to_explore_html_collapse_threshold_none_marks_nothing() -> None:

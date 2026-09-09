@@ -39,8 +39,7 @@ pytest.importorskip(
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
-from test_viz import corpus_catalog
-from test_viz import CORPUS_DIR
+from test_viz import CORPUS_DIR, corpus_catalog
 from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT
 
 from dsl41.ir import lower_source
@@ -1115,7 +1114,10 @@ def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> N
 # ------------------------------------------------------------- DL-192: locks
 #
 # `driven_locks` shares one page per engine across this block, like the two
-# above. Only the last two tests mutate the graph, and each restores it.
+# above. Four of these tests mutate the graph -- the toggle, the two focus
+# tests and the collapse -- and each restores what it changed; the focus
+# tests also call `_show_all` on entry, so a failure between two halves of
+# one of them cannot leave the rest of that engine's module hidden.
 
 
 @pytest.fixture(scope="module")
@@ -1135,35 +1137,70 @@ def driven_locks(request: pytest.FixtureRequest, locks_page_url: str, _playwrigh
     yield from _open_driven(_playwright, request.param, locks_page_url)
 
 
-def _hub_inside_members(d: Driven, hub_id: str) -> dict[str, Any]:
-    """Where a hub sits against the bounding box of the members that are
-    actually drawn."""
-    result: dict[str, Any] = d.page.evaluate(
-        """(id) => {
-          const hub = cy.$id(id), p = hub.position();
-          const ms = (hub.data('members') || []).map(m => cy.$id(m.id))
-            .filter(n => n.nonempty() && n.visible());
-          const xs = ms.map(n => n.position('x')), ys = ms.map(n => n.position('y'));
-          return {
-            members: ms.map(n => n.id()),
-            inside: p.x >= Math.min(...xs) - 1 && p.x <= Math.max(...xs) + 1
-                 && p.y >= Math.min(...ys) - 1 && p.y <= Math.max(...ys) + 1
-          };
-        }""",
-        hub_id,
+def _hub_overlaps(d: Driven) -> list[str]:
+    """Every drawn hub whose box touches a drawn job or box. A lock is a fact
+    ABOUT jobs and is placed on them after the layout, so the one thing it
+    must not do is cover one."""
+    hits: list[str] = d.page.evaluate(
+        """() => {
+          const hits = [];
+          cy.nodes('.lock:visible').forEach(hub => {
+            const h = hub.boundingBox();
+            cy.nodes(':visible').not('.lock').forEach(other => {
+              const o = other.boundingBox();
+              if (h.x1 < o.x2 && o.x1 < h.x2 && h.y1 < o.y2 && o.y1 < h.y2) {
+                hits.push(hub.id() + ' over ' + other.id());
+              }
+            });
+          });
+          return hits;
+        }"""
     )
-    return result
+    return hits
 
 
-def test_lock_hubs_sit_on_their_members(driven_locks: Driven) -> None:
-    """A lock is a fact ABOUT jobs, so it is left out of the layout and put
-    at the centroid of the members that are drawn -- inside their bounding
-    box, by construction."""
+def _drawn_hubs(d: Driven) -> list[str]:
+    ids: list[str] = d.page.evaluate("() => cy.nodes('.lock:visible').map(n => n.id())")
+    return sorted(ids)
+
+
+def test_lock_hubs_are_placed_clear_of_every_job(driven_locks: Driven) -> None:
+    """The centroid of a group's members is usually a point one of them
+    occupies -- and with one drawn member it IS that member. The hub walks a
+    spiral from there until nothing is under it."""
     _ready(driven_locks)
-    for hub in ("lock:r:R_ONE", "lock:r:R_BIG", "lock:m:lk_e+lk_f+lk_g"):
-        placed = _hub_inside_members(driven_locks, hub)
-        assert placed["members"], (driven_locks.engine, hub)
-        assert placed["inside"], (driven_locks.engine, hub, placed)
+    assert len(_drawn_hubs(driven_locks)) == 4, driven_locks.engine
+    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
+
+
+def test_a_hub_with_one_drawn_member_is_beside_it_and_the_view_still_fits(
+    driven_locks: Driven,
+) -> None:
+    """Focusing lk_x1 hides its only R_ONE partner. The hub must not land on
+    the one member left, and the fit must see both -- a fit over one point
+    zooms until the octagon fills the viewport and the job vanishes under
+    it. Restores the page."""
+    _ready(driven_locks)
+    _show_all(driven_locks)
+    driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
+    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
+    zoom = driven_locks.page.evaluate("() => cy.zoom()")
+    assert zoom < 12, f"{driven_locks.engine}: fit degenerated to {zoom}x"
+    _show_all(driven_locks)
+
+
+def test_hubs_stay_clear_of_the_jobs_after_a_collapse(driven_locks: Driven) -> None:
+    """A collapse takes members out and leaves the box: the hubs are placed
+    again against the new picture. Expands before returning."""
+    _ready(driven_locks)
+    _show_all(driven_locks)
+    driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
+    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
+    driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    driven_locks.page.wait_for_timeout(_SETTLE_MS)
 
 
 def test_lock_links_are_dotted_and_the_tee_marks_the_waiter(driven_locks: Driven) -> None:
@@ -1196,6 +1233,18 @@ def test_lock_hub_details_name_every_member(driven_locks: Driven) -> None:
         "lk_x2 · in box lk_box · 1 unit, never released",
     ], (driven_locks.engine, members)
     assert driven_locks.page.inner_text("#d-title") == "R_ONE"
+
+    # a threshold (res_type T) is a level check: it holds nothing, so there
+    # is no release to state
+    driven_locks.page.evaluate("() => { cy.$id('lock:r:R_GATE').emit('tap'); }")
+    driven_locks.page.wait_for_timeout(200)
+    rows = driven_locks.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-rows tr')).map("
+        "tr => [tr.querySelector('th').textContent, tr.querySelector('td').textContent])"
+    )
+    assert [value for label, value in rows if label == "member"] == [
+        "lk_x4 · threshold gate: needs 2 free, holds nothing"
+    ], (driven_locks.engine, rows)
 
     driven_locks.page.evaluate("() => { cy.$id('lock:m:lk_e+lk_f+lk_g').emit('tap'); }")
     driven_locks.page.wait_for_timeout(200)
@@ -1240,7 +1289,7 @@ def test_the_locks_toggle_hides_and_restores_every_lock_element(driven_locks: Dr
     driven_locks.page.wait_for_timeout(300)
     assert driven_locks.page.evaluate("() => cy.elements('.lock:visible').length") == 0
     # ...and the jobs are all still there: the toggle hides locks alone
-    assert driven_locks.page.evaluate("() => cy.nodes(':visible').length") == 12
+    assert driven_locks.page.evaluate("() => cy.nodes(':visible').length") == 18
     driven_locks.page.check("#locks")
     driven_locks.page.wait_for_timeout(300)
     assert driven_locks.page.evaluate("() => cy.elements('.lock:visible').length") == before
@@ -1250,8 +1299,10 @@ def test_a_lock_is_never_a_step_in_a_fan_in_or_a_fan_out(driven_locks: Driven) -
     """Two jobs sharing a semaphore are not upstream of each other: a lock
     orders nothing (M07/DL-21), so the trace walks the flow edges alone."""
     _ready(driven_locks)
-    assert _tree_ids(driven_locks, "lk_x2", "fanInTree") == ["lk_box", "lk_x2"]
-    assert _tree_ids(driven_locks, "lk_x1", "fanInTree") == ["lk_x1"]
+    # lk_x1 and lk_x2 share R_ONE and neither is upstream of the other: what
+    # a fan-in reaches is the seed and the box, never the other member
+    assert _tree_ids(driven_locks, "lk_x2", "fanInTree") == ["lk_box", "lk_seed", "lk_x2"]
+    assert _tree_ids(driven_locks, "lk_x1", "fanInTree") == ["lk_seed", "lk_x1"]
     assert _tree_ids(driven_locks, "lk_x1", "fanOutTree") == ["lk_x1"]
     assert _tree_ids(driven_locks, "lk_a", "fanOutTree") == ["lk_a"]
 
@@ -1283,6 +1334,7 @@ def test_focus_lock_menu_item_shows_the_hub_and_every_member(driven_locks: Drive
         "lk_x2",
         "lock:r:R_ONE",
     ], driven_locks.engine
+    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
     _show_all(driven_locks)
 
 
@@ -1313,7 +1365,7 @@ def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
         driven_locks.engine,
         rows,
     )
-    assert rows["release"] == "never released", rows
+    assert rows["demand"] == "1 unit, never released", rows
     _click(driven_locks, "#d-close")
 
     # the panel says where a folded member went

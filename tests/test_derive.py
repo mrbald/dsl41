@@ -752,9 +752,13 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     pair) and l22_alert's zero-lookback failure gate (+1 M03)."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     graph = derive_graph(catalog)
-    assert len(graph.edges) == 49
+    # viz_locks.jil (DL-192) adds 5: its lk_seed fans out to lk_box, lk_x1,
+    # lk_x5, lk_a and lk_e. Four consumers inherit the seed's cadence (+4
+    # M01); the box carries no cadence of its own, so its latch is
+    # cross-stream (+1 M02).
+    assert len(graph.edges) == 54
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 13, "M02": 17, "M04": 4, "M05": 3, "M09": 2, "M03": 5, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 17, "M02": 18, "M04": 4, "M05": 3, "M09": 2, "M03": 5, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
@@ -770,7 +774,9 @@ def test_whole_corpus_mutex_groups_boundary_and_redesign_flags() -> None:
         ["lk_e", "lk_f"],  # then the three pairs of one complete clique,
         ["lk_e", "lk_g"],
         ["lk_f", "lk_g"],
-        ["lk_h"],  # and a self-exclusion
+        ["lk_h"],  # a self-exclusion,
+        ["lk_p", "lk_q"],  # and two of the three pairs of a component that
+        ["lk_q", "lk_r"],  # is therefore NOT a clique (no hub is drawn)
         ["mutex_a", "mutex_b"],
         ["mutex_serial"],
     ]

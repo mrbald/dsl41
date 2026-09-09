@@ -1,12 +1,17 @@
-/* Locks for the explore page (DL-192): both kinds, every shape. R_ONE is a
+/* Locks for the explore page (DL-192): both kinds, every shape. lk_seed is
+   the scheduled producer that gives the file a layered dependency graph, so
+   the page lays it out the way a real estate does. Resources: R_ONE is a
    one-unit semaphore two jobs draw on (lk_x2 with FREE=N, so it never frees);
-   R_BIG is a three-unit pool lk_x3 draws two units of; R_UNUSED is declared
+   R_BIG is a three-unit pool lk_x3 draws two units of, and lk_x5 draws twice
+   in one statement (the runner sums those, so the page draws one link);
+   R_GATE is a threshold (res_type T) that holds nothing; R_UNUSED is declared
    and nothing consumes it, so no hub is drawn and the summary counts it.
    Mutex: lk_a names n(lk_b) one way, lk_c and lk_d name each other, lk_e/
-   lk_f/lk_g state all three pairs (a complete clique), and lk_h excludes
-   itself. lk_x2 and lk_d sit inside lk_box so a collapse hides a member and
-   the owning-box rows have something to say. Names are prefixed: the corpus
-   lowers into ONE catalog. Synthetic. */
+   lk_f/lk_g state all three pairs (a complete clique), lk_p/lk_q/lk_r state
+   only two of the three (an incomplete component: pairwise links, no hub),
+   and lk_h excludes itself. lk_x2 and lk_d sit inside lk_box so a collapse
+   hides a member and the owning-box rows have something to say. Names are
+   prefixed: the corpus lowers into ONE catalog. Synthetic. */
 insert_resource: R_ONE
 res_type: R
 amount: 1
@@ -15,17 +20,31 @@ insert_resource: R_BIG
 res_type: R
 amount: 3
 
+insert_resource: R_GATE
+res_type: T
+amount: 5
+
 insert_resource: R_UNUSED
 res_type: R
 amount: 2
 
+insert_job: lk_seed
+job_type: c
+command: /opt/lk_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "05:00"
+
 insert_job: lk_box
 job_type: b
+condition: s(lk_seed)
 
 insert_job: lk_x1
 job_type: c
 command: /opt/lk_x1.sh
 machine: m1
+condition: s(lk_seed)
 resources: (R_ONE, QUANTITY=1)
 
 insert_job: lk_x2
@@ -41,11 +60,24 @@ command: /opt/lk_x3.sh
 machine: m1
 resources: (R_BIG, QUANTITY=2, FREE=A)
 
+insert_job: lk_x4
+job_type: c
+command: /opt/lk_x4.sh
+machine: m1
+resources: (R_GATE, QUANTITY=2)
+
+insert_job: lk_x5
+job_type: c
+command: /opt/lk_x5.sh
+machine: m1
+condition: s(lk_seed)
+resources: (R_BIG, QUANTITY=1) and (R_BIG, QUANTITY=2)
+
 insert_job: lk_a
 job_type: c
 command: /opt/lk_a.sh
 machine: m1
-condition: n(lk_b)
+condition: s(lk_seed) & n(lk_b)
 
 insert_job: lk_b
 job_type: c
@@ -69,7 +101,7 @@ insert_job: lk_e
 job_type: c
 command: /opt/lk_e.sh
 machine: m1
-condition: n(lk_f) & n(lk_g)
+condition: s(lk_seed) & n(lk_f) & n(lk_g)
 
 insert_job: lk_f
 job_type: c
@@ -80,6 +112,23 @@ condition: n(lk_g)
 insert_job: lk_g
 job_type: c
 command: /opt/lk_g.sh
+machine: m1
+
+insert_job: lk_p
+job_type: c
+command: /opt/lk_p.sh
+machine: m1
+condition: n(lk_q)
+
+insert_job: lk_q
+job_type: c
+command: /opt/lk_q.sh
+machine: m1
+condition: n(lk_r)
+
+insert_job: lk_r
+job_type: c
+command: /opt/lk_r.sh
 machine: m1
 
 insert_job: lk_h
