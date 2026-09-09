@@ -11824,19 +11824,32 @@ relitigate an entry; append a new one.
   is stated.
   THE CLICK. A hub's panel gives the kind, the capacity, and one row per
   member: the job, its owning box and top box, and the how. For a resource
-  that is the quantity and the release policy, computed by
-  `capacity.release_policy` (promoted to public for this) -- never a second
-  copy of the FREE/res_type table, which would drift from the pool's. For a
-  mutex it is the direction in words, "waits while X runs" or "mutual". A
-  pair link's panel gives both directions. A member the canvas is not showing
+  that is the DEMAND in words, and the pool decides what the words say:
+  `capacity.requirement_demand` classifies the requirement and
+  `capacity.merge_requirements` coalesces a job that lists one resource
+  twice (both promoted to public for this, beside `release_policy`). An
+  acquire reads "N units, released on completion"; a threshold (`res_type:
+  T`) reads "threshold gate: needs N free, holds nothing", because it holds
+  nothing and so releases nothing. Never a second copy of that table: the
+  page and the runner must not disagree about the same JIL. For a mutex the
+  row is the direction in words, "waits while X runs" or "mutual"; a pair
+  link's panel gives both directions. A member the canvas is not showing
   says so: "not on canvas" when a focus hid it, "folded into BOX" when a
   collapse took it.
   THE LAYOUT. Lock elements are excluded from every ELK run and placed
-  afterwards, at the centroid of the members that are drawn. A lock is a fact
-  ABOUT jobs, not a step between them: laid out, a hub takes a layer of its
-  own and pushes the dependency picture apart. Placement re-runs after every
-  layout, expand and collapse; a hub whose members are all inside one box
-  sits beside that box rather than on its title.
+  afterwards. A lock is a fact ABOUT jobs, not a step between them: laid
+  out, a hub takes a layer of its own and pushes the dependency picture
+  apart. The centroid of a group's members is only the starting guess --
+  ELK lays a group's members near each other, so the centroid is usually a
+  point one of them occupies, and with one drawn member it IS that member.
+  The hub walks a bounded spiral from there until its box touches nothing:
+  strictly first (a job is never covered, and a compound box is avoided
+  whole, because a hub inside one reads as a lock on its members), then
+  keeping only a box's title band, because no bounded spiral escapes a box
+  a whole region wide. The centroid stands if even that fails: a hub drawn
+  somewhere beats one drawn nowhere. Placement re-runs after every layout,
+  focus, expand and collapse, and the view is fitted AFTER it -- ELK fits
+  the elements it laid out, which do not include the hubs.
   THE TRACE. `fanInStep`, `fanOutStep`, `fanInTree`, `fanOutTree` and
   `boxGate` read the flow edges alone. Two jobs sharing a semaphore are not
   upstream of each other, and a mutex partner is not upstream of anything --
@@ -11848,7 +11861,12 @@ relitigate an entry; append a new one.
   class of its own, so it composes with focus hiding instead of fighting it.
   The summary counts the locks the page DRAWS -- hubs, stated pairs, self
   badges -- so a clique of three reads as 3 in the report (stated exclusions)
-  and as 1 hub here; `edges` stays the dependency count. Lock ids are
+  and as 1 hub here. Both halves of the header mean one thing by "edges":
+  the summary and `#stats` count the dependency graph, and the lock count
+  sits beside them under its own word. `#stats` shows the lock TOTAL rather
+  than a live count -- webkit's style recalculation lags the layoutstop that
+  would read one, and a number that differs per browser is worse than no
+  number. Lock ids are
   namespaced (`lock:r:NAME`, `lock:m:A+B+C`) and widened with the same
   underscore idiom as EXT and edge ids: a job may legally be named
   `lock:r:R`, and cytoscape has one id namespace for every element.
@@ -11867,12 +11885,42 @@ relitigate an entry; append a new one.
   the bank-scale nightbank estate (520 jobs, 63 boxes): GL_DB's hub lands
   between the three regional stacks its six consumers sit in, and its panel
   names each one's owning and top box.
-  THE GATE: 3643 passed, 6 skipped, 2 xfailed; the opt-in browser suite 144
-  passed in chromium, webkit and firefox; branch coverage 100% on the
-  concurrency tier; ruff, ruff format --check, mypy and arch_check clean
-  (arch_check still reports the DL-75 review due on line count since
+  THE GATE: 3645 passed, 6 skipped, 2 xfailed at this entry's own commits,
+  3649 after the rework below; the opt-in browser suite passed in chromium,
+  webkit and firefox -- 153 tests then, 159 after it; branch coverage 100%
+  on the concurrency tier; ruff, ruff format --check, mypy and arch_check
+  clean (arch_check still reports the DL-75 review due on line count since
   arch-review/2026-09-08T233613Z; it stays owed).
   tests/corpus/viz_locks.jil is the new synthetic fixture, and the
   corpus-wide inventories in test_ir, test_derive, test_lint and test_viz
-  move with it -- two more L011 (a resource requirement is not wiring), six
-  more L012, one more subgraph.
+  move with it -- 18 jobs, 5 edges, 8 mutex groups, two more L011 (a
+  resource requirement is not wiring), eight more L012, two more L021, five
+  more L022, one more subgraph.
+  THE REVIEW: a fresh-context review of the three commits, plus a Playwright
+  visual check, found one blocker and one major.
+  * BLOCKER: hubs were drawn on top of jobs -- every hub on the fixture's
+    own page, and a hub with ONE drawn member landed exactly on it, which
+    also collapsed the fit to a point and zoomed to 30x. The spiral above is
+    the fix; the placement test asserted the property the defect
+    guaranteed ("the hub is inside its members' bounding box") and now
+    asserts that no hub's box touches a drawn job, on the default view,
+    after a focus that leaves one member, and after a collapse.
+  * MAJOR: a `res_type: T` requirement was reported as held units released
+    on completion. The pool branches on T BEFORE the release table, and only
+    half of that rule had been reused; `capacity.requirement_demand` now
+    owns both halves and the page states a gate as a gate.
+  * MINOR: a job listing one resource twice drew two coincident links and
+    two rows while the pool sums them -- coalesced through
+    `capacity.merge_requirements`. MINOR: the header's two edge counts
+    disagreed. MINOR: a dead `_POLICY_WORDS` copy in the emitter, deleted.
+    MINOR: this entry's own gate numbers.
+  * NITs: `unused_resources` is private again; the source-substring test
+    keeps only what a skipped browser run would leave unchecked; the
+    fixture gained the three shapes it lacked (a threshold resource, a
+    duplicate requirement, an incomplete mutex component that must stay
+    pairwise) and the dependency edges that let ELK lay it out normally;
+    two comments were corrected.
+  Re-checked at bank scale after the fix: no hub covers a job or a box
+  title on the 520-job estate, and the one hub whose six members span three
+  regions sits inside the region box its centroid falls in -- the relaxed
+  pass, deliberately.
