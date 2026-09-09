@@ -962,6 +962,44 @@ def test_the_cli_verb_lists_with_dry_run_and_refuses_without_a_class(tmp_path: P
     assert seal_path(run_root, 1).exists()
 
 
+def test_estate_prune_older_than_days_reaches_the_planner(tmp_path: Path) -> None:
+    """--older-than-days (cli_estate.py:995) reaches retention.prune the
+    same way --keep-runs's kwarg does (test_retention.py:768): a run
+    written seconds ago survives a one-day threshold, listed as kept
+    rather than removed, and goes once the threshold reads as already
+    elapsed."""
+    run_root = tmp_path / "run"
+    _estate_with_runs(run_root, carried=False)
+    _attest(run_root, 1)
+
+    fresh = _invoke(
+        "estate",
+        "prune",
+        "--run-root",
+        str(run_root),
+        "--tombstones",
+        "--dry-run",
+        "--older-than-days",
+        "1",
+    )
+    assert fresh.exit_code == 0 and "would remove (0)" in fresh.output
+    assert str(run_root / "runs" / "b.1") in fresh.output  # kept, not removed
+    assert (run_root / "runs" / "b.1").exists()
+
+    aged = _invoke(
+        "estate",
+        "prune",
+        "--run-root",
+        str(run_root),
+        "--tombstones",
+        "--older-than-days",
+        "0",
+    )
+    assert aged.exit_code == 0 and "removed 3 artifact(s)" in aged.output
+    assert not (run_root / "runs" / "b.1").exists()
+    assert seal_path(run_root, 1).exists()
+
+
 def test_the_report_names_the_rule_that_decided_each_verdict(tmp_path: Path) -> None:
     """A report tells an operator which sentence to argue with, not only
     what happened."""

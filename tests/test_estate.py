@@ -1556,6 +1556,50 @@ def test_pr22b_the_launch_gate_reads_the_committed_boundarys_manifest(tmp_path: 
     assert refused is not None and "default_tz" in refused
 
 
+def test_seal_next_as_machine_reaches_the_committed_periods_profile(tmp_path: Path) -> None:
+    """--next-as-machine (cli_estate.py:179, repeatable) is C2's machine
+    set: passed twice with a duplicate, and read back sorted and
+    de-duplicated -- the same normalization `--as-machine` gets at genesis
+    -- from the profile the boundary committed."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+    sealed = _seal_next(
+        run_root,
+        c2,
+        "--next-as-machine",
+        "beta",
+        "--next-as-machine",
+        "alpha",
+        "--next-as-machine",
+        "beta",
+    )
+    assert sealed.exit_code == 0
+
+    manifest = read_period_manifest(run_root, 2)
+    assert manifest is not None
+    assert manifest.runtime_profile.as_machine == ("alpha", "beta")
+
+
+def test_seal_next_timezone_map_reaches_the_committed_periods_profile(tmp_path: Path) -> None:
+    """--next-timezone-map (cli_estate.py:176) parses the same vendor
+    listing --timezone-map does at genesis (SEM-35/DL-62), and its
+    aliases land in the profile the boundary committed."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+    tz_map = tmp_path / "ujo_timezones.txt"
+    tz_map.write_text(
+        "Entry Type Zone\n------ ---- ----\nZurich City Europe/Zurich\n", encoding="utf-8"
+    )
+    sealed = _seal_next(run_root, c2, "--next-timezone-map", str(tz_map))
+    assert sealed.exit_code == 0
+
+    manifest = read_period_manifest(run_root, 2)
+    assert manifest is not None
+    assert manifest.runtime_profile.tz_aliases == {"zurich": "Europe/Zurich"}
+
+
 def test_pr22b_the_gate_still_reads_the_open_period_when_no_boundary_is_staged(
     tmp_path: Path,
 ) -> None:

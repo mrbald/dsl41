@@ -1226,6 +1226,51 @@ def test_a_retry_under_the_original_id_applies_nothing_twice(short_root: Path) -
     assert [r["rec"] for r in records] == ["input", "decision"]
 
 
+def test_cli_sendevent_exit_code_reaches_the_change_status_payload(short_root: Path) -> None:
+    """--exit-code (cli_control.py) rides in the CHANGE_STATUS payload as an
+    int, and the CLI's own exit code follows the answer exactly as it does
+    for --status: 0 for applied, 3 once the same --expect is stale."""
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            applied = await asyncio.to_thread(
+                _sendevent_cli,
+                server.path,
+                "CHANGE_STATUS",
+                "--job",
+                "j",
+                "--status",
+                "FAILURE",
+                "--exit-code",
+                "7",
+            )
+            assert applied.returncode == 0, applied.stderr
+            assert json.loads(applied.stdout)["decision"] == "applied"
+            assert engine.oracle.store.job["j"].exit_code == 7
+
+            stale = await asyncio.to_thread(
+                _sendevent_cli,
+                server.path,
+                "CHANGE_STATUS",
+                "--job",
+                "j",
+                "--status",
+                "SUCCESS",
+                "--exit-code",
+                "0",
+                "--expect",
+                "0",
+            )
+            assert stale.returncode == 3
+            assert engine.oracle.store.job["j"].exit_code == 7  # unchanged
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_the_shell_can_read_the_revision_its_expect_has_to_name(short_root: Path) -> None:
     """The read half of ss0, at the shell. `global` was on the wire from
     S1c and reachable only from the TUI, which left `SET_GLOBAL` as the one
