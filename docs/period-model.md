@@ -2,9 +2,9 @@
 
 Status: **frozen (2026-08-20, DL-114).** Draft 31, converged. Intended to become normative in the way
 `docs/concurrency-model.md` and `docs/control-protocol.md` are: once frozen,
-each change to a frozen item requires a decision-log entry. It supersedes
-`docs/ops-model.md` §1–§3 and §8a–§8b as the *mechanism*; that document stays
-the ops-view plan and points here.
+each change to a frozen item requires a decision-log entry. It is the only home of the mechanism that `docs/ops-model.md` §1–§3 and
+§8a–§8b argued for, before those sections were removed at DL-189; that
+document stays the ops-view plan and points here.
 
 Nothing ships incrementally. Correctness is carried by §13's obligations and
 §14's worked estate, not by staged exposure. An obligation weak enough to let a

@@ -9,14 +9,13 @@ document proposed — the period, the seal, the carry, the lineage fence, the
 optional run root — is **frozen in `docs/period-model.md`** (DL-114, with its
 rulings DL-115…DL-129) and **built** (DL-130…DL-136, DL-141…DL-144). Where
 this document and period-model disagree, **period-model wins**. §1–§3 and
-§8a–§8b below are kept as the *argument* that got there and are marked
-*superseded*; the
+§8a–§8b, the argument that got there, were removed at DL-189; `docs/period-model.md`
+is the only home of the mechanism now. The
 scenario catalogue (§5), the closed book (§6), run history (§6a), retention
 (§7), authority (§8) and the deployment shapes (§4a) remain this document's.
 
 **What shipped since this document was written.** Read every "today", "does
-not exist" and "gap" below against this list, and read the superseded
-sections as history rather than as a description of the code:
+not exist" and "gap" below against this list:
 
 - the period identity, the content-addressed catalog bundle, the
   `RuntimeProfile` and the manifests (DL-130);
@@ -28,22 +27,25 @@ sections as history rather than as a description of the code:
 - retention floors and `estate prune`, and the archive class that closed
   E20 (DL-135, DL-144);
 - run history, `dsl41 runs` (DL-113), made boundary-aware (DL-136, DL-141);
-- the capacity decomposition this document's §8b.4 argued for (DL-120);
+- the capacity decomposition this document argued for (DL-120; removed
+  §8b.4, DL-189);
 - the access perimeter — three tiers and local peer authentication —
   which closes most of §8 (DL-146…DL-148, `docs/access-model.md`).
 
 What is still a plan: follower mode and `standby check` (§4), the store-backed
-term, the multi-executor rig (§4a.5), and the store-era seal (§8a.2 stage 5).
+term, the multi-executor rig (§4a.5), and the store-era seal (removed §8a.2
+stage 5, DL-189).
 
 **Peer-reviewed 2026-08-18** (four rounds, converged). Round 4 acted on the
 repo owner's objection that rolling the run root is clumsy and
-counter-intuitive: §8a.0 is the result and it supersedes this document's
-original framing of the run root as the period boundary. Four claims were withdrawn and are marked at the point
-they were made rather than deleted: §1.3's "a seal does not require a quiesced
-estate", §2.2's per-job release window, §8a.1's "only the last stage waits on
-the store", and §1.1's IR-G analogy. The sweep gained four findings (G7–G10) and
-the capacity fix gained its shape. Where a paragraph says *"corrected after peer
-review"*, the older reading was wrong, not merely weaker.
+counter-intuitive: the conclusion that the run root is not the period
+boundary was the result (removed §8a.0, DL-189), superseding this document's
+original framing of the run root as the period boundary. Four claims were
+withdrawn during review: "a seal does not require a quiesced estate" (removed
+§1.3, DL-189), the per-job release window (removed §2.2, DL-189), "only the
+last stage waits on the store" (removed §8a.1, DL-189), and the IR-G analogy
+(removed §1.1, DL-189). The sweep gained four findings (G7–G10) and the
+capacity fix gained its shape.
 
 ## 0. The finding this document starts from
 
@@ -93,300 +95,6 @@ seeded (period-model §7). `run_number` is monotone across the estate
 (period-model I2), so `runs/<job>.<n>` names one run within a lineage.
 A fresh run root still resets everything on this list — that is what a NEW
 estate is.*)
-
-## 1. The period, the seal, and the carry
-
-*Superseded by `period-model.md` §1–§3 (identities, records, the seal artifact
-and its canonical form, the carried inventory). Kept as the argument.*
-
-Accountants solved this. A ledger is not replayed from the founding of the
-company to compute today's balance: periods are **closed**, a closing entry
-becomes the next period's **opening balance**, closed periods are kept for audit
-and never re-posted to, and a correction is an **adjusting entry** in the open
-period rather than an edit to a closed one.
-
-The mapping is exact enough to use as the design:
-
-| accounting | dsl41 |
-| --- | --- |
-| journal entry | one admitted input (`input` / `advance` / `host` records) |
-| ledger balance | the §3 authoritative state: job, global and host rows, the timer heap |
-| trial balance | the cutoff report (`ha-deployment.md` §5) |
-| closing the books | the **seal** |
-| opening balance | the same seal, read forward |
-| adjusting entry | `CHANGE_STATUS`, or any operator input, in the open period |
-| restatement | **forbidden** — there is no verb that edits a closed period |
-| the bound ledger book | a closed period: its seal, its inputs, its catalog |
-
-**One record, two readings.** A seal closes period N and opens period N+1. There
-is no second concept for "checkpoint" and no snapshot beside it — one record, or
-this becomes the parallel model DL-91 exists to catch.
-
-```
-seal: {period_id, prev_seal_digest, closes_at_index, at,
-       catalog_hash, state_machine_version, epoch, principal,
-       state: {jobs, globals, hosts, timers, timer_seq, waiters},
-       in_flight: [{job, run_number, effect_id, executor_id, generation}],
-       unresolved: [...],        # the cutoff report, carried
-       digest}
-```
-
-It is written by the leader, as one admitted input, in one transaction, under
-the term that admits it — the same path every other input takes (§4 of
-`concurrency-model.md`, frozen). It is not a background job and it is not a
-maintenance script.
-
-### 1.1 Four rules that make a seal safe
-
-1. **A seal is an authoritative checkpoint, reproducible from its opening
-   checkpoint and its period's inputs.** Say it that way rather than reaching
-   for IR-G. IR-G is safe because nothing ever uses it as authority; a seal *is*
-   used as authority — the next engine opens on it without replaying the closed
-   period — so the analogy was cover, not argument. What keeps it honest is
-   reproduction, not derivation: `dsl41 audit --period N` replays period N from
-   its opening seal and refuses if the canonical form's digest differs. **That
-   is why `audit` ships in stage 1** (§8a.2) and not later: a checkpoint nothing
-   can reproduce is authoritative state with no proof, and shipping the carry
-   first would mean three stages of exactly that.
-2. **A closed period is never replayed.** Resume, takeover and audit all start at
-   the last seal. Inputs below `closes_at_index` are archive.
-3. **Nothing may be posted to a closed period.** An operator correcting history
-   posts an adjusting entry in the open period. This needs no new verb: it is
-   what `CHANGE_STATUS` already is.
-4. **A seal names its catalog.** `catalog_hash` and `state_machine_version` ride
-   in the record, so a closed period knows which JIL and which semantics produced
-   it, and a carry across a catalog change is expressible rather than implied.
-
-`prev_seal_digest` chains the periods. It costs one field and it makes the
-archive **self-consistent** — which is not the same as tamper-evident, and the
-earlier draft claimed the stronger word. Anyone who can rewrite a seal can
-rewrite the chain head after it. Tamper-evidence needs an external anchor:
-a signature, immutable retention, or an off-box copy of the head. The chain is
-still worth its one field, because it detects the accident and the partial
-restore; it does not detect the adversary.
-
-**Canonical form.** The digest is computed over a canonical serialization, not
-over incidental JSON bytes, or `audit` reports mismatches for a re-serialization
-that changed nothing — which discredits the audit exactly when it must be
-trusted. Normative, not an implementation note: maps sorted by a specified key
-order; semantically unordered collections sorted by specified field tuples;
-semantically ordered ones keeping their order; the timer heap serialized by
-`(due, token)` rather than its incidental heap-array layout; `reservations`
-sorted by bucket after duplicate-bucket rejection; sets such as `ran_members`
-sorted; and exact encodings pinned for datetimes, numbers, Unicode and
-whitespace. The record carries its own `seal_format_version`; nothing here may
-rest on Pydantic's or Python's current serialization behaviour.
-
-### 1.2 What the seal must carry, and one thing that is not obvious
-
-The rows are easy: `JobRuntime`, `GlobalRuntime` and `HostRuntime` are frozen
-Pydantic models (`src/dsl41/oracle_state.py`) and serialize as themselves.
-The timer heap carries its ordering token and `_timer_seq`
-(`RuntimeState` in `src/dsl41/oracle_state.py`), which §3 already requires to be
-authoritative.
-
-**The capacity pool's waiter order does not survive a seal, and today's argument
-that it needs no token depends on replaying from genesis.** DL-86 left
-`_CapacityPool` outside `RuntimeState` under two tested invariants, and defended
-the missing ordering token like this: *"a waiter's rank is fixed at its QUE_WAIT
-transition, which is itself a projected change, so replaying the transitions
-replays the order."* That is true, and it is true **only while replay starts at
-genesis**. A seal cuts the transitions away and leaves the rows, and the rows say
-who is QUE_WAIT without saying in what order they queued. Two jobs waiting on
-one pool would resume in an arbitrary order — which decides which one starts.
-
-So the seal carries `waiters` explicitly, as an ordered list. The alternative —
-a rank field on the row — is worse: it adds a projected field that moves on every
-queue change, for a fact only the seal needs.
-
-*(The conclusion was right and the shape was backwards. DL-120 took the
-alternative this paragraph called worse: the rank is `JobRuntime.waiter_seq`
-and the allocator is `RuntimeState.enqueue_counter`, both carried, and the
-seal holds no `waiters` list. §8b.4 is where that argument is made.)*
-
-This is the general shape of the risk and worth stating once: **any invariant
-whose proof is "replay reconstructs it" must be re-checked against a boundary
-that does not replay.** The timer heap passed because DL-86 already gave it a
-token. The waiter queue did not.
-
-### 1.3 What a seal cannot do
-
-*(Corrected after peer review. The first bullet said the opposite and was
-store-era reasoning applied to a file substrate; the second contradicted §8b.1;
-the third persisted a projection this project's sibling plan forbids
-persisting.)*
-
-- **On the file substrate it CANNOT cross a live run, and therefore requires a
-  quiesced estate.** The period boundary is also a *process* boundary: the
-  supervisor is one per run root, `SupervisorClient` connects to
-  `<run_root>/supervisor.sock`, and `reattach` is keyed within one root. A
-  new-root engine cannot LIST, signal or await work the old root's supervisor
-  owns. So an `in_flight` summary does not help and the outbox is not the whole
-  problem — there is no channel to the process. Quiescence is the stage-1
-  contract (§8a.2), and the multi-root bridge that lifts it is stage 4. This
-  costs less than it reads: `deployment-runbook.md` §6 already drains before a
-  re-baseline, so stage 1 imposes no new release-window tax. *(Narrowed at
-  build. This is the rule for a **physical roll**, and it is enforced: a roll
-  whose seal carries any live execution refuses (`src/dsl41/estate.py`). An
-  **in-place** transition never crosses a supervisor, so in detached mode it
-  drains nothing beyond the §10 R-closure; tethered still drains fully, because
-  stopping the engine cancels live commands — period-model §8's mode table.)*
-- **It cannot carry the decision index, so it must not seal inside the retry
-  horizon.** The earlier draft said the index cannot be pruned and then listed
-  it as not carried — a straight contradiction. Carrying it does not work
-  either: `_by_index` is log-local and a new root resets indices, so old and new
-  decisions collide. And a retry cannot survive a seal in any case, because
-  `parse_envelope` rejects a foreign `baseline_id` before dedup is ever
-  consulted, while `baseline_id` is inside the fingerprint. The resolution is a
-  precondition, not a protocol change: **`retry_horizon = N`**, measured since
-  the last admitted externally requested mutation, with every admitted attempt
-  decided and nothing awaiting admission or a response. N must be named
-  normatively and clients told that retry guarantees expire after it — which
-  weakens an unbounded promise `control-protocol.md` §3 makes today, so it takes
-  its own decision-log entry. *(Softened at build. The horizon landed as a
-  **soft** gate, not a precondition: a boundary inside it warns and commits
-  with `--force-seal`, and the sidecar and the `seal` record carry the override
-  and the gate's numbers — period-model §9.)*
-- **It cannot resolve an unknown, and it does not carry one either.** A run
-  whose executor went dark stays unknown until evidence or an operator resolves
-  it. But `unresolved` is a **projection** and persisting it as opening truth
-  would break the rule `ha-deployment.md` §5 states for exactly this — derived,
-  never persisted as truth. It does not need carrying: `outcome_unknown` is
-  derived from the bound executor's quarantine plus the absence of evidence, and
-  both of those are in state the seal already carries. The cutoff report is
-  regenerated in the new period, not copied into it.
-
-## 2. Re-baselining is a seal with a catalog change
-
-*Superseded by `period-model.md` §10 (classification: three tiers, the graph,
-the named cases) and §6–§8 (cutoff, the seal operation, preconditions). Note
-§2.2 below was withdrawn and stays withdrawn.*
-
-This is the payoff. Once a period boundary exists, an estate change stops being
-its own procedure:
-
-| operation | what it is |
-| --- | --- |
-| initial JIL release | native genesis opens period 1 under catalog C1. There is no opening seal — period-model §1.3's genesis is its own ordered transaction |
-| incremental JIL change | seal under C1; open the next period under C2, from the carry |
-| rollback | the same, with C1 again — *forward* from the current carry, never back to an old run root |
-| engine version upgrade | seal; open under the same catalog. *Corrected: **not** at a new `state_machine_version` — period-model §12 makes an SM change across a transition a non-goal, so a bump is a full drain and a new-estate genesis* |
-| routine restart / crash | not a seal at all: resume inside the open period |
-
-Rollback deserves its sentence. Before the boundary, rollback meant "the
-previous tag and another fresh run root" (`deployment-runbook.md` §6), which
-threw away everything that happened under the bad release. Under the period model, rollback
-carries forward from the state the bad release actually produced, which is the
-only correct reading — the jobs that ran, ran.
-
-### 2.1 The re-baseline report
-
-A catalog change needs the same discipline the UC backend already applies to a
-mapping: classify every row, refuse what cannot be carried, and record an
-assumption for what can be carried only under one. The vocabulary exists — reuse
-it rather than invent a second one.
-
-| class | case | what happens |
-| --- | --- | --- |
-| **carry** | definition semantically unchanged | the row carries as-is |
-| **new** | no carried row | genesis seeding applies (SEM-24 flags, declared globals) |
-| **removed** | carried row, no catalog entry | retained as a ghost, listed, never silently dropped. L001 already refuses a *condition* that references it (`src/dsl41/lint.py`), so retention is for audit, not for truth |
-| **A** | changed, carryable under a stated assumption | carried, assumption recorded: condition changed (boundary truth may move), schedule changed (timers are recomputed, not carried), `initial_status` changed while the carried row disagrees |
-| **R** | cannot be carried | refuses the re-baseline while it is live: the job is RUNNING and its definition changed; its box membership changed while the box is running; its machine or affinity role changed while an effect is bound to the old one |
-
-**Genesis seeding must not overwrite the carry.** `Oracle.__init__` seeds
-`initial_status` and declared globals at construction. Under carry-forward it
-applies to **new** rows only, or every re-baseline silently clears every operator
-hold — the §0 failure with extra steps. A job whose `initial_status` changed
-while its carried row disagrees is an A-row, and the operator is told which won.
-
-**The boundary truth diff is computable, and the machinery exists.** Evaluate
-every condition against the carried state under C1 and under C2, and report the
-jobs whose readiness flips at the boundary. That is `equiv` tier a/b over two
-catalogs at one state (implementation order §8) — not a new evaluator, which is
-the only acceptable answer here.
-
-### 2.2 The window does not get smaller — the loss does
-
-*(Withdrawn after peer review.)* An earlier draft claimed the gate becomes
-per-job — *"a weekly release touching twelve jobs of eight hundred needs those
-twelve quiet, not the estate"*. **That is false on the file substrate**, for
-§1.3's reason: the supervisor handoff forces a full drain whatever the diff
-says. The window shrinks only in what must be *verified*, not in what must be
-*drained*.
-
-Two independent things also killed it as stated. The R-gate as drafted does not
-catch a box run spanning two catalogs: box B RUNNING under C1, member M not yet
-started because its condition is false, C2 changes M's command but not its
-membership — M is INACTIVE so "changed job is live" does not fire, membership is
-unchanged so the box rule does not fire, and M later starts under C2 inside B's
-C1 execution. **E19 is open about exactly this**, so §2 cannot claim the gate is
-safe while it is. *(E19 is now closed: period-model §10.3 classifies a changed
-member of an executing box **R** even while the member is INACTIVE, PR-42.)*
-And "live" cannot mean RUNNING: QUE_WAIT, armed latches, deferred timers and
-pending effects are all latent execution intent and each needs its own
-classification.
-
-*(Partially restored in round 4.)* The per-job gate returns once the run root
-stops rolling, because the drain it was killed by was the supervisor handoff.
-It returns **narrower than first claimed**, and the wording matters:
-
-> In **detached** mode, a catalog transition need not drain jobs outside the
-> transition's transitive R-classified live closure.
-
-Three qualifications ride with it. Tethered mode is excluded — the restart kills
-live commands regardless. Live FW runs are restarted in-engine rather than
-externally reattached, so a change touching one stays R. And the closure is
-*transitive*: live boxes, reservations, global declarations, success-code
-interpretation, dependencies, calendars, routing and pending effects all
-participate, which is why this can never be stated as "only the changed job must
-be quiet".
-
-What survives regardless of mode is the part that mattered: **the release stops
-resetting the estate.** Globals, holds, `last_end_at`, `armed`, `ran_members` and `run_number`
-cross the window. That was always the value; the smaller window was a bonus that
-turned out not to exist.
-
-The pre-window rehearsal does improve: `rehearse` can start from the real carry
-instead of from cold, which is the difference between rehearsing this estate and
-rehearsing a fresh one.
-
-E9 still applies to a window that spans a tick. The seal's own cutoff is a
-different mechanism and is specified in §8a.2.
-
-## 3. The version boundary this document proposed did not ship
-
-*Rejected, not narrowed. `period-model.md` §2.1 and §12: a transition may
-change the catalog and the runtime profile but **never**
-`state_machine_version`, and the readiness gate refuses a `next_period` whose
-SM version differs (PR-17). An SM bump is a full drain and a new-estate
-genesis, exactly as `deployment-runbook.md` §7 still says. So the seal is not
-a cross-SM migration surface. What survives is the smaller half: an upgrade
-that does not move the SM version keeps the estate's state. The argument below
-is historical.*
-
-`deployment-runbook.md` §7 says to treat an engine upgrade like an estate change,
-because leader eligibility is an exact match on `state_machine_version` and
-replay would otherwise cross a semantic change. That rule is right, and the
-period model turns it from a caution into a boundary:
-
-> ~~Replay never crosses a seal, so a seal is the only point at which
-> `state_machine_version` may change.~~
-
-Two consequences an operator can act on:
-
-- An upgrade is **drain → seal → upgrade → open**, and the estate keeps its
-  state. Before the boundary it kept nothing. *(This one holds, for an upgrade
-  that does not move the SM version.)*
-- ~~The seal's `state` becomes the **only cross-version compatibility
-  surface**~~ — one schema, versioned, with a one-way migration per bump.
-  *(Withdrawn with the rule above. The seal schema still has to stay readable
-  for the estate's retention lifetime, which is a real obligation and a
-  different one.)*
-
-Wrapper and supervisor skew stays a separate question: a detached supervisor
-outlives the engine by design (DL-79), so an upgrade window must still confirm
-nothing it is about to redefine is running under the old wrapper.
 
 ## 4. Leadership is an ops act, not only an election
 
@@ -465,8 +173,8 @@ box. What has not moved is the term itself: the epoch is still written under
 the run-root lock, and the store is still what a second host would need.*)
 
 **That separation is what protects the simple setup.** The flock is kernel-
-released when the holder dies, `kill -9` included, with no expiry to renew — §1
-is explicit that it is *"not a lease"*. A store-backed term has no such property:
+released when the holder dies, `kill -9` included, with no expiry to renew —
+it is explicitly *"not a lease"* (removed §1, DL-189). A store-backed term has no such property:
 a dead engine's row still claims leadership, so it needs a lease or an explicit
 promotion (§4). Making the store the only substrate would trade instant local
 crash recovery for a timeout, on the deployment that needs it least.
@@ -600,7 +308,7 @@ C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
 | B1 | initial JIL release | fresh run root | native genesis opens period 1; no opening seal | — |
 | B2 | incremental change (add / remove / modify) | full quiesce, all state lost | seal → classified diff → open under C2 | — (DL-131, DL-133) |
 | B3 | emergency hotfix, mid-cycle | not supportable without losing the night | the R-gate over the transitive closure; refuse only while something in it is live | — (DL-131). Tethered mode still drains: a transition is a restart |
-| B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (§2) | — |
+| B4 | rollback | previous tag, fresh root, night discarded | forward from the carry under C1 (removed §2, DL-189) | — |
 | B5 | calendar / holiday change | a catalog change, but easy to think of as config | it *is* a catalog change: firing dates move | say so in the runbook |
 | B6 | properties / placeholder change | changes post-placeholder JIL, so changes the hash | same as B2 — this surprises people | say so in the runbook |
 | B7 | affinity role remap | — | route-table change under epoch/CAS; visible to later runs only (CM-18) | `ha-deployment.md` S8b |
@@ -611,7 +319,7 @@ C1/C2, D1–D4 and F1–F4 each collide with a namespace too.
 | --- | --- | --- | --- | --- |
 | C1 | ordinary night | frozen | unchanged | — |
 | C2 | closing the books | does not exist | the seal, at the estate's own cutoff, in the estate's own zone (SEM-35) | `dsl41 seal` ships (DL-134). The operator chooses each boundary: automatic sealing on a timer is a period-model §12 non-goal. The cadence question is E16 |
-| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance. It is a **projection**: `unresolved` derives from the carried host and execution rows and is regenerated in the new period, never copied into the seal (§1.3, period-model §3.3) | E13 |
+| C3 | cutoff with unresolved runs | does not exist | the cutoff report is the trial balance. It is a **projection**: `unresolved` derives from the carried host and execution rows and is regenerated in the new period, never copied into the seal (period-model §3.3; removed §1.3, DL-189) | E13 |
 | C4 | missed ticks over downtime | E9 skip-and-report, journaled | unchanged | — |
 | C5 | deliberate catch-up after downtime | explicit `FORCE_STARTJOB`s | unchanged; the seal makes "what did we skip" answerable from the `drop` records in one period | — |
 
@@ -659,7 +367,7 @@ policy decision is not an engine input (`access-model.md` §6). The admission
 stands when the receipt write fails. `supervise shutdown` goes to the
 owner-only supervisor socket and emits no perimeter receipt at all.
 There is no acknowledgement latch, and the accountant's rule is not enforced
-mechanically. `unresolved` is not carried at all — it is derived (§1.3).
+mechanically. `unresolved` is not carried at all — it is derived (removed §1.3, DL-189).
 
 ### F. Failover
 
@@ -744,7 +452,7 @@ frequency at which an operator asks it. `dsl41 runs` is the answer and it
 ships (DL-113); the rest of this section is what it was designed against, and
 the amendment at the end of §6a.1 says where the build differs.
 
-**The carry is the precondition.** Once `run_number` survives a re-baseline (§2),
+**The carry is the precondition.** Once `run_number` survives a re-baseline (removed §2, DL-189),
 `(estate, job, run_number)` is a stable primary key for the life of the estate,
 and the spool path becomes globally unique. Run history is not a separate feature
 from the period model; it is the second thing the period model makes possible.
@@ -754,8 +462,9 @@ from the period model; it is the second thing the period model makes possible.
 The ledger already holds every fact. So the run table is a **projection**, on the
 same rule as IR-G: regenerate it, never edit it, and never treat it as the
 source of a truth the inputs disagree with. *(Not "and as the seal itself" —
-§1.1 rule 1 settles that the other way: a seal IS used as authority, and what
-keeps it honest is reproduction rather than derivation.)*
+the removed §1.1 rule 1 (DL-189) settles that the other way: a seal IS used
+as authority, and what keeps it honest is reproduction rather than
+derivation.)*
 
 **It materializes at the seal**, before the period's inputs become archivable
 (§7). A seal therefore produces two derived things — the **carry**, which is
@@ -785,7 +494,8 @@ folding them into the run table would make it answer two questions badly. "Why
 did it not run" and "how long did it take" are different queries.
 
 *(Amended by DL-113, at build; extended by DL-136 and DL-141.* Built without
-waiting for §1–§4's seal: `dsl41 runs` is a plain offline CLI verb over the
+waiting for the seal (`period-model.md` is the mechanism; §1–§3 were removed
+at DL-189): `dsl41 runs` is a plain offline CLI verb over the
 WAL segments a run root still retains — one per period — plus that period's
 own catalog bundle and its spool, computed on demand rather than materialized
 at any write time. There is no writer of a new record kind, and **it does not
@@ -907,9 +617,9 @@ committed within `retry_horizon_us` of the last admitted externally requested
 attempt warns and needs `--force-seal`, and the override is recorded
 (period-model §9; `retry_horizon_us` on `RuntimeProfile` in
 `src/dsl41/period.py`, default 60 s). The index itself is log-local and a new
-period opens with a new one, so nothing sweeps it. What §1.3 was guarding
-against — pruning dedup state while a retry can still arrive — is answered by
-the gate rather than by a clock.
+period opens with a new one, so nothing sweeps it. What the removed §1.3
+(DL-189) was guarding against — pruning dedup state while a retry can still
+arrive — is answered by the gate rather than by a clock.
 
 What may never be deleted is not a business decision and is itemized:
 `src/dsl41/retention.py` computes the floor from one root, and `estate prune`
@@ -978,577 +688,9 @@ host row, `force_seal` and `forced_gate` on the `seal` record.
 Whether four-eyes is required on break-glass remains the client's control
 framework's call, not dsl41's.
 
-## 8a. The seal programme — stage order
+## 8b.2 The state-inventory sweep (stub)
 
-*Superseded. `period-model.md` is one unit with no staged exposure: nothing
-ships incrementally, and its §13 obligations and §14 worked estate are the risk
-control. §8a.0's conclusion — the directory is not the baseline — survives
-verbatim as period-model §1.1; §8a.1's "does not need the store" survives as
-the mathematical claim only.*
-
-### 8a.0 The directory is not the baseline
-
-*(Rewritten after round 4 of peer review, which started from the repo owner's
-objection: rolling the run root daily and at every release is clumsy and
-counter-intuitive, and folder structure should be optional hygiene rather than a
-limiting feature of the scheduler. The objection is correct. This document had
-accepted the constraint instead of attacking it.)*
-
-**What enforces one catalog per log is a value at position zero, not a
-directory.** Two sites: `start_run` refuses a run root that already holds a
-journal, and `check_leader_eligibility` compares the **header's** `catalog_hash`
-and `state_machine_version` against the current build. The header is written once
-at genesis. Everything else about the folder is incidental.
-
-The landing position separates five identities this design had conflated:
-
-| concept | lifetime and purpose |
-| --- | --- |
-| **estate root** | stable sockets, supervisor, locks, `runs/`, the operator's path |
-| **catalog period** | a fresh `baseline_id`, catalog hash, machine version, cutoff |
-| **WAL segment** | the corruption, retention, backup and archive unit |
-| **seal** | the verified recovery state between segments |
-| **execution** | `run_id`, monotone `run_number`, and its start-period identity |
-
-> The directory is an operational container. Catalog periods are semantic
-> boundaries. WAL segments are retention and corruption boundaries. **Rolling the
-> directory is optional archival hygiene.**
-
-**`baseline_id` must rotate per period, and this is load-bearing.** Keeping one
-because the physical ledger is continuous opens a correctness hole: a client
-reads job revision 7 under C1; C2 opens in the same root under the same baseline;
-the catalog change need not touch that row or move its revision; the client then
-submits `(baseline=B, expect=7)` and it is accepted against C2 semantics. Today
-the engine takes its baseline from the header and keeps it for life. Frozen v2's
-wire shape does not change — the *definition* does, from "physical log identity"
-to "semantic period identity". The retry horizon (§1.3) is what makes refusing a
-late C1 retry after that rotation coherent rather than arbitrary.
-
-**One immortal `journal.jsonl` is not the answer**, and the reasons are in
-shipped code rather than in scale anxiety: `read_journal` reads the whole file
-into memory and refuses the entire journal on one corrupt interior line; decision
-and outbox reconstruction scan every record; reconciliation scans every
-historical dispatch plus the whole `runs/` directory; and the supervisor keeps
-every completed run in memory and returns all of them from `LIST`, with no
-eviction (G11). Under rolling roots each of those is bounded by one night. Remove
-the rolling without segmenting and they are unbounded from day one.
-
-**What makes rolling genuinely optional** rather than nominally optional is one
-condition: the seal and opening format must be *identical* for both
-continuations — continue under the same root, or open a fresh root from that
-seal. Two formats would be two semantic paths and the option would be a fiction.
-A physical roll taken while jobs are live still needs the stage-4 bridge or
-quiescence; an ordinary same-root transition needs neither.
-
-### 8a.1 Neither does it need the store
-
-Two facts, both already true, decide this.
-
-**The run root boundary is already a period boundary.** A new run root is a new
-log, replayed from its own header. So "replay starts at the last seal rather
-than at the beginning of time" — the thing §1.1's rule 2 asks for — is *already
-what happens* on the file substrate. What a new run root loses is not the bound;
-it is the state (§0). The seal has to supply the state, not the bound.
-
-**The catalog seed is already the genesis input.** `Oracle.__init__` opens an
-input transaction, seeds SEM-24 flags and declared globals, and commits it —
-DL-87's comment says so in as many words: *"the catalog seed IS an input -- the
-genesis one."* A carried opening is therefore not a new concept in the oracle.
-It is the same genesis input, seeded from a seal for rows that have one and from
-the catalog for rows that do not.
-
-So the seal, on one host, is **the handoff artifact between two run roots**:
-
-```
-dsl41 seal --run-root <old>        # closes it: sidecar state + a `seal` record
-dsl41 run  --from-seal <old>/seals/<id>.json --run-root <new> <estate>...
-```
-
-*(The spelling changed. `--from-seal` never existed. The shipped physical roll
-names the lineage **anchor**, not a sidecar path, and the closing period must
-also be attested:*
-
-```sh
-dsl41 seal  --run-root <old> --estate-anchor <anchor> --next <estate>...
-dsl41 audit --run-root <old> --estate-anchor <anchor>
-dsl41 run   --open-from <anchor> --run-root <new> <estate>...
-```
-
-*`--next` is required on every seal, even when the catalog does not change.
-And rolling the root is optional: `dsl41 run --resume` on the same root is the
-other opener.)*
-
-No store, no transaction manager, no HA. `docs/ha-deployment.md`'s S8a is not a
-prerequisite of any of this.
-
-*(Narrowed after peer review.)* What survives is the **mathematical** claim: no
-shared database is required for a file-based checkpoint, because the missing
-state can be carried locally. What does **not** survive is the staging claim
-that only the last stage waits on the store — stage 1 has substantial
-prerequisites of its own (the quiescence predicate, the cutoff barrier, the
-retry horizon, and stitching the shipped run-history projection across the
-boundary), and none of them is a store, but none of them is free either.
-
-**Durability without a transaction.** The state goes in a sidecar written with
-the liturgy the spool already uses (same-directory temp, fsync, rename, fsync
-dir), and *then* the `seal` record is appended to the journal. Crash between the
-two and the sidecar is orphaned, which is harmless because no record names it.
-The record landing means the sidecar is already durable. That is the same
-write-ahead ordering `dispatch` and `spawn.json` already have, not a new one.
-
-### 8a.2 Stages
-
-| # | stage | delivers | needs |
-| --- | --- | --- | --- |
-| 1 | **the period transition, in place** — schema + canonical form, rotating `baseline_id`, content-addressed catalogs, segmented WAL, resume-from-latest-seal, the cutoff barrier, the retry horizon, **`dsl41 audit`**, and DL-113 made period-aware | the provable core, with its proof | — |
-| 2 | **the carry across a catalog change** — the classifier over a transitive blast radius, genesis-for-new-rows-only, the boundary truth diff | **a JIL release stops resetting the estate** | 1 |
-| 3 | ~~**the version boundary** — `state_machine_version` may move only across a seal~~ **withdrawn** (§3): an SM bump is not a transition, so no state crosses one | an upgrade that keeps the SM version keeps estate state (§3) | 1 |
-| 4 | **the physical roll while live** — the multi-root execution bridge: each live run's old supervisor endpoint and spool root carried until it drains | rolling the directory without draining. Needed ONLY for a physical roll: an in-place transition (stage 1) never crosses a supervisor | 1 |
-| 5 | **the seal in the store** — many periods in one ledger, so "replay starts at the last seal" becomes a mechanism rather than a side effect of a new run root | bounded replay across a takeover | S8a, and it gates S8e |
-
-`audit` moved into stage 1 and the closed book's remaining parts (chain
-retention, archive policy) ride with it. Stages 2, 3 and 4 are independent of
-each other and all three only need 1.
-
-**Quiescence is now mode-dependent, not universal.** The multi-root supervisor
-problem (§1.3) dissolves for an in-place transition: on a stable root the
-supervisor never rolls, detached commands stay addressable, and resume reattaches
-them from `LIST`. But *"live runs would never notice"* is false in **tethered**
-mode, which is the CLI default — stopping the engine cancels live jobs, and only
-detached deliberately leaves them running. So:
-
-- **detached**: no full drain. A catalog transition need only quiesce the
-  transition's transitive R-classified live closure (§2.2).
-- **tethered**: a restart still kills live commands, so a full drain remains
-  until there is a hot reload or a mode change.
-- **both**: a short admission and cutoff barrier is still required. "No full
-  drain" does not license appending a period record concurrently with controls
-  and ticks.
-
-The predicate below is therefore the **physical-roll-while-live** gate (stage 4)
-and the tethered gate, not a universal precondition. Each item is mechanically
-checkable, and a failure refuses rather than proceeds:
-
-- `outbox.pending() == []` — pending, not an unused outbox; resolved effects
-  stay in the closed journal;
-- no job STARTING or RUNNING, boxes and FW included;
-- no live or reaping adapter task;
-- no pending SPAWN or KILL, and no indeterminate KILL whose target might exist;
-- every supervisor's `LIST` is empty — and **if a supervisor is unreachable,
-  quiescence is unprovable and the seal refuses**, which is what forecloses the
-  terminal-row/pending-KILL orphan;
-- the reconciliation sweep over journal dispatches, spool directories and
-  supervisor `LIST` finds no surviving execution;
-- `retry_horizon` elapsed (§1.3).
-
-An **offline** sealer, after a crash, must first run the existing same-root
-recovery barrier. It may not replay rows, observe "terminal", and seal — a
-recorded kill still has to be re-driven first.
-
-**Stage 1's cutoff barrier.** Quiescence does not settle which same-instant
-ticks were consumed, and `Scheduler._next` cannot answer it (G7). The barrier
-is an ordering, and it carries a watermark rather than a snapshot:
-
-1. quiesce scheduled triggers and drain executions;
-2. stop accepting new external mutations;
-3. choose the cutoff instant **T**;
-4. admit every scheduler tick due at or before T;
-5. advance the oracle through T, firing every due semantic timer;
-6. drain the resulting synchronous inputs and effects;
-7. re-check the full quiescence predicate — if steps 4–5 started work despite
-   the holds, **refuse** and let the operator drain again;
-8. append the seal as the final record at T;
-9. open the next period's scheduler strictly after T.
-
-The only carried evidence is `scheduler_admitted_through: T`. It states what
-happened instead of snapshotting derived state, and it settles stage 2's
-ownership question in one line: **C1 owns every tick ≤ T, C2 owns every tick
-> T**, so a schedule newly introduced by C2 cannot retroactively fire at T.
-
-### 8a.3 What must be frozen before stage 1 writes code
-
-1. **The seal record schema.** It is the one thing here that is expensive to
-   get wrong, because it has to stay readable for the estate's retention
-   lifetime. *(Not, as §3 first argued, because it is a cross-SM-version
-   translation surface — an SM bump is a new estate.)*
-2. **The carried-state inventory** — swept in §8b, which found five more gaps
-   than §1.2's one.
-3. **Where the state lives**: sidecar plus record, write-ahead ordered (§8a.1).
-4. **`run_number` continuity.** Carrying it makes `runs/<job>.<n>` unique for
-   the life of the estate, which is a real gain for investigation. It is still a
-   decision, because it changes what a spool path means.
-
-### 8a.4 The classifier needs more than the fingerprint
-
-Stage 2 needs "did *this job's* definition change", and DL-113 built part of
-that for the run-history break line: `period.job_fingerprints` — written in
-`runner_history` as `_job_fingerprints` and lifted by DL-131 — sha256 over one
-job's lowered IR with `span` keys stripped.
-
-*(Narrowed after peer review.)* It is **not sufficient**, and the primitive's
-own docstring says why — it is "NOT a definition diff". It hashes
-`catalog.jobs[name]` and nothing that job depends on, so a changed resource
-amount, calendar, global declaration or machine mapping alters a job's behaviour
-while leaving its serialized `JobIR` byte-identical. The classifier needs a
-**transitive blast radius**, not a per-job hash.
-
-That is not new machinery either: `derive.py` already builds the graph and the
-`deps` verb already serves a blast-radius view (upstream, globals, downstream,
-box containment). The fingerprint stays useful as the leaf test inside it.
-
-It also inherits that primitive's stated limit — it fingerprints the
-post-placeholder definition — but stage 2 is comparing two catalogs the operator
-is deliberately swapping between, which is the case where placeholders are
-stable and the fingerprint says what it claims.
-
-What the classifier adds on top is the part a hash cannot give: *how* it
-changed, and therefore whether the carry is a **carry**, an **A** or an **R**
-(§2.1).
-
-### 8a.5 Two seals, one record
-
-A seal with no catalog change and a seal with one have the same record and
-different preconditions, and collapsing that distinction would hide the only
-precondition that matters:
-
-- **no catalog change** — no precondition. It is a handoff, and on the file
-  substrate an operator only reaches for one at an upgrade (stage 3).
-- **catalog change** — refused while any R-classified job is live (§2.2). Not
-  the whole-estate quiesce the runbook has today.
-
-*(Corrected at build. The discriminator is not the catalog alone: a
-**runtime-profile** change with no catalog change is a transition too, and it
-classifies jobs, so it can produce R verdicts of its own. And "no
-precondition" was never right — every boundary runs the same gates whatever
-changed: the SM version must match, the cutoff barrier runs, and the
-retry-horizon gate warns. What an unchanged C2 buys is an empty changed
-closure, so the R gate has nothing to refuse on.)*
-
-The daily "close the books" cadence E16 asks about is a **store-era** trigger:
-on the file substrate a period ends when a run root does, so sealing daily would
-mean restarting daily. That is worth saying before someone builds a timer for
-it.
-
-*(Half wrong, corrected at build. A period does NOT end when a run root does:
-one root holds many periods, and "to roll a segment, seal" is period-model
-§1's own line. So a daily seal is available on the file substrate. What
-survives is the cost — a transition is a restart, not a reload — and the
-warning about the timer, which period-model §12 made a non-goal outright.)*
-
-## 8b. The state-inventory sweep
-
-*Superseded by `period-model.md` §3.3 (carried / not carried, with the
-reconstruction rule for each derived item) and §5 (the capacity decomposition,
-which is §8b.4's "right fix"). G1–G11 below are the findings **as made**, in
-the present tense they were written in. **All eleven are answered** —
-G1–G4 by the capacity decomposition (DL-120), G5–G9 by the seal record and the
-cutoff watermark (DL-132, DL-133), G10 by the boundary-aware history fold
-(DL-136), and G11 by the supervisor's bounded `LIST` window
-(`_evict_completed` in `src/dsl41/runner_supervisor.py`). Read no sentence
-here as a live defect. Two caveats: G6 was never a modelling defect — when C2
-lowers a pool below the carried use, classification still follows the three
-tiers, so an executing dependent is R, a latent one is A and a not-live one
-carries; and G10's
-residue is stated rather than removed — a run that spans a boundary still
-reports RUNNING in run history, because the fold reads one segment at a time
-(§6a.1).*
-
-Every piece of live state, walked against one question: **is this
-reconstructible from the rows a seal carries, or only from the transitions a
-seal cuts away?** Read against the code, not the docs
-(`oracle_state.py`, `oracle.py`, `capacity.py`, `runner.py`,
-`runner_admission.py`, `runner_effects.py`, `runner_scheduler.py`).
-
-§1.2 found one gap by inspection. The sweep found five more, and two of them
-are worse than the one that prompted it.
-
-### 8b.1 The result
-
-| state | where | verdict |
-| --- | --- | --- |
-| `_jobs`, `_globals` | `RuntimeState` | **carry** — frozen models, in canonical form (§1.1) |
-| `_hosts` | `RuntimeState` | **carry the durable routing fields, reset `last_contact` — G8** |
-| `_timers`, `_timer_seq` | `RuntimeState` | **carry** — already authoritative, and §3's ordering token means the heap's cross-job firing order survives |
-| `_snapshots`, `_in_input` | `RuntimeState` | transaction scratch, empty between inputs |
-| `_bucket_cap` | `CapacityPool` | derived from the catalog — but see **G6** |
-| `_bucket_used` | `CapacityPool` | **carry — G1** |
-| `_held` | `CapacityPool` | **carry — G2** |
-| `_waiters`, `_waiter_seq`, `_enqueue_counter` | `CapacityPool` | **carry — G3**, and **G4** |
-| `_referencers` | `Oracle` | derived from the catalog |
-| `_trace`, `_emitted`, `_queue`, `_in_wake` | `Oracle` | transient or derived; the trace is audit, not state |
-| `_now` | `Oracle` | **carry — G5** |
-| `frontiers` | `Engine` | per-log: a new log starts at 0. Its `at` is G5's fact, not a second one |
-| `outbox` | `Engine` | **empty by precondition in stages 1–3 — G9**; carried in full at stage 4 |
-| `decisions` | `Engine` | not carried, and not carryable: `_by_index` is log-local. The retry horizon is the answer (§1.3) |
-| `drops`, `deduped`, `refusals` | `Engine` | per-run audit lists |
-| `_live`, `_dispatched`, `_reaping`, `_activity` | `Engine` | live process bookkeeping, rebuilt by the §7 reconciliation ladder |
-| `Scheduler._next`, `_CalCache` | `runner_scheduler` | **not fully derived — G7.** The cutoff watermark replaces it |
-| `_trace` | `Oracle` | transient *for the oracle*, and **not** for its shipped consumer — G10 |
-
-### 8b.2 The findings
-
-**G1 — consumed capacity units are held by no row, and a seal would refund
-them.** `CapacityPool.release` decrements `_bucket_used` only under policy
-`completion`, or under `success` when the job actually succeeded. Units under
-`never` — `res_type: D`, or `FREE: N` — and `success` units on a failed
-terminal stay in `_bucket_used` while `_held.pop(job)` has already dropped the
-job. So a depletable resource's spent units are recorded **nowhere in the
-rows**. Recomputing `_bucket_used` at a seal by summing the demand of RUNNING
-jobs, which is the obvious implementation and the one DL-86's invariant
-invites, would silently **refill every depletable resource in the estate** —
-mid-run replenishment, which is the SEM-16-class non-goal (DL-50), performed
-by accident and in reverse. This is the most dangerous item in
-the sweep, and it is invisible in any test whose estate has no depletables.
-
-Reproduced rather than reasoned — a `res_type: D` resource of 10, one job
-taking `(FUEL, QUANTITY=3)`, acquired and then released on **SUCCESS**:
-
-```
-demand vector: [('r:FUEL', 3, 'acquire', 'never')]
-after acquire: used={'r:FUEL': 3} held={'j1': [('r:FUEL', 3, 'never')]}
-after release: used={'r:FUEL': 3} held={}          <- spent, and no row says so
-```
-
-A seal recomputing from holders sees `held={}` and writes `used={}`.
-
-**G2 — `_held` cannot be recomputed across a catalog change.** For an
-unchanged catalog, `demand_vector(job_ir)` reproduces what a RUNNING job
-acquired. Across a re-baseline it does not: it reads the job's *current* IR, so
-a job whose `resources:` or `job_load` changed would release a different vector
-than it acquired, leaking or double-freeing units. `_held` must be carried for
-every in-flight job rather than recomputed. Invisible in stage 1 by
-construction; it appears the moment stage 2 does.
-
-**G3 — the waiter order, confirmed and made precise.** §1.2 named it; the code
-says exactly what must be carried. `sorted_waiters` keys on
-`(priority_value, _waiter_seq[j], j)` — the first term comes from the catalog
-and the third from the name, so **only `_waiter_seq` and `_enqueue_counter`
-need carrying**, and they must be carried as the sequence numbers rather than
-as an already-sorted list, because the new period may re-sort them against a
-new catalog's priorities.
-
-**G4 — a removed waiter crashes the new period.** `sorted_waiters` does
-`self.catalog.jobs[j]` with no guard, so a job that is QUE_WAIT at seal time
-and absent from the new catalog raises `KeyError` on the first admission the
-new period attempts (reproduced: `sorted_waiters()` over a pool holding one
-name the catalog does not have raises immediately). Unreachable today — a
-waiter is always a catalog job,
-because job verbs are catalog-only — and reachable the day the carry meets a
-catalog that dropped it. It is stage 2's, and the §2.1 classifier should
-R-classify a removed job that is currently QUE_WAIT rather than leave the
-lookup to fail.
-
-**G5 — the clock position.** `Oracle._now` and `Frontiers.at` are the same
-fact: feed times must be non-decreasing. A new period must open at or after
-it, and the seal must carry the **clock domain** beside it, for the reason the
-resume gate already refuses a domain mismatch — a real-clock estate reopened
-under a virtual one would accept an earlier time and break monotonicity.
-
-**G6 — carried usage against a re-baselined capacity.** `_bucket_cap` is
-derived from the catalog, and `_bucket_used` is carried (G1). A re-baseline
-that *lowers* a machine's `max_load` or a resource's amount can therefore open
-a period with `used > cap`. That is not corruption — admission simply refuses
-until releases catch up, which is arguably the correct reading of "you shrank
-the pool while it was full" — but it is a state no genesis can produce, so it
-must be an explicit A-row in the §2.1 classification rather than something an
-operator meets by surprise.
-
-**G7 — the scheduler cutoff cannot be re-derived.** §8b.1 first called
-`Scheduler._next` "derived from catalog + clock". It is not, at a boundary.
-`runner_startup.py` re-anchors **inclusive** of the scheduler frontier and
-dedups against `replayed_ticks` — "the ticks THIS segment's journal has
-already ADJUDICATED" (DL-174: admitted, or already dropped by an earlier
-resume of this same segment) — and its own comment says an exclusive
-re-anchor would lose a same-instant sibling silently, with no drop record
-(DL-45). A seal cuts exactly that evidence away, so the clock cannot say
-which same-instant ticks were already consumed. Anchor exclusive of T and an
-unconsumed tick vanishes; anchor inclusive with nothing else to dedup against
-and a consumed one fires twice. Since DL-166 the anchor is unconditionally
-inclusive and the missed-tick sweep carries both dedup sources, but the
-second source is not something the clock can supply: the answer is still
-§8a.2's barrier and its `scheduler_admitted_through: T` watermark.
-
-**G8 — `last_contact` must not cross the seal.** §8b.1 first said host rows
-"serialize as themselves". That inverts DL-95: `last_contact` is deliberately
-outside the semantic projection, and a replay re-seeds it at resume so a new
-leader **over-waits** rather than evicting early. Carry a stale one and the new
-period can conclude a quarantined host's deadman has already expired — which
-reaches the one state that permits a double run. Carry the durable routing
-fields; let takeover reconciliation re-stamp the liveness evidence.
-
-**G9 — the outbox is not an `in_flight` summary.** An earlier draft replaced the
-outbox with a RUNNING-oriented list. That drops the case
-`concurrency-model.md` §5 exists to explain: KILLJOB does not advance
-`run_number`, so a job can be TERMINATED at run 7 with a pending KILL for run 7
-still undelivered. A RUNNING-oriented summary omits it, the new period's
-reconciliation skips terminal rows, and the process survives forever. Stages 1–3
-dodge this by requiring an empty pending outbox; stage 4 must carry the outbox
-whole — kind, index, `at`, outcomes and admission order.
-
-**G10 — the trace is transient for the oracle and load-bearing for a shipped
-consumer.** DL-113's run history folds each run root independently and builds
-leaf rows only from `dispatch` records, and box rows only from a `STARTING`
-trace transition. A run dispatched before a seal and completed after it
-therefore leaves a permanently RUNNING row in the old root and **no row at all**
-in the new one; a carried RUNNING box is worse, because its later terminal
-transition closes a run the new root never saw open. Quiescence makes this
-rare — a quiesced seal has no open runs — but not impossible, since a box's own
-run can be open across a boundary at which no member is running. The opening
-seal has to become an input to the history fold. This is shipped code, so it is
-a stage-1 obligation rather than a future concern.
-
-**G11 — the supervisor leaks completed runs, and rolling roots were hiding it.**
-`Supervisor` keeps every completed `_Run` in memory and returns all of them from
-`LIST`; there is no eviction. Under a rolling root the supervisor dies with the
-root, so the leak is bounded by one night and nobody notices. Stop rolling and it
-is unbounded for the life of the estate, and `LIST` — which the takeover barrier
-reconciles against — grows without limit. This is shipped code and a real bug
-today; it is only *latent* because of the very constraint §8a.0 removes.
-
-### 8b.3 What the sweep changes
-
-The general rule §1.2 stated holds, and the sweep shows its reach. Every gap
-here is an invariant whose proof is *"replay reconstructs it"*, and every one
-of them was sound while replay started at genesis. Two of them (G1, G2) are
-not the ordering nuisance the waiter queue is — they are unit accounting, and
-getting them wrong spends or invents resource capacity silently.
-
-So the pool is the piece of this system least ready for a seal, and it is the
-one that looked most settled. `capacity.py`'s own docstring says the pool
-*"carries tested invariants instead"* of living under the state owner. Those
-invariants are true and they are not sufficient for a boundary that does not
-replay: they establish that no pool change happens without a row change, which
-is what optimistic locking needs, and say nothing about whether the pool is
-**reconstructible** from those rows, which is what a seal needs. Two different
-properties, and the first does not imply the second.
-
-### 8b.4 The cheap fix, and the right one
-
-**Cheap:** carry the pool — `_bucket_used`, `_held`, `_waiter_seq`,
-`_enqueue_counter` — as four maps in the seal record. It removes G1, G2 and G3
-today. Three reasons not to.
-
-It **freezes private internals into a long-lived artifact schema** (§3).
-`_held`'s entries are tuples of `(bucket_key, units, policy)`
-chosen for a mutator's convenience, never for persistence. Put them in the seal
-and the pool can never be refactored without a migration.
-
-It **keeps two owners, so the next field repeats G1 silently.** G1 was found by
-a human reading `release()`. Nothing would find the next one: `arch_check.py`'s
-DL-83 gate derives its watched set from the state models' AST, but it watches
-*write escape* — assignments to `JobRuntime`/`HostRuntime` fields outside the
-owner — not *carry completeness*. `CapacityPool` is outside both its model list
-and its map list, so the gate has nothing to say about it. That is precisely
-why G1 could exist.
-
-And it **leaves the modelling error in place.** Look at what G1 actually is:
-`_bucket_used` sums two facts with different lifetimes and different truth
-conditions — units **held by live runs** (transient, and a function of which
-jobs are running) and units **permanently spent** (authoritative, irreversible:
-a `res_type: D` or `FREE: N` acquire never releases, DL-50). Recomputation is
-not wrong; the *sum is not decomposable*. Any fix that keeps them added
-together is carrying a number nobody can explain.
-
-**The right fix: move the pool's state onto the entities it describes, and the
-pool becomes derived.**
-
-| today | belongs |
-| --- | --- |
-| `_held[job]` — the vector this run acquired | `JobRuntime` — it is a per-run fact with exactly `run_number`'s lifetime |
-| `_waiter_seq[job]` — this job's queue rank | `JobRuntime` — non-null iff QUE_WAIT |
-| the spent half of `_bucket_used` | `RuntimeState`, as an authoritative `consumed` map |
-| the held half of `_bucket_used` | nowhere: `sum(row.held for running rows)` |
-| `_bucket_cap` | nowhere: already derived from the catalog |
-
-Then `CapacityPool` is a pure function of (catalog, rows, consumed) and holds no
-mutable state at all. G4 becomes a catalog lookup with a documented default,
-because a removed job's rank rides on its own row. G6 is untouched, being a
-genuine semantic question rather than a modelling error.
-
-*(Two overclaims withdrawn after peer review.)* G1–G3 do not "stop existing" —
-their facts become **explicit and reconstructible**, which is the real and
-smaller claim. And the architecture gate cannot "close the class": it can
-enforce where state *lives*, and it cannot prove a decomposition is
-**semantic**. `_bucket_used` could be moved unchanged under `RuntimeState` and
-pass a single-owner gate while still summing two facts. The gate is worth
-adding; it is a guard against escape, not against bad modelling, and only
-review catches the second.
-
-**The settled shape.** Placement follows ownership and mutation boundaries
-rather than the schema argument, which does not discriminate — a tuple frozen
-into the seal is frozen there wherever it lives. The answer to that is a public,
-typed, canonically-serialized model; the answer to *where* is the row:
-
-```python
-class CapacityReservation(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    bucket: str
-    units: int
-    release_policy: Literal["completion", "success", "never"]
-```
-
-with `JobRuntime` carrying `reservations: tuple[CapacityReservation, ...] = ()`
-and `waiter_seq: int | None = None`. A reservation belongs to exactly one
-`(job, run_number)`; acquisition coincides with that row's start transition and
-release with its terminal one; it must participate in that row's optimistic-lock
-projection; the model already forbids overlapping runs of one job, so no
-separate table is implied; and a future non-quiesced re-baseline needs the old
-run's acquired vector beside the old run number, independent of C2's definition.
-
-`RuntimeState` enforces what a row cannot see on its own: `reservations` is
-non-empty only while STARTING or RUNNING; `waiter_seq` is non-null iff QUE_WAIT;
-a terminal transition clears reservations and **atomically** moves the
-non-released units into `consumed`; a start may not overwrite non-empty
-reservations; and the acquired vector is frozen at acquisition, never recomputed
-from the current catalog. `consumed` stays a top-level `RuntimeState` map,
-because its lifetime belongs to the bucket rather than to any completed job.
-
-`_enqueue_counter` is **carried**, under `RuntimeState`, non-negative and at
-least every row's non-null `waiter_seq`. The considered alternative — redefine
-the rank as `1 + max(active waiter_seq)` and reset when the queue empties — is
-semantically sufficient, and it buys one integer of storage in exchange for a
-normalization step whose equivalence to genesis replay must itself be proven.
-That is a strictly larger correctness obligation for a rounding error.
-
-Two fields enter the semantic projection by doing this, and that is correct
-rather than a cost: `_PROJECTED_JOB_FIELDS` is derived as "everything except
-`state_rev`", so both are projected by default, and both change at exactly the
-moments `status` already does — acquire at a start, release at a terminal. No
-new revision churn.
-
-`consumed` deliberately does **not** become a fourth `expect` namespace. It is
-authoritative state under the owner, like the timer heap, and no operator holds
-a revision on it today. It gains a namespace on the day depletable
-replenishment needs one — mid-run `update_resource`, the SEM-16-class non-goal
-of DL-50, out of scope per `runner-design.md` §12 — which is also the day an
-operator has a reason to address it.
-
-**This is DL-86's own move, finished.** That entry moved `_box_ran` onto
-`JobRuntime.ran_members` — *"projected with the entity it describes"* — deleted
-`_run_started_at`, and kept `_CapacityPool` because it could prove the
-**revision** invariant: no pool change is constructible without a row change.
-That invariant is true. It is not the property a seal needs, which is
-**reconstructibility from those rows**, and DL-86 never had to answer that
-question because replay always started at genesis. Doing this closes
-`concurrency-model.md` §3's state inventory, which has been down to one open
-item since.
-
-**Why before stage 1, not after.** The seal schema is the long-lived artifact
-schema (§3).
-Shipping the cheap fix and then this one means a schema migration bought
-nothing. This is the irreversible-commit case where the carpenter's rule
-applies.
-
-**And it lets the gate close the class.** Once the pool holds no state, the
-DL-83 gate can assert the stronger property it cannot assert today: that
-`RuntimeState` is the *only* holder of authoritative oracle state, by naming the
-classes permitted instance attributes at all. Then the next G1 fails CI instead
-of waiting for someone to read `release()` again.
-
-**What would change this answer.** If the pool were about to be replaced — the
-cross-node resource coordination DL-49 defers — freezing its internals briefly
-would be defensible. It is not: that track builds on this model rather than
-replacing it, and it would inherit the same undecomposable sum.
+G1–G11 were resolved; the sweep text and the seal programme (§8a–§8b) were removed at DL-189 and remain in git history before that entry.
 
 ## 9. Obligations
 
@@ -1579,8 +721,9 @@ and **the local multi-executor rig is a third proving tier** (§4a.5).
 Continuing the runner E-series (`runner-design.md` §15, extended by
 `ha-deployment.md` §11 to E15).
 
-- **E16** — seal cadence. *(Reframed. §8a.5 called this store-era only, on the
-  reading that a period ends when a run root does. Period-model §1.1 removed
+- **E16** — seal cadence. *(Reframed. The removed §8a.5 (DL-189) called this
+  store-era only, on the reading that a period ends when a run root does.
+  Period-model §1.1 removed
   that: one root holds many periods, so a daily seal is available on the file
   substrate now.)* Every boundary is an operator act — automatic sealing on a
   timer is a period-model §12 non-goal — and it costs a **restart**, not a new
