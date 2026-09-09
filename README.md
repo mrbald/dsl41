@@ -144,9 +144,10 @@ the dossier: a member's fan-in adds every enclosing box and what gates it
 (SEM-10), its fan-out adds what an enclosing box's completion releases
 (SEM-11); off, they follow the condition edges alone (DL-190). Incoming
 arrows are an AND unless the job carries the badge ∨, which marks a
-condition the page draws as branches: each alternative's arrows are hollow,
-labelled `|1`, `|2` and coloured together when the job is clicked, and the
-details panel shows the condition text and its AND/OR tree (DL-191). A bare
+condition the page draws as branches: each alternative's arrows are hollow
+and are coloured together when the job is clicked, a label names which
+alternation where that groups several arrows, and the details panel shows
+the condition text and its AND/OR tree (DL-191). A bare
 `n()` is a lock, draws no arrow, and now appears in that tree instead of
 nowhere. Locks are drawn too (DL-192): a mutual exclusion as a dotted link
 whose tee marks the job that waits (a complete clique of three or more as one

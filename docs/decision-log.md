@@ -11673,18 +11673,28 @@ relitigate an entry; append a new one.
   that would flatten the nesting. The badge is read off the node's own
   data, so a collapsed box shows its own condition's badge and never merges
   its members'.
-  THE BRANCH. An atom under an OR carries a branch label, appended to the
-  DL-35 thinned edge label (an empty thinned label leaves the suffix
-  standing alone) and marked with the class `any`. A flat any and an
-  all-of-any with one OR use `|k`, k the operand index inside the OR; an
-  all-of-any with several ORs prefixes a letter per OR in operand order, so
-  `a|1` and `b|1` read as two alternations and not one twice; an any-of-all
-  shares one `|k` across every atom of that alternative. Complex labels
-  nothing. On the canvas the branch arrow gets a HOLLOW arrowhead: the line
-  style channel stays the migration class's (exact/assumed/redesign), which
-  DL-35 owns. Colour stays the redundant channel -- tapping a node paints
-  its own alternatives from a six-step ramp, one colour per branch, and the
-  next tap or a blank tap clears it.
+  THE BRANCH. An atom under an OR carries a branch, and its arrow the class
+  `any`. A flat any and an all-of-any with one OR use `|k`, k the operand
+  index inside the OR; an all-of-any with several ORs prefixes a letter per
+  OR in operand order, so `a|1` and `b|1` read as two alternations and not
+  one twice; an any-of-all shares one `|k` across every atom of that
+  alternative. Complex names no branch at all. The branch NUMBER restarts
+  per attribute, so what the page groups by is `branch_key` -- the attribute
+  and the branch together. A box whose condition and whose box_success are
+  both ORs states two alternations that both begin at `|1`, and painting
+  them alike would say they were alternatives of one another.
+  WHAT THE CANVAS SPENDS A LABEL ON. The hollow arrowhead already says "one
+  alternative", so the edge label carries a suffix only where it GROUPS
+  arrows: an any-of-all's `|k`, shared by a whole alternative's atoms, and
+  which OR of several under one AND (`|a`, `|b`). A flat any and a single OR
+  under an AND get none -- one label per arrow groups nothing, and the
+  suffixes collide on the taxi edges' shared column. The line-style channel
+  stays the migration class's (exact/assumed/redesign), which DL-35 owns.
+  Colour stays the redundant channel: tapping a node paints its own
+  alternatives from a six-step ramp, in the order its tree states them, and
+  the next tap or a blank tap clears it. The ramp holds no amber and no
+  vermillion -- they read as the `assumed` class, which most edges are on a
+  migrated estate.
   THE TREE. The node's details panel renders each attribute's tree as a
   nested list, groups labelled "all of" / "any of", each branch under an OR
   carrying the swatch its arrows carry. A leaf names its arrow -- hover
@@ -11692,9 +11702,12 @@ relitigate an entry; append a new one.
   arrow)` for a bare local n(), `(not on canvas)` for an arrow a focus
   hid, and `(folded: X -> Y)` for one a collapse re-pointed at a box. That
   last wording is deliberate: the extension keeps the folded edge's id and
-  re-points it, so the arrow IS on the canvas, standing for several edges
-  rather than for this one. A meta-edge is neutral for the same reason: no
-  branch label, no hollow head, no branch colour.
+  re-points it, so the arrow IS on the canvas -- re-pointed, not gone. A
+  meta-edge is drawn neutral: no branch label, no hollow head, no branch
+  colour. The reason is not that one meta-edge stands for several edges
+  (this build makes one per crossing edge, id and data kept) but that
+  several of them can share one endpoint pair and overlap, and per-branch
+  paint stacked on one line is unreadable.
   THE MAPPING, WITHOUT TOUCHING IR-G. The page needs each edge's own atom,
   which IR-G does not index. The emitter recomputes it: per consumer, walk
   its conditions in `iter_conditions` then `iter_atoms` order and claim the
@@ -11719,8 +11732,14 @@ relitigate an entry; append a new one.
   edges too (M15/M16), so a scalar would explain only one attribute of
   three and the arrows into a box whose box_success is an OR would carry a
   branch label nothing on the page accounted for.
+  THE EDGE'S OWN PANEL. Every edge carries the attribute it derives from,
+  and the panel names it beside the branch: an operator who taps a hollow
+  arrow can read which alternation it belongs to, which the mapping row only
+  hinted at.
   KEYBOARD. A search that hits exactly one node now selects it and opens
-  its details, so Enter alone answers "what gates this job?".
+  its details, so Enter alone answers "what gates this job?". A tree leaf
+  highlights its arrow on focus as well as on hover: the leaf is a real
+  button, Tab reaches it, and the keyboard gets the same answer.
   WHAT IS NOT CHANGED, ON PURPOSE. The Markdown/HTML report keeps DL-35's
   grammar unamended: it stays the artifact of record, its OR shapes are
   already an appendix (M12), and a second grammar for the same fact in a
@@ -11739,10 +11758,34 @@ relitigate an entry; append a new one.
   keeps its id, which is why the leaf names where it went instead of
   calling it missing.
   THE GATE: 3627 passed, 6 skipped, 2 xfailed; the opt-in browser suite
-  114 passed in chromium, webkit and firefox; branch coverage 100% on the
-  concurrency tier; ruff, ruff format --check, mypy and arch_check clean
-  (arch_check still reports the DL-75 review due on line count since
-  arch-review/2026-09-08T233613Z; it stays owed).
+  passed in chromium, webkit and firefox -- 114 tests at this entry's own
+  commits, 153 once DL-192's locks and the rework below joined the same
+  file; branch coverage 100% on the concurrency tier; ruff, ruff format
+  --check, mypy and arch_check clean (arch_check still reports the DL-75
+  review due on line count since arch-review/2026-09-08T233613Z; it stays
+  owed).
+  THE REVIEW: a fresh-context review of the three commits found no blocker
+  and one MAJOR, all folded in before the push.
+  * MAJOR: the branch number restarts per attribute and nothing namespaced
+    it, so a box with an OR condition and an OR box_success painted its
+    start-gate and completion-override alternatives one colour. `branch_key`
+    now carries the attribute, and the page groups, paints and swatches by
+    it.
+  * MINOR: the edge panel named neither the branch nor the attribute; both
+    are rows now. MINOR: the tree leaf's hover highlight had no keyboard
+    equivalent; focus and blur do the same. MINOR: the meta-edge rationale
+    was false for this build (see above). MINOR: this entry's own browser
+    count was wrong.
+  * NITs: the branch order was a lexicographic sort (`|10` between `|1` and
+    `|2`) and now follows the tree; one wiring assertion pinned a function
+    definition rather than the concat that orders the stylesheet; a README
+    line ran to 97 columns. The module-level `dsl` import stays -- CLI
+    imports this module on demand, so only `--format explore` pays -- with
+    a comment saying so, and the elements payload's growth is accepted.
+  A Playwright visual check over a synthetic page and the bank-scale
+  nightbank estate drove the two rendering rulings: the ramp's amber pair
+  vanished against `assumed` edges, and the per-arrow branch suffixes
+  collided on the taxi column without grouping anything.
 - DL-192 the explore page draws the locks (2026-09-09; `viz --format
   explore`; amends DL-35's chart grammar for this page).
   THE PROBLEM. The page drew no lock of either kind. A MUTEX is derive's M07
