@@ -14,6 +14,10 @@
 #                                  thread -- no Worker, no fetch)
 #   cytoscape-context-menus 4.1.0 (MIT; its CSS is inlined in
 #                                  templates/viz_explore.html, not vendored)
+#   cytoscape-expand-collapse 4.1.1 (MIT; box collapse/expand on the explore
+#                                  page, DL-190. Its cues draw on a canvas
+#                                  layer of its own: no CSS, no customized
+#                                  built-in elements, so no WebKit caveat)
 #   @ungap/custom-elements 1.3.0  (ISC; dist min.js copied byte-exact. The
 #                                  context-menus plugin builds its menu from
 #                                  CUSTOMIZED BUILT-IN elements, which WebKit
@@ -40,7 +44,7 @@ cd "$work"
 npm install --no-save --no-audit --no-fund \
     mermaid@11.16.1 @mermaid-js/layout-elk@0.2.2 elkjs@0.9.3 \
     cytoscape@3.33.1 cytoscape-elk@2.3.0 cytoscape-context-menus@4.1.0 \
-    @ungap/custom-elements@1.3.0 esbuild@0.28.2
+    cytoscape-expand-collapse@4.1.1 @ungap/custom-elements@1.3.0 esbuild@0.28.2
 
 banner='/*! @mermaid-js/layout-elk 0.2.2 (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
 banner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
@@ -57,18 +61,21 @@ npx esbuild @mermaid-js/layout-elk --bundle --format=iife \
     --outfile="$vendor/mermaid-layout-elk.iife.min.js"
 
 # Bundle #2 (DL-71): cytoscape + extensions for the --explore page. The
-# entry registers both extensions so the page only needs cyBundle.default.
+# entry registers every extension so the page only needs cyBundle.default.
 cat > cy_entry.js <<'EOF'
 import cytoscape from "cytoscape";
 import elk from "cytoscape-elk";
 import contextMenus from "cytoscape-context-menus";
+import expandCollapse from "cytoscape-expand-collapse";
 cytoscape.use(elk);
 cytoscape.use(contextMenus);
+cytoscape.use(expandCollapse);
 export default cytoscape;
 EOF
 
 cybanner='/*! cytoscape 3.33.1 (MIT) + cytoscape-elk 2.3.0 (MIT) +'
-cybanner+=' cytoscape-context-menus 4.1.0 (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
+cybanner+=' cytoscape-context-menus 4.1.0 (MIT) + cytoscape-expand-collapse 4.1.1'
+cybanner+=' (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
 cybanner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
 cybanner+=' in the dsl41 distribution for full texts and source URLs. */'
 
@@ -107,6 +114,8 @@ done
 grep -q 'EPL-2.0' "$vendor/mermaid-layout-elk.iife.min.js"
 grep -q 'EPL-2.0' "$vendor/cytoscape-explore.iife.min.js"
 grep -q 'var cyBundle' "$vendor/cytoscape-explore.iife.min.js"
+# the expand-collapse extension registers under this core name (DL-190)
+grep -q 'expandCollapse' "$vendor/cytoscape-explore.iife.min.js"
 # upstream's own banner is the attribution here (nothing of ours is prepended)
 grep -q 'ISC' "$vendor/custom-elements.min.js"
 

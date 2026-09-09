@@ -450,7 +450,7 @@ def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> N
         raise typer.Exit(2)
 
 
-def _refuse_undeliverable_viz_flags(*, collapse_threshold: int | None, fixed_scale: bool) -> None:
+def _refuse_undeliverable_viz_flags(*, fixed_scale: bool) -> None:
     """DL-75: refuse a shaping flag only where the chosen format cannot
     deliver its effect -- refusing one the user is getting anyway teaches
     nothing except to distrust the refusals. --elk/--fixed-scale stay silent
@@ -460,17 +460,13 @@ def _refuse_undeliverable_viz_flags(*, collapse_threshold: int | None, fixed_sca
     shapes it and every standalone job is on it already -- DL-76);
     --format explore passes that same test for --elk and
     --include-singletons (it always lays out with ELK, and always carries
-    every standalone job -- search must find them). The two it cannot honor
-    are below."""
+    every standalone job -- search must find them), and since DL-190 for
+    --collapse-threshold too: the page folds the over-threshold boxes before
+    its first layout, the report's own rule. The one it cannot honor is
+    below."""
     undeliverable = [
         (flag, reason)
         for flag, reason, passed in (
-            (
-                "--collapse-threshold",
-                "every box is a compound node the canvas never collapses -- navigate"
-                " (right-click a node to focus) instead of thinning the chart",
-                collapse_threshold is not None,
-            ),
             (
                 "--fixed-scale",
                 "the canvas fits its layout to the viewport and the operator zooms from"
@@ -506,7 +502,8 @@ def viz(
     collapse_threshold: int = typer.Option(
         None,
         "--collapse-threshold",
-        help="Boxes with more direct members than this render as one node.",
+        help="Boxes with more direct members than this render as one node; "
+        "under --format explore they start collapsed (none without the flag).",
         show_default="12",
     ),
     direction: str = typer.Option(
@@ -551,10 +548,7 @@ def viz(
     if direction not in ("auto", "LR", "TD"):
         raise typer.Exit(refuse(f"--direction must be auto, LR, or TD, got {direction!r}"))
     if output_format is VizFormat.explore:
-        _refuse_undeliverable_viz_flags(
-            collapse_threshold=collapse_threshold,
-            fixed_scale=fixed_scale,
-        )
+        _refuse_undeliverable_viz_flags(fixed_scale=fixed_scale)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
     threshold = DEFAULT_COLLAPSE_THRESHOLD if collapse_threshold is None else collapse_threshold
     title = ", ".join(f.name for f in files)
@@ -565,6 +559,9 @@ def viz(
             catalog,
             title=title,
             direction=direction,  # type: ignore[arg-type]  # validated above
+            # None, not the report's 12: the page opens on the whole graph
+            # unless the operator asks for folds (DL-71, DL-190)
+            collapse_threshold=collapse_threshold,
         )
     elif output_format is VizFormat.html:
         from dsl41.viz_html import to_html

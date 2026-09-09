@@ -59,10 +59,18 @@ Regeneration: scripts/vendor_mermaid.sh.
    cytoscape payload so cytoscape-context-menus' customized built-in
    elements exist in WebKit, which does not implement them natively.
 
+8. cytoscape-expand-collapse 4.1.1 -- MIT
+   Copyright (c) 2017 - present, iVis@Bilkent.
+   Source: https://github.com/iVis-at-Bilkent/cytoscape.js-expand-collapse
+           https://registry.npmjs.org/cytoscape-expand-collapse/-/cytoscape-expand-collapse-4.1.1.tgz
+   Vendored (bundled) into: src/dsl41/_vendor/cytoscape-explore.iife.min.js
+   (box collapse/expand on the explore page, DL-190; its cues draw on a
+   canvas layer of its own, so no stylesheet is inlined)
+
 ----------------------------------------------------------------------
 The MIT License (mermaid 11.16.1, @mermaid-js/layout-elk 0.2.2,
-cytoscape 3.33.1, cytoscape-elk 2.3.0, cytoscape-context-menus 4.1.0;
-per-package copyright lines above)
+cytoscape 3.33.1, cytoscape-elk 2.3.0, cytoscape-context-menus 4.1.0,
+cytoscape-expand-collapse 4.1.1; per-package copyright lines above)
 ----------------------------------------------------------------------
 
 The MIT License (MIT)

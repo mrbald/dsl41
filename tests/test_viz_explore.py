@@ -35,11 +35,16 @@ _CUSTOM_ELEMENTS_SHA256 = "cc14433db77c53e92706d93a0c8e3df870d9826c6c334044c9fe9
 
 def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
     payload = _vendor_bytes("cytoscape-explore.iife.min.js")
-    assert len(payload) > 1_500_000  # esbuild output is not byte-reproducible
+    # esbuild output is not byte-reproducible, so a floor -- set above the
+    # pre-DL-190 bundle (1,943,787 bytes), so a rebuild that lost the
+    # expand-collapse extension fails here and not in a browser
+    assert len(payload) > 1_960_000
     assert b"</script" not in payload  # inline-safety: embedded without escaping
     assert payload.startswith(b"/*!")  # attribution banner from vendor_mermaid.sh
-    assert b"EPL-2.0" in payload[:400]
+    assert b"EPL-2.0" in payload[:500]
+    assert b"cytoscape-expand-collapse 4.1.1 (MIT)" in payload[:500]  # DL-190
     assert b"var cyBundle" in payload[:600]  # the IIFE global the page JS expects
+    assert b"expandCollapse" in payload  # the core extension name the page calls
 
 
 def test_vendored_custom_elements_polyfill_is_the_pinned_npm_payload() -> None:
@@ -268,10 +273,18 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
         "initial.run();",
     ):
         assert page.index(essential) < registration, essential
-    # ...and the loss is named, not swallowed
-    assert "} catch (err) {" in page
-    assert 'lostFeature = " \N{MIDDLE DOT} context menu unavailable in this browser";' in page
+    # ...and the loss is named, not swallowed. Two optional extensions since
+    # DL-190, so each APPENDS its notice: one failing must not erase the other
+    assert page.count("} catch (err) {") == 2
+    assert 'lostFeature += " \N{MIDDLE DOT} context menu unavailable in this browser";' in page
+    assert 'lostFeature += " \N{MIDDLE DOT} box collapse unavailable in this browser";' in page
     assert page.count("+ lostFeature;") == 1  # every updateStats keeps it
+    # the expand-collapse extension is guarded the same way. It sits ABOVE the
+    # initial layout on purpose -- the emitter's initial folds must land before
+    # the first picture (DL-190 amends DL-77's letter: the guard is the rule,
+    # the position was its proxy) -- so the guard is what the test pins
+    assert "try {\n  cy.expandCollapse({" in page
+    assert page.index("cy.expandCollapse({") < page.index("initial.run();")
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
@@ -288,7 +301,10 @@ def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
     # rather than silently vanishing from the picture
     assert 'selector: "edge.nesting"' in page
     assert page.count('"curve-style": "bezier"') == 1
-    assert 'edge.addClass("nesting")' in page
+    # re-classified after every collapse/expand (DL-190): a collapse re-points
+    # a member's edges at its box, so a meta-edge can land on a box's ancestor
+    assert 'edge.toggleClass("nesting", nested)' in page
+    assert 'cy.on("expandcollapse.aftercollapse expandcollapse.afterexpand"' in page
 
 
 def test_to_explore_html_survives_marker_shaped_job_and_title() -> None:
@@ -358,21 +374,51 @@ def test_cli_viz_explore_stdout_is_the_navigation_page() -> None:
 
 
 def test_cli_viz_explore_refuses_only_the_undeliverable_flags() -> None:
-    # DL-75's rule applied to what the page actually does: the canvas never
-    # collapses a box, and elkLayout runs with fit:true -- it scales its
-    # layout to the viewport, which is the very thing --fixed-scale asks an
-    # emitter to stop doing. Those two are refused, with the reason.
-    for flag, argv in (
-        ("--collapse-threshold", ["--collapse-threshold", "1"]),
-        ("--fixed-scale", ["--fixed-scale"]),
-    ):
-        result = runner.invoke(
-            app, ["viz", "--format", "explore", *argv, str(CORPUS_DIR / "sem10_box_basic.jil")]
-        )
-        assert result.exit_code == 2, flag
-        assert f"{flag} cannot shape --format explore" in result.stderr
-        assert "shape Mermaid charts" not in result.stderr  # say what, and why
-        assert "--format html" in result.stderr
+    # DL-75's rule applied to what the page actually does: elkLayout runs
+    # with fit:true -- it scales its layout to the viewport, which is the very
+    # thing --fixed-scale asks an emitter to stop doing. That one is refused,
+    # with the reason. (--collapse-threshold left this list at DL-190: the
+    # page folds the over-threshold boxes before its first layout.)
+    result = runner.invoke(
+        app,
+        ["viz", "--format", "explore", "--fixed-scale", str(CORPUS_DIR / "sem10_box_basic.jil")],
+    )
+    assert result.exit_code == 2
+    assert "--fixed-scale cannot shape --format explore" in result.stderr
+    assert "shape Mermaid charts" not in result.stderr  # say what, and why
+    assert "--format html" in result.stderr
+
+
+def test_cli_viz_explore_collapse_threshold_marks_the_boxes_that_start_collapsed(
+    tmp_path: Path,
+) -> None:
+    # DL-190: the report's rule -- a top-level box with MORE direct members
+    # than the threshold folds -- marks the node the page collapses before
+    # its first layout. Without the flag nothing is marked: the page opens
+    # on the whole graph, as DL-71 built it (the report's default 12 is not
+    # borrowed).
+    jil = _solo_jil(tmp_path)  # box_a holds one member
+    marked = runner.invoke(
+        app, ["viz", "--format", "explore", "--collapse-threshold", "0", str(jil)]
+    )
+    assert marked.exit_code == 0, marked.stderr
+    assert marked.stderr == ""
+    by_id = {n["data"]["id"]: n["data"] for n in _page_elements(marked.stdout)["nodes"]}  # type: ignore[index]
+    assert by_id["box_a"].get("collapsed") is True
+    assert "collapsed" not in by_id["job_a"] and "collapsed" not in by_id["solo"]
+
+    at_threshold = runner.invoke(
+        app, ["viz", "--format", "explore", "--collapse-threshold", "1", str(jil)]
+    )
+    assert at_threshold.exit_code == 0
+    assert not any(
+        "collapsed" in n["data"]
+        for n in _page_elements(at_threshold.stdout)["nodes"]  # type: ignore[index]
+    )  # one member is not MORE than one
+
+    plain = runner.invoke(app, ["viz", "--format", "explore", str(jil)])
+    assert plain.exit_code == 0
+    assert not any("collapsed" in n["data"] for n in _page_elements(plain.stdout)["nodes"])  # type: ignore[index]
 
 
 def _solo_jil(tmp_path: Path) -> Path:
@@ -423,4 +469,4 @@ def test_cli_viz_explore_honors_direction() -> None:
     assert result.stdout.startswith("<!doctype html>")
     assert 'DIRECTION = "DOWN"' in result.stdout
     page_nodes = _page_elements(result.stdout)["nodes"]
-    assert len(page_nodes) == 3  # boxes are never collapsed here
+    assert len(page_nodes) == 3  # every node is emitted; the page folds, not the emitter

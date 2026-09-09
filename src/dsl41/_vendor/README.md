@@ -9,7 +9,7 @@ zero network). Dev-time regeneration only — users of the package never need no
 |---|---|---|
 | `mermaid.min.js` | mermaid 11.16.1 `dist/mermaid.min.js`, byte-exact from npm | MIT (bundles DOMPurify, lodash-es, js-yaml, cytoscape, d3, katex, roughjs — see its `/*! */` banners) |
 | `mermaid-layout-elk.iife.min.js` | built: `@mermaid-js/layout-elk` 0.2.2 + `elkjs` 0.9.3, esbuild IIFE (`scripts/vendor_mermaid.sh`) | MIT + EPL-2.0 (elkjs) |
-| `cytoscape-explore.iife.min.js` | built: `cytoscape` 3.33.1 + `cytoscape-elk` 2.3.0 + `elkjs` 0.9.3 + `cytoscape-context-menus` 4.1.0, esbuild IIFE (`scripts/vendor_mermaid.sh`) | MIT + EPL-2.0 (elkjs) |
+| `cytoscape-explore.iife.min.js` | built: `cytoscape` 3.33.1 + `cytoscape-elk` 2.3.0 + `elkjs` 0.9.3 + `cytoscape-context-menus` 4.1.0 + `cytoscape-expand-collapse` 4.1.1, esbuild IIFE (`scripts/vendor_mermaid.sh`) | MIT + EPL-2.0 (elkjs) |
 | `custom-elements.min.js` | `@ungap/custom-elements` 1.3.0 `min.js`, byte-exact from npm | ISC |
 
 `elkjs` is deliberately duplicated across the two built bundles: they are
@@ -32,7 +32,9 @@ the script and by `tests/test_viz_html.py` / `tests/test_viz_explore.py`:
 - the elk bundle's IIFE global is a namespace object (`elkLayouts.default`
   holds the layout-loader array); the page JS accepts both shapes;
 - the cytoscape bundle's IIFE global is `cyBundle` (`cyBundle.default` is
-  the constructor with both extensions registered); cytoscape-elk drives
+  the constructor with all three extensions registered -- `expandCollapse`
+  is the third since DL-190, and its cues draw on a canvas layer of their
+  own: no stylesheet to inline, no customized built-ins); cytoscape-elk drives
   elkjs's bundled synchronous shim on the main thread — no Worker, no
   fetch — and the context-menus CSS is inlined in
   `templates/viz_explore.html` (drift-checked by the script);

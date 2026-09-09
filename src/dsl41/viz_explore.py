@@ -50,10 +50,19 @@ from dsl41.viz_html import substitute
 _KIND_CLASS = {"BOX": "box", "FW": "fw"}  # anything else renders as a command
 
 
-def _elements(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, list[dict[str, object]]]:
+def _elements(
+    catalog: CatalogIR, graph: DerivedGraph, *, collapse_threshold: int | None = None
+) -> dict[str, list[dict[str, object]]]:
     """Cytoscape elements for the whole graph. Pure function; deterministic
     for identical input (catalog nodes in source order, EXT nodes in
-    first-reference order, edges in derivation order)."""
+    first-reference order, edges in derivation order).
+
+    `collapse_threshold` marks the boxes the page folds before its first
+    layout (DL-190): a TOP-LEVEL box with more direct members than the
+    threshold carries `collapsed: true`, the same rule `viz._anchors` folds
+    the report's charts by. A nested box goes with its parent, so it is
+    never marked itself. None (the CLI default for this format) marks
+    nothing: the page opens on the whole graph, as DL-71 built it."""
     nodes: list[dict[str, object]] = []
     for name in graph.nodes:
         job = catalog.jobs.get(name)
@@ -68,6 +77,13 @@ def _elements(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, list[dict[st
         parent = graph.box_tree.parent.get(name)
         if parent is not None:
             data["parent"] = parent
+        if (
+            kind == "BOX"
+            and collapse_threshold is not None
+            and parent is None
+            and len(graph.box_tree.children.get(name, [])) > collapse_threshold
+        ):
+            data["collapsed"] = True
         nodes.append({"data": data, "classes": _KIND_CLASS.get(kind, "cmd")})
 
     # Producer locality is decided off the atom's `instance` fact
@@ -162,13 +178,17 @@ def to_explore_html(
     *,
     title: str = "catalog",
     direction: Direction | Literal["auto"] = "auto",
+    collapse_threshold: int | None = None,
 ) -> str:
     """One self-contained offline HTML page: the whole graph, always ELK,
-    always natural scale, boxes never collapse, singletons always present
-    (search must find them). --direction maps auto/LR -> RIGHT, TD -> DOWN."""
+    always natural scale, singletons always present (search must find
+    them). Boxes open expanded and the operator collapses and expands them
+    on the page; `collapse_threshold` folds the report's over-threshold
+    top-level boxes before the first layout (DL-190; None folds nothing).
+    --direction maps auto/LR -> RIGHT, TD -> DOWN."""
     if graph is None:
         graph = derive_graph(catalog)
-    elements = _elements(catalog, graph)
+    elements = _elements(catalog, graph, collapse_threshold=collapse_threshold)
     boxes = sum(1 for n in elements["nodes"] if n["classes"] == "box")
     summary = (
         f"{len(graph.nodes)} jobs \N{MIDDLE DOT} {len(elements['edges'])} edges"

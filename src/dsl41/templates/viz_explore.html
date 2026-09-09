@@ -6,7 +6,8 @@
 <title>Explore: __DSL41_TITLE__</title>
 <!-- Self-contained page emitted by `dsl41 viz --format explore`. Embeds
      @ungap/custom-elements 1.3.0 (ISC), cytoscape 3.33.1 (MIT), cytoscape-elk
-     2.3.0 (MIT), cytoscape-context-menus 4.1.0 (MIT), elkjs 0.9.3 (EPL-2.0);
+     2.3.0 (MIT), cytoscape-context-menus 4.1.0 (MIT), cytoscape-expand-collapse
+     4.1.1 (MIT), elkjs 0.9.3 (EPL-2.0);
      full texts and source URLs in THIRD_PARTY_LICENSES of the dsl41
      distribution. Renders offline: no network access. -->
 <style>
@@ -118,10 +119,14 @@
            placeholder="find job &mdash; substring, Enter" spellcheck="false">
     <button type="button" id="show-all">show all</button>
     <button type="button" id="fit">fit</button>
+    <button type="button" id="collapse-all">collapse boxes</button>
+    <button type="button" id="expand-all">expand boxes</button>
     <label><input type="checkbox" id="relayout" checked> re-layout on focus</label>
+    <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone."><input type="checkbox" id="trace-boxes" checked> trace through boxes</label>
     <span id="stats">laying out&hellip;</span>
     <span class="hint">right-click a node to focus / hide &middot; click for
-    details &middot; drag pans, wheel zooms</span>
+    details &middot; double-click a box, or its corner cue, to collapse or
+    expand it &middot; drag pans, wheel zooms</span>
   </div>
 </header>
 <div id="wrap">
@@ -172,6 +177,19 @@ function elkLayout(extra) {
 
 var elements = JSON.parse(document.getElementById("graph-data").textContent);
 
+/* The expand-collapse api, once the (optional, guarded) extension is up;
+   null means the page runs without box folding. Declared here because the
+   node label style below asks it how many members a collapsed box stands
+   for, and a style function must not throw before the extension exists. */
+var ec = null;
+
+function nodeLabel(ele) {
+  if (ec && ele.hasClass("cy-expand-collapse-collapsed-node")) {
+    return ele.data("label") + " (" + ec.getCollapsedChildrenRecursively(ele).nodes().length + ")";
+  }
+  return ele.data("label");
+}
+
 var cy = cytoscape({
   container: document.getElementById("cy"),
   elements: elements,
@@ -180,10 +198,10 @@ var cy = cytoscape({
     { selector: "node", style: {
         shape: "round-rectangle",
         width: function (ele) {
-          return Math.max(30, ele.data("label").length * 6.5 + 14);
+          return Math.max(30, nodeLabel(ele).length * 6.5 + 14);
         },
         height: 24,
-        label: "data(label)",
+        label: nodeLabel,
         "text-valign": "center",
         "text-halign": "center",
         "font-size": 11,
@@ -216,6 +234,12 @@ var cy = cytoscape({
         "background-opacity": 0.3,
         "border-color": "#5b21b6",
         "font-weight": "bold"
+    } },
+    { selector: "node.cy-expand-collapse-collapsed-node", style: {  /* a collapsed box: one node standing for its members */
+        "text-valign": "center",
+        "background-opacity": 1,
+        "border-width": 2,
+        "border-style": "double"
     } },
     { selector: "edge", style: {
         "curve-style": "taxi",
@@ -253,6 +277,13 @@ var cy = cytoscape({
         "text-opacity": 0,
         "text-background-opacity": 0
     } },
+    { selector: "edge.cy-expand-collapse-meta-edge", style: {  /* stands for every edge that crossed a collapsed box's border */
+        label: "",
+        "line-style": "solid",
+        width: 2,
+        "line-color": "#5b21b6",
+        "target-arrow-color": "#5b21b6"
+    } },
     { selector: ".hidden", style: { display: "none" } },
     { selector: "node.hit", style: {
         "border-width": 3,
@@ -268,14 +299,18 @@ var cy = cytoscape({
 
 /* An edge between a node and one of its own ancestors has overlapping
    endpoints -- taxi routing cannot draw it at all ("invalid endpoints"), and
-   the dependency would just vanish from the picture. Ancestry is fixed for
-   the life of the page, so classify once and let those few keep the bezier. */
-cy.edges().forEach(function (edge) {
-  var src = edge.source(), dst = edge.target();
-  if (src.ancestors().anySame(dst) || dst.ancestors().anySame(src)) {
-    edge.addClass("nesting");
-  }
-});
+   the dependency would just vanish from the picture. Those few keep the
+   bezier. Classified at load and again after every collapse or expand: a
+   collapse rewires a member's edges onto its box, so a meta-edge can land on
+   a box's own ancestor. */
+function classifyNesting() {
+  cy.edges().forEach(function (edge) {
+    var src = edge.source(), dst = edge.target();
+    var nested = src.ancestors().anySame(dst) || dst.ancestors().anySame(src);
+    edge.toggleClass("nesting", nested);
+  });
+}
+classifyNesting();
 
 var stats = document.getElementById("stats");
 var relayoutToggle = document.getElementById("relayout");
@@ -284,11 +319,18 @@ var relayoutToggle = document.getElementById("relayout");
    updateStats keeps it, so a degraded page never looks like a whole one. */
 var lostFeature = "";
 
+/* The totals are the emitted graph's, fixed at load: a collapse takes a
+   box's members and their inner edges out of the graph and re-points the
+   border-crossing edges at the box, so live counts would read as a loss. */
+var TOTAL_NODES = elements.nodes.length, TOTAL_EDGES = elements.edges.length;
+
 function updateStats(suffix) {
+  var collapsed = cy.nodes(".cy-expand-collapse-collapsed-node").length;
   var vn = cy.nodes(":visible").length, ve = cy.edges(":visible").length;
-  stats.textContent = "visible " + vn + " / " + cy.nodes().length + " nodes · "
-    + ve + " / " + cy.edges().length + " edges" + (suffix ? " · " + suffix : "")
-    + lostFeature;
+  stats.textContent = "visible " + vn + " / " + TOTAL_NODES + " nodes · "
+    + ve + " / " + TOTAL_EDGES + " edges"
+    + (collapsed ? " · " + collapsed + (collapsed === 1 ? " box" : " boxes") + " collapsed" : "")
+    + (suffix ? " · " + suffix : "") + lostFeature;
 }
 
 /* Edge labels overlap at fit zoom on a bank-scale graph: hide them below
@@ -301,29 +343,34 @@ function updateEdgeLabels() {
   cy.edges().toggleClass("nolabel", !show);
 }
 cy.on("zoom", updateEdgeLabels);
+/* edges an expand just restored carry whatever class they were removed
+   with; forget the memo so the current zoom decides again for all of them */
+function refreshEdgeLabels() { labelsShown = null; updateEdgeLabels(); }
 
-function relayoutOrFit() {
+function relayoutOrFit(suffix) {
   if (relayoutToggle.checked) {
     var visible = cy.elements(":visible");
     var layout = visible.layout(elkLayout());
-    layout.on("layoutstop", function () { updateStats(); });
+    layout.on("layoutstop", function () { updateStats(suffix); });
     layout.run();
   } else {
     cy.fit(cy.nodes(":visible"), 40);
   }
-  updateStats();
+  updateStats(suffix);
 }
 
 /* focus = hide non-selected, keeping compound ancestors (members without
    their box do not render), then ELK re-layout of the visible subset
-   (toggle off = fit only). */
-function focusOn(keep) {
+   (toggle off = fit only). `how` names the rule that chose the set, in
+   #stats, so a picture drawn "via boxes" is never mistaken for one drawn
+   from the edges alone. */
+function focusOn(keep, how) {
   keep = keep.union(keep.ancestors());
   cy.batch(function () {
     cy.nodes().addClass("hidden");
     keep.removeClass("hidden");
   });
-  relayoutOrFit();
+  relayoutOrFit(how);
 }
 
 function showAll() {
@@ -368,18 +415,32 @@ document.getElementById("d-close").addEventListener("click", function () {
 });
 
 cy.on("tap", "node", function (evt) {
-  var d = evt.target.data();
+  var n = evt.target, d = n.data();
+  var members = null;
+  if (d.kind === "BOX") {
+    var away = ec ? ec.getCollapsedChildrenRecursively(n).nodes().length : 0;
+    members = (n.descendants().length + away) + (away ? " (collapsed)" : "");
+  }
   showDetails(d.id, [
     ["kind", d.kind],
+    ["members", members],
     ["schedule", d.schedule],
     ["command / watched file", d.detail, "code"],
     ["owning box", d.parent]
   ]);
 });
 
+/* an end the expand-collapse extension remembers is a node; a plain id
+   is accepted too, so a future build that stores ids reads the same */
+function endId(end) { return end && typeof end.id === "function" ? end.id() : String(end); }
+
 cy.on("tap", "edge", function (evt) {
-  var d = evt.target.data();
+  var e = evt.target, d = e.data();
+  /* a meta-edge IS the original edge, re-pointed at a collapsed box; its
+     annotations are its own, and the row names the member it really joins */
+  var ends = e.hasClass("cy-expand-collapse-meta-edge") ? d.originalEnds : null;
   showDetails(d.source + " → " + d.target, [
+    ["stands for", ends ? endId(ends.source) + " → " + endId(ends.target) + " (inside a collapsed box)" : null],
     ["via", d.via],
     ["lookback", d.lookback],
     ["class", d.cls],
@@ -399,16 +460,23 @@ document.getElementById("fit").addEventListener("click", function () {
   cy.fit(cy.nodes(":visible"), 40);
 });
 
-/* Substring search. Hits hidden by a previous focus are un-hidden -- a
-   search that cannot find a hidden node is a lying search. */
+/* Substring search. Hits hidden by a previous focus are un-hidden, and a
+   collapsed box holding a hit is expanded first -- a search that cannot
+   find a hidden or a collapsed node is a lying search. */
 document.getElementById("search").addEventListener("keydown", function (evt) {
   if (evt.key !== "Enter") return;
   var query = evt.target.value.trim().toLowerCase();
   cy.nodes().removeClass("hit");
   if (!query) { updateStats(); return; }
-  var hits = cy.nodes().filter(function (n) {
-    return n.data("id").toLowerCase().indexOf(query) !== -1;
-  });
+  var matches = function (n) { return n.data("id").toLowerCase().indexOf(query) !== -1; };
+  if (ec) {
+    cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+      if (ec.getCollapsedChildrenRecursively(box).nodes().some(matches)) {
+        ec.expandRecursively(box, { layoutBy: null });
+      }
+    });
+  }
+  var hits = cy.nodes().filter(matches);
   if (hits.empty()) {
     updateStats("no match for “" + query + "”");
     return;
@@ -421,6 +489,60 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
   cy.fit(hits, 60);
 });
 
+/* ------------------------------------------------------- box collapse / expand */
+
+/* cytoscape-expand-collapse (DL-190): a collapsed box stays in the graph as
+   one node; its members and their edges leave it, remembered on the box,
+   and every edge that crossed the box's border becomes one meta-edge to
+   the box. Optional and guarded like the menu (DL-77): a throw costs this
+   feature alone, and #stats says so. It sits ABOVE the initial layout on
+   purpose -- the boxes the emitter marked `collapsed` (--collapse-threshold)
+   have to fold before the first layout or the first picture is the wrong
+   one -- and the guard, not the position, is what keeps everything else
+   alive when it fails. */
+try {
+  cy.expandCollapse({
+    layoutBy: function () { relayoutOrFit(); },  /* the re-layout toggle decides */
+    fisheye: false,
+    animate: false,
+    undoable: false,
+    cueEnabled: true,
+    expandCollapseCuePosition: "top-left",
+    expandCollapseCueSize: 12,
+    expandCollapseCueLineSize: 8,
+    zIndex: 15  /* over the graph, under #details (20) and the menu (1000) */
+  });
+  ec = cy.expandCollapse("get");
+  cy.on("expandcollapse.aftercollapse expandcollapse.afterexpand", function () {
+    classifyNesting();
+    refreshEdgeLabels();
+  });
+  /* the emitter's initial folds, deepest first: an inner box collapsed
+     before its outer one is remembered collapsed, and comes back so */
+  cy.nodes("node.box[?collapsed]").sort(function (a, b) {
+    return b.ancestors().length - a.ancestors().length;
+  }).forEach(function (box) {
+    if (box.inside() && ec.isCollapsible(box)) ec.collapse(box, { layoutBy: null });
+  });
+} catch (err) {
+  lostFeature += " · box collapse unavailable in this browser";
+  if (window.console) console.error("box collapse unavailable:", err);
+}
+
+function collapseBox(box) { if (ec && ec.isCollapsible(box)) ec.collapse(box); }
+function expandBox(box) { if (ec && ec.isExpandable(box)) ec.expand(box); }
+cy.on("dbltap", "node.box", function (evt) {
+  var box = evt.target;
+  if (!ec) return;
+  if (ec.isExpandable(box)) expandBox(box); else collapseBox(box);
+});
+document.getElementById("collapse-all").addEventListener("click", function () {
+  if (ec) ec.collapseAll();
+});
+document.getElementById("expand-all").addEventListener("click", function () {
+  if (ec) ec.expandAll();
+});
+
 /* ------------------------------------------------------------ initial layout */
 
 var initial = cy.elements().layout(elkLayout());
@@ -429,6 +551,52 @@ initial.on("layoutstop", function () {
   updateStats();
 });
 initial.run();
+
+/* ------------------------------------------------------ tracing through boxes */
+
+var traceToggle = document.getElementById("trace-boxes");
+function viaBoxes() { return traceToggle.checked; }
+function howLabel(what) { return what + (viaBoxes() ? ", via boxes" : ", edges only"); }
+
+/* One step upstream. Edges only: the producers this node's own condition
+   names. Through boxes (SEM-10): a member starts only when its box is
+   RUNNING and its own conditions hold, so every enclosing box, and what
+   gates that box, is upstream too. Siblings are not -- they gate nothing
+   of this node's start -- and the rule never adds one. Computed here over
+   `parent` rather than emitted as edges: a box->member edge for the start
+   gate and a member->box edge for the completion fold would be a cycle,
+   and a fan-in over it would pull every sibling in. */
+function fanInStep(nodes) {
+  var next = nodes.incomers("node");
+  if (viaBoxes()) {
+    var boxes = nodes.ancestors();
+    next = next.union(boxes).union(boxes.incomers("node"));
+  }
+  return next;
+}
+
+/* One step downstream. Edges only: the consumers whose conditions name this
+   node. Through boxes: a box's start releases its members (SEM-10), and a
+   member's completion is a vote in every enclosing box's fold (SEM-11), so
+   the box's consumers are downstream of the member. Overrides that name a
+   member (SEM-12) are already explicit edges and need nothing here. */
+function fanOutStep(nodes) {
+  var next = nodes.outgoers("node");
+  if (viaBoxes()) {
+    next = next.union(nodes.children()).union(nodes.ancestors().outgoers("node"));
+  }
+  return next;
+}
+
+/* the closure of a step: the tree items */
+function closure(start, step) {
+  var seen = start, frontier = start;
+  while (frontier.nonempty()) {
+    frontier = step(frontier).difference(seen);
+    seen = seen.union(frontier);
+  }
+  return seen;
+}
 
 /* ------------------------------------------------------------- context menu */
 
@@ -444,28 +612,29 @@ function target(evt) { return evt.target || evt.cyTarget; }
 var menuItems = [
   { id: "fan-in", content: "focus fan-in (direct)", selector: "node",
     onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(n.incomers("node")));
+      var n = target(evt); focusOn(n.union(fanInStep(n)), howLabel("fan-in"));
     } },
   { id: "fan-out", content: "focus fan-out (direct)", selector: "node",
     onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(n.outgoers("node")));
+      var n = target(evt); focusOn(n.union(fanOutStep(n)), howLabel("fan-out"));
     } },
   { id: "fan-in-tree", content: "focus fan-in tree", selector: "node",
     onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(n.predecessors("node")));
+      var n = target(evt); focusOn(closure(n, fanInStep), howLabel("fan-in tree"));
     } },
   { id: "fan-out-tree", content: "focus fan-out tree", selector: "node",
     onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(n.successors("node")));
+      var n = target(evt); focusOn(closure(n, fanOutStep), howLabel("fan-out tree"));
     } },
   { id: "both-trees", content: "focus both trees", selector: "node",
     onClickFunction: function (evt) {
       var n = target(evt);
-      focusOn(n.union(n.predecessors("node")).union(n.successors("node")));
+      focusOn(closure(n, fanInStep).union(closure(n, fanOutStep)), howLabel("both trees"));
     } },
   { id: "neighbours", content: "focus this + neighbours", selector: "node",
     onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(n.neighborhood("node")));
+      var n = target(evt);
+      focusOn(n.union(fanInStep(n)).union(fanOutStep(n)), howLabel("neighbours"));
     }, hasTrailingDivider: true },
   { id: "hide", content: "hide this node", selector: "node",
     onClickFunction: function (evt) {
@@ -480,11 +649,27 @@ var menuItems = [
   { id: "menu-fit", content: "fit", selector: "node", coreAsWell: true,
     onClickFunction: function () { cy.fit(cy.nodes(":visible"), 40); } }
 ];
+/* the box items exist only when box collapse does: a menu entry that
+   silently does nothing is the DL-77 shape in miniature */
+if (ec) {
+  menuItems.splice(7, 0,
+    { id: "collapse", content: "collapse this box", selector: "node.box:parent",
+      onClickFunction: function (evt) { collapseBox(target(evt)); } },
+    { id: "expand", content: "expand this box",
+      selector: "node.cy-expand-collapse-collapsed-node",
+      onClickFunction: function (evt) { expandBox(target(evt)); },
+      hasTrailingDivider: true });
+  menuItems.push(
+    { id: "menu-collapse-all", content: "collapse all boxes", selector: "node",
+      coreAsWell: true, onClickFunction: function () { ec.collapseAll(); } },
+    { id: "menu-expand-all", content: "expand all boxes", selector: "node",
+      coreAsWell: true, onClickFunction: function () { ec.expandAll(); } });
+}
 
 try {
   cy.contextMenus({ menuItems: menuItems });
 } catch (err) {
-  lostFeature = " · context menu unavailable in this browser";
+  lostFeature += " · context menu unavailable in this browser";
   updateStats();
   if (window.console) console.error("context menu unavailable:", err);
 }
