@@ -901,11 +901,19 @@ def test_branch_arrows_are_hollow_and_carry_their_branch_in_the_label(
         ".map(e => e.style('target-arrow-fill'))))})"
     )
     assert fills == {"any": ["hollow"], "rest": ["filled"]}, driven_cond.engine
+    # the suffix names which OR, not which operand: it is there to GROUP the
+    # arrows of one alternation, and the hollow head already says "alternative"
     labels = driven_cond.page.evaluate(
         "() => Object.fromEntries(cy.edges().filter(e => e.data('target') === 'TWO')"
         ".map(e => [e.data('source'), e.data('label')]))"
     )
-    assert labels == {"A": "a|1", "B": "a|2", "C": "b|1", "D": "b|2", "E": ""}, driven_cond.engine
+    assert labels == {"A": "|a", "B": "|a", "C": "|b", "D": "|b", "E": ""}, driven_cond.engine
+    # a flat OR spends no label at all
+    flat = driven_cond.page.evaluate(
+        "() => Array.from(new Set(cy.edges().filter(e => e.data('target') === 'ANY')"
+        ".map(e => e.data('label'))))"
+    )
+    assert flat == [""], driven_cond.engine
 
 
 def test_details_panel_shows_the_condition_rows_and_the_tree(driven_cond: Driven) -> None:
@@ -981,12 +989,37 @@ def test_a_tree_leaf_highlights_its_arrow_on_hover_and_selects_it_on_click(
     driven_cond.page.mouse.move(5, 5)
     driven_cond.page.wait_for_timeout(200)
     assert driven_cond.page.evaluate("() => cy.edges('.leaf-hover').length") == 0
+    # the keyboard gets the same answer: the leaf is a real button, Tab
+    # reaches it, and focus must highlight what hover highlights
+    leaves.nth(1).focus()
+    driven_cond.page.wait_for_timeout(200)
+    assert driven_cond.page.evaluate(
+        "() => cy.edges('.leaf-hover').map(e => e.data('source') + '>' + e.data('target'))"
+    ) == ["B>AOA"], driven_cond.engine
+    driven_cond.page.evaluate("() => document.activeElement.blur()")
+    driven_cond.page.wait_for_timeout(200)
+    assert driven_cond.page.evaluate("() => cy.edges('.leaf-hover').length") == 0
     leaves.nth(1).click()
     driven_cond.page.wait_for_timeout(200)
     assert driven_cond.page.evaluate(
         "() => cy.edges(':selected').map(e => e.data('source') + '>' + e.data('target'))"
     ) == ["B>AOA"], driven_cond.engine
     driven_cond.page.evaluate("() => { cy.elements().unselect(); cy.emit('tap'); }")
+
+
+def test_edge_details_name_the_attribute_and_the_branch(driven_cond: Driven) -> None:
+    """The review's MINOR: an operator who taps a hollow arrow could not learn
+    which alternation it belonged to. The panel says both now."""
+    _ready(driven_cond)
+    driven_cond.page.evaluate(
+        "() => { cy.edges().filter(e => e.data('source') === 'B'"
+        " && e.data('target') === 'AOA')[0].emit('tap'); }"
+    )
+    driven_cond.page.wait_for_timeout(200)
+    rows = _detail_rows(driven_cond)
+    assert rows["attribute"] == "condition", (driven_cond.engine, rows)
+    assert rows["branch"] == "|1", (driven_cond.engine, rows)
+    _click(driven_cond, "#d-close")
 
 
 def test_a_leaf_whose_arrow_is_off_the_canvas_says_so(driven_cond: Driven) -> None:
@@ -1302,3 +1335,58 @@ def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
 def test_no_uncaught_page_errors_on_the_locks_page(driven_locks: Driven) -> None:
     _ready(driven_locks)
     assert driven_locks.errors == [], f"{driven_locks.engine}: {driven_locks.errors}"
+
+
+# ------------------------- DL-191 rework: two OR attributes on one box (MAJOR)
+
+_TWO_ATTR_TEXT = (
+    "".join(
+        f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        for name in ("A", "B", "C", "D")
+    )
+    + "insert_job: BX\njob_type: b\ncondition: s(A) | s(B)\nbox_success: s(C) | s(D)\n"
+)
+
+
+@pytest.fixture(scope="module")
+def two_attr_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """A box whose START gate and whose COMPLETION override are both ORs.
+    Both alternations number themselves from one, and they are not
+    alternatives of one another."""
+    path = tmp_path_factory.mktemp("explore-two-attr") / "two.html"
+    path.write_text(to_explore_html(lower_source(_TWO_ATTR_TEXT), title="two attributes"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_two_attr(
+    request: pytest.FixtureRequest, two_attr_page_url: str, _playwright: Any
+) -> Any:
+    yield from _open_driven(_playwright, request.param, two_attr_page_url)
+
+
+def test_two_or_attributes_get_four_distinct_branch_colours(driven_two_attr: Driven) -> None:
+    """Before the rework A and C shared `|1` and were painted one colour,
+    which said they were alternatives of one another. They are not: A
+    satisfies the box's start gate, C its completion override."""
+    _ready(driven_two_attr)
+    driven_two_attr.page.evaluate("() => { cy.$id('BX').emit('tap'); }")
+    driven_two_attr.page.wait_for_timeout(300)
+    painted = driven_two_attr.page.evaluate(
+        "() => Object.fromEntries(cy.edges().filter(e => e.classes()"
+        ".some(c => c.indexOf('br-') === 0)).map(e => [e.data('source'),"
+        " e.classes().filter(c => c.indexOf('br-') === 0).join(',')]))"
+    )
+    assert painted == {"A": "br-0", "B": "br-1", "C": "br-2", "D": "br-3"}, driven_two_attr.engine
+    # the panel shows two trees, four branch groups, four distinct swatches
+    swatches = driven_two_attr.page.evaluate(
+        "() => Array.from(document.querySelectorAll('#d-tree .swatch'))"
+        ".map(s => [s.title, s.style.background])"
+    )
+    assert [t for t, _ in swatches] == ["branch |1", "branch |2", "branch |1", "branch |2"]
+    assert len({colour for _, colour in swatches}) == 4, (driven_two_attr.engine, swatches)
+
+
+def test_no_uncaught_page_errors_on_the_two_attribute_page(driven_two_attr: Driven) -> None:
+    _ready(driven_two_attr)
+    assert driven_two_attr.errors == [], f"{driven_two_attr.engine}: {driven_two_attr.errors}"

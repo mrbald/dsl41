@@ -349,7 +349,9 @@ def test_elements_or_join_marks_each_alternative_with_its_branch() -> None:
         for e in _flow_edges(els)
         if e["data"]["target"] == "fold_or_join"  # type: ignore[index]
     }
-    assert labels["fold_or_m1"] == ("|1", "assumed any")  # empty thinned label -> suffix alone
+    # a flat OR carries NO label suffix: the hollow head already says "one
+    # alternative", and one label per arrow groups nothing (DL-191 R2)
+    assert labels["fold_or_m1"] == ("", "assumed any")
     tree = _node(els, "fold_or_join")["data"]["cond_tree"]["condition"]  # type: ignore[index,call-overload]
     assert tree["op"] == "or"
     assert [leaf["atom"] for leaf in _leaves(tree)] == ["s(fold_or_m1)", "s(fold_or_m2)"]
@@ -367,7 +369,15 @@ def test_elements_bare_notrunning_atoms_are_lock_leaves_with_no_edge() -> None:
         ("s(mutex_feeder)", False, "e0"),
     ]
     serial = _leaves(_node(els, "mutex_serial")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
-    assert serial == [{"atom": "n(mutex_serial)", "edge": None, "branch": None, "lock": True}]
+    assert serial == [
+        {
+            "atom": "n(mutex_serial)",
+            "edge": None,
+            "branch": None,
+            "branch_key": None,
+            "lock": True,
+        }
+    ]
 
 
 def test_elements_classify_every_drawable_shape() -> None:
@@ -425,9 +435,80 @@ def test_elements_lock_inside_an_or_keeps_its_branch_without_an_edge() -> None:
     assert _branches(els, "LOCK") == {"B": "|2"}
     leaves = _leaves(_node(els, "LOCK")["data"]["cond_tree"]["condition"])  # type: ignore[index,call-overload]
     assert leaves == [
-        {"atom": "n(A)", "edge": None, "branch": "|1", "lock": True},
-        {"atom": "s(B)", "edge": leaves[1]["edge"], "branch": "|2", "lock": False},
+        {
+            "atom": "n(A)",
+            "edge": None,
+            "branch": "|1",
+            "branch_key": "condition:|1",
+            "lock": True,
+        },
+        {
+            "atom": "s(B)",
+            "edge": leaves[1]["edge"],
+            "branch": "|2",
+            "branch_key": "condition:|2",
+            "lock": False,
+        },
     ]
+
+
+def test_elements_two_or_attributes_never_share_a_branch_identity() -> None:
+    """The review's MAJOR: a box whose condition and box_success are both ORs
+    states two different alternations, and both number themselves from one.
+    The label stays human, the identity the page groups and paints by carries
+    the attribute."""
+    text = (
+        "".join(
+            f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            for name in ("A", "B", "C", "D")
+        )
+        + "insert_job: BX\njob_type: b\ncondition: s(A) | s(B)\nbox_success: s(C) | s(D)\n"
+    )
+    catalog = catalog_of(text)
+    els = _elements(catalog, derive_graph(catalog))
+    keyed = {
+        str(e["data"]["source"]): (e["data"]["attr"], e["data"]["branch"], e["data"]["branch_key"])  # type: ignore[index]
+        for e in _flow_edges(els)
+    }
+    assert keyed == {
+        "A": ("condition", "|1", "condition:|1"),
+        "B": ("condition", "|2", "condition:|2"),
+        "C": ("box_success", "|1", "box_success:|1"),
+        "D": ("box_success", "|2", "box_success:|2"),
+    }
+    # ...and the tree leaves carry the same identity, so the panel's swatches
+    # and the canvas paint agree
+    trees = _node(els, "BX")["data"]["cond_tree"]  # type: ignore[index]
+    keys = {
+        attr: [leaf["branch_key"] for leaf in _leaves(tree)]
+        for attr, tree in trees.items()  # type: ignore[union-attr]
+    }
+    assert keys == {
+        "condition": ["condition:|1", "condition:|2"],
+        "box_success": ["box_success:|1", "box_success:|2"],
+    }
+
+
+def test_elements_canvas_suffix_only_where_it_groups_arrows() -> None:
+    """DL-191 R2 (visual check): the hollow head already says "one
+    alternative", so the label suffix is spent only where it GROUPS -- an
+    any-of-all's shared `|k`, and which OR of several under one AND. The
+    branch data is complete either way."""
+    els = _cond_elements()
+
+    def labels(target: str) -> dict[str, object]:
+        return {
+            str(e["data"]["source"]): e["data"]["label"]  # type: ignore[index]
+            for e in _flow_edges(els)
+            if e["data"]["target"] == target  # type: ignore[index]
+        }
+
+    assert labels("ANY") == {"A": "", "B": "", "C": ""}  # flat any: nothing to group
+    assert labels("AOA") == {"A": "", "B": "", "C": "f"}  # one OR under an AND
+    assert labels("AOFA") == {"A": "|1", "B": "|1", "C": "|2"}  # the alternative
+    assert labels("TWO") == {"A": "|a", "B": "|a", "C": "|b", "D": "|b", "E": ""}
+    # the branches themselves are untouched, and still tell the two ORs apart
+    assert _branches(els, "TWO") == {"A": "a|1", "B": "a|2", "C": "b|1", "D": "b|2", "E": None}
 
 
 def test_elements_every_corpus_edge_matches_the_atom_it_derives_from() -> None:
@@ -787,12 +868,16 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     assert "a bare n() is a lock and draws no arrow" in page
     assert '{ selector: "edge.any", style: {' in page
     assert '"target-arrow-fill": "hollow"' in page
-    # the ramp is six colours, and colour is the redundant channel
-    assert page.count('var BRANCH_COLORS = ["#0072b2", "#d55e00", "#009e73",') == 1
-    assert 'e.addClass("br-" + (order.indexOf(b) % BRANCH_COLORS.length))' in page
-    # ...and a meta-edge takes none of it: its style block sits BELOW the ramp
-    assert page.index("branchStyles()") < page.index('"target-arrow-fill": "filled"')
+    # the ramp is six colours, none of them the amber of the `assumed` class
+    # (visual check), and colour is the redundant channel
+    assert page.count('var BRANCH_COLORS = ["#0072b2", "#009e73", "#7c3aed",') == 1
+    assert "#d55e00" not in page[: page.index("var STYLE_BASE")]
+    assert 'e.addClass("br-" + (order.indexOf(key) % BRANCH_COLORS.length))' in page
+    # ...and a meta-edge takes none of it: the ramp is concatenated BETWEEN the
+    # base styles and the tail, and the meta-edge rule is in the tail
+    assert "style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)" in page
     assert page.index('selector: "edge.any"') < page.index("var STYLE_TAIL")
+    assert page.index("var STYLE_TAIL") < page.index('"target-arrow-fill": "filled"')
     # the panel: three text rows and the tree
     for row in ('["condition", d.condition, "code"]', '["box_success", d.box_success, "code"]'):
         assert row in page
@@ -801,6 +886,11 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     # Enter with exactly one hit selects the node and opens its details
     assert "if (hits.length === 1) {" in page
     assert "showNodeDetails(hits[0]);" in page
+    # the leaf highlight answers the keyboard as well as the pointer
+    assert 'button.addEventListener("focus", mark);' in page
+    assert 'button.addEventListener("blur", unmark);' in page
+    # the edge panel names the attribute the edge came from and its branch
+    assert '["attribute", d.attr],' in page and '["branch", d.branch],' in page
 
 
 def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
