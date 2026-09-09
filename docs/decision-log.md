@@ -11924,3 +11924,136 @@ relitigate an entry; append a new one.
   title on the 520-job estate, and the one hub whose six members span three
   regions sits inside the region box its centroid falls in -- the relaxed
   pass, deliberately.
+- DL-193 architecture review after the explore-page window (2026-09-09; the
+  DL-75 gate had been asking since DL-189, over
+  `arch-review/2026-09-08T233613Z..4934ffa` -- DL-189's cuts, then DL-190,
+  DL-191 and DL-192). Two fresh-context reviewers read one cluster each:
+  the explore page (`viz_explore.py`, its template, and the window's
+  touches in `capacity.py`) and everything else. Sixteen findings are acted
+  on, each named below by what a reader no longer has to hold in their
+  head.
+  THE PAGE. (1) An override edge is the one whose `attr` is not
+  `condition`; the M15/M16 mapping-row test was a fifth hand-spelling of
+  DL-162's partition, in a second language, beside the flag the same edge
+  already carried. (2) The header's arithmetic is done once, in the
+  emitter, and rides in the payload as `totals`: the page recomputed it
+  over the same arrays with a class-string parser of its own, the two were
+  kept equal by hand, and they had already drifted once (DL-192's review).
+  The one asymmetry is deliberate and stays -- the header says "N jobs"
+  (EXT excluded), `#stats` says "N nodes" (EXT included). (3) A lock
+  member's line is ONE sentence, built where the rule that words it lives:
+  the mutex direction by `_mutex_how`, the resource demand by
+  `_resource_how` off `capacity.requirement_demand`'s answer. The page held
+  a `ReleasePolicy` value table for the resource half while the mutex half
+  arrived in words, and the demand was emitted twice, on the member and on
+  the link, with `free` read nowhere and a pair link's `how` unreachable
+  behind its `directions`. The link keeps its thinned label and gets its
+  own sentence for the edge panel. (4) One id-widening rule, `_free_id`,
+  for edge, EXT and lock ids; one taken set under one name; the EXT
+  registration block written once instead of twice. (5) `branchOrder`'s
+  second pass over the incomers could contribute no key the tree lacks --
+  `_condition_facts` raises rather than emit an edge it could not match to
+  an atom -- so the order is the tree's. (6) The node carries the
+  three-value `cond_badge` it prints; the six-value `CondShape` stays in
+  the emitter, where it picks the branch labels and the canvas suffix,
+  instead of crossing the boundary to be collapsed by a membership list.
+  (7) `capacity.job_demand` is the one fold of a job's groups on one
+  resource: DL-192 made the two PRIMITIVES shared and left the fold written
+  twice, once in the pool over bucket keys and once in the emitter. The
+  pool's behaviour is unchanged and its tests are the proof. (8) The first
+  layout is CONSTRUCTED and its stop handler attached above the optional
+  extension, as DL-77 orders, but RUN below it: `ec` or its absence is then
+  a known fact at layoutstop, and three module flags, a re-entrancy guard
+  and a second entry point go. DL-77 is untouched -- everything essential
+  is still wired above, a throw is still caught, and the forced-throw
+  browser test still passes in three engines. (9) `branch_key` is composed
+  on the page from the `attr` and `branch` it already had, and a leaf's
+  `lock` said what its missing `edge` id says. (10) `relayoutOrFit` runs
+  `updateStats` once, and `after` after it, on both paths.
+  THE REST. (11) `--fixed-scale` is the one flag `--format explore` cannot
+  deliver, so it is refused in one line rather than by a three-column table
+  of one row with a loop around it; `_refuse_removed_viz_flags` keeps its
+  table, which three rows earn. (12) `ops-model.md` §8b.2, a stub whose
+  body said the text is in git history, is deleted with the `G1`-`G11` row
+  in `citation-index.md`: no source or test file cites a G token, and the
+  namespace's only readers were inside the stub that served them. (13)
+  `--collapse-threshold` travels under one name, and the report's default
+  of 12 is applied on the four branches that want it rather than computed
+  at the top of the function and bypassed nine lines later; `show_default`
+  now says what the explore page does. (14) The mypy gate names
+  `tests/uc_oracle.py` beside `src`, in CI and in `docs/agent-workflow.md`:
+  DL-189 moved a fully annotated executable spec out of the package for a
+  good reason, and it kept only ruff. It is clean under the gate as it
+  stands. (15) `ops-model.md` drops the section numbers in its "removed
+  §x.y" phrases -- there is no §1, §2, §8a or §8b to find, and DL-189 was
+  already on every one of those lines. (16) The expand-collapse
+  maintenance caveat lives in `_vendor/README.md`;
+  `scripts/vendor_mermaid.sh` points at it.
+  THE CITATIONS UNDER tests/. `scripts/arch_check.py` builds its citation,
+  duplicate-body and private-import checks from `SRC.glob("*.py")`, so
+  `tests/uc_oracle.py`'s citations are not proved to resolve. That is
+  ACCEPTED and recorded rather than fixed: extending the source list to a
+  named set of `tests/` modules is the better answer only if more
+  spec-shaped code follows `uc_oracle` out of the package. The type gate
+  above is the half that was worth closing now.
+  IR-F ON DISK, the first reviewer's question. `ir.dump_catalog` and
+  `ir.load_catalog` have no caller in `src/` and five in one test. They are
+  not dead code and not an unbuilt half: they are the REFERENCE SPELLING of
+  ir-design §8's serialization sentence, and the round-trip test is what
+  makes that sentence a claim rather than a promise. No CLI verb reads or
+  writes an IR-F file BY DESIGN -- `dsl41 run` consumes JIL bytes, because
+  JIL is the input of record (DL-51) and the run root stores the
+  byte-exact post-placeholder JIL bundle (DL-130). The Python DSL is the
+  bridge: `to_jil()` renders a module, and a decompiled module writes it on
+  stdout. §8 is amended in place to say so, and to say that `equiv` and
+  `period` keep their own canonicalisations, which differ on purpose.
+  DECLINED, each with the trigger that reopens it. `runner_ledger`'s
+  two-mode `mode` flag stays. The reviewer is right that what the two modes
+  share after DL-189 is two lines, and that two overloads exist only to
+  make `where` a type error in one of them; the cost is real to whoever
+  reads that function and to nobody else, and both whole-message tests pin
+  texts quoted in frozen contracts. Re-find trigger: the next change
+  touching `check_leader_eligibility` or `check_replay_version`. The test
+  name
+  `test_state_machine_version_modes_split_on_absent_and_agree_when_present`
+  stays although its body proves the modes do NOT split. What is worth
+  recording is the mechanism, which is structural:
+  `unresolved_test_citations` reds CI on a doc naming a test that no test
+  defines, and the log is append-only, so a cited test name is immutable
+  and any behaviour change that inverts one leaves either a lying name or a
+  red gate. DL-189 chose correctly for this instance -- the docstring's
+  first sentence is the correction, and it is the first thing a reader
+  sees. The fix is a "renamed tests" table in `citation-index.md` that the
+  check consults, and it waits for a second instance. The second
+  reviewer's sweep for courtesies serving a producer that no longer exists
+  found none: `legacy_batch: False` is a schema statement its three-way
+  reader needs (D2, DL-138), `next_epoch`'s `default=0` is equally the
+  fresh-run-root path, and `runner_admission` / `runner_control`'s "for
+  compatibility" language is a refusal, not an opt-out.
+  LOAD-BEARING, left alone and named so the next review does not reopen
+  them: the citation comments throughout both files (DL-75(3)); `fanInTree`
+  / `fanOutTree`'s `gateOnly` and `foldedOnly` requeue sets, which are
+  SEM-10 and SEM-12 making "reached as an ancestor" and "reached as a
+  producer" different walks (DL-190's review MAJOR, proven on a fixture);
+  `is_start_gate`'s exclusion of globals against the page's override-only
+  test, which are deliberately different partitions; the two-pass spiral
+  and its strict/relaxed split, which is DL-192's placement BLOCKER fix
+  under a property test; `_box_chain` on every lock member, which a
+  collapse makes unreachable from `ancestors()`; the `scratch("_dsl41")`
+  member cache, which the style engine asks for per frame; `.hidden` and
+  `.lockoff` as two independent display channels, whose merge would
+  reintroduce a bug DL-192 designed around; the DL-77 guard shape itself;
+  `_take_edge` and `_condition_facts` raising, which is DL-07's rule and
+  what makes finding (5) safe; the five functions behind the condition
+  classification, each naming a distinct AutoSys irregularity; `flow()`;
+  `mutex_plan`'s completeness rule and the tee's direction from
+  `bare_notrunning`; the meta-edge neutral styling and the `(folded: X ->
+  Y)` leaf wording, both from browser probes; DL-192's four publicisation
+  moves; `tests/uc_oracle.py`'s placement at `tests/` root beside the other
+  harnesses; and `_refuse_removed_viz_flags`'s three-row table.
+  THE GATE: 3650 passed, 6 skipped, 2 xfailed; the opt-in browser suite 159
+  passed in chromium, webkit and firefox, run after the payload change and
+  again after the layout handshake moved; branch coverage 100% on the
+  concurrency tier; ruff, ruff format --check, mypy (now including
+  `tests/uc_oracle.py`) and arch_check clean. arch_check still reports the
+  review due on line count; this entry is the answer to it.
