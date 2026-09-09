@@ -873,7 +873,7 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
         'document.getElementById("show-all").addEventListener',
         'document.getElementById("fit").addEventListener',
         'document.getElementById("search").addEventListener',
-        "initial.run();",
+        'initial.on("layoutstop"',
     ):
         assert page.index(essential) < registration, essential
     # ...and the loss is named, not swallowed. Two optional extensions since
@@ -882,13 +882,15 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     assert 'lostFeature += " \N{MIDDLE DOT} context menu unavailable in this browser";' in page
     assert 'lostFeature += " \N{MIDDLE DOT} box collapse unavailable in this browser";' in page
     assert page.count("+ lostFeature;") == 1  # every updateStats keeps it
-    # the expand-collapse extension (DL-190) is guarded the same way and sits
-    # below the initial layout like the menu; the initial folds run from the
-    # layout's own stop handler once the extension is up, so nothing
-    # essential waits on it
+    # the expand-collapse extension (DL-190) is guarded the same way. The
+    # layout is CONSTRUCTED and its stop handler attached above both optional
+    # plugins -- that is the wiring DL-77 orders -- and only the RUN sits
+    # below the expand-collapse guard, so the handler fires knowing whether
+    # there is an extension to fold with (DL-193)
     ec_registration = page.index("cy.expandCollapse({")
     assert "try {" in page[ec_registration - 60 : ec_registration]
-    assert page.index("initial.run();") < ec_registration < registration
+    assert page.index('initial.on("layoutstop"') < ec_registration < registration
+    assert ec_registration < page.index("initial.run();") < registration
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:

@@ -604,9 +604,9 @@ function relayoutOrFit(suffix, after) {
   } else {
     placeLocks();  /* the members did not move, but which of them are drawn can */
     cy.fit(cy.nodes(":visible"), 40);
+    updateStats(suffix);
     if (after) after();
   }
-  updateStats(suffix);
 }
 
 /* focus = hide non-selected, keeping compound ancestors (members without
@@ -1003,11 +1003,10 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
    every member owns an ELK position before anything folds; an expand later
    (the cue, a search) restores members where a layout put them, never at
    cytoscape's default grid (the DL-77 symptom). The emitter's initial folds
-   (--collapse-threshold) then run in this layout's stop handler, once the
-   extension below is registered, and a second layout draws the folded
-   picture. #stats stays "laying out" until that second layout stops. */
-var initialDone = false, foldedInitial = false, ecFailed = false;
-
+   (--collapse-threshold) then run in this layout's stop handler, and a
+   second layout draws the folded picture. #stats stays "laying out" until
+   that second layout stops. The layout is CONSTRUCTED here and run below
+   the extension, so the handler knows whether there is one to fold with. */
 function finishInitial() {
   placeLocks();
   cy.fit(cy.nodes(":visible"), 40);  /* the hubs were placed after the layout */
@@ -1016,8 +1015,6 @@ function finishInitial() {
 }
 
 function foldMarked() {
-  if (foldedInitial || !initialDone || !ec) return;
-  foldedInitial = true;
   var marked = cy.nodes("node.box[?collapsed]").filter(function (box) {
     return ec.isCollapsible(box);
   });
@@ -1030,11 +1027,10 @@ function foldMarked() {
 
 var initial = flow(cy.elements()).layout(elkLayout());
 initial.on("layoutstop", function () {
-  initialDone = true;
-  if (ecFailed || cy.nodes("node.box[?collapsed]").empty()) finishInitial();
-  else foldMarked();  /* a no-op until the extension is up; it calls back */
+  /* the extension registers below and the layout is RUN below that, so `ec`
+     or its absence is a known fact here -- one order, not two (DL-193) */
+  if (ec) foldMarked(); else finishInitial();
 });
-initial.run();
 
 /* ------------------------------------------------------- box collapse / expand */
 
@@ -1075,15 +1071,21 @@ try {
     refreshEdgeLabels();
     clearBranchPaint();
   });
-  foldMarked();  /* the initial folds, if the first layout already stopped */
 } catch (err) {
-  ecFailed = true;
   lostFeature += " · box collapse unavailable in this browser";
   document.getElementById("collapse-all").disabled = true;
   document.getElementById("expand-all").disabled = true;
-  if (initialDone) finishInitial();
   if (window.console) console.error("box collapse unavailable:", err);
 }
+
+/* The first layout RUNS here, below the optional extension and outside its
+   guard. DL-77's rule is about the order of essential WIRING against a
+   plugin that may throw: the layout, its stop handler, the toolbar and the
+   search are all attached above, and a throw is still caught above. What
+   moving the call buys is that the stop handler runs with `ec` decided,
+   instead of a three-flag handshake for the two orders it could arrive
+   in (DL-193). */
+initial.run();
 
 function collapseBox(box) { if (ec && ec.isCollapsible(box)) ec.collapse(box); }
 function expandBox(box) { if (ec && ec.isExpandable(box)) ec.expand(box); }
@@ -1114,14 +1116,15 @@ var traceToggle = document.getElementById("trace-boxes");
 function viaBoxes() { return traceToggle.checked; }
 function howLabel(what) { return what + (viaBoxes() ? ", via boxes" : ", edges only"); }
 
-/* A box-override edge (box_success / box_failure, mapping rows M15 and
-   M16) is a COMPLETION predicate on a box already running (SEM-12): it
-   folds the box, it gates nothing's start (derive's is_start_gate draws
-   the same line). The box gate below leaves it out, and the fan-out
-   closure remembers a box it reached through one. */
+/* A box-override edge (box_success / box_failure) is a COMPLETION
+   predicate on a box already running (SEM-12): it folds the box, it gates
+   nothing's start (derive's is_start_gate draws the same line). The box
+   gate below leaves it out, and the fan-out closure remembers a box it
+   reached through one. The attribute the edge derives from IS the
+   partition -- an override walk is what produces one, and the mapping-row
+   codes were a second spelling of the same fact (DL-193). */
 function isOverride(edge) {
-  var row = edge.data("mapping_row");
-  return row === "M15" || row === "M16";
+  return edge.data("attr") !== "condition";
 }
 
 /* What gates a box's START: its incoming condition edges, overrides left
