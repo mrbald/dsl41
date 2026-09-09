@@ -393,9 +393,9 @@ def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
     Python's `==` is not integer identity -- `True == 1` and `1.0 == 1` --
     so a bare comparison let a JSON `true` or a float stand in for version
     1 and lead a log this build may not lead. The same class the supervisor
-    closed at its own version gate (DL-151). An ABSENT field keeps the
-    pre-S6a courtesy and still reads as v1; `runner_history`'s replay half
-    is deliberately stricter and states why."""
+    closed at its own version gate (DL-151). An ABSENT field refuses as
+    well (DL-189): `read_journal` has required it on every segment since
+    DL-138, so a record without one is hand-built and neither half guesses."""
     catalog = lower_source(_SOLO_JIL)
     record = {
         "rec": "segment",
@@ -405,24 +405,28 @@ def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
     check_leader_eligibility(
         {**record, "state_machine_version": STATE_MACHINE_VERSION}, catalog=catalog
     )
-    check_leader_eligibility(record, catalog=catalog)  # absent: the courtesy
+    with pytest.raises(EngineError, match="state-machine version mismatch"):
+        check_leader_eligibility(record, catalog=catalog)  # absent: refuses since DL-189
     for wrong in (True, 1.0, "1", None):
         with pytest.raises(EngineError, match="state-machine version mismatch"):
             check_leader_eligibility({**record, "state_machine_version": wrong}, catalog=catalog)
 
 
 def test_state_machine_version_modes_split_on_absent_and_agree_when_present() -> None:
-    """DL-165: `check_state_machine_version` is the one door behind both
+    """The name is the one DL-165 cites and is kept for that reason; the
+    split it names is gone. DL-165 made `check_state_machine_version` the one door behind both
     `check_leader_eligibility` (mode="lead") and `runner_history`'s
-    `check_replay_version` (mode="replay"). An ABSENT field is the one
-    case the two modes must disagree on -- that split is the reason two
-    modes exist. Every PRESENT value, right or wrong, both modes must
-    agree on, because `read_journal` has refused an unversioned record
-    outright since DL-138 and no on-disk log can reach one gate and not
-    the other."""
-    check_state_machine_version({}, mode="lead")  # absent: the pre-S6a courtesy
+    `check_replay_version` (mode="replay"), and kept one split: lead read
+    an ABSENT field as v1, replay refused it. DL-189 removed the split.
+    `read_journal` has refused an unversioned record outright since DL-138
+    and `runner_startup` reads before it gates, so no on-disk log could
+    ever reach the lead courtesy; a policy no artifact can exercise is not
+    kept. Both modes now refuse absent, and agree on every present value,
+    right or wrong. `mode` survives only to pick that half's message."""
+    with pytest.raises(EngineError, match="state-machine version mismatch"):
+        check_state_machine_version({}, mode="lead")  # absent: refuses since DL-189
     with pytest.raises(EngineError, match="state_machine_version None"):
-        check_state_machine_version({}, mode="replay")  # absent: deliberately stricter
+        check_state_machine_version({}, mode="replay")
 
     right = {"state_machine_version": STATE_MACHINE_VERSION}
     check_state_machine_version(right, mode="lead")
@@ -481,6 +485,7 @@ def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:
         "rec": "segment",
         "catalog_hash": catalog_hash_v2(catalog),
         "catalog_hash_version": 2,
+        "state_machine_version": STATE_MACHINE_VERSION,
     }
     check_leader_eligibility(current, catalog=catalog)
     with pytest.raises(EngineError, match="catalog hash mismatch"):
@@ -502,6 +507,7 @@ def test_a_changed_estate_refuses() -> None:
         "rec": "segment",
         "catalog_hash": catalog_hash_v2(catalog),
         "catalog_hash_version": 2,
+        "state_machine_version": STATE_MACHINE_VERSION,
     }
     with pytest.raises(EngineError, match="catalog hash mismatch"):
         check_leader_eligibility(record, catalog=changed)

@@ -69,11 +69,6 @@ from dsl41.runner_clock import EngineError
 #: manufactured by bookkeeping.
 STATE_MACHINE_VERSION = 1
 
-#: absent from a journal written before S6a, on the courtesy S2 gave a
-#: journal with no `request_id`: it was written by the build that defined
-#: version 1, so that is what it pinned.
-_ASSUMED_VERSION = 1
-
 LOCK_NAME = "leader.lock"
 
 
@@ -295,24 +290,19 @@ def check_state_machine_version(
     """period-model ss2.1 / concurrency-model ss7: one executable implements
     exactly one `STATE_MACHINE_VERSION`, so a foreign build can neither
     LEAD nor REPLAY a log it did not derive. `mode` names which half is
-    asking, because the two halves read an ABSENT field differently ON
-    PURPOSE (DL-165) -- that split is the reason this argument exists at
-    all, and it does not collapse to one policy here.
+    asking -- `check_leader_eligibility` at resume, `check_replay_version`
+    in every offline reader -- and selects that half's refusal text; the
+    policy is one.
 
-    `mode="lead"` (`check_leader_eligibility`, resume only): an absent
-    field reads as v1, the pre-S6a courtesy -- a journal with no
-    `state_machine_version` was written by the build that defined version
-    1, so that is what it pinned.
-
-    `mode="replay"` (`check_replay_version`, every offline reader): an
-    absent field REFUSES. `period.check_segment_record` has required the
-    field, typed, on every record `read_journal` returns since DL-138, so
-    an opening with none is hand-built and names no semantics at all --
-    history does not guess. This is deliberately stricter than the lead
-    half, and the two gates cannot disagree about a file on disk: the
-    courtesy above describes a journal `read_journal` has refused
-    unconditionally since DL-138, so no on-disk log can reach the lead
-    gate reading absent-as-v1 while the replay gate would refuse it.
+    An ABSENT field refuses in both modes. `period.check_segment_record`
+    has required the field, typed, on every record `read_journal` returns
+    since DL-138, so an opening with none is hand-built and names no
+    semantics at all -- neither half guesses. Until DL-189 the lead half
+    read an absent field as v1, the courtesy S2 gave a journal written
+    before S6a (DL-165); no on-disk log could reach it, because
+    `read_journal` refuses an unversioned segment before eligibility is
+    asked (`runner_startup` reads first, then gates), so DL-189 removed
+    the courtesy rather than carry a policy split no artifact can exercise.
 
     Read EXACTLY in both modes: `True == 1` and `1.0 == 1` in Python, so a
     bare comparison would let a JSON `true` stand in for version 1 and a
@@ -323,7 +313,7 @@ def check_state_machine_version(
     `where` names the segment in the replay message. The lead half never
     had one, and the overloads above make passing it in lead mode a type
     error rather than a value that is silently dropped."""
-    pinned = opening.get("state_machine_version", _ASSUMED_VERSION if mode == "lead" else None)
+    pinned = opening.get("state_machine_version")
     if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
         return
     if mode == "lead":
@@ -354,8 +344,7 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     did not change, which is the outage DL-100 named.
 
     The version half is `check_state_machine_version`, mode="lead" --
-    see there for why an absent field is read as v1 and the replay half is
-    not."""
+    see there for why an absent field refuses in both halves (DL-189)."""
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"

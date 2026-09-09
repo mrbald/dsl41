@@ -920,9 +920,9 @@ def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None
     refusal: it reaches `dsl41 runs` and `read_run_root` as ordinary rows.
 
     A thin wrapper over `runner_ledger.check_state_machine_version`,
-    mode="replay" -- see there for why an absent field refuses here and
-    does not at the lead half (`check_leader_eligibility`), and why the
-    two gates can never disagree about a file on disk. The wrapper's own
+    mode="replay" -- see there for why an absent field refuses, in this
+    half and in the lead half alike since DL-189, and why the two gates
+    can never disagree about a file on disk. The wrapper's own
     job is the exception type: the door raises `EngineError`, the type
     every other gate in this ledger raises, and history's own doors answer
     `RunHistoryError` (docstring above), so this is where one becomes the
