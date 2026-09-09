@@ -142,9 +142,14 @@ without it), and a right-click menu that focuses a job's fan-in/fan-out
 remains. "Trace through boxes" (on by default) makes those focuses follow
 the dossier: a member's fan-in adds every enclosing box and what gates it
 (SEM-10), its fan-out adds what an enclosing box's completion releases
-(SEM-11); off, they follow the condition edges alone (DL-190). Edges route
-orthogonally along the layout axis, so the picture keeps the layering ELK
-computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
+(SEM-11); off, they follow the condition edges alone (DL-190). Incoming
+arrows are an AND unless the job carries the badge ∨, which marks a
+condition the page draws as branches: each alternative's arrows are hollow,
+labelled `|1`, `|2` and coloured together when the job is clicked, and the
+details panel shows the condition text and its AND/OR tree (DL-191). A bare
+`n()` is a lock, draws no arrow, and now appears in that tree instead of
+nowhere. Edges route orthogonally along the layout axis, so the picture
+keeps the layering ELK computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
 all three on every push (tests/test_viz_explore_browser.py): Safari needs a
 polyfill for the menu plugin's customized built-in elements, vendored into
 the page (DL-77), and if a browser refuses the menu or the collapse
@@ -755,13 +760,15 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   parity; plus the --format html-chart single-chart page (DL-76) and the shaping
   flags it delivers
 - tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
-  EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), the
-  same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
+  EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), condition
+  shapes, branch labels and the edge-to-atom match proven over the whole corpus (DL-191),
+  the same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
   customElements polyfill), script order and the guarded context menu (DL-77),
   CLI flag absorption
 - tests/test_viz_explore_browser.py — the same page RUNNING, in chromium, webkit and
   firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
-  re-layout toggle, details panel and context menu all respond, and nothing throws.
+  re-layout toggle, details panel, context menu, box collapse and the condition badge,
+  branch paint and condition tree all respond, and nothing throws.
   Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still
   needs no browsers; CI's explore-page job is where it runs. Locally:
   `uv run playwright install chromium webkit firefox`, then

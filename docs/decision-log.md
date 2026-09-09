@@ -11646,3 +11646,100 @@ relitigate an entry; append a new one.
   fold by the main session; tests by a Sonnet agent from a verified
   expectation table; one fresh-context Opus reviewer over the core
   commit, whose findings the main session ruled on above.
+- DL-191 the explore page shows the boolean structure of a condition
+  (2026-09-09; `viz --format explore`; amends DL-35's chart grammar for
+  this page alone).
+  THE PROBLEM. The page drew one arrow per condition ATOM and showed the
+  structure nowhere. A job on `s(A) & (s(B) | f(C))` had three arrows in,
+  no AND or OR anywhere, and no condition row in the details panel. A bare
+  local n() is a mutex record and not an edge (M07), so it was on the page
+  nowhere at all.
+  THE DEFAULT READING, STATED. Every incoming arrow must hold. The toolbar
+  legend says so, and only a departure from it is marked: an unlabelled
+  arrow is an AND arrow, and nothing about the ordinary case changes.
+  THE TEXT. Every catalog node carries the source text of each
+  condition-bearing attribute -- `condition`, `box_success`, `box_failure`,
+  rendered from the Cond tree by `dsl.cond_to_source` -- and the details
+  panel shows them as code rows, untruncated like every other annotation
+  (DL-71's content policy).
+  THE SHAPE AND THE BADGE. Each attribute's tree is paren-stripped and
+  same-operator-flattened first: parens are fidelity only and both
+  operators are associative, so `a & (b & c)` is one three-operand AND and
+  not a nesting. The flattened tree classifies as single, all, any,
+  all-of-any (an AND of atoms and flat ORs), any-of-all (an OR of atoms and
+  flat ANDs), or complex. A node whose reading is an OR the canvas can draw
+  gets the badge U+2228 after its label; complex gets the starred form,
+  which sends the reader to the tree and the text rather than to a picture
+  that would flatten the nesting. The badge is read off the node's own
+  data, so a collapsed box shows its own condition's badge and never merges
+  its members'.
+  THE BRANCH. An atom under an OR carries a branch label, appended to the
+  DL-35 thinned edge label (an empty thinned label leaves the suffix
+  standing alone) and marked with the class `any`. A flat any and an
+  all-of-any with one OR use `|k`, k the operand index inside the OR; an
+  all-of-any with several ORs prefixes a letter per OR in operand order, so
+  `a|1` and `b|1` read as two alternations and not one twice; an any-of-all
+  shares one `|k` across every atom of that alternative. Complex labels
+  nothing. On the canvas the branch arrow gets a HOLLOW arrowhead: the line
+  style channel stays the migration class's (exact/assumed/redesign), which
+  DL-35 owns. Colour stays the redundant channel -- tapping a node paints
+  its own alternatives from a six-step ramp, one colour per branch, and the
+  next tap or a blank tap clears it.
+  THE TREE. The node's details panel renders each attribute's tree as a
+  nested list, groups labelled "all of" / "any of", each branch under an OR
+  carrying the swatch its arrows carry. A leaf names its arrow -- hover
+  highlights it, a click selects it -- or says why it cannot: `(lock, no
+  arrow)` for a bare local n(), `(not on canvas)` for an arrow a focus
+  hid, and `(folded: X -> Y)` for one a collapse re-pointed at a box. That
+  last wording is deliberate: the extension keeps the folded edge's id and
+  re-points it, so the arrow IS on the canvas, standing for several edges
+  rather than for this one. A meta-edge is neutral for the same reason: no
+  branch label, no hollow head, no branch colour.
+  THE MAPPING, WITHOUT TOUCHING IR-G. The page needs each edge's own atom,
+  which IR-G does not index. The emitter recomputes it: per consumer, walk
+  its conditions in `iter_conditions` then `iter_atoms` order and claim the
+  first unclaimed edge whose `atom` equals it -- `derive_graph` emits
+  exactly one edge per non-mutex atom occurrence, in that order, and
+  DerivedEdge holds a deep copy, so equality is by value and two identical
+  atoms at different positions stay distinct. An unmatched edge, or a
+  non-mutex atom with no edge, raises: the lens does not draw a condition
+  it cannot account for. The test
+  `test_elements_every_corpus_edge_matches_the_atom_it_derives_from`
+  proves zero of either over every corpus file and over the whole corpus
+  as one catalog. The attribute an edge came from is read off that walk
+  and never guessed from the mapping row: box_success naming
+  an outside job and box_failure naming a global are both M16
+  (sem12_external_gate.jil is exactly that pair).
+  `derive._is_mutex_ref` becomes public `derive.is_mutex_atom(origin,
+  atom)`: which atoms deliberately have no edge is a question a reader that
+  walks a condition beside the edges has to ask, and restating the
+  predicate here is what DL-162 forbids.
+  KEYED BY ATTRIBUTE. `cond_shape` and `cond_tree` are maps from attribute
+  to shape and tree, not scalars. box_success and box_failure atoms derive
+  edges too (M15/M16), so a scalar would explain only one attribute of
+  three and the arrows into a box whose box_success is an OR would carry a
+  branch label nothing on the page accounted for.
+  KEYBOARD. A search that hits exactly one node now selects it and opens
+  its details, so Enter alone answers "what gates this job?".
+  WHAT IS NOT CHANGED, ON PURPOSE. The Markdown/HTML report keeps DL-35's
+  grammar unamended: it stays the artifact of record, its OR shapes are
+  already an appendix (M12), and a second grammar for the same fact in a
+  static chart would be two things to keep true. IR-G gains no field --
+  the atom-to-edge map is derived at emission and never persisted. The
+  mutex records, the M12 classifier and the linter rules are untouched.
+  VERIFIED before the tests were written: chromium, webkit and firefox,
+  one page, identical results in all three -- badges on the OR shapes and
+  only those, hollow heads on the branch arrows and filled elsewhere, the
+  paint classes and their swatches, the lock leaf, the hover highlight, the
+  Enter-with-one-hit panel, and a collapsed box that keeps its own badge
+  while its meta-edges stay neutral. No page errors in any engine. Two
+  findings came out of those probes and changed the tree: a collapse copies
+  the folded edge's classes onto the meta-edge, branch paint included (the
+  paint is now cleared on every collapse and expand), and a folded edge
+  keeps its id, which is why the leaf names where it went instead of
+  calling it missing.
+  THE GATE: 3627 passed, 6 skipped, 2 xfailed; the opt-in browser suite
+  114 passed in chromium, webkit and firefox; branch coverage 100% on the
+  concurrency tier; ruff, ruff format --check, mypy and arch_check clean
+  (arch_check still reports the DL-75 review due on line count since
+  arch-review/2026-09-08T233613Z; it stays owed).
