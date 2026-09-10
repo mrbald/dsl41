@@ -743,7 +743,8 @@ a seal whose `next_period` names a different one is refused at readiness
 The `leader` record names the tool version, but resume
 gates on catalog hash, clock domain and runtime profile — not version. Do not lean on
 that: treat an engine upgrade like an estate change unless the release
-notes say the journal format is resume-compatible across the pair.
+note (the annotated tag's message; README "Release") says the journal
+format is resume-compatible across the pair.
 The conservative cycle, which needs no such promise:
 
 1. Build the new venv beside the old (`/opt/dsl41/venv-<ver>`), smoke

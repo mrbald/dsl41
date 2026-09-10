@@ -137,7 +137,8 @@ on `s(AMER_MKT_FX_C)`.
 1. Spot the FAILURE row; read the job log
    (`runs/<night>/logs/AMER_MKT_FX_C.out`).
 2. Rerun it: `dsl41 sendevent FORCE_STARTJOB -J AMER_MKT_FX_C --socket $S`
-   ("the fix was deployed"), or select the row in the TUI and press `f`.
+   ("the fix was deployed"), or select the row in the TUI, press `f` and
+   confirm.
    The second attempt succeeds and the region resumes. Plain `STARTJOB`
    would be REFUSED here: the job already ran in this box execution
    (SEM-10, at-most-once per box run), and after the box folds it is not
@@ -302,10 +303,12 @@ still the truth. The operator flow is cold:
    refuses re-baselining; the old night's journal stays intact as the
    record of what happened).
 
-Every run root is self-contained: `<run>/engine/manifest/` holds the
-post-placeholder JIL this run actually loaded plus `manifest.json`
-(tool version, catalog hash, input hashes, launch options) — the audit
-artifact outlives the estate files it was launched from.
+Every run root is self-contained: `<run>/engine/catalogs/<source_bundle_hash>/`
+holds the post-placeholder JIL this run actually loaded plus `sources.json`
+(the original paths and the sha256 of the stored text), and
+`<run>/engine/periods/<id>/manifest.json` holds the period's metadata
+(catalog hash, bundle address, runtime profile, state-machine version) —
+the audit artifact outlives the estate files it was launched from.
 
 Try it: after a night completes, change `EMEA_ACC_CASH_C`'s sleep and
 start a new night. The point of the hash gate: a journal only replays
@@ -349,14 +352,16 @@ right order, and knowing which ones lie.
    yet. A held job starts nothing and satisfies nothing. ON_ICE would be
    wrong here: exercise 12's rule means icing a broken region box fires
    `GLOBAL_RISK_B` on the spot. Ice skips, hold parks.
-3. Kill the running work: `v` to the active view, `k` (KILLJOB) each
-   RUNNING command job. Kill leaves, not boxes: KILLJOB on a box
+3. Kill the running work: `v` to the active view, then `k` (KILLJOB) on
+   each RUNNING command job, confirming each one. Kill leaves, not boxes:
+   KILLJOB on a box
    terminates the box row but only `job_terminator` members die with it
    (SEM-14) — the rest keep running to completion.
 4. The trap: a tick that lands on a held job arms the latch (flag `A`),
    and the latch has no expiry — OFF_HOLD tonight fires the missed run
-   at once. After the skip decision, nobody releases holds. There is no
-   discharge verb; the latch dies with the night (step 6).
+   at once. After the skip decision, nobody releases holds. `sendevent
+   DISARM` would drop a latch on request (DL-158); this exercise does not
+   use it, and the latch dies with the night (step 6).
 5. Leave `SOD_APPROVE_C` parked. The auto_hold approval gate IS the
    skip-day veto: the night never flips, `current/` keeps whatever the
    last flip left there (empty, in a fresh sandbox run root — the
@@ -905,8 +910,14 @@ spool of any period that has not been attested. **prunable** is licensed
 by name: a SPAWN tombstone whose period is attested and whose run has
 ended, and a quarantined candidate. **held** is everything between — a
 closed period's WAL, an older manifest, a superseded checkpoint. The floor
-has lifted on those and one question is still open (may a seal-only
-archive stand in for pruned inputs?), so nothing deletes them yet.
+has lifted on those, and by default nothing deletes them. The one class
+that reaches into `held` is `estate prune --archive-inputs`
+(`docs/period-model.md` §12a, DL-144). It answers PR-Q3 — may a seal-only
+archive stand in for pruned inputs? — with yes, conditionally: an attested
+period's WAL and its committed candidate's two files may go once a later
+chain checkpoint covers them, and that checkpoint then stands for the
+period. A period manifest, a superseded checkpoint and a bundle stay held
+(PR-36c).
 Pruning a tombstone only goes one way: after it, that period can no longer
 be re-derived from its own evidence, and its attestation is the proof that
 stands for it.

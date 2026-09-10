@@ -83,10 +83,13 @@ Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
 ## Existing hats integration
 
-The marked block below is retained while its external source is unavailable.
-If `~/.hats` is missing, report that once and continue with the local rules.
-Do not invent the missing core or assume how its sync operates.
-Hats onboarding and ownership resolution are separate work.
+The marked block below predates the link to the shared core. Its source is
+the hats repository, linked at `~/.hats` where the core is installed, and a
+session-start hook there injects `~/.hats/docs/USING.md` (DL-195 amends
+DL-186's premise). The block stands as written until it is reconciled with
+that source; that reconciliation, and who owns the sync, are separate work.
+If `~/.hats` is missing, report that once, do not invent the missing core,
+and continue with the local rules.
 <!-- hats:core -->
 ## Git workflow
 

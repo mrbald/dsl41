@@ -136,11 +136,11 @@ customElements polyfill embedded — see THIRD_PARTY_LICENSES): the whole
 graph as an interactive map — substring search, click for full edge
 annotations, boxes that collapse to one node and expand again (double-click,
 the corner cue, the menu, or two toolbar buttons; `--collapse-threshold`
-folds the over-threshold top-level boxes before the first layout, none
-without it), and a right-click menu that focuses a job's fan-in/fan-out
-(direct, tree, or both) by hiding everything else and re-laying-out what
-remains. "Trace through boxes" (on by default) makes those focuses follow
-the dossier: a member's fan-in adds every enclosing box and what gates it
+folds the over-threshold top-level boxes once the first layout has placed
+their members, none without it), and a right-click menu that focuses a
+job's fan-in/fan-out (direct, tree, or both) by hiding everything else and
+re-laying-out what remains. "Trace through boxes" (on by default) makes those
+focuses follow the dossier: a member's fan-in adds every enclosing box and what gates it
 (SEM-10), its fan-out adds what an enclosing box's completion releases
 (SEM-11); off, they follow the condition edges alone (DL-190). Incoming
 arrows are an AND unless the job carries the badge ∨, which marks a
@@ -152,8 +152,9 @@ the condition text and its AND/OR tree (DL-191). A bare
 nowhere. Locks are drawn too (DL-192): a mutual exclusion as a dotted link
 whose tee marks the job that waits (a complete clique of three or more as one
 hub), a resource semaphore as a hub per consumed `insert_resource` labelled
-with its capacity, both excluded from the layout, placed on their members,
-never part of a fan-in or fan-out, and switchable off. Edges route
+with its capacity, both excluded from the layout, placed beside their
+members and clear of every job, never part of a fan-in or fan-out, and
+switchable off. Edges route
 orthogonally along the layout axis, so the picture keeps the layering ELK
 computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
 all three on every push (tests/test_viz_explore_browser.py): Safari needs a
@@ -441,8 +442,8 @@ has six tiers, all built:
   [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
   ss5 socket protocol
 
-The suite spans 55 test files (`pytest --collect-only -q` shows the current
-count) plus the 30-file synthetic/doc-derived JIL corpus under
+The suite spans 56 test files (`pytest --collect-only -q` shows the current
+count) plus the 31-file synthetic/doc-derived JIL corpus under
 `tests/corpus/`.
 
 ### Source map
@@ -842,6 +843,15 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   the first engine stops (S6b); and the takeover barrier — a start the previous
   leader recorded and never dispatched is re-driven, one with no recorded intent
   is still failed, and one the host says it is running is neither (S6c)
+- tests/test_runner_leadership.py — stage S7c: S5's routing table and S6's
+  election under real processes, for the four claims a single interpreter
+  cannot observe — the `flock` refused from a second OS process while the
+  first engine keeps serving and released by the kernel when its holder dies,
+  the inode fence lost by a real `unlink` under a live engine, the outbox
+  window between two statements with a process that really died there, and
+  an eviction bound whose inputs are produced by a live supervisor rather
+  than configured. Seconds, not minutes: the bound's arithmetic is pinned
+  under a controlled clock in test_hosts.py
 - tests/test_admission.py — phase-12 stage S2: the frozen admission order
   ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
   §4). CM-04 (the deadline fires before the gate reads the status it gates on),
@@ -864,6 +874,11 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   was admitted, the shell spends a different exit code on each outcome and is
   told the `request_id` that makes its retry safe, and `query global` gives a
   script the read its `--expect` has to be composed from
+- tests/test_decision_record.py — the atomic `decision` record and control
+  protocol v3 (DL-118; period-model ss2.3's PR-35/PR-49, concurrency-model
+  ss4 step 7 and CM-17, control-protocol ss2/ss5): a result and its effects
+  commit as one write, the version handshake, and what the subscribe stream
+  promises about which records it carries
 - tests/test_hosts.py — phase-12 stage S5a: the ss8 routing table. CM-13 in one
   scenario (a drain routes nothing new AND finishes what is running — either half
   alone is easy and wrong), the re-drive that makes `passive` reversible, held-ness
@@ -886,6 +901,12 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   holds spawns while letting kills through, and the held set that is now the
   outbox itself. The leak it closes is tested where the processes are real, in
   tests/test_runner_supervisor.py
+- tests/test_access.py — the access perimeter (access-model ss12, DL-146),
+  its ten obligations in order: zero-config unchanged, a configured-but-invalid
+  map refuses, resolution order, gate coverage and the completeness gate,
+  denial shape and receipts, the privileged ledger, reload semantics and
+  stream revocation, filesystem modes, credential-less refusal, actor
+  overwrite — real domain, one asyncio.run per scenario
 - tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
   boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
   steady-size polling under VirtualClock, and the AdapterResult mapping
@@ -903,6 +924,10 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   status/trace/explain/plan queries, subscribe backfill/live seam, socket hygiene),
   the DL-45 commit-discipline regression, the run/rehearse/sendevent/query CLI, and
   the DL-46 status-response fields (pending_timers, log paths)
+- tests/test_rehearse_check.py — `rehearse --check-cadence` (DL-182/DL-184):
+  rehearse_check.py and its CLI wiring (`--check-cadence`, `--cadence-policy`,
+  `_emit_cadence_check`) over inline estates in the runner-side convention,
+  each expectation pinned to the rule in the module's docstring it exercises
 - tests/test_runner_tui.py — phase-11d TUI (skips without the [ui] extra): the
   sendevent console parser, ControlClient against a real ControlServer (round trip,
   reconnect, subscribe), the ss13.6 pilot smokes (table, explain atoms, pending
@@ -974,6 +999,16 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   own rule produces, over a sweep whose size is derived from the module's own
   rule count, so neither a rule added without a case nor a case caught by a
   neighbouring rule passes unnoticed
+- tests/test_canon.py — the canonical form (period-model ss3.2, PR-08..PR-14,
+  DL-119) behind the seal: one golden vector pinning EXACT bytes and an EXACT
+  digest as literals, because equality and sensitivity tests alone would pass
+  a canonicalizer that is consistently wrong; every control character written
+  as an escape
+- tests/test_period_identity.py — period identity (period-model ss1.1/ss2.1,
+  DL-130): the estate layout, `source_bundle_hash` and `catalog_hash` v2, the
+  `segment` record, `RuntimeProfile` and the two manifests, with golden
+  vectors as exact bytes and the PR-15 sweep derived from
+  `RuntimeProfile.model_fields`, so a field added later is tested by default
 - tests/test_boundary.py — the boundary operation (period-model ss1.1/ss1.3/ss6–ss9/
   ss11, DL-133): the genesis transaction re-run at each of its crash points, the
   ownership refusals for a root and an anchor, the anchor fence deleted under a
@@ -1012,6 +1047,37 @@ count) plus the 30-file synthetic/doc-derived JIL corpus under
   that run stays whole. Every estate is built by the real machinery; the one
   hand-written artifact is the supervisor's tombstone, reconstructed from the
   binding the WAL already holds
+- tests/test_estate_wide.py — the estate-wide walk (period-model ss1.3,
+  PR-02f): `audit`, `journal`, `runs` and `estate prune` pointed at a lineage
+  rather than at one root, all four held to `boundary.walk_estate` — each
+  finds period 1's root through the archive registry after a physical roll,
+  reports one estate-wide result, and refuses BY NAME a root the registry
+  names and the disk does not; the lineage is built by the real machinery
+- tests/test_capacity_decomposition.py — DL-120, the capacity state on the
+  entities it describes: PR-19 (spent units survive a release), PR-19a (a
+  ghost bucket survives its resource's removal), PR-20 (a run releases the
+  vector it ACQUIRED, not what the catalog wants by then), PR-21 (waiter
+  order on the rows), PR-52 (the ownership gate covers the new state), and
+  the four `RuntimeState` invariants, both directions
+- tests/test_fw_spool.py — PR-34/PR-34a, the FW watch as evidence rather than
+  memory (period-model ss2.2, DL-129): the append-only poll spool — a `start`
+  line on dispatch, one fsynced line per poll including polls that changed
+  nothing — from which an audit re-derives the watch's progress after a
+  restart, with the two timestamps behind `next_poll_at` asserted directly
+- tests/test_supervisor_idempotency.py — PR-36, SPAWN idempotency that
+  outlives the supervisor (period-model ss11a, DL-129): the run directory as
+  the dedup store (`.by_run_id`, `receipt.json` before the fork, `reply.json`
+  as the answer first given). The crash matrix drives `Supervisor.spawn_run`
+  in process, stops it at each named write boundary and asks a fresh
+  Supervisor what the directory says; the wire tests drive a real supervisor
+  subprocess for the frozen envelope, the grammar refusal and survival across
+  a restart
+- tests/test_nightbank_example.py — examples/nightbank loads, lints clean and
+  reaches the SOD flip on one virtual-clock night; since stage S7b the seeded
+  sweep at the foot of the file drives the real 82-job night through
+  interleavings of leader failover, a spawn decided and never acted on,
+  duplicated and stale completions, quarantine and drain, checking CM-14 and
+  CM-09 over every one. The real-process path is S7c's tier
 - tests/test_nightbank_boundary.py — the boundary era over the training estate
   (period-model ss1.3/ss7–ss9/ss11/ss11a/ss12, DL-136): the RUNBOOK's exercises
   15–21 driven as acceptance scenarios, asserting only what an operator sees.
@@ -1113,9 +1179,17 @@ publishing (OIDC) in the `pypi` environment. The repository holds no PyPI
 token. The header comment of the workflow records the one-time setup on
 pypi.org.
 
-The project is before 1.0. A minor bump (0.6.0 -> 0.7.0) carries a functional
-unit. A patch bump (0.6.0 -> 0.6.1) carries documentation or a correction with
-no behavior change.
+Since 1.0.0 (2026-08-26) a minor bump (1.3.0 -> 1.4.0) carries one or more
+functional units. A patch bump (1.3.0 -> 1.3.1) carries documentation or a
+correction with no behavior change. A module that was never documented as an
+API may leave the package inside a minor bump; the tag message names it
+(DL-195).
+
+The annotated tag's message is the release note. Its first line is the
+summary. Its body says whether the WAL format, the state-machine version or a
+protocol version moved, which is what the upgrade section of
+[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
+asks a release note for, and it names any Python module that left the package.
 
 ### Make a release
 
@@ -1125,18 +1199,25 @@ The list follows CI, including format checking and the scoped **100%** branch
 coverage requirement (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
-This command writes the same version into `uv.lock`. Commit both files and push
-them:
+This command writes the same version into `uv.lock`. Move the install pins in
+docs/deployment-runbook.md to the same version, so the pinned-install procedure
+names the current release. Build locally and compare the wheel's file list
+with the previous release's (`uv build`, then `unzip -Z1` on both): the
+difference must be what the tag message is about to say. Commit the three
+files and push them:
 
 ```sh
-git commit -am "chore: X.Y.Z (one-line summary)"
+git commit pyproject.toml uv.lock docs/deployment-runbook.md \
+  -m "chore: X.Y.Z (one-line summary)"
 git push origin main
 ```
 
-Then tag that commit and push the tag:
+Then tag that commit and push the tag. The first `-m` is the summary; the
+second is the release note's body (see above):
 
 ```sh
-git tag -a vX.Y.Z -m "X.Y.Z: one-line summary"
+git tag -a vX.Y.Z -m "X.Y.Z: one-line summary" \
+  -m "WAL format, state-machine and protocol versions: unchanged (or what moved)."
 git push origin vX.Y.Z
 ```
 

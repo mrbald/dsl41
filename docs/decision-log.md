@@ -12089,3 +12089,57 @@ relitigate an entry; append a new one.
   definition file other than JIL; even then, store the rendered JIL.
   RECORDED IN: README's DSL section (the two forms, named), ir-design §8
   (DL-193's amendment stands).
+- DL-195 the release-scope review before 1.4.0: the docs a user reads
+  match the tree, and the release note lives in the tag (2026-09-10; a
+  pair review, Codex gpt-6-astra at xhigh and Claude Fable 5.1 at xhigh,
+  converged in three of three rounds over v1.3.0..a0dec20).
+  THE QUESTION. Thirty-seven commits and DL-186..DL-194 landed in two
+  days: the operator TUI's safety slice, the explore page's boxes,
+  conditions and locks, the decommission cuts, and the JIL-durable ruling.
+  Before the cut, both reviewers listed what the landed work had made
+  stale and which owed follow-up belonged in the same unit. Independent
+  passes first, then two exchange rounds; every cited line was re-checked.
+  RULINGS. (1) The version rule after 1.0, stated in README: a minor bump
+  carries functional units; a patch bump carries documentation or a
+  correction with no behavior change. `dsl41.uc_oracle` leaving the wheel
+  (DL-189) stays inside the 1.4.0 minor bump: README documented it as the
+  P-Mxx test twin and never as a supported API, and the tag message names
+  it. (2) The annotated tag's message is the release note. Its body says
+  whether the WAL format, the state-machine version or a protocol version
+  moved -- the sentence deployment-runbook ss7 asks a release note for --
+  and names any module that left the package. For 1.4.0 none moved:
+  artifact format 1, catalog hash 2, state machine 1, control protocol 3,
+  supervisor protocol 1, IR 0.2, by two independent diffs of the window;
+  the only removed constant is DL-189's unreachable courtesy. (3) The bump
+  commit moves the deployment runbook's install pins to the released
+  version, so the pinned-install procedure names the current release,
+  and compares the built wheel's file list with the previous release's.
+  (4) DL-186's premise "the hats source is unavailable here" is amended:
+  `~/.hats` resolves and its session-start hook injects the core's
+  USING.md. CLAUDE.md says so above the marked block; the block stands as
+  written, and reconciling it with its source, together with the
+  sync-ownership question, stays separate work
+  (docs/agent-harness-review.md).
+  ACTED. README: the pre-1.0 paragraph replaced by (1) and (2), and the
+  release steps carry (3); the Tests section names the eleven test files
+  it had not named, and the counts read 56 files and 31 corpus files; the
+  explore paragraph no longer says the threshold folds precede the first
+  layout (DL-190's review moved them after it) nor that lock hubs sit on
+  their members (DL-192's review moved them clear). The nightbank RUNBOOK:
+  the `f` and `k` keys confirm (DL-187); the stored inputs are named at
+  their DL-138 homes, `catalogs/<source_bundle_hash>/` and
+  `periods/<id>/manifest.json`, in place of the retired `manifest/`;
+  DISARM exists (DL-158); the archive question is closed (DL-144). The
+  deployment runbook's ss7 points at the tag message.
+  VERIFIED, not changed: the wheel built at a0dec20 differs from the
+  published 1.3.0 wheel by exactly `dsl41/uc_oracle.py`; the templates and
+  the vendored bundle are present under their names.
+  DEFERRED, agreed by both reviewers: sweep (b) completion-order
+  permutations (DL-184); the readiness and `why` unit (designed
+  2026-09-09, its disposition recorded when it starts); the marked-block
+  reconciliation in (4). Not gaps: the remote relay and shared store
+  (designed in concurrency-model ss7, unbuilt, outside this release), IR-F
+  JSON as a CLI input (DL-194), resources in the static report (DL-192),
+  the TUI console history and `--socket` fallback (DL-187's triggers
+  stand), and the sample version string in the RUNBOOK's `verify` output,
+  which describes the seal it shows.
