@@ -138,8 +138,13 @@ annotations, boxes that collapse to one node and expand again (double-click,
 the corner cue, the menu, or two toolbar buttons; `--collapse-threshold`
 folds the over-threshold top-level boxes once the first layout has placed
 their members, none without it), and a right-click menu that focuses a
-job's fan-in/fan-out (direct, tree, or both) by hiding everything else and
-re-laying-out what remains. "Trace through boxes" (on by default) makes those
+job's fan-in/fan-out (direct, tree, or both) by hiding everything else. A
+collapse or an expand runs no layout at all: only the folded box's own members
+move, and the lock hubs are placed again on what is left drawn, so the rest of
+the picture and the viewport stay where the operator left them (DL-196). The
+"arrange" button lays the drawn graph out again on demand, and the "arrange
+after hiding" toggle — off by default — makes a focus or "show all" do the
+same with the space they free. "Trace through boxes" (on by default) makes those
 focuses follow the dossier: a member's fan-in adds every enclosing box and what gates it
 (SEM-10), its fan-out adds what an enclosing box's completion releases
 (SEM-11); off, they follow the condition edges alone (DL-190). Incoming
@@ -779,7 +784,7 @@ count) plus the 31-file synthetic/doc-derived JIL corpus under
   CLI flag absorption
 - tests/test_viz_explore_browser.py — the same page RUNNING, in chromium, webkit and
   firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
-  re-layout toggle, details panel, context menu, box collapse, the condition badge,
+  "arrange after hiding" toggle, details panel, context menu, box collapse, the condition badge,
   branch paint and condition tree, and the lock hubs, toggle and focus item all respond,
   and nothing throws.
   Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still

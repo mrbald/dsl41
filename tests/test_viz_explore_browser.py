@@ -62,6 +62,14 @@ _LAID_OUT = (
     " return !!s && !s.textContent.includes('laying out'); }"
 )
 
+#: every leaf node's position, keyed by id. Compound boxes are left out on
+#: purpose: a box's position is its children's bounding box, so hiding members
+#: legitimately moves it -- only leaves can be pinned.
+_LEAF_POSITIONS = (
+    "() => Object.fromEntries(cy.nodes().filter(n => n.isChildless())"
+    ".map(n => [n.id(), [n.position('x'), n.position('y')]]))"
+)
+
 
 @dataclass
 class Driven:
@@ -226,6 +234,36 @@ def _client_point(d: Driven, node_id: str) -> dict[str, float]:
     return point
 
 
+def _positions(d: Driven, ids: list[str]) -> dict[str, list[float]]:
+    """Where each of `ids` sits in model coordinates. DL-196's rule is about
+    exactly this: a node moves only when a layout runs, so a fold must leave
+    every one of these untouched. `ids` is a literal list this module writes,
+    never test input."""
+    at: dict[str, list[float]] = d.page.evaluate(
+        "(ids) => Object.fromEntries(ids.map("
+        "id => [id, [cy.$id(id).position('x'), cy.$id(id).position('y')]]))",
+        ids,
+    )
+    return at
+
+
+def _viewport(d: Driven) -> list[float]:
+    """Pan and zoom: the other half of the same rule -- the viewport moves
+    only after a layout run, after a find, or on a fit."""
+    view: list[float] = d.page.evaluate("() => [cy.pan().x, cy.pan().y, cy.zoom()]")
+    return view
+
+
+def _all_on_screen(d: Driven) -> bool:
+    """Everything drawn is inside the canvas: what a fit leaves behind."""
+    fitted: bool = d.page.evaluate(
+        "() => { const b = cy.nodes(':visible').renderedBoundingBox();"
+        " const r = document.getElementById('cy').getBoundingClientRect();"
+        " return b.x1 >= -1 && b.y1 >= -1 && b.x2 <= r.width + 1 && b.y2 <= r.height + 1; }"
+    )
+    return fitted
+
+
 def _visible_ids(d: Driven) -> list[str]:
     ids: list[str] = d.page.evaluate("() => cy.nodes(':visible').map(n => n.id())")
     return sorted(ids)
@@ -335,32 +373,59 @@ def test_show_all_restores_every_element_and_clears_highlights(driven: Driven) -
 
 
 def test_relayout_toggle_off_leaves_leaf_positions_alone(driven: Driven) -> None:
-    """With the toggle off a focus only fits. Compound boxes are excluded on
-    purpose: a box's position is its children's bounding box, so hiding members
-    legitimately moves it -- only leaves can be pinned."""
+    """ "Arrange after hiding" is OFF (DL-196: the preservation principle -- a
+    node moves only when a layout runs, and the button is one click away), so
+    a focus hides, places the hubs and fits, and moves nothing. The toggle is
+    unchecked unless a test checked it, and every test that checks it
+    unchecks it again in a `finally`, so the assertion below reads the page's
+    own default."""
     _ready(driven)
     _show_all(driven)
-    sample = _sample_node(driven)
-    driven.page.uncheck("#relayout")
-    leaves = (
-        "() => Object.fromEntries(cy.nodes().filter(n => n.isChildless())"
-        ".map(n => [n.id(), [n.position('x'), n.position('y')]]))"
+    assert not driven.page.evaluate("() => document.getElementById('relayout').checked"), (
+        f"{driven.engine}: the arrange-after-hiding toggle is checked"
     )
-    before = driven.page.evaluate(leaves)
+    sample = _sample_node(driven)
+    before = driven.page.evaluate(_LEAF_POSITIONS)
     driven.page.evaluate(
         "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
     )
     driven.page.wait_for_timeout(_SETTLE_MS)
-    after = driven.page.evaluate(leaves)
+    after = driven.page.evaluate(_LEAF_POSITIONS)
     moved = [
         k
         for k, v in before.items()
         if abs(v[0] - after[k][0]) > 0.5 or abs(v[1] - after[k][1]) > 0.5
     ]
     assert not moved, (
-        f"{driven.engine}: {len(moved)} leaf node(s) moved with re-layout off: {moved[:5]}"
+        f"{driven.engine}: {len(moved)} leaf node(s) moved with"
+        f" arrange after hiding off: {moved[:5]}"
     )
+    _show_all(driven)
+
+
+def test_relayout_toggle_on_re_lays_out_after_a_focus(driven: Driven) -> None:
+    """The mirror of the test above, and the toggle's whole job: switched on,
+    a focus runs ELK over what is left. Restores the default -- off -- and
+    the whole graph."""
+    _ready(driven)
+    _show_all(driven)
+    sample = _sample_node(driven)
+    before = driven.page.evaluate(_LEAF_POSITIONS)
     driven.page.check("#relayout")
+    try:
+        driven.page.evaluate(
+            "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
+        )
+        driven.page.wait_for_timeout(_SETTLE_MS)
+        after = driven.page.evaluate(_LEAF_POSITIONS)
+        moved = [
+            k
+            for k, v in before.items()
+            if abs(v[0] - after[k][0]) > 0.5 or abs(v[1] - after[k][1]) > 0.5
+        ]
+        assert moved, f"{driven.engine}: nothing moved with arrange after hiding on"
+    finally:
+        driven.page.uncheck("#relayout")  # the page's default, for every test after this
     _show_all(driven)
 
 
@@ -630,7 +695,9 @@ def test_context_menu_collapse_then_a_mouse_dblclick_expand(driven_trace: Driven
     driven_trace.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
 
-    point = _client_point(driven_trace, "B")  # collapse moved it; re-read
+    # the fold leaves B's centre where it was (DL-196), but it is now one
+    # small node rather than a container: re-read the rendered point
+    point = _client_point(driven_trace, "B")
     driven_trace.page.mouse.dblclick(point["x"], point["y"])
     driven_trace.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(driven_trace) == [
@@ -647,13 +714,18 @@ def test_context_menu_collapse_then_a_mouse_dblclick_expand(driven_trace: Driven
 
 
 def test_collapse_all_and_expand_all_toolbar_buttons(driven_trace: Driven) -> None:
+    """The two buttons, and DL-196 through them: a fold runs no layout, no
+    fit and no pan, so the viewport is exactly where it was on both sides."""
     _ready(driven_trace)
+    view = _viewport(driven_trace)
     _click(driven_trace, "#collapse-all")
     driven_trace.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
+    assert _viewport(driven_trace) == view, driven_trace.engine
 
     _click(driven_trace, "#expand-all")
     driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    assert _viewport(driven_trace) == view, driven_trace.engine
     assert _visible_ids(driven_trace) == [
         "B",
         "C",
@@ -665,6 +737,86 @@ def test_collapse_all_and_expand_all_toolbar_buttons(driven_trace: Driven) -> No
         "P",
         "Q",
     ], driven_trace.engine
+
+
+def test_a_collapse_and_an_expand_move_nothing_outside_the_box(driven_trace: Driven) -> None:
+    """DL-196's own rule, both ways round: a fold runs neither layout nor fit
+    nor pan, so every node outside the box keeps its exact position and the
+    viewport does not move -- through the collapse, and through the expand
+    after it. Starts and ends fully expanded."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    outside = ["C", "D", "P", "Q"]
+    before, view = _positions(d, outside), _viewport(d)
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
+    assert _positions(d, outside) == before, d.engine
+    assert _viewport(d) == view, d.engine
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('IM').length") == 1, d.engine
+    assert _positions(d, outside) == before, d.engine
+    assert _viewport(d) == view, d.engine
+
+
+def test_the_members_follow_a_collapsed_box_that_was_dragged(driven_trace: Driven) -> None:
+    """DL-196's own verification ask for this slice: a fold that runs no
+    layout is worth having only if manual placement survives it. Collapse B,
+    drag the collapsed node by a known delta -- `node.position` is where a
+    drag ends -- expand, and every member is exactly that delta from where it
+    was, nested ones included. Starts and ends fully expanded."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    members, outside = ["M", "N", "IM"], ["C", "D", "P", "Q"]
+    before, outside_before = _positions(d, members), _positions(d, outside)
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
+    d.page.evaluate(
+        "(at) => { cy.$id('B').position({x: at[0] + 500, y: at[1] + 300}); }",
+        _positions(d, ["B"])["B"],
+    )
+    d.page.wait_for_timeout(200)
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    after = _positions(d, members)
+    delta = {
+        k: [round(after[k][0] - before[k][0]), round(after[k][1] - before[k][1])] for k in members
+    }
+    assert delta == {k: [500, 300] for k in members}, (d.engine, delta)
+    assert _positions(d, outside) == outside_before, d.engine
+
+
+def test_the_arrange_button_lays_the_drawn_graph_out_again(driven_trace: Driven) -> None:
+    """Since a fold moves nothing, the operator needs one control that does.
+    Drag a node far out of place -- `node.position` is where a drag ends --
+    press arrange, and ELK puts it back among the others; the view fits what
+    it drew. Leaves the page laid out and fitted."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    d.page.evaluate("() => { cy.$id('P').position({x: 9000, y: 9000}); }")
+    assert _positions(d, ["P"])["P"] == [9000, 9000], d.engine
+    # derange the VIEWPORT too, or the fit assertion cannot fail: the page was
+    # fitted a moment ago, and ELK's fresh coordinates land inside that view
+    # whether a fit ran after them or not
+    d.page.evaluate("() => { cy.zoom(6); cy.pan({x: -3000, y: -2000}); }")
+    assert not _all_on_screen(d), f"{d.engine}: the viewport was not deranged"
+    _click(d, "#arrange")
+    d.page.wait_for_function(
+        "() => cy.$id('P').position('x') !== 9000 || cy.$id('P').position('y') !== 9000",
+        timeout=_LAYOUT_TIMEOUT_MS,
+    )
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _positions(d, ["P"])["P"] != [9000, 9000], d.engine
+    assert _all_on_screen(d), f"{d.engine}: arrange did not end with a fit"
 
 
 def test_no_uncaught_page_errors_on_the_trace_page(driven_trace: Driven) -> None:
@@ -688,6 +840,29 @@ def test_folded_page_starts_with_box_b_already_collapsed(driven_folded: Driven) 
         driven_folded.engine,
         stats,
     )
+
+
+def test_expanding_the_pre_folded_box_moves_nothing_but_its_members(
+    driven_folded: Driven,
+) -> None:
+    """The same DL-196 rule where the fold was the emitter's, not the
+    operator's: expanding B restores its members around B's own position and
+    touches nothing else -- no layout, no fit, no pan. (The hubs are placed
+    again after every fold; this fixture declares no locks, so there are none
+    to move -- test_hubs_stay_clear_of_the_jobs_after_a_collapse carries that
+    half.) Leaves B expanded; the search test further down folds it again
+    itself."""
+    d = driven_folded
+    _ready(d)
+    assert d.page.evaluate("() => ec !== null && ec.isExpandable(cy.$id('B'))"), d.engine
+    outside = ["C", "D", "P", "Q"]
+    before, view = _positions(d, outside), _viewport(d)
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('IM').length") == 1, d.engine
+    assert _positions(d, outside) == before, d.engine
+    assert _viewport(d) == view, d.engine
 
 
 def test_no_uncaught_page_errors_on_the_folded_page(driven_folded: Driven) -> None:
@@ -777,15 +952,19 @@ def test_fan_out_through_an_override_does_not_release_the_siblings(driven_overri
 
 def test_search_into_a_folded_box_restores_members_a_layout_placed(driven_folded: Driven) -> None:
     """The review's blocker: a box folded before its members ever had a layout
-    restores them on cytoscape's default grid. The first layout now runs over
-    the whole graph before the emitter's folds, and a search that expands a
-    box re-lays out, so the nine nodes come back at distinct positions (a box
-    holding one member shares that member's centre, hence eight)."""
+    restores them on cytoscape's default grid, every one of them on the same
+    point. The first layout runs over the whole graph before the emitter's
+    folds, so the members carry real positions into the fold and come back
+    around the box's own position, on distinct points. The expand runs no
+    layout of its own (DL-196), so the nodes outside the box do not move."""
     d = driven_folded
     _ready(d)
     if not d.page.evaluate("() => ec !== null && ec.isExpandable(cy.$id('B'))"):
         d.page.evaluate("() => { ec.collapse(cy.$id('B'), { layoutBy: null }); }")
+        d.page.wait_for_timeout(_SETTLE_MS)
     assert d.page.evaluate("() => cy.$id('IM').length") == 0  # IM is inside the folded box
+    outside = ["C", "D", "P", "Q"]
+    before = _positions(d, outside)
     d.page.fill("#search", "IM")
     d.page.press("#search", "Enter")
     d.page.wait_for_function(
@@ -795,11 +974,12 @@ def test_search_into_a_folded_box_restores_members_a_layout_placed(driven_folded
     )
     d.page.wait_for_timeout(_SETTLE_MS)
     assert d.page.evaluate("() => cy.nodes().length") == 9
+    assert _positions(d, outside) == before, d.engine
     distinct = d.page.evaluate(
-        "() => new Set(cy.nodes().map(n => Math.round(n.position('x')) + ','"
-        " + Math.round(n.position('y')))).size"
+        "() => new Set(['M', 'N', 'IM'].map(id => Math.round(cy.$id(id).position('x')) + ','"
+        " + Math.round(cy.$id(id).position('y')))).size"
     )
-    assert distinct >= 8, distinct
+    assert distinct == 3, (d.engine, distinct)
 
 
 def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) -> None:
@@ -827,6 +1007,13 @@ def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) 
         "() => document.getElementById('stats').textContent.includes('1 hit')",
         timeout=_CLICK_TIMEOUT_MS,
     )
+    # arrange is wired above the guard as well (DL-196 under DL-77's rule):
+    # the layout it runs is essential, and the loss notice survives it
+    d.page.evaluate("() => { cy.$id('P').position({x: 9000, y: 9000}); }")
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => cy.$id('P').position('x') !== 9000", timeout=_LAYOUT_TIMEOUT_MS)
+    stats = d.page.inner_text("#stats")
+    assert "visible" in stats and "box collapse unavailable in this browser" in stats, stats
     assert d.errors == [], d.errors
 
 
@@ -1182,21 +1369,30 @@ def test_a_hub_with_one_drawn_member_is_beside_it_and_the_view_still_fits(
     """Focusing lk_x1 hides its only R_ONE partner. The hub must not land on
     the one member left, and the fit must see both -- a fit over one point
     zooms until the octagon fills the viewport and the job vanishes under
-    it. Restores the page."""
+    it. Runs with "arrange after hiding" ON, which is the branch that fits
+    AFTER ELK and so the one this test was written for; the toggle defaults
+    off since DL-196, so it is checked here and unchecked again in a
+    `finally`. Restores the page."""
     _ready(driven_locks)
     _show_all(driven_locks)
-    driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
-    driven_locks.page.wait_for_timeout(_SETTLE_MS)
-    assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
-    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
-    zoom = driven_locks.page.evaluate("() => cy.zoom()")
-    assert zoom < 12, f"{driven_locks.engine}: fit degenerated to {zoom}x"
+    driven_locks.page.check("#relayout")
+    try:
+        driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
+        driven_locks.page.wait_for_timeout(_SETTLE_MS)
+        assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
+        assert _hub_overlaps(driven_locks) == [], driven_locks.engine
+        zoom = driven_locks.page.evaluate("() => cy.zoom()")
+        assert zoom < 12, f"{driven_locks.engine}: fit degenerated to {zoom}x"
+    finally:
+        driven_locks.page.uncheck("#relayout")  # the page's default
     _show_all(driven_locks)
 
 
 def test_hubs_stay_clear_of_the_jobs_after_a_collapse(driven_locks: Driven) -> None:
     """A collapse takes members out and leaves the box: the hubs are placed
-    again against the new picture. Expands before returning."""
+    again against the new picture. DL-192's property, kept under DL-196 --
+    the fold itself runs no layout now, and placeLocks runs from the fold's
+    own handler instead of from a layout's. Expands before returning."""
     _ready(driven_locks)
     _show_all(driven_locks)
     driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")

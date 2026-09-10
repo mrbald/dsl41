@@ -12306,3 +12306,74 @@ relitigate an entry; append a new one.
   Allocation: a Sonnet implementer from DL-196's slice paragraph, gates in
   its own foreground, no independent review (the test is the gate); the
   main session read the diff against the entry.
+- DL-198 DL-196 slice (2): a fold runs no layout, and "arrange" is the one
+  control that moves nodes on purpose (2026-09-10).
+  THE CHANGE. `cy.expandCollapse` takes `layoutBy: null`; fisheye and
+  animation stay off, now for the reason DL-196's review proved in the
+  bundle. What a fold still owes -- the hubs, because which of their
+  members are drawn changed (DL-192), and the collapsed count in `#stats`
+  -- runs one tick after the operation and is coalesced over it
+  (`afterFold`): the extension fires its per-box events inside its own
+  batch and before it restores the box to its pre-collapse position, so a
+  bounding box read synchronously is read mid-operation, and its own
+  post-operation hook uses the same timeout. The find path expands a
+  folded box in place and then fits to the hits; its "n hits" is queued
+  behind the fold's follow-up so it has the last word on `#stats`. The
+  toggle keeps its id, reads "arrange after hiding", governs the focus
+  items and "show all", and defaults OFF; its tooltip says that "hide this
+  node" never re-arranged (DL-71) and that a fold does not either. The
+  new toolbar button "arrange" runs ELK over the visible flow graph, places
+  the hubs, fits and reports, regardless of the toggle; the two share one
+  function. The load path is unchanged (DL-190: whole-graph layout, the
+  threshold folds with `layoutBy: null` as before, the second layout), and
+  a `loading` flag keeps its folds from scheduling the follow-up that would
+  have cleared "laying out" before the folded picture existed; "arrange"
+  is disabled until the load path's last layout stops, for the same
+  reason. A find fired inside that window queues its report and the load
+  path flushes it after its own fit, so it is never dropped and never
+  fires on a later unrelated fold. DL-77 holds: `afterFold` and the button
+  live outside the guard, and the forced-throw proof now clicks "arrange"
+  after the throw and reads a completed layout beside the loss notice.
+  THE README says a fold moves only the box's own members and re-places
+  the hubs, that "arrange" lays the drawn graph out again on demand, and
+  that "arrange after hiding" is off by default.
+  THE TESTS. Adapted: the toggle-off test asserts the default and the
+  leaf positions kept by a focus; collapse-all and expand-all assert pan
+  and zoom unchanged on both sides; the search-into-a-folded-box test
+  asserts the outside nodes unmoved and the three members restored on
+  three distinct points (a nine-node distinctness guard would be wrong by
+  contract, since DL-196 lets restored members land on packed
+  neighbours); the DL-192 one-drawn-member test checks the toggle on
+  before its focus, so the fit-after-ELK branch that keeps a hub on
+  screen is still guarded now that OFF is the default. New: a collapse
+  and an expand move nothing outside the box and leave pan and zoom
+  exact; the arrange button lays out again and ends with a fit, asserted
+  after the viewport was zoomed and panned away so the assertion can
+  fail; the pre-folded fixture's box expands moving nothing but its
+  members and the hubs; the members follow a collapsed box dragged by
+  (500, 300) before its expand, DL-196's verification ask, proven in three
+  engines; the toggle-on mirror. Every test that checks the toggle
+  restores it in a `finally`. The emitter test pins `layoutBy: null`,
+  `function afterFold(` and the arrange button by presence, not by count.
+  THE REVIEW: a fresh-context Opus pass over the uncommitted diff (record:
+  reviews/2026-09-10-dl196-slice2-review.md in the owner's store) found no
+  blocker, four majors and eleven smaller items. Majors, all fixed above:
+  a find during the load window lost its report and fired on a later fold
+  (probed: a stale count and a viewport jump); the arrange test's fit
+  assertion could not fail (probed with the fit removed); the toggle's
+  default flip left DL-192's hub-fit branch unguarded; the drag-then-expand
+  ask had no test. Declined: "arrange" drops DL-190's how-label from
+  `#stats` (slice 3 owns that line; "show all" behaves the same today); a
+  hide op still fits with the toggle off (that fit is the one DL-196's
+  principle names -- a focus is the operator asking to see the set); the
+  narrowed distinctness guard (above); the explicit `{layoutBy: null}` at
+  the two call sites (documents intent). The one accepted fix without a
+  regression test is the load-window find: it needs a race with the first
+  second of the page, and the code path is three lines read by hand.
+  THE GATE: 3651 passed, 6 skipped, 2 xfailed; the opt-in browser suite
+  177 passed in chromium, webkit and firefox (162 before: five new tests by
+  three engines); ruff, ruff format --check, mypy and arch_check clean.
+  Allocation: an Opus implementer from DL-196's slice paragraph, gates in
+  its own foreground; one fresh-context Opus reviewer; the rework resumed
+  the implementer with rulings by finding id; the main session read the
+  template diff against the entry and ruled.

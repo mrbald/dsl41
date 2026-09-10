@@ -132,9 +132,10 @@
            placeholder="find job &mdash; substring, Enter" spellcheck="false">
     <button type="button" id="show-all">show all</button>
     <button type="button" id="fit">fit</button>
+    <button type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
     <button type="button" id="collapse-all">collapse boxes</button>
     <button type="button" id="expand-all">expand boxes</button>
-    <label><input type="checkbox" id="relayout" checked> re-layout on focus</label>
+    <label title="what a hide op does with the space it frees. On: a focus item and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is and only the view fits. &ldquo;hide this node&rdquo; never re-arranges, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input type="checkbox" id="relayout"> arrange after hiding</label>
     <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input type="checkbox" id="trace-boxes" checked> trace through boxes</label>
     <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input type="checkbox" id="locks" checked> locks</label>
     <span id="stats">laying out&hellip;</span>
@@ -588,25 +589,41 @@ cy.on("zoom", updateEdgeLabels);
    with; forget the memo so the current zoom decides again for all of them */
 function refreshEdgeLabels() { labelsShown = null; updateEdgeLabels(); }
 
-function relayoutOrFit(suffix, after) {
-  if (relayoutToggle.checked) {
-    var layout = flow(cy.elements(":visible")).layout(elkLayout());
-    layout.on("layoutstop", function () {
-      placeLocks();
-      /* ELK fitted the elements it laid out, and the hubs are not among
-         them: fit again over everything drawn, or a focus whose flow half
-         is one node zooms to it and leaves the hub off-screen */
-      cy.fit(cy.nodes(":visible"), 40);
-      updateStats(suffix);
-      if (after) after();
-    });
-    layout.run();
-  } else {
-    placeLocks();  /* the members did not move, but which of them are drawn can */
+/* ELK over the visible flow graph, then the hubs, a fit and the stats. The
+   ONE thing on this page that moves a node on purpose (DL-196): the arrange
+   button runs it whenever asked, and a hide op runs it only with "arrange
+   after hiding" on. Nothing else -- no collapse, no expand, no find -- may
+   call it: manual placement is the operator's, and a layout is how it is
+   given up. */
+function arrangeVisible(suffix, after) {
+  var layout = flow(cy.elements(":visible")).layout(elkLayout());
+  layout.on("layoutstop", function () {
+    placeLocks();
+    /* ELK fitted the elements it laid out, and the hubs are not among
+       them: fit again over everything drawn, or a focus whose flow half
+       is one node zooms to it and leaves the hub off-screen */
     cy.fit(cy.nodes(":visible"), 40);
     updateStats(suffix);
     if (after) after();
+  });
+  layout.run();
+}
+
+/* What a hide op does with the space it frees, and only a hide op: the focus
+   items and "show all". The toggle DEFAULTS OFF (DL-196) -- preserving the
+   picture the operator arranged beats re-packing it, and arrange is one
+   click away. Off, the nodes stay where they are; the hubs are still placed
+   again, because which of their members are drawn changed, and the view
+   still fits. */
+function relayoutOrFit(suffix, after) {
+  if (relayoutToggle.checked) {
+    arrangeVisible(suffix, after);
+    return;
   }
+  placeLocks();  /* the members did not move, but which of them are drawn can */
+  cy.fit(cy.nodes(":visible"), 40);
+  updateStats(suffix);
+  if (after) after();
 }
 
 /* focus = hide non-selected, keeping compound ancestors (members without
@@ -950,6 +967,11 @@ document.getElementById("show-all").addEventListener("click", showAll);
 document.getElementById("fit").addEventListener("click", function () {
   cy.fit(cy.nodes(":visible"), 40);
 });
+/* the toggle governs the hide ops; this button governs nothing but itself --
+   a layout over what is drawn, whenever the picture has been pulled about */
+document.getElementById("arrange").addEventListener("click", function () {
+  arrangeVisible();
+});
 
 /* Substring search. Hits hidden by a previous focus are un-hidden, and a
    collapsed box holding a hit is expanded first -- a search that cannot
@@ -985,16 +1007,14 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
     hits.select();
     showNodeDetails(hits[0]);
   }
+  /* An expand here is an expand like any other (DL-196): in place, no
+     layout. The members come back around the box's own position, where the
+     first load-time layout put them relative to it, and the fit is to the
+     hits -- the answer to the question that was asked. It goes behind the
+     fold's own follow-up, which rewrites #stats without this count. */
   var found = hits.length + " hit" + (hits.length === 1 ? "" : "s");
-  if (expanded) {
-    /* the members just restored sit where the box's last layout left them,
-       on top of a picture laid out without them: re-layout (the toggle
-       decides, as for every other expand), then fit the hits */
-    relayoutOrFit(found, function () { cy.fit(hits, 60); });
-  } else {
-    updateStats(found);
-    cy.fit(hits, 60);
-  }
+  function report() { updateStats(found); cy.fit(hits, 60); }
+  if (expanded) afterFold(report); else report();
 });
 
 /* ------------------------------------------------------------ initial layout */
@@ -1007,11 +1027,24 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
    second layout draws the folded picture. #stats stays "laying out" until
    that second layout stops. The layout is CONSTRUCTED here and run below
    the extension, so the handler knows whether there is one to fold with. */
+/* true until the load path's last layout has stopped: see afterFold */
+var loading = true;
+
 function finishInitial() {
+  loading = false;
+  /* a second ELK run started while the load path was between its two layouts
+     would clear "laying out" before the folded picture exists, and the page's
+     readiness signal would mean nothing (DL-190) */
+  document.getElementById("arrange").disabled = false;
   placeLocks();
   cy.fit(cy.nodes(":visible"), 40);  /* the hubs were placed after the layout */
   updateEdgeLabels();
   updateStats();
+  /* a find during the load window queued its report and afterFold refused to
+     schedule it: run it now, after this fit and this updateStats, so the hit
+     count and the fit to the hits are the last word -- and never a stale
+     jump on the next unrelated fold */
+  flushFoldThen();
 }
 
 function foldMarked() {
@@ -1034,6 +1067,41 @@ initial.on("layoutstop", function () {
 
 /* ------------------------------------------------------- box collapse / expand */
 
+/* What still has to follow a fold now that it runs no layout: the hubs,
+   because which of their members are drawn changed (DL-192), and the
+   collapsed count in #stats. Deferred to the next tick, and coalesced over
+   the whole operation: the extension triggers these per box -- inside its
+   own cy.batch for a collapse, and before it restores the box to its
+   pre-collapse position -- so a bounding box read here is read
+   mid-operation. The extension's own post-operation hook uses the same
+   timeout for the same reason. `then` is for a caller that must have the
+   last word on #stats, which the find path does. */
+var foldPending = null;
+var foldThen = [];
+
+/* the queued follow-ups, run once and dropped. Two callers: the deferred tick
+   below, and finishInitial, for whatever the load window refused to schedule. */
+function flushFoldThen() {
+  var queued = foldThen;
+  foldThen = [];
+  queued.forEach(function (fn) { fn(); });
+}
+
+function afterFold(then) {
+  if (then) foldThen.push(then);
+  /* the load path places the hubs and writes #stats itself, and #stats must
+     say "laying out" until the SECOND layout stops (DL-190): its folds are
+     not the operator's, and they schedule nothing. A `then` queued in that
+     window is not dropped -- finishInitial flushes it. */
+  if (loading || foldPending !== null) return;
+  foldPending = setTimeout(function () {
+    foldPending = null;
+    placeLocks();
+    updateStats();
+    flushFoldThen();
+  }, 0);
+}
+
 /* cytoscape-expand-collapse (DL-190): a collapsed box stays in the graph as
    one node; its members and their inner edges leave it, remembered on the
    box, and every edge that crossed the box's border is re-pointed at the
@@ -1042,7 +1110,13 @@ initial.on("layoutstop", function () {
    #stats says so, and the two toolbar buttons that need it go inert. */
 try {
   cy.expandCollapse({
-    layoutBy: function () { relayoutOrFit(); },  /* the re-layout toggle decides */
+    /* No layout, no fit and no pan on a fold (DL-196): a moved picture
+       discards manual placement and the viewport. Only the box's own
+       members move -- the extension restores them around the collapsed
+       node's current position -- and the handlers below re-place the hubs.
+       fisheye would move every visible top-level node and pan the viewport
+       besides; animation is the extension's other default and stays off. */
+    layoutBy: null,
     fisheye: false,
     animate: false,
     undoable: false,
@@ -1058,6 +1132,7 @@ try {
     box.scratch("_dsl41", { members: ec.getCollapsedChildrenRecursively(box).nodes().length });
     classifyNesting();
     refreshEdgeLabels();
+    afterFold();
     /* the collapse copies the folded edge's classes onto the meta-edge,
        branch paint included -- and meta-edges sharing one endpoint pair
        overlap, so a branch colour on them reads as noise. The picture the
@@ -1069,6 +1144,7 @@ try {
     evt.target.removeScratch("_dsl41");
     classifyNesting();
     refreshEdgeLabels();
+    afterFold();
     clearBranchPaint();
   });
 } catch (err) {

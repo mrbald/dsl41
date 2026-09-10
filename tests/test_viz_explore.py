@@ -947,6 +947,40 @@ def test_to_explore_html_wires_the_trace_toggle_and_step_functions() -> None:
     assert "function isOverride(edge)" in page
 
 
+def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button() -> None:
+    # DL-196 slice (2): a collapse or an expand runs no layout, no fit and no
+    # pan -- `layoutBy: null` is what says so to the extension, and the
+    # handlers place the hubs and rewrite the count themselves. The toolbar
+    # carries an explicit `arrange` beside `fit`, and the toggle the fold used
+    # to share is renamed and DEFAULTS OFF: a node moves only when a layout
+    # runs, and a layout runs at load, on the button, or after a hide op with
+    # the toggle on.
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    assert "    layoutBy: null,\n" in page
+    assert "layoutBy: function" not in page  # the fold called relayoutOrFit through this
+    assert 'id="arrange"' in page
+    assert page.index('id="fit"') < page.index('id="arrange"') < page.index('id="collapse-all"')
+    assert '<input type="checkbox" id="relayout"> arrange after hiding' in page
+    assert 'id="relayout" checked' not in page
+    assert "re-layout on focus" not in page
+    # the button and the toggle's ON branch are one layout path, not two
+    assert "function arrangeVisible(suffix, after)" in page
+    assert "arrangeVisible(suffix, after);" in page  # relayoutOrFit delegates to it...
+    assert "arrangeVisible();" in page  # ...and the button runs the same path
+    # ...and the find path runs none of it: it expands in place and fits the hits
+    assert "relayoutOrFit(found" not in page
+    assert "ec.expandRecursively(box, { layoutBy: null });" in page
+    assert "cy.fit(hits, 60);" in page
+    # what still follows a fold: the hubs (DL-192) and the collapsed count.
+    # Read out of the two handler bodies rather than counted, so a reindent
+    # or a third legitimate caller does not fail this with a bare number.
+    assert "function afterFold(" in page
+    collapse_at = page.index('cy.on("expandcollapse.aftercollapse"')
+    expand_at = page.index('cy.on("expandcollapse.afterexpand"')
+    assert "afterFold();" in page[collapse_at:expand_at]
+    assert "afterFold();" in page[expand_at : page.index("} catch (err) {", expand_at)]
+
+
 def test_to_explore_html_carries_the_condition_grammar() -> None:
     # DL-191, the page half: the badge rule, the hollow arrowhead, the branch
     # ramp, the tree the panel renders, and the legend that states the default
@@ -1027,7 +1061,11 @@ def test_to_explore_html_carries_the_lock_grammar() -> None:
     assert 'function flow(elements) { return elements.not(".lock"); }' in page
     assert "function placeLocks()" in page
     assert "function freeSpot(hub, start, strict, relaxed)" in page
-    assert page.count("placeLocks();") >= 3  # initial, re-layout, fit-only
+    # at load, on arrange, on a fit-only hide op, and after a fold -- a fold
+    # runs no layout now (DL-196), so its own handler places them
+    assert "placeLocks();" in page
+    assert "function afterFold(" in page
+    assert "layoutBy: null," in page
     # a focused job keeps its own hubs as context, never a hub's other members
     assert 'keep.connectedEdges(".lock").connectedNodes().filter(".lock")' in page
     # the toggle, the tee, the octagon and the menu item
