@@ -1341,6 +1341,45 @@ def test_focus_lock_menu_item_shows_the_hub_and_every_member(driven_locks: Drive
     _show_all(driven_locks)
 
 
+def test_a_lock_hub_menu_offers_no_walk_and_a_job_menu_still_does(driven_locks: Driven) -> None:
+    """DL-196 slice (1): a hub has no flow edges, so a walk from it is empty,
+    and the six flow items are not offered on one -- `node[!lock]` in place
+    of the old `node`, which matched a hub too. `focus-lock` and `hide` stay
+    on both kinds. Restores the page by dismissing each menu with a
+    background click."""
+    _ready(driven_locks)
+    _show_all(driven_locks)
+    walk_ids = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree", "both-trees", "neighbours"]
+    selector = ",".join("#" + i for i in walk_ids)
+
+    point = _client_point(driven_locks, "lock:r:R_ONE")
+    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
+    driven_locks.page.wait_for_timeout(500)
+    shown = driven_locks.page.evaluate(
+        f"() => Array.from(document.querySelectorAll('{selector}'))"
+        ".filter(e => getComputedStyle(e).display !== 'none').map(e => e.id)"
+    )
+    assert shown == [], f"{driven_locks.engine}: hub menu still offers {shown}"
+    for kept in ("#focus-lock", "#hide"):
+        el = driven_locks.page.query_selector(kept)
+        assert el is not None and driven_locks.page.evaluate(
+            "(e) => getComputedStyle(e).display !== 'none'", el
+        ), f"{driven_locks.engine}: {kept} missing from the hub menu"
+    driven_locks.page.mouse.click(10, 10)  # dismiss: an outside click, nothing under test
+    driven_locks.page.wait_for_timeout(200)
+
+    point = _client_point(driven_locks, "lk_x1")
+    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
+    driven_locks.page.wait_for_timeout(500)
+    shown = driven_locks.page.evaluate(
+        f"() => Array.from(document.querySelectorAll('{selector}'))"
+        ".filter(e => getComputedStyle(e).display !== 'none').map(e => e.id)"
+    )
+    assert sorted(shown) == sorted(walk_ids), (driven_locks.engine, shown)
+    driven_locks.page.mouse.click(10, 10)
+    driven_locks.page.wait_for_timeout(200)
+
+
 def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
     driven_locks: Driven,
 ) -> None:

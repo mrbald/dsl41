@@ -12289,3 +12289,20 @@ relitigate an entry; append a new one.
   follow a collapsed box that was dragged before its expand; a menu
   dismissed by a background click leaves the selection intact, in three
   engines.
+- DL-197 DL-196 slice (1): a lock hub's menu offers no walk (2026-09-10).
+  THE CHANGE. The six flow items -- fan-in and fan-out, direct and tree,
+  both trees, neighbours -- match `node[!lock]` instead of `node`. A hub
+  carries `data.lock`; a job carries `self_lock` at most, never `lock`
+  (viz_explore.py, checked by grep), so the attribute-absence form
+  excludes exactly the hubs. cytoscape has no `:not()`, which is why the
+  draft's `node:not(.lock)` was refuted in DL-196's review. `hide`,
+  `focus-lock` and the box and core items are unchanged.
+  THE TEST. One browser test on the locks fixture: a right-click on a
+  resource hub shows none of the six ids and still shows `focus-lock` and
+  `hide`; a right-click on a job shows all six. Three engines.
+  THE GATE: 3650 passed, 6 skipped, 2 xfailed; the opt-in browser suite
+  162 passed in chromium, webkit and firefox (159 before, one test by
+  three engines); ruff, ruff format --check, mypy and arch_check clean.
+  Allocation: a Sonnet implementer from DL-196's slice paragraph, gates in
+  its own foreground, no independent review (the test is the gate); the
+  main session read the diff against the entry.

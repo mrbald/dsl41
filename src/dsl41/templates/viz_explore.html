@@ -1247,28 +1247,33 @@ function fanOutTree(start) {
 function target(evt) { return evt.target || evt.cyTarget; }
 
 var menuItems = [
-  { id: "fan-in", content: "focus fan-in (direct)", selector: "node",
+  /* a lock hub has no flow edges, so a walk from it is always empty; these
+     six items are not offered on one (DL-196). node[!lock] excludes only
+     hubs -- a job carries `self_lock` at most, never `lock` (viz_explore.py) --
+     cytoscape has no :not(), so the attribute-absence form is what selects
+     "every node except a hub". */
+  { id: "fan-in", content: "focus fan-in (direct)", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt); focusOn(n.union(fanInStep(n)), howLabel("fan-in"));
     } },
-  { id: "fan-out", content: "focus fan-out (direct)", selector: "node",
+  { id: "fan-out", content: "focus fan-out (direct)", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt); focusOn(n.union(fanOutStep(n)), howLabel("fan-out"));
     } },
-  { id: "fan-in-tree", content: "focus fan-in tree", selector: "node",
+  { id: "fan-in-tree", content: "focus fan-in tree", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt); focusOn(fanInTree(n), howLabel("fan-in tree"));
     } },
-  { id: "fan-out-tree", content: "focus fan-out tree", selector: "node",
+  { id: "fan-out-tree", content: "focus fan-out tree", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt); focusOn(fanOutTree(n), howLabel("fan-out tree"));
     } },
-  { id: "both-trees", content: "focus both trees", selector: "node",
+  { id: "both-trees", content: "focus both trees", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt);
       focusOn(fanInTree(n).union(fanOutTree(n)), howLabel("both trees"));
     } },
-  { id: "neighbours", content: "focus this + neighbours", selector: "node",
+  { id: "neighbours", content: "focus this + neighbours", selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt);
       focusOn(n.union(fanInStep(n)).union(fanOutStep(n)), howLabel("neighbours"));
