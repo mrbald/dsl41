@@ -12143,3 +12143,149 @@ relitigate an entry; append a new one.
   the TUI console history and `--socket` fallback (DL-187's triggers
   stand), and the sample version string in the RUNBOOK's `verify` output,
   which describes the seal it shows.
+- DL-196 the explore page's navigation is three layers: selection,
+  highlight and visibility (2026-09-10; rulings recorded before the build,
+  after four independent reviews of the draft; each slice lands under its
+  own entry with its own gate).
+  THE ASK. The lock hubs (DL-192) received the generic node menu, whose
+  fan-in and fan-out items walk the flow edges that exclude lock links, so
+  "focus fan-in" on a hub left the hub alone on the canvas. The owner asked
+  for more than the fix: navigation as "select X", then "hide X / hide
+  non-X / clear", so a set is built incrementally; fan ops over a
+  multi-selection, one step and transitive; area selection by mouse;
+  selection distinct from highlight -- one the operand of a bulk op, the
+  other a sticky visual aid, "highlight selected" the first synergy; no
+  layout run on a box collapse or expand, because a moved picture discards
+  manual placement and the viewport; and a find whose outcome is "select
+  all matches" or "highlight all matches".
+  THE REVIEW. A draft of fifteen rules went to four independent passes
+  before anything was built: the main session's own, a fresh-context Opus
+  adversarial pass, a fresh-context Opus pass with the UX lens, and Codex
+  gpt-6-astra at xhigh (records: reviews/2026-09-10-explore-selection-* in
+  the owner's store). Two of them read the vendored bundle and refuted six
+  claims of the draft: `node:not(.lock)` is not a cytoscape selector; alt
+  is not a box-selection modifier (the set is shift, ctrl, cmd, and it is
+  not configurable); the extension's fisheye moves every visible top-level
+  node, recurses up the ancestors and pans the viewport when the expanded
+  box does not fit; its animation default is 1000 ms while the browser
+  tests settle for 900; a collapse unselects the folded members and removes
+  them from the live graph; the marquee selects edges. Two more facts
+  changed the design: the menu closes on the mousedown of a background
+  click, and that click clears the selection; the DL-191 leaf click
+  unselects everything before it selects its arrow. Verified true: a
+  right-click never clears the selection; shift+tap toggles; box selection
+  adds while the modifier is still held at mouseup; an expand translates
+  the members by the box's displacement since the collapse; hidden nodes
+  are immune to the marquee; the emitter does not change.
+  THE MODEL. Three independent layers on every node. Selection: the set
+  the next bulk op acts on; a plain click replaces it, a background click
+  clears it. Highlight: a sticky mark that survives clicks and selection
+  changes, cleared only on request. Visibility: hidden or drawn. Selected
+  implies drawn: every selection-producing op un-hides what it selects and
+  its ancestors, without selecting the ancestors; a hide op unselects what
+  it hides; the marquee and a plain click reach drawn nodes only. A
+  highlighted node may be hidden or folded.
+  THE OPS. Select: fan-in and fan-out, each one step or transitive;
+  neighbours, one step; both cones; lock members, from a hub; lock peers,
+  from a job (its direct pair partners plus the members of its own hubs, no
+  closure; a self-lock adds nothing); find matches; marquee; select
+  highlighted; clear selection. Every select op adds, except find and a
+  plain click, which replace. Highlight: highlight selected, unhighlight
+  selected, clear highlights. Visibility: hide selected, hide others, show
+  all. A walk's result is the selection plus the seed plus the walk.
+  THE SEED. A node menu seeds its walks from that node; the canvas menu
+  seeds from the selection; both add. Labels name the seed: "select fan-in
+  of JOB_A, transitive"; "of selection (7)". This deviates from the Finder
+  rule, where a right-click outside the selection replaces it, on purpose:
+  replacing breaks additive building (walk from A, then add B's walk), and
+  the deviation is what makes "both cones of A" two clicks on A.
+  THE SURFACES. Menus carry seed-relative items only. Node: the four walks,
+  neighbours, both cones, lock peers, hide this node, collapse or expand
+  this box. Hub: select members, hide this lock. Canvas: the four walks of
+  the selection. Every selection op is a toolbar button as well, so it is
+  keyboard-reachable and works when the optional menu plugin fails
+  (DL-77): hide selected, hide others, show all; highlight selected,
+  unhighlight selected, select highlighted, clear highlights; clear
+  selection; fit, fit selection, arrange. A selection-dependent control is
+  disabled while nothing is selected, hide others first of all. Flow items
+  match `node[!lock]`: a hub carries `data.lock`, a job carries `self_lock`
+  at most (viz_explore.py). Escape closes an open menu, else clears a
+  focused find field, else clears the selection. Dismissing a menu never
+  changes the selection; the mechanism is the implementer's and the
+  browser test pins the requirement.
+  COMPOUNDS AND FOLDS. Hiding a node hides its descendants, and every node
+  hidden through an ancestor leaves the selection. Hide others keeps the
+  selected nodes, their ancestors and the hubs their lock links reach
+  (DL-192's context rule); a selected box with no selected descendant is
+  collapsed rather than emptied, so it stands for its members and no
+  sibling is shown (DL-190: siblings gate nothing). The state universe is
+  the live nodes plus the recursively folded members, and clear ops and
+  counts run over it. A collapse moves a folded member's selection to its
+  box; an expand leaves the box selected and its members unselected; a box
+  with a highlighted folded member carries a proxy highlight. A walk stops
+  at a collapsed box, the proxy for its members; the explicit membership
+  ops -- find, select highlighted, lock members, lock peers -- expand a
+  folded box to reach their target. The locks toggle keeps its authority:
+  off unselects the hubs, and a reveal whose target is a hub while it is
+  off skips the hub and says so in `#stats`.
+  EDGES ARE NEVER SELECTED. The marquee took edges and the DL-191 leaf
+  click cleared the node selection; both go. Edges are unselectable; the
+  leaf click and the edge tap mark the inspected arrow with a class, the
+  same visual as before. DL-191 is amended in wording only.
+  THE PICTURE. Selection is the cytoscape overlay, stronger than today's
+  0.15; highlight is the underlay; borders stay the node type's (fw, ext,
+  global, box, collapsed, lock), and both at once are both halos.
+  Highlight marks nodes only in the first cut: an edge highlight collides
+  with DL-191's branch paint and with the lock and meta-edge grammar, and
+  is deferred. `#stats` adds "n selected, m highlighted" -- the selected
+  count is a button that fits the selection, and reads "12 selected (9
+  drawn)" when they differ -- keeps every fact it carries (visible/total,
+  the lock total, the collapsed count, lostFeature last, DL-77), and
+  attaches the via-boxes qualifier (DL-190) to the last traversal only,
+  captured when it ran. A find with no match says so beside the field.
+  THE MOUSE. Plain drag pans, as on every map. Shift+drag adds a region;
+  shift+click toggles one node, which is also how an accidental member
+  leaves; ctrl and cmd work too, and the hint names shift. The marquee
+  starts on the background only. Nodes stay grabbable, and a drag on a
+  selected node moves the whole selection: that is manual placement, and
+  no op but a layout run disturbs it. There is no undo; arrange is the
+  recovery.
+  NO LAYOUT ON A FOLD. Collapse and expand run neither layout nor fit nor
+  pan: `layoutBy: null`, fisheye off, animation off -- the two extension
+  defaults DL-190 already switched off stay off, now for a reason the
+  bundle proved. Only the box's own members and the re-placed hubs move.
+  An expand of a threshold-folded box may land its members on the
+  neighbours the second load-time layout packed closer; that is visible,
+  and the arrange button repairs it. The load path is unchanged. The
+  toggle is renamed "arrange after hiding", governs hide selected, hide
+  others and show all, and DEFAULTS OFF: the owner's ruling, with two of
+  the reviewers -- the preservation principle wins, and the button is one
+  click away. The button "arrange" runs ELK over the visible flow graph and
+  fits. Principle: a node moves only when a layout runs, and a layout runs
+  at load, on the button, or after a hide op with the toggle on; the
+  viewport moves only after a layout run, after a find, or on a fit.
+  FIND. Two buttons, "select matches" and "highlight matches"; Enter is
+  select; shift+Enter and shift+click add. Both un-hide the matches and
+  their ancestors, expand a folded box holding a match in place, and fit
+  to the matches. One match opens its details, kind-aware: a hub match
+  opens the lock panel, where today's search always opened the job panel.
+  The private hit class goes. An empty query does nothing.
+  LABELS. Fan-in and fan-out stay, the repo's words; "tree" becomes
+  "transitive" on the page, and the log keeps its history.
+  DECLINED. Undo and a restorable previous selection (the highlight layer
+  is the stash); "mark" for "highlight"; edge highlight (deferred, above);
+  invert selection; touch; "focus lock" (select members, then hide others,
+  loses nothing); the Finder right-click rule (above).
+  THE SLICES, each landing under its own entry with its gate: (1) the
+  `node[!lock]` selector on the six flow items, and one browser test that a
+  hub's menu carries no walk; (2) no layout on a fold, the arrange button,
+  the toggle's rename and default; (3) the three layers, the toolbar, the
+  menus, find; (4) the marquee, Escape, the disabled states, the hints and
+  README. The cost is known up front: 20 of the 53 browser tests touch
+  focus, menu ids, `#stats` or the hit class, and one emitter test pins
+  menu ids. Verification asks carried into the slices: ctrl+click on
+  webkit opens the menu and leaves the selection alone; a two-seed
+  transitive walk through one box under trace-through-boxes; the members
+  follow a collapsed box that was dragged before its expand; a menu
+  dismissed by a background click leaves the selection intact, in three
+  engines.
