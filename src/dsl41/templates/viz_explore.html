@@ -684,9 +684,13 @@ var statsBuilt = false;
    (DL-77), and the four canvas walks it would carry do not exist either */
 var menuApi = null;
 
-var SELECTION_CONTROLS = ["sel-fan-in", "sel-fan-in-tree", "sel-fan-out",
-  "sel-fan-out-tree", "sel-lock-peers", "clear-selection", "highlight-selected",
-  "unhighlight-selected", "hide-selected", "hide-others", "fit-selection"];
+/* the four walks that take the selection as their seed. Both cones and
+   neighbours stay compositions and node-menu-only items (DL-199) -- this
+   list must never grow to all six. */
+var SELECTION_WALKS = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"];
+var SELECTION_CONTROLS = SELECTION_WALKS.map(function (kind) { return "sel-" + kind; })
+  .concat(["sel-lock-peers", "clear-selection", "highlight-selected",
+    "unhighlight-selected", "hide-selected", "hide-others", "fit-selection"]);
 var HIGHLIGHT_CONTROLS = ["select-highlighted", "clear-highlights"];
 
 function refreshControls(selected, marked) {
@@ -700,7 +704,7 @@ function refreshControls(selected, marked) {
   /* the canvas menu's four walks are the same ops over the same seed, and
      DL-196's rule names no exception for a menu */
   if (menuApi) {
-    ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"].forEach(function (kind) {
+    SELECTION_WALKS.forEach(function (kind) {
       if (selected) menuApi.enableMenuItem("menu-" + kind);
       else menuApi.disableMenuItem("menu-" + kind);
     });
@@ -802,17 +806,26 @@ function reveal(nodes) {
   placeLocks();
 }
 
+/* the locks toggle keeps its authority over every op that can select or
+   draw a hub: a hub it hides is not selected or highlighted, and the op
+   says how many it skipped. Only lock elements ever carry `lockoff` --
+   `syncLocks` toggles it on `cy.elements(".lock")` and nothing else does --
+   so filtering it out and testing its absence select the same nodes. */
+function withoutLocksOff(nodes) {
+  var skipped = nodes.filter(".lock.lockoff");
+  return { nodes: nodes.difference(skipped), skipped: skipped.length };
+}
+
 /* The one way anything enters the selection: adding by default, replacing
    on request (find, and the plain click cytoscape handles itself). Returns
    how many hubs it left alone because the locks toggle is off -- the toggle
    keeps its authority, and the caller says so in #stats. */
 function selectNodes(nodes, replace) {
-  var skipped = nodes.filter(".lock.lockoff");
-  nodes = nodes.difference(skipped);
+  var kept = withoutLocksOff(nodes);
   if (replace) cy.nodes().unselect();
-  reveal(nodes);
-  nodes.select();
-  return skipped.length;
+  reveal(kept.nodes);
+  kept.nodes.select();
+  return kept.skipped;
 }
 
 function skippedNote(count) {
@@ -1362,7 +1375,7 @@ wire("unhighlight-selected", unhighlightSelected);
 wire("clear-highlights", clearHighlights);
 wire("select-highlighted", selectHighlighted);
 wire("clear-selection", clearSelection);
-["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"].forEach(function (kind) {
+SELECTION_WALKS.forEach(function (kind) {
   wire("sel-" + kind, function () { runWalk(kind, selectedNodes(), selectionLabel()); });
 });
 wire("sel-lock-peers", selectLockPeersOfSelection);
@@ -1395,15 +1408,15 @@ function runFind(mode, add) {
   }
   var count = hits.length + (hits.length === 1 ? " match" : " matches");
   var op = "find \u201c" + text + "\u201d: " + count;
+  var kept = withoutLocksOff(hits);  /* the locks toggle keeps its authority here too */
   if (mode === "highlight") {
-    var off = hits.filter(".lock.lockoff");  /* the locks toggle keeps its authority here too */
-    reveal(hits.difference(off));
-    highlightNodes(hits.difference(off));
-    op += " highlighted" + skippedNote(off.length);
+    reveal(kept.nodes);
+    highlightNodes(kept.nodes);
+    op += " highlighted" + skippedNote(kept.skipped);
   } else {
     op += " selected" + skippedNote(selectNodes(hits, !add));
   }
-  var shown = hits.not(".lockoff");
+  var shown = kept.nodes;
   if (hits.length === 1 && shown.nonempty()) {
     if (hits.hasClass("lock")) showLockDetails(hits[0]); else showNodeDetails(hits[0]);
   }
@@ -1953,12 +1966,8 @@ var menuItems = [
   { id: "lock-members", content: "select lock members", selector: "node.lock",
     onClickFunction: function (evt) { selectLockMembers(target(evt)); } },
   { id: "hide-lock", content: "hide this lock", selector: "node.lock",
-    onClickFunction: function (evt) { hideThisNode(target(evt)); } },
-  selectionWalkItem("fan-in"),
-  selectionWalkItem("fan-out"),
-  selectionWalkItem("fan-in-tree"),
-  selectionWalkItem("fan-out-tree")
-];
+    onClickFunction: function (evt) { hideThisNode(target(evt)); } }
+].concat(SELECTION_WALKS.map(selectionWalkItem));
 /* the box items exist only when box collapse does: a menu entry that
    silently does nothing is the DL-77 shape in miniature */
 if (ec) {
@@ -1980,9 +1989,12 @@ if (ec) {
    replaces the selection, as it would with no menu open. Registered above
    the plugin, so the tapstart still sees the menu open. */
 var menuKeep = null;
-function menuIsOpen() {
+function openMenu() {
   var el = document.querySelector(".cy-context-menus-cxt-menu");
-  return !!el && getComputedStyle(el).display !== "none";
+  return el && getComputedStyle(el).display !== "none" ? el : null;
+}
+function menuIsOpen() {
+  return !!openMenu();
 }
 cy.on("tapstart", function () { menuKeep = menuIsOpen() ? selectedNodes() : null; });
 cy.on("tap", function (evt) {
@@ -2000,16 +2012,19 @@ cy.on("tap", function (evt) {
    field the operator is typing in, else it clears the selection. One key
    with three jobs, most local first, so it never reaches past what is in
    front of the operator. The menu is closed through the DOM, the same
-   element `menuIsOpen` asks about: the plugin's own dismissal is a tapstart
-   handler, and there is no public call for it. */
+   element `openMenu` finds for `menuIsOpen`: the plugin's own dismissal is
+   a tapstart handler, and there is no public call for it. The tapstart
+   stash and this handler must agree on what "open" is, or Escape closes a
+   menu the stash did not think was open and DL-196's rule that dismissing
+   a menu never changes the selection stops holding. */
 document.addEventListener("keydown", function (evt) {
   if (evt.key !== "Escape") return;
   /* One layer per press. Without this the browser's own Escape runs too: in
      webkit a search input clears itself, so closing a menu while the field
      had the focus would empty the field as well. */
   evt.preventDefault();
-  var menu = document.querySelector(".cy-context-menus-cxt-menu");
-  if (menu && getComputedStyle(menu).display !== "none") {
+  var menu = openMenu();
+  if (menu) {
     menu.style.display = "none";
     return;
   }
@@ -2048,8 +2063,12 @@ try {
     var seedLabel = onNode ? shortId(t.id()) : selectionLabel();
     Object.keys(WALKS).forEach(function (kind) {
       setMenuLabel(kind, "select " + walkName(kind, seedLabel));
-      /* the canvas items are seeded from the selection whatever was
-         right-clicked; on a node menu they are hidden, not renamed */
+    });
+    /* the canvas items are seeded from the selection whatever was
+       right-clicked; on a node menu they are hidden, not renamed. Only
+       four walks carry a canvas item (DL-199), so this loop runs the new
+       list, not all six -- the other two have no "menu-" id to find. */
+    SELECTION_WALKS.forEach(function (kind) {
       setMenuLabel("menu-" + kind, "select " + walkName(kind, selectionLabel()));
     });
     if (!onNode) return;

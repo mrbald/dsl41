@@ -1003,7 +1003,7 @@ def test_to_explore_html_pins_the_marquee_selection_controls_and_escape() -> Non
     # selection. Pinned by presence, not by count.
     page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     assert "boxSelectionEnabled: true," in page
-    assert "var SELECTION_CONTROLS = [" in page
+    assert "var SELECTION_CONTROLS = " in page
     assert "function refreshControls(" in page
     assert 'evt.key !== "Escape"' in page
     for control in (
