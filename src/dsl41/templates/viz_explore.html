@@ -929,10 +929,11 @@ function hideNodes(nodes) {
   return gone.length;  /* what left the canvas, which a box makes more than what was picked */
 }
 
-/* What a hide op does with the space it frees is the toggle's (DL-196): on,
-   the layout runs again; off, the hubs are placed again -- because which of
-   their members are drawn changed -- and nothing else moves besides what
-   `fit` asks. `fit` is the one difference between callers: a focus or "show
+/* What a hide op does with the space it frees is the toggle's (DL-196),
+   and it DEFAULTS OFF: preserving the picture the operator arranged beats
+   re-packing it, and arrange is one click away. On, the layout runs again;
+   off, the hubs are placed again -- because which of their members are
+   drawn changed -- and nothing else moves besides what `fit` asks. `fit` is the one difference between callers: a focus or "show
    all" fits, because that is the operator asking to see the set (DL-196);
    hiding a selection does not, because what is left was on the screen
    already. */
@@ -1345,7 +1346,7 @@ function guarded(fn) {
 }
 function wire(id, fn) { document.getElementById(id).addEventListener("click", guarded(fn)); }
 wire("show-all", showAll);
-wire("fit", function () { fitVisible(); });
+wire("fit", fitVisible);
 wire("fit-selection", fitSelection);
 /* the toggle governs the hide ops; this button governs nothing but itself --
    a layout over what is drawn, whenever the picture has been pulled about */

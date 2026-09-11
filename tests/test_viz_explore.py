@@ -871,7 +871,7 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     registration = page.index("cy.contextMenus({ menuItems: menuItems })")
     for essential in (
         'wire("show-all", showAll);',
-        'wire("fit", function () {',
+        'wire("fit",',
         'wire("hide-others", hideOthers);',
         'document.getElementById("search").addEventListener',
         'wire("find-select", function (evt) {',
