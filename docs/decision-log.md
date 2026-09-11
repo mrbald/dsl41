@@ -12680,3 +12680,153 @@ relitigate an entry; append a new one.
   it. The main session ruled on every finding, made every fix, and ran the
   gates when the test agent lost its connection twice. Both times its edits
   were on disk and finishing them cost less than restarting it.
+- DL-201 the DL-75 review over the navigation remodel, and the rework it
+  asked for (2026-09-11/12; the gate had been reporting a review due since
+  before DL-199, over `arch-review/2026-09-09T163229Z..d710e08` -- DL-196's
+  rulings, then DL-197, DL-198, DL-199 and DL-200). The window is 3,379
+  insertions, 1,033 of them the explore template; the rest is its two test
+  files, the decision log and the 1.5.0 bump.
+  THE PASSES. Three, each read-only and each with its own record
+  (reviews/2026-09-11-arch-review-{boss,opus,codex,merged}.md in the owner's
+  store): the main session's own; a fresh-context Opus agent with no
+  inherited context; and Codex at xhigh, fresh context. The Codex transcript
+  does not expose a model identity -- gpt-6-astra was requested and cannot be
+  proved from the jsonl -- so this is NOT recorded as a second-vendor read.
+  The mechanical gate was clean and none of the three repeated it.
+  THE VERDICT: the remodel's architecture is accepted. No new state model, no
+  command framework, no template split. All three passes reached that
+  independently. The debt was continuation plumbing and rules with more than
+  one owner. Nine findings acted on, in three slices, every one
+  behaviour-preserving.
+  SLICE 1, dead plumbing (4edfd59, 88be4ac). The `after` continuation went
+  dead INSIDE this window: find supplied it at the baseline and stopped when
+  DL-199 gave find its own report. `relayoutOrFit` and `afterHiding` were one
+  rule under two names -- same toggle, same call when on, one `cy.fit` apart
+  when off -- and are now `settleAfterHide(op, fit)`, where the boolean IS
+  DL-196's rule. `elkLayout`'s merge loop was dead from 2026-08-11, before
+  this window. One `fitVisible()` for four identical calls, and
+  `clearHighlights` calls `unhighlightNodes` instead of inlining it. The
+  follow-up commit restored the sentence saying WHY the toggle defaults off,
+  which the merge had dropped, and passed `fitVisible` to `wire` directly: the
+  closure around it existed only to satisfy a pin asserting the literal
+  handler text, and a closure whose whole body forwards is what this review
+  removes. The pin is loosened to the weakest form that still proves the
+  control is wired above the optional plugin (DL-77).
+  SLICE 2, one owner per fold rule (6bb4c21, 0f4470b). `repairFold()` is the
+  six synchronous repairs both fold handlers spelled, so a repair is added
+  once; it stays synchronous, because the edge unselectify and the proxies
+  must be true before the next frame while the deferred tick is for geometry
+  after the extension's operation. `reportAfterFold(expanded, fn)` owns the
+  branch five membership ops each remembered -- DL-199's own review had
+  already caught one of them forgetting it. `foldedNodes` takes roots and
+  serves `unhighlightSelected`, `hideNodes` and the aftercollapse handler;
+  `refreshProxies` and find's predicate keep their own walks, because both
+  need to know WHICH box holds a target and a flat union cannot say.
+  `foldedInto` is deleted and `lockMemberNodes` reaches its members through
+  `expandToReach`, the mechanism find and select-highlighted already use;
+  `memberAnchor` stays as the file's one chain walk.
+  THE ADVERSARIAL PASS ON SLICE 2, fresh context, read-only, cleared both
+  rulings the implementer had made alone and did it by reading the vendored
+  bundle rather than the summary: `removeChildren` recurses with the same
+  accumulator, so a collapsing box flattens its whole descendant subtree onto
+  itself, which is what makes `getCollapsedChildrenRecursively` reach a
+  member two levels down where the deleted chain walk did. Had the extension
+  stored only direct children the deletion would have lost that member. It
+  also confirmed the `clearInspected` reordering is inert -- `inspected` is
+  written in two functions and read only by the stylesheet, and no repair in
+  the tail adds, removes or copies an edge. Three residuals, all closed in
+  0f4470b: a REAL performance regression (the box scan ran per member set,
+  and the selection form multiplied it by the selection; a guard now tests
+  exactly the two states the deleted function handled, so the common case
+  costs what it used to), a fourth spelling of the folded union in the
+  aftercollapse handler, and an untested branch.
+  THE UNTESTED BRANCH is the one worth naming. `ids[box.id()]` covers a lock
+  member that is ITSELF a live collapsed box -- reachable, because a hub's
+  members are job names and a box job can declare a resource. It shipped on
+  reasoning alone; no fixture reached it, the locks corpus having one flat
+  box and no box member. A new page pins it, with a hub whose three members
+  sit in the three states a membership op must reach: drawn, two boxes deep,
+  and a box itself. New rather than an extension of `viz_locks.jil`, whose
+  page is module-scoped and shared by forty tests. With the branch removed
+  the test fails in three engines and nothing else moves.
+  SLICE 3, one spelling per list (e0e94b8). `SELECTION_WALKS` is the four
+  walks that take the selection as their seed, consumed by the control ids,
+  the canvas disabling, the toolbar wiring and the canvas menu items; the
+  label rewrite runs it for the `menu-` half and still walks all six for the
+  node labels. That dropped two `setMenuLabel` calls for `menu-neighbours`
+  and `menu-both-trees`, which have no item to find and were swallowed by a
+  null check -- Codex found them, and neither other pass did. The list must
+  never grow to all six: DL-199 leaves both cones and neighbours as
+  compositions, and the comment says so. `openMenu()` returns the open menu
+  element or null and serves both askers, so the tapstart stash and Escape
+  cannot drift on what "open" means -- the rule that dismissing a menu never
+  changes the selection depends on their agreeing. `withoutLocksOff` is the
+  one locks-off filter, over three spellings, one of them computed twice;
+  only lock elements ever carry `lockoff`, which is what makes the third
+  site equivalent, and that fact is now written where the helper is.
+  THREE RULINGS split the reviewers and are settled here. (1) Codex wanted
+  the two settle functions kept; two passes said merge, and the merge wins --
+  Codex did not address that they differ by one line. (2) On the report
+  protocol, the safe helper lands now and Codex's stronger form is DEFERRED:
+  giving `afterFold` an immediate path removes the `expanded` flag and the
+  `{nodes, expanded}` shapes entirely, and is the better end state, but an op
+  that expands nothing while an earlier fold is pending would begin reporting
+  after that fold. Reopen when a sixth membership op wants the flag, or when
+  the tuples cost a reader again; it needs its own three-engine
+  verification. (3) Codex put `foldedInto` and `memberAnchor` in
+  leave-alone; its objection was sound against MERGING them and did not
+  answer the deletion, which is what landed.
+  DECLINED, each with the trigger that reopens it. `fanInTree` and
+  `fanOutTree` stay two mirrored loops -- all three passes declined them
+  independently: the mirror encodes SEM-10 against SEM-12, and collapsing it
+  would pull siblings into a member's fan-in through a `box_success` edge
+  (fold if a third direction ever appears). `SELECTION_CONTROLS` is NOT a
+  restatement of the emitted `disabled` attributes: the array is the
+  membership and the attribute is the load-time state DL-200 ruled, two facts
+  (reopen if a control is ever added to one and not the other). The menu
+  items' initial `content` strings are always overwritten by the label
+  rewrite, but the plugin needs the field to build the element -- a dead
+  value in a required field. The three sites that name a node for the op line
+  each know their operand's kind statically; only `hideThisNode` needs the
+  conditional. The "stands for" row is built twice, but the em-dash against
+  the arrow is NOT an inconsistency: a lock orders nothing and takes no
+  arrowhead anywhere in this grammar. The seven `driven_*` browser fixtures
+  stay: three mechanical lines each, and a factory buys indirection pytest
+  does not reward.
+  LOAD-BEARING, left alone on purpose and agreed by all three passes: the
+  three layers as three channels, with `hl-proxy` a derived mark rather than
+  a second highlight set, because no cytoscape selector can ask "has a folded
+  descendant carrying `hl`"; `hidden` and `lockoff` as two independent
+  `display:none` classes, which compose where one class with a precedence
+  rule would be the flag matrix this review hunts; the bounded selection
+  history at event boundaries (`justUnselected`, the collapse scratch,
+  `menuKeep`), which recovers facts the renderer changed before the page
+  could read them; the deferred geometry, which follows the behaviour
+  DL-196's review proved against the bundle; the load path's two layouts and
+  the `loading` flag defended at four entries; `disabled` carrying two
+  independent reasons over disjoint sets, which is what keeps a precedence
+  rule from being needed, and which is worth watching; the `#stats` line
+  built from two text nodes and a real button, because rebuilding it drops
+  keyboard focus under the operator; the hub spiral, `node[!lock]`, the
+  `peered` class and the `guarded`/`wire` pair; and the citation comments,
+  which are why a 2,100-line file is readable.
+  A TEST-HARNESS FACT found while verifying slice 1 and confirmed twice
+  after: `tests/test_viz_explore_browser.py` is NOT `-k`-safe. Its page
+  fixtures are module-scoped and the tests inherit each other's page state,
+  so a filtered subset reports failures that pass in a full run -- the same
+  three failures appear against an unmodified tree. Anyone verifying that
+  module runs the whole of it. The note is in the commit messages where a
+  bisecting reader will meet it.
+  THE GATE: 3652 passed, 6 skipped, 2 xfailed; 100% coverage; ruff, ruff
+  format --check, mypy and arch_check clean; the opt-in browser suite 300
+  passed in chromium, webkit and firefox (291 before: three tests by three
+  engines). The rework is 275 insertions and 119 deletions over five commits.
+  ALLOCATION. Three passes for the review: the main session's own, one
+  fresh-context Opus agent, one Codex at xhigh. For the rework, a Sonnet
+  implementer on slices 1 and 3, whose every edit was named and whose gate is
+  the review; an Opus implementer on slice 2, with a fresh-context
+  adversarial reviewer, because repair order and report timing are cheap to
+  get wrong and expensive to notice. The rework on slice 2 went back to the
+  implementing agent, which held the context. The main session read every
+  diff against the sheet and ruled on the disagreements; it reran the gates
+  only for the two lines it wrote itself. Tag arch-review/2026-09-11T232315Z.
