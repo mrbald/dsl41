@@ -195,6 +195,23 @@ def _click(d: Driven, selector: str) -> None:
     d.page.locator(selector).click(timeout=_CLICK_TIMEOUT_MS, force=True)
 
 
+def _control_ready(d: Driven, selector: str) -> None:
+    """Wait for a control the selection or the highlight gates to catch up.
+
+    `refreshControls` runs inside the debounced `#stats` rewrite, one task
+    after the selection event that triggered it (DL-199's coalescer), so a
+    click issued in the same breath as a raw `.select()` would land on a
+    control still carrying `disabled` from DL-200. An operator cannot
+    outrun a task boundary; a test driving the page globals can. Waiting on
+    the control itself, rather than on a duration, is the same discipline
+    the layout waits use."""
+    d.page.wait_for_function(
+        "(sel) => { const el = document.querySelector(sel); return !!el && !el.disabled; }",
+        arg=selector,
+        timeout=_CLICK_TIMEOUT_MS,
+    )
+
+
 def _show_all(d: Driven) -> None:
     """Reset the shared page between tests through its own control."""
     _click(d, "#show-all")
@@ -320,6 +337,82 @@ def _detail_rows(d: Driven) -> dict[str, str]:
         "tr => [tr.querySelector('th').textContent, tr.querySelector('td').textContent])"
     )
     return dict(rows)
+
+
+# ------------------------------------------------------- DL-196 slice 4 helpers
+
+#: the eleven selection-dependent controls plus the stats button, and the two
+#: highlight-dependent ones -- the page's own `SELECTION_CONTROLS` and
+#: `HIGHLIGHT_CONTROLS`, kept here as literals rather than read off the page so
+#: a test that pins the wrong id fails loudly instead of agreeing with itself.
+_SELECTION_CONTROLS = [
+    "sel-fan-in",
+    "sel-fan-in-tree",
+    "sel-fan-out",
+    "sel-fan-out-tree",
+    "sel-lock-peers",
+    "clear-selection",
+    "highlight-selected",
+    "unhighlight-selected",
+    "hide-selected",
+    "hide-others",
+    "fit-selection",
+]
+_HIGHLIGHT_CONTROLS = ["select-highlighted", "clear-highlights"]
+_CANVAS_MENU_WALKS = ["menu-fan-in", "menu-fan-out", "menu-fan-in-tree", "menu-fan-out-tree"]
+
+
+def _disabled_map(d: Driven, ids: list[str]) -> dict[str, bool]:
+    result: dict[str, bool] = d.page.evaluate(
+        "(ids) => Object.fromEntries(ids.map(id => [id, document.getElementById(id).disabled]))",
+        ids,
+    )
+    return result
+
+
+def _menu_open(d: Driven) -> bool:
+    open_: bool = d.page.evaluate(
+        "() => { const m = document.querySelector('.cy-context-menus-cxt-menu');"
+        " return !!m && getComputedStyle(m).display !== 'none'; }"
+    )
+    return open_
+
+
+def _rendered_bbox(d: Driven, selector: str) -> dict[str, float]:
+    """The on-screen box of `selector` -- a page-global expression this module
+    controls (e.g. "cy.$id('lk_h')" or "cy.nodes(':visible')"), never test
+    input -- for a real mouse marquee: `renderedBoundingBox()` plus the `#cy`
+    client rect, the same construction `_client_point` uses for one point."""
+    box: dict[str, float] = d.page.evaluate(
+        f"() => {{ const b = {selector}.renderedBoundingBox();"
+        " const r = document.getElementById('cy').getBoundingClientRect();"
+        " return {x1: r.left + b.x1, y1: r.top + b.y1, x2: r.left + b.x2, y2: r.top + b.y2}; }"
+    )
+    return box
+
+
+def _drag(
+    d: Driven,
+    start: dict[str, float],
+    end: dict[str, float],
+    *,
+    modifier: str | None = None,
+    steps: int = 8,
+) -> None:
+    """A real mouse drag from `start` to `end`, moved in steps so the renderer
+    sees motion rather than a jump. `modifier` (Shift, Control or Meta -- the
+    marquee's own set, DL-196) is held down before the mousedown and released
+    only after the mouseup, so a marquee driven through this helper always
+    ADDS: cytoscape's own rule is that the box adds while the modifier is
+    still held at mouseup (verified in DL-196's review of the bundle)."""
+    if modifier:
+        d.page.keyboard.down(modifier)
+    d.page.mouse.move(start["x"], start["y"])
+    d.page.mouse.down()
+    d.page.mouse.move(end["x"], end["y"], steps=steps)  # interpolated: the renderer sees motion
+    d.page.mouse.up()
+    if modifier:
+        d.page.keyboard.up(modifier)
 
 
 # ----------------------------------------------------------------------- tests
@@ -911,6 +1004,43 @@ def test_the_members_follow_a_collapsed_box_that_was_dragged(driven_trace: Drive
     assert _positions(d, outside) == outside_before, d.engine
 
 
+def test_the_members_follow_a_collapsed_box_dragged_with_a_real_pointer(
+    driven_trace: Driven,
+) -> None:
+    """G8, carried from DL-198's review into this slice: the same property as
+    the test above, this time through a REAL mouse drag of the collapsed box
+    rather than `node.position()`. The box's own model-space delta is read
+    off the page rather than assumed from the screen-pixel one, since a drag
+    moves a node by the screen delta divided by the current zoom. Starts and
+    ends fully expanded."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    members, outside = ["M", "N", "IM"], ["C", "D", "P", "Q"]
+    before, outside_before = _positions(d, members), _positions(d, outside)
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
+    box_before = _positions(d, ["B"])["B"]
+
+    start = _client_point(d, "B")
+    _drag(d, start, {"x": start["x"] + 150, "y": start["y"] + 100})
+    d.page.wait_for_timeout(200)
+    box_after = _positions(d, ["B"])["B"]
+    box_delta = [round(box_after[0] - box_before[0]), round(box_after[1] - box_before[1])]
+    assert box_delta != [0, 0], f"{d.engine}: the pointer drag did not move the box"
+
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    after = _positions(d, members)
+    delta = {
+        k: [round(after[k][0] - before[k][0]), round(after[k][1] - before[k][1])] for k in members
+    }
+    assert delta == {k: box_delta for k in members}, (d.engine, delta, box_delta)
+    assert _positions(d, outside) == outside_before, d.engine
+
+
 def test_the_arrange_button_lays_the_drawn_graph_out_again(driven_trace: Driven) -> None:
     """Since a fold moves nothing, the operator needs one control that does.
     Drag a node far out of place -- `node.position` is where a drag ends --
@@ -967,6 +1097,7 @@ def test_sel_fan_in_tree_from_two_seeds_matches_the_union_of_each_seeds_tree(
     _click(d, "#clear-selection")
     expected = sorted(set(_tree_ids(d, "C", "fanInTree")) | set(_tree_ids(d, "D", "fanInTree")))
     d.page.evaluate("() => { cy.$id('C').select(); cy.$id('D').select(); }")
+    _control_ready(d, "#sel-fan-in-tree")
     _click(d, "#sel-fan-in-tree")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _selected_ids(d) == expected, d.engine
@@ -990,6 +1121,7 @@ def test_sel_fan_in_tree_walks_through_a_collapsed_box_then_hide_others_keeps_it
     assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('D').select(); }")
+    _control_ready(d, "#sel-fan-in-tree")
     _click(d, "#sel-fan-in-tree")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _selected_ids(d) == ["B", "D", "P", "Q"], d.engine
@@ -1646,6 +1778,7 @@ def test_hide_others_collapses_a_selected_box_with_no_selected_member(
     _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_box').select(); }")
+    _control_ready(d, "#hide-others")
     _click(d, "#hide-others")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert d.page.evaluate("() => cy.$id('lk_x2').length") == 0, (
@@ -1972,6 +2105,7 @@ def test_a_highlighted_folded_member_shows_a_proxy_and_select_highlighted_expand
     _click(d, "#clear-selection")
     _click(d, "#clear-highlights")
     d.page.evaluate("() => { cy.$id('lk_d').select(); }")
+    _control_ready(d, "#highlight-selected")
     _click(d, "#highlight-selected")
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     d.page.wait_for_timeout(_SETTLE_MS)
@@ -2125,6 +2259,7 @@ def test_hide_selected_unselects_and_stats_selected_fits_to_the_selection(
     _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    _control_ready(d, "#hide-selected")
     _click(d, "#hide-selected")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _selected_ids(d) == [], d.engine
@@ -2133,6 +2268,7 @@ def test_hide_selected_unselects_and_stats_selected_fits_to_the_selection(
     _show_all(d)
 
     d.page.evaluate("() => { cy.$id('lk_b').select(); cy.zoom(4); }")
+    _control_ready(d, "#stats-selected")
     _click(d, "#stats-selected")
     d.page.wait_for_timeout(300)
     zoom = d.page.evaluate("() => cy.zoom()")
@@ -2197,6 +2333,7 @@ def test_hide_selected_on_a_collapsed_box_hides_what_it_stands_for(driven_locks:
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     d.page.wait_for_timeout(_SETTLE_MS)
     d.page.evaluate("() => { cy.$id('lk_box').select(); }")
+    _control_ready(d, "#hide-selected")
     _click(d, "#hide-selected")
     d.page.wait_for_timeout(_SETTLE_MS)
     d.page.fill("#search", "lk_x2")
@@ -2316,6 +2453,7 @@ def test_sel_lock_peers_button_adds_hub_members_and_job_peers(driven_locks: Driv
     _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lock:r:R_ONE').select(); }")
+    _control_ready(d, "#sel-lock-peers")
     _click(d, "#sel-lock-peers")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _selected_ids(d) == ["lk_x1", "lk_x2", "lock:r:R_ONE"], d.engine
@@ -2323,6 +2461,7 @@ def test_sel_lock_peers_button_adds_hub_members_and_job_peers(driven_locks: Driv
 
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_c').select(); }")
+    _control_ready(d, "#sel-lock-peers")
     _click(d, "#sel-lock-peers")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _selected_ids(d) == ["lk_c", "lk_d"], d.engine
@@ -2340,6 +2479,7 @@ def test_hide_selected_keeps_the_viewport_and_hide_others_fits(driven_locks: Dri
     _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    _control_ready(d, "#hide-selected")
     view = _viewport(d)
     _click(d, "#hide-selected")
     d.page.wait_for_timeout(_SETTLE_MS)
@@ -2353,6 +2493,378 @@ def test_hide_selected_keeps_the_viewport_and_hide_others_fits(driven_locks: Dri
     assert _viewport(d) != view, d.engine
     _show_all(d)
     _click(d, "#clear-selection")
+
+
+# --------------------------------------- DL-196 slice 4: marquee, Escape, disabled
+#
+# All of this block uses `driven_locks`: 18 jobs + 4 hubs = 22 nodes once
+# everything is drawn. Every test restores the selection, the highlights and
+# any class it added.
+
+
+def test_a_plain_drag_on_the_background_pans_and_selects_nothing(driven_locks: Driven) -> None:
+    """DL-196 THE MOUSE: plain drag pans, as on every map."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    view_before = _viewport(d)
+    start = _canvas_point(d, 10, 10)  # inside the fit padding: guaranteed background
+    end = _canvas_point(d, 32, 28)
+    _drag(d, start, end)
+    d.page.wait_for_timeout(200)
+    assert _viewport(d)[:2] != view_before[:2], f"{d.engine}: the drag did not pan"
+    assert _selected_ids(d) == [], d.engine
+    d.page.evaluate(
+        "(p) => { cy.pan({x: p[0], y: p[1]}); }", [view_before[0], view_before[1]]
+    )  # restore: an exact pan set, no animation involved
+    d.page.wait_for_timeout(200)
+
+
+def test_shift_drag_box_around_the_whole_graph_selects_every_drawn_node(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: shift+drag adds a region; the marquee reaches every drawn node,
+    hub or job, and takes no edge (edges are unselectify'd, DL-196), and pans
+    nothing -- only a plain drag does that."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    view_before = _viewport(d)
+    box = _rendered_bbox(d, "cy.nodes(':visible')")
+    _drag(
+        d,
+        {"x": box["x1"] - 20, "y": box["y1"] - 20},
+        {"x": box["x2"] + 20, "y": box["y2"] + 20},
+        modifier="Shift",
+    )
+    d.page.wait_for_timeout(200)
+    assert _counts(d)["selected"] == 22, (d.engine, _counts(d))
+    assert d.page.evaluate("() => cy.edges(':selected').length") == 0, d.engine
+    assert _viewport(d) == view_before, f"{d.engine}: the marquee panned the view"
+    _click(d, "#clear-selection")
+
+
+def test_shift_drag_box_around_one_node_adds_to_the_selection(driven_locks: Driven) -> None:
+    """DL-196: the box ADDS -- with `lk_b` already selected, a box around
+    `lk_h` alone leaves both."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_b').select(); }")
+    box = _rendered_bbox(d, "cy.$id('lk_h')")
+    _drag(
+        d,
+        {"x": box["x1"] - 6, "y": box["y1"] - 6},
+        {"x": box["x2"] + 6, "y": box["y2"] + 6},
+        modifier="Shift",
+    )
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_b", "lk_h"], d.engine
+    _click(d, "#clear-selection")
+
+
+def test_a_hidden_node_is_immune_to_the_marquee(driven_locks: Driven) -> None:
+    """DL-196: the marquee reaches drawn nodes only. `lk_h` is boxed exactly
+    where it sits, but hidden first, so nothing is selected."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    box = _rendered_bbox(d, "cy.$id('lk_h')")
+    d.page.evaluate("() => { cy.$id('lk_h').addClass('hidden'); }")
+    d.page.wait_for_timeout(200)
+    try:
+        _drag(
+            d,
+            {"x": box["x1"] - 6, "y": box["y1"] - 6},
+            {"x": box["x2"] + 6, "y": box["y2"] + 6},
+            modifier="Shift",
+        )
+        d.page.wait_for_timeout(200)
+        assert _selected_ids(d) == [], d.engine
+    finally:
+        d.page.evaluate("() => { cy.$id('lk_h').removeClass('hidden'); }")
+    _click(d, "#clear-selection")
+
+
+def test_marquee_modifier_accepts_control_and_meta_too(driven_locks: Driven) -> None:
+    """DL-196's review of the bundle: the modifier set is shift, ctrl and cmd,
+    and it is not configurable -- not shift alone."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    box = _rendered_bbox(d, "cy.$id('lk_r')")
+    _drag(
+        d,
+        {"x": box["x1"] - 6, "y": box["y1"] - 6},
+        {"x": box["x2"] + 6, "y": box["y2"] + 6},
+        modifier="Control",
+    )
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_r"], (d.engine, "Control")
+    _click(d, "#clear-selection")
+
+    box = _rendered_bbox(d, "cy.$id('lk_q')")
+    _drag(
+        d,
+        {"x": box["x1"] - 6, "y": box["y1"] - 6},
+        {"x": box["x2"] + 6, "y": box["y2"] + 6},
+        modifier="Meta",
+    )
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_q"], (d.engine, "Meta")
+    _click(d, "#clear-selection")
+
+
+def test_shift_drag_starting_on_a_node_does_nothing(driven_locks: Driven) -> None:
+    """DL-196: the marquee starts on the background only -- a shift+drag that
+    starts ON a node does nothing at all, which is why the rule needed no
+    code of its own (the G5 verification ask). The node does not move and
+    nothing is selected."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    before = _positions(d, ["lk_g"])["lk_g"]
+    start = _client_point(d, "lk_g")
+    _drag(d, start, {"x": start["x"] + 80, "y": start["y"] + 60}, modifier="Shift")
+    d.page.wait_for_timeout(200)
+    after = _positions(d, ["lk_g"])["lk_g"]
+    assert after == before, (d.engine, before, after)
+    assert _selected_ids(d) == [], d.engine
+
+
+def test_marquee_replaces_the_selection_if_the_modifier_is_released_before_mouseup(
+    driven_locks: Driven,
+) -> None:
+    """cytoscape's own rule (DL-196's review of the bundle): the box ADDS to
+    the selection only while the modifier is still held at mouseup; released
+    early, the same drag ends as a plain box that REPLACES it instead --
+    `lk_b`, already selected, drops out."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_b').select(); }")
+    box = _rendered_bbox(d, "cy.$id('lk_h')")
+    d.page.keyboard.down("Shift")
+    d.page.mouse.move(box["x1"] - 6, box["y1"] - 6)
+    d.page.mouse.down()
+    d.page.mouse.move(box["x2"] + 6, box["y2"] + 6, steps=8)
+    d.page.keyboard.up("Shift")  # released BEFORE the button: this is the replace case
+    d.page.mouse.up()
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_h"], d.engine
+    _click(d, "#clear-selection")
+
+
+def test_dragging_a_selected_node_moves_the_whole_selection(driven_locks: Driven) -> None:
+    """DL-196: nodes stay grabbable, and a drag on a selected node moves the
+    whole selection -- manual placement, undone only by a layout run. A real
+    mouse drag of `lk_x3`; `lk_x4`'s model position moves by the same delta.
+    The exact numbers depend on the fit zoom, so only equality and
+    non-zero-ness are asserted, as the brief asks."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_x3').select(); cy.$id('lk_x4').select(); }")
+    before = _positions(d, ["lk_x3", "lk_x4"])
+    start = _client_point(d, "lk_x3")
+    _drag(d, start, {"x": start["x"] + 120, "y": start["y"] + 60})
+    d.page.wait_for_timeout(200)
+    after = _positions(d, ["lk_x3", "lk_x4"])
+    delta = {k: [after[k][0] - before[k][0], after[k][1] - before[k][1]] for k in before}
+    assert delta["lk_x3"] == delta["lk_x4"], (d.engine, delta)
+    assert delta["lk_x3"] != [0, 0], f"{d.engine}: the drag moved nothing"
+    _click(d, "#clear-selection")
+
+
+def test_selection_and_highlight_dependent_controls_track_the_layers(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: a control that reads the selection is disabled while nothing
+    is selected, one that reads the highlight while nothing is marked, and
+    `refreshControls` runs on every #stats rewrite. In order: at load (here,
+    nothing selected or highlighted), after the marquee selects one node,
+    after "highlight selected", after Escape clears the selection (the marks
+    survive), after "clear highlights" with a selection still present."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    _click(d, "#clear-highlights")
+
+    def assert_state(sel_disabled: bool, hl_disabled: bool, stage: str) -> None:
+        sel = _disabled_map(d, _SELECTION_CONTROLS)
+        hl = _disabled_map(d, _HIGHLIGHT_CONTROLS)
+        stats_disabled = _disabled_map(d, ["stats-selected"])["stats-selected"]
+        assert all(v == sel_disabled for v in sel.values()), (d.engine, stage, sel)
+        assert all(v == hl_disabled for v in hl.values()), (d.engine, stage, hl)
+        assert stats_disabled == sel_disabled, (d.engine, stage, "stats-selected")
+
+    assert_state(True, True, "at load")
+
+    box = _rendered_bbox(d, "cy.$id('lk_r')")
+    _drag(
+        d,
+        {"x": box["x1"] - 6, "y": box["y1"] - 6},
+        {"x": box["x2"] + 6, "y": box["y2"] + 6},
+        modifier="Shift",
+    )
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_r"], d.engine
+    assert d.page.inner_text("#stats-selected") == "1 selected", d.engine
+    assert_state(False, True, "after the marquee selects one node")
+
+    _click(d, "#highlight-selected")
+    d.page.wait_for_timeout(200)
+    assert_state(False, False, "after highlight-selected")
+
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == [], d.engine
+    assert_state(True, False, "after Escape clears the selection")
+
+    _click(d, "#clear-highlights")
+    d.page.wait_for_timeout(200)
+    assert_state(True, True, "after clear-highlights")
+
+
+def test_canvas_menu_items_are_selection_dependent_too(driven_locks: Driven) -> None:
+    """Codex review of slice 4: the four canvas-menu walks are the same ops as
+    their toolbar twins, through the plugin's own enableMenuItem /
+    disableMenuItem -- they start disabled at load and flip with the
+    selection, same as every other selection-dependent control."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    assert _disabled_map(d, _CANVAS_MENU_WALKS) == dict.fromkeys(_CANVAS_MENU_WALKS, True), d.engine
+    d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
+    d.page.wait_for_timeout(200)
+    assert _disabled_map(d, _CANVAS_MENU_WALKS) == dict.fromkeys(_CANVAS_MENU_WALKS, False), (
+        d.engine
+    )
+    _click(d, "#clear-selection")
+
+
+def test_escape_closes_a_menu_then_clears_a_focused_find_field_then_the_selection(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: Escape's three jobs, most local first. A menu open takes
+    precedence over the find field, which takes precedence over the
+    selection; dismissing a menu never touches the selection, and a second
+    right-click reopens it."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+
+    # 1. a menu open: Escape closes it and leaves the selection unchanged
+    d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    point = _client_point(d, "lk_g")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert _menu_open(d), f"{d.engine}: the menu never opened"
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert not _menu_open(d), f"{d.engine}: Escape did not close the menu"
+    assert _selected_ids(d) == ["lk_a"], d.engine
+    # ...and a second right-click opens it again
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert _menu_open(d), f"{d.engine}: the second right-click did not reopen the menu"
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    _click(d, "#clear-selection")
+
+    # 2. the find field focused and holding text: Escape empties it and
+    #    leaves the selection unchanged
+    d.page.evaluate("() => { cy.$id('lk_b').select(); }")
+    d.page.fill("#search", "lk_x")
+    d.page.evaluate("() => findField.focus()")
+    assert d.page.evaluate("() => document.activeElement.id") == "search", d.engine
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert d.page.input_value("#search") == "", d.engine
+    assert _selected_ids(d) == ["lk_b"], d.engine
+    _click(d, "#clear-selection")
+
+    # 3. neither a menu nor a find field holding text: Escape clears the
+    #    selection
+    d.page.evaluate("() => { cy.$id('lk_c').select(); document.activeElement.blur(); }")
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == [], d.engine
+
+
+def test_escape_closes_a_menu_without_touching_a_focused_find_field(driven_locks: Driven) -> None:
+    """Codex review of slice 4: Escape consumes exactly one layer per press.
+    `preventDefault` stops webkit's own default action on Escape -- a search
+    input clears itself natively -- which used to empty the find field in the
+    same keystroke that closed the menu. Fill the field, focus it, open a
+    menu, refocus the field, and one Escape must close the menu alone; a
+    second Escape then empties the field."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.fill("#search", "lk_x")
+    d.page.evaluate("() => findField.focus()")
+    point = _client_point(d, "lk_g")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert _menu_open(d), f"{d.engine}: the menu never opened"
+    d.page.evaluate("() => findField.focus()")  # the right-click may have moved focus
+    assert d.page.evaluate("() => document.activeElement.id") == "search", d.engine
+
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert not _menu_open(d), f"{d.engine}: Escape did not close the menu"
+    assert d.page.input_value("#search") == "lk_x", (
+        d.engine,
+        "the field was emptied on the same Escape that closed the menu",
+    )
+
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(200)
+    assert d.page.input_value("#search") == "", d.engine
+
+
+def test_escape_during_a_held_background_click_clears_the_pending_menu_stash(
+    driven_locks: Driven,
+) -> None:
+    """Codex review of slice 4, the obscure race: a background mousedown
+    while a menu is open stashes the current selection (it is restored one
+    tick after the tap completes, DL-196's menu-dismissal rule) -- and the
+    menu itself is gone by the time Escape is checked, closed already as
+    part of that same tapstart. Escape still finds a selection to act on and
+    clears it, and now clears the pending stash too, so releasing the mouse
+    does not put the selection back. Before the fix, the release did."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    point = _client_point(d, "lk_g")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert _menu_open(d), f"{d.engine}: the menu never opened"
+
+    bg = _canvas_point(d, 10, 10)
+    d.page.mouse.move(bg["x"], bg["y"])
+    d.page.mouse.down()
+    d.page.wait_for_timeout(100)
+    d.page.keyboard.press("Escape")
+    d.page.wait_for_timeout(100)
+    d.page.mouse.up()
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == [], f"{d.engine}: the release put the cleared selection back"
 
 
 def test_no_uncaught_page_errors_on_the_locks_page(driven_locks: Driven) -> None:

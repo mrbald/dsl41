@@ -12567,3 +12567,116 @@ relitigate an entry; append a new one.
   as the patches that made it, caught two defects both reviews had missed:
   an op label that printed two counts, and one that named the selection
   after the op had already grown it.
+- DL-200 DL-196 slice (4): the marquee, Escape, the disabled states and the
+  hints (2026-09-11). The navigation remodel is complete.
+  THE MARQUEE is one line, `boxSelectionEnabled: true`, and everything else
+  about it belongs to the renderer, proven in all three engines before any
+  rule was written: a plain drag still pans, because a box starts only while
+  shift, ctrl or cmd is held; the box ADDS to what is selected; it reaches
+  drawn nodes only, so a hidden node and a folded member are immune; and it
+  takes no edge, those being unselectable since DL-199. A drag on a selected
+  node moves the whole selection, also the renderer's, and that is manual
+  placement, which only a layout run disturbs -- there is no undo, and
+  arrange is the recovery.
+  DL-196'S MARQUEE ASK IS ANSWERED, and its sentence stands. The second
+  review suspected "the marquee starts on the background only" of being an
+  added restriction, because the renderer starts a modifier box from a
+  grabbed node; it does not. A shift+drag that starts on a node does nothing
+  at all in chromium, webkit or firefox -- the node does not move and
+  nothing is selected -- so the rule needed no code, and none was written.
+  THE MODIFIER the hint names is shift, and that is deliberate rather than
+  arbitrary: ctrl and cmd both work, but a hardware ctrl+click on macOS is
+  translated to a right-click by the operating system before the page sees
+  it, so ctrl is the one modifier whose meaning is not the page's to state.
+  This is the other half of DL-196's ctrl+click ask, which DL-199 left open
+  because a synthetic ctrl+click opens no menu under playwright: the two
+  gestures do not collide, a click without movement reaching the menu path
+  and a drag reaching the box path, and the page documents the modifier that
+  means the same thing everywhere.
+  ESCAPE has three jobs in one order, most local first, so it never reaches
+  past what is in front of the operator: it closes an open menu; else, if
+  the find field has the focus and holds text, it empties the field and its
+  note; else it clears the selection. The menu is closed through the DOM
+  element `menuIsOpen` already asks about -- the plugin's own dismissal is a
+  tapstart handler and it exposes no call for it -- and it opens again
+  afterwards, which is asserted rather than assumed.
+  THE DISABLED STATES. Eleven controls whose op reads the selection, and the
+  `#stats` count button, are disabled while nothing is selected; the two
+  that read the highlight are disabled while nothing is marked. They carry
+  `disabled` in the emitted markup, because at load neither layer holds
+  anything, and every `#stats` rewrite refreshes them -- which is every op
+  and every selection change, the one place that already runs at exactly
+  those moments. "Hide others" is the one DL-196 named first, and DL-199's
+  interim behaviour for it, doing nothing and saying so, is now unreachable
+  from the page; the guard stays in the code, where a page-global caller can
+  still reach it.
+  THE HINTS are two lines now: what a click, a shift+click, a shift+drag, a
+  right-click, a double-click and Escape do; then that a drag pans, that
+  dragging a selected node moves the whole selection, that nothing else
+  moves a node but arrange, and that there is no undo. The README paragraph
+  gains the marquee, Escape, the disabled rule and the no-undo sentence.
+  THE REVIEW was Codex gpt-6-astra at high, fresh context, over the
+  uncommitted diff, told what a three-engine probe had already settled and
+  told to run nothing (record: reviews/2026-09-11-dl196-slice4-codex-{brief,
+  r1}.md in the owner's store). No blocker, one major, five minors and a
+  nit; every one acted, and each fix verified in the three engines before it
+  was believed. The major was a real two-layer Escape: with the find field
+  focused and a menu open, the handler closed the menu and the browser's own
+  Escape emptied the field underneath it, webkit's search input clearing
+  itself by specification, so the handler now takes the event. The four
+  canvas walks were the toolbar's ops without the toolbar's disabling, and
+  now follow it through the plugin's own enable and disable calls. Escape
+  clearing the selection was the one op that could still run inside the load
+  window, and it could be undone a moment later by a menu dismissal still in
+  flight -- the press now clears the stash and stays out of the window. Two
+  claims in the hint and the README were false as written and are now
+  narrowed: a node moves when a LAYOUT runs, which a hide op does with
+  "arrange after hiding" on, and the find field Escape empties is the one
+  the operator is typing in. The nit was the marquee comment, which said the
+  box adds without saying that the renderer adds only while the modifier is
+  still held at mouseup, and replaces when it was let go first -- true in
+  all three engines, and now stated where the reader of that line is.
+  RULED HERE: an EMPTY focused find field has nothing to clear, so Escape
+  passes it and clears the selection instead. DL-196 orders the three jobs
+  without saying whether a branch that cannot act still consumes the press;
+  a branch that does nothing is not an answer to the key.
+  OWED AFTER THE REMODEL, which this entry completes: one architecture
+  review over the whole of it, DL-196 through DL-200, which arch_check has
+  been reporting due since before DL-199; and the next release note's two
+  qualifications, that a fold re-places the lock hubs and that an expand of
+  a threshold-folded box can land its members on neighbours the second
+  load-time layout packed closer, both of which the v1.5.0 tag body left
+  out.
+  THE TESTS. The browser module goes from 83 to 97. New: a plain drag pans
+  and selects nothing; a box around the whole drawn graph takes every drawn
+  node and no edge; a box around one node adds it to what was selected; a
+  hidden node is immune; ctrl and cmd serve as the modifier; a modifier drag
+  that starts on a node does nothing; a modifier released before the button
+  replaces rather than adds; a plain drag on a selected node moves the whole
+  selection by one delta; the two layers' controls tracked through load,
+  marquee, highlight, Escape and clear; the canvas items disabled with them;
+  Escape's three jobs in order, the menu kept from the focused field, and
+  the held-background-click case that used to put a cleared selection back.
+  The members of a collapsed box dragged with a REAL pointer follow it on
+  the expand -- DL-198 claimed "dragged" for a test that set the position
+  directly, and the pointer version now sits beside it, which was the second
+  review's G8. One emitter test pins the marquee flag, the disabled markup,
+  the control lists and the Escape handler by presence.
+  A TEST-SIDE RACE the disabling exposed: eight tests selected through the
+  page globals and clicked a gated control in the same breath, before the
+  debounced `#stats` rewrite had enabled it. An operator cannot outrun a
+  task boundary and a test can, so the tests wait -- on the control's own
+  disabled flag, not on a duration, the discipline the layout waits already
+  follow.
+  THE GATE: 3652 passed, 6 skipped, 2 xfailed; the opt-in browser suite 291
+  passed in chromium, webkit and firefox (249 before: 14 more tests by three
+  engines); ruff, ruff format --check and mypy clean; arch_check clean and
+  reporting a review due, 2,904 lines changed since the
+  arch-review/2026-09-09T163229Z tag.
+  ALLOCATION. The main session wrote the page core and ran the probes; one
+  fresh-context Codex reviewer at high effort, told to run nothing; a Sonnet
+  implementer for the tests, briefed from a verified expectation table and
+  messaged once mid-flight when the review's fixes changed the page under
+  it. The main session ruled on every finding, made every fix, and ran the
+  gates when the test agent lost its connection twice. Both times its edits
+  were on disk and finishing them cost less than restarting it.

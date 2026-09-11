@@ -994,6 +994,36 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     assert "afterFold();" in page[expand_at : page.index("} catch (err) {", expand_at)]
 
 
+def test_to_explore_html_pins_the_marquee_selection_controls_and_escape() -> None:
+    # DL-196 slice (4): the marquee is the renderer's own (`boxSelectionEnabled:
+    # true`); eleven selection-dependent controls and the stats button, plus two
+    # highlight-dependent ones, start `disabled` in the markup and are refreshed
+    # on every #stats rewrite (`refreshControls`, `SELECTION_CONTROLS`); Escape
+    # closes a menu, else clears a focused find field, else clears the
+    # selection. Pinned by presence, not by count.
+    page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
+    assert "boxSelectionEnabled: true," in page
+    assert "var SELECTION_CONTROLS = [" in page
+    assert "function refreshControls(" in page
+    assert 'evt.key !== "Escape"' in page
+    for control in (
+        "sel-fan-in",
+        "sel-fan-in-tree",
+        "sel-fan-out",
+        "sel-fan-out-tree",
+        "sel-lock-peers",
+        "clear-selection",
+        "highlight-selected",
+        "unhighlight-selected",
+        "hide-selected",
+        "hide-others",
+        "fit-selection",
+        "select-highlighted",
+        "clear-highlights",
+    ):
+        assert f'id="{control}" disabled' in page, control
+
+
 def test_to_explore_html_carries_the_condition_grammar() -> None:
     # DL-191, the page half: the badge rule, the hollow arrowhead, the branch
     # ramp, the tree the panel renders, and the legend that states the default

@@ -59,6 +59,8 @@
   #find-note { color: #b45309; font-size: 0.85rem; }
   #stats button, #stats button:hover { border: 0; background: none; padding: 0;
              font: inherit; color: #1d4ed8; cursor: pointer; text-decoration: underline; }
+  /* disabled while nothing is selected: it must not read as something to click */
+  #stats button:disabled { cursor: default; text-decoration: none; }
 
   /* the condition tree in the details panel (DL-191) */
   #d-tree { margin-top: 0.5rem; font-size: 0.85rem; }
@@ -146,27 +148,27 @@
       <span id="find-note"></span>
     </span>
     <span class="group"><span class="glabel">selection</span>
-      <button type="button" id="sel-fan-in" title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
-      <button type="button" id="sel-fan-in-tree" title="add everything upstream of the selection">+ fan-in, transitive</button>
-      <button type="button" id="sel-fan-out" title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
-      <button type="button" id="sel-fan-out-tree" title="add everything downstream of the selection">+ fan-out, transitive</button>
-      <button type="button" id="sel-lock-peers" title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
-      <button type="button" id="select-highlighted" title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
-      <button type="button" id="clear-selection" title="select nothing; a click on the canvas does the same">clear selection</button>
+      <button type="button" id="sel-fan-in" disabled title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
+      <button type="button" id="sel-fan-in-tree" disabled title="add everything upstream of the selection">+ fan-in, transitive</button>
+      <button type="button" id="sel-fan-out" disabled title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
+      <button type="button" id="sel-fan-out-tree" disabled title="add everything downstream of the selection">+ fan-out, transitive</button>
+      <button type="button" id="sel-lock-peers" disabled title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
+      <button type="button" id="select-highlighted" disabled title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
+      <button type="button" id="clear-selection" disabled title="select nothing; a click on the canvas does the same">clear selection</button>
     </span>
     <span class="group"><span class="glabel">highlight</span>
-      <button type="button" id="highlight-selected" title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
-      <button type="button" id="unhighlight-selected" title="take the mark off the selected nodes">unhighlight selected</button>
-      <button type="button" id="clear-highlights" title="take the mark off every node, folded members included">clear highlights</button>
+      <button type="button" id="highlight-selected" disabled title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
+      <button type="button" id="unhighlight-selected" disabled title="take the mark off the selected nodes">unhighlight selected</button>
+      <button type="button" id="clear-highlights" disabled title="take the mark off every node, folded members included">clear highlights</button>
     </span>
     <span class="group"><span class="glabel">visibility</span>
-      <button type="button" id="hide-selected" title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
-      <button type="button" id="hide-others" title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
+      <button type="button" id="hide-selected" disabled title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
+      <button type="button" id="hide-others" disabled title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
       <button type="button" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
     </span>
     <span class="group"><span class="glabel">view</span>
       <button type="button" id="fit">fit</button>
-      <button type="button" id="fit-selection" title="fit the view to the selected nodes">fit selection</button>
+      <button type="button" id="fit-selection" disabled title="fit the view to the selected nodes">fit selection</button>
       <button type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
       <button type="button" id="collapse-all">collapse boxes</button>
       <button type="button" id="expand-all">expand boxes</button>
@@ -176,9 +178,16 @@
     <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input type="checkbox" id="locks" checked> locks</label>
     <span id="stats">laying out&hellip;</span>
     <span class="hint">click selects one node and opens its details, shift+click
-    toggles one &middot; right-click a node, or the canvas for the selection, to add
-    a walk &middot; double-click a box, or its corner cue, to collapse or expand
-    it &middot; drag pans, wheel zooms</span>
+    toggles one &middot; shift+drag the background selects a region, and adds it
+    &middot; right-click a node, or the canvas for the selection, to add a walk
+    &middot; double-click a box, or its corner cue, to collapse or expand it
+    &middot; Escape closes a menu, else empties the find field it is typing
+    in, else clears the selection</span>
+    <span class="hint">drag pans, wheel zooms &middot; dragging a selected node
+    moves the whole selection &middot; a node otherwise moves only when a
+    layout runs: at load, on &ldquo;arrange&rdquo;, or after a hide op with
+    &ldquo;arrange after hiding&rdquo; on &middot; there is no undo, and
+    arrange is the recovery</span>
     <span class="hint">all incoming arrows must hold (AND) unless the job
     carries &#8744; &middot; a bare n() is a lock and draws no arrow</span>
     <span class="hint">dotted gray = lock &middot; the tee marks the job that
@@ -470,7 +479,19 @@ var STYLE_TAIL = [
 var cy = cytoscape({
   container: document.getElementById("cy"),
   elements: { nodes: payload.nodes, edges: payload.edges },
-  boxSelectionEnabled: false,
+  /* The marquee (DL-196). Everything it needs is the renderer's own, proven
+     in all three engines: a plain drag still pans, because a box starts only
+     while shift, ctrl or cmd is held; the box ADDS to the selection while
+     that modifier is still held at mouseup, and replaces it when the
+     modifier was let go first; it reaches drawn nodes only, so a hidden node
+     and a folded member are immune; it takes no edge, those being
+     unselectify'd below; and a MODIFIER drag that starts on a node does
+     nothing at all, which is why "the marquee starts on the background only"
+     needed no code. A plain drag on a selected node moves the whole
+     selection -- also the renderer's -- and that is manual placement, which
+     only a layout run disturbs. There is no undo; arrange is the
+     recovery. */
+  boxSelectionEnabled: true,
   style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)
 });
 
@@ -654,6 +675,40 @@ statsButton.title = "fit the view to the selected nodes";
 statsButton.addEventListener("click", function () { fitSelection(); });
 var statsBuilt = false;
 
+/* A control whose op reads the selection is disabled while nothing is
+   selected, and one that reads the highlight while nothing is highlighted
+   (DL-196: "hide others first of all"). They start disabled in the markup --
+   at load neither layer holds anything -- and every #stats rewrite refreshes
+   them, which is every op and every selection change. A disabled control
+   cannot mislead about what the next click would act on, and it is the same
+   answer the keyboard gets. */
+/* set once the optional menu plugin is up; null means the page has no menu
+   (DL-77), and the four canvas walks it would carry do not exist either */
+var menuApi = null;
+
+var SELECTION_CONTROLS = ["sel-fan-in", "sel-fan-in-tree", "sel-fan-out",
+  "sel-fan-out-tree", "sel-lock-peers", "clear-selection", "highlight-selected",
+  "unhighlight-selected", "hide-selected", "hide-others", "fit-selection"];
+var HIGHLIGHT_CONTROLS = ["select-highlighted", "clear-highlights"];
+
+function refreshControls(selected, marked) {
+  SELECTION_CONTROLS.forEach(function (id) {
+    document.getElementById(id).disabled = !selected;
+  });
+  HIGHLIGHT_CONTROLS.forEach(function (id) {
+    document.getElementById(id).disabled = !marked;
+  });
+  statsButton.disabled = !selected;
+  /* the canvas menu's four walks are the same ops over the same seed, and
+     DL-196's rule names no exception for a menu */
+  if (menuApi) {
+    ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"].forEach(function (kind) {
+      if (selected) menuApi.enableMenuItem("menu-" + kind);
+      else menuApi.disableMenuItem("menu-" + kind);
+    });
+  }
+}
+
 function updateStats(op) {
   if (op !== undefined) lastOp = op;
   /* The load path owns #stats until its last layout stops: "laying out" is
@@ -685,6 +740,7 @@ function updateStats(op) {
   statsHead.nodeValue = head;
   statsButton.textContent = selectedNodes().length + " selected";
   statsTail.nodeValue = tail;
+  refreshControls(selectedNodes().length, marked.length);
 }
 
 /* Edge labels overlap at fit zoom on a bank-scale graph: hide them below
@@ -1942,6 +1998,39 @@ cy.on("tap", function (evt) {
   }, 0);
 });
 
+/* Escape, in DL-196's order: it closes an open menu, else it clears a find
+   field the operator is typing in, else it clears the selection. One key
+   with three jobs, most local first, so it never reaches past what is in
+   front of the operator. The menu is closed through the DOM, the same
+   element `menuIsOpen` asks about: the plugin's own dismissal is a tapstart
+   handler, and there is no public call for it. */
+document.addEventListener("keydown", function (evt) {
+  if (evt.key !== "Escape") return;
+  /* One layer per press. Without this the browser's own Escape runs too: in
+     webkit a search input clears itself, so closing a menu while the field
+     had the focus would empty the field as well. */
+  evt.preventDefault();
+  var menu = document.querySelector(".cy-context-menus-cxt-menu");
+  if (menu && getComputedStyle(menu).display !== "none") {
+    menu.style.display = "none";
+    return;
+  }
+  /* An EMPTY focused field has nothing to clear, so Escape moves on to the
+     selection rather than doing nothing at all: DL-196 orders the three
+     jobs, and a branch that cannot act is not the operator's answer. */
+  if (document.activeElement === findField && findField.value !== "") {
+    findField.value = "";
+    findNote.textContent = "";
+    return;
+  }
+  /* not inside the load window, where every other op is barred: clearing
+     would move the selection and the last-op line behind the readiness
+     signal (DL-199) */
+  if (loading || selectedNodes().empty()) return;
+  menuKeep = null;  /* a menu dismissal in flight must not put this selection back */
+  clearSelection();
+});
+
 function setMenuLabel(id, text) {
   var el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -1950,6 +2039,8 @@ function setMenuLabel(id, text) {
 try {
   menuItems.forEach(function (item) { item.onClickFunction = guarded(item.onClickFunction); });
   cy.contextMenus({ menuItems: menuItems });
+  menuApi = cy.contextMenus("get");
+  refreshControls(selectedNodes().length, highlighted().length);  /* the four canvas walks start disabled too */
   /* As the menu opens -- after the plugin's own cxttap handler has shown
      the items the target matches -- the labels name the seed: "select
      fan-in of JOB_A, transitive", "... of selection (7)". */
