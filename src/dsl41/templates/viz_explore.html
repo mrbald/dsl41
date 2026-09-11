@@ -1594,7 +1594,7 @@ try {
   });
   cy.on("expandcollapse.aftercollapse", function (evt) {
     var box = evt.target;
-    var folded = ec.getCollapsedChildrenRecursively(box).nodes();
+    var folded = foldedNodes(box);  /* the extension marks the box before it fires */
     box.scratch("_dsl41", { members: folded.length });
     folded.unselect();  /* the deeper members the extension left selected */
     if (box.scratch("_dsl41sel")) {
@@ -1825,10 +1825,22 @@ function runWalk(kind, seed, seedLabel) {
    into folded boxes. */
 
 function lockMemberNodes(hub) {
-  var list = hub.data("members") || [], ids = Object.create(null);
-  list.forEach(function (m) { ids[m.id] = true; });
-  var expanded = expandToReach(function (box) {
-    if (ids[box.id()]) return true;  /* a hub can name a box job, collapsed on its own */
+  var list = hub.data("members") || [], ids = Object.create(null), unreached = false;
+  list.forEach(function (m) {
+    ids[m.id] = true;
+    /* the two states that put a member behind a fold, and the only two: it
+       is out of the graph, so a box holds it, or it IS a collapsed box --
+       a hub can name a box job. A member drawn and not collapsed is
+       already reached, so with none in either state no box scan can find
+       work and skipping it gives the same answer. */
+    var el = cy.$id(m.id);
+    if (el.empty() || el.hasClass("cy-expand-collapse-collapsed-node")) unreached = true;
+  });
+  /* and the scan is what costs: it reads every collapsed box's whole folded
+     subtree, which this op runs once per hub -- and the selection form runs
+     once per selected node, and again per hub a selected job locks with. */
+  var expanded = unreached && expandToReach(function (box) {
+    if (ids[box.id()]) return true;
     return ec.getCollapsedChildrenRecursively(box).nodes()
       .some(function (n) { return ids[n.id()]; });
   });

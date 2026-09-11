@@ -2925,3 +2925,142 @@ def test_two_or_attributes_get_four_distinct_branch_colours(driven_two_attr: Dri
 def test_no_uncaught_page_errors_on_the_two_attribute_page(driven_two_attr: Driven) -> None:
     _ready(driven_two_attr)
     assert driven_two_attr.errors == [], f"{driven_two_attr.engine}: {driven_two_attr.errors}"
+
+
+# ----------------- DL-75 rework slice 2: a lock member behind a box (MAJOR)
+
+#: A resource hub whose three members sit in the three states a membership op
+#: has to reach: `lb_flat` is drawn, `lb_deep` is two boxes deep, and
+#: `lb_boxm` IS a box -- a box job can declare a resource, so a hub can name
+#: one, and collapsed it stands on the canvas holding a non-member. The locks
+#: corpus has neither shape: its one box is flat and no box is a member.
+_LOCK_BOX_TEXT = """insert_resource: R_BOX
+res_type: R
+amount: 3
+
+insert_job: lb_seed
+job_type: c
+command: /opt/lb_seed.sh
+machine: m1
+date_conditions: 1
+days_of_week: all
+start_times: "05:00"
+
+insert_job: lb_boxm
+job_type: b
+condition: s(lb_seed)
+resources: (R_BOX, QUANTITY=1)
+
+insert_job: lb_kid
+job_type: c
+box_name: lb_boxm
+command: /opt/lb_kid.sh
+machine: m1
+
+insert_job: lb_outer
+job_type: b
+condition: s(lb_seed)
+
+insert_job: lb_inner
+job_type: b
+box_name: lb_outer
+
+insert_job: lb_deep
+job_type: c
+box_name: lb_inner
+command: /opt/lb_deep.sh
+machine: m1
+resources: (R_BOX, QUANTITY=1)
+
+insert_job: lb_flat
+job_type: c
+command: /opt/lb_flat.sh
+machine: m1
+condition: s(lb_seed)
+resources: (R_BOX, QUANTITY=1)
+"""
+
+
+@pytest.fixture(scope="module")
+def lock_box_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
+    path = tmp_path_factory.mktemp("explore-lock-box") / "lockbox.html"
+    path.write_text(to_explore_html(lower_source(_LOCK_BOX_TEXT), title="lock boxes"))
+    return path.as_uri()
+
+
+@pytest.fixture(scope="module", params=ENGINES)
+def driven_lock_box(
+    request: pytest.FixtureRequest, lock_box_page_url: str, _playwright: Any
+) -> Any:
+    yield from _open_driven(_playwright, request.param, lock_box_page_url)
+
+
+def _folded(d: Driven, node_id: str) -> bool:
+    collapsed: bool = d.page.evaluate(
+        "(id) => cy.$id(id).hasClass('cy-expand-collapse-collapsed-node')", node_id
+    )
+    return collapsed
+
+
+def _lock_members_from_the_menu(d: Driven, hub: str) -> None:
+    """The operator's own route to the op: right-click the hub, click the
+    item. `placeLocks` has already run by here -- the caller waits out the
+    fold -- so the hub is where the page last drew it."""
+    point = _client_point(d, hub)
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    _click(d, "#lock-members")
+    d.page.wait_for_timeout(_SETTLE_MS)
+
+
+def test_lock_members_expands_a_member_that_is_itself_a_collapsed_box(
+    driven_lock_box: Driven,
+) -> None:
+    """The member IS the box. Nothing of the hub's is folded inside it -- it
+    holds `lb_kid`, which the hub does not name -- so a box is reached here
+    only by matching its own id. Select lock members expands it, as the
+    chain walk this slice deleted did."""
+    d = driven_lock_box
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+
+    d.page.evaluate("() => { ec.collapse(cy.$id('lb_boxm'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _folded(d, "lb_boxm"), f"{d.engine}: lb_boxm never folded"
+    assert d.page.evaluate("() => cy.$id('lb_kid').length") == 0, d.engine
+
+    _lock_members_from_the_menu(d, "lock:r:R_BOX")
+    assert not _folded(d, "lb_boxm"), f"{d.engine}: the member box stayed folded"
+    assert d.page.evaluate("() => cy.$id('lb_kid').length") == 1, d.engine
+    assert _selected_ids(d) == ["lb_boxm", "lb_deep", "lb_flat"], d.engine
+    assert d.page.inner_text("#stats").endswith("members of R_BOX (3)"), d.engine
+    _click(d, "#clear-selection")
+
+
+def test_lock_members_reaches_a_member_two_boxes_deep(driven_lock_box: Driven) -> None:
+    """`lb_deep` sits in `lb_inner` sits in `lb_outer`. Collapsing the outer
+    box takes both out of the graph, so the box that has to be expanded is
+    two levels above the member the hub names."""
+    d = driven_lock_box
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+
+    d.page.evaluate("() => { ec.collapse(cy.$id('lb_outer'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _folded(d, "lb_outer"), f"{d.engine}: lb_outer never folded"
+    assert d.page.evaluate("() => cy.$id('lb_deep').length") == 0, d.engine
+    assert d.page.evaluate("() => cy.$id('lb_inner').length") == 0, d.engine
+
+    _lock_members_from_the_menu(d, "lock:r:R_BOX")
+    assert not _folded(d, "lb_outer"), f"{d.engine}: the outer box stayed folded"
+    assert d.page.evaluate("() => cy.$id('lb_deep').length") == 1, d.engine
+    assert _selected_ids(d) == ["lb_boxm", "lb_deep", "lb_flat"], d.engine
+    assert d.page.inner_text("#stats").endswith("members of R_BOX (3)"), d.engine
+    _click(d, "#clear-selection")
+
+
+def test_no_uncaught_page_errors_on_the_lock_box_page(driven_lock_box: Driven) -> None:
+    _ready(driven_lock_box)
+    assert driven_lock_box.errors == [], f"{driven_lock_box.engine}: {driven_lock_box.errors}"
