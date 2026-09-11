@@ -12377,3 +12377,193 @@ relitigate an entry; append a new one.
   its own foreground; one fresh-context Opus reviewer; the rework resumed
   the implementer with rulings by finding id; the main session read the
   template diff against the entry and ruled.
+- DL-199 DL-196 slice (3): the three layers, the toolbar, the menus and find
+  (2026-09-11).
+  THE LAYERS. Selection is cytoscape's node selection: a plain click
+  replaces, shift+click toggles, a background click clears. Edges are
+  unselectable from construction and again after every fold, a meta-edge
+  being a new element; the arrow a tree leaf's click or an edge tap
+  inspects wears the class `inspected`, the look edge selection had, and
+  the next tap anywhere clears it -- DL-191's leaf click no longer empties
+  the selection, and its wording is amended. Highlight is the class `hl`,
+  with `hl-proxy` on a collapsed box standing for a marked member; the
+  universe of the counts, of "clear highlights" and of "unhighlight
+  selected" is the live nodes plus the recursively folded members, which
+  keep their classes while the extension holds them out of the graph.
+  Selected implies drawn: every select op un-hides its targets and their
+  ancestors, selects the targets alone, places the hubs again only when
+  something was drawn that was not, and skips a hub while the locks toggle
+  is off, which the op label reports; the toggle turned off unselects the
+  hubs. Hiding a node hides its descendants AND, when it is a collapsed
+  box, the members it stands for, or an expand would draw what the operator
+  hid; what is hidden leaves the selection. "Hide others" is the exception
+  that folds instead: a selected box with no selected member is collapsed
+  before the hiding, so its members are folded rather than hidden and an
+  expand draws them, and the box's lock context is read off the live graph
+  afterwards.
+  THE OPS. The walks -- fan-in and fan-out, direct or transitive, both
+  cones, neighbours -- add the seed and the walk, read the flow edges alone,
+  reach hidden nodes, and continue through a collapsed box's border edges
+  without descending into its members. The membership ops -- find, select
+  highlighted, lock members, lock peers -- expand every folded box holding a
+  target, in place and with no layout, and queue their report behind the
+  fold's follow-up (DL-198), re-reading their targets before the fit because
+  the picture may have moved on. Lock peers are a job's direct pair partners
+  plus the members of its own hubs, no closure, reached through a partner's
+  folded box by way of its meta-edge; the op keeps the seed job, while lock
+  members does not add the seed hub -- a hub is not a flow node, and
+  selected-implies-drawn would fight the locks toggle. Find takes the id
+  substring: Enter or "select matches" replaces, shift adds, "highlight
+  matches" marks and leaves the selection alone; both un-hide, expand and
+  fit to the matches, one match opens its details and a hub's the lock
+  panel, no match says so beside the field and changes nothing, an empty
+  query does nothing. The field and its two buttons are disabled until the
+  load path's last layout stops, and no op runs inside that window: the
+  readiness signal in `#stats` must mean what it says, and a second ELK run
+  there would race the first.
+  THE SURFACES. The toolbar has five groups, one per layer and one for the
+  view: find, selection, highlight, visibility, view. Every op over the
+  selection is a button there, so it is keyboard-reachable and survives the
+  optional menu plugin (DL-77); the node-seeded items are the menu's, and
+  each has a selection-seeded equivalent -- both cones and neighbours are
+  two walks, "hide this node" is a click and "hide selected", and "+ lock
+  peers" covers a selected hub's members as well. Node menu: the six walks
+  seeded from that node, lock peers where a lock link exists, hide this
+  node, collapse or expand. Hub menu: select members, hide this lock.
+  Canvas menu: the four walks of the selection. Labels are rewritten as a
+  menu opens and name the seed: "select fan-in of JOB_A, transitive", "of
+  selection (7)", "members of R_ONE". Whether lock peers is offered is a
+  CLASS on the node, refreshed after every fold, not a show-or-hide as the
+  menu opens: the plugin recomputes its dividers at the end of its own
+  handler, and a later hide leaves one wrong. A collapsed box carries that
+  class when it borrows a folded member's lock link -- it stands for its
+  members, as it does for a walk's edges (DL-190), so the item follows.
+  `#stats` reads "visible v / N nodes, e / E edges, L locks, c boxes
+  collapsed, n selected, m highlighted (k not drawn), <last op>": one
+  selected count, because selected implies drawn, and the highlighted count
+  is the one that can differ. It is built once and rewritten in place, the
+  selected count a button that fits the selection -- recreating it would
+  drop the keyboard focus of whoever was on it. The last op persists until
+  the next op replaces it: a walk with the via-boxes qualifier captured when
+  it ran, a find with its count, a hide op with what it hid, "arranged",
+  "show all". Dismissing a menu never changes the selection: the plugin
+  closes on the tapstart of an outside click and cytoscape then completes
+  that click as a background tap which clears the selection, after it has
+  emitted `tap`, so the selection stashed at that tapstart is put back one
+  tick later, filtered to what is still live and drawn; a click that lands
+  on a node is a click. Selection is the overlay at 0.3, highlight the
+  underlay in a marker yellow no node type and no branch of the DL-191 ramp
+  uses, the proxy a paler underlay; a node that is both wears both halos,
+  and the border stays the node type's.
+  DL-196 WORDING CORRECTED, per the second round of its review: a walk
+  continues THROUGH a collapsed proxy rather than stopping at it, and
+  DL-190's trace test stands; there is one selected count; "focus lock" is
+  replaced by "select members" then "hide others", after a clear when
+  something else is selected; folds preserve the viewport, "hide others" and
+  "show all" fit, "hide selected" does neither, and restored members, hubs
+  and compound bounds are the geometry exceptions.
+  RULED HERE, where DL-196 did not: the toolbar's five groups; the
+  selection-seeded walk buttons, past DL-196's enumeration and following its
+  sentence; the find trio disabled inside the load window, which the second
+  review left to be placed here or in its own entry; "hide others" with
+  nothing selected does nothing and says so, until slice 4 disables the
+  control; long ids ellipsised at 32 characters in menu and op labels; the
+  membership ops expanding a folded box recursively, which is DL-71's search
+  behaviour inherited rather than narrowed to the path holding the target.
+  KNOWN AND LEFT: a collapse reads which of its members were selected from
+  what the same task unselected -- the extension unselects a box's direct
+  children before it announces the collapse -- so a script that unselects a
+  member and collapses its box in ONE task transfers a selection the
+  operator had cleared; two operator actions cannot share a task, and the
+  browser tests avoid the shape.
+  THE REVIEWS. Two independent passes over the same uncommitted diff, each
+  in a fresh context and neither shown the other's findings: a Claude Opus
+  adversarial pass (14 items: 3 major, 4 minor, 7 nits) and Codex
+  gpt-6-astra at xhigh (12 items: 8 major, 4 minor). Records:
+  reviews/2026-09-11-dl196-slice3-{review-brief,codex-brief,codex-r1}.md and
+  the findings file each wrote, in the owner's store. Both were told what a
+  three-engine probe had already settled, so neither spent its pass
+  re-deriving it. They agreed on two majors -- the load window reaches
+  further than the find field, and "every op is a toolbar button" was false
+  of four menu items -- and each found what the other did not. Acted, all
+  above: "highlight matches" ignored the locks toggle where "select
+  matches" honoured it; hiding a collapsed box left its folded members
+  drawable; the locks toggle and the peered class did not survive a fold;
+  an expand left a stale highlight proxy and could restore an arrow still
+  marked inspected; the stats button was recreated on every update and took
+  the keyboard focus with it; a queued find report could fit a match
+  another operation had folded away; a restored menu selection was not
+  filtered to what was still there; "unhighlight selected" could not reach
+  a mark through its proxy box; "hide this lock" named the hub by its raw
+  id while its sibling item used the lock's own name; the find note
+  outlived its query; the count button painted as a toolbar button on
+  hover; the hint said shift+click adds where DL-196 says it toggles. Two
+  emitter pins were strengthened rather than left: the walk table's pins
+  proved a table nothing dispatched through, and a find pin excluded one
+  spelling of a call instead of reading the function's body. Declined with
+  their reasons recorded here: the recursive expand (inherited, above); the
+  controls that sit enabled and inert with an empty selection (slice 4
+  owns the disabled states); the same-task collapse transfer (above).
+  THE PICTURE was checked by eye in chromium at three states -- selected,
+  highlighted, both -- and on an open node menu and an open canvas menu: the
+  halos read apart, a node wearing both shows both, the labels name their
+  seed, and the five groups stay whole as the toolbar wraps, at 1400 and at
+  1000 pixels.
+  THE TESTS. The browser module goes from 59 tests to 83. Eight were renamed
+  where the name had become false and no decision-log entry cited it -- a
+  search that marks hits is a find that selects matches, "show all" keeps
+  the selection and the highlights rather than clearing them, a menu item
+  selects a walk rather than narrowing the graph, a tree leaf inspects its
+  arrow rather than selecting it, "focus lock" is "select members" then
+  "hide others" -- and six more kept their names and changed their bodies.
+  The new ones pin: the menu offered by node kind, with its labels; the
+  canvas menu's four walks of the selection; a walk adding to an existing
+  selection; a two-seed transitive walk matching the union of each seed's
+  own tree; a walk through a collapsed box that leaves it folded, and a
+  "hide others" after it that keeps it so; a collapse moving a member's
+  selection to its box, nested and not; "hide others" collapsing a selected
+  box with no selected member; the selection surviving "hide others" and
+  "show all"; an edge tap that inspects without touching the node
+  selection; a proxy on a box standing for a marked member, and "select
+  highlighted" expanding it; the find contract in both modes, including the
+  hub skipped while the locks toggle is off; the two lock ops expanding a
+  folded box to reach their target; "hide selected" unselecting what it
+  hides, and the count button fitting the view; a menu dismissed by a
+  background click leaving the selection intact, in three engines; and one
+  per review fix -- hiding a collapsed box hides what it stands for, the
+  locks toggle survives a fold, an expand drops a stale proxy, a collapsed
+  box borrows its members' lock links for the menu, the count button keeps
+  the keyboard focus across a rewrite, the find note follows the query, the
+  toolbar's lock-peers button over a hub and over a job, and the geometry
+  rule that "hide selected" keeps the viewport where "hide others" fits.
+  The tests that wait for a layout now wait on its `layoutstop` rather than
+  on a fixed 900 ms.
+  DL-196's ctrl+click ask is UNSETTLED, and not by this entry: a synthetic
+  ctrl+click opens no menu in any of the three engines under playwright --
+  it selects the node, as a plain click does -- because the translation to a
+  right-click is the operating system's, not the page's. The test asserts
+  the selection is unchanged either way, which is the half that can be
+  driven here; whether a hardware ctrl+click on webkit opens the menu is
+  still unverified, and slice 4 carries it.
+  THE GATE: 3651 passed, 6 skipped, 2 xfailed; the opt-in browser suite 249
+  passed in chromium, webkit and firefox (177 before: 24 more tests by three
+  engines); ruff, ruff format --check and mypy clean; arch_check clean and
+  REPORTING A REVIEW DUE, 1,019 lines changed since the
+  arch-review/2026-09-09T163229Z tag -- owed, and DL-198's gate line omitted
+  the same notice.
+  ALLOCATION. The main session designed and wrote the page core, having the
+  DL-196 rulings and the bundle facts in context. Two reviewers read the
+  uncommitted diff in parallel, each fresh and neither shown the other:
+  Opus for the page's own logic, Codex gpt-6-astra at xhigh for a second
+  independent reading; both were told what the three-engine probe had
+  settled, and told to run nothing, because a test run in a tree another
+  agent is editing reports contaminated counts (DL-192's lesson). The main
+  session ruled on every finding and made every fix itself: the code was
+  its own, and a rework brief would have cost more than the edits. A Sonnet
+  implementer wrote the browser tests from a brief carrying a verified
+  expectation table, and was resumed by message for the rework the reviews
+  produced; it died on a network fault before its own gate run, and the
+  main session ran the gates. Reading the finished code whole, rather than
+  as the patches that made it, caught two defects both reviews had missed:
+  an op label that printed two counts, and one that named the selection
+  after the op had already grown it.

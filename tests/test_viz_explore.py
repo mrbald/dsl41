@@ -870,9 +870,11 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     page = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
     registration = page.index("cy.contextMenus({ menuItems: menuItems })")
     for essential in (
-        'document.getElementById("show-all").addEventListener',
-        'document.getElementById("fit").addEventListener',
+        'wire("show-all", showAll);',
+        'wire("fit", function () {',
+        'wire("hide-others", hideOthers);',
         'document.getElementById("search").addEventListener',
+        'wire("find-select", function (evt) {',
         'initial.on("layoutstop"',
     ):
         assert page.index(essential) < registration, essential
@@ -942,8 +944,14 @@ def test_to_explore_html_wires_the_trace_toggle_and_step_functions() -> None:
     # was reached (a box override is a completion predicate, not a start gate)
     assert "function fanInTree(start)" in page
     assert "function fanOutTree(start)" in page
-    assert 'focusOn(fanInTree(n), howLabel("fan-in tree"))' in page
-    assert 'focusOn(fanOutTree(n), howLabel("fan-out tree"))' in page
+    assert '"fan-in-tree": { word: "fan-in", transitive: true, set: fanInTree },' in page
+    assert '"fan-out-tree": { word: "fan-out", transitive: true, set: fanOutTree },' in page
+    # ...and the two seats that call the table: the node item and the
+    # selection-seeded toolbar button. A table nothing dispatches through
+    # would satisfy the two lines above (review finding C11)
+    assert "runWalk(kind, n, shortId(n.id()));" in page
+    assert "runWalk(kind, selectedNodes(), selectionLabel());" in page
+    assert "found = flowSeed.empty() ? cy.collection() : WALKS[kind].set(flowSeed);" in page
     assert "function isOverride(edge)" in page
 
 
@@ -966,11 +974,16 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     # the button and the toggle's ON branch are one layout path, not two
     assert "function arrangeVisible(suffix, after)" in page
     assert "arrangeVisible(suffix, after);" in page  # relayoutOrFit delegates to it...
-    assert "arrangeVisible();" in page  # ...and the button runs the same path
-    # ...and the find path runs none of it: it expands in place and fits the hits
-    assert "relayoutOrFit(found" not in page
+    assert 'arrangeVisible("arranged");' in page  # ...and the button runs the same path
+    # ...and the find path runs none of it: it expands in place and fits the
+    # matches. Read out of runFind's own body: an exclusion pinned to one
+    # spelling passes the moment the call is spelled differently (C11)
+    find_body = page[
+        page.index("function runFind(mode, add)") : page.index("findField.addEventListener")
+    ]
+    assert "relayoutOrFit" not in find_body and "arrangeVisible" not in find_body
     assert "ec.expandRecursively(box, { layoutBy: null });" in page
-    assert "cy.fit(hits, 60);" in page
+    assert "cy.fit(live, 60);" in page  # the matches still drawn when the report runs
     # what still follows a fold: the hubs (DL-192) and the collapsed count.
     # Read out of the two handler bodies rather than counted, so a reindent
     # or a third legitimate caller does not fail this with a bare number.
@@ -1012,8 +1025,20 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     assert "function renderCondTrees(n, order)" in page
     assert '"(lock, no arrow)"' in page and '"(not on canvas)"' in page
     # Enter with exactly one hit selects the node and opens its details
-    assert "if (hits.length === 1) {" in page
-    assert "showNodeDetails(hits[0]);" in page
+    assert "if (hits.length === 1 && shown.nonempty()) {" in page
+    # the find trio is disabled until the load path's last layout stops
+    # (DL-196's second review, G6/G7), and finishInitial enables exactly it
+    assert '<input id="search" type="search" disabled' in page
+    assert 'id="find-select" disabled' in page and 'id="find-highlight" disabled' in page
+    assert '["search", "find-select", "find-highlight"].forEach(function (id) {' in page
+    assert page.index('["search", "find-select", "find-highlight"]') > page.index(
+        "function finishInitial() {"
+    )
+    # ...kind-aware (DL-196): a hub match opens the lock panel
+    assert (
+        'if (hits.hasClass("lock")) showLockDetails(hits[0]); else showNodeDetails(hits[0]);'
+        in page
+    )
     # the leaf highlight answers the keyboard as well as the pointer
     assert 'button.addEventListener("focus", mark);' in page
     assert 'button.addEventListener("blur", unmark);' in page
@@ -1073,7 +1098,10 @@ def test_to_explore_html_carries_the_lock_grammar() -> None:
     assert '{ selector: "edge.lock[?source_tee]", style: {' in page
     assert '"target-arrow-shape": "tee"' in page
     assert 'shape: "octagon"' in page
-    assert '{ id: "focus-lock", content: "focus lock", selector: "node.lock",' in page
+    # DL-196 slice 3: a hub's menu offers its members and its own hiding
+    assert '{ id: "lock-members", content: "select lock members", selector: "node.lock",' in page
+    assert '{ id: "hide-lock", content: "hide this lock", selector: "node.lock",' in page
+    assert "focus-lock" not in page
     assert "dotted gray = lock" in page
     # a threshold gate holds nothing, and both halves of the header count the
     # dependency graph by "edges"

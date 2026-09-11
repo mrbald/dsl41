@@ -20,7 +20,7 @@
   header .summary { color: #4b5563; margin-left: 0.75rem; }
   #toolbar { display: flex; align-items: center; gap: 0.6rem;
              margin-top: 0.35rem; flex-wrap: wrap; }
-  #toolbar input[type="search"] { width: 18rem; padding: 0.25rem 0.5rem;
+  #toolbar input[type="search"] { width: 14rem; padding: 0.25rem 0.5rem;
              border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
   #toolbar button { padding: 0.25rem 0.7rem; border: 1px solid #d1d5db;
              border-radius: 4px; background: #f9fafb; color: #374151;
@@ -49,6 +49,16 @@
              background: none; color: #6b7280; font-size: 1rem;
              cursor: pointer; padding: 0; }
   .hint { color: #9ca3af; font-size: 0.8rem; }
+  /* the toolbar's groups (DL-196): one per layer -- find, selection,
+     highlight, visibility, view -- so twenty controls read as five */
+  #toolbar .group { display: inline-flex; align-items: center; gap: 0.3rem;
+             flex-wrap: wrap; padding-left: 0.5rem; border-left: 1px solid #e5e7eb; }
+  #toolbar .glabel { color: #9ca3af; font-size: 0.75rem; text-transform: uppercase;
+             letter-spacing: 0.04em; }
+  #toolbar button:disabled { color: #9ca3af; cursor: default; background: #f9fafb; }
+  #find-note { color: #b45309; font-size: 0.85rem; }
+  #stats button, #stats button:hover { border: 0; background: none; padding: 0;
+             font: inherit; color: #1d4ed8; cursor: pointer; text-decoration: underline; }
 
   /* the condition tree in the details panel (DL-191) */
   #d-tree { margin-top: 0.5rem; font-size: 0.85rem; }
@@ -128,20 +138,47 @@
 <header>
   <h1>Explore: __DSL41_TITLE__</h1><span class="summary">__DSL41_SUMMARY__</span>
   <div id="toolbar">
-    <input id="search" type="search"
-           placeholder="find job &mdash; substring, Enter" spellcheck="false">
-    <button type="button" id="show-all">show all</button>
-    <button type="button" id="fit">fit</button>
-    <button type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
-    <button type="button" id="collapse-all">collapse boxes</button>
-    <button type="button" id="expand-all">expand boxes</button>
-    <label title="what a hide op does with the space it frees. On: a focus item and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is and only the view fits. &ldquo;hide this node&rdquo; never re-arranges, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input type="checkbox" id="relayout"> arrange after hiding</label>
+    <span class="group">
+      <input id="search" type="search" disabled
+             placeholder="find &mdash; substring of a name; Enter selects" spellcheck="false">
+      <button type="button" id="find-select" disabled title="select every node whose name holds the text, replacing the selection (Enter does the same); shift adds them instead. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">select matches</button>
+      <button type="button" id="find-highlight" disabled title="highlight every node whose name holds the text; the selection is left alone. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">highlight matches</button>
+      <span id="find-note"></span>
+    </span>
+    <span class="group"><span class="glabel">selection</span>
+      <button type="button" id="sel-fan-in" title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
+      <button type="button" id="sel-fan-in-tree" title="add everything upstream of the selection">+ fan-in, transitive</button>
+      <button type="button" id="sel-fan-out" title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
+      <button type="button" id="sel-fan-out-tree" title="add everything downstream of the selection">+ fan-out, transitive</button>
+      <button type="button" id="sel-lock-peers" title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
+      <button type="button" id="select-highlighted" title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
+      <button type="button" id="clear-selection" title="select nothing; a click on the canvas does the same">clear selection</button>
+    </span>
+    <span class="group"><span class="glabel">highlight</span>
+      <button type="button" id="highlight-selected" title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
+      <button type="button" id="unhighlight-selected" title="take the mark off the selected nodes">unhighlight selected</button>
+      <button type="button" id="clear-highlights" title="take the mark off every node, folded members included">clear highlights</button>
+    </span>
+    <span class="group"><span class="glabel">visibility</span>
+      <button type="button" id="hide-selected" title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
+      <button type="button" id="hide-others" title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
+      <button type="button" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
+    </span>
+    <span class="group"><span class="glabel">view</span>
+      <button type="button" id="fit">fit</button>
+      <button type="button" id="fit-selection" title="fit the view to the selected nodes">fit selection</button>
+      <button type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
+      <button type="button" id="collapse-all">collapse boxes</button>
+      <button type="button" id="expand-all">expand boxes</button>
+    </span>
+    <label title="what a hide op does with the space it frees. On: &ldquo;hide selected&rdquo;, &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is, and only &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; fit the view. &ldquo;hide this node&rdquo; and &ldquo;hide selected&rdquo; never re-arrange and never move the view, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input type="checkbox" id="relayout"> arrange after hiding</label>
     <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input type="checkbox" id="trace-boxes" checked> trace through boxes</label>
     <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input type="checkbox" id="locks" checked> locks</label>
     <span id="stats">laying out&hellip;</span>
-    <span class="hint">right-click a node to focus / hide &middot; click for
-    details &middot; double-click a box, or its corner cue, to collapse or
-    expand it &middot; drag pans, wheel zooms</span>
+    <span class="hint">click selects one node and opens its details, shift+click
+    toggles one &middot; right-click a node, or the canvas for the selection, to add
+    a walk &middot; double-click a box, or its corner cue, to collapse or expand
+    it &middot; drag pans, wheel zooms</span>
     <span class="hint">all incoming arrows must hold (AND) unless the job
     carries &#8744; &middot; a bare n() is a lock and draws no arrow</span>
     <span class="hint">dotted gray = lock &middot; the tee marks the job that
@@ -394,16 +431,36 @@ var STYLE_TAIL = [
     } },
     { selector: ".hidden", style: { display: "none" } },
     { selector: ".lockoff", style: { display: "none" } },  /* the locks toggle, independent of focus */
-    { selector: "node.hit", style: {
-        "border-width": 3,
-        "border-color": "#1d4ed8"
-    } },
     { selector: "edge.leaf-hover", style: {  /* the tree leaf under the pointer */
         "overlay-color": "#1d4ed8",
         "overlay-opacity": 0.25,
         "overlay-padding": 4
     } },
-    { selector: ":selected", style: {
+    /* The three layers, three channels (DL-196). Selection is the overlay,
+       stronger than the 0.15 it was; highlight is the underlay, a marker
+       pen's yellow, which no node type and no step of the branch ramp uses;
+       the border stays the node type's (fw, ext, global, box, collapsed,
+       lock), so a node that is both wears both halos. A collapsed box that
+       stands for a highlighted member wears a paler proxy, and its own mark
+       on top of that. */
+    { selector: "node:selected", style: {
+        "overlay-color": "#1d4ed8",
+        "overlay-opacity": 0.3,
+        "overlay-padding": 4
+    } },
+    { selector: "node.hl-proxy", style: {
+        "underlay-color": "#fde047",
+        "underlay-opacity": 0.35,
+        "underlay-padding": 7
+    } },
+    { selector: "node.hl", style: {
+        "underlay-color": "#fde047",
+        "underlay-opacity": 0.8,
+        "underlay-padding": 7
+    } },
+    /* the arrow under inspection -- a tree leaf's click, an edge tap. Edges
+       are never selected (DL-196); the look edge selection had is a class */
+    { selector: "edge.inspected", style: {
         "overlay-color": "#1d4ed8",
         "overlay-opacity": 0.15,
         "overlay-padding": 4
@@ -416,6 +473,20 @@ var cy = cytoscape({
   boxSelectionEnabled: false,
   style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)
 });
+
+/* Edges are never selected (DL-196): the selection is a set of nodes, the
+   operand of every bulk op, and an arrow in it would be a lie about what
+   the next op acts on. Done again after every fold: a meta-edge is a new
+   element. */
+cy.edges().unselectify();
+
+/* A job with a lock link is offered "select lock peers" on its menu; one
+   without has none to select, and an item that could only select nothing is
+   the DL-77 shape in miniature. A CLASS, not a show-or-hide as the menu
+   opens: the selector decides the item and the plugin's own dividers, which
+   it recomputes at the end of its own handler, stay right. One spelling of
+   the rule, run here and again after every fold. */
+markPeered();
 
 /* An edge between a node and one of its own ancestors has overlapping
    endpoints -- taxi routing cannot draw it at all ("invalid endpoints"), and
@@ -564,15 +635,56 @@ var TOTAL_NODES = payload.totals.nodes;
 var TOTAL_EDGES = payload.totals.edges;
 var TOTAL_LOCKS = payload.totals.locks;
 
-function updateStats(suffix) {
+/* The last operation, named: a walk with the via-boxes qualifier it ran
+   under (DL-190), a find with its count, a hide op with what it hid. It
+   stays on the line until the next operation replaces it: the hub
+   re-placement and the collapsed-count rewrite that follow a fold are not
+   operations, and keep it. */
+var lastOp = "";
+
+/* The line is built once and rewritten in place: the selected count is a
+   real button, and replacing it while it holds the keyboard focus would
+   drop the focus under the operator (a layout finishing is enough). */
+var statsHead = document.createTextNode("");
+var statsTail = document.createTextNode("");
+var statsButton = document.createElement("button");
+statsButton.type = "button";
+statsButton.id = "stats-selected";
+statsButton.title = "fit the view to the selected nodes";
+statsButton.addEventListener("click", function () { fitSelection(); });
+var statsBuilt = false;
+
+function updateStats(op) {
+  if (op !== undefined) lastOp = op;
+  /* The load path owns #stats until its last layout stops: "laying out" is
+     the page's readiness signal, and anything that blanked it early would
+     make the signal mean nothing (DL-190; DL-196's second review, G6). The
+     ops are barred from that window too, but a toggle and a plugin's loss
+     notice are not ops, and this is the one place that writes. */
+  if (loading) return;
+  if (!statsBuilt) {
+    stats.replaceChildren(statsHead, statsButton, statsTail);
+    statsBuilt = true;
+  }
   var collapsed = cy.nodes(".cy-expand-collapse-collapsed-node").length;
   var vn = cy.nodes(":visible").not(".lock").length;
   var ve = cy.edges(":visible").not(".lock").length;
-  stats.textContent = "visible " + vn + " / " + TOTAL_NODES + " nodes · "
+  var head = "visible " + vn + " / " + TOTAL_NODES + " nodes · "
     + ve + " / " + TOTAL_EDGES + " edges"
     + (TOTAL_LOCKS ? " · " + TOTAL_LOCKS + " locks" : "")
     + (collapsed ? " · " + collapsed + (collapsed === 1 ? " box" : " boxes") + " collapsed" : "")
-    + (suffix ? " · " + suffix : "") + lostFeature;
+    + " · ";
+  /* the two layer counts (DL-196): selected implies drawn, so that count is
+     one number; a highlighted node may be hidden or folded, and that count
+     says how many are not on the canvas */
+  var marked = highlighted();
+  var away = marked.filter(function (n) { return n.removed() || !n.visible(); }).length;
+  var tail = " · " + marked.length + " highlighted"
+    + (away ? " (" + away + " not drawn)" : "")
+    + (lastOp ? " · " + lastOp : "") + lostFeature;
+  statsHead.nodeValue = head;
+  statsButton.textContent = selectedNodes().length + " selected";
+  statsTail.nodeValue = tail;
 }
 
 /* Edge labels overlap at fit zoom on a bank-scale graph: hide them below
@@ -626,16 +738,199 @@ function relayoutOrFit(suffix, after) {
   if (after) after();
 }
 
-/* focus = hide non-selected, keeping compound ancestors (members without
-   their box do not render), then ELK re-layout of the visible subset
-   (toggle off = fit only). `how` names the rule that chose the set, in
-   #stats, so a picture drawn "via boxes" is never mistaken for one drawn
-   from the edges alone. */
+/* --------------------------------------------- the three layers (DL-196) */
+
+/* Every node carries three independent facts. SELECTED: the set the next
+   bulk op acts on; a plain click replaces it, a background click clears it.
+   HIGHLIGHTED: a sticky mark that survives clicks, selection changes, hiding
+   and folding, and goes only on request. HIDDEN. Selected implies drawn:
+   whatever an op selects is un-hidden with its ancestors, and only the
+   targets are selected. A highlighted node may be hidden or folded. */
+
+function selectedNodes() { return cy.nodes(":selected"); }
+
+function shortId(id) { return id.length > 32 ? id.slice(0, 31) + "\u2026" : id; }
+function selectionLabel() { return "selection (" + selectedNodes().length + ")"; }
+
+/* Un-hide `nodes` and the boxes they sit in, without selecting the boxes.
+   The hubs are placed again only when something was drawn that was not:
+   which of a hub's members are drawn decides where it sits (DL-192), and a
+   walk that revealed nothing must move nothing. */
+function reveal(nodes) {
+  var revealed = nodes.union(nodes.ancestors()).filter(".hidden");
+  if (revealed.empty()) return;
+  revealed.removeClass("hidden");
+  placeLocks();
+}
+
+/* The one way anything enters the selection: adding by default, replacing
+   on request (find, and the plain click cytoscape handles itself). Returns
+   how many hubs it left alone because the locks toggle is off -- the toggle
+   keeps its authority, and the caller says so in #stats. */
+function selectNodes(nodes, replace) {
+  var skipped = nodes.filter(".lock.lockoff");
+  nodes = nodes.difference(skipped);
+  if (replace) cy.nodes().unselect();
+  reveal(nodes);
+  nodes.select();
+  return skipped.length;
+}
+
+function skippedNote(count) {
+  if (!count) return "";
+  return " (" + count + (count === 1 ? " lock" : " locks") + " skipped: locks off)";
+}
+
+function clearSelection() {
+  cy.nodes().unselect();
+  updateStats("selection cleared");
+}
+
+function fitSelection() {
+  var sel = selectedNodes();
+  if (sel.nonempty()) cy.fit(sel, 40);
+}
+
+/* --- highlight. The universe is the live nodes plus the recursively folded
+   members: a mark on a member survives its box's collapse -- the extension
+   keeps a removed element with its classes -- and the box wears a proxy
+   while it stands for one. */
+function foldedNodes() {
+  var folded = cy.collection();
+  if (!ec) return folded;
+  cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+    folded = folded.union(ec.getCollapsedChildrenRecursively(box).nodes());
+  });
+  return folded;
+}
+
+function highlighted() { return cy.nodes(".hl").union(foldedNodes().filter(".hl")); }
+
+function refreshProxies() {
+  if (!ec) return;
+  cy.nodes().removeClass("hl-proxy");  /* an expanded box stands for nothing */
+  cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+    box.toggleClass("hl-proxy", ec.getCollapsedChildrenRecursively(box).nodes(".hl").nonempty());
+  });
+}
+
+function highlightNodes(nodes) { nodes.addClass("hl"); refreshProxies(); }
+function unhighlightNodes(nodes) { nodes.removeClass("hl"); refreshProxies(); }
+
+function highlightSelected() {
+  var sel = selectedNodes();
+  highlightNodes(sel);
+  updateStats("highlighted " + sel.length);
+}
+
+/* A selected collapsed box wearing a proxy stands for the marked members it
+   folds: unhighlighting it takes their marks off too, or the yellow would
+   stay with nothing on the canvas to unmark. */
+function unhighlightSelected() {
+  var sel = selectedNodes(), marked = sel.filter(".hl");
+  if (ec) {
+    sel.filter(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+      marked = marked.union(ec.getCollapsedChildrenRecursively(box).nodes(".hl"));
+    });
+  }
+  unhighlightNodes(marked);
+  updateStats("unhighlighted " + marked.length);
+}
+
+function clearHighlights() {
+  var all = highlighted();
+  all.removeClass("hl");
+  cy.nodes().removeClass("hl-proxy");
+  updateStats("highlights cleared (" + all.length + ")");
+}
+
+/* The explicit membership ops -- find, select highlighted, lock members,
+   lock peers -- reach into folded boxes: each expands, in place and with no
+   layout, every collapsed box that holds one of its targets (DL-196). A
+   walk does not: it continues through the collapsed box's own border edges
+   and never descends. Returns whether anything was expanded, because what
+   follows a fold runs one tick later (afterFold) and the caller's report
+   must go behind it. */
+function expandToReach(boxHolds) {
+  var expanded = false;
+  if (!ec) return false;
+  cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+    if (!boxHolds(box)) return;
+    ec.expandRecursively(box, { layoutBy: null });
+    expanded = true;
+  });
+  return expanded;
+}
+
+function selectHighlighted() {
+  var expanded = expandToReach(function (box) { return box.hasClass("hl-proxy"); });
+  var marked = cy.nodes(".hl");
+  var skipped = selectNodes(marked, false);
+  var op = "selected highlighted (" + (marked.length - skipped) + ")" + skippedNote(skipped);
+  if (expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+}
+
+/* --- visibility. Hiding a node hides its descendants, and every node hidden
+   through an ancestor leaves the selection. Nothing here touches a
+   highlight, and "show all" restores visibility alone. */
+function hideNodes(nodes) {
+  var gone = nodes.union(nodes.descendants());
+  /* A collapsed box hides what it stands for. Its folded members are not
+     `descendants` -- the extension took them out of the graph -- so without
+     this an expand later would draw a member the operator had hidden. The
+     box a focus folds ON PURPOSE is the exception, and focusOn never comes
+     through here: it hides the live graph and leaves the folded members
+     alone, so expanding it draws them. */
+  if (ec) {
+    gone.filter(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+      gone = gone.union(ec.getCollapsedChildrenRecursively(box).nodes());
+    });
+  }
+  gone.unselect();
+  gone.addClass("hidden");
+  return gone.length;  /* what left the canvas, which a box makes more than what was picked */
+}
+
+/* What a hide op does with the space it frees is the toggle's (DL-196): on,
+   the layout runs again; off, the hubs are placed again and nothing else
+   moves. No fit: what is left was on the screen already. */
+function afterHiding(op) {
+  if (relayoutToggle.checked) { arrangeVisible(op); return; }
+  placeLocks();
+  updateStats(op);
+}
+
+function hideSelected() {
+  afterHiding("hid " + hideNodes(selectedNodes()));
+}
+
+function hideThisNode(n) {
+  hideNodes(n);
+  placeLocks();
+  updateStats("hid " + (n.hasClass("lock") ? lockTitle(n) : shortId(n.id())));
+}
+
+/* focus = hide everything but `keep`, its compound ancestors (members
+   without their box do not render) and, as CONTEXT, the hubs the kept
+   nodes' own lock links reach -- never a hub's other members (DL-192). A
+   kept box with no kept member is collapsed rather than emptied: it stands
+   for its members, and no sibling is shown (DL-190: siblings gate
+   nothing); its members are folded, not hidden, so an expand later draws
+   them. Then the toggle decides the layout and the view fits: a focus is
+   the operator asking to see the set. `how` names the rule that chose the
+   set, in #stats, so a picture drawn "via boxes" is never mistaken for one
+   drawn from the edges alone. */
 function focusOn(keep, how) {
+  /* the fold comes first, so the members are folded rather than hidden,
+     and the box's lock context is read off the live graph below: a
+     collapse re-points a member's lock link at the box */
+  if (ec) {
+    keep.filter("node.box:parent").forEach(function (box) {
+      if (box.descendants().anySame(keep) || !ec.isCollapsible(box)) return;
+      ec.collapse(box, { layoutBy: null });
+    });
+  }
   keep = keep.union(keep.ancestors());
-  /* a focused job keeps its own locks as CONTEXT: the hubs its lock links
-     reach, never a hub's other members -- those are not what was asked for,
-     and a lock orders nothing that a fan-in would follow (DL-192) */
   keep = keep.union(keep.connectedEdges(".lock").connectedNodes().filter(".lock"));
   cy.batch(function () {
     cy.nodes().addClass("hidden");
@@ -644,13 +939,45 @@ function focusOn(keep, how) {
   relayoutOrFit(how);
 }
 
+function hideOthers() {
+  var sel = selectedNodes();
+  if (sel.empty()) { updateStats("nothing selected"); return; }  /* hiding all would be a blank page */
+  focusOn(sel, "hide others (" + sel.length + " kept)");
+}
+
 function showAll() {
   cy.batch(function () {
     cy.elements().removeClass("hidden");
-    cy.nodes().removeClass("hit");
+    foldedNodes().removeClass("hidden");  /* a member hidden, then folded, comes back drawn */
   });
-  relayoutOrFit();
+  relayoutOrFit("show all");
 }
+
+/* Two facts a fold invalidates, restored after every one of them.
+   The locks toggle: a collapse takes an internal lock link out of the graph
+   and gives the border-crossing ones new meta-edges, and neither carries the
+   class the toggle last applied, so locks switched off could come back drawn
+   (and switched on, stay hidden). `peered`: which nodes have a lock link at
+   all decides whether the menu offers "select lock peers", and a collapsed
+   box borrows its folded members' links -- it stands for them, as it does
+   for a walk's edges (DL-190), so the item follows. */
+function syncLocks() {
+  cy.elements(".lock").toggleClass("lockoff", !locksToggle.checked);
+}
+
+function markPeered() {
+  cy.nodes().removeClass("peered");
+  cy.nodes().filter(function (n) { return n.connectedEdges(".lock").nonempty(); })
+    .addClass("peered");
+}
+
+/* the arrow under inspection: a tree leaf's click or an edge tap marks it,
+   the next tap anywhere clears it -- the life edge selection used to have */
+function inspect(edge) {
+  cy.edges().removeClass("inspected");
+  edge.addClass("inspected");
+}
+function clearInspected() { cy.edges().removeClass("inspected"); }
 
 /* ------------------------------------------------------------ details panel */
 
@@ -787,10 +1114,7 @@ function leafContent(leaf) {
   button.addEventListener("mouseleave", unmark);
   button.addEventListener("focus", mark);
   button.addEventListener("blur", unmark);
-  button.addEventListener("click", function () {
-    cy.elements().unselect();
-    edge.select();
-  });
+  button.addEventListener("click", function () { inspect(edge); });
   if (edge.hasClass("cy-expand-collapse-meta-edge")) {
     /* a fold re-points this arrow at the box and keeps its id: it IS on the
        canvas, standing for several edges, so name where it went rather than
@@ -927,6 +1251,7 @@ function showNodeDetails(n) {
 
 cy.on("tap", "node", function (evt) {
   var n = evt.target;
+  clearInspected();
   if (n.hasClass("lock")) showLockDetails(n);
   else showNodeDetails(n);
 });
@@ -937,6 +1262,7 @@ function endId(end) { return end && typeof end.id === "function" ? end.id() : St
 
 cy.on("tap", "edge", function (evt) {
   var e = evt.target, d = e.data();
+  inspect(e);
   if (e.hasClass("lock")) { showLockEdgeDetails(e); return; }
   clearBranchPaint();  /* the paint belongs to the node tap that made it */
   /* a meta-edge IS the original edge, re-pointed at a collapsed box; its
@@ -959,63 +1285,99 @@ cy.on("tap", function (evt) {
   details.hidden = true;
   dTree.replaceChildren();
   clearBranchPaint();
+  clearInspected();
 });
 
 /* ----------------------------------------------------------------- toolbar */
 
-document.getElementById("show-all").addEventListener("click", showAll);
-document.getElementById("fit").addEventListener("click", function () {
-  cy.fit(cy.nodes(":visible"), 40);
-});
+/* Every op over the selection is a toolbar button, so it is
+   keyboard-reachable and works when the optional menu plugin fails (DL-77);
+   the node-seeded items are the menu's, and each has a selection-seeded
+   equivalent here (both cones and neighbours are two walks; hide this node
+   is a click and hide selected). Nothing runs inside the load window: the
+   readiness signal in #stats must mean what it says until the load path's
+   last layout stops, and a second ELK run there would race the first (G6). */
+function guarded(fn) {
+  return function (evt) { if (!loading) fn(evt); };
+}
+function wire(id, fn) { document.getElementById(id).addEventListener("click", guarded(fn)); }
+wire("show-all", showAll);
+wire("fit", function () { cy.fit(cy.nodes(":visible"), 40); });
+wire("fit-selection", fitSelection);
 /* the toggle governs the hide ops; this button governs nothing but itself --
    a layout over what is drawn, whenever the picture has been pulled about */
-document.getElementById("arrange").addEventListener("click", function () {
-  arrangeVisible();
+wire("arrange", function () { arrangeVisible("arranged"); });
+wire("hide-selected", hideSelected);
+wire("hide-others", hideOthers);
+wire("highlight-selected", highlightSelected);
+wire("unhighlight-selected", unhighlightSelected);
+wire("clear-highlights", clearHighlights);
+wire("select-highlighted", selectHighlighted);
+wire("clear-selection", clearSelection);
+["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"].forEach(function (kind) {
+  wire("sel-" + kind, function () { runWalk(kind, selectedNodes(), selectionLabel()); });
 });
+wire("sel-lock-peers", selectLockPeersOfSelection);
 
-/* Substring search. Hits hidden by a previous focus are un-hidden, and a
-   collapsed box holding a hit is expanded first -- a search that cannot
-   find a hidden or a collapsed node is a lying search. */
-document.getElementById("search").addEventListener("keydown", function (evt) {
-  if (evt.key !== "Enter") return;
-  var query = evt.target.value.trim().toLowerCase();
-  cy.nodes().removeClass("hit");
-  if (!query) { updateStats(); return; }
+/* ------------------------------------------------------------------- find */
+
+/* Substring on the node id, case-insensitive. The outcome is a selection
+   (Enter or "select matches", replacing; shift adds) or a highlight
+   ("highlight matches", adding, the selection left alone) -- nothing of
+   its own. Both un-hide the matches and their ancestors, expand a folded
+   box holding one in place, and fit to the matches: a find that cannot
+   reach a hidden or a folded node is a lying find (DL-71). One match opens
+   its details, kind aware: a hub opens the lock panel. No match says so
+   beside the field and changes nothing; an empty query does nothing. */
+var findField = document.getElementById("search");
+var findNote = document.getElementById("find-note");
+
+function runFind(mode, add) {
+  var text = findField.value.trim(), query = text.toLowerCase();
+  findNote.textContent = "";
+  if (!query) return;
   var matches = function (n) { return n.data("id").toLowerCase().indexOf(query) !== -1; };
-  var expanded = false;
-  if (ec) {
-    cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
-      if (ec.getCollapsedChildrenRecursively(box).nodes().some(matches)) {
-        ec.expandRecursively(box, { layoutBy: null });
-        expanded = true;
-      }
-    });
-  }
+  var expanded = expandToReach(function (box) {
+    return ec.getCollapsedChildrenRecursively(box).nodes().some(matches);
+  });
   var hits = cy.nodes().filter(matches);
   if (hits.empty()) {
-    updateStats("no match for “" + query + "”");
+    findNote.textContent = "no match for \u201c" + text + "\u201d";
     return;
   }
-  cy.batch(function () {
-    hits.union(hits.ancestors()).removeClass("hidden");
-    hits.addClass("hit");
-  });
-  /* one hit is unambiguous: select it and open its details, so Enter alone
-     answers "what gates this job?" without reaching for the mouse (DL-191) */
-  if (hits.length === 1) {
-    cy.elements().unselect();
-    hits.select();
-    showNodeDetails(hits[0]);
+  var count = hits.length + (hits.length === 1 ? " match" : " matches");
+  var op = "find \u201c" + text + "\u201d: " + count;
+  if (mode === "highlight") {
+    var off = hits.filter(".lock.lockoff");  /* the locks toggle keeps its authority here too */
+    reveal(hits.difference(off));
+    highlightNodes(hits.difference(off));
+    op += " highlighted" + skippedNote(off.length);
+  } else {
+    op += " selected" + skippedNote(selectNodes(hits, !add));
+  }
+  var shown = hits.not(".lockoff");
+  if (hits.length === 1 && shown.nonempty()) {
+    if (hits.hasClass("lock")) showLockDetails(hits[0]); else showNodeDetails(hits[0]);
   }
   /* An expand here is an expand like any other (DL-196): in place, no
-     layout. The members come back around the box's own position, where the
-     first load-time layout put them relative to it, and the fit is to the
-     hits -- the answer to the question that was asked. It goes behind the
-     fold's own follow-up, which rewrites #stats without this count. */
-  var found = hits.length + " hit" + (hits.length === 1 ? "" : "s");
-  function report() { updateStats(found); cy.fit(hits, 60); }
+     layout. The fit is to the matches -- the answer to the question that
+     was asked -- and goes behind the fold's own follow-up. */
+  function report() {
+    updateStats(op);
+    /* queued behind a fold: read the matches again, because anything that
+       ran in between could have folded one away */
+    var live = shown.filter(function (n) { return !n.removed() && n.visible(); });
+    if (live.nonempty()) cy.fit(live, 60);
+  }
   if (expanded) afterFold(report); else report();
+}
+
+document.getElementById("search").addEventListener("keydown", function (evt) {
+  if (evt.key === "Enter") runFind("select", evt.shiftKey);
 });
+findField.addEventListener("input", function () { findNote.textContent = ""; });
+wire("find-select", function (evt) { runFind("select", evt.shiftKey); });
+wire("find-highlight", function () { runFind("highlight", true); });
 
 /* ------------------------------------------------------------ initial layout */
 
@@ -1030,12 +1392,41 @@ document.getElementById("search").addEventListener("keydown", function (evt) {
 /* true until the load path's last layout has stopped: see afterFold */
 var loading = true;
 
+/* The layer counts follow every selection change, the plain clicks
+   cytoscape handles itself included, coalesced over a task: a bulk select
+   fires one event per node. Not before the load path has written #stats,
+   whose "laying out" is the page's readiness signal. */
+var statsPending = null;
+cy.on("select unselect", "node", function () {
+  if (loading || statsPending !== null) return;
+  statsPending = setTimeout(function () { statsPending = null; updateStats(); }, 0);
+});
+
+/* What this task unselected, forgotten on the next tick. The fold handlers
+   read it: the extension unselects a box's direct children before it says
+   it is collapsing, and the box takes over the selection they had. */
+var justUnselected = cy.collection();
+var unselectReset = null;
+cy.on("unselect", "node", function (evt) {
+  justUnselected = justUnselected.union(evt.target);
+  if (unselectReset !== null) return;
+  unselectReset = setTimeout(function () {
+    justUnselected = cy.collection();
+    unselectReset = null;
+  }, 0);
+});
+
 function finishInitial() {
   loading = false;
   /* a second ELK run started while the load path was between its two layouts
      would clear "laying out" before the folded picture exists, and the page's
      readiness signal would mean nothing (DL-190) */
   document.getElementById("arrange").disabled = false;
+  /* find too: one fired inside the load window cleared "laying out" early
+     and could have its report overwritten (DL-196's second review, G6/G7) */
+  ["search", "find-select", "find-highlight"].forEach(function (id) {
+    document.getElementById(id).disabled = false;
+  });
   placeLocks();
   cy.fit(cy.nodes(":visible"), 40);  /* the hubs were placed after the layout */
   updateEdgeLabels();
@@ -1127,9 +1518,31 @@ try {
     zIndex: 15  /* over the graph, under #details (20) and the menu (1000) */
   });
   ec = cy.expandCollapse("get");
+  /* Selection and highlight ride a fold (DL-196). The extension unselects
+     the box's direct children before this fires -- and only those, so a
+     member selected deeper down is still selected here -- and the box takes
+     the selection over; the members come back unselected, so an expand
+     leaves the box selected. A mark stays on the folded member and shows
+     on the box as a proxy. */
+  cy.on("expandcollapse.beforecollapse", function (evt) {
+    var box = evt.target;
+    if (box.children().anySame(justUnselected) || box.descendants(":selected").nonempty()) {
+      box.scratch("_dsl41sel", true);
+    }
+  });
   cy.on("expandcollapse.aftercollapse", function (evt) {
     var box = evt.target;
-    box.scratch("_dsl41", { members: ec.getCollapsedChildrenRecursively(box).nodes().length });
+    var folded = ec.getCollapsedChildrenRecursively(box).nodes();
+    box.scratch("_dsl41", { members: folded.length });
+    folded.unselect();  /* the deeper members the extension left selected */
+    if (box.scratch("_dsl41sel")) {
+      box.removeScratch("_dsl41sel");
+      box.select();
+    }
+    cy.edges().unselectify();  /* the meta-edges are new elements */
+    syncLocks();
+    markPeered();
+    refreshProxies();
     classifyNesting();
     refreshEdgeLabels();
     afterFold();
@@ -1142,6 +1555,11 @@ try {
   });
   cy.on("expandcollapse.afterexpand", function (evt) {
     evt.target.removeScratch("_dsl41");
+    cy.edges().unselectify();
+    syncLocks();
+    markPeered();
+    refreshProxies();
+    clearInspected();  /* an arrow restored by this expand carries the mark it was folded with */
     classifyNesting();
     refreshEdgeLabels();
     afterFold();
@@ -1184,7 +1602,10 @@ document.getElementById("expand-all").addEventListener("click", function () {
    and a toggle that hid its lock are two independent facts. */
 var locksToggle = document.getElementById("locks");
 locksToggle.addEventListener("change", function () {
-  cy.elements(".lock").toggleClass("lockoff", !locksToggle.checked);
+  syncLocks();
+  /* off keeps its authority (DL-196): a hub it hides is not selected, and a
+     reveal whose target is a hub skips it and says so */
+  if (!locksToggle.checked) cy.nodes(".lock").unselect();
   updateStats();
 });
 
@@ -1311,6 +1732,121 @@ function fanOutTree(start) {
   return seen;
 }
 
+/* -------------------------------------------------------- selection walks */
+
+/* A walk ADDS to the selection: the seed, plus one step or the closure from
+   it. The seed is the node under the menu, or the whole selection from the
+   canvas menu and the toolbar (DL-196): both add, so a picture is built
+   walk by walk, and "both cones of A" is two clicks on A. A hub in the seed
+   contributes nothing and stays selected: the walks read the flow edges
+   alone (DL-192). A walk reaches hidden nodes and draws what it selects;
+   it continues through a collapsed box's own border edges and never
+   descends into its members. */
+var WALKS = {
+  "fan-in": { word: "fan-in", transitive: false,
+    set: function (seed) { return seed.union(fanInStep(seed)); } },
+  "fan-out": { word: "fan-out", transitive: false,
+    set: function (seed) { return seed.union(fanOutStep(seed)); } },
+  "fan-in-tree": { word: "fan-in", transitive: true, set: fanInTree },
+  "fan-out-tree": { word: "fan-out", transitive: true, set: fanOutTree },
+  "both-trees": { word: "both cones", transitive: true,
+    set: function (seed) { return fanInTree(seed).union(fanOutTree(seed)); } },
+  "neighbours": { word: "neighbours", transitive: false,
+    set: function (seed) { return seed.union(fanInStep(seed)).union(fanOutStep(seed)); } }
+};
+
+function walkName(kind, seedLabel) {
+  var walk = WALKS[kind];
+  return walk.word + " of " + seedLabel + (walk.transitive ? ", transitive" : "");
+}
+
+function runWalk(kind, seed, seedLabel) {
+  var flowSeed = flow(seed);
+  var found = flowSeed.empty() ? cy.collection() : WALKS[kind].set(flowSeed);
+  var skipped = selectNodes(found.union(seed), false);
+  updateStats(howLabel(walkName(kind, seedLabel)) + skippedNote(skipped));
+}
+
+/* --- locks: the members of a hub, and a job's peers -- its direct pair
+   partners plus the members of its own hubs, no closure (DL-196); a
+   self-lock adds nothing, having no link. Both are membership ops and reach
+   into folded boxes. */
+
+/* the collapsed box a lock member is folded into, or null when it is live */
+function foldedInto(m) {
+  var chain = [m.id].concat(m.boxes || []);
+  for (var i = 0; i < chain.length; i++) {
+    var el = cy.$id(chain[i]);
+    if (el.nonempty()) return el.hasClass("cy-expand-collapse-collapsed-node") ? el : null;
+  }
+  return null;
+}
+
+function lockMemberNodes(hub) {
+  var expanded = false, members = cy.collection();
+  (hub.data("members") || []).forEach(function (m) {
+    var box = foldedInto(m);
+    if (box && ec) {
+      ec.expandRecursively(box, { layoutBy: null });
+      expanded = true;
+    }
+    members = members.union(cy.$id(m.id));
+  });
+  return { nodes: members, expanded: expanded };
+}
+
+function selectLockMembers(hub) {
+  var found = lockMemberNodes(hub);
+  selectNodes(found.nodes, false);
+  var op = "members of " + lockTitle(hub) + " (" + found.nodes.length + ")";
+  if (found.expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+}
+
+function lockPeerNodes(job) {
+  var expanded = false, peers = cy.collection();
+  /* a pair link folded at the partner's end is a meta-edge to its box:
+     expand the box, then read the links again */
+  job.connectedEdges(".lock").forEach(function (e) {
+    if (!ec || !e.hasClass("cy-expand-collapse-meta-edge")) return;
+    var other = e.source().same(job) ? e.target() : e.source();
+    if (!other.hasClass("cy-expand-collapse-collapsed-node")) return;
+    ec.expandRecursively(other, { layoutBy: null });
+    expanded = true;
+  });
+  job.connectedEdges(".lock").connectedNodes().not(job).forEach(function (other) {
+    if (!other.hasClass("lock")) { peers = peers.union(other); return; }
+    var found = lockMemberNodes(other);
+    expanded = expanded || found.expanded;
+    peers = peers.union(found.nodes);
+  });
+  return { nodes: peers.not(job), expanded: expanded };
+}
+
+function selectLockPeers(job) {
+  var found = lockPeerNodes(job);
+  selectNodes(found.nodes.union(job), false);
+  var op = "lock peers of " + shortId(job.id()) + " (" + found.nodes.length + ")";
+  if (found.expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+}
+
+/* the toolbar's form: every selected hub's members and every selected job's
+   peers, one op over the selection */
+function selectLockPeersOfSelection() {
+  var sel = selectedNodes(), found = cy.collection(), expanded = false;
+  var seedLabel = selectionLabel();  /* the SEED's count: the op is about to grow it */
+  sel.forEach(function (n) {
+    var got = n.hasClass("lock") ? lockMemberNodes(n) : lockPeerNodes(n);
+    found = found.union(got.nodes);
+    expanded = expanded || got.expanded;
+  });
+  found = found.difference(sel);
+  selectNodes(found, false);
+  /* the seed label carries a count of its own, as the walks' does, so what
+     this op found is said in words rather than in a second parenthesis */
+  var op = "lock peers of " + seedLabel + ": " + found.length + " added";
+  if (expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+}
+
 /* ------------------------------------------------------------- context menu */
 
 /* LAST, and guarded: cytoscape-context-menus is the one OPTIONAL part of the
@@ -1322,59 +1858,52 @@ function fanOutTree(start) {
 
 function target(evt) { return evt.target || evt.cyTarget; }
 
-var menuItems = [
-  /* a lock hub has no flow edges, so a walk from it is always empty; these
-     six items are not offered on one (DL-196). node[!lock] excludes only
-     hubs -- a job carries `self_lock` at most, never `lock` (viz_explore.py) --
+/* Menus carry seed-relative items only (DL-196); everything else is a
+   toolbar button. Node: the walks, seeded from that node, lock peers, hide,
+   collapse or expand. Hub: select members, hide. Canvas: the walks, seeded
+   from the selection. The labels are rewritten as a menu opens, below, to
+   name the seed. Item ids become DOM ids: distinct from the toolbar's. */
+function nodeWalkItem(kind, extra) {
+  /* a lock hub has no flow edges, so a walk from it is always empty; the
+     walks are not offered on one (DL-197). node[!lock] excludes only hubs --
+     a job carries `self_lock` at most, never `lock` (viz_explore.py) --
      cytoscape has no :not(), so the attribute-absence form is what selects
      "every node except a hub". */
-  { id: "fan-in", content: "focus fan-in (direct)", selector: "node[!lock]",
-    onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(fanInStep(n)), howLabel("fan-in"));
-    } },
-  { id: "fan-out", content: "focus fan-out (direct)", selector: "node[!lock]",
-    onClickFunction: function (evt) {
-      var n = target(evt); focusOn(n.union(fanOutStep(n)), howLabel("fan-out"));
-    } },
-  { id: "fan-in-tree", content: "focus fan-in tree", selector: "node[!lock]",
-    onClickFunction: function (evt) {
-      var n = target(evt); focusOn(fanInTree(n), howLabel("fan-in tree"));
-    } },
-  { id: "fan-out-tree", content: "focus fan-out tree", selector: "node[!lock]",
-    onClickFunction: function (evt) {
-      var n = target(evt); focusOn(fanOutTree(n), howLabel("fan-out tree"));
-    } },
-  { id: "both-trees", content: "focus both trees", selector: "node[!lock]",
+  var item = { id: kind, content: "select " + WALKS[kind].word, selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt);
-      focusOn(fanInTree(n).union(fanOutTree(n)), howLabel("both trees"));
-    } },
-  { id: "neighbours", content: "focus this + neighbours", selector: "node[!lock]",
-    onClickFunction: function (evt) {
-      var n = target(evt);
-      focusOn(n.union(fanInStep(n)).union(fanOutStep(n)), howLabel("neighbours"));
-    }, hasTrailingDivider: true },
-  { id: "focus-lock", content: "focus lock", selector: "node.lock",
-    onClickFunction: function (evt) {
-      var hub = target(evt), keep = hub;
-      (hub.data("members") || []).forEach(function (m) {
-        var el = cy.$id(m.id);
-        if (el.nonempty()) keep = keep.union(el);
-      });
-      focusOn(keep, "lock");
-    }, hasTrailingDivider: true },
-  { id: "hide", content: "hide this node", selector: "node",
-    onClickFunction: function (evt) {
-      var n = target(evt);
-      n.union(n.descendants()).addClass("hidden");
-      updateStats();
-    }, hasTrailingDivider: true },
-  /* item ids become DOM ids of the menu entries -- keep them distinct
-     from the toolbar's #show-all/#fit (review finding: duplicate ids) */
-  { id: "menu-show-all", content: "show all", selector: "node",
-    coreAsWell: true, onClickFunction: showAll },
-  { id: "menu-fit", content: "fit", selector: "node", coreAsWell: true,
-    onClickFunction: function () { cy.fit(cy.nodes(":visible"), 40); } }
+      runWalk(kind, n, shortId(n.id()));
+    } };
+  if (extra) Object.keys(extra).forEach(function (k) { item[k] = extra[k]; });
+  return item;
+}
+function selectionWalkItem(kind) {
+  return { id: "menu-" + kind, content: "select " + WALKS[kind].word + " of selection",
+    coreAsWell: true,
+    onClickFunction: function () { runWalk(kind, selectedNodes(), selectionLabel()); } };
+}
+
+var menuItems = [
+  nodeWalkItem("fan-in"),
+  nodeWalkItem("fan-out"),
+  nodeWalkItem("fan-in-tree"),
+  nodeWalkItem("fan-out-tree"),
+  nodeWalkItem("both-trees"),
+  nodeWalkItem("neighbours", { hasTrailingDivider: true }),
+  { id: "lock-peers", content: "select lock peers", selector: "node[!lock].peered",
+    onClickFunction: function (evt) { selectLockPeers(target(evt)); },
+    hasTrailingDivider: true },
+  { id: "hide", content: "hide this node", selector: "node[!lock]",
+    onClickFunction: function (evt) { hideThisNode(target(evt)); },
+    hasTrailingDivider: true },
+  { id: "lock-members", content: "select lock members", selector: "node.lock",
+    onClickFunction: function (evt) { selectLockMembers(target(evt)); } },
+  { id: "hide-lock", content: "hide this lock", selector: "node.lock",
+    onClickFunction: function (evt) { hideThisNode(target(evt)); } },
+  selectionWalkItem("fan-in"),
+  selectionWalkItem("fan-out"),
+  selectionWalkItem("fan-in-tree"),
+  selectionWalkItem("fan-out-tree")
 ];
 /* the box items exist only when box collapse does: a menu entry that
    silently does nothing is the DL-77 shape in miniature */
@@ -1387,18 +1916,60 @@ if (ec) {
       selector: "node.cy-expand-collapse-collapsed-node",
       onClickFunction: function (evt) { expandBox(target(evt)); },
       hasTrailingDivider: true });
-  menuItems.push(
-    { id: "menu-collapse-all", content: "collapse all boxes", selector: "node",
-      coreAsWell: true, onClickFunction: function () { ec.collapseAll(); } },
-    { id: "menu-expand-all", content: "expand all boxes", selector: "node",
-      coreAsWell: true, onClickFunction: function () { ec.expandAll(); } });
+}
+
+/* Dismissing a menu never changes the selection (DL-196). The plugin closes
+   on the tapstart of a click outside it, and cytoscape then completes that
+   click as a background tap that clears the selection -- after it has
+   emitted `tap`, which is where the selection stashed at the tapstart is
+   put back, one tick later. A click that lands on a node is a click: it
+   replaces the selection, as it would with no menu open. Registered above
+   the plugin, so the tapstart still sees the menu open. */
+var menuKeep = null;
+function menuIsOpen() {
+  var el = document.querySelector(".cy-context-menus-cxt-menu");
+  return !!el && getComputedStyle(el).display !== "none";
+}
+cy.on("tapstart", function () { menuKeep = menuIsOpen() ? selectedNodes() : null; });
+cy.on("tap", function (evt) {
+  var keep = menuKeep;
+  menuKeep = null;
+  if (evt.target !== cy || !keep) return;
+  setTimeout(function () {
+    /* what the stash held may be gone by now -- folded away, hidden, or a
+       hub the locks toggle turned off -- and selected implies drawn */
+    keep.filter(function (n) { return !n.removed() && n.visible(); }).select();
+  }, 0);
+});
+
+function setMenuLabel(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
 }
 
 try {
+  menuItems.forEach(function (item) { item.onClickFunction = guarded(item.onClickFunction); });
   cy.contextMenus({ menuItems: menuItems });
+  /* As the menu opens -- after the plugin's own cxttap handler has shown
+     the items the target matches -- the labels name the seed: "select
+     fan-in of JOB_A, transitive", "... of selection (7)". */
+  cy.on("cxttap", function (evt) {
+    var t = target(evt);
+    var onNode = t !== cy && typeof t.isNode === "function" && t.isNode();
+    var seedLabel = onNode ? shortId(t.id()) : selectionLabel();
+    Object.keys(WALKS).forEach(function (kind) {
+      setMenuLabel(kind, "select " + walkName(kind, seedLabel));
+      /* the canvas items are seeded from the selection whatever was
+         right-clicked; on a node menu they are hidden, not renamed */
+      setMenuLabel("menu-" + kind, "select " + walkName(kind, selectionLabel()));
+    });
+    if (!onNode) return;
+    setMenuLabel("lock-peers", "select lock peers of " + seedLabel);
+    if (t.hasClass("lock")) setMenuLabel("lock-members", "select members of " + lockTitle(t));
+  });
 } catch (err) {
   lostFeature += " · context menu unavailable in this browser";
-  updateStats();
+  updateStats();  /* inside the load window this is a no-op; finishInitial carries the notice */
   if (window.console) console.error("context menu unavailable:", err);
 }
 </script>

@@ -207,7 +207,8 @@ def _counts(d: Driven) -> dict[str, int]:
             "() => ({nodes: cy.nodes().length, edges: cy.edges().length,"
             " visible_nodes: cy.nodes(':visible').length,"
             " visible_edges: cy.edges(':visible').length,"
-            " hits: cy.nodes('.hit').length})"
+            " selected: cy.nodes(':selected').length,"
+            " highlighted: highlighted().length})"
         )
     )
 
@@ -230,6 +231,19 @@ def _client_point(d: Driven, node_id: str) -> dict[str, float]:
         " const r = document.getElementById('cy').getBoundingClientRect();"
         " return {x: r.left + p.x, y: r.top + p.y}; }",
         node_id,
+    )
+    return point
+
+
+def _canvas_point(d: Driven, dx: float, dy: float) -> dict[str, float]:
+    """A point measured from the `#cy` element's OWN box, not the page's --
+    clear of the toolbar above it (which wraps to a different number of rows
+    per fixture) and, for a small offset from a corner, clear of the fitted
+    graph too: `cy.fit(..., 40)` reserves that much padding around it."""
+    point: dict[str, float] = d.page.evaluate(
+        "(off) => { const r = document.getElementById('cy').getBoundingClientRect();"
+        " return {x: r.left + off[0], y: r.top + off[1]}; }",
+        [dx, dy],
     )
     return point
 
@@ -267,6 +281,25 @@ def _all_on_screen(d: Driven) -> bool:
 def _visible_ids(d: Driven) -> list[str]:
     ids: list[str] = d.page.evaluate("() => cy.nodes(':visible').map(n => n.id())")
     return sorted(ids)
+
+
+def _selected_ids(d: Driven) -> list[str]:
+    """The selection layer (DL-196): the set the next bulk op acts on."""
+    ids: list[str] = d.page.evaluate("() => cy.nodes(':selected').map(n => n.id())")
+    return sorted(ids)
+
+
+def _arm_layout_wait(d: Driven) -> None:
+    """G9: a completion signal for the one layout an action under test is
+    about to run, armed before the action so the stop cannot race the arm."""
+    d.page.evaluate(
+        "() => { window.__layoutDone = false;"
+        " cy.one('layoutstop', () => { window.__layoutDone = true; }); }"
+    )
+
+
+def _wait_layout_done(d: Driven) -> None:
+    d.page.wait_for_function("() => window.__layoutDone === true", timeout=_LAYOUT_TIMEOUT_MS)
 
 
 def _tree_ids(d: Driven, node_id: str, tree: str) -> list[str]:
@@ -311,24 +344,31 @@ def test_fit_button_rescales_the_view(driven: Driven) -> None:
     assert abs(zoom - 5) > 1e-6, f"{driven.engine}: #fit left the zoom at {zoom}"
 
 
-def test_search_marks_hits_and_reports_no_match(driven: Driven) -> None:
+def test_search_select_mode_selects_matches_and_reports_no_match(driven: Driven) -> None:
+    """DL-196 slice 3: the private `.hit` class is gone. Enter runs "select
+    matches", replacing the selection; a query with no match says so beside
+    the field (`#find-note`), never in `#stats`, and changes nothing."""
     _ready(driven)
     _show_all(driven)
+    _click(driven, "#clear-selection")
     sample = _sample_node(driven)
     driven.page.fill("#search", sample[: max(6, len(sample) // 2)])
     driven.page.press("#search", "Enter")
     driven.page.wait_for_timeout(_SETTLE_MS)
     stats = driven.page.inner_text("#stats")
-    assert _counts(driven)["hits"] > 0, f"{driven.engine}: nothing marked, stats={stats!r}"
-    assert "hit" in stats, f"{driven.engine}: {stats!r}"
+    assert _counts(driven)["selected"] > 0, f"{driven.engine}: nothing selected, stats={stats!r}"
+    assert "selected" in stats, f"{driven.engine}: {stats!r}"
 
     driven.page.fill("#search", "zzz-no-such-job-zzz")
     driven.page.press("#search", "Enter")
     driven.page.wait_for_timeout(_SETTLE_MS)
-    assert "no match" in driven.page.inner_text("#stats")
+    assert driven.page.inner_text("#find-note") == "no match for “zzz-no-such-job-zzz”", (
+        driven.engine
+    )
 
     driven.page.fill("#search", "")
     driven.page.press("#search", "Enter")
+    _click(driven, "#clear-selection")
 
 
 def test_search_unhides_a_node_hidden_by_a_focus(driven: Driven) -> None:
@@ -354,13 +394,22 @@ def test_search_unhides_a_node_hidden_by_a_focus(driven: Driven) -> None:
     )
     driven.page.fill("#search", "")
     driven.page.press("#search", "Enter")
+    _click(driven, "#clear-selection")
 
 
-def test_show_all_restores_every_element_and_clears_highlights(driven: Driven) -> None:
+def test_show_all_restores_every_element_and_keeps_selection_and_highlights(
+    driven: Driven,
+) -> None:
+    """DL-196 slice 3: "show all" is visibility only. The old name here
+    ("...and_clears_highlights") described a fact that is now false: the
+    selection and the highlights both survive it."""
     _ready(driven)
+    _click(driven, "#clear-selection")
+    _click(driven, "#clear-highlights")
     sample = _sample_node(driven)
     driven.page.evaluate(
-        "(id) => { const n = cy.$id(id); n.union(n.descendants()).addClass('hidden'); updateStats(); }",
+        "(id) => { const n = cy.$id(id); n.select(); highlightNodes(n);"
+        " n.union(n.descendants()).addClass('hidden'); updateStats(); }",
         sample,
     )
     driven.page.wait_for_timeout(200)
@@ -369,7 +418,14 @@ def test_show_all_restores_every_element_and_clears_highlights(driven: Driven) -
     counts = _counts(driven)
     assert counts["visible_nodes"] == counts["nodes"], f"{driven.engine}: {counts}"
     assert counts["visible_edges"] == counts["edges"], f"{driven.engine}: {counts}"
-    assert counts["hits"] == 0
+    assert driven.page.evaluate("(id) => cy.$id(id).selected()", sample), (
+        f"{driven.engine}: show all cleared the selection"
+    )
+    assert driven.page.evaluate("(id) => cy.$id(id).hasClass('hl')", sample), (
+        f"{driven.engine}: show all cleared the highlight"
+    )
+    _click(driven, "#clear-selection")
+    _click(driven, "#clear-highlights")
 
 
 def test_relayout_toggle_off_leaves_leaf_positions_alone(driven: Driven) -> None:
@@ -413,9 +469,11 @@ def test_relayout_toggle_on_re_lays_out_after_a_focus(driven: Driven) -> None:
     before = driven.page.evaluate(_LEAF_POSITIONS)
     driven.page.check("#relayout")
     try:
+        _arm_layout_wait(driven)
         driven.page.evaluate(
             "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
         )
+        _wait_layout_done(driven)
         driven.page.wait_for_timeout(_SETTLE_MS)
         after = driven.page.evaluate(_LEAF_POSITIONS)
         moved = [
@@ -455,37 +513,91 @@ def test_details_panel_opens_for_a_node_and_for_an_edge(driven: Driven) -> None:
     _click(driven, "#d-close")
 
 
-def test_context_menu_opens_on_right_click_and_an_item_narrows_the_graph(driven: Driven) -> None:
+def test_context_menu_opens_on_right_click_and_an_item_selects_the_walk(driven: Driven) -> None:
     """The DL-77 defect itself: the menu is built from customized built-in
-    elements, so this is the one control that needs a real mouse."""
+    elements, so this is the one control that needs a real mouse. Under
+    DL-196 slice 3 a walk item ADDS to the selection -- it no longer narrows
+    the graph by itself, that is hide-others' separate job."""
     _ready(driven)
     _show_all(driven)
+    _click(driven, "#clear-selection")
     assert "context menu unavailable" not in driven.page.inner_text("#stats"), (
         f"{driven.engine}: the page reports its own context menu as lost"
     )
     sample = _sample_node(driven)
-    before = _counts(driven)["visible_nodes"]
     point = _client_point(driven, sample)
     driven.page.mouse.click(point["x"], point["y"], button="right")
     driven.page.wait_for_timeout(500)
-    items = driven.page.evaluate(
-        "() => Array.from(document.querySelectorAll('#fan-in,#fan-out,#fan-in-tree,#fan-out-tree,"
-        "#both-trees,#neighbours,#hide,#menu-show-all,#menu-fit')).map(e => e.id)"
-    )
-    assert len(items) == 9, f"{driven.engine}: menu items present = {items}"
     assert driven.page.evaluate(
         "() => { const e = document.querySelector('.cy-context-menus-cxt-menu');"
         " return !!e && getComputedStyle(e).display !== 'none'; }"
     ), f"{driven.engine}: right-click did not open the menu"
+    assert driven.page.evaluate(
+        "() => getComputedStyle(document.getElementById('fan-in-tree')).display !== 'none'"
+    ), f"{driven.engine}: fan-in-tree not offered on a plain node"
 
     _click(driven, "#fan-in-tree")
     driven.page.wait_for_timeout(_SETTLE_MS)
-    after = _counts(driven)["visible_nodes"]
-    assert 0 < after < before, (
-        f"{driven.engine}: fan-in tree left {after} of {before} nodes visible"
-    )
-    assert driven.page.evaluate("(id) => cy.$id(id).visible()", sample)
+    selected = _selected_ids(driven)
+    assert sample in selected, f"{driven.engine}: {sample} not selected after its own fan-in-tree"
+    assert selected == _tree_ids(driven, sample, "fanInTree"), driven.engine
+    _click(driven, "#clear-selection")
+
+
+def test_dismissing_the_menu_with_a_background_click_leaves_the_selection_intact(
+    driven: Driven,
+) -> None:
+    """DL-196's own verification ask: the plugin closes on the tapstart of an
+    outside click, and cytoscape then completes that click as a background
+    tap that would otherwise clear the selection; dismissing on a NODE is a
+    click and replaces it -- this pins only the background case, real mouse,
+    three engines."""
+    _ready(driven)
     _show_all(driven)
+    _click(driven, "#clear-selection")
+    sample = _sample_node(driven)
+    driven.page.evaluate("(id) => { cy.$id(id).select(); }", sample)
+    before = _selected_ids(driven)
+    point = _client_point(driven, sample)
+    driven.page.mouse.click(point["x"], point["y"], button="right")
+    driven.page.wait_for_timeout(500)
+    bg = _canvas_point(driven, 10, 10)  # the canvas's own corner: a real background tap
+    driven.page.mouse.click(bg["x"], bg["y"])
+    driven.page.wait_for_timeout(250)
+    assert _selected_ids(driven) == before, (
+        f"{driven.engine}: dismissing the menu with a background click changed the selection"
+    )
+    _click(driven, "#clear-selection")
+
+
+def test_ctrl_click_on_a_node_leaves_the_selection_unchanged_either_way(driven: Driven) -> None:
+    """DL-196's webkit verification ask: does ctrl+click on a node open the
+    context menu (the Mac convention) or select it? Either is acceptable --
+    what must hold is that it does not leave the selection in a surprising
+    state. The actual outcome per engine is reported alongside this slice's
+    test report, not asserted here as one fixed behaviour."""
+    _ready(driven)
+    _show_all(driven)
+    _click(driven, "#clear-selection")
+    sample = _sample_node(driven)
+    point = _client_point(driven, sample)
+    driven.page.keyboard.down("Control")
+    driven.page.mouse.click(point["x"], point["y"])
+    driven.page.keyboard.up("Control")
+    driven.page.wait_for_timeout(500)
+    opened = driven.page.evaluate(
+        "() => { const e = document.querySelector('.cy-context-menus-cxt-menu');"
+        " return !!e && getComputedStyle(e).display !== 'none'; }"
+    )
+    selected = _selected_ids(driven)
+    assert selected in ([], [sample]), (
+        f"{driven.engine}: ctrl+click left an unexpected selection {selected}"
+        f" (menu opened: {opened})"
+    )
+    if opened:
+        driven.page.mouse.click(10, 10)
+        driven.page.wait_for_timeout(200)
+    _click(driven, "#clear-selection")
 
 
 def test_no_uncaught_page_errors(driven: Driven) -> None:
@@ -549,12 +661,12 @@ def test_trace_boxes_off_drops_box_gating_from_fan_in_and_fan_out(driven_trace: 
         )
 
 
-def test_context_menu_lists_the_box_items_in_declared_order(driven_trace: Driven) -> None:
-    """`collapse`/`expand` sit only where their selector matches the clicked
-    node (a plain box shows `collapse`, not `expand`), but the DOM holds
-    every configured item regardless -- non-matching ones are `display:
-    none`, not absent -- so querying all thirteen ids finds them all, in the
-    order menuItems.splice/.push builds them."""
+def test_context_menu_lists_every_item_in_declared_order(driven_trace: Driven) -> None:
+    """Every configured item sits in the DOM regardless of the clicked node --
+    non-matching ones are `display: none`, not absent -- so querying all
+    sixteen finds them all, in the order the template's `menuItems` array
+    builds them (DL-196 slice 3): the six flow items, lock peers, hide, the
+    box pair, the hub pair, then the four canvas-only walks."""
     _ready(driven_trace)
     point = _client_point(driven_trace, "B")
     driven_trace.page.mouse.click(point["x"], point["y"], button="right")
@@ -562,8 +674,9 @@ def test_context_menu_lists_the_box_items_in_declared_order(driven_trace: Driven
     try:
         items = driven_trace.page.evaluate(
             "() => Array.from(document.querySelectorAll("
-            "'#fan-in,#fan-out,#fan-in-tree,#fan-out-tree,#both-trees,#neighbours,#hide,"
-            "#collapse,#expand,#menu-show-all,#menu-fit,#menu-collapse-all,#menu-expand-all'"
+            "'#fan-in,#fan-out,#fan-in-tree,#fan-out-tree,#both-trees,#neighbours,"
+            "#lock-peers,#hide,#collapse,#expand,#lock-members,#hide-lock,"
+            "#menu-fan-in,#menu-fan-out,#menu-fan-in-tree,#menu-fan-out-tree'"
             ")).map(e => e.id)"
         )
         assert items == [
@@ -573,13 +686,16 @@ def test_context_menu_lists_the_box_items_in_declared_order(driven_trace: Driven
             "fan-out-tree",
             "both-trees",
             "neighbours",
+            "lock-peers",
             "hide",
             "collapse",
             "expand",
-            "menu-show-all",
-            "menu-fit",
-            "menu-collapse-all",
-            "menu-expand-all",
+            "lock-members",
+            "hide-lock",
+            "menu-fan-in",
+            "menu-fan-out",
+            "menu-fan-in-tree",
+            "menu-fan-out-tree",
         ], driven_trace.engine
     finally:
         driven_trace.page.mouse.click(10, 10)  # dismiss: an outside click, nothing under test
@@ -641,14 +757,14 @@ def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: D
     _click(driven_trace, "#d-close")
 
 
-def test_search_expands_a_collapsed_box_to_find_the_hit(driven_trace: Driven) -> None:
+def test_search_expands_a_collapsed_box_to_find_the_match(driven_trace: Driven) -> None:
     """Continues from the collapsed B left above -- asserted, not just
     assumed, so a reordering fails here with a clear diagnosis instead of
     passing vacuously (a search on an already-expanded page would also find
     IM). Restores the page to fully expanded and the search box empty -- the
     base state the remaining tests in this block assume. Also re-fits the
     view: the search's own `cy.fit(hits, 60)` zooms tight around the one
-    hit, which can leave other nodes' rendered position outside the fixed
+    match, which can leave other nodes' rendered position outside the fixed
     1600x1000 viewport -- fine for the id-only assertions elsewhere, but the
     next tests click real screen points and need everything back on screen."""
     _ready(driven_trace)
@@ -670,12 +786,13 @@ def test_search_expands_a_collapsed_box_to_find_the_hit(driven_trace: Driven) ->
         "P",
         "Q",
     ], driven_trace.engine
-    assert driven_trace.page.inner_text("#stats").endswith("1 hit"), (
+    assert driven_trace.page.inner_text("#stats").endswith("1 match selected"), (
         driven_trace.engine,
         driven_trace.page.inner_text("#stats"),
     )
     driven_trace.page.fill("#search", "")
     driven_trace.page.press("#search", "Enter")
+    _click(driven_trace, "#clear-selection")
     _show_all(driven_trace)
 
 
@@ -817,6 +934,83 @@ def test_the_arrange_button_lays_the_drawn_graph_out_again(driven_trace: Driven)
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _positions(d, ["P"])["P"] != [9000, 9000], d.engine
     assert _all_on_screen(d), f"{d.engine}: arrange did not end with a fit"
+
+
+def test_collapse_moves_a_nested_members_selection_to_the_outer_box(driven_trace: Driven) -> None:
+    """DL-196: a collapse moves a folded member's selection to its box, and
+    an expand leaves the box selected with the member unselected -- nested
+    too. IM sits two levels down (inside IB, inside B); collapsing B still
+    moves its selection all the way up, not to the intermediate IB."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('IM').select(); }")
+    d.page.evaluate("() => { ec.collapse(cy.$id('B'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["B"], d.engine
+    d.page.evaluate("() => { ec.expand(cy.$id('B'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["B"], d.engine
+    assert d.page.evaluate("() => cy.$id('IM').selected()") is False, d.engine
+    _click(d, "#clear-selection")
+
+
+def test_sel_fan_in_tree_from_two_seeds_matches_the_union_of_each_seeds_tree(
+    driven_trace: Driven,
+) -> None:
+    """DL-196's own verification ask: a two-seed transitive walk under
+    trace-through-boxes reaches exactly the union of what each seed reaches
+    alone, the gate/producer promotion (fanInTree's `requeue`) included."""
+    d = driven_trace
+    _ready(d)
+    _click(d, "#clear-selection")
+    expected = sorted(set(_tree_ids(d, "C", "fanInTree")) | set(_tree_ids(d, "D", "fanInTree")))
+    d.page.evaluate("() => { cy.$id('C').select(); cy.$id('D').select(); }")
+    _click(d, "#sel-fan-in-tree")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == expected, d.engine
+    _click(d, "#clear-selection")
+
+
+def test_sel_fan_in_tree_walks_through_a_collapsed_box_then_hide_others_keeps_it_folded(
+    driven_trace: Driven,
+) -> None:
+    """B stays collapsed throughout: a walk never descends into a folded
+    box's members, it continues through the proxy's own border meta-edges
+    (G1, correcting DL-196's "stops at" wording); hide-others leaves the
+    fold untouched too, since none of B's own members are in the selection
+    (the fold-on-hide rule is about a selected box with no selected member,
+    which does not apply here -- B itself was never selected)."""
+    d = driven_trace
+    _ready(d)
+    _show_all(d)
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('D').select(); }")
+    _click(d, "#sel-fan-in-tree")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["B", "D", "P", "Q"], d.engine
+    assert d.page.evaluate("() => cy.$id('B').hasClass('cy-expand-collapse-collapsed-node')"), (
+        d.engine
+    )
+    stats = d.page.inner_text("#stats")
+    assert stats.endswith("fan-in of selection (1), transitive, via boxes"), (d.engine, stats)
+
+    _click(d, "#hide-others")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "D", "P", "Q"], d.engine
+    assert d.page.evaluate("() => cy.$id('B').hasClass('cy-expand-collapse-collapsed-node')"), (
+        d.engine
+    )
+
+    _click(d, "#clear-selection")
+    _show_all(d)
+    d.page.evaluate("() => { if (ec.isExpandable(cy.$id('B'))) ec.expand(cy.$id('B')); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == ["B", "C", "D", "IB", "IM", "M", "N", "P", "Q"], d.engine
 
 
 def test_no_uncaught_page_errors_on_the_trace_page(driven_trace: Driven) -> None:
@@ -969,7 +1163,7 @@ def test_search_into_a_folded_box_restores_members_a_layout_placed(driven_folded
     d.page.press("#search", "Enter")
     d.page.wait_for_function(
         "() => cy.$id('IM').length === 1"
-        " && document.getElementById('stats').textContent.includes('1 hit')",
+        " && document.getElementById('stats').textContent.includes('1 match selected')",
         timeout=_LAYOUT_TIMEOUT_MS,
     )
     d.page.wait_for_timeout(_SETTLE_MS)
@@ -1000,11 +1194,11 @@ def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) 
         ".map(e => e.id)"
     )
     assert "fan-in-tree" in menu_ids
-    assert not {"collapse", "expand", "menu-collapse-all", "menu-expand-all"} & set(menu_ids)
+    assert not {"collapse", "expand"} & set(menu_ids)
     d.page.fill("#search", "IM")
     d.page.press("#search", "Enter")
     d.page.wait_for_function(
-        "() => document.getElementById('stats').textContent.includes('1 hit')",
+        "() => document.getElementById('stats').textContent.includes('1 match selected')",
         timeout=_CLICK_TIMEOUT_MS,
     )
     # arrange is wired above the guard as well (DL-196 under DL-77's rule):
@@ -1161,11 +1355,12 @@ def test_tapping_a_node_paints_its_branches_and_a_blank_tap_clears_them(
     assert driven_cond.page.get_attribute("#details", "hidden") is not None
 
 
-def test_a_tree_leaf_highlights_its_arrow_on_hover_and_selects_it_on_click(
+def test_a_tree_leaf_highlights_its_arrow_on_hover_and_inspects_it_on_click(
     driven_cond: Driven,
 ) -> None:
     """A real pointer, not an emitted event: the leaf is a DOM button and the
-    arrow it names is a canvas element."""
+    arrow it names is a canvas element. DL-196 slice 3: a leaf click marks
+    the arrow `.inspected` (edges are unselectable), it does not select it."""
     _ready(driven_cond)
     _tap(driven_cond, "AOA")
     leaves = driven_cond.page.locator("#d-tree button.leaf")
@@ -1191,9 +1386,9 @@ def test_a_tree_leaf_highlights_its_arrow_on_hover_and_selects_it_on_click(
     leaves.nth(1).click()
     driven_cond.page.wait_for_timeout(200)
     assert driven_cond.page.evaluate(
-        "() => cy.edges(':selected').map(e => e.data('source') + '>' + e.data('target'))"
+        "() => cy.edges('.inspected').map(e => e.data('source') + '>' + e.data('target'))"
     ) == ["B>AOA"], driven_cond.engine
-    driven_cond.page.evaluate("() => { cy.elements().unselect(); cy.emit('tap'); }")
+    driven_cond.page.evaluate("() => { cy.emit('tap'); }")
 
 
 def test_edge_details_name_the_attribute_and_the_branch(driven_cond: Driven) -> None:
@@ -1247,6 +1442,7 @@ def test_search_enter_with_one_hit_selects_the_node_and_opens_its_details(
     assert driven_cond.page.get_attribute("#details", "hidden") is not None, driven_cond.engine
     driven_cond.page.fill("#search", "")
     driven_cond.page.press("#search", "Enter")
+    _click(driven_cond, "#clear-selection")
     _show_all(driven_cond)
 
 
@@ -1354,6 +1550,22 @@ def _drawn_hubs(d: Driven) -> list[str]:
     return sorted(ids)
 
 
+def test_initial_stats_and_find_controls_are_ready(driven_locks: Driven) -> None:
+    """DL-196 slice 3's `#stats` format and G6/G7's fix (the find field and
+    its two buttons stay disabled until `finishInitial`, like `#arrange`).
+    Runs first against this fixture, before any other test mutates it."""
+    d = driven_locks
+    _ready(d)
+    stats = d.page.inner_text("#stats")
+    assert stats == (
+        "visible 18 / 18 nodes · 5 / 5 edges · 9 locks · 0 selected · 0 highlighted"
+    ), (d.engine, stats)
+    for el_id in ("search", "find-select", "find-highlight"):
+        assert d.page.evaluate(f"() => document.getElementById('{el_id}').disabled") is False, (
+            f"{d.engine}: #{el_id} still disabled after _ready"
+        )
+
+
 def test_lock_hubs_are_placed_clear_of_every_job(driven_locks: Driven) -> None:
     """The centroid of a group's members is usually a point one of them
     occupies -- and with one drawn member it IS that member. The hub walks a
@@ -1377,7 +1589,9 @@ def test_a_hub_with_one_drawn_member_is_beside_it_and_the_view_still_fits(
     _show_all(driven_locks)
     driven_locks.page.check("#relayout")
     try:
+        _arm_layout_wait(driven_locks)
         driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
+        _wait_layout_done(driven_locks)
         driven_locks.page.wait_for_timeout(_SETTLE_MS)
         assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
         assert _hub_overlaps(driven_locks) == [], driven_locks.engine
@@ -1400,6 +1614,52 @@ def test_hubs_stay_clear_of_the_jobs_after_a_collapse(driven_locks: Driven) -> N
     assert _hub_overlaps(driven_locks) == [], driven_locks.engine
     driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     driven_locks.page.wait_for_timeout(_SETTLE_MS)
+
+
+def test_collapse_moves_a_selected_members_selection_to_its_box(driven_locks: Driven) -> None:
+    """DL-196: a collapse moves a folded member's selection to its box; an
+    expand leaves the box selected and the member unselected."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_d').select(); }")
+    d.page.evaluate("() => { ec.collapse(cy.$id('lk_box'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_box"], d.engine
+    d.page.evaluate("() => { ec.expand(cy.$id('lk_box'), { layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_box"], d.engine
+    assert d.page.evaluate("() => cy.$id('lk_d').selected()") is False, d.engine
+    _click(d, "#clear-selection")
+
+
+def test_hide_others_collapses_a_selected_box_with_no_selected_member(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: a selected box with no selected descendant is folded, not
+    emptied -- it stands for its members and no sibling is drawn. The hub
+    context is read off the box after the fold: R_ONE reaches through the
+    now-folded lk_x2, R_BIG does not (lk_d's pair link is not a hub)."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_box').select(); }")
+    _click(d, "#hide-others")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_x2').length") == 0, (
+        f"{d.engine}: lk_box was not collapsed"
+    )
+    assert _visible_ids(d) == ["lk_box", "lock:r:R_ONE"], d.engine
+    assert _selected_ids(d) == ["lk_box"], d.engine
+
+    _click(d, "#show-all")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    d.page.evaluate("() => { ec.expandAll({ layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.elements('.hidden').length") == 0, d.engine
+    _click(d, "#clear-selection")
 
 
 def test_lock_links_are_dotted_and_the_tee_marks_the_waiter(driven_locks: Driven) -> None:
@@ -1518,62 +1778,366 @@ def test_a_focused_job_keeps_its_own_hub_and_not_the_other_members(
     _show_all(driven_locks)
 
 
-def test_focus_lock_menu_item_shows_the_hub_and_every_member(driven_locks: Driven) -> None:
-    """A real right-click on a hub, then the item -- the DL-77 technique."""
-    _ready(driven_locks)
-    _show_all(driven_locks)
-    point = _client_point(driven_locks, "lock:r:R_ONE")
-    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
-    driven_locks.page.wait_for_timeout(500)
-    _click(driven_locks, "#focus-lock")
-    driven_locks.page.wait_for_timeout(_SETTLE_MS)
-    assert _visible_ids(driven_locks) == [
+def test_lock_members_then_hide_others_shows_the_hub_and_every_member(driven_locks: Driven) -> None:
+    """DL-196 declines a dedicated "focus lock" item ("select members, then
+    hide others" loses nothing): a real right-click on the hub for the first
+    step, the toolbar for the second."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    point = _client_point(d, "lock:r:R_ONE")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    _click(d, "#lock-members")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_x1", "lk_x2"], d.engine
+    _click(d, "#hide-others")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == [
         "lk_box",  # lk_x2's own box comes with it: a member without it cannot render
         "lk_x1",
         "lk_x2",
         "lock:r:R_ONE",
-    ], driven_locks.engine
-    assert _hub_overlaps(driven_locks) == [], driven_locks.engine
-    _show_all(driven_locks)
+    ], d.engine
+    assert _hub_overlaps(d) == [], d.engine
+    _click(d, "#clear-selection")
+    _show_all(d)
 
 
-def test_a_lock_hub_menu_offers_no_walk_and_a_job_menu_still_does(driven_locks: Driven) -> None:
-    """DL-196 slice (1): a hub has no flow edges, so a walk from it is empty,
-    and the six flow items are not offered on one -- `node[!lock]` in place
-    of the old `node`, which matched a hub too. `focus-lock` and `hide` stay
-    on both kinds. Restores the page by dismissing each menu with a
-    background click."""
-    _ready(driven_locks)
-    _show_all(driven_locks)
-    walk_ids = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree", "both-trees", "neighbours"]
-    selector = ",".join("#" + i for i in walk_ids)
+def test_node_menu_offers_walks_and_lock_items_by_node_kind(driven_locks: Driven) -> None:
+    """DL-196 slice 3: the six flow items plus lock-peers sit only on
+    `node[!lock]`, and lock-peers only where a lock link exists; a hub
+    (`node.lock`) offers `lock-members` and `hide-lock` instead, never a
+    flow item. Restores the page by dismissing each menu with a background
+    click."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    flow_ids = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree", "both-trees", "neighbours"]
 
-    point = _client_point(driven_locks, "lock:r:R_ONE")
-    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
-    driven_locks.page.wait_for_timeout(500)
-    shown = driven_locks.page.evaluate(
+    def _shown(ids: list[str]) -> list[str]:
+        selector = ",".join("#" + i for i in ids)
+        result: list[str] = d.page.evaluate(
+            f"() => Array.from(document.querySelectorAll('{selector}'))"
+            ".filter(e => getComputedStyle(e).display !== 'none').map(e => e.id)"
+        )
+        return result
+
+    def _dismiss() -> None:
+        d.page.mouse.click(10, 10)  # background: nothing under test
+        d.page.wait_for_timeout(200)
+
+    # lk_x1 has an R_ONE link: all six walks, lock-peers and hide
+    point = _client_point(d, "lk_x1")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert sorted(_shown([*flow_ids, "lock-peers", "hide"])) == sorted(
+        [*flow_ids, "lock-peers", "hide"]
+    ), d.engine
+    _dismiss()
+
+    # lk_seed carries no lock link at all: the six walks and hide, never lock-peers
+    point = _client_point(d, "lk_seed")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert sorted(_shown(flow_ids + ["hide"])) == sorted(flow_ids + ["hide"]), d.engine
+    assert _shown(["lock-peers"]) == [], d.engine
+    _dismiss()
+
+    # the hub offers exactly lock-members and hide-lock, no flow item
+    point = _client_point(d, "lock:r:R_ONE")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert _shown(flow_ids) == [], d.engine
+    assert sorted(_shown(["lock-members", "hide-lock"])) == ["hide-lock", "lock-members"], d.engine
+    assert d.page.inner_text("#lock-members") == "select members of R_ONE", d.engine
+    _dismiss()
+
+
+def test_canvas_menu_offers_the_four_walks_of_the_selection(driven_locks: Driven) -> None:
+    """DL-196: the canvas menu carries no per-node items, only the four
+    walks, seeded from the whole selection; the label names the count."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_x1').select(); cy.$id('lk_x5').select(); }")
+    bg = _canvas_point(d, 10, 10)  # near the canvas's own corner, inside the fit padding
+    d.page.mouse.click(bg["x"], bg["y"], button="right")
+    d.page.wait_for_timeout(500)
+    canvas_ids = ["menu-fan-in", "menu-fan-out", "menu-fan-in-tree", "menu-fan-out-tree"]
+    selector = ",".join("#" + i for i in canvas_ids)
+    shown = d.page.evaluate(
         f"() => Array.from(document.querySelectorAll('{selector}'))"
         ".filter(e => getComputedStyle(e).display !== 'none').map(e => e.id)"
     )
-    assert shown == [], f"{driven_locks.engine}: hub menu still offers {shown}"
-    for kept in ("#focus-lock", "#hide"):
-        el = driven_locks.page.query_selector(kept)
-        assert el is not None and driven_locks.page.evaluate(
-            "(e) => getComputedStyle(e).display !== 'none'", el
-        ), f"{driven_locks.engine}: {kept} missing from the hub menu"
-    driven_locks.page.mouse.click(10, 10)  # dismiss: an outside click, nothing under test
-    driven_locks.page.wait_for_timeout(200)
-
-    point = _client_point(driven_locks, "lk_x1")
-    driven_locks.page.mouse.click(point["x"], point["y"], button="right")
-    driven_locks.page.wait_for_timeout(500)
-    shown = driven_locks.page.evaluate(
-        f"() => Array.from(document.querySelectorAll('{selector}'))"
-        ".filter(e => getComputedStyle(e).display !== 'none').map(e => e.id)"
+    assert sorted(shown) == sorted(canvas_ids), d.engine
+    assert d.page.inner_text("#menu-fan-in") == "select fan-in of selection (2)", d.engine
+    assert d.page.inner_text("#menu-fan-in-tree") == "select fan-in of selection (2), transitive", (
+        d.engine
     )
-    assert sorted(shown) == sorted(walk_ids), (driven_locks.engine, shown)
-    driven_locks.page.mouse.click(10, 10)
-    driven_locks.page.wait_for_timeout(200)
+    d.page.mouse.click(bg["x"], bg["y"])  # dismiss: background, nothing under test
+    d.page.wait_for_timeout(200)
+    _click(d, "#clear-selection")
+
+
+def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> None:
+    """DL-196: a walk from the node menu ADDS the seed's closure to whatever
+    was already selected; the label names the actual seed (the clicked node,
+    not the selection) and the via-boxes qualifier follows the toggle.
+    Leaves the resulting selection in place for the next test."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_x1').select(); cy.$id('lk_x5').select(); }")
+    point = _client_point(d, "lk_x2")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    _click(d, "#fan-in-tree")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_box", "lk_seed", "lk_x1", "lk_x2", "lk_x5"], d.engine
+    stats = d.page.inner_text("#stats")
+    assert stats.endswith("5 selected · 0 highlighted · fan-in of lk_x2, transitive, via boxes"), (
+        d.engine,
+        stats,
+    )
+
+
+def test_hide_others_keeps_the_selection_then_show_all_restores_visibility(
+    driven_locks: Driven,
+) -> None:
+    """Continues from the walk test above: hide-others keeps the 5 selected
+    plus the hubs their lock links reach; show-all restores visibility only
+    -- the selection stays exactly what it was (DL-196: show all is
+    visibility alone)."""
+    d = driven_locks
+    _ready(d)
+    stats = d.page.inner_text("#stats")
+    assert stats.endswith("fan-in of lk_x2, transitive, via boxes"), (
+        f"{d.engine}: expected the prior test's selection still in place, got {stats!r}"
+    )
+    _click(d, "#hide-others")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _visible_ids(d) == sorted(
+        ["lk_box", "lk_seed", "lk_x1", "lk_x2", "lk_x5", "lock:r:R_BIG", "lock:r:R_ONE"]
+    ), d.engine
+    stats = d.page.inner_text("#stats")
+    assert (
+        "visible 5 / 18 nodes · 3 / 5 edges · 9 locks · 5 selected · 0 highlighted"
+        " · hide others (5 kept)" in stats
+    ), (d.engine, stats)
+    selection_before = _selected_ids(d)
+
+    _click(d, "#show-all")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == selection_before, d.engine
+    counts = _counts(d)
+    assert counts["visible_nodes"] == 22, (d.engine, counts)
+    assert d.page.inner_text("#stats").endswith("show all"), d.engine
+    _click(d, "#clear-selection")
+
+
+def test_edge_tap_inspects_without_touching_node_selection(driven_locks: Driven) -> None:
+    """DL-196 slice 3: edges are unselectable (`cy.edges().unselectify()`),
+    so a tap on one only marks the arrow under inspection; the node
+    selection is untouched, and the next tap anywhere clears the mark."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
+    d.page.evaluate("() => { cy.edges().not('.lock')[0].emit('tap'); }")
+    d.page.wait_for_timeout(200)
+    assert _selected_ids(d) == ["lk_x1"], d.engine
+    assert d.page.evaluate("() => cy.edges('.inspected').length") == 1, d.engine
+    assert d.page.evaluate("() => cy.edges(':selected').length") == 0, d.engine
+    d.page.evaluate("() => { cy.$id('lk_x1').emit('tap'); }")
+    d.page.wait_for_timeout(200)
+    assert d.page.evaluate("() => cy.edges('.inspected').length") == 0, d.engine
+    _click(d, "#clear-selection")
+    _click(d, "#d-close")  # both taps above opened the details panel
+
+
+def test_a_highlighted_folded_member_shows_a_proxy_and_select_highlighted_expands_it(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: a highlighted folded member keeps `.hl`; its box gets
+    `.hl-proxy` and the count reads "m highlighted (k not drawn)". Select
+    highlighted expands the box to reach its target and adds it."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    _click(d, "#clear-highlights")
+    d.page.evaluate("() => { cy.$id('lk_d').select(); }")
+    _click(d, "#highlight-selected")
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_box').hasClass('hl-proxy')"), d.engine
+    stats = d.page.inner_text("#stats")
+    assert "1 highlighted (1 not drawn) · highlighted 1" in stats, (d.engine, stats)
+
+    _click(d, "#select-highlighted")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_d').length") == 1, f"{d.engine}: lk_box not expanded"
+    assert _selected_ids(d) == ["lk_box", "lk_d"], d.engine
+    assert d.page.inner_text("#stats").endswith("selected highlighted (1)"), d.engine
+
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    _click(d, "#clear-highlights")
+    d.page.evaluate("() => { ec.expandAll({ layoutBy: null }); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.nodes('.hl').length") == 0, d.engine
+    assert d.page.evaluate("() => cy.nodes('.hl-proxy').length") == 0, d.engine
+    _click(d, "#clear-selection")
+
+
+def test_find_select_and_highlight_modes_cover_the_full_contract(driven_locks: Driven) -> None:
+    """Enter selects, replacing; shift+Enter adds; `#find-highlight` adds to
+    the highlight and leaves the selection alone; a hub match is skipped
+    while the locks toggle is off, and `#stats` says so."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    _click(d, "#clear-highlights")
+    if d.page.get_attribute("#details", "hidden") is None:
+        _click(d, "#d-close")  # this test's own assertions depend on the panel starting shut
+
+    d.page.fill("#search", "zzz")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_timeout(200)
+    assert d.page.inner_text("#find-note") == "no match for “zzz”", d.engine
+
+    d.page.uncheck("#locks")
+    d.page.wait_for_timeout(300)
+    d.page.fill("#search", "R_ONE")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == [], d.engine
+    stats = d.page.inner_text("#stats")
+    assert stats.endswith("find “R_ONE”: 1 match selected (1 lock skipped: locks off)"), (
+        d.engine,
+        stats,
+    )
+    assert d.page.get_attribute("#details", "hidden") is not None, d.engine
+
+    # "highlight matches" honours the toggle too: the hub is skipped, never marked
+    _click(d, "#clear-highlights")
+    d.page.fill("#search", "R_ONE")
+    _click(d, "#find-highlight")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert "lock:r:R_ONE" not in d.page.evaluate("() => cy.nodes('.hl').map(n => n.id())"), d.engine
+    assert d.page.inner_text("#stats").endswith(
+        "find “R_ONE”: 1 match highlighted (1 lock skipped: locks off)"
+    ), (d.engine, d.page.inner_text("#stats"))
+    _click(d, "#clear-highlights")
+
+    d.page.check("#locks")
+    d.page.wait_for_timeout(300)
+    d.page.fill("#search", "R_ONE")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lock:r:R_ONE"], d.engine
+    assert d.page.inner_text("#d-title") == "R_ONE", d.engine
+
+    d.page.fill("#search", "lk_a")
+    d.page.press("#search", "Shift+Enter")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_a", "lock:r:R_ONE"], d.engine
+
+    d.page.fill("#search", "lk_x")
+    selection_before = _selected_ids(d)
+    _click(d, "#find-highlight")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == selection_before, d.engine
+    assert sorted(d.page.evaluate("() => cy.nodes('.hl').map(n => n.id())")) == [
+        "lk_x1",
+        "lk_x2",
+        "lk_x3",
+        "lk_x4",
+        "lk_x5",
+    ], d.engine
+    assert d.page.inner_text("#stats").endswith("find “lk_x”: 5 matches highlighted"), d.engine
+
+    d.page.fill("#search", "")
+    d.page.press("#search", "Enter")
+    if d.page.get_attribute("#details", "hidden") is None:
+        _click(d, "#d-close")
+    _click(d, "#clear-selection")
+    _click(d, "#clear-highlights")
+
+
+def test_lock_members_and_lock_peers_expand_a_folded_box_to_reach_their_target(
+    driven_locks: Driven,
+) -> None:
+    """DL-196: the explicit membership ops -- lock members, lock peers --
+    expand a folded box to reach their target, unlike a walk. Each adds to
+    whatever was already selected."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    point = _client_point(d, "lock:r:R_ONE")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    _click(d, "#lock-members")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_x1", "lk_x2"], d.engine
+    assert d.page.evaluate("() => cy.$id('lk_x2').length") == 1, f"{d.engine}: lk_box not expanded"
+    assert d.page.inner_text("#stats").endswith("members of R_ONE (2)"), d.engine
+
+    _click(d, "#clear-selection")
+    # "forgotten on the next tick" (the fold's own beforecollapse handler): give
+    # the click's own unselect a tick to clear `justUnselected` before folding,
+    # or the just-cleared lk_x2 reads as "just unselected by this collapse"
+    d.page.wait_for_timeout(200)
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    point = _client_point(d, "lk_c")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    _click(d, "#lock-peers")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_c", "lk_d"], d.engine
+    assert d.page.inner_text("#stats").endswith("lock peers of lk_c (1)"), d.engine
+
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { selectLockPeers(cy.$id('lk_x1')); }")
+    assert _selected_ids(d) == ["lk_x1", "lk_x2"], d.engine
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { selectLockPeers(cy.$id('lk_e')); }")
+    assert _selected_ids(d) == ["lk_e", "lk_f", "lk_g"], d.engine
+    _click(d, "#clear-selection")
+
+
+def test_hide_selected_unselects_and_stats_selected_fits_to_the_selection(
+    driven_locks: Driven,
+) -> None:
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    _click(d, "#hide-selected")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == [], d.engine
+    assert d.page.evaluate("() => cy.$id('lk_a').visible()") is False, d.engine
+    assert d.page.inner_text("#stats").endswith("hid 1"), d.engine
+    _show_all(d)
+
+    d.page.evaluate("() => { cy.$id('lk_b').select(); cy.zoom(4); }")
+    _click(d, "#stats-selected")
+    d.page.wait_for_timeout(300)
+    zoom = d.page.evaluate("() => cy.zoom()")
+    assert abs(zoom - 4) > 1e-6, f"{d.engine}: #stats-selected left the zoom at {zoom}"
+    _click(d, "#clear-selection")
 
 
 def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
@@ -1620,6 +2184,175 @@ def test_a_collapse_folds_a_lock_link_into_a_meta_edge_that_names_its_member(
     driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     driven_locks.page.wait_for_timeout(_SETTLE_MS)
     assert driven_locks.page.evaluate("() => cy.$id('lk_x2').length") == 1
+
+
+def test_hide_selected_on_a_collapsed_box_hides_what_it_stands_for(driven_locks: Driven) -> None:
+    """A rework fix: hiding a collapsed box must hide what it stands for, not
+    just the box node itself -- a later find that expands the box and
+    reveals one member must not also reveal its untouched sibling."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    d.page.evaluate("() => { cy.$id('lk_box').select(); }")
+    _click(d, "#hide-selected")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    d.page.fill("#search", "lk_x2")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_x2').visible()") is True, d.engine
+    assert d.page.evaluate("() => cy.$id('lk_d').visible()") is False, d.engine
+    assert d.page.evaluate("() => cy.$id('lk_d').hasClass('hidden')") is True, d.engine
+    d.page.fill("#search", "")
+    d.page.press("#search", "Enter")
+    _click(d, "#show-all")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    _click(d, "#clear-selection")
+
+
+def test_the_locks_toggle_survives_a_fold(driven_locks: Driven) -> None:
+    """A rework fix: a collapse gives the crossing lock links new meta-edges,
+    which must carry the toggle's `lockoff` class too, through both a
+    collapse and an expand."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    d.page.uncheck("#locks")
+    d.page.wait_for_timeout(300)
+    assert d.page.evaluate("() => cy.elements('.lock:visible').length") == 0, d.engine
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.elements('.lock:visible').length") == 0, d.engine
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.elements('.lock:visible').length") == 0, d.engine
+    d.page.check("#locks")
+    d.page.wait_for_timeout(300)
+    assert d.page.evaluate("() => cy.elements('.lock').not(':visible').length") == 0, d.engine
+
+
+def test_expand_removes_a_stale_highlight_proxy(driven_locks: Driven) -> None:
+    """A rework fix: `.hl-proxy` must not survive the expand that makes it
+    meaningless -- the box no longer stands for the highlighted member."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-highlights")
+    d.page.evaluate("() => { highlightNodes(cy.$id('lk_d')); }")
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_box').hasClass('hl-proxy')"), d.engine
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert not d.page.evaluate("() => cy.$id('lk_box').hasClass('hl-proxy')"), d.engine
+    _click(d, "#clear-highlights")
+
+
+def test_a_collapsed_box_borrows_its_members_lock_links_for_the_menu(driven_locks: Driven) -> None:
+    """A rework fix: `lk_box` folds a member's lock link into a meta-edge of
+    its own, so while collapsed it carries `peered` (lock-peers reads it) --
+    and loses the class again on expand."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert d.page.evaluate("() => cy.$id('lk_box').hasClass('peered')"), d.engine
+    point = _client_point(d, "lk_box")
+    d.page.mouse.click(point["x"], point["y"], button="right")
+    d.page.wait_for_timeout(500)
+    assert d.page.evaluate(
+        "() => getComputedStyle(document.getElementById('lock-peers')).display !== 'none'"
+    ), d.engine
+    d.page.mouse.click(10, 10)  # dismiss: background, nothing under test
+    d.page.wait_for_timeout(200)
+    d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert not d.page.evaluate("() => cy.$id('lk_box').hasClass('peered')"), d.engine
+
+
+def test_stats_selected_button_keeps_keyboard_focus_across_a_rewrite(driven_locks: Driven) -> None:
+    """A rework fix: the button is now created once and rewritten in place,
+    so a keyboard user does not lose focus every time `#stats` updates."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    d.page.wait_for_timeout(200)
+    d.page.locator("#stats-selected").focus()
+    assert d.page.evaluate("() => document.activeElement.id") == "stats-selected", d.engine
+    d.page.evaluate("() => { updateStats('probe'); }")
+    d.page.wait_for_timeout(200)
+    assert d.page.evaluate("() => document.activeElement.id") == "stats-selected", d.engine
+    _click(d, "#clear-selection")
+
+
+def test_find_note_clears_when_the_query_changes(driven_locks: Driven) -> None:
+    """A rework fix: `#find-note` follows the query field, so a no-match note
+    does not linger once the operator starts typing a different one."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    d.page.fill("#search", "zzz")
+    d.page.press("#search", "Enter")
+    d.page.wait_for_timeout(200)
+    assert d.page.inner_text("#find-note") != "", d.engine
+    d.page.fill("#search", "lk_a")
+    d.page.wait_for_timeout(200)
+    assert d.page.inner_text("#find-note") == "", d.engine
+    d.page.fill("#search", "")
+
+
+def test_sel_lock_peers_button_adds_hub_members_and_job_peers(driven_locks: Driven) -> None:
+    """DL-196: the toolbar's selection-seeded form of lock members / lock
+    peers, one op over the whole selection. The seed label carries its own
+    count, as the walks' does, so what the op found is said in words rather
+    than a second parenthesis."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lock:r:R_ONE').select(); }")
+    _click(d, "#sel-lock-peers")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_x1", "lk_x2", "lock:r:R_ONE"], d.engine
+    assert d.page.inner_text("#stats").endswith("lock peers of selection (1): 2 added"), d.engine
+
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_c').select(); }")
+    _click(d, "#sel-lock-peers")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _selected_ids(d) == ["lk_c", "lk_d"], d.engine
+    assert d.page.inner_text("#stats").endswith("lock peers of selection (1): 1 added"), d.engine
+    _click(d, "#clear-selection")
+
+
+def test_hide_selected_keeps_the_viewport_and_hide_others_fits(driven_locks: Driven) -> None:
+    """DL-196's geometry rule, after the second review's correction: a hide
+    op's own removal never moves the viewport by itself -- hide-selected
+    leaves pan and zoom exactly where they were; hide-others fits to what it
+    kept."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _click(d, "#clear-selection")
+    d.page.evaluate("() => { cy.$id('lk_a').select(); }")
+    view = _viewport(d)
+    _click(d, "#hide-selected")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _viewport(d) == view, d.engine
+    _show_all(d)
+
+    d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
+    view = _viewport(d)
+    _click(d, "#hide-others")
+    d.page.wait_for_timeout(_SETTLE_MS)
+    assert _viewport(d) != view, d.engine
+    _show_all(d)
+    _click(d, "#clear-selection")
 
 
 def test_no_uncaught_page_errors_on_the_locks_page(driven_locks: Driven) -> None:

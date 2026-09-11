@@ -133,19 +133,28 @@ without the appendices — the terminal-artifact counterpart to `chart`,
 which is bare pipeable text. `--format explore` writes a different kind of
 page (~2 MB: cytoscape + ELK + an expand-collapse extension + a
 customElements polyfill embedded — see THIRD_PARTY_LICENSES): the whole
-graph as an interactive map — substring search, click for full edge
-annotations, boxes that collapse to one node and expand again (double-click,
-the corner cue, the menu, or two toolbar buttons; `--collapse-threshold`
-folds the over-threshold top-level boxes once the first layout has placed
-their members, none without it), and a right-click menu that focuses a
-job's fan-in/fan-out (direct, tree, or both) by hiding everything else. A
-collapse or an expand runs no layout at all: only the folded box's own members
-move, and the lock hubs are placed again on what is left drawn, so the rest of
-the picture and the viewport stay where the operator left them (DL-196). The
-"arrange" button lays the drawn graph out again on demand, and the "arrange
-after hiding" toggle — off by default — makes a focus or "show all" do the
-same with the space they free. "Trace through boxes" (on by default) makes those
-focuses follow the dossier: a member's fan-in adds every enclosing box and what gates it
+graph as an interactive map — click for full edge annotations, boxes that
+collapse to one node and expand again (double-click, the corner cue, the
+menu, or two toolbar buttons; `--collapse-threshold` folds the
+over-threshold top-level boxes once the first layout has placed their
+members, none without it), and navigation in three independent layers
+(DL-196): a selection, built by clicking, by a substring find that selects
+or highlights every match, or by walking a node's or the selection's
+fan-in/fan-out (direct or transitive) from the right-click menu or the
+toolbar; a sticky highlight that survives clicks, hiding and folding; and
+visibility — "hide selected", "hide others", "show all". Every op over the
+selection is a toolbar button as well as a menu item, so the page stays
+usable where the menu plugin cannot load (DL-77). A collapse or an expand
+runs no layout at all: only the folded box's own members move, and the lock
+hubs are placed again on what is left drawn, so the rest of the picture and
+the viewport stay where the operator left them (DL-196). The "arrange"
+button lays the drawn graph out again on demand, and the "arrange after
+hiding" toggle — off by default — makes "hide selected", "hide others" and
+"show all" do the same with the space they free; "hide this node" never
+re-arranges. Off, only "hide others" and "show all" move the view, and a
+box's own bounds still follow the members it is left with. "Trace through
+boxes" (on by default) makes the walks follow the dossier: a member's
+fan-in adds every enclosing box and what gates it
 (SEM-10), its fan-out adds what an enclosing box's completion releases
 (SEM-11); off, they follow the condition edges alone (DL-190). Incoming
 arrows are an AND unless the job carries the badge ∨, which marks a
