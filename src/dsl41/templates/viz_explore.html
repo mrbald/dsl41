@@ -833,11 +833,15 @@ function fitSelection() {
 /* --- highlight. The universe is the live nodes plus the recursively folded
    members: a mark on a member survives its box's collapse -- the extension
    keeps a removed element with its classes -- and the box wears a proxy
-   while it stands for one. */
-function foldedNodes() {
+   while it stands for one.
+   `roots` narrows the boxes read to those among a given set -- a selection,
+   the nodes a hide is about to take -- and defaults to every live one. The
+   answer is a flat union, so a caller that must know WHICH box holds a
+   target cannot use it. */
+function foldedNodes(roots) {
   var folded = cy.collection();
   if (!ec) return folded;
-  cy.nodes(".cy-expand-collapse-collapsed-node").forEach(function (box) {
+  (roots || cy.nodes()).filter(".cy-expand-collapse-collapsed-node").forEach(function (box) {
     folded = folded.union(ec.getCollapsedChildrenRecursively(box).nodes());
   });
   return folded;
@@ -866,12 +870,8 @@ function highlightSelected() {
    folds: unhighlighting it takes their marks off too, or the yellow would
    stay with nothing on the canvas to unmark. */
 function unhighlightSelected() {
-  var sel = selectedNodes(), marked = sel.filter(".hl");
-  if (ec) {
-    sel.filter(".cy-expand-collapse-collapsed-node").forEach(function (box) {
-      marked = marked.union(ec.getCollapsedChildrenRecursively(box).nodes(".hl"));
-    });
-  }
+  var sel = selectedNodes();
+  var marked = sel.filter(".hl").union(foldedNodes(sel).filter(".hl"));
   unhighlightNodes(marked);
   updateStats("unhighlighted " + marked.length);
 }
@@ -888,7 +888,7 @@ function clearHighlights() {
    walk does not: it continues through the collapsed box's own border edges
    and never descends. Returns whether anything was expanded, because what
    follows a fold runs one tick later (afterFold) and the caller's report
-   must go behind it. */
+   goes behind it (reportAfterFold). */
 function expandToReach(boxHolds) {
   var expanded = false;
   if (!ec) return false;
@@ -900,12 +900,20 @@ function expandToReach(boxHolds) {
   return expanded;
 }
 
+/* Where a membership op's report goes. Behind the fold's follow-up when the
+   op expanded something, and now when it did not: afterFold unconditionally
+   would schedule a tick for an op that folded nothing, and that tick places
+   the hubs, which moves them for no reason. */
+function reportAfterFold(expanded, fn) {
+  if (expanded) afterFold(fn); else fn();
+}
+
 function selectHighlighted() {
   var expanded = expandToReach(function (box) { return box.hasClass("hl-proxy"); });
   var marked = cy.nodes(".hl");
   var skipped = selectNodes(marked, false);
   var op = "selected highlighted (" + (marked.length - skipped) + ")" + skippedNote(skipped);
-  if (expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+  reportAfterFold(expanded, function () { updateStats(op); });
 }
 
 /* --- visibility. Hiding a node hides its descendants, and every node hidden
@@ -919,11 +927,7 @@ function hideNodes(nodes) {
      box a focus folds ON PURPOSE is the exception, and focusOn never comes
      through here: it hides the live graph and leaves the folded members
      alone, so expanding it draws them. */
-  if (ec) {
-    gone.filter(".cy-expand-collapse-collapsed-node").forEach(function (box) {
-      gone = gone.union(ec.getCollapsedChildrenRecursively(box).nodes());
-    });
-  }
+  gone = gone.union(foldedNodes(gone));
   gone.unselect();
   gone.addClass("hidden");
   return gone.length;  /* what left the canvas, which a box makes more than what was picked */
@@ -1413,7 +1417,7 @@ function runFind(mode, add) {
     var live = shown.filter(function (n) { return !n.removed() && n.visible(); });
     if (live.nonempty()) cy.fit(live, 60);
   }
-  if (expanded) afterFold(report); else report();
+  reportAfterFold(expanded, report);
 }
 
 document.getElementById("search").addEventListener("keydown", function (evt) {
@@ -1537,6 +1541,20 @@ function afterFold(then) {
   }, 0);
 }
 
+/* Everything a fold breaks, put back in one place -- each repair says why
+   at its own definition. Both handlers call this, so a repair is added
+   once. Synchronous, and it stays that way: the edge unselectify and the
+   proxies must be true before the next frame, while the deferred tick
+   above is for geometry AFTER the extension's own operation. */
+function repairFold() {
+  cy.edges().unselectify();  /* the meta-edges are new elements */
+  syncLocks();
+  markPeered();
+  refreshProxies();
+  classifyNesting();
+  refreshEdgeLabels();
+}
+
 /* cytoscape-expand-collapse (DL-190): a collapsed box stays in the graph as
    one node; its members and their inner edges leave it, remembered on the
    box, and every edge that crossed the box's border is re-pointed at the
@@ -1583,12 +1601,7 @@ try {
       box.removeScratch("_dsl41sel");
       box.select();
     }
-    cy.edges().unselectify();  /* the meta-edges are new elements */
-    syncLocks();
-    markPeered();
-    refreshProxies();
-    classifyNesting();
-    refreshEdgeLabels();
+    repairFold();
     afterFold();
     /* the collapse copies the folded edge's classes onto the meta-edge,
        branch paint included -- and meta-edges sharing one endpoint pair
@@ -1599,13 +1612,8 @@ try {
   });
   cy.on("expandcollapse.afterexpand", function (evt) {
     evt.target.removeScratch("_dsl41");
-    cy.edges().unselectify();
-    syncLocks();
-    markPeered();
-    refreshProxies();
+    repairFold();
     clearInspected();  /* an arrow restored by this expand carries the mark it was folded with */
-    classifyNesting();
-    refreshEdgeLabels();
     afterFold();
     clearBranchPaint();
   });
@@ -1816,26 +1824,16 @@ function runWalk(kind, seed, seedLabel) {
    self-lock adds nothing, having no link. Both are membership ops and reach
    into folded boxes. */
 
-/* the collapsed box a lock member is folded into, or null when it is live */
-function foldedInto(m) {
-  var chain = [m.id].concat(m.boxes || []);
-  for (var i = 0; i < chain.length; i++) {
-    var el = cy.$id(chain[i]);
-    if (el.nonempty()) return el.hasClass("cy-expand-collapse-collapsed-node") ? el : null;
-  }
-  return null;
-}
-
 function lockMemberNodes(hub) {
-  var expanded = false, members = cy.collection();
-  (hub.data("members") || []).forEach(function (m) {
-    var box = foldedInto(m);
-    if (box && ec) {
-      ec.expandRecursively(box, { layoutBy: null });
-      expanded = true;
-    }
-    members = members.union(cy.$id(m.id));
+  var list = hub.data("members") || [], ids = Object.create(null);
+  list.forEach(function (m) { ids[m.id] = true; });
+  var expanded = expandToReach(function (box) {
+    if (ids[box.id()]) return true;  /* a hub can name a box job, collapsed on its own */
+    return ec.getCollapsedChildrenRecursively(box).nodes()
+      .some(function (n) { return ids[n.id()]; });
   });
+  var members = cy.collection();
+  list.forEach(function (m) { members = members.union(cy.$id(m.id)); });
   return { nodes: members, expanded: expanded };
 }
 
@@ -1843,7 +1841,7 @@ function selectLockMembers(hub) {
   var found = lockMemberNodes(hub);
   selectNodes(found.nodes, false);
   var op = "members of " + lockTitle(hub) + " (" + found.nodes.length + ")";
-  if (found.expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+  reportAfterFold(found.expanded, function () { updateStats(op); });
 }
 
 function lockPeerNodes(job) {
@@ -1870,7 +1868,7 @@ function selectLockPeers(job) {
   var found = lockPeerNodes(job);
   selectNodes(found.nodes.union(job), false);
   var op = "lock peers of " + shortId(job.id()) + " (" + found.nodes.length + ")";
-  if (found.expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+  reportAfterFold(found.expanded, function () { updateStats(op); });
 }
 
 /* the toolbar's form: every selected hub's members and every selected job's
@@ -1888,7 +1886,7 @@ function selectLockPeersOfSelection() {
   /* the seed label carries a count of its own, as the walks' does, so what
      this op found is said in words rather than in a second parenthesis */
   var op = "lock peers of " + seedLabel + ": " + found.length + " added";
-  if (expanded) afterFold(function () { updateStats(op); }); else updateStats(op);
+  reportAfterFold(expanded, function () { updateStats(op); });
 }
 
 /* ------------------------------------------------------------- context menu */
