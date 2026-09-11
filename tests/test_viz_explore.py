@@ -972,8 +972,8 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     assert 'id="relayout" checked' not in page
     assert "re-layout on focus" not in page
     # the button and the toggle's ON branch are one layout path, not two
-    assert "function arrangeVisible(suffix, after)" in page
-    assert "arrangeVisible(suffix, after);" in page  # relayoutOrFit delegates to it...
+    assert "function arrangeVisible(suffix)" in page
+    assert "arrangeVisible(op); return; }" in page  # settleAfterHide delegates to it...
     assert 'arrangeVisible("arranged");' in page  # ...and the button runs the same path
     # ...and the find path runs none of it: it expands in place and fits the
     # matches. Read out of runFind's own body: an exclusion pinned to one

@@ -225,8 +225,8 @@ var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
    centres reads as a spline tangle and hides the layers ELK just computed. */
 var TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal";
 
-function elkLayout(extra) {
-  var opts = {
+function elkLayout() {
+  return {
     name: "elk",
     nodeDimensionsIncludeLabels: true,
     fit: true,
@@ -237,8 +237,6 @@ function elkLayout(extra) {
       "elk.hierarchyHandling": "INCLUDE_CHILDREN"
     }
   };
-  if (extra) Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
-  return opts;
 }
 
 /* The emitted payload: the elements, and the header totals computed with
@@ -757,41 +755,26 @@ cy.on("zoom", updateEdgeLabels);
    with; forget the memo so the current zoom decides again for all of them */
 function refreshEdgeLabels() { labelsShown = null; updateEdgeLabels(); }
 
+/* The four places that fit the drawn graph to the viewport, one function. */
+function fitVisible() { cy.fit(cy.nodes(":visible"), 40); }
+
 /* ELK over the visible flow graph, then the hubs, a fit and the stats. The
    ONE thing on this page that moves a node on purpose (DL-196): the arrange
    button runs it whenever asked, and a hide op runs it only with "arrange
    after hiding" on. Nothing else -- no collapse, no expand, no find -- may
    call it: manual placement is the operator's, and a layout is how it is
    given up. */
-function arrangeVisible(suffix, after) {
+function arrangeVisible(suffix) {
   var layout = flow(cy.elements(":visible")).layout(elkLayout());
   layout.on("layoutstop", function () {
     placeLocks();
     /* ELK fitted the elements it laid out, and the hubs are not among
        them: fit again over everything drawn, or a focus whose flow half
        is one node zooms to it and leaves the hub off-screen */
-    cy.fit(cy.nodes(":visible"), 40);
+    fitVisible();
     updateStats(suffix);
-    if (after) after();
   });
   layout.run();
-}
-
-/* What a hide op does with the space it frees, and only a hide op: the focus
-   items and "show all". The toggle DEFAULTS OFF (DL-196) -- preserving the
-   picture the operator arranged beats re-packing it, and arrange is one
-   click away. Off, the nodes stay where they are; the hubs are still placed
-   again, because which of their members are drawn changed, and the view
-   still fits. */
-function relayoutOrFit(suffix, after) {
-  if (relayoutToggle.checked) {
-    arrangeVisible(suffix, after);
-    return;
-  }
-  placeLocks();  /* the members did not move, but which of them are drawn can */
-  cy.fit(cy.nodes(":visible"), 40);
-  updateStats(suffix);
-  if (after) after();
 }
 
 /* --------------------------------------------- the three layers (DL-196) */
@@ -895,8 +878,7 @@ function unhighlightSelected() {
 
 function clearHighlights() {
   var all = highlighted();
-  all.removeClass("hl");
-  cy.nodes().removeClass("hl-proxy");
+  unhighlightNodes(all);
   updateStats("highlights cleared (" + all.length + ")");
 }
 
@@ -948,16 +930,21 @@ function hideNodes(nodes) {
 }
 
 /* What a hide op does with the space it frees is the toggle's (DL-196): on,
-   the layout runs again; off, the hubs are placed again and nothing else
-   moves. No fit: what is left was on the screen already. */
-function afterHiding(op) {
+   the layout runs again; off, the hubs are placed again -- because which of
+   their members are drawn changed -- and nothing else moves besides what
+   `fit` asks. `fit` is the one difference between callers: a focus or "show
+   all" fits, because that is the operator asking to see the set (DL-196);
+   hiding a selection does not, because what is left was on the screen
+   already. */
+function settleAfterHide(op, fit) {
   if (relayoutToggle.checked) { arrangeVisible(op); return; }
   placeLocks();
+  if (fit) fitVisible();
   updateStats(op);
 }
 
 function hideSelected() {
-  afterHiding("hid " + hideNodes(selectedNodes()));
+  settleAfterHide("hid " + hideNodes(selectedNodes()), false);
 }
 
 function hideThisNode(n) {
@@ -992,7 +979,7 @@ function focusOn(keep, how) {
     cy.nodes().addClass("hidden");
     keep.removeClass("hidden");
   });
-  relayoutOrFit(how);
+  settleAfterHide(how, true);
 }
 
 function hideOthers() {
@@ -1006,7 +993,7 @@ function showAll() {
     cy.elements().removeClass("hidden");
     foldedNodes().removeClass("hidden");  /* a member hidden, then folded, comes back drawn */
   });
-  relayoutOrFit("show all");
+  settleAfterHide("show all", true);
 }
 
 /* Two facts a fold invalidates, restored after every one of them.
@@ -1358,7 +1345,7 @@ function guarded(fn) {
 }
 function wire(id, fn) { document.getElementById(id).addEventListener("click", guarded(fn)); }
 wire("show-all", showAll);
-wire("fit", function () { cy.fit(cy.nodes(":visible"), 40); });
+wire("fit", function () { fitVisible(); });
 wire("fit-selection", fitSelection);
 /* the toggle governs the hide ops; this button governs nothing but itself --
    a layout over what is drawn, whenever the picture has been pulled about */
@@ -1484,7 +1471,7 @@ function finishInitial() {
     document.getElementById(id).disabled = false;
   });
   placeLocks();
-  cy.fit(cy.nodes(":visible"), 40);  /* the hubs were placed after the layout */
+  fitVisible();  /* the hubs were placed after the layout */
   updateEdgeLabels();
   updateStats();
   /* a find during the load window queued its report and afterFold refused to
