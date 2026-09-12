@@ -145,13 +145,14 @@ toolbar; a sticky highlight that survives clicks, hiding and folding; and
 visibility — "hide selected", "hide others", "show all". Shift+drag the
 background to add a region to the selection (plain drag still pans, and
 ctrl or cmd work too); Escape closes an open menu, else empties the find
-field if that is where you are typing, else clears the selection. Every op over the selection is a toolbar
-button as well as a menu item, so the page stays usable where the menu
-plugin cannot load (DL-77), and a control whose op reads the selection is
-disabled while nothing is selected. Dragging a selected node moves the
-whole selection, and a node otherwise moves only when a layout runs — at
-load, on "arrange", or after a hide op with "arrange after hiding" on.
-There is no undo. A collapse or an expand
+field if that is where you are typing, else clears the selection. Every op
+over the selection is a toolbar button as well as a menu item, so the page
+stays usable where the menu plugin cannot load (DL-77), and a control is
+disabled while the layer its op reads is empty — the selection ops while
+nothing is selected, the two highlight ops while nothing is marked.
+Dragging a selected node moves the whole selection, and a node otherwise
+moves only when a layout runs — at load, on "arrange", or after a hide op
+with "arrange after hiding" on. There is no undo. A collapse or an expand
 runs no layout at all: only the folded box's own members move, and the lock
 hubs are placed again on what is left drawn, so the rest of the picture and
 the viewport stay where the operator left them (DL-196). The "arrange"
