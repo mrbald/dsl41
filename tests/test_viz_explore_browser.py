@@ -251,7 +251,12 @@ def _control_ready(d: Driven, selector: str) -> None:
 
 
 def _show_all(d: Driven) -> None:
-    """Reset the shared page between tests through its own control."""
+    """Click the page's own "show all" control and wait for the settle. Not a
+    reset between tests -- that is `_reset`'s reload, which every test gets
+    for free -- but the "show all" button itself, for the three tests that
+    exercise what it actually does: restore visibility while keeping the
+    selection and the highlights (DL-196), which a mid-test hide or focus
+    needs undone before the rest of that same test can proceed."""
     _click(d, "#show-all")
     d.page.wait_for_timeout(_SETTLE_MS)
 
@@ -480,7 +485,6 @@ def test_search_select_mode_selects_matches_and_reports_no_match(driven: Driven)
     matches", replacing the selection; a query with no match says so beside
     the field (`#find-note`), never in `#stats`, and changes nothing."""
     _ready(driven)
-    _show_all(driven)
     _click(driven, "#clear-selection")
     sample = _sample_node(driven)
     driven.page.fill("#search", sample[: max(6, len(sample) // 2)])
@@ -506,7 +510,6 @@ def test_search_unhides_a_node_hidden_by_a_focus(driven: Driven) -> None:
     """The template's stated contract: a search that cannot find a hidden node
     is a lying search."""
     _ready(driven)
-    _show_all(driven)
     sample = _sample_node(driven)
     driven.page.evaluate(
         "(id) => { const n = cy.$id(id); focusOn(n.union(n.incomers('node'))); }", sample
@@ -567,7 +570,6 @@ def test_relayout_toggle_off_leaves_leaf_positions_alone(driven: Driven) -> None
     unchecks it again in a `finally`, so the assertion below reads the page's
     own default."""
     _ready(driven)
-    _show_all(driven)
     assert not driven.page.evaluate("() => document.getElementById('relayout').checked"), (
         f"{driven.engine}: the arrange-after-hiding toggle is checked"
     )
@@ -587,7 +589,6 @@ def test_relayout_toggle_off_leaves_leaf_positions_alone(driven: Driven) -> None
         f"{driven.engine}: {len(moved)} leaf node(s) moved with"
         f" arrange after hiding off: {moved[:5]}"
     )
-    _show_all(driven)
 
 
 def test_relayout_toggle_on_re_lays_out_after_a_focus(driven: Driven) -> None:
@@ -595,7 +596,6 @@ def test_relayout_toggle_on_re_lays_out_after_a_focus(driven: Driven) -> None:
     a focus runs ELK over what is left. Restores the default -- off -- and
     the whole graph."""
     _ready(driven)
-    _show_all(driven)
     sample = _sample_node(driven)
     before = driven.page.evaluate(_LEAF_POSITIONS)
     driven.page.check("#relayout")
@@ -615,12 +615,10 @@ def test_relayout_toggle_on_re_lays_out_after_a_focus(driven: Driven) -> None:
         assert moved, f"{driven.engine}: nothing moved with arrange after hiding on"
     finally:
         driven.page.uncheck("#relayout")  # the page's default, for every test after this
-    _show_all(driven)
 
 
 def test_details_panel_opens_for_a_node_and_for_an_edge(driven: Driven) -> None:
     _ready(driven)
-    _show_all(driven)
     sample = _sample_node(driven)
     driven.page.evaluate("(id) => { cy.$id(id).emit('tap'); }", sample)
     driven.page.wait_for_timeout(200)
@@ -650,7 +648,6 @@ def test_context_menu_opens_on_right_click_and_an_item_selects_the_walk(driven: 
     DL-196 slice 3 a walk item ADDS to the selection -- it no longer narrows
     the graph by itself, that is hide-others' separate job."""
     _ready(driven)
-    _show_all(driven)
     _click(driven, "#clear-selection")
     assert "context menu unavailable" not in driven.page.inner_text("#stats"), (
         f"{driven.engine}: the page reports its own context menu as lost"
@@ -684,7 +681,6 @@ def test_dismissing_the_menu_with_a_background_click_leaves_the_selection_intact
     click and replaces it -- this pins only the background case, real mouse,
     three engines."""
     _ready(driven)
-    _show_all(driven)
     _click(driven, "#clear-selection")
     sample = _sample_node(driven)
     driven.page.evaluate("(id) => { cy.$id(id).select(); }", sample)
@@ -708,7 +704,6 @@ def test_ctrl_click_on_a_node_leaves_the_selection_unchanged_either_way(driven: 
     state. The actual outcome per engine is reported alongside this slice's
     test report, not asserted here as one fixed behaviour."""
     _ready(driven)
-    _show_all(driven)
     _click(driven, "#clear-selection")
     sample = _sample_node(driven)
     point = _client_point(driven, sample)
@@ -741,12 +736,10 @@ def test_no_uncaught_page_errors(driven: Driven) -> None:
 # ---------------------------------------------------- DL-190: collapse and trace
 #
 # `driven_trace` shares one `trace_page_url` load per engine across every test
-# below that takes it, module-scoped and run in file order (pyproject.toml
-# carries no pytest-randomly or similar, and there is no conftest.py to add
-# one). Several of these tests build on the graph state the previous one left, the
-# same way the corpus tests above lean on `_show_all` -- documented at each
-# such test, and each mutating test either restores the base state itself or
-# hands off to a test that expects exactly what it left behind.
+# below that takes it (`_driven_trace` is the module-scoped page; `driven_trace`
+# reloads it before each test, DL-201). A mutating test restores what it
+# changed before it returns, or -- like `_collapse_b`'s three callers -- builds
+# its own precondition rather than relying on what an earlier test left.
 
 
 def test_canvas_layers_include_the_expand_collapse_cue(driven_trace: Driven) -> None:
@@ -903,10 +896,8 @@ def test_search_expands_a_collapsed_box_to_find_the_match(driven_trace: Driven) 
     """Collapses B itself (via `_collapse_b`) as its own precondition: a
     search on an already-expanded page would also find IM, so asserting the
     collapse before searching is what makes this a real test of the expand
-    path rather than a vacuous one. Restores the page to fully expanded and
-    the search box empty afterward, and re-fits the view: the search's own
-    `cy.fit(hits, 60)` zooms tight around the one match, which can leave
-    other nodes' rendered position outside the fixed 1600x1000 viewport."""
+    path rather than a vacuous one. The search's own expand leaves the page
+    fully expanded already, so nothing further needs restoring."""
     _ready(driven_trace)
     _collapse_b(driven_trace)
     stats = driven_trace.page.inner_text("#stats")
@@ -934,7 +925,6 @@ def test_search_expands_a_collapsed_box_to_find_the_match(driven_trace: Driven) 
     driven_trace.page.fill("#search", "")
     driven_trace.page.press("#search", "Enter")
     _click(driven_trace, "#clear-selection")
-    _show_all(driven_trace)
 
 
 def test_context_menu_collapse_then_a_mouse_dblclick_expand(driven_trace: Driven) -> None:
@@ -1004,7 +994,6 @@ def test_a_collapse_and_an_expand_move_nothing_outside_the_box(driven_trace: Dri
     after it. Starts and ends fully expanded."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     outside = ["C", "D", "P", "Q"]
     before, view = _positions(d, outside), _viewport(d)
 
@@ -1029,7 +1018,6 @@ def test_the_members_follow_a_collapsed_box_that_was_dragged(driven_trace: Drive
     was, nested ones included. Starts and ends fully expanded."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     members, outside = ["M", "N", "IM"], ["C", "D", "P", "Q"]
     before, outside_before = _positions(d, members), _positions(d, outside)
 
@@ -1063,7 +1051,6 @@ def test_the_members_follow_a_collapsed_box_dragged_with_a_real_pointer(
     ends fully expanded."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     members, outside = ["M", "N", "IM"], ["C", "D", "P", "Q"]
     before, outside_before = _positions(d, members), _positions(d, outside)
 
@@ -1096,7 +1083,6 @@ def test_the_arrange_button_lays_the_drawn_graph_out_again(driven_trace: Driven)
     it drew. Leaves the page laid out and fitted."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     d.page.evaluate("() => { cy.$id('P').position({x: 9000, y: 9000}); }")
     assert _positions(d, ["P"])["P"] == [9000, 9000], d.engine
     # derange the VIEWPORT too, or the fit assertion cannot fail: the page was
@@ -1121,7 +1107,6 @@ def test_collapse_moves_a_nested_members_selection_to_the_outer_box(driven_trace
     moves its selection all the way up, not to the intermediate IB."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('IM').select(); }")
     d.page.evaluate("() => { ec.collapse(cy.$id('B'), { layoutBy: null }); }")
@@ -1163,7 +1148,6 @@ def test_sel_fan_in_tree_walks_through_a_collapsed_box_then_hide_others_keeps_it
     which does not apply here -- B itself was never selected)."""
     d = driven_trace
     _ready(d)
-    _show_all(d)
     d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(d) == ["B", "C", "D", "P", "Q"], d.engine
@@ -1406,8 +1390,9 @@ def test_a_throwing_collapse_extension_costs_only_itself(driven_broken: Driven) 
 # ------------------------------------------- DL-191: condition visibility
 #
 # `driven_cond` shares one `cond_page_url` load per engine across the block,
-# module-scoped and run in file order, like the DL-190 block above. Only the
-# collapse test mutates the graph, and it expands again before it returns.
+# like the DL-190 block above (`_driven_cond` is module-scoped; `driven_cond`
+# reloads it before each test, DL-201). Only the collapse test mutates the
+# graph, and it expands again before it returns.
 
 _TREE = "#d-tree"
 
@@ -1641,7 +1626,6 @@ def test_search_enter_with_one_hit_selects_the_node_and_opens_its_details(
     driven_cond.page.fill("#search", "")
     driven_cond.page.press("#search", "Enter")
     _click(driven_cond, "#clear-selection")
-    _show_all(driven_cond)
 
 
 def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay_neutral(
@@ -1687,7 +1671,6 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
     driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)
     assert _label(driven_cond, "BOX") == "BOX \u2228", driven_cond.engine
-    _show_all(driven_cond)
 
 
 def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> None:
@@ -1698,10 +1681,10 @@ def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> N
 # ------------------------------------------------------------- DL-192: locks
 #
 # `driven_locks` shares one page per engine across this block, like the two
-# above. Four of these tests mutate the graph -- the toggle, the two focus
-# tests and the collapse -- and each restores what it changed; the focus
-# tests also call `_show_all` on entry, so a failure between two halves of
-# one of them cannot leave the rest of that engine's module hidden.
+# above (`_driven_locks` is module-scoped; `driven_locks` reloads it before
+# each test, DL-201, so a test that mutates the graph no longer needs to
+# restore it for the tests after it -- only the ones still below actually
+# need the restored state for their own remaining assertions).
 
 
 @pytest.fixture(scope="module")
@@ -1788,9 +1771,9 @@ def test_a_hub_with_one_drawn_member_is_beside_it_and_the_view_still_fits(
     it. Runs with "arrange after hiding" ON, which is the branch that fits
     AFTER ELK and so the one this test was written for; the toggle defaults
     off since DL-196, so it is checked here and unchecked again in a
-    `finally`. Restores the page."""
+    `finally`. Leaves the focus in place; the next test's own reload
+    restores full visibility."""
     _ready(driven_locks)
-    _show_all(driven_locks)
     driven_locks.page.check("#relayout")
     try:
         _arm_layout_wait(driven_locks)
@@ -1803,7 +1786,6 @@ def test_a_hub_with_one_drawn_member_is_beside_it_and_the_view_still_fits(
         assert zoom < 12, f"{driven_locks.engine}: fit degenerated to {zoom}x"
     finally:
         driven_locks.page.uncheck("#relayout")  # the page's default
-    _show_all(driven_locks)
 
 
 def test_hubs_stay_clear_of_the_jobs_after_a_collapse(driven_locks: Driven) -> None:
@@ -1812,7 +1794,6 @@ def test_hubs_stay_clear_of_the_jobs_after_a_collapse(driven_locks: Driven) -> N
     the fold itself runs no layout now, and placeLocks runs from the fold's
     own handler instead of from a layout's. Expands before returning."""
     _ready(driven_locks)
-    _show_all(driven_locks)
     driven_locks.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     driven_locks.page.wait_for_timeout(_SETTLE_MS)
     assert _hub_overlaps(driven_locks) == [], driven_locks.engine
@@ -1825,7 +1806,6 @@ def test_collapse_moves_a_selected_members_selection_to_its_box(driven_locks: Dr
     expand leaves the box selected and the member unselected."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_d').select(); }")
     d.page.evaluate("() => { ec.collapse(cy.$id('lk_box'), { layoutBy: null }); }")
@@ -1847,7 +1827,6 @@ def test_hide_others_collapses_a_selected_box_with_no_selected_member(
     now-folded lk_x2, R_BIG does not (lk_d's pair link is not a hub)."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_box').select(); }")
     _control_ready(d, "#hide-others")
@@ -1980,7 +1959,6 @@ def test_a_focused_job_keeps_its_own_hub_and_not_the_other_members(
     driven_locks.page.evaluate("() => { focusOn(cy.$id('lk_x1')); }")
     driven_locks.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(driven_locks) == ["lk_x1", "lock:r:R_ONE"], driven_locks.engine
-    _show_all(driven_locks)
 
 
 def test_lock_members_then_hide_others_shows_the_hub_and_every_member(driven_locks: Driven) -> None:
@@ -1989,7 +1967,6 @@ def test_lock_members_then_hide_others_shows_the_hub_and_every_member(driven_loc
     step, the toolbar for the second."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     point = _client_point(d, "lock:r:R_ONE")
     d.page.mouse.click(point["x"], point["y"], button="right")
@@ -2007,7 +1984,6 @@ def test_lock_members_then_hide_others_shows_the_hub_and_every_member(driven_loc
     ], d.engine
     assert _hub_overlaps(d) == [], d.engine
     _click(d, "#clear-selection")
-    _show_all(d)
 
 
 def test_node_menu_offers_walks_and_lock_items_by_node_kind(driven_locks: Driven) -> None:
@@ -2018,7 +1994,6 @@ def test_node_menu_offers_walks_and_lock_items_by_node_kind(driven_locks: Driven
     click."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     flow_ids = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree", "both-trees", "neighbours"]
 
     def _shown(ids: list[str]) -> list[str]:
@@ -2065,7 +2040,6 @@ def test_canvas_menu_offers_the_four_walks_of_the_selection(driven_locks: Driven
     walks, seeded from the whole selection; the label names the count."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_x1').select(); cy.$id('lk_x5').select(); }")
     bg = _canvas_point(d, 10, 10)  # near the canvas's own corner, inside the fit padding
@@ -2110,7 +2084,6 @@ def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> N
     not the selection) and the via-boxes qualifier follows the toggle."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _walk_fan_in_from_lk_x2(d)
     assert _selected_ids(d) == ["lk_box", "lk_seed", "lk_x1", "lk_x2", "lk_x5"], d.engine
     stats = d.page.inner_text("#stats")
@@ -2157,7 +2130,6 @@ def test_edge_tap_inspects_without_touching_node_selection(driven_locks: Driven)
     selection is untouched, and the next tap anywhere clears the mark."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
     d.page.evaluate("() => { cy.edges().not('.lock')[0].emit('tap'); }")
@@ -2180,7 +2152,6 @@ def test_a_highlighted_folded_member_shows_a_proxy_and_select_highlighted_expand
     highlighted expands the box to reach its target and adds it."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     _click(d, "#clear-highlights")
     d.page.evaluate("() => { cy.$id('lk_d').select(); }")
@@ -2214,7 +2185,6 @@ def test_find_select_and_highlight_modes_cover_the_full_contract(driven_locks: D
     while the locks toggle is off, and `#stats` says so."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     _click(d, "#clear-highlights")
     if d.page.get_attribute("#details", "hidden") is None:
@@ -2292,7 +2262,6 @@ def test_lock_members_and_lock_peers_expand_a_folded_box_to_reach_their_target(
     whatever was already selected."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
 
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
@@ -2335,7 +2304,6 @@ def test_hide_selected_unselects_and_stats_selected_fits_to_the_selection(
 ) -> None:
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
     _control_ready(d, "#hide-selected")
@@ -2344,7 +2312,6 @@ def test_hide_selected_unselects_and_stats_selected_fits_to_the_selection(
     assert _selected_ids(d) == [], d.engine
     assert d.page.evaluate("() => cy.$id('lk_a').visible()") is False, d.engine
     assert d.page.inner_text("#stats").endswith("hid 1"), d.engine
-    _show_all(d)
 
     d.page.evaluate("() => { cy.$id('lk_b').select(); cy.zoom(4); }")
     _control_ready(d, "#stats-selected")
@@ -2407,7 +2374,6 @@ def test_hide_selected_on_a_collapsed_box_hides_what_it_stands_for(driven_locks:
     reveals one member must not also reveal its untouched sibling."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     d.page.wait_for_timeout(_SETTLE_MS)
@@ -2434,7 +2400,6 @@ def test_the_locks_toggle_survives_a_fold(driven_locks: Driven) -> None:
     collapse and an expand."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     d.page.uncheck("#locks")
     d.page.wait_for_timeout(300)
     assert d.page.evaluate("() => cy.elements('.lock:visible').length") == 0, d.engine
@@ -2454,7 +2419,6 @@ def test_expand_removes_a_stale_highlight_proxy(driven_locks: Driven) -> None:
     meaningless -- the box no longer stands for the highlighted member."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-highlights")
     d.page.evaluate("() => { highlightNodes(cy.$id('lk_d')); }")
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
@@ -2472,7 +2436,6 @@ def test_a_collapsed_box_borrows_its_members_lock_links_for_the_menu(driven_lock
     and loses the class again on expand."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     d.page.evaluate("() => { cy.$id('lk_box').emit('dbltap'); }")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert d.page.evaluate("() => cy.$id('lk_box').hasClass('peered')"), d.engine
@@ -2494,7 +2457,6 @@ def test_stats_selected_button_keeps_keyboard_focus_across_a_rewrite(driven_lock
     so a keyboard user does not lose focus every time `#stats` updates."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
     d.page.wait_for_timeout(200)
@@ -2511,7 +2473,6 @@ def test_find_note_clears_when_the_query_changes(driven_locks: Driven) -> None:
     does not linger once the operator starts typing a different one."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     d.page.fill("#search", "zzz")
     d.page.press("#search", "Enter")
     d.page.wait_for_timeout(200)
@@ -2529,7 +2490,6 @@ def test_sel_lock_peers_button_adds_hub_members_and_job_peers(driven_locks: Driv
     than a second parenthesis."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lock:r:R_ONE').select(); }")
     _control_ready(d, "#sel-lock-peers")
@@ -2555,7 +2515,6 @@ def test_hide_selected_keeps_the_viewport_and_hide_others_fits(driven_locks: Dri
     kept."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
     _control_ready(d, "#hide-selected")
@@ -2563,14 +2522,12 @@ def test_hide_selected_keeps_the_viewport_and_hide_others_fits(driven_locks: Dri
     _click(d, "#hide-selected")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _viewport(d) == view, d.engine
-    _show_all(d)
 
     d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
     view = _viewport(d)
     _click(d, "#hide-others")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _viewport(d) != view, d.engine
-    _show_all(d)
     _click(d, "#clear-selection")
 
 
@@ -2585,7 +2542,6 @@ def test_a_plain_drag_on_the_background_pans_and_selects_nothing(driven_locks: D
     """DL-196 THE MOUSE: plain drag pans, as on every map."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     view_before = _viewport(d)
     start = _canvas_point(d, 10, 10)  # inside the fit padding: guaranteed background
@@ -2608,7 +2564,6 @@ def test_shift_drag_box_around_the_whole_graph_selects_every_drawn_node(
     nothing -- only a plain drag does that."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     view_before = _viewport(d)
     box = _rendered_bbox(d, "cy.nodes(':visible')")
@@ -2630,7 +2585,6 @@ def test_shift_drag_box_around_one_node_adds_to_the_selection(driven_locks: Driv
     `lk_h` alone leaves both."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_b').select(); }")
     box = _rendered_bbox(d, "cy.$id('lk_h')")
@@ -2650,7 +2604,6 @@ def test_a_hidden_node_is_immune_to_the_marquee(driven_locks: Driven) -> None:
     where it sits, but hidden first, so nothing is selected."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     box = _rendered_bbox(d, "cy.$id('lk_h')")
     d.page.evaluate("() => { cy.$id('lk_h').addClass('hidden'); }")
@@ -2674,7 +2627,6 @@ def test_marquee_modifier_accepts_control_and_meta_too(driven_locks: Driven) -> 
     and it is not configurable -- not shift alone."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     box = _rendered_bbox(d, "cy.$id('lk_r')")
     _drag(
@@ -2706,7 +2658,6 @@ def test_shift_drag_starting_on_a_node_does_nothing(driven_locks: Driven) -> Non
     nothing is selected."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     before = _positions(d, ["lk_g"])["lk_g"]
     start = _client_point(d, "lk_g")
@@ -2726,7 +2677,6 @@ def test_marquee_replaces_the_selection_if_the_modifier_is_released_before_mouse
     `lk_b`, already selected, drops out."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_b').select(); }")
     box = _rendered_bbox(d, "cy.$id('lk_h')")
@@ -2749,7 +2699,6 @@ def test_dragging_a_selected_node_moves_the_whole_selection(driven_locks: Driven
     non-zero-ness are asserted, as the brief asks."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_x3').select(); cy.$id('lk_x4').select(); }")
     before = _positions(d, ["lk_x3", "lk_x4"])
@@ -2774,7 +2723,6 @@ def test_selection_and_highlight_dependent_controls_track_the_layers(
     survive), after "clear highlights" with a selection still present."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     _click(d, "#clear-highlights")
 
@@ -2821,7 +2769,6 @@ def test_canvas_menu_items_are_selection_dependent_too(driven_locks: Driven) -> 
     selection, same as every other selection-dependent control."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     assert _disabled_map(d, _CANVAS_MENU_WALKS) == dict.fromkeys(_CANVAS_MENU_WALKS, True), d.engine
     d.page.evaluate("() => { cy.$id('lk_x1').select(); }")
@@ -2841,7 +2788,6 @@ def test_escape_closes_a_menu_then_clears_a_focused_find_field_then_the_selectio
     right-click reopens it."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
 
     # 1. a menu open: Escape closes it and leaves the selection unchanged
@@ -2891,7 +2837,6 @@ def test_escape_closes_a_menu_without_touching_a_focused_find_field(driven_locks
     second Escape then empties the field."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.fill("#search", "lk_x")
     d.page.evaluate("() => findField.focus()")
@@ -2927,7 +2872,6 @@ def test_escape_during_a_held_background_click_clears_the_pending_menu_stash(
     does not put the selection back. Before the fix, the release did."""
     d = driven_locks
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_a').select(); }")
     point = _client_point(d, "lk_g")
@@ -3118,7 +3062,6 @@ def test_lock_members_expands_a_member_that_is_itself_a_collapsed_box(
     chain walk this slice deleted did."""
     d = driven_lock_box
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
 
     d.page.evaluate("() => { ec.collapse(cy.$id('lb_boxm'), { layoutBy: null }); }")
@@ -3140,7 +3083,6 @@ def test_lock_members_reaches_a_member_two_boxes_deep(driven_lock_box: Driven) -
     two levels above the member the hub names."""
     d = driven_lock_box
     _ready(d)
-    _show_all(d)
     _click(d, "#clear-selection")
 
     d.page.evaluate("() => { ec.collapse(cy.$id('lb_outer'), { layoutBy: null }); }")
