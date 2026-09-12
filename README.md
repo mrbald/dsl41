@@ -1221,11 +1221,11 @@ coverage requirement (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
 This command writes the same version into `uv.lock`. Move the install pins in
-docs/deployment-runbook.md to the same version, so the pinned-install procedure
-names the current release. Build locally and compare the wheel's file list
-with the previous release's (`uv build`, then `unzip -Z1` on both): the
-difference must be what the tag message is about to say. Commit the three
-files and push them:
+[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
+to the same version, so the pinned-install procedure names the current
+release. Build locally and compare the wheel's file list with the previous
+release's (`uv build`, then `unzip -Z1` on both): the difference must be what
+the tag message is about to say. Commit the three files and push them:
 
 ```sh
 git commit pyproject.toml uv.lock docs/deployment-runbook.md \

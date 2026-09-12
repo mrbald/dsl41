@@ -12830,7 +12830,7 @@ relitigate an entry; append a new one.
   implementing agent, which held the context. The main session read every
   diff against the sheet and ruled on the disagreements; it reran the gates
   only for the two lines it wrote itself. Tag arch-review/2026-09-11T232315Z.
-\n- DL-202 the browser suite gets a real per-test reset, and can be run in
+- DL-202 the browser suite gets a real per-test reset, and can be run in
   subsets (2026-09-12; follow-on from DL-201, which recorded the flaw rather
   than fixing it).
   THE FLAW. Every fixture in `tests/test_viz_explore_browser.py` was
