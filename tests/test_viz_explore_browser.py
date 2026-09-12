@@ -93,8 +93,8 @@ def page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 @pytest.fixture(scope="module")
 def _playwright() -> Any:
-    """One Playwright driver for the whole module. `driven`, `driven_trace`
-    and `driven_folded` are all module-scoped and independently parametrized,
+    """One Playwright driver for the whole module. `_driven`, `_driven_trace`
+    and `_driven_folded` are all module-scoped and independently parametrized,
     so pytest keeps more than one alive at once (a later test in the file
     can still need an earlier fixture's engine) -- a second, nested
     `sync_playwright()` while an outer one is still open raises "Sync API
@@ -106,8 +106,8 @@ def _playwright() -> Any:
 
 
 def _open_driven(pw: Any, engine: str, url: str) -> Any:
-    """`driven`, `driven_trace` and `driven_folded`'s shared body: launch one
-    engine from the module's Playwright instance and load one page into it."""
+    """Every module-scoped `_driven*` fixture's shared body: launch one engine
+    from the module's Playwright instance and load one page into it."""
     try:
         browser = getattr(pw, engine).launch()
     except PlaywrightError as exc:  # pragma: no cover -- environment, not logic
@@ -125,8 +125,17 @@ def _open_driven(pw: Any, engine: str, url: str) -> Any:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven(request: pytest.FixtureRequest, page_url: str, _playwright: Any) -> Any:
+def _driven(request: pytest.FixtureRequest, page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, page_url)
+
+
+@pytest.fixture
+def driven(_driven: Driven) -> Driven:
+    """Function-scoped: reloads `_driven`'s shared page and waits for the
+    layout the reload retriggers, so every test starts from the page's true
+    initial state -- folds, toggles, selection, highlights and node
+    positions all restored -- rather than inheriting the previous test's."""
+    return _reset(_driven)
 
 
 @pytest.fixture(scope="module")
@@ -156,13 +165,25 @@ def folded_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_trace(request: pytest.FixtureRequest, trace_page_url: str, _playwright: Any) -> Any:
+def _driven_trace(request: pytest.FixtureRequest, trace_page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, trace_page_url)
 
 
+@pytest.fixture
+def driven_trace(_driven_trace: Driven) -> Driven:
+    """See `driven`: reloads `_driven_trace`'s shared page before every test."""
+    return _reset(_driven_trace)
+
+
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_folded(request: pytest.FixtureRequest, folded_page_url: str, _playwright: Any) -> Any:
+def _driven_folded(request: pytest.FixtureRequest, folded_page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, folded_page_url)
+
+
+@pytest.fixture
+def driven_folded(_driven_folded: Driven) -> Driven:
+    """See `driven`: reloads `_driven_folded`'s shared page before every test."""
+    return _reset(_driven_folded)
 
 
 # --------------------------------------------------------------------- helpers
@@ -186,6 +207,23 @@ def _ready(d: Driven) -> None:
             f"{d.page.inner_text('#stats')!r}. Uncaught page errors: {d.errors or 'none'}"
         )
         pytest.fail(d.dead)
+
+
+def _reset(d: Driven) -> Driven:
+    """Every function-scoped `driven*` fixture's shared body: reload the page
+    and wait for the layout the reload retriggers. A reload restores the
+    page's true initial state -- folds, toggles, selection, highlights and
+    node positions, all of it -- which the old per-test `_show_all` click
+    never did, and on the corpus page it is three to six times cheaper
+    (measured: 0.16-0.30s here across the three engines, against 0.94-0.96s
+    for `_show_all`). Checks `d.dead` itself, the same short-circuit `_ready`
+    uses, so a page whose layout never arrives fails once, with one
+    diagnosis, instead of a fresh timeout per test."""
+    if d.dead:
+        pytest.fail(d.dead)
+    d.page.reload()
+    _ready(d)
+    return d
 
 
 def _click(d: Driven, selector: str) -> None:
@@ -795,11 +833,21 @@ def test_context_menu_lists_every_item_in_declared_order(driven_trace: Driven) -
         driven_trace.page.wait_for_timeout(200)
 
 
+def _collapse_b(d: Driven) -> None:
+    """Collapse box B with a real dbltap and wait for the settle. The
+    precondition `test_meta_edge_and_collapsed_box_show_their_own_details_rows`
+    and `test_search_expands_a_collapsed_box_to_find_the_match` need, factored
+    out so each builds it itself rather than inheriting it from
+    `test_dbltap_collapses_box_b_and_folds_its_border_edges`, which uses it too."""
+    d.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
+    d.page.wait_for_timeout(_SETTLE_MS)
+
+
 def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven) -> None:
-    """Leaves B collapsed: the next two tests continue from this state."""
+    """A real dbltap on B collapses it and folds its border edges into meta
+    edges."""
     _ready(driven_trace)
-    driven_trace.page.evaluate("() => { cy.$id('B').emit('dbltap'); }")
-    driven_trace.page.wait_for_timeout(_SETTLE_MS)
+    _collapse_b(driven_trace)
 
     assert _visible_ids(driven_trace) == ["B", "C", "D", "P", "Q"], driven_trace.engine
     meta_ends = sorted(
@@ -821,13 +869,14 @@ def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven)
 
 
 def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: Driven) -> None:
-    """Continues from the dbltap test above -- B is still collapsed. Tapping
-    only opens the panel, so this leaves the collapse untouched for the
-    search test after it."""
+    """Collapses B itself (via `_collapse_b`) as its own precondition, then
+    checks that a meta edge and the collapsed box each show their own details
+    rows. Tapping only opens the panel, so it leaves the collapse untouched."""
     _ready(driven_trace)
+    _collapse_b(driven_trace)
     stats = driven_trace.page.inner_text("#stats")
     assert "1 box collapsed" in stats, (
-        f"{driven_trace.engine}: expected B still collapsed from the prior test, got {stats!r}"
+        f"{driven_trace.engine}: expected the collapse helper to leave B collapsed, got {stats!r}"
     )
 
     driven_trace.page.evaluate(
@@ -851,19 +900,18 @@ def test_meta_edge_and_collapsed_box_show_their_own_details_rows(driven_trace: D
 
 
 def test_search_expands_a_collapsed_box_to_find_the_match(driven_trace: Driven) -> None:
-    """Continues from the collapsed B left above -- asserted, not just
-    assumed, so a reordering fails here with a clear diagnosis instead of
-    passing vacuously (a search on an already-expanded page would also find
-    IM). Restores the page to fully expanded and the search box empty -- the
-    base state the remaining tests in this block assume. Also re-fits the
-    view: the search's own `cy.fit(hits, 60)` zooms tight around the one
-    match, which can leave other nodes' rendered position outside the fixed
-    1600x1000 viewport -- fine for the id-only assertions elsewhere, but the
-    next tests click real screen points and need everything back on screen."""
+    """Collapses B itself (via `_collapse_b`) as its own precondition: a
+    search on an already-expanded page would also find IM, so asserting the
+    collapse before searching is what makes this a real test of the expand
+    path rather than a vacuous one. Restores the page to fully expanded and
+    the search box empty afterward, and re-fits the view: the search's own
+    `cy.fit(hits, 60)` zooms tight around the one match, which can leave
+    other nodes' rendered position outside the fixed 1600x1000 viewport."""
     _ready(driven_trace)
+    _collapse_b(driven_trace)
     stats = driven_trace.page.inner_text("#stats")
     assert "1 box collapsed" in stats, (
-        f"{driven_trace.engine}: expected B still collapsed from the dbltap test, got {stats!r}"
+        f"{driven_trace.engine}: expected the collapse helper to leave B collapsed, got {stats!r}"
     )
     driven_trace.page.fill("#search", "IM")
     driven_trace.page.press("#search", "Enter")
@@ -1243,15 +1291,27 @@ def broken_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_override(
+def _driven_override(
     request: pytest.FixtureRequest, override_page_url: str, _playwright: Any
 ) -> Any:
     yield from _open_driven(_playwright, request.param, override_page_url)
 
 
+@pytest.fixture
+def driven_override(_driven_override: Driven) -> Driven:
+    """See `driven`: reloads `_driven_override`'s shared page before every test."""
+    return _reset(_driven_override)
+
+
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_broken(request: pytest.FixtureRequest, broken_page_url: str, _playwright: Any) -> Any:
+def _driven_broken(request: pytest.FixtureRequest, broken_page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, broken_page_url)
+
+
+@pytest.fixture
+def driven_broken(_driven_broken: Driven) -> Driven:
+    """See `driven`: reloads `_driven_broken`'s shared page before every test."""
+    return _reset(_driven_broken)
 
 
 def test_the_box_gate_leaves_a_box_override_out_of_a_members_fan_in(
@@ -1364,8 +1424,14 @@ def cond_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_cond(request: pytest.FixtureRequest, cond_page_url: str, _playwright: Any) -> Any:
+def _driven_cond(request: pytest.FixtureRequest, cond_page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, cond_page_url)
+
+
+@pytest.fixture
+def driven_cond(_driven_cond: Driven) -> Driven:
+    """See `driven`: reloads `_driven_cond`'s shared page before every test."""
+    return _reset(_driven_cond)
 
 
 def _label(d: Driven, node_id: str) -> str:
@@ -1651,8 +1717,14 @@ def locks_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_locks(request: pytest.FixtureRequest, locks_page_url: str, _playwright: Any) -> Any:
+def _driven_locks(request: pytest.FixtureRequest, locks_page_url: str, _playwright: Any) -> Any:
     yield from _open_driven(_playwright, request.param, locks_page_url)
+
+
+@pytest.fixture
+def driven_locks(_driven_locks: Driven) -> Driven:
+    """See `driven`: reloads `_driven_locks`'s shared page before every test."""
+    return _reset(_driven_locks)
 
 
 def _hub_overlaps(d: Driven) -> list[str]:
@@ -2015,14 +2087,14 @@ def test_canvas_menu_offers_the_four_walks_of_the_selection(driven_locks: Driven
     _click(d, "#clear-selection")
 
 
-def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> None:
-    """DL-196: a walk from the node menu ADDS the seed's closure to whatever
-    was already selected; the label names the actual seed (the clicked node,
-    not the selection) and the via-boxes qualifier follows the toggle.
-    Leaves the resulting selection in place for the next test."""
-    d = driven_locks
-    _ready(d)
-    _show_all(d)
+def _walk_fan_in_from_lk_x2(d: Driven) -> None:
+    """Clear the selection, select lk_x1 and lk_x5, then right-click lk_x2 and
+    walk its fan-in tree from the node menu -- the five-node selection
+    (lk_box, lk_seed, lk_x1, lk_x2, lk_x5) that
+    `test_node_menu_walk_adds_to_an_existing_selection` and
+    `test_hide_others_keeps_the_selection_then_show_all_restores_visibility`
+    each need as their own precondition, factored out so neither inherits it
+    from the other."""
     _click(d, "#clear-selection")
     d.page.evaluate("() => { cy.$id('lk_x1').select(); cy.$id('lk_x5').select(); }")
     point = _client_point(d, "lk_x2")
@@ -2030,6 +2102,16 @@ def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> N
     d.page.wait_for_timeout(500)
     _click(d, "#fan-in-tree")
     d.page.wait_for_timeout(_SETTLE_MS)
+
+
+def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> None:
+    """DL-196: a walk from the node menu ADDS the seed's closure to whatever
+    was already selected; the label names the actual seed (the clicked node,
+    not the selection) and the via-boxes qualifier follows the toggle."""
+    d = driven_locks
+    _ready(d)
+    _show_all(d)
+    _walk_fan_in_from_lk_x2(d)
     assert _selected_ids(d) == ["lk_box", "lk_seed", "lk_x1", "lk_x2", "lk_x5"], d.engine
     stats = d.page.inner_text("#stats")
     assert stats.endswith("5 selected · 0 highlighted · fan-in of lk_x2, transitive, via boxes"), (
@@ -2041,16 +2123,13 @@ def test_node_menu_walk_adds_to_an_existing_selection(driven_locks: Driven) -> N
 def test_hide_others_keeps_the_selection_then_show_all_restores_visibility(
     driven_locks: Driven,
 ) -> None:
-    """Continues from the walk test above: hide-others keeps the 5 selected
-    plus the hubs their lock links reach; show-all restores visibility only
-    -- the selection stays exactly what it was (DL-196: show all is
-    visibility alone)."""
+    """Builds its own five-node selection (via `_walk_fan_in_from_lk_x2`):
+    hide-others keeps the 5 selected plus the hubs their lock links reach;
+    show-all restores visibility only -- the selection stays exactly what it
+    was (DL-196: show all is visibility alone)."""
     d = driven_locks
     _ready(d)
-    stats = d.page.inner_text("#stats")
-    assert stats.endswith("fan-in of lk_x2, transitive, via boxes"), (
-        f"{d.engine}: expected the prior test's selection still in place, got {stats!r}"
-    )
+    _walk_fan_in_from_lk_x2(d)
     _click(d, "#hide-others")
     d.page.wait_for_timeout(_SETTLE_MS)
     assert _visible_ids(d) == sorted(
@@ -2894,10 +2973,16 @@ def two_attr_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_two_attr(
+def _driven_two_attr(
     request: pytest.FixtureRequest, two_attr_page_url: str, _playwright: Any
 ) -> Any:
     yield from _open_driven(_playwright, request.param, two_attr_page_url)
+
+
+@pytest.fixture
+def driven_two_attr(_driven_two_attr: Driven) -> Driven:
+    """See `driven`: reloads `_driven_two_attr`'s shared page before every test."""
+    return _reset(_driven_two_attr)
 
 
 def test_two_or_attributes_get_four_distinct_branch_colours(driven_two_attr: Driven) -> None:
@@ -2989,10 +3074,21 @@ def lock_box_page_url(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def driven_lock_box(
+def _driven_lock_box(
     request: pytest.FixtureRequest, lock_box_page_url: str, _playwright: Any
 ) -> Any:
     yield from _open_driven(_playwright, request.param, lock_box_page_url)
+
+
+@pytest.fixture
+def driven_lock_box(_driven_lock_box: Driven) -> Driven:
+    """See `driven`: reloads `_driven_lock_box`'s shared page before every test.
+
+    Not one of the brief's eight named fixtures (0f4470b added it the same
+    day, after the brief's list was drafted); it has the identical
+    module-scoped-fixture flaw, so it gets the identical fix rather than
+    being left out."""
+    return _reset(_driven_lock_box)
 
 
 def _folded(d: Driven, node_id: str) -> bool:
