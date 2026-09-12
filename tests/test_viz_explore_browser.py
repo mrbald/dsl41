@@ -1591,7 +1591,8 @@ def test_edge_details_name_the_attribute_and_the_branch(driven_cond: Driven) -> 
 
 def test_a_leaf_whose_arrow_is_off_the_canvas_says_so(driven_cond: Driven) -> None:
     """A focus can hide the arrow a leaf names; the leaf then says so instead
-    of offering a link to an element that is not drawn. Restores the page."""
+    of offering a link to an element that is not drawn, and stops saying so
+    once the arrow is back."""
     _ready(driven_cond)
     driven_cond.page.evaluate("() => { cy.$id('B').addClass('hidden'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)

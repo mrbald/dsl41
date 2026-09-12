@@ -12830,3 +12830,70 @@ relitigate an entry; append a new one.
   implementing agent, which held the context. The main session read every
   diff against the sheet and ruled on the disagreements; it reran the gates
   only for the two lines it wrote itself. Tag arch-review/2026-09-11T232315Z.
+\n- DL-202 the browser suite gets a real per-test reset, and can be run in
+  subsets (2026-09-12; follow-on from DL-201, which recorded the flaw rather
+  than fixing it).
+  THE FLAW. Every fixture in `tests/test_viz_explore_browser.py` was
+  module-scoped. There was no function-scoped fixture and no automatic reset:
+  the tests shared one live page per engine and inherited each other's state,
+  so a filtered run reported failures that passed in a full run. Hit twice
+  during the DL-201 rework, each time costing a whole-module run to prove the
+  failures were phantom. The suite had a helper whose docstring called itself
+  "Reset the shared page between tests", and it was not one: it clicked
+  "show all", which by DL-196 deliberately KEEPS the selection and the
+  highlights, and it neither unfolded a box nor restored a toggle. It was
+  called by hand in 64 places across 100 tests, so a third of them reset
+  nothing. The comment and the behaviour disagreed, which is why this is a
+  defect and not a considered trade of correctness for speed.
+  THE MEASUREMENT DECIDED THE DESIGN, and inverted the expectation. A
+  `page.reload()` plus the module's own readiness wait costs 0.159 s in
+  chromium, 0.180 s in webkit and 0.302 s in firefox. The `_show_all` click
+  it replaces costs 0.94-0.96 s, because it sleeps a fixed settle timeout
+  where the reload waits on the page's readiness signal. A reload is three to
+  six times CHEAPER and restores the page's true initial state -- folds,
+  toggles, selection, highlights and node positions, all of it. The
+  alternative designs died on that number: no per-page knowledge of which
+  boxes start folded, and no test-only reset entry point in the production
+  template.
+  THE SHAPE. Each of the nine page fixtures keeps its module-scoped body
+  under a private name -- launching an engine and loading a page is the
+  expensive part and stays shared -- and gains a function-scoped fixture
+  under the original name that reloads through one `_reset` helper. The
+  engine parametrization stays on the module-scoped fixture and reaches the
+  tests through the dependency. `_reset` checks `dead` itself, the
+  short-circuit `_ready` already had, so a page whose layout never arrives
+  fails once with one diagnosis instead of timing out per test.
+  THREE CHAINED TESTS SURFACED, and they were deliberate, not accidental:
+  their docstrings said so. `test_dbltap_collapses_box_b_and_folds_its_
+  border_edges` left B collapsed for the next two; `test_node_menu_walk_adds_
+  to_an_existing_selection` left a five-node selection for the one after it.
+  RULED: each downstream test builds its own precondition through a shared
+  helper (`_collapse_b`, `_walk_fan_in_from_lk_x2`), rather than the chains
+  being merged into single tests. In every case the inherited state is a
+  PRECONDITION and not the assertion -- the two trace tests are about what a
+  folded box and a re-pointed arrow show in the details panel, and the locks
+  test is about what hide-others and show-all do to a selection. Merging
+  would trade three precise failures for one broad one. One assertion is
+  DROPPED rather than moved: the locks test opened by checking the previous
+  test's last-op line was still on screen, which is a guard on the chain and
+  not a fact about hide others. The three false docstrings are rewritten.
+  THE CLEANUP. 61 of the 64 `_show_all` calls existed only to reset and are
+  gone. Three stay, and each is an action under test with an assertion after
+  it: show all's own contract (DL-196: visibility alone, the selection and
+  the highlights survive), and two mid-test hides that the rest of their own
+  test needs undone. The helper keeps its name and gets an honest docstring.
+  THE EVIDENCE. The subset that failed three tests in three engines against
+  the pre-fix tree now passes 27 of 27, and a second arbitrary subset passes
+  75 of 75. The whole module is 6:41, down from 8:45: adding a reset to every
+  test and removing 61 slow ones nets out two minutes faster.
+  THE GATE: 3652 passed, 6 skipped, 2 xfailed; 100% coverage; ruff, ruff
+  format --check, mypy and arch_check clean; the browser suite 300 passed in
+  chromium, webkit and firefox, unchanged in count.
+  ALLOCATION. One Sonnet implementer, fresh context, no adversarial reviewer:
+  the gate is decisive here, because a wrong reset or a wrong removal fails
+  loudly in three engines. It was briefed to REPORT AND STOP if the reset
+  surfaced a test depending on a neighbour, which it did, and the main
+  session ruled on the three chains before it continued. It also corrected
+  the brief: `driven_lock_box` landed the same day as DL-201's rework and was
+  missing from the brief's list of eight, and it extended the treatment
+  rather than following a stale list.
