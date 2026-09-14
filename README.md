@@ -144,9 +144,18 @@ fan-in/fan-out (direct or transitive) from the right-click menu or the
 toolbar; a sticky highlight that survives clicks, hiding and folding; and
 visibility — "hide selected", "hide others", "show all". Shift+drag the
 background to add a region to the selection (plain drag still pans, and
-ctrl or cmd work too); Escape closes an open menu, else empties the find
-field if that is where you are typing, else clears the selection. Every op
-over the selection is a toolbar button as well as a menu item, so the page
+ctrl or cmd work too); Escape closes an open menu or controls/help panel,
+else empties the find field if that is where you are typing, else clears
+the selection. The compact header keeps Find, its two match actions, Fit
+and Help available. Selection, Highlight, Visibility and View open panels
+over the canvas. A panel stays open for repeat commands. Close, Escape or
+an outside click dismisses it without changing the selection or view.
+Trace through boxes sits in Selection. Arrange after hiding and Locks sit
+in Visibility. Help contains the catalog totals, gestures and graph legend. The bottom
+status keeps the counts, the selected-count fit button and operation
+feedback; scroll it horizontally for a long message. Feature failures
+also show a persistent notice. Every op over the selection has an HTML
+button, so the page
 stays usable where the menu plugin cannot load (DL-77), and a control is
 disabled while the layer its op reads is empty — the selection ops while
 nothing is selected, the two highlight ops while nothing is marked.

@@ -968,7 +968,7 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     assert "layoutBy: function" not in page  # the fold called relayoutOrFit through this
     assert 'id="arrange"' in page
     assert page.index('id="fit"') < page.index('id="arrange"') < page.index('id="collapse-all"')
-    assert '<input type="checkbox" id="relayout"> arrange after hiding' in page
+    assert '<input tabindex="0" type="checkbox" id="relayout"> arrange after hiding' in page
     assert 'id="relayout" checked' not in page
     assert "re-layout on focus" not in page
     # the button and the toggle's ON branch are one layout path, not two
@@ -1098,7 +1098,7 @@ def test_to_explore_html_summary_counts_the_locks_it_draws() -> None:
     # nothing unused -> nothing said (read the summary span: the vendored
     # bundle has the word "unused" in it somewhere, as it has most words)
     plain = to_explore_html(catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"))
-    summary = re.search(r'<span class="summary">(.*?)</span>', plain)
+    summary = re.search(r'<span class="summary"[^>]*>(.*?)</span>', plain)
     assert summary is not None
     assert (
         summary.group(1)

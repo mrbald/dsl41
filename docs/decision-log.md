@@ -12936,3 +12936,23 @@ relitigate an entry; append a new one.
   examples` (`src/dsl41/_vendor/README.md` and the two `examples/nightbank`
   docs) and all of them already pass, so the format half of the gate is
   unaffected. `docs/` is not on that path list and is untouched.
+
+- DL-204 the explore page keeps its controls in two compact header rows
+  (2026-09-14). Find and its two match actions, Fit and Help stay available.
+  Selection, Highlight, Visibility and View disclose HTML panels over the
+  canvas. One panel opens at a time and stays open for repeated commands.
+  Close and Escape restore focus to its disclosure. An outside canvas
+  gesture dismisses the panel without reaching the graph. Tab can leave
+  it without a focus trap. The graph and its navigation operations keep
+  their state and geometry when panels open or close.
+  Trace through boxes moves beside the Selection walks. Arrange after
+  hiding and Locks move into Visibility. Their defaults stay unchanged.
+  Help starts closed and holds the catalog totals, existing gestures and
+  graph legend. A tall graph menu scrolls within the canvas bounds.
+  The bottom status retains every count, the persistent selected-count
+  fit button and operation feedback. Long controls and status scroll within
+  their own rows, so they cannot take more canvas height. Optional-feature
+  failures also show a persistent notice with the full message accessible.
+  This changes DL-199's presentation of the five groups and extends
+  DL-200's Escape order with controls/help dismissal before find/selection.
+  The node-details panel remains separate. No plugin or dependency is added.
