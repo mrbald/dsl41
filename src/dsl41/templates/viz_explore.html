@@ -15,20 +15,58 @@
   body { margin: 0; display: flex; flex-direction: column;
          font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI",
          Roboto, sans-serif; color: #1f2937; background: #ffffff; }
-  header { border-bottom: 1px solid #e5e7eb; padding: 0.4rem 1rem; }
-  header h1 { font-size: 1.05rem; margin: 0; display: inline; }
-  header .summary { color: #4b5563; margin-left: 0.75rem; }
-  #toolbar { display: flex; align-items: center; gap: 0.6rem;
-             margin-top: 0.35rem; flex-wrap: wrap; }
-  #toolbar input[type="search"] { width: 14rem; padding: 0.25rem 0.5rem;
+  [hidden] { display: none !important; }
+  body { overflow: hidden; }
+  header { flex: none; padding: 4px 12px; border-bottom: 1px solid #e5e7eb; }
+  .title-row { display: flex; align-items: center; gap: 12px; height: 30px; }
+  header h1 { flex: 1; min-width: 0; font-size: 1.05rem; margin: 0;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .summary { color: #4b5563; max-width: 35%; overflow: hidden;
+             white-space: nowrap; text-overflow: ellipsis; }
+  #toolbar { display: flex; align-items: center; gap: 6px; height: 34px;
+             overflow-x: auto; white-space: nowrap; }
+  #toolbar .group { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  #toolbar input[type="search"] { width: 12rem; padding: 3px 6px;
              border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
-  #toolbar button { padding: 0.25rem 0.7rem; border: 1px solid #d1d5db;
+  header button, .chrome-panel button { padding: 3px 9px; border: 1px solid #d1d5db;
              border-radius: 4px; background: #f9fafb; color: #374151;
-             font: inherit; cursor: pointer; }
-  #toolbar button:hover { background: #f3f4f6; }
-  #toolbar label { color: #374151; user-select: none; }
-  #stats { color: #6b7280; font-size: 0.85rem; }
-  #wrap { position: relative; flex: 1; min-height: 0; }
+             font: inherit; cursor: pointer; white-space: nowrap; }
+  header button:hover, .chrome-panel button:hover { background: #f3f4f6; }
+  button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+             outline: 2px solid #2563eb; outline-offset: 2px; }
+  button:disabled { color: #9ca3af; cursor: default; background: #f9fafb; }
+  .disclosure[aria-expanded="true"] { background: #dbeafe; border-color: #93c5fd; }
+  .disclosure::after { content: " ▾"; }
+  .disclosure[aria-expanded="true"]::after { content: " ▴"; }
+  #chrome-backdrop { position: absolute; inset: 0; z-index: 25; }
+  .chrome-panel { position: absolute; top: 8px; left: 8px; z-index: 30;
+             box-sizing: border-box; width: 32rem; max-width: calc(100% - 16px);
+             max-height: calc(100% - 16px); overflow: auto; padding: 10px;
+             background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+             box-shadow: 0 2px 8px #0002; }
+  .panel-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .panel-heading h2 { font-size: 1rem; margin: 0; flex: 1; }
+  .panel-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .panel-settings { display: grid; gap: 6px; border-top: 1px solid #e5e7eb;
+             margin-top: 10px; padding-top: 8px; }
+  .panel-settings label { color: #374151; user-select: none; }
+  #help-panel p { margin: 8px 0; }
+  #help-panel h3 { font-size: 0.95rem; margin: 12px 0 4px; }
+  #status-bar { display: flex; gap: 8px; flex: none; height: 30px; box-sizing: border-box;
+             border-top: 1px solid #e5e7eb; padding: 0 12px;
+             white-space: nowrap; line-height: 28px; }
+  #status-scroll { min-width: 0; flex: 1; overflow-x: auto; }
+  #feature-warning { flex: none; color: #b45309; border: 0; background: none;
+             font: inherit; cursor: pointer; text-decoration: underline; }
+  #stats { color: #4b5563; font-size: 0.85rem; }
+  #find-note { color: #b45309; font-size: 0.85rem; }
+  #find-note:not(:empty)::after { content: " · "; }
+  @media (max-width: 600px) {
+    header { padding-left: 8px; padding-right: 8px; }
+    header .summary { display: none; }
+    #toolbar input[type="search"] { width: 8rem; }
+  }
+  #wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   #cy { position: absolute; inset: 0; }
   #details { position: absolute; top: 8px; right: 8px; z-index: 20;
              width: 26rem; max-width: 45%; max-height: calc(100% - 16px);
@@ -48,19 +86,10 @@
   #d-close { position: absolute; top: 6px; right: 8px; border: 0;
              background: none; color: #6b7280; font-size: 1rem;
              cursor: pointer; padding: 0; }
-  .hint { color: #9ca3af; font-size: 0.8rem; }
-  /* the toolbar's groups (DL-196): one per layer -- find, selection,
-     highlight, visibility, view -- so twenty controls read as five */
-  #toolbar .group { display: inline-flex; align-items: center; gap: 0.3rem;
-             flex-wrap: wrap; padding-left: 0.5rem; border-left: 1px solid #e5e7eb; }
-  #toolbar .glabel { color: #9ca3af; font-size: 0.75rem; text-transform: uppercase;
-             letter-spacing: 0.04em; }
-  #toolbar button:disabled { color: #9ca3af; cursor: default; background: #f9fafb; }
-  #find-note { color: #b45309; font-size: 0.85rem; }
   #stats button, #stats button:hover { border: 0; background: none; padding: 0;
              font: inherit; color: #1d4ed8; cursor: pointer; text-decoration: underline; }
   /* disabled while nothing is selected: it must not read as something to click */
-  #stats button:disabled { cursor: default; text-decoration: none; }
+  #stats button:disabled { color: #9ca3af; cursor: default; text-decoration: none; }
 
   /* the condition tree in the details panel (DL-191) */
   #d-tree { margin-top: 0.5rem; font-size: 0.85rem; }
@@ -134,68 +163,107 @@
     transform: translateY(-50%);
   }
   /* end cytoscape-context-menus CSS */
+  /* A short canvas must leave the menu's first and last actions reachable.
+     The plugin measures this bounded box for its existing edge placement. */
+  .cy-context-menus-cxt-menu { max-height: 50%; max-width: 50%;
+             overflow: auto; box-sizing: border-box; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Explore: __DSL41_TITLE__</h1><span class="summary">__DSL41_SUMMARY__</span>
-  <div id="toolbar">
-    <span class="group">
+  <div class="title-row">
+    <h1 title="Explore: __DSL41_TITLE__">Explore: __DSL41_TITLE__</h1>
+    <span class="summary" title="__DSL41_SUMMARY__">__DSL41_SUMMARY__</span>
+    <button tabindex="0" type="button" id="fit">fit</button>
+    <button tabindex="0" type="button" id="help-toggle" class="disclosure" aria-expanded="false" aria-controls="help-panel">Help</button>
+  </div>
+  <div id="toolbar" aria-label="Graph controls">
+    <span class="group" role="group" aria-label="Find">
+      <label for="search">Find</label>
       <input id="search" type="search" disabled
-             placeholder="find &mdash; substring of a name; Enter selects" spellcheck="false">
-      <button type="button" id="find-select" disabled title="select every node whose name holds the text, replacing the selection (Enter does the same); shift adds them instead. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">select matches</button>
-      <button type="button" id="find-highlight" disabled title="highlight every node whose name holds the text; the selection is left alone. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">highlight matches</button>
-      <span id="find-note"></span>
+             placeholder="name contains…" spellcheck="false">
+      <button tabindex="0" type="button" id="find-select" disabled title="select every node whose name holds the text, replacing the selection (Enter does the same); shift adds them instead. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">select matches</button>
+      <button tabindex="0" type="button" id="find-highlight" disabled title="highlight every node whose name holds the text; the selection is left alone. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">highlight matches</button>
     </span>
-    <span class="group"><span class="glabel">selection</span>
-      <button type="button" id="sel-fan-in" disabled title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
-      <button type="button" id="sel-fan-in-tree" disabled title="add everything upstream of the selection">+ fan-in, transitive</button>
-      <button type="button" id="sel-fan-out" disabled title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
-      <button type="button" id="sel-fan-out-tree" disabled title="add everything downstream of the selection">+ fan-out, transitive</button>
-      <button type="button" id="sel-lock-peers" disabled title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
-      <button type="button" id="select-highlighted" disabled title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
-      <button type="button" id="clear-selection" disabled title="select nothing; a click on the canvas does the same">clear selection</button>
-    </span>
-    <span class="group"><span class="glabel">highlight</span>
-      <button type="button" id="highlight-selected" disabled title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
-      <button type="button" id="unhighlight-selected" disabled title="take the mark off the selected nodes">unhighlight selected</button>
-      <button type="button" id="clear-highlights" disabled title="take the mark off every node, folded members included">clear highlights</button>
-    </span>
-    <span class="group"><span class="glabel">visibility</span>
-      <button type="button" id="hide-selected" disabled title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
-      <button type="button" id="hide-others" disabled title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
-      <button type="button" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
-    </span>
-    <span class="group"><span class="glabel">view</span>
-      <button type="button" id="fit">fit</button>
-      <button type="button" id="fit-selection" disabled title="fit the view to the selected nodes">fit selection</button>
-      <button type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
-      <button type="button" id="collapse-all">collapse boxes</button>
-      <button type="button" id="expand-all">expand boxes</button>
-    </span>
-    <label title="what a hide op does with the space it frees. On: &ldquo;hide selected&rdquo;, &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is, and only &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; fit the view. &ldquo;hide this node&rdquo; and &ldquo;hide selected&rdquo; never re-arrange and never move the view, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input type="checkbox" id="relayout"> arrange after hiding</label>
-    <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input type="checkbox" id="trace-boxes" checked> trace through boxes</label>
-    <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input type="checkbox" id="locks" checked> locks</label>
-    <span id="stats">laying out&hellip;</span>
-    <span class="hint">click selects one node and opens its details, shift+click
-    toggles one &middot; shift+drag the background selects a region, and adds it
-    &middot; right-click a node, or the canvas for the selection, to add a walk
-    &middot; double-click a box, or its corner cue, to collapse or expand it
-    &middot; Escape closes a menu, else empties the find field it is typing
-    in, else clears the selection</span>
-    <span class="hint">drag pans, wheel zooms &middot; dragging a selected node
-    moves the whole selection &middot; a node otherwise moves only when a
-    layout runs: at load, on &ldquo;arrange&rdquo;, or after a hide op with
-    &ldquo;arrange after hiding&rdquo; on &middot; there is no undo, and
-    arrange is the recovery</span>
-    <span class="hint">all incoming arrows must hold (AND) unless the job
-    carries &#8744; &middot; a bare n() is a lock and draws no arrow</span>
-    <span class="hint">dotted gray = lock &middot; the tee marks the job that
-    waits</span>
+    <button tabindex="0" type="button" id="selection-toggle" class="disclosure" aria-expanded="false" aria-controls="selection-panel">Selection</button>
+    <button tabindex="0" type="button" id="highlight-toggle" class="disclosure" aria-expanded="false" aria-controls="highlight-panel">Highlight</button>
+    <button tabindex="0" type="button" id="visibility-toggle" class="disclosure" aria-expanded="false" aria-controls="visibility-panel">Visibility</button>
+    <button tabindex="0" type="button" id="view-toggle" class="disclosure" aria-expanded="false" aria-controls="view-panel">View</button>
   </div>
 </header>
 <div id="wrap">
   <div id="cy"></div>
+  <div id="chrome-backdrop" hidden aria-hidden="true"></div>
+  <section id="selection-panel" class="chrome-panel" role="region" aria-labelledby="selection-heading" hidden>
+    <div class="panel-heading"><h2 id="selection-heading">Selection</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close selection">Close</button></div>
+    <div class="panel-actions">
+      <button tabindex="0" type="button" id="sel-fan-in" disabled title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
+      <button tabindex="0" type="button" id="sel-fan-in-tree" disabled title="add everything upstream of the selection">+ fan-in, transitive</button>
+      <button tabindex="0" type="button" id="sel-fan-out" disabled title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
+      <button tabindex="0" type="button" id="sel-fan-out-tree" disabled title="add everything downstream of the selection">+ fan-out, transitive</button>
+      <button tabindex="0" type="button" id="sel-lock-peers" disabled title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
+      <button tabindex="0" type="button" id="select-highlighted" disabled title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
+      <button tabindex="0" type="button" id="clear-selection" disabled title="select nothing; a click on the canvas does the same">clear selection</button>
+    </div>
+    <div class="panel-settings">
+      <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input tabindex="0" type="checkbox" id="trace-boxes" checked> trace through boxes</label>
+    </div>
+  </section>
+  <section id="highlight-panel" class="chrome-panel" role="region" aria-labelledby="highlight-heading" hidden>
+    <div class="panel-heading"><h2 id="highlight-heading">Highlight</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close highlight">Close</button></div>
+    <div class="panel-actions">
+      <button tabindex="0" type="button" id="highlight-selected" disabled title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
+      <button tabindex="0" type="button" id="unhighlight-selected" disabled title="take the mark off the selected nodes">unhighlight selected</button>
+      <button tabindex="0" type="button" id="clear-highlights" disabled title="take the mark off every node, folded members included">clear highlights</button>
+    </div>
+  </section>
+  <section id="visibility-panel" class="chrome-panel" role="region" aria-labelledby="visibility-heading" hidden>
+    <div class="panel-heading"><h2 id="visibility-heading">Visibility</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close visibility">Close</button></div>
+    <div class="panel-actions">
+      <button tabindex="0" type="button" id="hide-selected" disabled title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
+      <button tabindex="0" type="button" id="hide-others" disabled title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
+      <button tabindex="0" type="button" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
+    </div>
+    <div class="panel-settings">
+      <label title="what a hide op does with the space it frees. On: &ldquo;hide selected&rdquo;, &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is, and only &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; fit the view. &ldquo;hide this node&rdquo; and &ldquo;hide selected&rdquo; never re-arrange and never move the view, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input tabindex="0" type="checkbox" id="relayout"> arrange after hiding</label>
+      <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input tabindex="0" type="checkbox" id="locks" checked> locks</label>
+    </div>
+  </section>
+  <section id="view-panel" class="chrome-panel" role="region" aria-labelledby="view-heading" hidden>
+    <div class="panel-heading"><h2 id="view-heading">View</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close view">Close</button></div>
+    <div class="panel-actions">
+      <button tabindex="0" type="button" id="fit-selection" disabled title="fit the view to the selected nodes">fit selection</button>
+      <button tabindex="0" type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
+      <button tabindex="0" type="button" id="collapse-all">collapse boxes</button>
+      <button tabindex="0" type="button" id="expand-all">expand boxes</button>
+    </div>
+  </section>
+  <section id="help-panel" class="chrome-panel" role="region" aria-labelledby="help-heading" hidden>
+    <div class="panel-heading"><h2 id="help-heading">Help</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close Help">Close</button></div>
+    <p id="catalog-summary">__DSL41_SUMMARY__</p>
+    <h3>Gestures</h3>
+    <p>click selects one node and opens its details, shift+click
+    toggles one &middot; shift+drag the background selects a region, and adds it
+    &middot; right-click a node, or the canvas for the selection, to add a walk
+    &middot; double-click a box, or its corner cue, to collapse or expand it
+    &middot; Escape closes a menu or controls/help panel, else empties the find field
+    you are typing in, else clears the selection</p>
+    <p>drag pans, wheel zooms &middot; dragging a selected node
+    moves the whole selection &middot; a node otherwise moves only when a
+    layout runs: at load, on &ldquo;arrange&rdquo;, or after a hide op with
+    &ldquo;arrange after hiding&rdquo; on &middot; there is no undo, and
+    arrange is the recovery</p>
+    <h3>Graph legend</h3>
+    <p>all incoming arrows must hold (AND) unless the job
+    carries &#8744; &middot; a bare n() is a lock and draws no arrow</p>
+    <p>dotted gray = lock &middot; the tee marks the job that
+    waits</p>
+  </section>
   <aside id="details" hidden>
     <button type="button" id="d-close" title="close">&#10005;</button>
     <h2 id="d-title"></h2>
@@ -203,6 +271,12 @@
     <div id="d-tree"></div>
   </aside>
 </div>
+<footer id="status-bar">
+  <div id="status-scroll" tabindex="0" aria-label="Graph status; scroll horizontally for the full message">
+    <span id="find-note" role="status"></span><span id="stats" role="status">laying out&hellip;</span>
+  </div>
+  <button tabindex="0" id="feature-warning" type="button" hidden>Features unavailable</button>
+</footer>
 <!-- customElements polyfill FIRST: cytoscape-context-menus builds its menu
      from customized built-in elements (class extends HTMLDivElement +
      customElements.define(..., {extends: "div"})), which WebKit has never
@@ -668,6 +742,7 @@ var statsHead = document.createTextNode("");
 var statsTail = document.createTextNode("");
 var statsButton = document.createElement("button");
 statsButton.type = "button";
+statsButton.tabIndex = 0;
 statsButton.id = "stats-selected";
 statsButton.title = "fit the view to the selected nodes";
 statsButton.addEventListener("click", function () { fitSelection(); });
@@ -718,6 +793,10 @@ function updateStats(op) {
      make the signal mean nothing (DL-190; DL-196's second review, G6). The
      ops are barred from that window too, but a toggle and a plugin's loss
      notice are not ops, and this is the one place that writes. */
+  var warning = document.getElementById("feature-warning");
+  warning.hidden = !lostFeature;
+  warning.title = lostFeature.replace(/^ · /, "");
+  warning.setAttribute("aria-label", warning.title + "; show status details");
   if (loading) return;
   if (!statsBuilt) {
     stats.replaceChildren(statsHead, statsButton, statsTail);
@@ -1347,6 +1426,72 @@ cy.on("tap", function (evt) {
   dTree.replaceChildren();
   clearBranchPaint();
   clearInspected();
+});
+
+/* --------------------------------------------------------- compact controls */
+
+document.getElementById("feature-warning").addEventListener("click", function () {
+  var strip = document.getElementById("status-scroll");
+  strip.scrollLeft = strip.scrollWidth;
+  strip.focus();
+});
+
+/* Cytoscape captures wheel on #cy. Stop menu wheel events at its parent,
+   before that capture handler can zoom the graph and dismiss the menu.
+   Keep the native scroll action; wheel gestures on the canvas still zoom. */
+document.getElementById("wrap").addEventListener("wheel", function (evt) {
+  if (evt.target.closest(".cy-context-menus-cxt-menu")) evt.stopPropagation();
+}, { capture: true, passive: true });
+
+/* Explicit tabindex on chrome controls also includes native buttons and
+   checkboxes in WebKit's default Tab order. */
+var chromeTrigger = null;
+var chromeBackdrop = document.getElementById("chrome-backdrop");
+
+function closeChrome(restoreFocus) {
+  if (!chromeTrigger) return;
+  var trigger = chromeTrigger;
+  document.getElementById(trigger.getAttribute("aria-controls")).hidden = true;
+  trigger.setAttribute("aria-expanded", "false");
+  chromeTrigger = null;
+  chromeBackdrop.hidden = true;
+  if (restoreFocus) trigger.focus();
+}
+
+document.querySelectorAll(".disclosure").forEach(function (trigger) {
+  trigger.addEventListener("click", function () {
+    var wasOpen = chromeTrigger === trigger;
+    closeChrome(false);
+    if (wasOpen) return;
+    var menu = openMenu();
+    if (menu) menu.style.display = "none";
+    chromeTrigger = trigger;
+    var panel = document.getElementById(trigger.getAttribute("aria-controls"));
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    chromeBackdrop.hidden = false;
+    panel.querySelector("button, input").focus();
+  });
+});
+document.querySelectorAll("[data-close-panel]").forEach(function (button) {
+  button.addEventListener("click", function () { closeChrome(true); });
+});
+/* The backdrop consumes the complete outside gesture. It is removed on click,
+   after mouseup, so neither a canvas tap nor a drag can clear the selection. */
+chromeBackdrop.addEventListener("click", function () { closeChrome(true); });
+chromeBackdrop.addEventListener("contextmenu", function (evt) {
+  evt.preventDefault();
+  closeChrome(true);
+});
+document.addEventListener("click", function (evt) {
+  if (!chromeTrigger || evt.target.closest(".chrome-panel, .disclosure")) return;
+  closeChrome(false);
+});
+/* Tabbing out dismisses the overlay without pulling focus back. Its controls
+   are ordinary HTML, including when the optional graph menu failed to load. */
+document.addEventListener("focusin", function (evt) {
+  if (!chromeTrigger || evt.target === chromeTrigger || evt.target.closest(".chrome-panel")) return;
+  closeChrome(false);
 });
 
 /* ----------------------------------------------------------------- toolbar */
@@ -2008,9 +2153,10 @@ cy.on("tap", function (evt) {
   }, 0);
 });
 
-/* Escape, in DL-196's order: it closes an open menu, else it clears a find
-   field the operator is typing in, else it clears the selection. One key
-   with three jobs, most local first, so it never reaches past what is in
+/* Escape closes a menu or the new controls/help panel, then keeps DL-196's
+   find/selection order: it clears a find
+   field the operator is typing in, else it clears the selection. The most
+   local surface comes first, so it never reaches past what is in
    front of the operator. The menu is closed through the DOM, the same
    element `openMenu` finds for `menuIsOpen`: the plugin's own dismissal is
    a tapstart handler, and there is no public call for it. The tapstart
@@ -2028,6 +2174,7 @@ document.addEventListener("keydown", function (evt) {
     menu.style.display = "none";
     return;
   }
+  if (chromeTrigger) { closeChrome(true); return; }
   /* An EMPTY focused field has nothing to clear, so Escape moves on to the
      selection rather than doing nothing at all: DL-196 orders the three
      jobs, and a branch that cannot act is not the operator's answer. */
