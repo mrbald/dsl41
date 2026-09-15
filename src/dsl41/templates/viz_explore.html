@@ -68,7 +68,13 @@
   }
   #wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   #cy { position: absolute; inset: 0; }
-  #details { position: absolute; top: 8px; right: 8px; z-index: 20;
+  /* above #chrome-backdrop (25), below .chrome-panel (30): a controls panel
+     must not make the node details inert. The backdrop is what dismisses a
+     panel on an outside gesture, and it covers all of #wrap -- so details
+     sitting under it took the click instead of its own buttons, DL-191's
+     condition tree included. Details stays below an open panel, which is
+     the one case where the two overlap and the panel is the newer intent. */
+  #details { position: absolute; top: 8px; right: 8px; z-index: 26;
              width: 26rem; max-width: 45%; max-height: calc(100% - 16px);
              overflow: auto; background: #fffffff5; border: 1px solid #d1d5db;
              border-radius: 6px; padding: 0.6rem 0.8rem;

@@ -3203,6 +3203,38 @@ def test_panels_and_help_leave_graph_geometry_and_layers_unchanged(driven_trace:
     assert before == (d.page.evaluate(_LEAF_POSITIONS), _viewport(d), _selected_ids(d), _counts(d))
 
 
+def test_node_details_stay_operable_under_an_open_controls_panel(
+    driven_trace: Driven,
+) -> None:
+    """DL-204 keeps the node-details panel separate, and #chrome-backdrop --
+    the layer that turns an outside gesture into a dismissal -- covers all of
+    #wrap. So details has to sit ABOVE it, or a controls panel makes details
+    inert and swallows the click meant for its own buttons, DL-191's
+    condition tree included.
+
+    `is_visible` cannot see this: an occluded panel is still visible, and
+    that is exactly how the defect passed a green suite. The assertion is
+    therefore hit-testing plus a real click that has to ACT."""
+    d = driven_trace
+    point = _client_point(d, "M")
+    d.page.mouse.click(point["x"], point["y"])
+    assert d.page.locator("#details").is_visible(), d.engine
+    d.page.locator("#selection-toggle").click()
+    assert d.page.locator("#selection-panel").is_visible(), d.engine
+    hit = d.page.evaluate(
+        "() => { const r = document.getElementById('d-close').getBoundingClientRect();"
+        " const t = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);"
+        " return t ? t.id : null; }"
+    )
+    assert hit == "d-close", (d.engine, hit)
+    d.page.locator("#d-close").click()
+    # its own button acted, and the same click is an outside gesture for the
+    # panel, so that dismisses too -- one click, both surfaces, no graph change
+    assert not d.page.locator("#details").is_visible(), d.engine
+    assert d.page.locator(".chrome-panel:visible").count() == 0, d.engine
+    assert d.page.get_attribute("#selection-toggle", "aria-expanded") == "false", d.engine
+
+
 def test_panel_keyboard_repeat_actions_and_escape_preserve_find_and_selection(
     driven_trace: Driven,
 ) -> None:

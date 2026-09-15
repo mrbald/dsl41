@@ -12955,4 +12955,21 @@ relitigate an entry; append a new one.
   failures also show a persistent notice with the full message accessible.
   This changes DL-199's presentation of the five groups and extends
   DL-200's Escape order with controls/help dismissal before find/selection.
-  The node-details panel remains separate. No plugin or dependency is added.
+  IT ALSO MOVES DL-199'S FIND REPORT. That entry put "no match" beside the
+  field; the field is now in a compact row with no space for it, so the
+  report joins the bottom status strip, ahead of the counts and separated
+  from them. The report itself is unchanged -- what it says and when it says
+  it -- and this sentence is the amendment, because a relocated contract
+  that no entry mentions is how a later reader concludes the code is wrong.
+  THE NODE-DETAILS PANEL REMAINS SEPARATE, and that costs a stacking rule.
+  `#chrome-backdrop` is what turns an outside gesture into a dismissal, and
+  it covers all of `#wrap`, so details must sit ABOVE it (26) and below an
+  open panel (30). Under the backdrop, details stayed VISIBLE while every
+  click on it -- `#d-close`, DL-191's condition tree -- was eaten by the
+  backdrop instead. Found in review, not by the suite: `is_visible` returns
+  true for an occluded panel, so the 321 browser cases passed over it. The
+  regression test hit-tests `elementFromPoint` and then makes a real click
+  ACT, because visibility was never the property in question. One click on
+  details both acts and dismisses the panel, which is the outside-gesture
+  rule doing its job, and it is asserted in all three engines.
+  No plugin or dependency is added.
