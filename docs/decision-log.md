@@ -12936,3 +12936,40 @@ relitigate an entry; append a new one.
   examples` (`src/dsl41/_vendor/README.md` and the two `examples/nightbank`
   docs) and all of them already pass, so the format half of the gate is
   unaffected. `docs/` is not on that path list and is untouched.
+
+- DL-204 the explore page keeps its controls in two compact header rows
+  (2026-09-14). Find and its two match actions, Fit and Help stay available.
+  Selection, Highlight, Visibility and View disclose HTML panels over the
+  canvas. One panel opens at a time and stays open for repeated commands.
+  Close and Escape restore focus to its disclosure. An outside canvas
+  gesture dismisses the panel without reaching the graph. Tab can leave
+  it without a focus trap. The graph and its navigation operations keep
+  their state and geometry when panels open or close.
+  Trace through boxes moves beside the Selection walks. Arrange after
+  hiding and Locks move into Visibility. Their defaults stay unchanged.
+  Help starts closed and holds the catalog totals, existing gestures and
+  graph legend. A tall graph menu scrolls within the canvas bounds.
+  The bottom status retains every count, the persistent selected-count
+  fit button and operation feedback. Long controls and status scroll within
+  their own rows, so they cannot take more canvas height. Optional-feature
+  failures also show a persistent notice with the full message accessible.
+  This changes DL-199's presentation of the five groups and extends
+  DL-200's Escape order with controls/help dismissal before find/selection.
+  IT ALSO MOVES DL-199'S FIND REPORT. That entry put "no match" beside the
+  field; the field is now in a compact row with no space for it, so the
+  report joins the bottom status strip, ahead of the counts and separated
+  from them. The report itself is unchanged -- what it says and when it says
+  it -- and this sentence is the amendment, because a relocated contract
+  that no entry mentions is how a later reader concludes the code is wrong.
+  THE NODE-DETAILS PANEL REMAINS SEPARATE, and that costs a stacking rule.
+  `#chrome-backdrop` is what turns an outside gesture into a dismissal, and
+  it covers all of `#wrap`, so details must sit ABOVE it (26) and below an
+  open panel (30). Under the backdrop, details stayed VISIBLE while every
+  click on it -- `#d-close`, DL-191's condition tree -- was eaten by the
+  backdrop instead. Found in review, not by the suite: `is_visible` returns
+  true for an occluded panel, so the 321 browser cases passed over it. The
+  regression test hit-tests `elementFromPoint` and then makes a real click
+  ACT, because visibility was never the property in question. One click on
+  details both acts and dismisses the panel, which is the outside-gesture
+  rule doing its job, and it is asserted in all three engines.
+  No plugin or dependency is added.
