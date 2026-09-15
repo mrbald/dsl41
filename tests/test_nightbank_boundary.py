@@ -60,7 +60,7 @@ from dsl41.boundary import (
     read_seal,
     stage_next_period,
 )
-from dsl41 import boundary
+from dsl41 import boundary, runner_adapters
 from dsl41.cli import app
 from dsl41.ir import lower_catalog
 from dsl41.oracle_state import Event
@@ -909,6 +909,53 @@ def _park_spawn(night: _LiveNight, job: str):
     return gate
 
 
+def _park_reconciliation(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """Hold every CMD adapter on THIS side of the spool until the gate opens.
+
+    A supervisor killed with -9 does NOT take its wrappers with it: the
+    command runs in its own pgid (`runner_wrapper` duty 1) and the
+    supervisor dies by pid, so each wrapper survives to take lifeline EOF
+    and record its own outcome (duty 6). The adapter then retires the row
+    from that record by either of two routes -- `_await_outcome`'s
+    `status.json` re-poll, or, when the lost connection wakes it first, the
+    `resolve_spool` ladder -- and a retired row is no longer a carried
+    bound run for ss8's proof to object to. That is the engine behaving as
+    `test_kill_supervisor_midrun_engine_resolves_via_spool` requires
+    (supervisor-protocol ss5, DL-48 item (8)); it is the TEST that must pin
+    the instant.
+
+    Constructed rather than raced, for DL-83's reason: the window is
+    milliseconds wide, and a test that raced it would fail whenever it
+    lost. Both routes are patched on `runner_adapters` itself, where
+    `_await_outcome` looks them up at call time, so the gate binds adapter
+    tasks already inside it; only `status.json` is withheld, because
+    `executions_at` reads `spawn.json` through the same loader and needs it
+    (DL-205).
+
+    The gate decides the OUTCOME, not the timing: with it held, no schedule
+    retires the rows, so the scenario reaches its seal in the same state on
+    any machine. A caller still waits for the wrappers' records to land
+    before sealing -- otherwise the row could pass on a fast machine
+    because reconciliation had not arrived yet, which is DL-83's vacuous
+    pass wearing the other face."""
+    gate = asyncio.Event()
+    load_json = runner_adapters.load_json
+    resolve_spool = runner_adapters.resolve_spool
+
+    def held_load_json(path):
+        if os.path.basename(str(path)) == "status.json" and not gate.is_set():
+            return None
+        return load_json(path)
+
+    async def held_resolve_spool(job, run_number, *args, **kwargs):
+        await gate.wait()
+        return await resolve_spool(job, run_number, *args, **kwargs)
+
+    monkeypatch.setattr(runner_adapters, "load_json", held_load_json)
+    monkeypatch.setattr(runner_adapters, "resolve_spool", held_resolve_spool)
+    return gate
+
+
 async def _arrange_live_closure(night: _LiveNight, *, park: str | None = None):
     """ss14 B1's live closure, arranged through operator verbs alone.
 
@@ -1622,7 +1669,9 @@ def test_b2_a_changed_member_of_a_live_box_refuses_and_moves_nothing(
     asyncio.run(scenario())
 
 
-def test_b2_a_restarted_supervisor_cannot_prove_the_seal(night_base: Path) -> None:
+def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
+    night_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """ss14 B2 row 3 (PR-27): the supervisor is restarted before the seal,
     so its LIST is empty.
 
@@ -1631,9 +1680,16 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(night_base: Path) -> No
     the clause that answers is the RECONCILIATION one -- a carried bound run
     that the leased incarnation's LIST does not account for -- and not the
     incarnation-mismatch clause beside it, which `test_pr27_*` in
-    tests/test_boundary.py owns. An empty history is not proof either way."""
+    tests/test_boundary.py owns. An empty history is not proof either way.
+
+    The row is about a seal taken while those runs are still CARRIED, so
+    `_park_reconciliation` pins that instant instead of racing it: the
+    surviving wrappers record their own deaths within milliseconds, and an
+    engine that has consumed those records carries no bound run for ss8 to
+    object to -- a legitimate commit, not this row (DL-205)."""
 
     async def scenario() -> None:
+        gate: asyncio.Event | None = None
         night = await _start_detached_night(night_base)
         try:
             await _arrange_live_closure(night)
@@ -1645,22 +1701,40 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(night_base: Path) -> No
             was = _wal(night)
             client = night.wiring.client
             leased = client.incarnation
+            # installed BEFORE the kill: the wrappers start recording the
+            # moment it lands, and the adapter tasks are already inside
+            # `_await_outcome` by now
+            gate = _park_reconciliation(monkeypatch)
             _kill_group(night.run_root)  # the operator's restart: -9 and come back
             await client.ensure_running()
             await client.acquire()
             # the fixture's own check that a restart really happened; the
             # engine's objection below is about the LIST, not this value
             assert client.incarnation is not None and client.incarnation != leased
+            # the state this row is ABOUT: every orphaned wrapper has
+            # recorded its own death, so the evidence that would retire
+            # these rows is on disk and only the gate keeps the engine from
+            # consuming it. Waited for, so the seal below meets the same
+            # estate on a fast machine and a loaded one
+            await _wait_for_evidence(
+                night,
+                lambda: all(
+                    (night.run_root / "runs" / f"{job}.1" / "status.json").exists()
+                    for job in (B_HOLDER, B_LONG, B_KILLED)
+                ),
+                "every orphaned wrapper's own record of its death",
+            )
             with pytest.raises(EngineError, match="leased incarnation's LIST"):
                 await _seal_live(night, _seal_request(night, staged))
             assert (await client.list_runs())["runs"] == []
             # the ESTATE is untouched, and the supervisor proof is ss6 step
             # 7's -- AFTER the cutoff -- so C1 keeps the cutoff's own
             # admitted work. `_assert_untouched` is the wrong helper here on
-            # purpose: the restart took the wrappers with it, which is
-            # exactly why the boundary must not commit over their rows
+            # purpose: the restart orphaned the wrappers, which is exactly
+            # why the boundary must not commit over their rows
             _assert_c1_still_open(night, was=was, barrier=True)
-            assert night.engine.oracle.store.runtime(B_LONG).status == "RUNNING"
+            for job in (B_HOLDER, B_LONG, B_KILLED):
+                assert night.engine.oracle.store.runtime(job).status == "RUNNING", job
             assert night.engine.oracle.store.runtime(B_LONG).run_number == carried["run_number"]
             # the watch is in-engine and owned by no supervisor, so it is the
             # one thing the restart left alive -- and this row is where ss14's
@@ -1673,6 +1747,10 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(night_base: Path) -> No
                 "another FW poll after the refusal",
             )
         finally:
+            # release before teardown: shutdown drains the adapter tasks,
+            # and a task parked on the gate would never arrive
+            if gate is not None:
+                gate.set()
             await _end_night(night)
 
     asyncio.run(scenario())
