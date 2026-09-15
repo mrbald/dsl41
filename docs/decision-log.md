@@ -12973,3 +12973,42 @@ relitigate an entry; append a new one.
   details both acts and dismisses the panel, which is the outside-gesture
   rule doing its job, and it is asserted in all three engines.
   No plugin or dependency is added.
+
+- DL-205 ss14 B2 row 3 pins its instant instead of racing it
+  `test_b2_a_restarted_supervisor_cannot_prove_the_seal` asserted the ss8
+  reconciliation refusal over a window it had to WIN, and on a loaded CI
+  runner it lost: the seal committed and the row read `DID NOT RAISE`.
+  The engine was right both times, so nothing in `src/` changes.
+  A supervisor killed with -9 does NOT take its wrappers with it. The
+  command holds its own pgid (`runner_wrapper` duty 1) and the supervisor
+  dies by pid, so every wrapper survives to take lifeline EOF and record
+  its own outcome (duty 6). The adapter then retires the row from that
+  record by either of two routes -- `_await_outcome`'s one-second
+  `status.json` re-poll, or, when the lost connection wakes it first, the
+  `resolve_spool` ladder, which fires within milliseconds. A retired row
+  is no longer a carried bound run, and DL-133 (13) reconciles the LIST
+  against "the executions the seal will carry", so the clause is vacuous
+  and the commit is correct. The suite already pinned that same reading for
+  the same event, in
+  `test_kill_supervisor_midrun_engine_resolves_via_spool`
+  (supervisor-protocol ss5; DL-48 item (8) lists "kill -9 supervisor ->
+  spool-resolve TERMINATED, engine survives socket loss" among its
+  integration cases): the two rows expected opposite outcomes and only
+  timing separated them.
+  The row is about a seal taken while those runs are still CARRIED, so the
+  test now constructs that instant. `_park_reconciliation` holds both
+  routes at module level -- so the gate also binds adapter tasks already
+  inside `_await_outcome` -- and withholds `status.json` ALONE, because
+  `executions_at` reads `spawn.json` through the same loader and needs it.
+  The gate decides the outcome, not the timing: no schedule can retire the
+  rows while it is held. The scenario then WAITS for every orphaned
+  wrapper's record to land before sealing, so a fast machine meets the same
+  estate as a loaded one; without that wait the row would pass on a fast
+  machine because reconciliation had not arrived yet, which is DL-83's
+  vacuous pass wearing the other face. The gate opens in `finally`, since
+  shutdown drains the adapter tasks and one parked on it would never
+  arrive.
+  Killing the wrappers too was considered and rejected: duty 6 means a
+  supervisor kill always leaves an outcome, so that repair would construct
+  a state the runtime cannot reach and still would not be deterministic.
+  DL-143, which landed the row, is not edited.
