@@ -12897,3 +12897,42 @@ relitigate an entry; append a new one.
   the brief: `driven_lock_box` landed the same day as DL-201's rework and was
   missing from the brief's list of eight, and it extended the treatment
   rather than following a stale list.
+- DL-203 the lint rule set is named in pyproject rather than inherited from
+  ruff's default (2026-09-15; prompted by the dependabot bump from ruff
+  0.15.20 to 0.16.7, PR #12).
+  THE TRIGGER. The bump touched `uv.lock` and nothing else, and it turned the
+  lint gate red on all three pythons. No line of this project's code changed.
+  Ruff 0.16 widened its DEFAULT rule selection, and the project had never
+  named a selection, so the gate's contents were a vendor default that a
+  dependency bump rewrote underneath it.
+  THE MEASUREMENT. On `src tests`: ruff 0.15.20 with defaults passes clean;
+  ruff 0.16.7 with defaults reports 780 findings across ~37 rules, 227 of
+  them auto-fixable; ruff 0.16.7 with `--select E4,E7,E9,F` passes clean. The
+  four selectors are what 0.15's default was, so naming them restores exactly
+  the policy the tree was written and cleaned under, with no code change. The
+  three numbers are the whole argument: the findings are new RULES, not new
+  DEFECTS.
+  THE RULING. `[tool.ruff.lint] select = ["E4", "E7", "E9", "F"]` in
+  pyproject, and the bump merges behind it. A lint gate whose contents a
+  dependency bump can rewrite is not a gate -- it is a vendor's opinion
+  arriving unreviewed, and on this repo it arrives monthly by robot. Widening
+  the set stays available and becomes a decision with an entry, which is the
+  point: the choice moves from ruff's release notes to this ledger.
+  REJECTED: pinning `ruff<0.16`. It buys the same quiet at the price of a
+  version ceiling that must later be justified and removed, and it leaves the
+  gate's real contents still unnamed. The problem was never the version.
+  ALSO REJECTED, for now: adopting the wider set and fixing all 780. That is
+  a real slice, not a dependency bump, and folding it into one would have
+  merged a semantic review under a `deps:` commit message.
+  WHAT THIS DOES NOT DECIDE, and the reason the number is worth recording:
+  373 of the 780 are DTZ -- naive `datetime` calls -- in a compiler whose
+  period model, calendars and runner all carry clock-domain contracts, and
+  clock-domain mixups are a named recurring defect class here. That is the
+  candidate worth reading first if the set is ever widened. It is REGISTERED,
+  not dismissed; this entry declines to rule on it rather than discarding it.
+  ONE MORE BEHAVIOUR CHANGE, checked because the gate runs it: ruff 0.16's
+  FORMATTER also began formatting python code blocks inside markdown. It
+  finds three more files under CI's `ruff format --check src tests scripts
+  examples` (`src/dsl41/_vendor/README.md` and the two `examples/nightbank`
+  docs) and all of them already pass, so the format half of the gate is
+  unaffected. `docs/` is not on that path list and is untouched.

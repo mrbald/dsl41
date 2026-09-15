@@ -82,6 +82,17 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 100
 
+# DL-203: the rule set is named here rather than inherited from ruff's
+# default, because that default is a vendor choice and it moves. Ruff 0.16
+# widened it and reported 780 findings on a tree that 0.15 called clean, with
+# no line of this project's code changing. A lint gate a dependency bump can
+# rewrite is not a gate. These four are the policy the tree was written and
+# cleaned under; `--select E4,E7,E9,F` is clean under both versions. Widening
+# the set is a real decision and gets its own entry -- the 373 naive-datetime
+# findings in ruff 0.16's default are the candidate worth reading first.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # a wedged test dumps every thread's stack instead of hanging silently (the
