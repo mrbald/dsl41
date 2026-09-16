@@ -208,8 +208,10 @@ checks passed. Compiler source and tests are unchanged.
 
 ## Deferred work and triggers
 
-- Hats: locate the source and its sync ownership before editing the marked block.
-  Then reconcile the blanket gates with risk-based allocation in that source.
+- Hats: DONE (DL-206). The source is `~/.hats` and `hats init` owns the marked
+  block; the four project sections moved outside it. The blanket gates were
+  already ruled to stand over risk-based allocation, and that precedence now
+  reads where the axes are cited.
 - Pre-push hygiene: no guard source is shipped or installed in this checkout.
   The gitleaks CI workflow is not a local pre-push guard and cannot detect all
   client-derived narrative. Locate any required guard; do not claim it exists.

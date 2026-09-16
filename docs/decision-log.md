@@ -13012,3 +13012,41 @@ relitigate an entry; append a new one.
   supervisor kill always leaves an outcome, so that repair would construct
   a state the runtime cannot reach and still would not be deterministic.
   DL-143, which landed the row, is not edited.
+
+- DL-206 the hats block holds the core's wiring stanza and nothing else
+  (2026-09-16)
+  DL-186 put four project sections -- Git workflow, Verification gates,
+  Self-review, Agent allocation -- INSIDE the `<!-- hats:core -->` markers,
+  and deferred the reconciliation because the core's source was thought
+  unavailable. DL-195 retired that premise; this entry finishes the job.
+  `hats init` generates exactly one section, "Engineering core (hats)", and
+  its canonical text ends "This block is managed by `hats init`; keep
+  project text outside the markers" -- a line the copied block never had.
+  So ownership is not ambiguous: the block is the core's, everything else
+  in CLAUDE.md is this project's. The four sections move ABOVE the markers
+  unchanged in substance, and the block is now byte-identical to
+  what `hats.cli._stanza("~/.hats")` emits, which is the shape `hats init`
+  re-reads -- it parses the BLOCK, not the generator -- to resolve the core.
+  NOT a rescue: `hats init` on an already-wired project prints "nothing to
+  do" and returns, appending a stanza only when the project is unwired, so
+  no edit inside the markers was ever at risk of being clobbered. The fix
+  is that a reader could not tell which rules the core owned.
+  The gates question was already settled and is only being put where it
+  reads: "Verification gates" and "Self-review" bind here whatever the
+  core's allocation prior would allow skipping. The block's "skip what
+  self-verifies" bullet contradicted that in place and is no longer stated
+  here; it survives in the core, fenced by the amendments below. The three
+  axes now POINT at the core's "Allocation of cognition" prior rather than
+  restating it, so the copy cannot drift. A pointer imports the prior's
+  "Where it misleads" too, so four local amendments override it: house-voice
+  writing stays top-tier, frozen contracts are a named review trigger, the
+  orchestrator does not re-run the executor's gates (the prior allows it
+  after a tier drop; this project answers that risk by not dropping the tier
+  that far), and the gates above are never waived. The operational rules the
+  core does not carry stay local -- subagents run foreground, suite-length
+  commands pass an explicit timeout, reviewers write findings to a file and
+  report a ranked table, mechanical agents get a length cap.
+  Kept outside the markers because the stanza does not say it: if `~/.hats`
+  does not resolve, report it once, do not invent the core, continue with
+  the local rules.
+  The deferral register in `docs/agent-harness-review.md` is marked done.
