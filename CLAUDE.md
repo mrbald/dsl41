@@ -65,8 +65,8 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
 - Use the locked environment: `uv sync --frozen --extra dev`.
   The full verification commands are in `docs/agent-workflow.md`.
   CI remains the executable check of that list.
-- The hats block's full gates and multi-file review remain required;
-  its risk-based exceptions do not waive those rules.
+- "Verification gates" and "Self-review" below remain required; the core's
+  risk-based allocation prior does not waive them (DL-206).
 - When `scripts/arch_check.py` reports an architecture review due, use
   `arch-review`. Its shared body is
   `.claude/skills/arch-review/SKILL.md`; Codex discovers the same body
@@ -81,16 +81,6 @@ planning, and review, including semantic and instruction-policy changes.
 Exchange independent findings before reconciling material disagreements.
 Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
-## Existing hats integration
-
-The marked block below predates the link to the shared core. Its source is
-the hats repository, linked at `~/.hats` where the core is installed, and a
-session-start hook there injects `~/.hats/docs/USING.md` (DL-195 amends
-DL-186's premise). The block stands as written until it is reconciled with
-that source; that reconciliation, and who owns the sync, are separate work.
-If `~/.hats` is missing, report that once, do not invent the missing core,
-and continue with the local rules.
-<!-- hats:core -->
 ## Git workflow
 
 - Never run `git pull`. Use `git fetch` then `git rebase`.
@@ -128,21 +118,26 @@ ask which governs -- never silently drop the review discipline
 (2026-08-25: silent compliance shipped a pushed slice with no independent
 review).
 
-Before any delegation, choose three things explicitly -- model tier,
-review-or-none, context mode. Never default to inherit.
-- Model tier follows judgment density: count the decisions the brief does
-  not force. Fully-forced work drops a tier; semantic interpretation or
-  house-voice writing stays top-tier.
-- Adversarial review follows verification asymmetry: review what is cheap
-  to get wrong and expensive to notice (semantics, frozen contracts). Skip
-  what self-verifies (goldens, round-trips, renames) -- the gate is the
-  review there.
-- Context follows need: reviewers start fresh (independence beats
-  context); rework resumes the implementing agent; full-context forks only
-  when unwritten session rulings would cost more to write down.
-The implementing agent runs the gates and reports; the main session reads
-the diff against the spec and rules on disagreements -- it does not re-run
-gates. A multi-slice plan sheet carries an allocation column.
+How to allocate is the core's **Allocation of cognition** prior
+(`~/.hats/docs/PRIORS.md`), which covers three axes: tier by judgment
+density, review by verification asymmetry, context by need. Read the rule
+there; it is not copied here, so the two cannot drift apart.
+Four local amendments override it where they differ (DL-206):
+- House-voice writing stays top-tier, alongside the prior's semantic
+  rulings. This file opens with a style contract; prose that carries it is
+  not fully-forced work.
+- Frozen contracts are a named review trigger, with semantics. The
+  contracts are listed under "Read for the task".
+- The orchestrator does NOT re-run the executor's gates here. It reads the
+  diff against the spec and rules on disagreements. The prior's misleads
+  clause allows re-running after a tier drop; this project does not, and
+  answers low-tier report risk by not dropping the tier that far.
+- The prior's exceptions never waive this file's gates: the full suite and
+  the multi-file adversarial review above are required whatever it would
+  allow skipping (see "Python and verification").
+Still choose tier, review-or-none and context mode EXPLICITLY before any
+delegation -- never default to inherit. A multi-slice plan sheet carries an
+allocation column.
 
 Subagents run every command in the foreground and never end a turn
 waiting on a background command -- the completion wake-up is unreliable
@@ -160,6 +155,11 @@ blockers; it does not restate findings. Mechanical agents get a report
 length cap in the brief. Skill loads are the expensive context items --
 budget for them, not for diff reads.
 
+The block below is the core's own wiring stanza and nothing else (DL-206).
+If `~/.hats` does not resolve, report that once, do not invent the missing
+core, and continue with the rules above.
+
+<!-- hats:core -->
 ## Engineering core (hats)
 
 This project uses the shared **hats engineering core**. Before substantive
@@ -168,4 +168,5 @@ work, read and follow `~/.hats/docs/USING.md`; it loads the hard rules
 thinking tools. Re-read each session: the core is the source of truth and
 its updates propagate here automatically. If `~/.hats` does not resolve,
 the core is not linked on this machine (see the hats repo's README).
+This block is managed by `hats init`; keep project text outside the markers.
 <!-- /hats:core -->
