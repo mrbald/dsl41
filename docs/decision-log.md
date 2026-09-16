@@ -13050,3 +13050,155 @@ relitigate an entry; append a new one.
   does not resolve, report it once, do not invent the core, continue with
   the local rules.
   The deferral register in `docs/agent-harness-review.md` is marked done.
+
+- DL-207 `minify` emits a de-identified estate, and an unclassified attribute
+  stops it (2026-09-16)
+  An owner who runs a real estate cannot hand one over as a test case: the JIL
+  names the client in every direction at once -- job names, hosts, commands,
+  paths, owners, calendars, and the comments around them. `dsl41 minify` takes
+  that estate and emits the part this compiler models, with every name replaced
+  by a synthetic one. The repository is public, so one leaked identifier is the
+  failure that decides the design; every rule fails closed.
+  The layering is the scanner's, not a new one: parse, transform the statement
+  AST, render PRESERVE over an AST whose trivia has been emptied. Canonical was
+  tried first and rejected: it sorts a statement's attributes into a fixed key
+  order, which is lossless for every statement whose lowering reads attributes
+  as a map and lossy for the two kinds that read them in SOURCE order -- an
+  insert_machine pool binds `factor`/`max_load` to the `machine:` line above
+  them (DL-49), and a cycle pairs `start_date`/`end_date` positionally (SEM-39,
+  and those two keys sort the wrong way round, so even one pair inverts).
+  Canonical mode had no non-test consumer before this module: F2 pins it as a
+  fixpoint, which is a LEXICAL claim and was never a semantic one. Preserve mode
+  keeps source order, so an estate carrying virtual pools and cycles minifies
+  with no refusal and no change to the scanner spec.
+  RE-FIND TRIGGER on that reading: canonical output is not semantically faithful
+  for an order-bound statement, and nothing outside the tests consumes it today.
+  The first consumer that needs it to be faithful fixes it in the scanner spec
+  -- order-sensitive statements keep source order -- rather than working around
+  it again here.
+  The price is that preserve mode reproduces trivia byte for byte, so the
+  transform empties it -- comments, blank lines, indents, separator runs -- and
+  one channel becomes load-bearing: a `#` tail is VALUE text, not a comment
+  (DL-31), so the scanner leaves it INSIDE the statement subject and no
+  `Comment` object is ever created for it. It vanishes only because every
+  subject is replaced by a minted name, so the transform ASSERTS that and
+  refuses a subject it did not rename. The token guard is not trusted for it.
+  The emitted bytes are then re-scanned and required to say what the transform
+  meant: the same statements, keys and values, and no comment anywhere. F1 alone
+  would prove nothing here, since preserve mode round-trips a value that
+  re-reads as a comment just as happily as one that does not.
+  Every attribute key, and every subcommand, resolves to exactly one class.
+  KEEP emits the value verbatim AFTER checking that it lies in the closed space
+  its key claims -- a vendor enum, a number, a clock time, a day token, an IANA
+  zone, a date, a SEM-37 calendar keyword. The CHECK is the class, not the
+  assumption: lowering polices only about half these keys and carries the rest
+  opaquely, so a KEEP that merely assumed the space shipped a client string
+  written into `timezone` or `job_load` byte for byte. A value outside the space
+  is a refusal. RENAME maps an identifier into a synthetic namespace. REPLACE
+  swaps free text whose PRESENCE is semantic for a fixed inert constant, and
+  `command` is its only member -- lowering refuses a CMD job without one, so it
+  cannot be dropped, and its text is the richest source of client identity in an
+  estate. DROP omits the attribute, and is reserved for what the IR carries
+  opaquely while the value is free text or a site-chosen name. A key in none of
+  the four is a REFUSAL that names every such key with file:line and changes
+  nothing. That is DL-07's stance one layer earlier: an unknown attribute may
+  neither leak (KEEP by default) nor silently vanish (DROP by default).
+  The table is derived from what the IR models -- ANNOTATION_ATTRS,
+  PASSTHROUGH_ALLOWED, TIME_CLUSTER, EXEC_BASE_ATTRS, the box-inert cluster, and
+  the keys lowering pops by name -- not from a hand-written inventory. Two keys
+  resolve by statement kind and only two: `machine:` is one exec placement on a
+  job and a pool-member list in an insert_machine (DL-49), and `condition:` is a
+  job expression on a job and a vendor keyword expression on a calendar
+  (SEM-36).
+  THE FIRST VERSION LEAKED, and the shape of the leak is the entry's main
+  lesson. An independent review -- not the builder's own, which had named this
+  risk in the abstract and shipped it anyway -- found that `timezone:
+  ACMEBANKLONDONDESK5` was emitted verbatim at exit 0. The predicate delegated
+  to `resolve_timezone` and tested only that it returned something; the POSIX
+  fixed-offset pattern has an unbounded letter run, so the resolver handed back
+  the client's own string as the zone. The guard could not fire, because a value
+  that is KEPT is exempt from it by construction. The failure even inverted the
+  risk: a letters-only site label refused, and the same label with a trailing
+  digit shipped. The general defect is a predicate that delegates to a
+  permissive parser and reads "it parsed" as "it is in a closed set", so all 45
+  predicates were audited against one question -- can this accept a value
+  carrying an arbitrary caller-chosen substring? One could, and it was this one.
+  The calendar `condition` predicate delegates too and survives only because
+  autocal enumerates the SEM-37 inventory; it now carries a docstring saying
+  that is the reason, so the next reader does not mistake luck for design.
+  `timezone` therefore no longer delegates: it accepts an exact canonical IANA
+  key or a POSIX offset whose abbreviation is on a written-down list, and
+  nothing else. That is strictly narrower than a zone name being "public
+  vocabulary", and it costs something real -- a site alias like `Zurich` now
+  REFUSES, and SEM-35 models exactly such alias tables. The remedy is the
+  owner's to pick and is named in the refusal: `--scrub-timezones` maps every
+  zone to UTC. A zone still discloses a REGION even when it is canonical, so
+  without the flag the command names the surviving zones on stderr. Neither
+  direction is taken silently.
+  The numeric timing hints stay: `avg_runtime`, `max_run_alarm`, `min_run_alarm`,
+  `term_run_time`, `heartbeat_interval`. A number names nobody and duration work
+  downstream needs them. The same argument keeps a numeric global VALUE as
+  itself: `compare_value` compares two integers numerically, so mapping `100` to
+  a synthetic token would turn `v(X) > 100` into a string comparison and change
+  the semantics the artifact exists to exercise. A non-numeric global value maps
+  like any other identifier, which keeps the equality structure the oracle reads.
+  Names are positional and allocated at an identifier's FIRST appearance
+  anywhere in the input, a reference included -- boxes `b<N>`, a member of box
+  `b<N>` `b<N>j<M>`, an unboxed job `j<N>`, machines `m<N>`, resources `l<N>`,
+  calendars and cycles `c<N>`, globals `g<N>`, external instances `x<N>`,
+  non-numeric global values `v<N>`, watched files `/f/<N>`, `<N>` base36 from 1.
+  Box membership is resolved in a pre-pass, so a job that moves box across
+  statements keeps one stable name. The same input gives byte-identical output
+  every run, across hash seeds.
+  Rule-11 calendar date rows are checked the same way, by
+  `autocal.standard_rows` -- the scanner carries ANY non-attribute line under a
+  `calendar:` statement verbatim (DL-36), so an export's label column would
+  otherwise ship unchanged. An extended calendar's `condition` is checked
+  against autocal's own SEM-37 inventory rather than trusted.
+  Conditions are rewritten atom by atom through the existing parser: names are
+  allocated left to right, so first appearance fixes the number, and the
+  rewritten atoms are spliced back right to left, so each `CondSpan` is still
+  valid when its turn comes. Everything outside an identifier -- operators,
+  whitespace, parentheses, the SEM-04 lookback token, `s(X, 0)` included --
+  comes out byte-identical. A condition that will not parse is a refusal.
+  `resources:` is REBUILT from its parsed parts rather than patched in place;
+  the first version rewrote the name inside the parens and let the text around
+  it, the tail after the first comma and a paren-less value through, with only
+  the guard behind them. Anything outside the DL-21 grammar refuses.
+  Two checks stand behind the transform, and one of them is not optional. The
+  structural verify (`--no-verify` skips it) lowers both estates and asserts
+  they are isomorphic under the mapping -- job set, job types, box membership,
+  condition atom structure with lookbacks, resource demands, the M07 mutex
+  groups and the SEM-30 time cluster -- so the artifact is known to still
+  exercise what it claims. The leak guard is always on: every identifier, path
+  and free-text value in the input is a needle, and a needle that survives into
+  the rendered output refuses. It is a BACKSTOP and the user-facing text says
+  so, because the timezone leak proved the cost of overstating it. Its limits
+  are stated rather than papered over. A needle token must be at least 4
+  characters and carry a letter, because shorter and all-digit tokens collide
+  with kept clock times and timing hints, and a guard that fires on every estate
+  gets switched off. And a token the emitted KEEP values or the JIL vocabulary
+  already account for is not a needle: a KEEP value goes out verbatim by design.
+  An identifier written into a KEEP value is therefore invisible to the guard,
+  and the classification table -- not the guard -- is the defence there.
+  A refusal QUOTES the estate: values, file names and line numbers. The block
+  leads with one line saying so, because a refusal pasted into a public issue
+  leaks exactly what the tool exists to prevent.
+  The mapping re-identifies the estate, so it is never written unless
+  `--mapping` asks, never printed to stdout, and its warning says so in those
+  words.
+  The module is split in two, and the cut is the one that matters: `minify_rules`
+  answers "may this byte leave the estate" from a table and a predicate per key,
+  with no transform state in sight, and `minify` does the walking. One file at
+  1477 lines tripped the architecture gate's size note, and the policy half is
+  what a reader audits.
+  Rejected: renaming into hashed names (an owner reading the artifact beside the
+  original needs to follow a job by eye, and a hash is not cheaper to generate
+  than a counter); a whitelist-only table with no refusal (silently dropping the
+  unknown is the same loss DL-07 refuses); and making the leak guard skippable
+  (the one check whose failure is unrecoverable once the artifact is shared).
+  Exit codes follow the surface's contract with one addition: 0 emitted, 2 the
+  input never reached the tool, 3 a minify refusal.
+  Not built, and named so the absence is a choice: `--tz-aliases` (SEM-35 alias
+  tables would let a site label map rather than refuse) and `--properties` (a
+  DL-19 estate must be resolved before it is minified).

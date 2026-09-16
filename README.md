@@ -538,6 +538,23 @@ count) plus the 31-file synthetic/doc-derived JIL corpus under
   DL-189; it shares Event/TraceEntry with oracle.py.
 - src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
   extracted from corpus-observed patterns only (phase 10, last by design)
+- src/dsl41/minify_rules.py — what `minify` may emit (DL-207): the
+  classification table and one value predicate per key. Every attribute key and
+  every subcommand resolves to exactly one of KEEP / RENAME / REPLACE / DROP,
+  derived from what the IR models; a key in none of them stops the run rather
+  than leaking or vanishing, and a KEEP value is checked against the closed
+  space its key claims rather than assumed to be in it. Pure functions of one
+  attribute, no transform state
+- src/dsl41/minify.py — the minifier itself, behind the `minify` verb: a real
+  estate in, a de-identified one out. Renders in PRESERVE mode over an AST whose
+  trivia has been emptied, so the DL-49 pool binding and the SEM-39 date pairs
+  survive attribute order. A structural verify proves the result isomorphic to
+  the original under the name mapping, and a leak guard that cannot be switched
+  off refuses an input token that survives into the output unless the JIL
+  vocabulary, a minted name or a validated KEEP value accounts for it. The guard
+  is a BACKSTOP, not a total check: it sees tokens of four or more characters
+  that carry a letter, and it cannot see a value the table already proved to be
+  closed vocabulary — the table, not the guard, is what makes the output safe
 - src/dsl41/placeholders.py — non-core estate templating preprocessor (DL-19):
   `~{$NAME}~` resolution from KEY=VALUE properties files (fixpoint, loud on
   residue), behind the `resolve` verb. Nothing in the core imports it.
@@ -747,7 +764,9 @@ count) plus the 31-file synthetic/doc-derived JIL corpus under
   cli_compile.py, cli_run.py, cli_control.py and cli_estate.py. The verbs are:
   `lint`, `equiv`, `report`, `uc` (the U3a
   record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
-  `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
+  `minify` (DL-207: a de-identified copy of an estate to hand over as a test
+  case — read the output before you do; the leak guard is a backstop, not a
+  total check), `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
   preprocessor), `journal` (render-by-replay of a run WAL, crossing period
   boundaries over re-derived seals — DL-142), `runs` (DL-113: offline run
   history folded from one or more run roots' journal, manifest and spool —
