@@ -1,8 +1,9 @@
 """The compiler verbs: a catalog in, an artifact out (DL-137's split).
 
-`lint`, `equiv`, `report`, `uc`, `decompile`, `folds`, `resolve` and `viz`
--- every verb that reads JIL and writes a finding, a report, a bundle, a
-module or a chart, and touches no run root and no socket. Registered on
+`lint`, `equiv`, `report`, `uc`, `decompile`, `minify`, `folds`, `resolve`
+and `viz` -- every verb that reads JIL and writes a finding, a report, a
+bundle, a module, a chart or a de-identified estate, and touches no run root
+and no socket. Registered on
 the app in `cli.py`; the exit-code contract is stated there.
 """
 
@@ -26,6 +27,7 @@ from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
+    from dsl41.minify import MinifyRefusal
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
 
 
@@ -596,3 +598,130 @@ def viz(
             fixed_scale=fixed_scale,
         )
     _emit(report, out)
+
+
+def _print_refusal(exc: "MinifyRefusal") -> None:
+    """One refusal block on stderr, led by what it is made of.
+
+    A refusal has to quote the value and the file:line or the owner cannot act
+    on it -- but that quote is estate text, and the whole point of the command
+    is that estate text does not travel. So the block says so before it says
+    anything else. Printed once, not per line.
+    """
+    typer.echo(
+        "minify refused. The lines below QUOTE THE ESTATE (values, file names,"
+        " line numbers): they are as sensitive as the input. Do not paste them"
+        " into a public issue, a chat or a commit message.",
+        err=True,
+    )
+    for message in exc.messages:
+        typer.echo(f"  {message}", err=True)
+
+
+def minify(
+    files: list[Path] = typer.Argument(..., help="JIL source files to minify (never a run root)"),
+    out: Path = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Directory to write one minified file per input; without it the whole"
+        " minified estate goes to stdout.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite files that already exist under --out."
+    ),
+    mapping: Path = typer.Option(
+        None,
+        "--mapping",
+        help="Write the old->new name map here as JSON. This file RE-IDENTIFIES the"
+        " estate: never commit or share it.",
+    ),
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help="Lower both estates and prove them isomorphic under the mapping"
+        " before emitting anything.",
+    ),
+    scrub_timezones: bool = typer.Option(
+        False,
+        "--scrub-timezones",
+        help="Map every SEM-35 timezone to UTC. Off by default: a zone name is"
+        " public vocabulary and the estate stops exercising SEM-35 without it,"
+        " but a zone does disclose a region.",
+    ),
+) -> None:
+    """Emit a de-identified, minified copy of FILES.
+
+    Everything dsl41 models structurally survives -- the job graph, conditions
+    and their lookbacks, schedules, exit-code policy, resource gates, the
+    numeric timing hints. Everything that could name the estate does not: names
+    are renamed into synthetic namespaces, `command` becomes an inert constant,
+    comments and the observability attributes are dropped, every kept value is
+    checked against the closed space its key claims, and an attribute this tool
+    cannot classify stops the run rather than guessing.
+
+    The leak guard behind all this is a BACKSTOP, not a total check: it only
+    sees tokens of 4+ characters that carry a letter, and it cannot see a value
+    the classification table already proved to be closed vocabulary. Read the
+    output before you hand it over.
+
+    Exit 0 once the estate is emitted; 2 when the input never reached the tool
+    (unreadable file, JIL parse error); 3 for every minify refusal -- an
+    unclassified key or subcommand, a value that will not parse, a structural
+    mismatch against the original, a surviving input token, a KEEP value outside
+    its closed space, or an existing output file without --force. A refusal
+    quotes the estate on stderr and says so.
+    """
+    from dsl41.ast_jil import JilParseError
+    from dsl41.ast_jil import parse as parse_jil
+    from dsl41.minify import MinifyRefusal, minify_files, output_paths
+
+    try:
+        parsed = [parse_jil(path.read_bytes().decode("utf-8"), file=str(path)) for path in files]
+    except (JilParseError, OSError, UnicodeDecodeError) as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    try:
+        targets = output_paths(list(files), out) if out is not None else []
+        if not force:
+            existing = [t for t in [*targets, *([mapping] if mapping else [])] if t.exists()]
+            if existing:
+                raise MinifyRefusal(
+                    [f"{path} exists (use --force to overwrite)" for path in existing]
+                )
+        result = minify_files(parsed, verify=verify, scrub_timezones=scrub_timezones)
+        if out is not None:
+            # A --out that names a FILE, or a path under one, is an OSError from
+            # mkdir; without this it left the surface as an exit-1 traceback.
+            out.mkdir(parents=True, exist_ok=True)
+    except MinifyRefusal as exc:
+        _print_refusal(exc)
+        raise typer.Exit(3) from exc
+    except OSError as exc:
+        typer.echo(f"--out: {exc}", err=True)
+        raise typer.Exit(3) from exc
+    zones = result.kept_timezones()
+    if zones and not scrub_timezones:
+        typer.echo(
+            f"note: the output keeps {len(zones)} timezone(s): {', '.join(zones)}."
+            " A zone discloses a region -- pass --scrub-timezones to map them all"
+            " to UTC.",
+            err=True,
+        )
+    if out is None:
+        typer.echo("\n".join(result.bodies), nl=False)
+    else:
+        for target, body in zip(targets, result.bodies, strict=True):
+            target.write_bytes(body.encode("utf-8"))
+            typer.echo(f"wrote {target}", err=True)
+        typer.echo(
+            "note: output FILENAMES are the input basenames and are not minified;"
+            " rename them if the file names themselves name the estate.",
+            err=True,
+        )
+    if mapping is not None:
+        mapping.write_bytes(result.names.to_json().encode("utf-8"))
+        typer.echo(
+            f"wrote {mapping}: this file RE-IDENTIFIES the estate. Never commit it,"
+            " never share it with the minified output.",
+            err=True,
+        )

@@ -9,7 +9,7 @@ what its domain is:
                     the catalog door, and the readings that turn an
                     exception or a control answer into an exit code
     cli_compile.py  a catalog in, an artifact out: lint, equiv, report,
-                    uc, decompile, folds, resolve, viz
+                    uc, decompile, minify, folds, resolve, viz
     cli_run.py      run, rehearse, and their offline readers journal, runs
     cli_control.py  what an operator says to a RUNNING engine: sendevent,
                     host, query, ui, serve, supervise
@@ -23,8 +23,11 @@ Exit-code contract (shared by all catalog-consuming commands): 0 success
 (for lint: clean); 1 linter findings at or above the failing severity
 (errors, or warnings too with --strict); 2 the input never reached the
 tool (unreadable file, JIL parse error, placeholder-resolution failure,
-or lowering refusal). The runner verbs extend it: see cli_run.py's note
-for 1 vs 2, and DL-92's 2/3/4 for a mutation's four outcomes.
+or lowering refusal). `minify` extends it with 3: the input reached the
+tool and the tool refused to emit (an unclassified attribute, a structural
+mismatch, a surviving identifier). The runner verbs extend it further: see
+cli_run.py's note for 1 vs 2, and DL-92's 2/3/4 for a mutation's four
+outcomes.
 
 Templated estates (DL-19/DL-22): every catalog-consuming command accepts
 --properties/-p to resolve `~{$NAME}~` placeholders before parsing, so a
@@ -64,6 +67,7 @@ app.command()(cli_compile.equiv)
 app.command()(cli_compile.report)
 app.command()(cli_compile.uc)
 app.command()(cli_compile.decompile)
+app.command()(cli_compile.minify)
 app.command()(cli_run.journal)
 app.command()(cli_run.runs)
 app.command()(cli_compile.folds)
