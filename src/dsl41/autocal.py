@@ -81,6 +81,36 @@ _DEFECTIVE_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+#: The shapes a standard-calendar date row can take (SEM-36, Q9/DL-60):
+#: the date alone, or the date plus a time tail in one of two spellings.
+#: (field count, colon count in the tail) -> (form name, strptime format).
+#: Lifted so the register derives the row-shape space (DL-209).
+_ROW_TIME_FORMS: tuple[tuple[str, int, int, str | None], ...] = (
+    ("date", 1, 0, None),
+    ("hh:mm", 2, 1, "%H:%M"),
+    ("hh:mm:ss", 2, 2, "%H:%M:%S"),
+)
+
+
+def _row_format(fields: int, colons: int) -> str | None:
+    """The strptime format for a row of this shape, or None for no shape."""
+    for _name, form_fields, form_colons, fmt in _ROW_TIME_FORMS:
+        if form_fields == fields and form_colons == colons:
+            return fmt
+    return None
+
+
+def classify_row(row: str) -> str | None:
+    """Which `_ROW_TIME_FORMS` shape this date row is written in, or None
+    when it is none of them (`standard_rows` refuses those)."""
+    parts = row.split()
+    tail_colons = parts[1].count(":") if len(parts) == 2 else 0
+    for name, fields, colons, _fmt in _ROW_TIME_FORMS:
+        if len(parts) == fields and tail_colons == colons:
+            return name
+    return None
+
+
 def standard_rows(cal: CalendarIR) -> dict[date, frozenset[tuple[int, int]]]:
     """A standard calendar's date rows as day -> row (hour, minute) ticks.
     Rows are `mm/dd/yyyy` with an optional HH:MM or HH:MM:SS tail -- the
@@ -99,7 +129,10 @@ def standard_rows(cal: CalendarIR) -> dict[date, frozenset[tuple[int, int]]]:
             tick = (0, 0)
             if len(parts) == 2:
                 tail = parts[1]
-                t = datetime.strptime(tail, "%H:%M:%S" if tail.count(":") == 2 else "%H:%M").time()
+                fmt = _row_format(len(parts), tail.count(":"))
+                if fmt is None:
+                    raise ValueError
+                t = datetime.strptime(tail, fmt).time()
                 tick = (t.hour, t.minute)
         except ValueError:
             raise CalendarRuleError(
@@ -639,6 +672,14 @@ def _exclusion_base(node: _Node) -> _Node | None:
 _ACTIONS = frozenset("osnwp")
 _REPLACE = frozenset("nwp")  # the replacing action codes; O/S never move a date
 
+#: The two categories an action code can be stated for (SEM-36/38). Lifted
+#: so the register can carry a row per (category, code): N walks for a
+#: non-workday and advances exactly one day for a holiday, so the pair is
+#: the behaviour, not the letter (DL-209).
+ActionCategory = Literal["non_workday", "holiday"]
+_ACTION_CATEGORIES: tuple[ActionCategory, ...] = ("non_workday", "holiday")
+_HOLIDAY_CATEGORY: ActionCategory = "holiday"
+
 
 @dataclass(frozen=True)
 class CompiledCalendar:
@@ -710,7 +751,7 @@ class CompiledCalendar:
         for day in candidates:
             if self.holiday is not None and day in self.ctx.holidays:
                 if self.holiday in _REPLACE:
-                    out.add(self._replace("holiday", day))
+                    out.add(self._replace(_HOLIDAY_CATEGORY, day))
                 else:  # "o": restrict-to-holidays keeps it; "s" keeps as-is
                     out.add(day)
                 continue
@@ -726,10 +767,10 @@ class CompiledCalendar:
 
     def _replace(self, category: str, day: date) -> date:
         """One replacement code's target for one excluded date."""
-        code = self.holiday if category == "holiday" else self.non_workday
+        code = self.holiday if category == _HOLIDAY_CATEGORY else self.non_workday
         if code is None or code not in _REPLACE:
             raise _err(self.name, f"internal: {category} code {code!r} is not a replacement")
-        if code == "n" and category == "holiday":
+        if code == "n" and category == _HOLIDAY_CATEGORY:
             # [V] one-shot: 'Excludes the holiday and includes the next
             # day. This applies even if the next day is a holiday or
             # non-workday.'
@@ -745,7 +786,7 @@ class CompiledCalendar:
         # PENDING: Q8c -- no worked example; holiday-ness of the target
         # deliberately not re-checked
         return self._walk(
-            day, step, holiday_free=category == "holiday", code=code, category=category
+            day, step, holiday_free=category == _HOLIDAY_CATEGORY, code=code, category=category
         )
 
     def _walk(self, day: date, step: int, *, holiday_free: bool, code: str, category: str) -> date:
@@ -760,15 +801,15 @@ class CompiledCalendar:
         raise _err(self.name, f"{category} action {code!r} found no valid day within a year")
 
 
-def _parse_workday(cal: str, value: str) -> frozenset[int]:
-    """All vendor serializations (SEM-36): positional `{X|.}` x7
-    (Monday-first), the comma list of two-letter day codes, and the
-    observed `all` = every day is a workday (Q9, DL-60)."""
-    text = value.strip().lower()
-    if text == "all":
-        return frozenset(range(7))
-    if re.fullmatch(r"[x.]{7}", text):
-        return frozenset(i for i, ch in enumerate(text) if ch == "x")
+def _workday_all(cal: str, text: str) -> frozenset[int]:
+    return frozenset(range(7))
+
+
+def _workday_mask(cal: str, text: str) -> frozenset[int]:
+    return frozenset(i for i, ch in enumerate(text) if ch == "x")
+
+
+def _workday_codes(cal: str, text: str) -> frozenset[int]:
     days = set()
     for part in text.split(","):
         code = part.strip()
@@ -779,6 +820,38 @@ def _parse_workday(cal: str, value: str) -> frozenset[int]:
         else:
             raise _err(cal, f"workday: unrecognized day {part.strip()!r}")
     return frozenset(days)
+
+
+#: The `workday:` serializations (SEM-36), in the order `_parse_workday`
+#: tested them: positional `{X|.}` x7 (Monday-first), the comma list of two-
+#: or three-letter day codes, and the observed `all` (Q9, DL-60). Lifted so
+#: the register derives the form space rather than naming three facets
+#: (DL-209). `codes` matches anything the first two did not: it is the
+#: fallthrough, and its own parse is what refuses an unknown day.
+_WORKDAY_FORMS: tuple[
+    tuple[str, Callable[[str], bool], Callable[[str, str], frozenset[int]]], ...
+] = (
+    ("all", lambda text: text == "all", _workday_all),
+    ("mask", lambda text: re.fullmatch(r"[x.]{7}", text) is not None, _workday_mask),
+    ("codes", lambda text: True, _workday_codes),
+)
+
+
+def classify_workday(value: str) -> str:
+    """Which `_WORKDAY_FORMS` entry this `workday:` value is written in.
+    The register's detector reads this; `_parse_workday` reads the same
+    table for the value itself."""
+    text = value.strip().lower()
+    return next(name for name, matches, _build in _WORKDAY_FORMS if matches(text))
+
+
+def _parse_workday(cal: str, value: str) -> frozenset[int]:
+    """All vendor serializations (SEM-36), one per `_WORKDAY_FORMS` row."""
+    text = value.strip().lower()
+    for _name, matches, build in _WORKDAY_FORMS:
+        if matches(text):
+            return build(cal, text)
+    raise AssertionError("unreachable: the codes form matches everything")
 
 
 def _parse_action(cal: str, key: str, value: str) -> str | None:
@@ -832,8 +905,11 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
         if cal.attrs.get("workday", "").strip()
         else frozenset(range(5))
     )
-    non_workday = _parse_action(cal.name, "non_workday", cal.attrs.get("non_workday", ""))
-    holiday = _parse_action(cal.name, "holiday", cal.attrs.get("holiday", ""))
+    actions = {
+        category: _parse_action(cal.name, category, cal.attrs.get(category, ""))
+        for category in _ACTION_CATEGORIES
+    }
+    non_workday, holiday = actions["non_workday"], actions["holiday"]
 
     holidays: frozenset[date] = frozenset()
     holcal_name = cal.attrs.get("holcal", "").strip()

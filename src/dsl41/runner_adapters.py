@@ -46,13 +46,14 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Final, Protocol, TYPE_CHECKING, get_args
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_supervisor as _supervisor
 from dsl41 import runner_wrapper as _wrapper
+from dsl41.runner_wrapper import WrapperOutcome
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
@@ -193,6 +194,10 @@ class Failed:
 
 
 #: int = RAW exit code (SEM-09/DL-33 verdict stays oracle-side)
+#: Every `status.json` outcome the wrapper can write, derived from its own
+#: Literal so the adapter cannot drift from the writer.
+WRAPPER_OUTCOMES: Final[frozenset[str]] = frozenset(get_args(WrapperOutcome))
+
 AdapterResult = int | Terminated | Failed
 
 
@@ -285,6 +290,10 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     record maps to FAILURE with a truthful cause -- never to anything that
     could satisfy a success-dependent downstream."""
     outcome = status.get("outcome")
+    if outcome not in WRAPPER_OUTCOMES:
+        # the vocabulary is the wrapper's (DL-209); an outcome outside it is
+        # refused here rather than falling through four `==` comparisons
+        return Failed(f"unrecognized status record outcome {outcome!r}")
     if outcome == "exited":
         exit_code = status.get("exit_code")
         if isinstance(exit_code, int):
@@ -306,9 +315,7 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
         return Terminated(cause)
     if outcome == "terminated":
         return Terminated(str(status.get("cause", "terminated")))
-    if outcome == "spawn_failed":
-        return Failed(f"spawn failed: {status.get('error')}")
-    return Failed(f"unrecognized status record outcome {outcome!r}")
+    return Failed(f"spawn failed: {status.get('error')}")  # the fourth outcome
 
 
 def status_payload(result: AdapterResult, *, where: str) -> dict[str, object]:

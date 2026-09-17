@@ -71,17 +71,21 @@ SURFACES: tuple[str, ...] = (
     "cal_family",
     "cal_operator",
     "cal_action",
+    "cal_workday_form",
+    "cal_row_form",
     "event",
     "status",
     "timer",
     "profile_field",
     "profile_alt",
     "adapter_outcome",
+    "wrapper_outcome",
     "event_source",
     "trace_marker",
     "preflight_code",
     "demand_mode",
     "machine_verdict",
+    "literal_alt",
     "runtime",
     "adapter_policy",
 )
@@ -113,6 +117,16 @@ class Behaviour(BaseModel):
     protocol: str | None = None
     #: a bounded search states its bound ("731 days", "60 years")
     bound: str | None = None
+    #: the exact regex this row's member is recognised by, pinned verbatim.
+    #: A row carrying one is held to the code's pattern, so an edit to the
+    #: regex fails until somebody re-reads what it now admits.
+    pattern: str | None = None
+    #: `<label>@<module>.<qualname>` for each `PENDING` marker this row
+    #: claims. The marker SITES are a derived domain of their own, checked
+    #: by claim rather than by a fixture -- every site the sources carry
+    #: must be claimed by exactly one row, so a SECOND default pinned under
+    #: an already-used label needs its own row instead of riding the first.
+    sites: tuple[str, ...] = ()
     #: one sentence: what is modelled, or what is not
     effect: str
     #: scope fixture where the behaviour MAY apply

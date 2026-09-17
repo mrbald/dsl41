@@ -88,14 +88,22 @@ EventKind = Literal[
 ]
 
 
+#: The engine's ss7 input alphabet: where an externally injected event came
+#: from. Named (DL-209) because the stamps live in call keywords AND in
+#: parameter defaults -- `adapter` exists only as `Engine._enqueue`'s default
+#: -- so an AST sweep for one spelling misses the other, and `adapter` is
+#: the stamp that makes an event a COMPLETION subject to the ss4 stale gate.
+EventSource = Literal["scheduler", "control", "adapter", "reconcile"]
+
+
 class Event(BaseModel):
     at: datetime
     kind: EventKind
     payload: dict[str, object] = {}
     #: provenance of an externally injected event -- the engine's ss7 input
-    #: alphabet (scheduler | control | adapter | reconcile); None for oracle-
-    #: internal and script events. Start causes surface it (DL-68).
-    source: str | None = None
+    #: alphabet; None for oracle-internal and script events. Start causes
+    #: surface it (DL-68).
+    source: EventSource | None = None
 
     def job(self) -> str | None:
         job = self.payload.get("job")

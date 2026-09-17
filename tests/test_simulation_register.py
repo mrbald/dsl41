@@ -36,12 +36,24 @@ from typing import Any, Literal, get_args, get_origin
 
 import pytest
 
-from dsl41 import ast_jil, autocal, capacity, conditions, ir, oracle, runner_preflight
+from dsl41 import (
+    ast_jil,
+    oracle_state,
+    autocal,
+    capacity,
+    conditions,
+    ir,
+    oracle,
+    runner_adapters,
+    runner_preflight,
+    runner_wrapper,
+)
 from dsl41.conditions import Lookback, parse_condition
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, JobStatus, ReleasePolicy
 from dsl41.period import RuntimeProfile
 from dsl41.runner_adapters import FakeAdapter
+from dsl41 import simulation_register_rows as rows_mod
 from dsl41.simulation_register import (
     FREE_SURFACES,
     UNREACHABLE,
@@ -107,6 +119,7 @@ SCAN_SELF_CHECK = (
     "resources",
     "command",
     "job_type",
+    "start_times",
 )
 
 
@@ -144,6 +157,12 @@ def _scan_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
             if sub.func.attr in ("pop", "get") and _is_attr_receiver(sub.func.value) and sub.args:
+                found |= _string_constants(sub.args[0])
+        # a local helper that takes the key by name (`take("start_times")`)
+        # reads the attribute just as `attrs.pop` does
+        if isinstance(sub, ast.Call) and sub.args:
+            callee = sub.func.id if isinstance(sub.func, ast.Name) else ""
+            if callee.endswith(("take", "pop", "get")):
                 found |= _string_constants(sub.args[0])
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
             if sub.func.id == "_int_attr" and len(sub.args) >= 2:
@@ -278,10 +297,16 @@ def _cause_template(node: ast.expr, enclosing: str) -> str:
     return f"<dynamic:{enclosing}>"
 
 
+#: Where an adapter result is CONSTRUCTED. Held to the package by
+#: `test_no_other_module_builds_an_adapter_outcome`: a hard-coded file list
+#: that nothing checks is a domain that shrinks when the code moves.
+OUTCOME_FILES = ("runner_adapters.py", "runner_startup.py")
+
+
 def _outcome_templates() -> set[str]:
     """`Kind=template` for every `Failed(`/`Terminated(` call site."""
     out: set[str] = set()
-    for name in ("runner_adapters.py", "runner_startup.py"):
+    for name in OUTCOME_FILES:
         tree = ast.parse((SRC / name).read_text(encoding="utf-8"))
         stack: list[str] = []
 
@@ -308,6 +333,98 @@ def _outcome_templates() -> set[str]:
 
         Walker().visit(tree)
     return out
+
+
+#: Literals a dedicated surface already owns, and protocol vocabularies the
+#: register deliberately does not cover (the frozen concurrency and
+#: supervisor contracts close those with their own obligations, DL-209).
+#: Anything else of that shape belongs to `literal_alt`.
+LITERAL_ALT_EXCLUDED = frozenset(
+    {
+        "conditions.CmpOp",  # cond_terminal:CMP_OP=*
+        "conditions.Lookback.kind",  # lookback_kind
+        "conditions.Status",  # atom_status
+        "capacity.DemandMode",  # demand_mode
+        "ir.InitialStatus",  # initial_status
+        "ir.ResourceRef.free",  # free_code
+        "oracle_state.EventKind",  # event
+        "oracle_state.HostState",  # a host-protocol vocabulary
+        "oracle_state.JobStatus",  # status
+        "oracle_state.ReleasePolicy",  # release_policy
+        "runner_preflight.MachineVerdict",  # machine_verdict
+        "oracle_state.EventSource",  # event_source
+        "autocal.ActionCategory",  # cal_action, whose members are its pairs
+    }
+)
+
+LITERAL_ALT_MODULES = (
+    "ir",
+    "conditions",
+    "oracle_state",
+    "oracle",
+    "capacity",
+    "runner_preflight",
+    "runner_adapters",
+    "runner_scheduler",
+    "timezones",
+    "autocal",
+)
+
+
+def _literal_alternatives_of(node: ast.expr) -> list[str]:
+    """The alternatives if `node` is `Literal[...]` or `Literal[...] | None`."""
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        if node.value.id == "Literal":
+            inner = node.slice
+            elts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+            return [e.value for e in elts if isinstance(e, ast.Constant)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        for side in (node.left, node.right):
+            if found := _literal_alternatives_of(side):
+                return found
+    return []
+
+
+def _literal_alts() -> set[str]:
+    """`Name=alt` for a module-level Literal alias, `Class.field=alt` for an
+    annotated class attribute, over the estate-facing modules. Any class
+    shape counts -- pydantic model, dataclass or NamedTuple -- because the
+    alternatives are closed the same way in each."""
+    out: set[str] = set()
+    for module in LITERAL_ALT_MODULES:
+        tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    alts = _literal_alternatives_of(node.value)
+                    key = f"{module}.{target.id}"
+                    if alts and key not in LITERAL_ALT_EXCLUDED:
+                        out |= {f"{target.id}={alt}" for alt in alts}
+            if isinstance(node, ast.ClassDef):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        alts = _literal_alternatives_of(stmt.annotation)
+                        key = f"{module}.{node.name}.{stmt.target.id}"
+                        if alts and key not in LITERAL_ALT_EXCLUDED:
+                            out |= {f"{node.name}.{stmt.target.id}={alt}" for alt in alts}
+    return out
+
+
+def test_no_other_module_builds_an_adapter_outcome() -> None:
+    """Breaks when a `Failed(`/`Terminated(` moves to or appears in a module
+    the template scan does not read -- which would drop its cause from the
+    domain without dropping the behaviour from the code."""
+    elsewhere: list[str] = []
+    for path in sorted(SRC.glob("*.py")):
+        if path.name in OUTCOME_FILES:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in ("Failed", "Terminated") and node.args:
+                    elsewhere.append(f"{path.name}:{node.lineno}")
+    assert elsewhere == [], f"adapter outcomes built outside {OUTCOME_FILES}: {elsewhere}"
 
 
 def _keyword_constants(keyword: str) -> set[str]:
@@ -406,18 +523,27 @@ def surface_domains() -> dict[str, set[str]]:
             | {name for name, _ in autocal._DEFECTIVE_FAMILIES}
         ),
         "cal_operator": _cal_operator_domain(),
-        "cal_action": set(autocal._ACTIONS),
+        "cal_action": {
+            f"{category}:{code}"
+            for category in autocal._ACTION_CATEGORIES
+            for code in autocal._ACTIONS
+        },
         "event": set(get_args(EventKind)),
         "status": set(get_args(JobStatus)),
-        "timer": set(oracle.TIMER_CHECKS) | {"deferred_cause"},
+        "timer": set(oracle.TIMER_CHECKS) | {oracle.DEFERRED_TIMER_KEY},
         "profile_field": set(RuntimeProfile.model_fields),
         "profile_alt": _literal_alternatives(),
-        "adapter_outcome": {"int", "Terminated", "Failed"} | _outcome_templates(),
-        "event_source": _keyword_constants("source"),
+        "adapter_outcome": {kind.__name__ for kind in get_args(runner_adapters.AdapterResult)}
+        | _outcome_templates(),
+        "event_source": set(get_args(oracle_state.EventSource)),
         "trace_marker": _trace_markers(),
         "preflight_code": _preflight_codes(),
         "demand_mode": set(get_args(capacity.DemandMode)),
         "machine_verdict": set(get_args(runner_preflight.MachineVerdict)),
+        "wrapper_outcome": set(get_args(runner_wrapper.WrapperOutcome)),
+        "cal_workday_form": {name for name, _match, _build in autocal._WORKDAY_FORMS},
+        "cal_row_form": {name for name, _f, _c, _fmt in autocal._ROW_TIME_FORMS},
+        "literal_alt": _literal_alts(),
     }
 
 
@@ -458,6 +584,10 @@ SURFACE_KIND: dict[str, str] = {
     "adapter_outcome": "outcome",
     "adapter_policy": "outcome",
     "event_source": "site",
+    "literal_alt": "site",
+    "wrapper_outcome": "outcome",
+    "cal_workday_form": "jil",
+    "cal_row_form": "jil",
     "trace_marker": "scenario",
     "preflight_code": "jil",
     "demand_mode": "jil",
@@ -472,6 +602,8 @@ BASE_FIXTURE: dict[str, str] = {
     "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\n--\n",
     "profile": "{}",
     "outcome": "int",
+    # a `wrapper=` fixture names a status-record outcome; `int` is the base
+    # for the adapter-result surface and names none of them
     # a `site` fixture names a function; the base names one that stamps no
     # provenance at all
     "site": "oracle.Oracle._record",
@@ -600,26 +732,80 @@ def _cond_tokens(text: str) -> list[tuple[str, str]]:
     return [(t.type, t.value) for t in tree.scan_values(lambda v: isinstance(v, Token))]
 
 
-def _site_source(qualname: str) -> str:
-    """The source of `module.qualname`, for a `site` fixture."""
+def _site_object(qualname: str) -> Any:
+    """The object `module.qualname` names."""
     module, _, rest = qualname.partition(".")
     obj: Any = importlib.import_module(f"dsl41.{module}")
     for part in rest.split("."):
         obj = getattr(obj, part)
-    return textwrap.dedent(inspect.getsource(obj))
+    return obj
+
+
+def _site_source(qualname: str) -> str:
+    """The source of `module.qualname`, for a `site` fixture."""
+    return textwrap.dedent(inspect.getsource(_site_object(qualname)))
 
 
 def _stamps_source(qualname: str, value: str) -> bool:
-    """Whether that function passes `source="<value>"` to anything."""
+    """Whether that function stamps `source="<value>"` -- passing it to a
+    call OR declaring it as its own parameter default. Both spellings are
+    real stamps: `adapter` exists ONLY as a default, and a sweep that reads
+    call keywords alone cannot see the provenance that marks a completion."""
     tree = ast.parse(_site_source(qualname))
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for kw in node.keywords:
-            if kw.arg == "source" and isinstance(kw.value, ast.Constant):
-                if kw.value.value == value:
-                    return True
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "source" and isinstance(kw.value, ast.Constant):
+                    if kw.value.value == value:
+                        return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            positional = args.args[len(args.args) - len(args.defaults) :]
+            defaults = list(zip(positional, args.defaults))
+            defaults += [
+                (arg, default)
+                for arg, default in zip(args.kwonlyargs, args.kw_defaults)
+                if default is not None
+            ]
+            for arg, default in defaults:
+                if arg.arg == "source" and isinstance(default, ast.Constant):
+                    if default.value == value:
+                        return True
     return False
+
+
+def _declares_literal(qualname: str, member: str) -> bool:
+    """Whether that module (or class) declares the member's alternative. The
+    member is `Name=alt` or `Class.field=alt`, and the fixture names the
+    module-qualified site that declares it."""
+    field, _, alternative = member.rpartition("=")
+    module = qualname.split(".")[0]
+    for candidate in _literal_declarations(module):
+        if candidate == f"{field}={alternative}":
+            return True
+    return False
+
+
+@cache
+def _literal_declarations(module: str) -> frozenset[str]:
+    """`Name=alt` / `Class.field=alt` for every Literal this module declares,
+    including the ones a dedicated surface owns -- the exclusion map is the
+    register's, not the module's."""
+    out: set[str] = set()
+    tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                out |= {f"{target.id}={alt}" for alt in _literal_alternatives_of(node.value)}
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    out |= {
+                        f"{node.name}.{stmt.target.id}={alt}"
+                        for alt in _literal_alternatives_of(stmt.annotation)
+                    }
+    return frozenset(out)
 
 
 def detect(surface: str, member: str, kind: str, text: str) -> bool:
@@ -627,8 +813,12 @@ def detect(surface: str, member: str, kind: str, text: str) -> bool:
     surface: the register never gets a per-row detector, because a per-row
     detector can be written to pass."""
     if kind == "site":
+        if surface == "literal_alt":
+            return _declares_literal(text, member)
         return _stamps_source(text, member)
     if kind == "outcome":
+        if surface == "wrapper_outcome":
+            return text == f"wrapper={member}"
         return text == member
     if kind == "profile":
         data = json.loads(text)
@@ -722,10 +912,21 @@ def _detect_jil(surface: str, member: str, text: str) -> bool:
     if surface == "cal_operator":
         return _detect_cal_operator(member, text)
     if surface == "cal_action":
+        category, _, code = member.partition(":")
         return any(
-            v.strip().lower() == member
-            for key in ("non_workday", "holiday")
-            for v in _attr_values(text, CALENDAR_SUBCOMMANDS, key)
+            v.strip().lower() == code for v in _attr_values(text, CALENDAR_SUBCOMMANDS, category)
+        )
+    if surface == "cal_workday_form":
+        return any(
+            autocal.classify_workday(v) == member
+            for v in _attr_values(text, CALENDAR_SUBCOMMANDS, "workday")
+        )
+    if surface == "cal_row_form":
+        return any(
+            autocal.classify_row(row) == member
+            for stmt in _statements(text)
+            if stmt.subcommand.lower() in CALENDAR_SUBCOMMANDS
+            for row in stmt.date_lines
         )
     return _detect_lowered(surface, member, text)
 
@@ -751,20 +952,24 @@ LOCAL_IDENTITY = frozenset({"localhost", "m0"})
 
 
 def _preflight_items(catalog: ir.CatalogIR) -> list[runner_preflight.PreflightItem]:
-    """Preflight under BOTH machine policies: `machine-mixed` exists only
-    under local-eligible, and `machine` only under strict, so one policy
-    alone cannot enumerate the code space."""
-    return [
-        item
-        for policy in ("strict", "local-eligible")
+    """Preflight under BOTH machine policies, de-duplicated: `machine-mixed`
+    exists only under local-eligible and `machine` only under strict, so one
+    policy alone cannot enumerate the code space -- but every other rule
+    reports the same finding twice.
+
+    The owner rule reads `getpass.getuser()`, so the `owner` fixture states a
+    name no account has rather than pinning one here."""
+    seen: dict[tuple[str, str, str | None, str], runner_preflight.PreflightItem] = {}
+    for policy in ("strict", "local-eligible"):
         for item in runner_preflight.preflight(
             catalog,
             execution=True,
             as_machine=AS_MACHINE,
             start=PREFLIGHT_START,
             machine_policy=policy,  # type: ignore[arg-type]
-        )
-    ]
+        ):
+            seen.setdefault((item.severity, item.code, item.job, item.message), item)
+    return list(seen.values())
 
 
 def _detect_lowered(surface: str, member: str, text: str) -> bool:
@@ -874,8 +1079,9 @@ def test_provisional_rows_name_their_question() -> None:
         if row.klass is not Klass.PROVISIONAL:
             continue
         if row.label is None:
-            assert "no label" in row.effect, f"{row.id}: no label and no 'no label' in effect"
-            assert re.search(r"\b(DL|SEM)-\d+", row.cite), f"{row.id}: unlabelled, uncited"
+            assert "no label" in row.effect.lower(), f"{row.id}: no label, and no saying so"
+            followable = re.search(r"\b(DL|SEM|PR)-\d+", row.cite) or CODE_CITE_RE.search(row.cite)
+            assert followable, f"{row.id}: unlabelled, and the cite leads nowhere"
 
 
 def test_refused_rows_cite_a_site() -> None:
@@ -923,6 +1129,83 @@ def test_labels_match_the_citation_index_shape() -> None:
             assert LABEL_RE.match(row.label), f"{row.id}: {row.label!r}"
 
 
+def _enclosing_qualname(tree: ast.Module, line: int) -> str:
+    """The `Class.function` (or `<module>`) whose body holds `line`."""
+    best = ("<module>", -1)
+    stack: list[str] = []
+
+    class Walker(ast.NodeVisitor):
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._scope(node)
+
+        def _func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self._scope(node)
+
+        visit_FunctionDef = _func  # type: ignore[assignment]
+        visit_AsyncFunctionDef = _func  # type: ignore[assignment]
+
+        def _scope(self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            nonlocal best
+            stack.append(node.name)
+            start = node.lineno
+            end = node.end_lineno or start
+            if start <= line <= end and start > best[1]:
+                best = (".".join(stack), start)
+            self.generic_visit(node)
+            stack.pop()
+
+    Walker().visit(tree)
+    return best[0]
+
+
+def marker_sites() -> dict[str, list[str]]:
+    """`<label>@<module>.<qualname>` -> the lines that carry it. One entry
+    per SITE, not per label: two defaults pinned under the same question are
+    two behaviours, and collapsing them to the label let the second ride the
+    first's row."""
+    out: dict[str, list[str]] = {}
+    for path in sorted(SRC.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for number, line in enumerate(source.splitlines(), start=1):
+            for label in MARKER_RE.findall(line):
+                if SKIP_LABEL_RE.match(label):
+                    continue
+                member = f"{label}@{path.stem}.{_enclosing_qualname(tree, number)}"
+                out.setdefault(member, []).append(f"{path.name}:{number}")
+    return out
+
+
+def test_every_marker_site_is_claimed_by_exactly_one_row() -> None:
+    """Breaks when a SECOND default is pinned under a label a row already
+    claims. Counting labels alone hid that: one `Q8d` row covered four
+    distinct pinned choices, and a fifth needed no row at all."""
+    sites = marker_sites()
+    claims: dict[str, list[str]] = {}
+    for row in REGISTER:
+        for site in row.sites:
+            claims.setdefault(site, []).append(row.id)
+    assert sorted(set(claims) - set(sites)) == [], (
+        f"rows claim marker sites the sources do not carry: {sorted(set(claims) - set(sites))}"
+    )
+    assert sorted(set(sites) - set(claims)) == [], (
+        f"marker sites no row claims: {sorted(set(sites) - set(claims))}"
+    )
+    doubled = {site: ids for site, ids in claims.items() if len(ids) > 1}
+    assert doubled == {}, f"marker sites claimed by more than one row: {doubled}"
+
+
+def test_marked_rows_claim_their_sites() -> None:
+    """Breaks when a row says it has a code marker and names no site."""
+    for row in REGISTER:
+        if row.marker:
+            assert row.sites, f"{row.id}: marker=True with no sites"
+        if row.sites:
+            assert row.marker, f"{row.id}: sites without marker=True"
+            assert row.label is not None, row.id
+            assert all(site.startswith(f"{row.label}@") for site in row.sites), row.id
+
+
 def test_marked_rows_have_a_marker_in_the_sources() -> None:
     """Breaks when a row claims a `PENDING` marker the code does not carry."""
     markers = source_markers()
@@ -963,6 +1246,7 @@ def test_every_provisional_row_is_followable() -> None:
         and not row.marker
         and row.protocol is None
         and not re.search(r"\b(DL|SEM|PR)-\d+", row.cite)
+        and not CODE_CITE_RE.search(row.cite)
     ]
     assert stranded == [], f"provisional rows with no way to follow them: {stranded}"
 
@@ -1011,6 +1295,40 @@ def test_code_citations_resolve() -> None:
                     dead.append((row.id, match.group(0)))
                     break
     assert dead == [], f"citations that resolve to nothing: {dead}"
+
+
+def test_pinned_patterns_equal_the_code() -> None:
+    """Breaks when a regex the register pinned is edited. A family name or a
+    terminal name alone says nothing about what the pattern ADMITS, so the
+    row carries the pattern verbatim and this holds the two equal: the edit
+    is not blocked, it just cannot land without re-reading the row."""
+    families = {name: pattern.pattern for name, pattern, _b in autocal._FAMILIES}
+    families |= {name: pattern.pattern for name, pattern in autocal._DEFECTIVE_FAMILIES}
+    terminals = {term.name: term.pattern.to_regexp() for term in _lex_parser().terminals}
+    for row in REGISTER:
+        if row.pattern is None:
+            continue
+        if row.surface == "cal_family":
+            assert row.pattern == families[row.member], row.id
+        elif row.surface == "cond_terminal":
+            assert row.pattern == terminals[row.member], row.id
+        else:
+            raise AssertionError(f"{row.id}: no pattern source for surface {row.surface!r}")
+
+
+def test_every_regex_member_pins_its_pattern() -> None:
+    """Breaks when a regex-recognised member joins a surface without pinning
+    what its regex admits -- the hole this mechanism exists to close."""
+    missing = [row.id for row in rows_for("cal_family") if row.pattern is None]
+    # lark tells the two apart itself: a fixed-string terminal (the anonymous
+    # punctuation) has nothing to read, a regex one does
+    regex_terminals = {
+        term.name for term in _lex_parser().terminals if term.pattern.type == "re"
+    } - set(_lex_parser().ignore_tokens)
+    for row in rows_for("cond_terminal"):
+        if row.member in regex_terminals and row.pattern is None:
+            missing.append(row.id)
+    assert missing == [], f"regex members with no pinned pattern: {missing}"
 
 
 def runbook_headings() -> list[str]:
@@ -1075,8 +1393,21 @@ def _assert_well_formed(row: Behaviour, kind: str, text: str) -> None:
         RuntimeProfile.model_validate(json.loads(text))
     elif kind == "outcome":
         head, _, _cause = text.partition("=")
-        assert head in ("int", "Terminated", "Failed"), f"{row.id}: {text!r}"
+        assert head in ("int", "Terminated", "Failed", "wrapper"), f"{row.id}: {text!r}"
     elif kind == "site":
+        target = _site_object(text)
+        if row.surface == "event_source":
+            # the claim is "THIS function stamps it": a class would be
+            # satisfied by anything stamped anywhere inside it
+            assert inspect.isfunction(target) or inspect.ismethod(target), (
+                f"{row.id}: {text!r} is not a function"
+            )
+        else:
+            # a `literal_alt` site names where the Literal is DECLARED, which
+            # is a class or a module-level function, never a call
+            assert inspect.isclass(target) or inspect.isfunction(target), (
+                f"{row.id}: {text!r} is not a declaring site"
+            )
         ast.parse(_site_source(text))
     else:
         raise AssertionError(f"{row.id}: unknown fixture kind {kind!r}")
@@ -1088,10 +1419,20 @@ def _assert_well_formed(row: Behaviour, kind: str, text: str) -> None:
 GEN_FROM = datetime(2026, 1, 1).date()
 GEN_TO = datetime(2026, 12, 31).date()
 
-#: Surfaces whose MEMBERS are preflight verdicts. A fixture there produces a
-#: preflight ERROR because that is the behaviour it exposes, so the gate
-#: holds it to lowering and calendar generation only.
-PREFLIGHT_SURFACES = frozenset({"preflight_code", "machine_verdict"})
+#: The rows whose fixture produces a preflight ERROR ON PURPOSE, because the
+#: ERROR IS the behaviour the row exposes. Named one by one, not by surface:
+#: `preflight_code:n-retrys` and `:skeleton-cycle` are WARN rules and lose
+#: nothing by staying under the gate.
+PREFLIGHT_EXEMPT = frozenset(
+    {
+        "preflight_code:machine-mixed",
+        "machine_verdict:foreign",
+        "machine_verdict:mixed",
+        # its QUIET half has to be a machine that is NOT local, and every
+        # such estate is a preflight ERROR by construction
+        "machine_verdict:local",
+    }
+)
 
 JIL_ROWS = tuple(row for row in REGISTER if fixture_kind(row) == "jil")
 
@@ -1133,7 +1474,7 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
         return
     if row.klass is Klass.REFUSED:
         assert refused_here, f"{row.id}: nothing refuses either fixture"
-    elif row.surface not in PREFLIGHT_SURFACES:
+    elif row.id not in PREFLIGHT_EXEMPT:
         assert refused_here == [], f"{row.id}: {refused_here}"
 
 
@@ -1192,31 +1533,35 @@ def test_the_doc_keeps_its_hand_written_preamble() -> None:
 # ----------------------------------------------------------------- 5. autocal
 
 
-def _breadth_tokens() -> list[str]:
-    """Every calendar token the autocal suites exercise, as literals."""
-    text = (REPO / "tests" / "test_autocal_breadth.py").read_text(encoding="utf-8")
-    text += (REPO / "tests" / "test_autocal.py").read_text(encoding="utf-8")
-    return sorted({m.upper() for m in re.findall(r"\b([A-Za-z]+(?:#[A-Za-z0-9]+)?)\b", text)})
+def _register_calendar_tokens() -> list[str]:
+    """Every token the register itself names: each `_KEYWORDS` key and each
+    `cal_family` row's own trigger token. No sampling from test prose, and
+    no "at least N" floor -- the inventory IS the register's."""
+    tokens = [key.upper() for key in autocal._KEYWORDS]
+    for member, (token, _pattern, _words) in rows_mod._CAL_FAMILIES.items():
+        assert member in {row.member for row in rows_for("cal_family")}
+        tokens.append(token)
+    for member, (token, _pattern, _words) in rows_mod._DEFECTIVE_FAMILIES.items():
+        assert member in {row.member for row in rows_for("cal_family")}
+        tokens.append(token)
+    return tokens
 
 
 def test_classify_token_agrees_with_the_parser() -> None:
     """Breaks when the lifted keyword/family tables stop describing what
-    `_parse_token` actually accepts."""
-    checked = 0
-    for token in _breadth_tokens():
-        classified = autocal.classify_token(token)
-        try:
-            autocal._parse_token("C", token)
-        except autocal.CalendarRuleError:
-            accepted = False
-        else:
-            accepted = True
-        if accepted:
-            assert classified is not None and classified[0] in ("keyword", "family"), token
-            checked += 1
-        else:
-            assert classified is None or classified[0] == "defective", token
-    assert checked > 20, "the token inventory got too small to prove anything"
+    `_parse_token` actually accepts, over EVERY token the register names --
+    each keyword, each family's own token, and each defective token, in the
+    plain and `X`-prefixed spellings."""
+    for token in _register_calendar_tokens():
+        for spelling in (token, f"X{token}"):
+            classified = autocal.classify_token(spelling)
+            try:
+                autocal._parse_token("C", spelling)
+            except autocal.CalendarRuleError:
+                assert classified is None or classified[0] == "defective", spelling
+            else:
+                assert classified is not None, spelling
+                assert classified[0] in ("keyword", "family"), spelling
 
 
 @pytest.mark.parametrize("token", ["WORKDX1", "WORKDX12", "CWEK#1", "CWEKM2", "CWEKX3"])
@@ -1245,12 +1590,6 @@ def test_fake_adapter_completes_unscripted_runs_instantly() -> None:
     the `adapter_policy:unscripted-completion` row states it."""
     default = inspect.signature(FakeAdapter.__init__).parameters["default"].default
     assert default == (0.0, 0)
-
-
-def test_the_fourth_timer_shape_is_the_deferred_cause() -> None:
-    """Breaks when the run_window defer stops carrying `deferred_cause` --
-    the `timer:deferred_cause` row derives from that literal."""
-    assert "deferred_cause" in inspect.getsource(Oracle._schedule_timer)
 
 
 def test_res_types_is_the_set_preflight_refuses_against() -> None:

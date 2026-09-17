@@ -90,7 +90,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # DL-72: the shared process-identity helpers live in a sibling stdlib-only
 # module. sys.path[0] is this file's directory when we are run by file path --
@@ -151,6 +151,14 @@ PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
 
 # ------------------------------------------------------------------- the shim
+
+
+#: The `status.json` `outcome` vocabulary, frozen in
+#: docs/supervisor-protocol.md ss3 and listed in this module's docstring.
+#: This process WRITES these strings; `runner_adapters.outcome_from_status`
+#: reads the same name rather than repeating the four literals, so a fifth
+#: outcome cannot reach the engine unannounced (DL-209).
+WrapperOutcome = Literal["exited", "signaled", "terminated", "spawn_failed"]
 
 
 def _test_pause(point: str) -> None:

@@ -35,9 +35,10 @@ The rows are data in `src/dsl41/simulation_register_rows.py`. The table
 below is generated from them by `scripts/render_simulation_coverage.py`,
 and `tests/test_simulation_register.py` fails when the two differ. The same
 test derives the domain of every surface from the code's own inventories,
-so a new attribute, token, event kind, status, profile field, adapter
-outcome, event provenance, trace marker, preflight code, or value
-alternative without a row fails the suite.
+so a new attribute, token, event kind, status, profile field, adapter or
+wrapper outcome, event provenance, trace marker, preflight code, calendar
+serialization, closed Literal alternative, or `PENDING` marker site without
+a row fails the suite.
 
 <!-- register:begin -->
 
@@ -92,9 +93,9 @@ alternative without a row fails the suite.
 | job_attr:auto_delete | passthrough | dossier ss5, DL-32 | - | generic | the definition is never deleted; the catalog is static for the run |
 | job_attr:auto_hold | supported | dossier ss5 | - | generic | the member enters ON_HOLD when its box starts, instead of starting with it |
 | job_attr:avg_runtime | passthrough | dossier ss5, DL-32 | - | generic | the statistics seed is carried; no runtime estimate is computed from it |
-| job_attr:box_failure | supported | SEM-12 | - | generic | overrides a box's failure verdict; evaluated only when the box is done |
+| job_attr:box_failure | supported | SEM-12 | - | generic | overrides a box's failure verdict, evaluated on every member transition while the box is RUNNING; the default fold runs only if no override fired |
 | job_attr:box_name | supported | SEM-11 | - | generic | names the box this job is a member of; the box's start starts the member |
-| job_attr:box_success | supported | SEM-12 | - | generic | overrides a box's success verdict; evaluated only when the box is done |
+| job_attr:box_success | supported | SEM-12 | - | generic | overrides a box's success verdict, evaluated on every member transition while the box is RUNNING, so an internal reference can finish the box early |
 | job_attr:box_success#iced-member | provisional | SEM-12, SEM-20 | Q6 | none | an iced member is read as satisfied inside box_success, the same way it is read inside an ordinary condition |
 | job_attr:box_terminator | supported | SEM-14 | - | generic | this member's failure terminates the whole box |
 | job_attr:chk_files | passthrough | dossier ss5, DL-32 | - | generic | the pre-start disk-space gate is not evaluated; the job starts regardless |
@@ -108,7 +109,7 @@ alternative without a row fails the suite.
 | job_attr:elevated | passthrough | dossier ss5, DL-32 | - | generic | no privilege elevation happens; the child runs as the invoking user |
 | job_attr:envvars | passthrough | ir._Lowerer._exec_spec, DL-32 | - | generic | carried verbatim on the exec spec; the child process environment is not modified; inert on a BOX (SEM-10) |
 | job_attr:exclude_calendar | supported | SEM-30, DL-56 | - | generic | the named calendar whose days are subtracted from the schedule's day set |
-| job_attr:exclude_calendar#two-year-probe | supported | DL-56, runner_preflight._calendar_preflight | - | none | an exclusion that leaves no eligible day inside 731 days reports the schedule as exhausted; absence is proven within that bound only |
+| job_attr:exclude_calendar#two-year-probe | supported | DL-56, DL-57, runner_preflight._calendar_preflight | - | none | preflight WARNs when the exclusion covers every eligible day it probes -- 732 dates inclusive, anchor through anchor+731 days; absence is proven within that bound only, and the run is warned, not refused |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
 | job_attr:group | passthrough | dossier ss5, DL-32 | - | generic | the group tag is carried; nothing schedules or reports by group |
 | job_attr:heartbeat_interval | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -123,9 +124,9 @@ alternative without a row fails the suite.
 | job_attr:max_exit_success | supported | SEM-09, DL-33 | - | generic | shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success |
 | job_attr:max_run_alarm | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:min_run_alarm | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:must_complete_times | supported | SEM-34 | - | generic | an alarm only: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
+| job_attr:must_complete_times | supported | SEM-34 | - | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
 | job_attr:must_complete_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - | none | an instant matching no start time uses the first offset; no label was opened for the corner |
-| job_attr:must_start_times | supported | SEM-34 | - | generic | an alarm only: a missed start raises MUST_START_ALARM and changes no status |
+| job_attr:must_start_times | supported | SEM-34 | - | generic | the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and changes no status |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - | none | an instant matching no start time uses the first offset; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
 | job_attr:notification_alarm_types | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -157,9 +158,9 @@ alternative without a row fails the suite.
 | job_attr:timezone | supported | SEM-35 | - | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - | generic | no resource limit is applied to the child process |
-| job_attr:watch_file | supported | dossier ss6 | - | generic | the path an FW job polls; the job completes when the file arrives |
+| job_attr:watch_file | supported | dossier ss6 | - | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
 | job_attr:watch_file_min_size | supported | dossier ss6 | - | generic | the size the watched file must reach before the FW job completes |
-| job_attr:watch_file_min_size#steady-size | provisional | runner_adapters.FileWatcherAdapter | E6 | none | the size is read once per poll; a file still growing is not waited out |
+| job_attr:watch_file_min_size#steady-size | provisional | runner_adapters.FileWatcherAdapter | E6 | none | two consecutive qualifying polls must report the SAME size before the watch completes; a file still growing resets the count |
 | job_attr:watch_interval | supported | dossier ss6 | - | generic | the poll interval of an FW job, in seconds |
 | job_attr:watch_interval#default | provisional | runner_adapters.FileWatcherAdapter | E6 | none | an FW job with no watch_interval polls at the profile's default interval |
 
@@ -203,17 +204,21 @@ alternative without a row fails the suite.
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| calendar_attr:adjust | supported | SEM-36, SEM-38 | - | generic | a uniform blind day shift applied to every surviving day, -9..+9 |
+| calendar_attr:adjust | supported | SEM-36, SEM-38 | - | generic | a uniform blind day shift applied to every surviving day; the documented range is -9..+9 and anything outside it refuses the calendar |
+| calendar_attr:adjust#absent | supported | SEM-36, autocal.compile_calendar | - | none | an absent or blank adjust is zero: no day is shifted |
 | calendar_attr:adjust#with-replacement | provisional | SEM-38, DL-59 | Q8b | none | disposition replaces first, then the blind adjust shifts every survivor |
 | calendar_attr:condition | supported | SEM-37, DL-57 | - | generic | one date-condition rule; the rules of a calendar union into its day set |
 | calendar_attr:cyccal | supported | SEM-36, SEM-39 | - | generic | names the cycle whose periods the cycle-scoped tokens count in |
-| calendar_attr:description | supported | SEM-36 | - | generic | carried on the calendar record; no rule reads it |
+| calendar_attr:description | passthrough | SEM-36 | - | generic | carried on the calendar record; no rule reads it |
 | calendar_attr:end_date | supported | SEM-39 | - | generic | closes the cycle period its preceding start_date opened |
 | calendar_attr:holcal | supported | SEM-36 | - | generic | names the standard calendar whose days are this calendar's holidays |
 | calendar_attr:holiday | supported | SEM-36, SEM-38 | - | generic | what happens to a generated day that is a holiday; it governs holcal dates outright |
+| calendar_attr:holiday#absent | supported | SEM-38, DL-58, autocal.CompiledCalendar._dispose | - | none | with no holiday action a holcal date is handled by the non_workday action, if there is one, and otherwise kept |
 | calendar_attr:non_workday | supported | SEM-36, SEM-38 | - | generic | what happens to a generated day that is not a workday: filter or replacement |
+| calendar_attr:non_workday#absent | supported | SEM-38, autocal.CompiledCalendar._dispose | - | none | with no non_workday action a generated day is kept exactly as it falls |
 | calendar_attr:start_date | supported | SEM-39 | - | generic | opens one cycle period; it pairs positionally with the end_date after it |
 | calendar_attr:workday | supported | SEM-36 | - | generic | the weekday mask every workday-scoped token and W/P walk counts in |
+| calendar_attr:workday#absent | supported | SEM-36, autocal.compile_calendar | - | none | an absent or blank workday is Monday to Friday |
 | calendar_attr:workday#all | supported | SEM-36, DL-60 | - | none | the observed `all` serialization makes every day a workday |
 | calendar_attr:workday#codes | supported | SEM-36 | - | none | the comma list of day codes is the third accepted serialization |
 | calendar_attr:workday#mask | supported | SEM-36 | - | none | the positional seven-character mask reads Monday first |
@@ -332,7 +337,7 @@ alternative without a row fails the suite.
 | --- | --- | --- | --- | --- | --- |
 | cond_terminal:AND=& | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes AND=& and the transformer gives it its SEM meaning |
 | cond_terminal:AND=and | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes AND=and and the transformer gives it its SEM meaning |
-| cond_terminal:BARE_VALUE | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes BARE_VALUE and the transformer gives it its SEM meaning |
+| cond_terminal:BARE_VALUE | supported | SEM-02, SEM-03, SEM-04 | - | generic | an unquoted comparand: anything but whitespace, parentheses and the operators |
 | cond_terminal:CIRCUMFLEX | supported | SEM-02, SEM-03, SEM-04 | - | generic | introduces the cross-instance suffix of a job reference (SEM-07) |
 | cond_terminal:CMP_OP=!= | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=!= and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP=< | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=< and the transformer gives it its SEM meaning |
@@ -343,15 +348,15 @@ alternative without a row fails the suite.
 | cond_terminal:COMMA | supported | SEM-02, SEM-03, SEM-04 | - | generic | separates a job reference from its lookback qualifier (SEM-04) |
 | cond_terminal:EXITCODE_KW=e | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes EXITCODE_KW=e and the transformer gives it its SEM meaning |
 | cond_terminal:EXITCODE_KW=exitcode | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes EXITCODE_KW=exitcode and the transformer gives it its SEM meaning |
-| cond_terminal:GLOBAL_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes GLOBAL_NAME and the transformer gives it its SEM meaning |
-| cond_terminal:INSTANCE_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes INSTANCE_NAME and the transformer gives it its SEM meaning |
-| cond_terminal:INT | supported | SEM-02, SEM-03, SEM-04 | - | generic | the integer an exitcode_atom compares against (SEM-02) |
-| cond_terminal:JOB_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes JOB_NAME and the transformer gives it its SEM meaning |
-| cond_terminal:LOOKBACK_TOKEN | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes LOOKBACK_TOKEN and the transformer gives it its SEM meaning |
+| cond_terminal:GLOBAL_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | a global variable name: anything but whitespace, parentheses, comma, the comparison characters and the operators |
+| cond_terminal:INSTANCE_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | a cross-instance suffix: letters, digits, underscore, hash, at or dollar |
+| cond_terminal:INT | supported | SEM-02, SEM-03, SEM-04 | - | generic | the integer an exitcode_atom compares against, ASCII digits only |
+| cond_terminal:JOB_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | a job name: any run of characters except whitespace, parentheses, comma, caret, the operators and a bare colon; a colon inside a name is escaped |
+| cond_terminal:LOOKBACK_TOKEN | supported | SEM-02, SEM-03, SEM-04 | - | generic | three lookback spellings: bare hours, `hhhh.mm` and `hhhh\:mm`, with one to four hour digits and one or two minute digits; the mm RANGE is checked at lowering, not here |
 | cond_terminal:LPAR | supported | SEM-02, SEM-03, SEM-04 | - | generic | opens an atom's argument list and a parenthesised group |
 | cond_terminal:OR=or | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes OR=or and the transformer gives it its SEM meaning |
 | cond_terminal:OR=\| | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes OR=\| and the transformer gives it its SEM meaning |
-| cond_terminal:QUOTED | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes QUOTED and the transformer gives it its SEM meaning |
+| cond_terminal:QUOTED | supported | SEM-02, SEM-03, SEM-04 | - | generic | a double-quoted comparand with no interior quote; the quotes are stripped from the semantic value |
 | cond_terminal:RPAR | supported | SEM-02, SEM-03, SEM-04 | - | generic | closes an atom's argument list and a parenthesised group |
 | cond_terminal:STATUS_KW=d | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=d and the transformer gives it its SEM meaning |
 | cond_terminal:STATUS_KW=done | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=done and the transformer gives it its SEM meaning |
@@ -423,22 +428,22 @@ alternative without a row fails the suite.
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| cal_family:cddd | supported | SEM-37 | - | generic | the cddd ordinal family generates its documented day set |
-| cal_family:cweek | supported | SEM-37 | - | generic | the cweek ordinal family generates its documented day set |
-| cal_family:cweek_parity | supported | SEM-37 | - | generic | the cweek_parity ordinal family generates its documented day set |
-| cal_family:cwek | refused | autocal._parse_token, SEM-37 | - | generic | the cwek family is doc-defective: the vendor's own text contradicts itself, so the token is refused rather than guessed |
-| cal_family:cwrk | supported | SEM-37 | - | generic | the cwrk ordinal family generates its documented day set |
-| cal_family:cycl | supported | SEM-37 | - | generic | the cycl ordinal family generates its documented day set |
-| cal_family:cycp | supported | SEM-37 | - | generic | the cycp ordinal family generates its documented day set |
-| cal_family:day_ordinal | supported | SEM-37 | - | generic | the day_ordinal ordinal family generates its documented day set |
-| cal_family:mnthd | supported | SEM-37 | - | generic | the mnthd ordinal family generates its documented day set |
-| cal_family:month_ordinal | supported | SEM-37 | - | generic | the month_ordinal ordinal family generates its documented day set |
-| cal_family:week | supported | SEM-37 | - | generic | the week ordinal family generates its documented day set |
-| cal_family:week_parity | supported | SEM-37 | - | generic | the week_parity ordinal family generates its documented day set |
-| cal_family:weekd | supported | SEM-37 | - | generic | the weekd ordinal family generates its documented day set |
-| cal_family:wekr | supported | SEM-37 | - | generic | the wekr ordinal family generates its documented day set |
-| cal_family:workd | supported | SEM-37 | - | generic | the workd ordinal family generates its documented day set |
-| cal_family:workdx | refused | autocal._parse_token, SEM-37 | - | generic | the workdx family is doc-defective: the vendor's own text contradicts itself, so the token is refused rather than guessed |
+| cal_family:cddd | supported | SEM-37 | - | generic | the nth named weekday of a cycle period, `#`/`M`, 1..53 or `L` |
+| cal_family:cweek | supported | SEM-37 | - | generic | the nth seven-day chunk of a cycle period, `#`/`M`/`X`, 1..53; `L` belongs to the parity form |
+| cal_family:cweek_parity | supported | SEM-37 | - | generic | every even (`E`) or odd (`O`) chunk of a period, or its last (`L`) |
+| cal_family:cwek | refused | autocal._parse_token, SEM-37 | - | generic | a cycle-week ordinal, `#`/`M`/`X` with one digit or `L`, whose definitions are garbled in the vendor's own render; refused rather than guessed, because no sane default exists |
+| cal_family:cwrk | supported | SEM-37 | - | generic | the nth workday of a cycle period, `#`/`M`/`X`, 1..365 or `L` |
+| cal_family:cycl | supported | SEM-37 | - | generic | the nth day of a cycle period, `#`/`M`/`X`, 1..365 or `L` |
+| cal_family:cycp | supported | SEM-37 | - | generic | the nth cycle period itself, 1..30; no from-end or excluded form |
+| cal_family:day_ordinal | supported | SEM-37 | - | generic | the nth named weekday of the month, `#`/`M`, a SINGLE digit 1..5 or `L` |
+| cal_family:mnthd | supported | SEM-37 | - | generic | the nth day of the month, `#`/`M`/`X`, 1..31 or `L` |
+| cal_family:month_ordinal | supported | SEM-37 | - | generic | the nth day of a named month, `#`/`M`, 1..31 or `L` |
+| cal_family:week | supported | SEM-37 | - | generic | the nth week of the year, `#`/`M`/`X`, 1..53 or `L` |
+| cal_family:week_parity | supported | SEM-37 | - | generic | every even (`E`) or odd (`O`) week of the year |
+| cal_family:weekd | supported | SEM-37 | - | generic | the nth day of the week, from the start (`#`), the end (`M`) or excluded (`X`), 1..7 or `L` |
+| cal_family:wekr | supported | SEM-37 | - | generic | the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L` |
+| cal_family:workd | supported | SEM-37 | - | generic | the nth workday of the month, counted from the start (`#`) or the end (`M`), 1..31 or `L` |
+| cal_family:workdx | refused | autocal._parse_token, SEM-37 | - | generic | an excluded workday ordinal whose text contradicts its month-scoped siblings; refused rather than guessed, because no sane default exists |
 
 ### cal_operator
 
@@ -451,7 +456,7 @@ alternative without a row fails the suite.
 | cal_operator:, | supported | SEM-37, DL-60 | - | generic | separates the rules of one calendar |
 | cal_operator:,#list-union | provisional | SEM-37, DL-59 | Q8d | none | the rules of one calendar union; an exclusion-only rule subtracts from that union |
 | cal_operator:and | supported | SEM-37, DL-60 | - | generic | the word synonym of `&` |
-| cal_operator:and#word-synonym | provisional | SEM-37, DL-59 | Q8d | none | AND is pinned as an exact synonym of & |
+| cal_operator:and#word-synonym | supported | SEM-37, DL-58 | - | none | AND is an exact synonym of &; the word form was verified, unlike OR |
 | cal_operator:not | supported | SEM-37, DL-60 | - | generic | complements its operand |
 | cal_operator:or | supported | SEM-37, DL-60 | - | generic | the word synonym of `\|` |
 | cal_operator:or#word-synonym | provisional | SEM-37, DL-59 | Q8d | none | OR is pinned as an exact synonym of \| |
@@ -465,14 +470,33 @@ alternative without a row fails the suite.
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| cal_action:n | supported | SEM-38 | - | generic | action n replaces an excluded date with a walked target day |
-| cal_action:n#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | the replacement target is final: the date-conditions are not re-checked and a replacement never re-enters the other category |
-| cal_action:o | supported | SEM-38 | - | generic | action o filters the category without moving any date |
-| cal_action:p | supported | SEM-38 | - | generic | action p replaces an excluded date with a walked target day |
-| cal_action:p#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | the replacement target is final: the date-conditions are not re-checked and a replacement never re-enters the other category |
-| cal_action:s | supported | SEM-38 | - | generic | action s filters the category without moving any date |
-| cal_action:w | supported | SEM-38 | - | generic | action w replaces an excluded date with a walked target day |
-| cal_action:w#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | the replacement target is final: the date-conditions are not re-checked and a replacement never re-enters the other category |
+| cal_action:holiday:n | supported | SEM-38 | - | generic | replace the holiday with the NEXT CALENDAR DAY, even if that day is itself a holiday or a non-workday |
+| cal_action:holiday:o | supported | SEM-38 | - | generic | restrict to holidays: a generated day that is not a holiday is dropped |
+| cal_action:holiday:p | supported | SEM-38 | - | generic | walk BACKWARD to the previous non-holiday workday and use that date |
+| cal_action:holiday:s | supported | SEM-38 | - | generic | keep the holiday unchanged, and shield it from the non_workday action |
+| cal_action:holiday:w | supported | SEM-38 | - | generic | walk FORWARD to the next non-holiday workday and use that date |
+| cal_action:non_workday:n | supported | SEM-38 | - | generic | replace the date with the next workday that is also not a holiday |
+| cal_action:non_workday:n#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | every replacement target is final, for N and for W/P and in both categories: the date-conditions are not re-checked and a replaced date never re-enters the other category |
+| cal_action:non_workday:o | supported | SEM-38 | - | generic | restrict to non-workdays: a generated day that IS a workday is dropped |
+| cal_action:non_workday:p | supported | SEM-38 | - | generic | walk BACKWARD to the previous workday and use that date |
+| cal_action:non_workday:s | supported | SEM-38 | - | generic | keep the date unchanged; the day is generated as it falls |
+| cal_action:non_workday:w | supported | SEM-38 | - | generic | walk FORWARD to the next workday and use that date |
+
+### cal_workday_form
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| cal_workday_form:all | supported | SEM-36, DL-60 | - | generic | the observed `all` serialization makes every day of the week a workday |
+| cal_workday_form:codes | supported | SEM-36 | - | generic | a comma list of two- or three-letter day codes; it is also the fallthrough form, so an unrecognized day is refused here |
+| cal_workday_form:mask | supported | SEM-36 | - | generic | the positional seven-character `{X\|.}` mask reads Monday first |
+
+### cal_row_form
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| cal_row_form:date | supported | SEM-36, DL-58 | - | generic | a bare date row fires at 00:00, the vendor's firing time for a job with no start_times of its own |
+| cal_row_form:hh:mm | supported | SEM-36 | - | generic | a minute-grained time tail becomes the row's tick |
+| cal_row_form:hh:mm:ss | supported | SEM-36, DL-60 | - | generic | the observed export's seconds tail is accepted and truncated to the minute, because ticks are minute-grained |
 
 ### event
 
@@ -528,6 +552,7 @@ alternative without a row fails the suite.
 | profile_field:default_tz | supported | period-model ss2.1, SEM-35 | - | generic | the zone a job with no timezone of its own is read in |
 | profile_field:execution_mode | supported | period-model ss2.1 | - | generic | whether the engine owns the child processes or a supervisor does |
 | profile_field:fw_default_interval_us | supported | period-model ss2.1 | - | generic | the poll interval an FW job with no watch_interval uses |
+| profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, period-model ss2.1 | - | none | startup converts the microsecond profile field to WHOLE SECONDS for the watcher and clamps it to at least one, so a sub-second interval is not what the profile asked for. No label was opened for the conversion |
 | profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - | generic | how the one ambiguous machine verdict resolves |
 | profile_field:reconcile_settle_us | supported | period-model ss2.1 | - | generic | how long reconcile waits for late evidence before it decides |
 | profile_field:retry_horizon_us | supported | period-model ss2.1 | - | generic | how far ahead a deferred dispatch retry may be scheduled |
@@ -540,7 +565,7 @@ alternative without a row fails the suite.
 | --- | --- | --- | --- | --- | --- |
 | profile_alt:execution_mode=detached | supported | period-model ss2.1 | - | generic | a supervisor owns the child processes across engine restarts |
 | profile_alt:execution_mode=tethered | supported | period-model ss2.1 | - | generic | the engine owns the child processes; there is no supervisor |
-| profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - | generic | an unresolvable machine is treated as eligible here |
+| profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - | generic | a job whose machine does not resolve local is refused |
 
 ### adapter_outcome
@@ -550,24 +575,35 @@ alternative without a row fails the suite.
 | adapter_outcome:Failed | supported | dossier ss6 | - | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
 | adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - | generic | a dispatch whose run directory is gone provably never reached the host, so it fails rather than being retried blind |
 | adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | generic | a resumed run with no status record fails rather than guessing an exit code |
-| adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner-design ss15 | E7 | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code |
+| adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15 | E7 | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code; both the tethered and the supervised adapter build it |
 | adapter_outcome:Failed=malformed status record: outcome 'exited' with exit_code={} | refused | runner_adapters.outcome_from_status | - | generic | an 'exited' record with no integer exit code is refused as a truthful FAILURE, never mapped to something a downstream success could consume |
 | adapter_outcome:Failed=spawn failed: {} | supported | runner_adapters.outcome_from_status | - | generic | the wrapper recorded that the spawn itself failed; the run never started |
 | adapter_outcome:Failed=unrecognized status record outcome {} | refused | runner_adapters.outcome_from_status | - | generic | a status record whose outcome the protocol does not define is refused, never guessed |
-| adapter_outcome:Failed=wrapper spawn failed: {} | supported | runner_adapters.LocalCommandAdapter.run | - | generic | the engine could not spawn the wrapper at all; the run never started |
+| adapter_outcome:Failed=wrapper spawn failed: {} | supported | runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run | - | generic | the engine could not spawn the wrapper at all; the run never started |
 | adapter_outcome:Terminated | supported | dossier ss6, DL-41a | - | generic | an OBSERVED kill; the engine injects STATUS TERMINATED for it |
 | adapter_outcome:Terminated#external-signal | provisional | runner_adapters | E8 | none | a kill by an external signal is reported as TERMINATED, the same verdict an oracle-ordered kill gets |
 | adapter_outcome:Terminated=<dynamic:outcome_from_status> | supported | runner_adapters.outcome_from_status, DL-41a | - | generic | a signalled or terminated status record carries its own cause text into the TERMINATED verdict |
 | adapter_outcome:Terminated=wrapper lost; killed at resume | supported | runner_adapters.resolve_spool | - | generic | a resume that finds the wrapper gone kills the surviving command group and reports the kill that happened |
 | adapter_outcome:int | supported | dossier ss6, SEM-09 | - | generic | a raw exit code; the SUCCESS/FAILURE verdict over it stays oracle-side |
 
+### wrapper_outcome
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| wrapper_outcome:exited | supported | runner-design ss6, supervisor-protocol ss3, SEM-09 | - | generic | the command ended on its own; the raw exit code goes to the oracle and SEM-09 decides the verdict |
+| wrapper_outcome:exited#no-exit-code | refused | runner_adapters.outcome_from_status | - | none | an 'exited' record whose exit_code is not an integer is refused as a truthful FAILURE, never mapped to anything a success-dependent downstream could consume |
+| wrapper_outcome:signaled | supported | runner-design ss6, DL-41a | - | generic | the command was killed by a signal; the engine injects STATUS TERMINATED because a kill actually happened |
+| wrapper_outcome:spawn_failed | supported | runner-design ss6 | - | generic | /bin/sh could never be spawned; the engine injects STATUS FAILURE and the run never started |
+| wrapper_outcome:terminated | supported | runner-design ss6, DL-41a | - | generic | the wrapper killed the command when it lost its parent; the engine injects STATUS TERMINATED with the recorded cause |
+
 ### event_source
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| event_source:control | supported | ir-design ss7, DL-68, rehearse_check.play_once | - | generic | the event was injected over the control socket or a rehearsal script, not produced by the engine itself |
-| event_source:reconcile | supported | ir-design ss7, DL-68, runner.Engine.inject_host | - | generic | the status came from resolving an incomplete run at resume, not from a live adapter completion |
-| event_source:scheduler | supported | ir-design ss7, DL-68, runner.Engine._cutoff | - | generic | the start came from a calendar tick, so a journal reader can tell it from an operator's sendevent |
+| event_source:adapter | supported | ir-design ss7, DL-68, runner.Engine._enqueue | - | generic | the event is a live adapter completion -- the stamp that subjects it to the ss4 stale gate; it is the DEFAULT provenance of an engine-raised input |
+| event_source:control | supported | ir-design ss7, DL-68, runner.Engine.inject | - | generic | the event crossed the ss10 control socket, or a rehearsal script stood in for one; it is not something the engine raised itself |
+| event_source:reconcile | supported | ir-design ss7, DL-68, runner_startup._inject_completion | - | generic | the completion came from resolving an incomplete run at resume, not from a live adapter; it still goes through the ss4 stale gate |
+| event_source:scheduler | supported | ir-design ss7, DL-68, runner.Engine.run_until_quiescent | - | generic | the start came from a calendar tick, so a journal reader can tell it from an operator's sendevent; `Engine._cutoff` stamps it on the boundary path |
 
 ### trace_marker
 
@@ -607,30 +643,58 @@ alternative without a row fails the suite.
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| demand_mode:acquire | supported | DL-50, capacity.requirement_demand | - | generic | a requirement in acquire mode is what one resources group does to its bucket |
-| demand_mode:gate | supported | DL-50, capacity.requirement_demand | - | generic | a requirement in gate mode is what one resources group does to its bucket |
+| demand_mode:acquire | supported | DL-50, capacity.requirement_demand | - | generic | the start HOLDS its units until the release policy gives them back; a bucket short of them queues the job in QUE_WAIT |
+| demand_mode:gate | supported | DL-50, capacity.requirement_demand | - | generic | a threshold check only (res_type T): the level is read, nothing is held and so nothing is ever released |
 
 ### machine_verdict
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
 | machine_verdict:error | refused | runner_preflight.resolve_machine, DL-49 | - | generic | a machine definition the resolver cannot read -- no type, an empty pool, a nested or undefined member -- is refused, never guessed |
-| machine_verdict:foreign | supported | DL-49, DL-52 | - | generic | the job's machine resolves elsewhere; preflight refuses the run rather than running it on the wrong host |
+| machine_verdict:foreign | supported | DL-49, DL-52 | - | generic | the job's machine resolves elsewhere; the verdict is modelled and `preflight_code:machine` is the ERROR it becomes -- one behaviour, read once as a verdict and once as a refusal |
 | machine_verdict:local | supported | DL-49, DL-52 | - | generic | the job's machine resolves to a name this runner answers to, so it runs here |
 | machine_verdict:mixed | supported | DL-49 | - | generic | a pool with members on both sides; the machine policy decides whether it runs here |
+
+### literal_alt
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| literal_alt:And.kind=and | supported | SEM-03, ir-design ss3 | - | generic | the discriminator that makes an AND node readable back from JSON |
+| literal_alt:CalendarIR.kind=extended | supported | SEM-36, DL-36 | - | generic | a calendar of rules; `compile_calendar` reads it and refuses a standard one |
+| literal_alt:CalendarIR.kind=standard | supported | SEM-36, DL-36 | - | generic | a calendar of date rows; `standard_days` reads it and `holcal` requires it |
+| literal_alt:CatalogIR.ir_version=0.2 | supported | ir-design ss4 | - | generic | the IR version stamped on every catalog; a reader that meets another refuses |
+| literal_alt:ExecSpec.kind=cmd | supported | SEM-10, ir-design ss4 | - | generic | the discriminator that selects the command exec spec |
+| literal_alt:ExitCodeAtom.kind=exitcode | supported | SEM-02, ir-design ss3 | - | generic | the discriminator of an exit-code atom |
+| literal_alt:FwSpec.kind=fw | supported | SEM-10, ir-design ss4 | - | generic | the discriminator that selects the file-watcher exec spec |
+| literal_alt:GlobalAtom.kind=global | supported | SEM-08, ir-design ss3 | - | generic | the discriminator of a global-variable atom |
+| literal_alt:Or.kind=or | supported | SEM-03, ir-design ss3 | - | generic | the discriminator that makes an OR node readable back from JSON |
+| literal_alt:Paren.kind=paren | supported | SEM-03, ir-design ss3 | - | generic | the discriminator that keeps explicit grouping in the model |
+| literal_alt:PreflightItem.severity=ERROR | supported | runner-design ss8 | - | generic | the finding refuses the run |
+| literal_alt:PreflightItem.severity=WARN | supported | runner-design ss8 | - | generic | the finding is printed and journaled, and the run goes ahead |
+| literal_alt:ResolvedTz.how=city | supported | SEM-35 | - | generic | the unique-city default, which applies ONLY when the estate supplied no alias table at all |
+| literal_alt:ResolvedTz.how=map | supported | SEM-35, DL-62 | - | generic | the name resolved through the estate's ujo_timezones alias table, chained at most five hops with an OS lookup per hop |
+| literal_alt:ResolvedTz.how=os | supported | SEM-35 | - | generic | the zone name resolved straight out of the OS database |
+| literal_alt:ResolvedTz.how=posix | supported | SEM-35 | - | generic | a POSIX fixed-offset spelling, resolved without the zone database |
+| literal_alt:SlaSpec.kind=absolute | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - | generic | an absolute must_*_times is lowered and carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| literal_alt:SlaSpec.kind=relative | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - | generic | a relative `+n` must_*_times is what arms the alarm timer |
+| literal_alt:StatusAtom.kind=status | supported | SEM-02, ir-design ss3 | - | generic | the discriminator of a job-status atom |
 
 ### runtime
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
+| runtime:calendar-nesting-cap | refused | autocal._parse_rule | - | none | a rule nested deeper than 100 levels is refused; the bound is the parser's own recursion budget, not a documented vendor limit |
+| runtime:calendar-preflight-candidates | supported | DL-57, runner_preflight._next_eligible_day | - | none | the eligible-day probe advances at most 732 candidates, not 732 days: a sparse calendar's 732 candidates can span decades, so the bound is on what was examined and not on the time it covered |
 | runtime:calendar-row-seconds-truncation | supported | autocal.standard_rows, DL-60 | - | none | a date row's seconds are dropped: ticks are minute-grained |
 | runtime:empty-workday-mask | refused | autocal.compile_calendar | - | none | a W/P action with an all-non-workday mask has nowhere to walk and refuses the calendar before any day is generated |
 | runtime:exclusion-only-compound | provisional | autocal.compile_calendar, DL-59 | Q8d | none | a compound rule with no inclusive leaf is evaluated literally as an include, which makes it near-universal |
 | runtime:member-arm-scope | provisional | oracle.Oracle._after_transition | Q3c | none | a box member's latched tick is scoped to the box run it was latched in |
-| runtime:missed-tick-skip | provisional | runner_scheduler.Scheduler.pop_due, runner_startup | E9 | none | a tick whose instant passed while the engine was down is journaled and dropped, never fired late |
+| runtime:missed-tick-skip | provisional | runner_startup, runner_scheduler.Scheduler.pop_due | E9 | none | a tick whose instant passed while the engine was down is journaled and dropped, never fired late |
+| runtime:preflight-date-basis-utc | provisional | SEM-35, runner_preflight._preflight_local_day | - | none | preflight reads the run anchor as the JOB's local day and falls back to UTC for an unresolvable zone, never consulting the run-level base timezone the scheduler uses; the two can name different days. No label was opened for it |
+| runtime:preflight-no-start-skips-probe | provisional | DL-56, runner_preflight.preflight | - | none | preflight with no run anchor skips the calendar-exhaustion probe entirely, so a run_calendar that can never fire again passes unremarked. No label was opened for it |
 | runtime:scan-horizon | supported | autocal._SCAN_YEARS, runner_scheduler._EXTENDED_SCAN_DAYS | - | none | a calendar that generates nothing within 60 years reads as exhausted; dormancy is proven within that bound only |
-| runtime:sla-offset-broadcast | supported | SEM-34, ir._Lowerer._sla_attr | - | none | one relative offset broadcasts to every start slot |
-| runtime:unsized-capacity | refused | runner_preflight._resource_preflight, DL-50 | - | none | preflight refuses a run over an unsized resource; a direct oracle caller bypasses that guard and runs unthrottled |
+| runtime:sla-offset-broadcast | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - | none | one relative offset broadcasts to every start slot, which SEM-34 marks open -- the strict count rule and the vendor's own example disagree; no label was opened for it |
+| runtime:unsized-capacity | refused | runner_preflight._resource_preflight, DL-50 | - | none | preflight refuses a run over an unsized resource; a direct oracle caller bypasses that guard and runs unthrottled, and there the malformed values go quiet -- a malformed job_load reads as zero demand, a malformed priority as unset, and a malformed amount omits the bucket altogether |
 | runtime:walk-cap | refused | autocal.CompiledCalendar._walk | - | none | a W/P replacement that finds no valid day within 366 days is degenerate and refuses the calendar |
 
 ### adapter_policy

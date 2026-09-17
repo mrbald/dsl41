@@ -36,6 +36,7 @@ from dsl41.capacity import RES_TYPES
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
+from dsl41.period import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
 from dsl41.timezones import city_candidates, resolve_timezone, to_local
@@ -82,7 +83,8 @@ _KNOWN_MACHINE_TYPES = frozenset({"a", "r", "n", "v"})
 
 MachineVerdict = Literal["local", "foreign", "mixed", "error"]
 
-MachinePolicy = Literal["strict", "local-eligible"]
+#: Re-exported: `period.RuntimeProfile.machine_policy` is the owner (DL-209).
+MachinePolicy = _MachinePolicy
 
 
 @dataclass(frozen=True)

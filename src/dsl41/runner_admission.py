@@ -96,7 +96,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.period import CMD_GRACE_S
-from dsl41.oracle_state import Event, EventKind, RuntimeState, TERMINAL
+from dsl41.oracle_state import Event, EventKind, EventSource, RuntimeState, TERMINAL
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
@@ -346,7 +346,7 @@ class Attempt(BaseModel):
     fingerprint: str
     kind: str | None = None
     payload: dict[str, Any] = {}
-    source: str | None = None
+    source: EventSource | None = None
     expect: dict[str, int] | None = None
     epoch: int = INERT_EPOCH
     claimed_actor: str | None = None

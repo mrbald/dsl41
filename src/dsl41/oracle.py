@@ -283,6 +283,12 @@ class InputBatch:
 #: canonicalizes; `_schedule_timer` refuses anything outside it.
 TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", "term_run_time"})
 
+#: PR-09's fourth armed shape: a run_window-deferred start carries no
+#: deadline `check`, it carries the provenance of the start it defers.
+#: Named once (DL-209) -- `_schedule_timer` admits it, `_dispatch` replays
+#: it, and the coverage register derives the timer domain from the pair.
+DEFERRED_TIMER_KEY: Final = "deferred_cause"
+
 
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
@@ -489,7 +495,7 @@ class Oracle:
         # TIMER_CHECKS (and to the PR-09 test that enumerates it) first.
         check = ev.payload.get("check")
         if check is None:
-            if "deferred_cause" not in ev.payload:
+            if DEFERRED_TIMER_KEY not in ev.payload:
                 raise OracleError("unregistered timer shape (PR-09)")
         elif check not in TIMER_CHECKS:
             raise OracleError(f"unregistered timer check {check!r} (PR-09)")
@@ -587,7 +593,7 @@ class Oracle:
             # DL-68: a sourced event names its trigger -- a scheduler tick and
             # an operator sendevent must not collapse to one cause string
             cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
-            deferred = ev.payload.get("deferred_cause")
+            deferred = ev.payload.get(DEFERRED_TIMER_KEY)
             if isinstance(deferred, str):
                 # SEM-33 defer: the fired timer replays the original start's
                 # provenance instead of collapsing to a bare TIMER (DL-68)
@@ -937,7 +943,7 @@ class Oracle:
                     Event(
                         at=next_open,
                         kind="TIMER",
-                        payload={"job": job_ir.name, "deferred_cause": cause},
+                        payload={"job": job_ir.name, DEFERRED_TIMER_KEY: cause},
                     ),
                 )
                 self._record(

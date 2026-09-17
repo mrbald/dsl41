@@ -45,6 +45,11 @@ HOLCAL_NAME = "HOLS"
 HOLCAL_BLOCK = f"calendar: {HOLCAL_NAME}\n01/01/2026"
 
 
+def _nested(rule: str, depth: int) -> str:
+    """`rule` wrapped in `depth` parenthesis pairs."""
+    return "(" * depth + rule + ")" * depth
+
+
 def _weekly_dates(first: str, count: int) -> str:
     """`count` consecutive weekly date rows from `first` (mm/dd/yyyy)."""
     day = datetime.strptime(first, "%m/%d/%Y").date()
@@ -336,12 +341,14 @@ _TIME_CLUSTER_ATTRS: dict[str, tuple[str, str, dict[str, str]]] = {
     ),
     "must_start_times": (
         "SEM-34",
-        "an alarm only: a missed start raises MUST_START_ALARM and changes no status",
+        "the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and"
+        " changes no status",
         {"start_times": '"08:00"', "must_start_times": '"+30"'},
     ),
     "must_complete_times": (
         "SEM-34",
-        "an alarm only: a missed completion raises MUST_COMPLETE_ALARM and changes no status",
+        "the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM"
+        " and changes no status",
         {"start_times": '"08:00"', "must_complete_times": '"+45"'},
     ),
 }
@@ -405,13 +412,15 @@ _SEMANTICS_ATTRS: dict[str, tuple[str, str, str, dict[str, str | None]]] = {
     "box_success": (
         SUPPORTED,
         "SEM-12",
-        "overrides a box's success verdict; evaluated only when the box is done",
+        "overrides a box's success verdict, evaluated on every member transition while"
+        " the box is RUNNING, so an internal reference can finish the box early",
         {"job_type": "b", "command": None, "machine": None, "box_success": "s(J1)"},
     ),
     "box_failure": (
         SUPPORTED,
         "SEM-12",
-        "overrides a box's failure verdict; evaluated only when the box is done",
+        "overrides a box's failure verdict, evaluated on every member transition while"
+        " the box is RUNNING; the default fold runs only if no override fired",
         {"job_type": "b", "command": None, "machine": None, "box_failure": "f(J1)"},
     ),
     "max_exit_success": (
@@ -497,6 +506,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, ir.JobIR.job_load_units",
             label="Qr4",
             marker=True,
+            sites=("Qr4@ir.JobIR.job_load_units",),
             effect="a job with no job_load demands zero machine-load units, so an unsized"
             " job never queues behind max_load",
             trigger=_job(),
@@ -519,6 +529,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, capacity.CapacityPool.sorted_waiters",
             label="Qr2",
             marker=True,
+            sites=("Qr2@capacity.CapacityPool.sorted_waiters.key", "Qr2@ir.JobIR.priority_value"),
             effect="a lower priority number is assumed to mean higher priority",
             trigger=_job(priority="1"),
             quiet=_job(priority="99"),
@@ -544,6 +555,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="SEM-30, runner_scheduler",
             label="E10",
             marker=True,
+            sites=("E10@runner_scheduler.<module>",),
             effect="a schedule with no days_of_week is read as every day",
             trigger=_job(date_conditions="1", start_times='"08:00"'),
             quiet=_job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
@@ -556,6 +568,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="SEM-35, runner_scheduler",
             label="E10",
             marker=True,
+            sites=("E10@runner_scheduler.Scheduler",),
             effect="a start time inside a DST fold or gap resolves by the pinned"
             " interpretation, not by a vendor-verified rule",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
@@ -566,10 +579,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="exclude_calendar",
             facet="two-year-probe",
             klass=SUPPORTED,
-            cite="DL-56, runner_preflight._calendar_preflight",
-            bound="731 days",
-            effect="an exclusion that leaves no eligible day inside 731 days reports the"
-            " schedule as exhausted; absence is proven within that bound only",
+            cite="DL-56, DL-57, runner_preflight._calendar_preflight",
+            bound="732 dates inclusive, anchor through anchor+731 days",
+            effect="preflight WARNs when the exclusion covers every eligible day it probes"
+            " -- 732 dates inclusive, anchor through anchor+731 days; absence is proven"
+            " within that bound only, and the run is warned, not refused",
             trigger=_job(
                 HOLCAL_BLOCK,
                 date_conditions="1",
@@ -626,6 +640,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters._build_run_spec",
             label="E5",
             marker=True,
+            sites=("E5@runner_adapters.LocalCommandAdapter", "E5@runner_adapters._build_run_spec"),
             effect="a profile that fails to source fails the job with sh's exit code",
             trigger=_job(profile="/tmp/missing.sh"),
             quiet=_job(),
@@ -653,6 +668,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, oracle.Oracle._readmit",
             label="Qr6",
             marker=True,
+            sites=("Qr6@oracle.<module>", "Qr6@oracle.Oracle._readmit"),
             effect="a job admitted out of QUE_WAIT does not re-evaluate its condition",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
@@ -733,7 +749,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="watch_file",
             klass=SUPPORTED,
             cite="dossier ss6",
-            effect="the path an FW job polls; the job completes when the file arrives",
+            effect="the path an FW job polls; the job completes only once the file exists,"
+            " reaches watch_file_min_size, and two consecutive polls agree on its size",
             trigger=_job(**_FW_JOB),
         ),
         _row(
@@ -752,6 +769,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
             marker=True,
+            sites=("E6@runner_adapters.FileWatcherAdapter.__init__",),
             effect="an FW job with no watch_interval polls at the profile's default interval",
             trigger=_job(**_FW_JOB),
             quiet=_job(watch_interval="30", **_FW_JOB),
@@ -772,7 +790,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
             marker=True,
-            effect="the size is read once per poll; a file still growing is not waited out",
+            sites=("E6@runner_adapters.FileWatcherAdapter",),
+            effect="two consecutive qualifying polls must report the SAME size before the"
+            " watch completes; a file still growing resets the count",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
             quiet=_job(**_FW_JOB),
         ),
@@ -866,6 +886,7 @@ MACHINE_ATTR_ROWS: tuple[Row, ...] = (
         cite="DL-49, runner_preflight._resource_preflight",
         label="Qr3",
         marker=True,
+        sites=("Qr3@runner_preflight._resource_preflight",),
         effect="a pool machine carries no load throttle; preflight WARNs and the job runs",
         trigger=_estate(
             "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1024,16 +1045,20 @@ _CALENDAR_ATTRS: dict[str, tuple[str, str, str]] = {
     ),
     "adjust": (
         "SEM-36, SEM-38",
-        "a uniform blind day shift applied to every surviving day, -9..+9",
+        "a uniform blind day shift applied to every surviving day; the documented"
+        " range is -9..+9 and anything outside it refuses the calendar",
         "adjust: 1",
     ),
 }
+
+#: Calendar attributes the engine carries and never reads.
+_CALENDAR_PASSTHROUGH = frozenset({"description"})
 
 CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
     _row(
         surface="calendar_attr",
         member=member,
-        klass=SUPPORTED,
+        klass=PASSTHROUGH if member in _CALENDAR_PASSTHROUGH else SUPPORTED,
         cite=cite,
         effect=effect,
         trigger=_cal(
@@ -1077,9 +1102,51 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
         cite="SEM-38, DL-59",
         label="Q8b",
         marker=True,
+        sites=("Q8b@autocal.compile_calendar",),
         protocol="Q8b",
         effect="disposition replaces first, then the blind adjust shifts every survivor",
         trigger=_cal("condition: DAILY", "adjust: 1", "non_workday: N"),
+        quiet=_cal("condition: DAILY", "adjust: 1"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="workday",
+        facet="absent",
+        klass=SUPPORTED,
+        cite="SEM-36, autocal.compile_calendar",
+        effect="an absent or blank workday is Monday to Friday",
+        trigger=_cal("condition: DAILY"),
+        quiet=_cal("condition: DAILY", "workday: all"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="non_workday",
+        facet="absent",
+        klass=SUPPORTED,
+        cite="SEM-38, autocal.CompiledCalendar._dispose",
+        effect="with no non_workday action a generated day is kept exactly as it falls",
+        trigger=_cal("condition: DAILY"),
+        quiet=_cal("condition: DAILY", "non_workday: O"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="holiday",
+        facet="absent",
+        klass=SUPPORTED,
+        cite="SEM-38, DL-58, autocal.CompiledCalendar._dispose",
+        effect="with no holiday action a holcal date is handled by the non_workday"
+        " action, if there is one, and otherwise kept",
+        trigger=_cal("condition: DAILY", holcal=True),
+        quiet=_cal("condition: DAILY", "holiday: S", holcal=True),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="adjust",
+        facet="absent",
+        klass=SUPPORTED,
+        cite="SEM-36, autocal.compile_calendar",
+        effect="an absent or blank adjust is zero: no day is shifted",
+        trigger=_cal("condition: DAILY"),
         quiet=_cal("condition: DAILY", "adjust: 1"),
     ),
     _row(
@@ -1195,6 +1262,7 @@ VALUE_ROWS: tuple[Row, ...] = (
             cite="DL-49, ir.MachineIR.max_load_units",
             label="Qr3",
             marker=True,
+            sites=("Qr3@ir.MachineIR.max_load_units",),
             effect="a virtual machine carries no machine-load throttle of its own",
             trigger=_estate(
                 "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1336,6 +1404,45 @@ _COND_TERMINALS: dict[str, tuple[str, str | None]] = {
     "CIRCUMFLEX": ("s(J1^PROD)", "s(J1)"),
 }
 
+#: The regex-bodied terminals, with the pattern PINNED as the built parser
+#: reports it and what it admits in words (DL-209). An edit to any of these
+#: regexes fails until somebody re-reads what the new one accepts.
+_TERMINAL_PATTERNS: dict[str, tuple[str, str]] = {
+    "JOB_NAME": (
+        r"(?:[^\s(),^&|:\\]|\\:)+",
+        "a job name: any run of characters except whitespace, parentheses, comma,"
+        " caret, the operators and a bare colon; a colon inside a name is escaped",
+    ),
+    "INSTANCE_NAME": (
+        r"[A-Za-z0-9_#@$]+",
+        "a cross-instance suffix: letters, digits, underscore, hash, at or dollar",
+    ),
+    "LOOKBACK_TOKEN": (
+        r"\d{1,4}(\.\d{1,2}|\\:\d{1,2})?",
+        "three lookback spellings: bare hours, `hhhh.mm` and `hhhh\\:mm`, with one to"
+        " four hour digits and one or two minute digits; the mm RANGE is checked at"
+        " lowering, not here",
+    ),
+    "GLOBAL_NAME": (
+        r"[^\s(),=<>!&|]+",
+        "a global variable name: anything but whitespace, parentheses, comma, the"
+        " comparison characters and the operators",
+    ),
+    "QUOTED": (
+        r'"[^"]*"',
+        "a double-quoted comparand with no interior quote; the quotes are stripped"
+        " from the semantic value",
+    ),
+    "BARE_VALUE": (
+        r"[^\s()&|]+",
+        "an unquoted comparand: anything but whitespace, parentheses and the operators",
+    ),
+    "INT": (
+        r"(?:[0-9])+",
+        "the integer an exitcode_atom compares against, ASCII digits only",
+    ),
+}
+
 #: What each of those six punctuates or carries, for the row's effect.
 _IMPLICIT_TERMINAL_EFFECTS: dict[str, str] = {
     "INT": "the integer an exitcode_atom compares against (SEM-02)",
@@ -1365,9 +1472,14 @@ COND_ROWS: tuple[Row, ...] = (
             member=member,
             klass=SUPPORTED,
             cite="SEM-02, SEM-03, SEM-04",
-            effect=_IMPLICIT_TERMINAL_EFFECTS.get(
-                member,
-                f"the grammar lexes {member} and the transformer gives it its SEM meaning",
+            pattern=_TERMINAL_PATTERNS[member][0] if member in _TERMINAL_PATTERNS else None,
+            effect=(
+                _TERMINAL_PATTERNS[member][1]
+                if member in _TERMINAL_PATTERNS
+                else _IMPLICIT_TERMINAL_EFFECTS.get(
+                    member,
+                    f"the grammar lexes {member} and the transformer gives it its SEM meaning",
+                )
             ),
             trigger=text,
             quiet=quiet,
@@ -1446,29 +1558,98 @@ _CAL_KEYWORDS: tuple[str, ...] = (
     "sun",
 )
 
-_CAL_FAMILIES: dict[str, str] = {
-    # family name: a token of that family
-    "workd": "WORKD#1",
-    "weekd": "WEEKD#1",
-    "wekr": "WEKRMON#1",
-    "week_parity": "WEEK#E",
-    "week": "WEEK#1",
-    "mnthd": "MNTHD#1",
-    "month_ordinal": "JAN#1",
-    "day_ordinal": "MON#1",
-    "cycl": "CYCL#1",
-    "cycp": "CYCP#1",
-    "cweek_parity": "CWEEK#E",
-    "cweek": "CWEEK#2",
-    "cwrk": "CWRK#1",
-    "cddd": "CMON#1",
+#: family name -> (a token of that family, its exact pattern, what the
+#: pattern admits in words). The pattern is PINNED: the test holds it equal
+#: to `autocal._FAMILIES`, so editing the regex fails until somebody re-reads
+#: what it now accepts (DL-209). `#` counts from the start, `M` from the end,
+#: `X` excludes, and `L` is the last one.
+_CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
+    # family name: (a token of that family, pattern, alternatives)
+    "workd": (
+        "WORKD#1",
+        "workd([#m])(\\d+|l)",
+        "the nth workday of the month, counted from the start (`#`) or the end (`M`), 1..31 or `L`",
+    ),
+    "weekd": (
+        "WEEKD#1",
+        "weekd([#mx])(\\d+|l)",
+        "the nth day of the week, from the start (`#`), the end (`M`) or excluded (`X`), 1..7 or `L`",
+    ),
+    "wekr": (
+        "WEKRMON#1",
+        "wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\\d+|l)",
+        "the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L`",
+    ),
+    "week_parity": ("WEEK#E", "week#([eo])", "every even (`E`) or odd (`O`) week of the year"),
+    "week": (
+        "WEEK#1",
+        "week([#mx])(\\d+|l)",
+        "the nth week of the year, `#`/`M`/`X`, 1..53 or `L`",
+    ),
+    "mnthd": (
+        "MNTHD#1",
+        "mnthd([#mx])(\\d+|l)",
+        "the nth day of the month, `#`/`M`/`X`, 1..31 or `L`",
+    ),
+    "month_ordinal": (
+        "JAN#1",
+        "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)([#m])(\\d+|l)",
+        "the nth day of a named month, `#`/`M`, 1..31 or `L`",
+    ),
+    "day_ordinal": (
+        "MON#1",
+        "(mon|tue|wed|thu|fri|sat|sun)([#m])(\\d|l)",
+        "the nth named weekday of the month, `#`/`M`, a SINGLE digit 1..5 or `L`",
+    ),
+    "cycl": (
+        "CYCL#1",
+        "cycl([#mx])(\\d+|l)",
+        "the nth day of a cycle period, `#`/`M`/`X`, 1..365 or `L`",
+    ),
+    "cycp": (
+        "CYCP#1",
+        "cycp#(\\d+)",
+        "the nth cycle period itself, 1..30; no from-end or excluded form",
+    ),
+    "cweek_parity": (
+        "CWEEK#E",
+        "cweek#([eol])",
+        "every even (`E`) or odd (`O`) chunk of a period, or its last (`L`)",
+    ),
+    "cweek": (
+        "CWEEK#2",
+        "cweek([#mx])(\\d+)",
+        "the nth seven-day chunk of a cycle period, `#`/`M`/`X`, 1..53; `L` belongs to the parity form",
+    ),
+    "cwrk": (
+        "CWRK#1",
+        "cwrk([#mx])(\\d+|l)",
+        "the nth workday of a cycle period, `#`/`M`/`X`, 1..365 or `L`",
+    ),
+    "cddd": (
+        "CMON#1",
+        "c(mon|tue|wed|thu|fri|sat|sun)([#m])(\\d+|l)",
+        "the nth named weekday of a cycle period, `#`/`M`, 1..53 or `L`",
+    ),
 }
 
 #: The families whose tokens only mean anything inside a cycle's periods;
 #: their calendars need a `cyccal` or `compile_calendar` refuses them.
 _CYCLE_SCOPED_FAMILIES = frozenset({"cycl", "cycp", "cweek_parity", "cweek", "cwrk", "cddd"})
 
-_DEFECTIVE_FAMILIES: dict[str, str] = {"workdx": "WORKDX1", "cwek": "CWEK#1"}
+_DEFECTIVE_FAMILIES: dict[str, tuple[str, str, str]] = {
+    "workdx": (
+        "WORKDX1",
+        r"workdx\d+",
+        "an excluded workday ordinal whose text contradicts its month-scoped siblings",
+    ),
+    "cwek": (
+        "CWEK#1",
+        r"cwek(#(\d|l)|m\d|x\d)",
+        "a cycle-week ordinal, `#`/`M`/`X` with one digit or `L`, whose definitions are"
+        " garbled in the vendor's own render",
+    ),
+}
 
 _CAL_OPERATORS: dict[str, tuple[str, str]] = {
     # member: (effect, the condition line its trigger carries)
@@ -1483,6 +1664,25 @@ _CAL_OPERATORS: dict[str, tuple[str, str]] = {
     "not": ("complements its operand", "condition: NOT MON"),
     "x": ("the X- prefix reads a token as its complement", "condition: DAILY & XMON"),
     ",": ("separates the rules of one calendar", "condition: MON,TUE"),
+}
+
+#: What each (category, action) pair DOES (SEM-38). The pair is the
+#: behaviour, not the letter: N advances exactly one calendar day for a
+#: holiday and walks to the next non-holiday workday for a non-workday, and
+#: S is a no-op for a non-workday but SHIELDS a holiday from the non-workday
+#: action (DL-58).
+_ACTION_EFFECTS: dict[tuple[str, str], str] = {
+    ("non_workday", "o"): "restrict to non-workdays: a generated day that IS a workday is dropped",
+    ("non_workday", "s"): "keep the date unchanged; the day is generated as it falls",
+    ("non_workday", "n"): "replace the date with the next workday that is also not a holiday",
+    ("non_workday", "w"): "walk FORWARD to the next workday and use that date",
+    ("non_workday", "p"): "walk BACKWARD to the previous workday and use that date",
+    ("holiday", "o"): "restrict to holidays: a generated day that is not a holiday is dropped",
+    ("holiday", "s"): "keep the holiday unchanged, and shield it from the non_workday action",
+    ("holiday", "n"): "replace the holiday with the NEXT CALENDAR DAY, even if that day is"
+    " itself a holiday or a non-workday",
+    ("holiday", "w"): "walk FORWARD to the next non-holiday workday and use that date",
+    ("holiday", "p"): "walk BACKWARD to the previous non-holiday workday and use that date",
 }
 
 CALENDAR_ROWS: tuple[Row, ...] = (
@@ -1500,10 +1700,11 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             member=member,
             klass=SUPPORTED,
             cite="SEM-37",
-            effect=f"the {member} ordinal family generates its documented day set",
+            pattern=pattern,
+            effect=f"{words}",
             trigger=_cal(f"condition: {token}", cyccal=member in _CYCLE_SCOPED_FAMILIES),
         )
-        for member, token in _CAL_FAMILIES.items()
+        for member, (token, pattern, words) in _CAL_FAMILIES.items()
     )
     + tuple(
         _row(
@@ -1511,11 +1712,11 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             member=member,
             klass=REFUSED,
             cite="autocal._parse_token, SEM-37",
-            effect=f"the {member} family is doc-defective: the vendor's own text contradicts"
-            " itself, so the token is refused rather than guessed",
+            pattern=pattern,
+            effect=f"{words}; refused rather than guessed, because no sane default exists",
             trigger=_cal(f"condition: {token}"),
         )
-        for member, token in _DEFECTIVE_FAMILIES.items()
+        for member, (token, pattern, words) in _DEFECTIVE_FAMILIES.items()
     )
     + tuple(
         _row(
@@ -1537,6 +1738,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             cite="SEM-37, DL-59",
             label="Q8d",
             marker=True,
+            sites=("Q8d@autocal._exclusion_base",),
             protocol=_CAL_PROTOCOL,
             effect="the rules of one calendar union; an exclusion-only rule subtracts from"
             " that union",
@@ -1551,6 +1753,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             cite="SEM-37, DL-59",
             label="Q8d",
             marker=True,
+            sites=("Q8d@autocal._parse_rule",),
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON & JAN | TUE"),
@@ -1563,7 +1766,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
+            # the SAME pinned choice as `&#flat-precedence`, whose row owns
+            # the `_parse_rule` marker; a sibling facet claims no site
+            marker=False,
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON | JAN & TUE"),
@@ -1573,12 +1778,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             surface="cal_operator",
             member="and",
             facet="word-synonym",
-            klass=PROVISIONAL,
-            cite="SEM-37, DL-59",
-            label="Q8d",
-            marker=True,
-            protocol=_CAL_PROTOCOL,
-            effect="AND is pinned as an exact synonym of &",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-58",
+            effect="AND is an exact synonym of &; the word form was verified, unlike OR",
             trigger=_cal("condition: MON AND JAN"),
             quiet=_cal("condition: MON & JAN"),
         ),
@@ -1590,44 +1792,43 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             cite="SEM-37, DL-59",
             label="Q8d",
             marker=True,
+            sites=("Q8d@autocal.<module>",),
             protocol=_CAL_PROTOCOL,
             effect="OR is pinned as an exact synonym of |",
             trigger=_cal("condition: MON OR TUE"),
             quiet=_cal("condition: MON | TUE"),
         ),
     )
-    + _rows(
-        "cal_action",
-        ("o", "s"),
-        klass=SUPPORTED,
-        cite="SEM-38",
-        effect="action {member} filters the category without moving any date",
-        trigger=lambda m: _cal("condition: DAILY", f"non_workday: {m.upper()}"),
-    )
-    + _rows(
-        "cal_action",
-        ("n", "w", "p"),
-        klass=SUPPORTED,
-        cite="SEM-38",
-        effect="action {member} replaces an excluded date with a walked target day",
-        trigger=lambda m: _cal("condition: DAILY", f"non_workday: {m.upper()}"),
-    )
     + tuple(
         _row(
             surface="cal_action",
-            member=member,
+            member=f"{category}:{code}",
+            klass=SUPPORTED,
+            cite="SEM-38",
+            effect=_ACTION_EFFECTS[(category, code)],
+            trigger=_cal("condition: DAILY", f"{category}: {code.upper()}", holcal=True),
+            quiet=_cal("condition: DAILY", holcal=True),
+        )
+        for category in ("non_workday", "holiday")
+        for code in ("o", "s", "n", "w", "p")
+    )
+    + (
+        _row(
+            surface="cal_action",
+            member="non_workday:n",
             facet="target-recheck",
             klass=PROVISIONAL,
             cite="SEM-38, DL-59",
             label="Q8c",
             marker=True,
+            sites=("Q8c@autocal.CompiledCalendar._replace",),
             protocol=_CAL_PROTOCOL,
-            effect="the replacement target is final: the date-conditions are not re-checked"
-            " and a replacement never re-enters the other category",
-            trigger=_cal("condition: DAILY", f"non_workday: {member.upper()}", holcal=True),
-            quiet=_cal("condition: DAILY", f"non_workday: {member.upper()}"),
-        )
-        for member in ("n", "w", "p")
+            effect="every replacement target is final, for N and for W/P and in both"
+            " categories: the date-conditions are not re-checked and a replaced date"
+            " never re-enters the other category",
+            trigger=_cal("condition: DAILY", "non_workday: N", "adjust: 1", holcal=True),
+            quiet=_cal("condition: DAILY", "non_workday: N", holcal=True),
+        ),
     )
 )
 
@@ -1784,6 +1985,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             cite="SEM-20, oracle.Oracle._handle_oob",
             label="Q3d",
             marker=True,
+            sites=("Q3d@oracle.Oracle._handle_oob",),
             protocol="Q3d",
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
@@ -1911,33 +2113,53 @@ _PROFILE_FIELDS: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+_PROFILE_FACETS: tuple[Row, ...] = (
+    _row(
+        surface="profile_field",
+        member="fw_default_interval_us",
+        facet="rounding",
+        klass=PROVISIONAL,
+        cite="runner_startup.wire_from_profile, period-model ss2.1",
+        effect="startup converts the microsecond profile field to WHOLE SECONDS for the"
+        " watcher and clamps it to at least one, so a sub-second interval is not what"
+        " the profile asked for. No label was opened for the conversion",
+        trigger='{"fw_default_interval_us": 500000}',
+        quiet='{"fw_default_interval_us": 30000000}',
+    ),
+)
+
 _PROFILE_ALTS: dict[str, str] = {
     "machine_policy=strict": "a job whose machine does not resolve local is refused",
-    "machine_policy=local-eligible": "an unresolvable machine is treated as eligible here",
+    "machine_policy=local-eligible": "only a MIXED pool runs here, with a warning that"
+    " pool placement was ignored; a foreign or unreadable machine still refuses",
     "execution_mode=tethered": "the engine owns the child processes; there is no supervisor",
     "execution_mode=detached": "a supervisor owns the child processes across engine restarts",
 }
 
-PROFILE_ROWS: tuple[Row, ...] = tuple(
-    _row(
-        surface="profile_field",
-        member=member,
-        klass=SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=override,
+PROFILE_ROWS: tuple[Row, ...] = (
+    tuple(
+        _row(
+            surface="profile_field",
+            member=member,
+            klass=SUPPORTED,
+            cite=cite,
+            effect=effect,
+            trigger=override,
+        )
+        for member, (cite, effect, override) in _PROFILE_FIELDS.items()
     )
-    for member, (cite, effect, override) in _PROFILE_FIELDS.items()
-) + tuple(
-    _row(
-        surface="profile_alt",
-        member=member,
-        klass=SUPPORTED,
-        cite="period-model ss2.1",
-        effect=effect,
-        trigger='{"%s": "%s"}' % tuple(member.split("=", 1)),
+    + tuple(
+        _row(
+            surface="profile_alt",
+            member=member,
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect=effect,
+            trigger='{"%s": "%s"}' % tuple(member.split("=", 1)),
+        )
+        for member, effect in _PROFILE_ALTS.items()
     )
-    for member, effect in _PROFILE_ALTS.items()
+    + _PROFILE_FACETS
 )
 
 
@@ -1948,6 +2170,19 @@ PROFILE_ROWS: tuple[Row, ...] = tuple(
 #: parts with `{}` where a value goes, and anything else is `<dynamic:...>`
 #: qualified by the function that builds it (DL-209, R-a).
 _UNOBSERVABLE = "exit_status_unobservable"
+
+#: Which E7 site each unobservable-exit template owns: the bare cause is the
+#: resume ladder's, the rc-bearing one belongs to the two live adapters.
+_E7_SITES: dict[str, tuple[str, ...]] = {
+    f"Failed={_UNOBSERVABLE}": (
+        "E7@runner_adapters.resolve_spool",
+        "E7@runner_startup.<module>",
+    ),
+    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
+        "E7@runner_adapters.LocalCommandAdapter.run",
+        "E7@runner_adapters.SupervisedCommandAdapter._await_outcome",
+    ),
+}
 _CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
 
 _OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
@@ -1959,9 +2194,11 @@ _OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
     ),
     f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
         PROVISIONAL,
-        "runner_adapters.LocalCommandAdapter.run, runner-design ss15",
+        "runner_adapters.LocalCommandAdapter.run,"
+        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
         "a wrapper that exited without writing a status record fails the run and"
-        " names the wrapper's own exit code",
+        " names the wrapper's own exit code; both the tethered and the supervised"
+        " adapter build it",
     ),
     f"Failed={_CRASH_CAUSE}": (
         SUPPORTED,
@@ -1987,7 +2224,7 @@ _OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
     ),
     "Failed=wrapper spawn failed: {}": (
         SUPPORTED,
-        "runner_adapters.LocalCommandAdapter.run",
+        "runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
         "the engine could not spawn the wrapper at all; the run never started",
     ),
     "Terminated=<dynamic:outcome_from_status>": (
@@ -2040,6 +2277,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
             # the E7 label sits on every unobservable-exit template
             label="E7" if _UNOBSERVABLE in member else None,
             marker=_UNOBSERVABLE in member,
+            sites=_E7_SITES.get(member, ()),
             effect=effect,
             trigger=member,
         )
@@ -2053,6 +2291,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         cite="runner_adapters",
         label="E8",
         marker=True,
+        sites=("E8@runner_adapters.outcome_from_status",),
         protocol="E8",
         effect="a kill by an external signal is reported as TERMINATED, the same verdict"
         " an oracle-ordered kill gets",
@@ -2099,22 +2338,28 @@ ADAPTER_ROWS: tuple[Row, ...] = (
 _SOURCE_SITES: dict[str, tuple[str, str, str]] = {
     # member: (the stamping site, a site that stamps something else, effect)
     "scheduler": (
-        "runner.Engine._cutoff",
+        "runner.Engine.run_until_quiescent",
         "runner.Engine.inject_host",
-        "the start came from a calendar tick, so a journal reader can tell it"
-        " from an operator's sendevent",
+        "the start came from a calendar tick, so a journal reader can tell it from"
+        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
     ),
     "control": (
-        "rehearse_check.play_once",
-        "runner.Engine._cutoff",
-        "the event was injected over the control socket or a rehearsal script,"
-        " not produced by the engine itself",
+        "runner.Engine.inject",
+        "runner.Engine._enqueue",
+        "the event crossed the ss10 control socket, or a rehearsal script stood in"
+        " for one; it is not something the engine raised itself",
     ),
     "reconcile": (
-        "runner.Engine.inject_host",
+        "runner_startup._inject_completion",
         "runner.Engine._cutoff",
-        "the status came from resolving an incomplete run at resume, not from a"
-        " live adapter completion",
+        "the completion came from resolving an incomplete run at resume, not from a"
+        " live adapter; it still goes through the ss4 stale gate",
+    ),
+    "adapter": (
+        "runner.Engine._enqueue",
+        "runner.Engine._cutoff",
+        "the event is a live adapter completion -- the stamp that subjects it to the"
+        " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
     ),
 }
 
@@ -2357,16 +2602,27 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
 )
 
 
-DEMAND_ROWS: tuple[Row, ...] = _rows(
-    "demand_mode",
-    ("acquire", "gate"),
-    klass=SUPPORTED,
-    cite="DL-50, capacity.requirement_demand",
-    effect="a requirement in {member} mode is what one resources group does to its bucket",
-    trigger=lambda m: _job(
-        f"insert_resource: R0\nres_type: {'T' if m == 'gate' else 'R'}\namount: 4",
-        resources="(R0, QUANTITY=1)",
-    ),
+#: What each mode does to the bucket, per `capacity.requirement_demand`.
+_DEMAND_EFFECTS = {
+    "acquire": "the start HOLDS its units until the release policy gives them back;"
+    " a bucket short of them queues the job in QUE_WAIT",
+    "gate": "a threshold check only (res_type T): the level is read, nothing is held"
+    " and so nothing is ever released",
+}
+
+DEMAND_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="demand_mode",
+        member=member,
+        klass=SUPPORTED,
+        cite="DL-50, capacity.requirement_demand",
+        effect=effect,
+        trigger=_job(
+            f"insert_resource: R0\nres_type: {'T' if member == 'gate' else 'R'}\namount: 4",
+            resources="(R0, QUANTITY=1)",
+        ),
+    )
+    for member, effect in _DEMAND_EFFECTS.items()
 )
 
 MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
@@ -2384,8 +2640,9 @@ MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
         member="foreign",
         klass=SUPPORTED,
         cite="DL-49, DL-52",
-        effect="the job's machine resolves elsewhere; preflight refuses the run rather"
-        " than running it on the wrong host",
+        effect="the job's machine resolves elsewhere; the verdict is modelled and"
+        " `preflight_code:machine` is the ERROR it becomes -- one behaviour, read"
+        " once as a verdict and once as a refusal",
         trigger=FOREIGN_ESTATE,
         quiet=LOCAL_ESTATE,
     ),
@@ -2411,6 +2668,242 @@ MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
 )
 
 
+# ----------------------------------------------- wrapper, calendar and literal forms
+
+_WRAPPER_OUTCOMES: dict[str, tuple[str, str, str]] = {
+    # member: (class, cite, effect)
+    "exited": (
+        SUPPORTED,
+        "runner-design ss6, supervisor-protocol ss3, SEM-09",
+        "the command ended on its own; the raw exit code goes to the oracle and"
+        " SEM-09 decides the verdict",
+    ),
+    "signaled": (
+        SUPPORTED,
+        "runner-design ss6, DL-41a",
+        "the command was killed by a signal; the engine injects STATUS TERMINATED"
+        " because a kill actually happened",
+    ),
+    "terminated": (
+        SUPPORTED,
+        "runner-design ss6, DL-41a",
+        "the wrapper killed the command when it lost its parent; the engine injects"
+        " STATUS TERMINATED with the recorded cause",
+    ),
+    "spawn_failed": (
+        SUPPORTED,
+        "runner-design ss6",
+        "/bin/sh could never be spawned; the engine injects STATUS FAILURE and the"
+        " run never started",
+    ),
+}
+
+WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="wrapper_outcome",
+        member=member,
+        klass=klass,
+        cite=cite,
+        effect=effect,
+        trigger=f"wrapper={member}",
+    )
+    for member, (klass, cite, effect) in _WRAPPER_OUTCOMES.items()
+) + (
+    _row(
+        surface="wrapper_outcome",
+        member="exited",
+        facet="no-exit-code",
+        klass=REFUSED,
+        cite="runner_adapters.outcome_from_status",
+        effect="an 'exited' record whose exit_code is not an integer is refused as a"
+        " truthful FAILURE, never mapped to anything a success-dependent downstream"
+        " could consume",
+        trigger="wrapper=exited",
+        quiet="wrapper=signaled",
+    ),
+)
+
+
+CAL_FORM_ROWS: tuple[Row, ...] = (
+    _row(
+        surface="cal_workday_form",
+        member="all",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-60",
+        effect="the observed `all` serialization makes every day of the week a workday",
+        trigger=_cal("condition: DAILY", "workday: all"),
+        quiet=_cal("condition: DAILY", "workday: xxxxx.."),
+    ),
+    _row(
+        surface="cal_workday_form",
+        member="mask",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="the positional seven-character `{X|.}` mask reads Monday first",
+        trigger=_cal("condition: DAILY", "workday: xxxxx.."),
+        quiet=_cal("condition: DAILY", "workday: all"),
+    ),
+    _row(
+        surface="cal_workday_form",
+        member="codes",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="a comma list of two- or three-letter day codes; it is also the"
+        " fallthrough form, so an unrecognized day is refused here",
+        trigger=_cal("condition: DAILY", "workday: mo,tu,we,th,fr"),
+        quiet=_cal("condition: DAILY", "workday: all"),
+    ),
+    _row(
+        surface="cal_row_form",
+        member="date",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-58",
+        effect="a bare date row fires at 00:00, the vendor's firing time for a job with"
+        " no start_times of its own",
+        trigger=_stmt("calendar: SC0\n01/01/2026"),
+    ),
+    _row(
+        surface="cal_row_form",
+        member="hh:mm",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="a minute-grained time tail becomes the row's tick",
+        trigger=_stmt("calendar: SC0\n01/01/2026 08:30"),
+    ),
+    _row(
+        surface="cal_row_form",
+        member="hh:mm:ss",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-60",
+        effect="the observed export's seconds tail is accepted and truncated to the"
+        " minute, because ticks are minute-grained",
+        trigger=_stmt("calendar: SC0\n01/01/2026 08:30:45"),
+    ),
+)
+
+
+#: Every closed alternative set a Literal declares in the estate-facing
+#: modules that no dedicated surface already owns. The fixture kind is
+#: `site`: most of these are discriminators and shapes a JIL estate cannot
+#: select directly, so the row names the declaring module instead.
+_LITERAL_ALTS: dict[str, tuple[str, str, str]] = {
+    # member: (cite, effect, the declaring site)
+    "And.kind=and": (
+        "SEM-03, ir-design ss3",
+        "the discriminator that makes an AND node readable back from JSON",
+        "conditions.And",
+    ),
+    "Or.kind=or": (
+        "SEM-03, ir-design ss3",
+        "the discriminator that makes an OR node readable back from JSON",
+        "conditions.Or",
+    ),
+    "Paren.kind=paren": (
+        "SEM-03, ir-design ss3",
+        "the discriminator that keeps explicit grouping in the model",
+        "conditions.Paren",
+    ),
+    "StatusAtom.kind=status": (
+        "SEM-02, ir-design ss3",
+        "the discriminator of a job-status atom",
+        "conditions.StatusAtom",
+    ),
+    "ExitCodeAtom.kind=exitcode": (
+        "SEM-02, ir-design ss3",
+        "the discriminator of an exit-code atom",
+        "conditions.ExitCodeAtom",
+    ),
+    "GlobalAtom.kind=global": (
+        "SEM-08, ir-design ss3",
+        "the discriminator of a global-variable atom",
+        "conditions.GlobalAtom",
+    ),
+    "ExecSpec.kind=cmd": (
+        "SEM-10, ir-design ss4",
+        "the discriminator that selects the command exec spec",
+        "ir.ExecSpec",
+    ),
+    "FwSpec.kind=fw": (
+        "SEM-10, ir-design ss4",
+        "the discriminator that selects the file-watcher exec spec",
+        "ir.FwSpec",
+    ),
+    "CalendarIR.kind=standard": (
+        "SEM-36, DL-36",
+        "a calendar of date rows; `standard_days` reads it and `holcal` requires it",
+        "ir.CalendarIR",
+    ),
+    "CalendarIR.kind=extended": (
+        "SEM-36, DL-36",
+        "a calendar of rules; `compile_calendar` reads it and refuses a standard one",
+        "ir.CalendarIR",
+    ),
+    "CatalogIR.ir_version=0.2": (
+        "ir-design ss4",
+        "the IR version stamped on every catalog; a reader that meets another refuses",
+        "ir.CatalogIR",
+    ),
+    "SlaSpec.kind=absolute": (
+        "SEM-34, oracle.Oracle._arm_sla_and_term",
+        "an absolute must_*_times is lowered and carried, and arms nothing: the oracle"
+        " owns no calendar, so no absolute deadline exists v1",
+        "ir.SlaSpec",
+    ),
+    "SlaSpec.kind=relative": (
+        "SEM-34, oracle.Oracle._arm_sla_and_term",
+        "a relative `+n` must_*_times is what arms the alarm timer",
+        "ir.SlaSpec",
+    ),
+    "PreflightItem.severity=ERROR": (
+        "runner-design ss8",
+        "the finding refuses the run",
+        "runner_preflight.PreflightItem",
+    ),
+    "PreflightItem.severity=WARN": (
+        "runner-design ss8",
+        "the finding is printed and journaled, and the run goes ahead",
+        "runner_preflight.PreflightItem",
+    ),
+    "ResolvedTz.how=os": (
+        "SEM-35",
+        "the zone name resolved straight out of the OS database",
+        "timezones.resolve_timezone",
+    ),
+    "ResolvedTz.how=map": (
+        "SEM-35, DL-62",
+        "the name resolved through the estate's ujo_timezones alias table, chained at"
+        " most five hops with an OS lookup per hop",
+        "timezones.resolve_timezone",
+    ),
+    "ResolvedTz.how=city": (
+        "SEM-35",
+        "the unique-city default, which applies ONLY when the estate supplied no alias"
+        " table at all",
+        "timezones.resolve_timezone",
+    ),
+    "ResolvedTz.how=posix": (
+        "SEM-35",
+        "a POSIX fixed-offset spelling, resolved without the zone database",
+        "timezones._os_zone",
+    ),
+}
+
+LITERAL_ALT_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="literal_alt",
+        member=member,
+        klass=SUPPORTED,
+        cite=cite,
+        effect=effect,
+        trigger=site,
+        # a site in ANOTHER module: the detector reads what the module
+        # declares, so the quiet has to be somewhere that declares none of it
+        quiet="conditions.parse_condition" if site.startswith("ir.") else "ir.unquote_jil_value",
+    )
+    for member, (cite, effect, site) in _LITERAL_ALTS.items()
+)
+
+
 # ------------------------------------------------------------------ runtime
 
 RUNTIME_ROWS: tuple[Row, ...] = (
@@ -2421,6 +2914,7 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         cite="oracle.Oracle._after_transition",
         label="Q3c",
         marker=True,
+        sites=("Q3c@oracle.<module>", "Q3c@oracle.Oracle._after_transition"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
         trigger="kind: jil\n" + _job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
@@ -2430,9 +2924,15 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="missed-tick-skip",
         klass=PROVISIONAL,
-        cite="runner_scheduler.Scheduler.pop_due, runner_startup",
+        cite="runner_startup, runner_scheduler.Scheduler.pop_due",
         label="E9",
         marker=True,
+        sites=(
+            "E9@runner_scheduler.<module>",
+            "E9@runner_scheduler.Scheduler.pop_due",
+            "E9@runner_startup._resume_under_lock",
+            "E9@runner_startup.resume_run",
+        ),
         effect="a tick whose instant passed while the engine was down is journaled and"
         " dropped, never fired late",
         trigger="kind: jil\n" + SCHEDULED_JOB,
@@ -2445,6 +2945,7 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         cite="autocal.compile_calendar, DL-59",
         label="Q8d",
         marker=True,
+        sites=("Q8d@autocal.compile_calendar",),
         protocol=_CAL_PROTOCOL,
         effect="a compound rule with no inclusive leaf is evaluated literally as an include,"
         " which makes it near-universal",
@@ -2499,11 +3000,66 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="runtime",
+        member="calendar-preflight-candidates",
+        klass=SUPPORTED,
+        cite="DL-57, runner_preflight._next_eligible_day",
+        bound="732 candidates",
+        effect="the eligible-day probe advances at most 732 candidates, not 732 days:"
+        " a sparse calendar's 732 candidates can span decades, so the bound is on"
+        " what was examined and not on the time it covered",
+        trigger="kind: jil\n"
+        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+    ),
+    _row(
+        surface="runtime",
+        member="preflight-date-basis-utc",
+        klass=PROVISIONAL,
+        cite="SEM-35, runner_preflight._preflight_local_day",
+        effect="preflight reads the run anchor as the JOB's local day and falls back to"
+        " UTC for an unresolvable zone, never consulting the run-level base timezone the"
+        " scheduler uses; the two can name different days. No label was opened for it",
+        trigger="kind: jil\n"
+        + _job(
+            date_conditions="1",
+            days_of_week="all",
+            start_times='"08:00"',
+            timezone="Pacific/Auckland",
+        ),
+        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
+    ),
+    _row(
+        surface="runtime",
+        member="preflight-no-start-skips-probe",
+        klass=PROVISIONAL,
+        cite="DL-56, runner_preflight.preflight",
+        effect="preflight with no run anchor skips the calendar-exhaustion probe"
+        " entirely, so a run_calendar that can never fire again passes unremarked."
+        " No label was opened for it",
+        trigger="kind: jil\n"
+        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+    ),
+    _row(
+        surface="runtime",
+        member="calendar-nesting-cap",
+        klass=REFUSED,
+        cite="autocal._parse_rule",
+        bound="100 levels",
+        effect="a rule nested deeper than 100 levels is refused; the bound is the"
+        " parser's own recursion budget, not a documented vendor limit",
+        trigger="kind: jil\n" + _cal("condition: " + _nested("DAILY", 101)),
+        quiet="kind: jil\n" + _cal("condition: " + _nested("DAILY", 3)),
+    ),
+    _row(
+        surface="runtime",
         member="unsized-capacity",
         klass=REFUSED,
         cite="runner_preflight._resource_preflight, DL-50",
         effect="preflight refuses a run over an unsized resource; a direct oracle caller"
-        " bypasses that guard and runs unthrottled",
+        " bypasses that guard and runs unthrottled, and there the malformed values go"
+        " quiet -- a malformed job_load reads as zero demand, a malformed priority as"
+        " unset, and a malformed amount omits the bucket altogether",
         trigger="kind: jil\n"
         + _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
         quiet="kind: jil\n" + _job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
@@ -2520,9 +3076,11 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     _row(
         surface="runtime",
         member="sla-offset-broadcast",
-        klass=SUPPORTED,
-        cite="SEM-34, ir._Lowerer._sla_attr",
-        effect="one relative offset broadcasts to every start slot",
+        klass=PROVISIONAL,
+        cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+        effect="one relative offset broadcasts to every start slot, which SEM-34 marks"
+        " open -- the strict count rule and the vendor's own example disagree; no label"
+        " was opened for it",
         trigger="kind: jil\n"
         + _job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
         quiet="kind: jil\n"
@@ -2550,5 +3108,8 @@ ROWS: tuple[Row, ...] = (
     + PREFLIGHT_CODE_ROWS
     + DEMAND_ROWS
     + MACHINE_VERDICT_ROWS
+    + WRAPPER_OUTCOME_ROWS
+    + CAL_FORM_ROWS
+    + LITERAL_ALT_ROWS
     + RUNTIME_ROWS
 )
