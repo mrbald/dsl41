@@ -13202,3 +13202,31 @@ relitigate an entry; append a new one.
   Not built, and named so the absence is a choice: `--tz-aliases` (SEM-35 alias
   tables would let a site label map rather than refuse) and `--properties` (a
   DL-19 estate must be resolved before it is minified).
+  SUPERSEDED BY DL-208 for `--properties` only: the option is built, and the
+  resolve-before-minify order it asked for is kept inside the verb.
+  `--tz-aliases` stays not built.
+
+- DL-208 `minify` takes `--properties` like every other catalog-consuming verb
+  (2026-09-17)
+  A templated estate could not be minified. Its placeholders sit in the same
+  lanes as any other value, and a `~{$NAME}~` token in a KEEP lane is outside
+  every closed space, so the run stopped with a refusal on each one. The CLI
+  contract already promised `--properties`/`-p` on every catalog-consuming verb.
+  DL-207 declined the option by name, "a DL-19 estate must be resolved before
+  it is minified", with `dsl41 resolve` as the step before. This entry reverses
+  that clause. `-p` IS resolve-before-minify, in one step and through the same
+  loader every other verb uses, so the order DL-207 asked for is kept and only
+  the second command goes; the two-step path stays valid. What the clause cost
+  was the contract: cli.py promised `-p` on every catalog-consuming verb, and
+  `minify` was the one verb that broke the promise, so a templated estate
+  failed with a refusal that named a closed space instead of the missing
+  option.
+  `minify` now resolves placeholders before parsing, with the same loader and
+  the same failure class as the other verbs: an unreadable properties file or an
+  unresolved token is exit 2, the input never reached the tool. The bound value
+  then walks the lanes exactly as if it had been written in the JIL, so a KEEP
+  value that resolves to text outside its closed space still refuses with exit
+  3. Nothing else changes: a placeholder in a RENAME lane was already absorbed
+  into the synthetic name and still is. A properties file is estate text in the
+  same measure as the JIL it fills, and its values reach the output only through
+  the lanes.

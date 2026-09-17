@@ -649,6 +649,7 @@ def minify(
         " public vocabulary and the estate stops exercising SEM-35 without it,"
         " but a zone does disclose a region.",
     ),
+    properties: list[Path] = PROPERTIES,
 ) -> None:
     """Emit a de-identified, minified copy of FILES.
 
@@ -665,20 +666,33 @@ def minify(
     the classification table already proved to be closed vocabulary. Read the
     output before you hand it over.
 
+    `--properties` resolves `~{$NAME}~` placeholders before parsing, so a
+    placeholder in a KEEP lane is checked as its bound value, not as the
+    token. Without it a placeholder is ordinary text, and one in a KEEP lane
+    refuses as outside its closed space. A properties file is estate text in
+    the same measure as the JIL it fills.
+
     Exit 0 once the estate is emitted; 2 when the input never reached the tool
-    (unreadable file, JIL parse error); 3 for every minify refusal -- an
-    unclassified key or subcommand, a value that will not parse, a structural
-    mismatch against the original, a surviving input token, a KEEP value outside
-    its closed space, or an existing output file without --force. A refusal
-    quotes the estate on stderr and says so.
+    (an unreadable file, a JIL parse error, an unreadable properties file, or
+    a placeholder --properties cannot resolve); 3 for every minify refusal --
+    an unclassified key or subcommand, a value that will not parse, a
+    structural mismatch against the original, a surviving input token, a KEEP
+    value outside its closed space, or an existing output file without
+    --force. A refusal quotes the estate on stderr and says so.
     """
-    from dsl41.ast_jil import JilParseError
+    from dsl41.ast_jil import JilFile, JilParseError
     from dsl41.ast_jil import parse as parse_jil
     from dsl41.minify import MinifyRefusal, minify_files, output_paths
 
     try:
-        parsed = [parse_jil(path.read_bytes().decode("utf-8"), file=str(path)) for path in files]
-    except (JilParseError, OSError, UnicodeDecodeError) as exc:
+        bindings = load_properties(properties) if properties else None
+        parsed: list[JilFile] = []
+        for path in files:
+            text = path.read_bytes().decode("utf-8")
+            if bindings is not None:
+                text, _ = substitute(text, bindings, file=str(path))
+            parsed.append(parse_jil(text, file=str(path)))
+    except (JilParseError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
         raise typer.Exit(refuse(exc)) from exc
     try:
         targets = output_paths(list(files), out) if out is not None else []
