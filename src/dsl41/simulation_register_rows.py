@@ -662,6 +662,53 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
     + (
         _row(
             surface="job_attr",
+            member="run_window",
+            facet="equal-endpoints",
+            klass=PROVISIONAL,
+            cite="SEM-33, oracle.Oracle._run_window_permits",
+            effect="a window whose endpoints are equal is one minute wide, not zero and"
+            " not all day; the pin is undocumented and no label was opened for it",
+            trigger=_job(date_conditions="1", days_of_week="all", run_window='"09:00-09:00"'),
+            quiet=_job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="midpoint-tie",
+            klass=PROVISIONAL,
+            cite="SEM-33, oracle.Oracle._run_window_permits",
+            effect="a start exactly halfway between the previous close and the next"
+            " opening DEFERS to the opening rather than dropping; the tie is"
+            " undocumented and no label was opened for it",
+            trigger=_job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+            quiet=_job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="watch_file",
+            facet="stat-error",
+            klass=PROVISIONAL,
+            cite="runner-design ss6, runner_adapters.FileWatcherAdapter",
+            effect="EVERY stat error reads as the file being absent -- a permission"
+            " denial is not told apart from a missing file -- and the watch resets its"
+            " stable count and keeps polling; no label was opened for it",
+            trigger=_job(job_type="f", command=None, watch_file="/nonexistent/dir/watched"),
+            quiet=_job(**_FW_JOB),
+        ),
+        _row(
+            surface="job_attr",
+            member="resources",
+            facet="duplicate",
+            klass=REFUSED,
+            cite="runner_preflight._resource_preflight, DL-50",
+            effect="a job naming one resource twice is refused at preflight as ambiguous"
+            " demand; a direct oracle caller instead SUMS the quantities and takes the"
+            " most restrictive release policy",
+            trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1) AND (R0, QUANTITY=2)"),
+            quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
+        ),
+        _row(
+            surface="job_attr",
             member="condition",
             facet="queued-no-recheck",
             klass=PROVISIONAL,
@@ -1990,6 +2037,18 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
             quiet=_scn(BASE_JIL, "0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_ICE",
+            facet="running",
+            klass=PROVISIONAL,
+            cite="SEM-05, SEM-20, oracle.Oracle._atom_true",
+            effect="icing a STARTING or RUNNING job does NOT make its atoms read as"
+            " satisfied: the in-flight run is real, so conditions keep reading the live"
+            " status until it completes; no label was opened for the exception",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_ICE job=J0"),
+            quiet=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(
             surface="event",

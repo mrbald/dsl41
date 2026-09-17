@@ -144,8 +144,11 @@ a row fails the suite.
 | job_attr:profile | supported | runner_adapters._build_run_spec | - | generic | sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10) |
 | job_attr:profile#sourcing-failure | provisional | runner_adapters._build_run_spec | E5 | none | a profile that fails to source fails the job with sh's exit code |
 | job_attr:resources | supported | DL-21, DL-50 | - | generic | the resource groups a start must satisfy before it may run |
+| job_attr:resources#duplicate | refused | runner_preflight._resource_preflight, DL-50 | - | none | a job naming one resource twice is refused at preflight as ambiguous demand; a direct oracle caller instead SUMS the quantities and takes the most restrictive release policy |
 | job_attr:run_calendar | supported | SEM-30, DL-56 | - | generic | the named calendar whose days are the schedule's day set |
 | job_attr:run_window | supported | SEM-33 | - | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early |
+| job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._run_window_permits | - | none | a window whose endpoints are equal is one minute wide, not zero and not all day; the pin is undocumented and no label was opened for it |
+| job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._run_window_permits | - | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
 | job_attr:send_notification | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:start_mins | supported | SEM-32 | - | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - | generic | the wall-clock times a schedule tick fires at on an eligible day |
@@ -159,6 +162,7 @@ a row fails the suite.
 | job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - | generic | no resource limit is applied to the child process |
 | job_attr:watch_file | supported | dossier ss6 | - | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
+| job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
 | job_attr:watch_file_min_size | supported | dossier ss6 | - | generic | the size the watched file must reach before the FW job completes |
 | job_attr:watch_file_min_size#steady-size | provisional | runner_adapters.FileWatcherAdapter | E6 | none | two consecutive qualifying polls must report the SAME size before the watch completes; a file still growing resets the count |
 | job_attr:watch_interval | supported | dossier ss6 | - | generic | the poll interval of an FW job, in seconds |
@@ -515,6 +519,7 @@ a row fails the suite.
 | event:ON_ICE | supported | ir-design ss7 | - | generic | ices a job: downstream conditions read it as satisfied and it never runs |
 | event:ON_ICE#armed | provisional | SEM-20, oracle.Oracle._handle_oob | Q3d | none | a pre-existing arm survives the ice round trip untouched |
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
+| event:ON_ICE#running | provisional | SEM-05, SEM-20, oracle.Oracle._atom_true | - | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes; no label was opened for the exception |
 | event:ON_NOEXEC | supported | ir-design ss7 | - | generic | marks a job as not executing; it completes without running |
 | event:SET_GLOBAL | supported | ir-design ss7 | - | generic | sets a global and wakes every job whose condition reads it |
 | event:STARTJOB | supported | ir-design ss7 | - | generic | a schedule tick or operator start; it arms must_start whether or not it starts |
