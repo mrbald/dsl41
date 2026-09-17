@@ -28,9 +28,11 @@ import inspect
 import json
 import pathlib
 import re
+import textwrap
 
 from datetime import datetime, timedelta
-from typing import Literal, get_args, get_origin
+from functools import cache
+from typing import Any, Literal, get_args, get_origin
 
 import pytest
 
@@ -42,6 +44,7 @@ from dsl41.period import RuntimeProfile
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.simulation_register import (
     FREE_SURFACES,
+    UNREACHABLE,
     REGISTER,
     SURFACES,
     Behaviour,
@@ -196,6 +199,15 @@ def _grammar_text() -> str:
     return conditions._grammar_text()
 
 
+@cache
+def _lex_parser() -> Any:
+    """The grammar built so every token survives to the tree -- the anonymous
+    punctuation terminals are filtered out of an ordinary parse."""
+    from lark import Lark
+
+    return Lark(_grammar_text(), start="start", parser="lalr", keep_all_tokens=True)
+
+
 def grammar_rules() -> set[str]:
     """Rule heads (with the inlining `?` stripped) and alias names."""
     text = _grammar_text()
@@ -219,16 +231,29 @@ def _terminal_bodies() -> dict[str, str]:
     return bodies
 
 
-def grammar_terminals() -> set[str]:
-    """`NAME=literal` per quoted alternative; bare `NAME` for a regex-only
-    terminal. `%import`ed terminals (INT, WS) define nothing here and are
-    deliberately out: WS is `%ignore`d and can never surface as a token."""
-    out: set[str] = set()
+def _terminal_literals() -> dict[str, list[str]]:
+    """Terminal name -> its quoted alternatives, regex bodies removed first
+    (`QUOTED`'s own regex contains a quote character)."""
+    out: dict[str, list[str]] = {}
     for name, body in _terminal_bodies().items():
         stripped = re.sub(r"/(?:[^/\\]|\\.)*/", " ", body)
-        literals = re.findall(r'"((?:[^"\\]|\\.)*)"', stripped)
-        if literals:
-            out |= {f"{name}={literal.lower()}" for literal in literals}
+        out[name] = re.findall(r'"((?:[^"\\]|\\.)*)"', stripped)
+    return out
+
+
+def grammar_terminals() -> set[str]:
+    """`NAME=literal` per quoted alternative; bare `NAME` for every other
+    terminal. The names come from the built parser, not the grammar text, so
+    the `%import`ed ones (INT, WS) and the anonymous ones lark builds from
+    quoted punctuation inside the rules (LPAR, RPAR, COMMA, CIRCUMFLEX) are
+    in the domain too -- reading the text alone made six terminals
+    invisible."""
+    literals = _terminal_literals()
+    out: set[str] = set()
+    for name in (terminal.name for terminal in _lex_parser().terminals):
+        alternatives = literals.get(name) or []
+        if alternatives:
+            out |= {f"{name}={literal.lower()}" for literal in alternatives}
         else:
             out.add(name)
     return out
@@ -237,17 +262,95 @@ def grammar_terminals() -> set[str]:
 # ------------------------------------------------------------------ domains
 
 
-def _failed_causes() -> set[str]:
-    """Every `Failed("<literal>")` cause the adapter layer can produce."""
+def _cause_template(node: ast.expr, enclosing: str) -> str:
+    """One `Failed(...)`/`Terminated(...)` argument as a template: a constant
+    is itself, an f-string is its constant parts with `{}` where a value
+    goes, and anything else is `<dynamic:...>` named by the function that
+    builds it. A cause space enumerated only by its string LITERALS is two
+    members wide and looks complete; this is the whole space."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else "{}"
+            for part in node.values
+        )
+    return f"<dynamic:{enclosing}>"
+
+
+def _outcome_templates() -> set[str]:
+    """`Kind=template` for every `Failed(`/`Terminated(` call site."""
     out: set[str] = set()
     for name in ("runner_adapters.py", "runner_startup.py"):
         tree = ast.parse((SRC / name).read_text(encoding="utf-8"))
+        stack: list[str] = []
+
+        class Walker(ast.NodeVisitor):
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            def _func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            visit_FunctionDef = _func  # type: ignore[assignment]
+            visit_AsyncFunctionDef = _func  # type: ignore[assignment]
+
+            def visit_Call(self, node: ast.Call) -> None:
+                if isinstance(node.func, ast.Name):
+                    if node.func.id in ("Failed", "Terminated") and node.args:
+                        template = _cause_template(node.args[0], ".".join(stack))
+                        out.add(f"{node.func.id}={template}")
+                self.generic_visit(node)
+
+        Walker().visit(tree)
+    return out
+
+
+def _keyword_constants(keyword: str) -> set[str]:
+    """Every string constant passed as `<keyword>=` anywhere in the package."""
+    out: set[str] = set()
+    for path in sorted(SRC.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == "Failed" and node.args:
-                    arg = node.args[0]
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg == keyword and isinstance(kw.value, ast.Constant):
+                    if isinstance(kw.value.value, str):
+                        out.add(kw.value.value)
+    return out
+
+
+def _trace_markers() -> set[str]:
+    """Every constant marker `Oracle._record` writes: a trace line that is
+    not an `OLD->NEW` status transition."""
+    tree = ast.parse((SRC / "oracle.py").read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "_record" and len(node.args) >= 2:
+                arg = node.args[1]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if "->" not in arg.value:
                         out.add(arg.value)
+    return out
+
+
+def _preflight_codes() -> set[str]:
+    """Every constant `code=` a `PreflightItem` is built with."""
+    tree = ast.parse((SRC / "runner_preflight.py").read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "PreflightItem":
+                for kw in node.keywords:
+                    if kw.arg == "code" and isinstance(kw.value, ast.Constant):
+                        if isinstance(kw.value.value, str):
+                            out.add(kw.value.value)
     return out
 
 
@@ -309,9 +412,12 @@ def surface_domains() -> dict[str, set[str]]:
         "timer": set(oracle.TIMER_CHECKS) | {"deferred_cause"},
         "profile_field": set(RuntimeProfile.model_fields),
         "profile_alt": _literal_alternatives(),
-        "adapter_outcome": (
-            {"int", "Terminated", "Failed"} | {f"Failed={c}" for c in _failed_causes()}
-        ),
+        "adapter_outcome": {"int", "Terminated", "Failed"} | _outcome_templates(),
+        "event_source": _keyword_constants("source"),
+        "trace_marker": _trace_markers(),
+        "preflight_code": _preflight_codes(),
+        "demand_mode": set(get_args(capacity.DemandMode)),
+        "machine_verdict": set(get_args(runner_preflight.MachineVerdict)),
     }
 
 
@@ -351,6 +457,11 @@ SURFACE_KIND: dict[str, str] = {
     "profile_alt": "profile",
     "adapter_outcome": "outcome",
     "adapter_policy": "outcome",
+    "event_source": "site",
+    "trace_marker": "scenario",
+    "preflight_code": "jil",
+    "demand_mode": "jil",
+    "machine_verdict": "jil",
 }
 
 BASE_FIXTURE: dict[str, str] = {
@@ -361,6 +472,9 @@ BASE_FIXTURE: dict[str, str] = {
     "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\n--\n",
     "profile": "{}",
     "outcome": "int",
+    # a `site` fixture names a function; the base names one that stamps no
+    # provenance at all
+    "site": "oracle.Oracle._record",
 }
 
 CALENDAR_SUBCOMMANDS = frozenset({"calendar", "ext_calendar", "extended_calendar", "cycle"})
@@ -480,17 +594,40 @@ def _cond_tree_rules(text: str) -> set[str]:
 
 
 def _cond_tokens(text: str) -> list[tuple[str, str]]:
-    from lark import Lark, Token
+    from lark import Token
 
-    parser = Lark(_grammar_text(), start="start", parser="lalr", keep_all_tokens=True)
-    tree = parser.parse(text)
+    tree = _lex_parser().parse(text)
     return [(t.type, t.value) for t in tree.scan_values(lambda v: isinstance(v, Token))]
+
+
+def _site_source(qualname: str) -> str:
+    """The source of `module.qualname`, for a `site` fixture."""
+    module, _, rest = qualname.partition(".")
+    obj: Any = importlib.import_module(f"dsl41.{module}")
+    for part in rest.split("."):
+        obj = getattr(obj, part)
+    return textwrap.dedent(inspect.getsource(obj))
+
+
+def _stamps_source(qualname: str, value: str) -> bool:
+    """Whether that function passes `source="<value>"` to anything."""
+    tree = ast.parse(_site_source(qualname))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "source" and isinstance(kw.value, ast.Constant):
+                if kw.value.value == value:
+                    return True
+    return False
 
 
 def detect(surface: str, member: str, kind: str, text: str) -> bool:
     """Whether `text` exposes `member` of `surface`. One generic detector per
     surface: the register never gets a per-row detector, because a per-row
     detector can be written to pass."""
+    if kind == "site":
+        return _stamps_source(text, member)
     if kind == "outcome":
         return text == member
     if kind == "profile":
@@ -506,6 +643,11 @@ def detect(surface: str, member: str, kind: str, text: str) -> bool:
             return member in _cond_tree_rules(text)
         if surface == "cond_terminal":
             name, _, literal = member.partition("=")
+            if name in _lex_parser().ignore_tokens:
+                # an ignored terminal is never a token; it is exposed when
+                # its own pattern matches the text
+                pattern = next(x for x in _lex_parser().terminals if x.name == name)
+                return re.search(pattern.pattern.to_regexp(), text) is not None
             return any(
                 t == name and (not literal or v.lower() == literal) for t, v in _cond_tokens(text)
             )
@@ -522,6 +664,8 @@ def detect(surface: str, member: str, kind: str, text: str) -> bool:
         o, emitted, scripted = _run_scenario(text)
         if surface == "event":
             return member in set(emitted) | set(scripted)
+        if surface == "trace_marker":
+            return any(entry.transition == member for entry in o.trace())
         if surface == "status":
             return any(entry.transition.split("->")[-1] == member for entry in o.trace())
         return any(
@@ -598,8 +742,53 @@ def _detect_cal_operator(member: str, text: str) -> bool:
     return any(member in rule for rule in rules)
 
 
+#: A fixed anchor and identity for the preflight detector: no clock read, no
+#: hostname guess. `as_machine` is non-empty, so `_local_identity` takes
+#: EXACTLY these names plus localhost.
+PREFLIGHT_START = datetime(2026, 1, 1, 0, 0)
+AS_MACHINE = frozenset({"m0"})
+LOCAL_IDENTITY = frozenset({"localhost", "m0"})
+
+
+def _preflight_items(catalog: ir.CatalogIR) -> list[runner_preflight.PreflightItem]:
+    """Preflight under BOTH machine policies: `machine-mixed` exists only
+    under local-eligible, and `machine` only under strict, so one policy
+    alone cannot enumerate the code space."""
+    return [
+        item
+        for policy in ("strict", "local-eligible")
+        for item in runner_preflight.preflight(
+            catalog,
+            execution=True,
+            as_machine=AS_MACHINE,
+            start=PREFLIGHT_START,
+            machine_policy=policy,  # type: ignore[arg-type]
+        )
+    ]
+
+
 def _detect_lowered(surface: str, member: str, text: str) -> bool:
     catalog = ir.lower_source(text)
+    if surface == "preflight_code":
+        return any(item.code == member for item in _preflight_items(catalog))
+    if surface == "demand_mode":
+        return any(
+            capacity.requirement_demand(
+                capacity.resource_type(catalog.resources.get(ref.name)), ref.free
+            )[0]
+            == member
+            for job in catalog.jobs.values()
+            for ref in job.resources
+        )
+    if surface == "machine_verdict":
+        return any(
+            runner_preflight.resolve_machine(
+                job.exec_.machine, catalog.machines, LOCAL_IDENTITY
+            ).verdict
+            == member
+            for job in catalog.jobs.values()
+            if job.exec_ is not None and job.exec_.machine is not None
+        )
     if surface == "machine_type":
         return any((m.machine_type or "").lower() == member for m in catalog.machines.values())
     if surface == "res_type":
@@ -838,7 +1027,24 @@ def test_stated_protocols_exist_in_the_runbook() -> None:
 
 # ------------------------------------------------------------------- 3. scope
 
-MEMBER_ROWS = tuple(row for row in REGISTER if row.facet == "" and row.surface not in FREE_SURFACES)
+MEMBER_ROWS = tuple(
+    row
+    for row in REGISTER
+    if row.facet == "" and row.surface not in FREE_SURFACES and row.id not in UNREACHABLE
+)
+
+
+def test_the_unreachable_set_is_only_what_cannot_be_reached() -> None:
+    """Breaks when the unreachable set grows a member a fixture COULD
+    exercise. `preflight_code:job-type` is proven here: lowering maps every
+    accepted job_type into the runner's executable universe, so the preflight
+    gate behind it cannot fire on any JIL. `preflight_code:oracle` has no
+    such one-line proof -- it guards `Oracle(catalog)` raising over a catalog
+    lowering does not build -- so it is pinned as the only other member."""
+    assert set(ir._JOB_TYPE_MAP.values()) <= runner_preflight._RUNNABLE_TYPES
+    assert UNREACHABLE == {"preflight_code:job-type", "preflight_code:oracle"}
+    for row_id in UNREACHABLE:
+        assert row_id in by_id(), row_id
 
 
 @pytest.mark.parametrize("row_id", [row.id for row in MEMBER_ROWS])
@@ -870,6 +1076,8 @@ def _assert_well_formed(row: Behaviour, kind: str, text: str) -> None:
     elif kind == "outcome":
         head, _, _cause = text.partition("=")
         assert head in ("int", "Terminated", "Failed"), f"{row.id}: {text!r}"
+    elif kind == "site":
+        ast.parse(_site_source(text))
     else:
         raise AssertionError(f"{row.id}: unknown fixture kind {kind!r}")
 
@@ -879,7 +1087,11 @@ def _assert_well_formed(row: Behaviour, kind: str, text: str) -> None:
 #: calendar date or the machine it runs on.
 GEN_FROM = datetime(2026, 1, 1).date()
 GEN_TO = datetime(2026, 12, 31).date()
-FIXTURE_USER = "register_fixture_user"
+
+#: Surfaces whose MEMBERS are preflight verdicts. A fixture there produces a
+#: preflight ERROR because that is the behaviour it exposes, so the gate
+#: holds it to lowering and calendar generation only.
+PREFLIGHT_SURFACES = frozenset({"preflight_code", "machine_verdict"})
 
 JIL_ROWS = tuple(row for row in REGISTER if fixture_kind(row) == "jil")
 
@@ -909,15 +1121,19 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
                 compiled.days_between(GEN_FROM, GEN_TO)
             except autocal.CalendarRuleError as exc:
                 refused_here.append(f"calendar: {exc}")
-        for name, job in catalog.jobs.items():
-            items = runner_preflight._resource_preflight(name, job, catalog)
-            items += runner_preflight._owner_preflight(name, job, FIXTURE_USER)
-            refused_here += [
-                f"preflight: {item.message}" for item in items if item.severity == "ERROR"
-            ]
+        refused_here += [
+            f"preflight: {item.code}: {item.message}"
+            for item in _preflight_items(catalog)
+            if item.severity == "ERROR"
+        ]
+    if row.id in UNREACHABLE:
+        # no input reaches the gate this row describes, which is the row's
+        # own claim; `test_the_unreachable_set_is_only_what_cannot_be_reached`
+        # is what holds that claim honest
+        return
     if row.klass is Klass.REFUSED:
         assert refused_here, f"{row.id}: nothing refuses either fixture"
-    else:
+    elif row.surface not in PREFLIGHT_SURFACES:
         assert refused_here == [], f"{row.id}: {refused_here}"
 
 

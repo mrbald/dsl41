@@ -72,13 +72,12 @@ CALENDAR_ATTRS = frozenset(
 #: Doc-defective tokens (SEM-37): WORKDXnn's text contradicts its
 #: month-scoped siblings; the CWEK family's definitions are garbled in
 #: the vendor's own render. Refused outright, no default, no switch.
-#: Named per family (DL-209) so the register can carry a refusal row for each.
+#: Named per family (DL-209) so the register can carry a refusal row for each,
+#: and read directly by BOTH `_parse_token` and `classify_token`: a derived
+#: alternation beside the table was a second spelling of one rule.
 _DEFECTIVE_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("workdx", re.compile(r"workdx\d+", re.ASCII)),
     ("cwek", re.compile(r"cwek(#(\d|l)|m\d|x\d)", re.ASCII)),
-)
-_DEFECTIVE_RE = re.compile(
-    "|".join(pattern.pattern for _, pattern in _DEFECTIVE_FAMILIES), re.ASCII
 )
 
 
@@ -505,7 +504,7 @@ def _parse_token(cal: str, raw: str) -> _Token:
     """One keyword to its day predicate. Case-insensitive (SEM-37 [V]);
     unknown and doc-defective tokens refuse loudly."""
     tok = raw.lower()
-    if _DEFECTIVE_RE.fullmatch(tok):
+    if any(pattern.fullmatch(tok) for _, pattern in _DEFECTIVE_FAMILIES):
         raise _err(cal, f"token {raw!r} is doc-defective (SEM-37); refused pending Q8/live")
 
     # the X- prefix exclusion convention; infix X-forms match per family.

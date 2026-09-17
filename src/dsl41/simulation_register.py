@@ -77,6 +77,11 @@ SURFACES: tuple[str, ...] = (
     "profile_field",
     "profile_alt",
     "adapter_outcome",
+    "event_source",
+    "trace_marker",
+    "preflight_code",
+    "demand_mode",
+    "machine_verdict",
     "runtime",
     "adapter_policy",
 )
@@ -125,6 +130,13 @@ REGISTER: tuple[Behaviour, ...] = tuple(Behaviour.model_validate(row) for row in
 #: Surfaces whose member set no inventory enumerates (see SURFACES).
 FREE_SURFACES: frozenset[str] = frozenset({"runtime", "adapter_policy"})
 
+#: Members no input can reach. The code can still emit them -- they are
+#: defensive second gates standing behind a refusal that fires earlier -- so
+#: they are rows; but no fixture can make one fire, so they have no detector
+#: and the doc says so rather than claiming one. Adding to this set is a
+#: claim the test holds you to (`job-type` is proven unreachable there).
+UNREACHABLE: frozenset[str] = frozenset({"preflight_code:job-type", "preflight_code:oracle"})
+
 
 def by_id() -> dict[str, Behaviour]:
     """Every row by its id. Ids are unique (the test pins it)."""
@@ -138,9 +150,11 @@ def rows_for(surface: str) -> tuple[Behaviour, ...]:
 
 def detector_of(row: Behaviour) -> str:
     """What reads this row at runtime today. A member row on a derived
-    surface has the surface's generic detector; everything else waits for a
-    collector, and until one lands no run output may claim the row was
-    assessed."""
+    surface has the surface's generic detector; a member no input can reach
+    has none and never will; everything else waits for a collector, and
+    until one lands no run output may claim the row was assessed."""
+    if row.id in UNREACHABLE:
+        return "unreachable"
     if row.facet == "" and row.surface not in FREE_SURFACES:
         return "generic"
     return "none"

@@ -35,7 +35,8 @@ The rows are data in `src/dsl41/simulation_register_rows.py`. The table
 below is generated from them by `scripts/render_simulation_coverage.py`,
 and `tests/test_simulation_register.py` fails when the two differ. The same
 test derives the domain of every surface from the code's own inventories,
-so a new attribute, token, event kind, status, profile field, or value
+so a new attribute, token, event kind, status, profile field, adapter
+outcome, event provenance, trace marker, preflight code, or value
 alternative without a row fails the suite.
 
 <!-- register:begin -->
@@ -107,7 +108,7 @@ alternative without a row fails the suite.
 | job_attr:elevated | passthrough | dossier ss5, DL-32 | - | generic | no privilege elevation happens; the child runs as the invoking user |
 | job_attr:envvars | passthrough | ir._Lowerer._exec_spec, DL-32 | - | generic | carried verbatim on the exec spec; the child process environment is not modified; inert on a BOX (SEM-10) |
 | job_attr:exclude_calendar | supported | SEM-30, DL-56 | - | generic | the named calendar whose days are subtracted from the schedule's day set |
-| job_attr:exclude_calendar#two-year-probe | supported | DL-56, runner_scheduler | - | none | an exclusion that leaves no eligible day inside 731 days reports the schedule as exhausted; absence is proven within that bound only |
+| job_attr:exclude_calendar#two-year-probe | supported | DL-56, runner_preflight._calendar_preflight | - | none | an exclusion that leaves no eligible day inside 731 days reports the schedule as exhausted; absence is proven within that bound only |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
 | job_attr:group | passthrough | dossier ss5, DL-32 | - | generic | the group tag is carried; nothing schedules or reports by group |
 | job_attr:heartbeat_interval | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -332,21 +333,26 @@ alternative without a row fails the suite.
 | cond_terminal:AND=& | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes AND=& and the transformer gives it its SEM meaning |
 | cond_terminal:AND=and | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes AND=and and the transformer gives it its SEM meaning |
 | cond_terminal:BARE_VALUE | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes BARE_VALUE and the transformer gives it its SEM meaning |
+| cond_terminal:CIRCUMFLEX | supported | SEM-02, SEM-03, SEM-04 | - | generic | introduces the cross-instance suffix of a job reference (SEM-07) |
 | cond_terminal:CMP_OP=!= | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=!= and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP=< | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=< and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP=<= | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=<= and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP== | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP== and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP=> | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=> and the transformer gives it its SEM meaning |
 | cond_terminal:CMP_OP=>= | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes CMP_OP=>= and the transformer gives it its SEM meaning |
+| cond_terminal:COMMA | supported | SEM-02, SEM-03, SEM-04 | - | generic | separates a job reference from its lookback qualifier (SEM-04) |
 | cond_terminal:EXITCODE_KW=e | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes EXITCODE_KW=e and the transformer gives it its SEM meaning |
 | cond_terminal:EXITCODE_KW=exitcode | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes EXITCODE_KW=exitcode and the transformer gives it its SEM meaning |
 | cond_terminal:GLOBAL_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes GLOBAL_NAME and the transformer gives it its SEM meaning |
 | cond_terminal:INSTANCE_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes INSTANCE_NAME and the transformer gives it its SEM meaning |
+| cond_terminal:INT | supported | SEM-02, SEM-03, SEM-04 | - | generic | the integer an exitcode_atom compares against (SEM-02) |
 | cond_terminal:JOB_NAME | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes JOB_NAME and the transformer gives it its SEM meaning |
 | cond_terminal:LOOKBACK_TOKEN | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes LOOKBACK_TOKEN and the transformer gives it its SEM meaning |
+| cond_terminal:LPAR | supported | SEM-02, SEM-03, SEM-04 | - | generic | opens an atom's argument list and a parenthesised group |
 | cond_terminal:OR=or | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes OR=or and the transformer gives it its SEM meaning |
 | cond_terminal:OR=\| | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes OR=\| and the transformer gives it its SEM meaning |
 | cond_terminal:QUOTED | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes QUOTED and the transformer gives it its SEM meaning |
+| cond_terminal:RPAR | supported | SEM-02, SEM-03, SEM-04 | - | generic | closes an atom's argument list and a parenthesised group |
 | cond_terminal:STATUS_KW=d | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=d and the transformer gives it its SEM meaning |
 | cond_terminal:STATUS_KW=done | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=done and the transformer gives it its SEM meaning |
 | cond_terminal:STATUS_KW=f | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=f and the transformer gives it its SEM meaning |
@@ -359,6 +365,7 @@ alternative without a row fails the suite.
 | cond_terminal:STATUS_KW=terminated | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=terminated and the transformer gives it its SEM meaning |
 | cond_terminal:VALUE_KW=v | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes VALUE_KW=v and the transformer gives it its SEM meaning |
 | cond_terminal:VALUE_KW=value | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes VALUE_KW=value and the transformer gives it its SEM meaning |
+| cond_terminal:WS | supported | SEM-02, SEM-03, SEM-04 | - | generic | whitespace between tokens, ignored by the lexer and never a token |
 
 ### lookback_kind
 
@@ -542,10 +549,75 @@ alternative without a row fails the suite.
 | --- | --- | --- | --- | --- | --- |
 | adapter_outcome:Failed | supported | dossier ss6 | - | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
 | adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - | generic | a dispatch whose run directory is gone provably never reached the host, so it fails rather than being retried blind |
-| adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters, runner-design ss15 | E7 | generic | a wrapper that exited without a status record fails the run rather than guessing an exit code |
+| adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | generic | a resumed run with no status record fails rather than guessing an exit code |
+| adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner-design ss15 | E7 | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code |
+| adapter_outcome:Failed=malformed status record: outcome 'exited' with exit_code={} | refused | runner_adapters.outcome_from_status | - | generic | an 'exited' record with no integer exit code is refused as a truthful FAILURE, never mapped to something a downstream success could consume |
+| adapter_outcome:Failed=spawn failed: {} | supported | runner_adapters.outcome_from_status | - | generic | the wrapper recorded that the spawn itself failed; the run never started |
+| adapter_outcome:Failed=unrecognized status record outcome {} | refused | runner_adapters.outcome_from_status | - | generic | a status record whose outcome the protocol does not define is refused, never guessed |
+| adapter_outcome:Failed=wrapper spawn failed: {} | supported | runner_adapters.LocalCommandAdapter.run | - | generic | the engine could not spawn the wrapper at all; the run never started |
 | adapter_outcome:Terminated | supported | dossier ss6, DL-41a | - | generic | an OBSERVED kill; the engine injects STATUS TERMINATED for it |
 | adapter_outcome:Terminated#external-signal | provisional | runner_adapters | E8 | none | a kill by an external signal is reported as TERMINATED, the same verdict an oracle-ordered kill gets |
+| adapter_outcome:Terminated=<dynamic:outcome_from_status> | supported | runner_adapters.outcome_from_status, DL-41a | - | generic | a signalled or terminated status record carries its own cause text into the TERMINATED verdict |
+| adapter_outcome:Terminated=wrapper lost; killed at resume | supported | runner_adapters.resolve_spool | - | generic | a resume that finds the wrapper gone kills the surviving command group and reports the kill that happened |
 | adapter_outcome:int | supported | dossier ss6, SEM-09 | - | generic | a raw exit code; the SUCCESS/FAILURE verdict over it stays oracle-side |
+
+### event_source
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| event_source:control | supported | ir-design ss7, DL-68, rehearse_check.play_once | - | generic | the event was injected over the control socket or a rehearsal script, not produced by the engine itself |
+| event_source:reconcile | supported | ir-design ss7, DL-68, runner.Engine.inject_host | - | generic | the status came from resolving an incomplete run at resume, not from a live adapter completion |
+| event_source:scheduler | supported | ir-design ss7, DL-68, runner.Engine._cutoff | - | generic | the start came from a calendar tick, so a journal reader can tell it from an operator's sendevent |
+
+### trace_marker
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| trace_marker:DISARM | supported | ir-design ss7, oracle.Oracle._record | - | generic | an explicit journaled disarm: the latched tick is dropped and nothing else moves |
+| trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - | generic | the must_complete deadline passed with the run still live; no status moved |
+| trace_marker:MUST_START_ALARM | supported | ir-design ss7, oracle.Oracle._record | - | generic | the must_start deadline passed with no new run; no status moved |
+| trace_marker:OFF_HOLD | supported | ir-design ss7, oracle.Oracle._record | - | generic | the hold is released and the start is re-attempted immediately |
+| trace_marker:OFF_ICE | supported | ir-design ss7, oracle.Oracle._record | - | generic | the ice is cleared; conditions are deliberately NOT re-evaluated |
+| trace_marker:OFF_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - | generic | the noexec flag is cleared |
+| trace_marker:ON_HOLD | supported | ir-design ss7, oracle.Oracle._record | - | generic | the job is held: it stays startable but no start goes through |
+| trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - | generic | the job is iced: downstream conditions read it as satisfied and it never runs |
+| trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - | generic | the job is marked not-executing; it completes without running |
+| trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - | generic | a start outside the run_window, closer to the next opening, was queued for it |
+| trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - | generic | a start outside the run_window, closer to the previous close, was dropped |
+| trace_marker:SCHED_ARM | supported | ir-design ss7, oracle.Oracle._record | - | generic | a schedule tick that could not start the job latched instead |
+| trace_marker:SCHED_DISARM | supported | ir-design ss7, oracle.Oracle._record | - | generic | an unconsumed member arm died with the box run that armed it |
+| trace_marker:START_REFUSED | supported | ir-design ss7, oracle.Oracle._record | - | generic | a start request the oracle declined, with the reason it declined it |
+
+### preflight_code
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| preflight_code:calendar | refused | runner_preflight._calendar_preflight, DL-56 | - | generic | a calendar the scheduler cannot read or that can never fire refuses the run |
+| preflight_code:job-type | refused | runner_preflight._job_type_preflight | - | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
+| preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
+| preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
+| preflight_code:n-retrys | supported | runner_preflight._retry_preflight, DL-53 | - | generic | the run is warned, not refused: n_retrys is carried and never applied, so the job runs exactly once |
+| preflight_code:oracle | refused | runner_preflight._oracle_preflight | - | unreachable | an oracle that will not construct over this catalog refuses the run; no JIL reaches this gate, because lowering builds no such catalog |
+| preflight_code:owner | refused | runner_preflight._owner_preflight | - | generic | an owner other than the invoking user refuses the run: there is no setuid |
+| preflight_code:resources | refused | runner_preflight._resource_preflight, DL-50 | - | generic | a resource the oracle cannot model faithfully refuses the run |
+| preflight_code:skeleton-cycle | supported | runner_preflight._skeleton_cycle_preflight, DL-13 | - | generic | a cycle in the AND-success skeleton is legal AutoSys; it warns and disables `plan` rather than refusing the run |
+| preflight_code:timezone | refused | runner_preflight._timezone_preflight, SEM-35 | - | generic | a timezone name the SEM-35 ladder cannot resolve refuses the run |
+
+### demand_mode
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| demand_mode:acquire | supported | DL-50, capacity.requirement_demand | - | generic | a requirement in acquire mode is what one resources group does to its bucket |
+| demand_mode:gate | supported | DL-50, capacity.requirement_demand | - | generic | a requirement in gate mode is what one resources group does to its bucket |
+
+### machine_verdict
+
+| id | class | cite | label | detector | effect |
+| --- | --- | --- | --- | --- | --- |
+| machine_verdict:error | refused | runner_preflight.resolve_machine, DL-49 | - | generic | a machine definition the resolver cannot read -- no type, an empty pool, a nested or undefined member -- is refused, never guessed |
+| machine_verdict:foreign | supported | DL-49, DL-52 | - | generic | the job's machine resolves elsewhere; preflight refuses the run rather than running it on the wrong host |
+| machine_verdict:local | supported | DL-49, DL-52 | - | generic | the job's machine resolves to a name this runner answers to, so it runs here |
+| machine_verdict:mixed | supported | DL-49 | - | generic | a pool with members on both sides; the machine policy decides whether it runs here |
 
 ### runtime
 

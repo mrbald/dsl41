@@ -307,12 +307,12 @@ _TIME_CLUSTER_ATTRS: dict[str, tuple[str, str, dict[str, str]]] = {
     "run_calendar": (
         "SEM-30, DL-56",
         "the named calendar whose days are the schedule's day set",
-        {"run_calendar": '"HOLS"'},
+        {"run_calendar": f'"{HOLCAL_NAME}"'},
     ),
     "exclude_calendar": (
         "SEM-30, DL-56",
         "the named calendar whose days are subtracted from the schedule's day set",
-        {"exclude_calendar": '"HOLS"'},
+        {"exclude_calendar": f'"{HOLCAL_NAME}"'},
     ),
     "start_times": (
         "SEM-32",
@@ -531,7 +531,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite=cite,
             effect=effect,
-            trigger=_job(date_conditions="1", **extra),
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", **extra),
         )
         for member, (cite, effect, extra) in _TIME_CLUSTER_ATTRS.items()
     )
@@ -566,11 +566,16 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="exclude_calendar",
             facet="two-year-probe",
             klass=SUPPORTED,
-            cite="DL-56, runner_scheduler",
+            cite="DL-56, runner_preflight._calendar_preflight",
             bound="731 days",
             effect="an exclusion that leaves no eligible day inside 731 days reports the"
             " schedule as exhausted; absence is proven within that bound only",
-            trigger=_job(date_conditions="1", days_of_week="all", exclude_calendar='"HOLS"'),
+            trigger=_job(
+                HOLCAL_BLOCK,
+                date_conditions="1",
+                days_of_week="all",
+                exclude_calendar=f'"{HOLCAL_NAME}"',
+            ),
             quiet=_job(date_conditions="1", days_of_week="all"),
         ),
         _row(
@@ -1286,7 +1291,7 @@ _COND_RULES: dict[str, tuple[str, str, str | None]] = {
     "paren": ("an explicitly grouped subexpression", "(s(J1))", "s(J1)"),
 }
 
-_COND_TERMINALS: dict[str, tuple[str, str]] = {
+_COND_TERMINALS: dict[str, tuple[str, str | None]] = {
     # member: (a condition whose lexing yields it, one that does not)
     "STATUS_KW=success": ("success(J1)", "s(J1)"),
     "STATUS_KW=failure": ("failure(J1)", "s(J1)"),
@@ -1318,6 +1323,27 @@ _COND_TERMINALS: dict[str, tuple[str, str]] = {
     "AND=and": ("s(J1) and f(J2)", "s(J1)&f(J2)"),
     "OR=|": ("s(J1)|f(J2)", "s(J1)&f(J2)"),
     "OR=or": ("s(J1) or f(J2)", "s(J1)|f(J2)"),
+    # terminals the grammar TEXT does not define: two %import-ed from
+    # lark's common set, four anonymous ones lark builds from the quoted
+    # punctuation inside the rules (R-b, DL-209)
+    "INT": ("e(J1)=0", "s(J1)"),
+    "WS": ("s(J1) & f(J2)", "s(J1)&f(J2)"),
+    # every atom form carries its own parentheses, so no parseable
+    # condition can be their quiet: they fall back to the no-condition base
+    "LPAR": ("s(J1)", None),
+    "RPAR": ("s(J1)", None),
+    "COMMA": ("s(J1,1.30)", "s(J1)"),
+    "CIRCUMFLEX": ("s(J1^PROD)", "s(J1)"),
+}
+
+#: What each of those six punctuates or carries, for the row's effect.
+_IMPLICIT_TERMINAL_EFFECTS: dict[str, str] = {
+    "INT": "the integer an exitcode_atom compares against (SEM-02)",
+    "WS": "whitespace between tokens, ignored by the lexer and never a token",
+    "LPAR": "opens an atom's argument list and a parenthesised group",
+    "RPAR": "closes an atom's argument list and a parenthesised group",
+    "COMMA": "separates a job reference from its lookback qualifier (SEM-04)",
+    "CIRCUMFLEX": "introduces the cross-instance suffix of a job reference (SEM-07)",
 }
 
 COND_ROWS: tuple[Row, ...] = (
@@ -1339,7 +1365,10 @@ COND_ROWS: tuple[Row, ...] = (
             member=member,
             klass=SUPPORTED,
             cite="SEM-02, SEM-03, SEM-04",
-            effect=f"the grammar lexes {member} and the transformer gives it its SEM meaning",
+            effect=_IMPLICIT_TERMINAL_EFFECTS.get(
+                member,
+                f"the grammar lexes {member} and the transformer gives it its SEM meaning",
+            ),
             trigger=text,
             quiet=quiet,
         )
@@ -1914,7 +1943,66 @@ PROFILE_ROWS: tuple[Row, ...] = tuple(
 
 # ------------------------------------------------------------------ adapters
 
+#: Every `Failed(` / `Terminated(` template the adapter layer can build, as
+#: the test derives them: a constant is itself, an f-string is its constant
+#: parts with `{}` where a value goes, and anything else is `<dynamic:...>`
+#: qualified by the function that builds it (DL-209, R-a).
+_UNOBSERVABLE = "exit_status_unobservable"
 _CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
+
+_OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
+    # "Kind=template": (class, cite, effect)
+    f"Failed={_UNOBSERVABLE}": (
+        PROVISIONAL,
+        "runner_adapters.resolve_spool, runner-design ss15",
+        "a resumed run with no status record fails rather than guessing an exit code",
+    ),
+    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
+        PROVISIONAL,
+        "runner_adapters.LocalCommandAdapter.run, runner-design ss15",
+        "a wrapper that exited without writing a status record fails the run and"
+        " names the wrapper's own exit code",
+    ),
+    f"Failed={_CRASH_CAUSE}": (
+        SUPPORTED,
+        "runner_adapters.resolve_spool, DL-118",
+        "a dispatch whose run directory is gone provably never reached the host,"
+        " so it fails rather than being retried blind",
+    ),
+    "Failed=malformed status record: outcome 'exited' with exit_code={}": (
+        REFUSED,
+        "runner_adapters.outcome_from_status",
+        "an 'exited' record with no integer exit code is refused as a truthful"
+        " FAILURE, never mapped to something a downstream success could consume",
+    ),
+    "Failed=unrecognized status record outcome {}": (
+        REFUSED,
+        "runner_adapters.outcome_from_status",
+        "a status record whose outcome the protocol does not define is refused, never guessed",
+    ),
+    "Failed=spawn failed: {}": (
+        SUPPORTED,
+        "runner_adapters.outcome_from_status",
+        "the wrapper recorded that the spawn itself failed; the run never started",
+    ),
+    "Failed=wrapper spawn failed: {}": (
+        SUPPORTED,
+        "runner_adapters.LocalCommandAdapter.run",
+        "the engine could not spawn the wrapper at all; the run never started",
+    ),
+    "Terminated=<dynamic:outcome_from_status>": (
+        SUPPORTED,
+        "runner_adapters.outcome_from_status, DL-41a",
+        "a signalled or terminated status record carries its own cause text into"
+        " the TERMINATED verdict",
+    ),
+    "Terminated=wrapper lost; killed at resume": (
+        SUPPORTED,
+        "runner_adapters.resolve_spool",
+        "a resume that finds the wrapper gone kills the surviving command group"
+        " and reports the kill that happened",
+    ),
+}
 
 ADAPTER_ROWS: tuple[Row, ...] = (
     _row(
@@ -1943,25 +2031,19 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         " with the cause",
         trigger="Failed",
     ),
-    _row(
-        surface="adapter_outcome",
-        member="Failed=exit_status_unobservable",
-        klass=PROVISIONAL,
-        cite="runner_adapters, runner-design ss15",
-        label="E7",
-        marker=True,
-        effect="a wrapper that exited without a status record fails the run rather than"
-        " guessing an exit code",
-        trigger="Failed=exit_status_unobservable",
-    ),
-    _row(
-        surface="adapter_outcome",
-        member=f"Failed={_CRASH_CAUSE}",
-        klass=SUPPORTED,
-        cite="runner_adapters.resolve_spool, DL-118",
-        effect="a dispatch whose run directory is gone provably never reached the host,"
-        " so it fails rather than being retried blind",
-        trigger=f"Failed={_CRASH_CAUSE}",
+    *(
+        _row(
+            surface="adapter_outcome",
+            member=member,
+            klass=klass,
+            cite=cite,
+            # the E7 label sits on every unobservable-exit template
+            label="E7" if _UNOBSERVABLE in member else None,
+            marker=_UNOBSERVABLE in member,
+            effect=effect,
+            trigger=member,
+        )
+        for member, (klass, cite, effect) in _OUTCOME_TEMPLATES.items()
     ),
     _row(
         surface="adapter_outcome",
@@ -2003,6 +2085,328 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         effect="the adapter imposes no timeout of its own; term_run_time is the oracle's timer",
         trigger="Terminated",
         quiet="int",
+    ),
+)
+
+
+# ------------------------------------------------- engine-side value surfaces
+
+#: A `site` fixture is a `module.qualname` string; the detector parses that
+#: function and answers whether it stamps the member. Circularity is bounded
+#: on purpose: the fixture names WHERE the provenance is stamped, and the
+#: domain is derived from every `source=` constant in the package, so a new
+#: provenance with no row still fails.
+_SOURCE_SITES: dict[str, tuple[str, str, str]] = {
+    # member: (the stamping site, a site that stamps something else, effect)
+    "scheduler": (
+        "runner.Engine._cutoff",
+        "runner.Engine.inject_host",
+        "the start came from a calendar tick, so a journal reader can tell it"
+        " from an operator's sendevent",
+    ),
+    "control": (
+        "rehearse_check.play_once",
+        "runner.Engine._cutoff",
+        "the event was injected over the control socket or a rehearsal script,"
+        " not produced by the engine itself",
+    ),
+    "reconcile": (
+        "runner.Engine.inject_host",
+        "runner.Engine._cutoff",
+        "the status came from resolving an incomplete run at resume, not from a"
+        " live adapter completion",
+    ),
+}
+
+EVENT_SOURCE_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="event_source",
+        member=member,
+        klass=SUPPORTED,
+        cite=f"ir-design ss7, DL-68, {site}",
+        effect=effect,
+        trigger=site,
+        quiet=other,
+    )
+    for member, (site, other, effect) in _SOURCE_SITES.items()
+)
+
+
+BOX_ARM_JIL = _estate(
+    MACHINE_BLOCK,
+    "insert_job: BOX0\njob_type: b",
+    "insert_job: MEM\njob_type: c\ncommand: true\nmachine: M0\nbox_name: BOX0\n"
+    'condition: s(GATE)\ndate_conditions: 1\ndays_of_week: all\nstart_times: "08:00"',
+    "insert_job: GATE\njob_type: c\ncommand: true\nmachine: M0",
+)
+SLA_START_JIL = _estate(
+    _job(date_conditions="1", days_of_week="all", start_times='"08:00"', must_start_times='"+30"'),
+    TICKER_BLOCK,
+)
+SLA_COMPLETE_JIL = _estate(
+    _job(
+        date_conditions="1", days_of_week="all", start_times='"08:00"', must_complete_times='"+20"'
+    ),
+    TICKER_BLOCK,
+)
+
+#: Every out-of-band marker `Oracle._record` can write: a trace line that is
+#: not a status transition. The status surface derives `JobStatus`; this one
+#: derives the vocabulary beside it.
+_TRACE_MARKERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    # member: (effect, the jil, the event script)
+    "ON_ICE": (
+        "the job is iced: downstream conditions read it as satisfied and it never runs",
+        BASE_JIL,
+        ("0 ON_ICE job=J0",),
+    ),
+    "OFF_ICE": (
+        "the ice is cleared; conditions are deliberately NOT re-evaluated",
+        BASE_JIL,
+        ("0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
+    ),
+    "ON_HOLD": (
+        "the job is held: it stays startable but no start goes through",
+        BASE_JIL,
+        ("0 ON_HOLD job=J0",),
+    ),
+    "OFF_HOLD": (
+        "the hold is released and the start is re-attempted immediately",
+        BASE_JIL,
+        ("0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
+    ),
+    "ON_NOEXEC": (
+        "the job is marked not-executing; it completes without running",
+        BASE_JIL,
+        ("0 ON_NOEXEC job=J0",),
+    ),
+    "OFF_NOEXEC": (
+        "the noexec flag is cleared",
+        BASE_JIL,
+        ("0 ON_NOEXEC job=J0", "1 OFF_NOEXEC job=J0"),
+    ),
+    "DISARM": (
+        "an explicit journaled disarm: the latched tick is dropped and nothing else moves",
+        BASE_JIL,
+        ("0 DISARM job=J0",),
+    ),
+    "START_REFUSED": (
+        "a start request the oracle declined, with the reason it declined it",
+        BASE_JIL,
+        ("0 STARTJOB job=J0", "1 STARTJOB job=J0"),
+    ),
+    "SCHED_ARM": (
+        "a schedule tick that could not start the job latched instead",
+        SLA_START_JIL,
+        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0"),
+    ),
+    "SCHED_DISARM": (
+        "an unconsumed member arm died with the box run that armed it",
+        BOX_ARM_JIL,
+        ("0 STARTJOB job=BOX0", "1 STARTJOB job=MEM", "2 STATUS job=BOX0 status=SUCCESS"),
+    ),
+    "MUST_START_ALARM": (
+        "the must_start deadline passed with no new run; no status moved",
+        SLA_START_JIL,
+        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0", "31 STATUS job=TICK status=SUCCESS"),
+    ),
+    "MUST_COMPLETE_ALARM": (
+        "the must_complete deadline passed with the run still live; no status moved",
+        SLA_COMPLETE_JIL,
+        ("0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
+    ),
+    "RUN_WINDOW_DEFER": (
+        "a start outside the run_window, closer to the next opening, was queued for it",
+        _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+        ("0 STARTJOB job=J0",),
+    ),
+    "RUN_WINDOW_SKIP": (
+        "a start outside the run_window, closer to the previous close, was dropped",
+        _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
+        ("0 STARTJOB job=J0",),
+    ),
+}
+
+TRACE_MARKER_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="trace_marker",
+        member=member,
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect=effect,
+        trigger=_scn(jil, *events),
+    )
+    for member, (effect, jil, events) in _TRACE_MARKERS.items()
+)
+
+
+FOREIGN_MACHINE = "insert_machine: FAR\ntype: a\nnode_name: otherhost"
+LOCAL_MACHINE = "insert_machine: LOC\ntype: a\nnode_name: localhost"
+POOL_MACHINE = "insert_machine: POOL\ntype: v\nmachine: LOC\nmachine: FAR"
+
+
+def _placed(machine: str, *blocks: str) -> str:
+    """An estate whose one job is placed on `machine`."""
+    return _estate(
+        MACHINE_BLOCK,
+        *blocks,
+        f"insert_job: J0\njob_type: c\ncommand: true\nmachine: {machine}",
+    )
+
+
+LOCAL_ESTATE = _placed("LOC", LOCAL_MACHINE)
+FOREIGN_ESTATE = _placed("FAR", FOREIGN_MACHINE)
+
+#: Preflight's own verdict vocabulary. Fixtures here deliberately produce
+#: preflight findings -- that is what the surface enumerates.
+_PREFLIGHT_CODES: dict[str, tuple[str, str, str, str]] = {
+    # member: (class, cite, effect, the estate)
+    "resources": (
+        REFUSED,
+        "runner_preflight._resource_preflight, DL-50",
+        "a resource the oracle cannot model faithfully refuses the run",
+        _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
+    ),
+    "owner": (
+        REFUSED,
+        "runner_preflight._owner_preflight",
+        "an owner other than the invoking user refuses the run: there is no setuid",
+        _job(owner="someone_else"),
+    ),
+    "machine": (
+        REFUSED,
+        "runner_preflight._machine_preflight, DL-49",
+        "a job whose machine does not resolve to this host refuses the run:"
+        " there is no remote fabric",
+        FOREIGN_ESTATE,
+    ),
+    "machine-mixed": (
+        SUPPORTED,
+        "runner_preflight._machine_preflight, DL-49",
+        "a pool with some members here and some elsewhere runs here under"
+        " local-eligible, with a warning that pool placement was ignored",
+        _placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
+    ),
+    "calendar": (
+        REFUSED,
+        "runner_preflight._calendar_preflight, DL-56",
+        "a calendar the scheduler cannot read or that can never fire refuses the run",
+        _job(date_conditions="1", run_calendar="MISSING"),
+    ),
+    "timezone": (
+        REFUSED,
+        "runner_preflight._timezone_preflight, SEM-35",
+        "a timezone name the SEM-35 ladder cannot resolve refuses the run",
+        _job(
+            date_conditions="1",
+            days_of_week="all",
+            start_times='"08:00"',
+            timezone="Mars/Olympus",
+        ),
+    ),
+    "n-retrys": (
+        SUPPORTED,
+        "runner_preflight._retry_preflight, DL-53",
+        "the run is warned, not refused: n_retrys is carried and never applied,"
+        " so the job runs exactly once",
+        _job(n_retrys="2"),
+    ),
+    "skeleton-cycle": (
+        SUPPORTED,
+        "runner_preflight._skeleton_cycle_preflight, DL-13",
+        "a cycle in the AND-success skeleton is legal AutoSys; it warns and"
+        " disables `plan` rather than refusing the run",
+        _estate(
+            MACHINE_BLOCK,
+            "insert_job: A\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(B)",
+            "insert_job: B\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(A)",
+        ),
+    ),
+    "job-type": (
+        REFUSED,
+        "runner_preflight._job_type_preflight",
+        "a job_type with no adapter refuses the run; no JIL reaches this gate,"
+        " because lowering already refuses every type outside CMD/BOX/FW",
+        BASE_JIL,
+    ),
+    "oracle": (
+        REFUSED,
+        "runner_preflight._oracle_preflight",
+        "an oracle that will not construct over this catalog refuses the run;"
+        " no JIL reaches this gate, because lowering builds no such catalog",
+        BASE_JIL,
+    ),
+}
+
+#: The two codes no JIL can reach: their fixtures are ordinary estates that
+#: show the gate passing, and the row says so rather than pretending to
+#: trigger it (`simulation_register.UNREACHABLE`).
+_UNREACHABLE_CODES = frozenset({"job-type", "oracle"})
+
+PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
+    _row(
+        surface="preflight_code",
+        member=member,
+        klass=klass,
+        cite=cite,
+        effect=effect,
+        trigger=estate,
+        quiet=GLOBAL_JIL if member in _UNREACHABLE_CODES else None,
+    )
+    for member, (klass, cite, effect, estate) in _PREFLIGHT_CODES.items()
+)
+
+
+DEMAND_ROWS: tuple[Row, ...] = _rows(
+    "demand_mode",
+    ("acquire", "gate"),
+    klass=SUPPORTED,
+    cite="DL-50, capacity.requirement_demand",
+    effect="a requirement in {member} mode is what one resources group does to its bucket",
+    trigger=lambda m: _job(
+        f"insert_resource: R0\nres_type: {'T' if m == 'gate' else 'R'}\namount: 4",
+        resources="(R0, QUANTITY=1)",
+    ),
+)
+
+MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
+    _row(
+        surface="machine_verdict",
+        member="local",
+        klass=SUPPORTED,
+        cite="DL-49, DL-52",
+        effect="the job's machine resolves to a name this runner answers to, so it runs here",
+        trigger=LOCAL_ESTATE,
+        quiet=FOREIGN_ESTATE,
+    ),
+    _row(
+        surface="machine_verdict",
+        member="foreign",
+        klass=SUPPORTED,
+        cite="DL-49, DL-52",
+        effect="the job's machine resolves elsewhere; preflight refuses the run rather"
+        " than running it on the wrong host",
+        trigger=FOREIGN_ESTATE,
+        quiet=LOCAL_ESTATE,
+    ),
+    _row(
+        surface="machine_verdict",
+        member="mixed",
+        klass=SUPPORTED,
+        cite="DL-49",
+        effect="a pool with members on both sides; the machine policy decides whether it runs here",
+        trigger=_placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
+        quiet=LOCAL_ESTATE,
+    ),
+    _row(
+        surface="machine_verdict",
+        member="error",
+        klass=REFUSED,
+        cite="runner_preflight.resolve_machine, DL-49",
+        effect="a machine definition the resolver cannot read -- no type, an empty pool,"
+        " a nested or undefined member -- is refused, never guessed",
+        trigger=_placed("BADPOOL", "insert_machine: BADPOOL\ntype: v"),
+        quiet=LOCAL_ESTATE,
     ),
 )
 
@@ -2141,5 +2545,10 @@ ROWS: tuple[Row, ...] = (
     + SCENARIO_ROWS
     + PROFILE_ROWS
     + ADAPTER_ROWS
+    + EVENT_SOURCE_ROWS
+    + TRACE_MARKER_ROWS
+    + PREFLIGHT_CODE_ROWS
+    + DEMAND_ROWS
+    + MACHINE_VERDICT_ROWS
     + RUNTIME_ROWS
 )
