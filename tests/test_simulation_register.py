@@ -354,11 +354,18 @@ LITERAL_ALT_EXCLUDED = frozenset(
         "runner_preflight.MachineVerdict",  # machine_verdict
         "oracle_state.EventSource",  # event_source
         "autocal.ActionCategory",  # cal_action, whose members are its pairs
+        "period.MachinePolicy",  # profile_alt:machine_policy=*
+        "period.RuntimeProfile.execution_mode",  # profile_alt:execution_mode=*
+        # the estate-layout sentinel is part of the period model's on-disk
+        # contract, closed by that document's own obligations (DL-209)
+        "period.Sentinel.rec",
+        "period.Sentinel.see",
     }
 )
 
 LITERAL_ALT_MODULES = (
     "ir",
+    "period",
     "conditions",
     "oracle_state",
     "oracle",
@@ -409,6 +416,19 @@ def _literal_alts() -> set[str]:
                         if alts and key not in LITERAL_ALT_EXCLUDED:
                             out |= {f"{node.name}.{stmt.target.id}={alt}" for alt in alts}
     return out
+
+
+def test_every_cited_literal_module_is_scanned() -> None:
+    """Breaks when a `literal_alt` row names a module the domain scan does
+    not read -- the row would then be held to nothing."""
+    unscanned = sorted(
+        {
+            row.trigger.split(".")[0]
+            for row in rows_for("literal_alt")
+            if row.trigger.split(".")[0] not in LITERAL_ALT_MODULES
+        }
+    )
+    assert unscanned == [], f"literal_alt rows cite unscanned modules: {unscanned}"
 
 
 def test_no_other_module_builds_an_adapter_outcome() -> None:
@@ -775,15 +795,20 @@ def _stamps_source(qualname: str, value: str) -> bool:
 
 
 def _declares_literal(qualname: str, member: str) -> bool:
-    """Whether that module (or class) declares the member's alternative. The
-    member is `Name=alt` or `Class.field=alt`, and the fixture names the
-    module-qualified site that declares it."""
+    """Whether THAT site declares the member's alternative.
+
+    The site must be the declaring class (`module.Class` for a
+    `Class.field=alt` member) or the module itself (for a module-level
+    alias). Matching on the module alone let any class or function in the
+    file satisfy the row, which made the fixture say nothing about where the
+    alternative lives."""
     field, _, alternative = member.rpartition("=")
-    module = qualname.split(".")[0]
-    for candidate in _literal_declarations(module):
-        if candidate == f"{field}={alternative}":
-            return True
-    return False
+    module, _, rest = qualname.partition(".")
+    declarations = _literal_declarations(module)
+    if f"{field}={alternative}" not in declarations:
+        return False
+    owner = field.rpartition(".")[0]
+    return rest == owner
 
 
 @cache
@@ -951,31 +976,37 @@ AS_MACHINE = frozenset({"m0"})
 LOCAL_IDENTITY = frozenset({"localhost", "m0"})
 
 
-def _preflight_items(catalog: ir.CatalogIR) -> list[runner_preflight.PreflightItem]:
-    """Preflight under BOTH machine policies, de-duplicated: `machine-mixed`
-    exists only under local-eligible and `machine` only under strict, so one
-    policy alone cannot enumerate the code space -- but every other rule
-    reports the same finding twice.
+def _preflight_under(catalog: ir.CatalogIR, policy: str) -> list[runner_preflight.PreflightItem]:
+    """Preflight under one machine policy -- a configuration an operator can
+    actually run.
 
     The owner rule reads `getpass.getuser()`, so the `owner` fixture states a
     name no account has rather than pinning one here."""
-    seen: dict[tuple[str, str, str | None, str], runner_preflight.PreflightItem] = {}
-    for policy in ("strict", "local-eligible"):
-        for item in runner_preflight.preflight(
-            catalog,
-            execution=True,
-            as_machine=AS_MACHINE,
-            start=PREFLIGHT_START,
-            machine_policy=policy,  # type: ignore[arg-type]
-        ):
-            seen.setdefault((item.severity, item.code, item.job, item.message), item)
-    return list(seen.values())
+    return runner_preflight.preflight(
+        catalog,
+        execution=True,
+        as_machine=AS_MACHINE,
+        start=PREFLIGHT_START,
+        machine_policy=policy,  # type: ignore[arg-type]
+    )
+
+
+def _preflight_codes_of(catalog: ir.CatalogIR) -> set[str]:
+    """Every code this estate can produce, over BOTH policies: `machine-mixed`
+    exists only under local-eligible and `machine` only under strict, so one
+    policy alone cannot enumerate the code space. Used for the DOMAIN, never
+    for the gate -- the union is stricter than any real configuration."""
+    return {
+        item.code
+        for policy in ("strict", "local-eligible")
+        for item in _preflight_under(catalog, policy)
+    }
 
 
 def _detect_lowered(surface: str, member: str, text: str) -> bool:
     catalog = ir.lower_source(text)
     if surface == "preflight_code":
-        return any(item.code == member for item in _preflight_items(catalog))
+        return member in _preflight_codes_of(catalog)
     if surface == "demand_mode":
         return any(
             capacity.requirement_demand(
@@ -1171,8 +1202,14 @@ def marker_sites() -> dict[str, list[str]]:
             for label in MARKER_RE.findall(line):
                 if SKIP_LABEL_RE.match(label):
                     continue
-                member = f"{label}@{path.stem}.{_enclosing_qualname(tree, number)}"
-                out.setdefault(member, []).append(f"{path.name}:{number}")
+                scope = f"{label}@{path.stem}.{_enclosing_qualname(tree, number)}"
+                # one member per marker LINE, not per (label, function): two
+                # defaults pinned in one function are two behaviours, and
+                # keying on the function let the second ride the first's row.
+                # The ordinal, not the line number, keeps the id stable under
+                # edits elsewhere in the file.
+                ordinal = sum(1 for key in out if key.rsplit("#", 1)[0] == scope) + 1
+                out[f"{scope}#{ordinal}"] = [f"{path.name}:{number}"]
     return out
 
 
@@ -1322,9 +1359,10 @@ def test_every_regex_member_pins_its_pattern() -> None:
     missing = [row.id for row in rows_for("cal_family") if row.pattern is None]
     # lark tells the two apart itself: a fixed-string terminal (the anonymous
     # punctuation) has nothing to read, a regex one does
-    regex_terminals = {
-        term.name for term in _lex_parser().terminals if term.pattern.type == "re"
-    } - set(_lex_parser().ignore_tokens)
+    # `%ignore` changes how a terminal is CONSUMED, not whether it has a
+    # regex to read: WS is pinned like INT, which lark imports from the same
+    # common set
+    regex_terminals = {term.name for term in _lex_parser().terminals if term.pattern.type == "re"}
     for row in rows_for("cond_terminal"):
         if row.member in regex_terminals and row.pattern is None:
             missing.append(row.id)
@@ -1420,14 +1458,17 @@ GEN_FROM = datetime(2026, 1, 1).date()
 GEN_TO = datetime(2026, 12, 31).date()
 
 #: The rows whose fixture produces a preflight ERROR ON PURPOSE, because the
-#: ERROR IS the behaviour the row exposes. Named one by one, not by surface:
-#: `preflight_code:n-retrys` and `:skeleton-cycle` are WARN rules and lose
-#: nothing by staying under the gate.
+#: ERROR is what the row exposes -- or, for the three placement rows, because
+#: no estate that shows the verdict can also pass the gate. Named one by one,
+#: not by surface: `preflight_code:n-retrys` and `:skeleton-cycle` are WARN
+#: rules and stay under the gate.
 PREFLIGHT_EXEMPT = frozenset(
     {
+        # a mixed pool is an ERROR under `strict`, which is the policy the
+        # gate runs; it is a WARN only under `local-eligible`
         "preflight_code:machine-mixed",
-        "machine_verdict:foreign",
         "machine_verdict:mixed",
+        "machine_verdict:foreign",
         # its QUIET half has to be a machine that is NOT local, and every
         # such estate is a preflight ERROR by construction
         "machine_verdict:local",
@@ -1464,7 +1505,7 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
                 refused_here.append(f"calendar: {exc}")
         refused_here += [
             f"preflight: {item.code}: {item.message}"
-            for item in _preflight_items(catalog)
+            for item in _preflight_under(catalog, "strict")
             if item.severity == "ERROR"
         ]
     if row.id in UNREACHABLE:

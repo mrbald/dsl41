@@ -193,11 +193,11 @@ class Failed:
     cause: str
 
 
-#: int = RAW exit code (SEM-09/DL-33 verdict stays oracle-side)
 #: Every `status.json` outcome the wrapper can write, derived from its own
 #: Literal so the adapter cannot drift from the writer.
 WRAPPER_OUTCOMES: Final[frozenset[str]] = frozenset(get_args(WrapperOutcome))
 
+#: int = RAW exit code (SEM-09/DL-33 verdict stays oracle-side)
 AdapterResult = int | Terminated | Failed
 
 
@@ -290,9 +290,14 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
     record maps to FAILURE with a truthful cause -- never to anything that
     could satisfy a success-dependent downstream."""
     outcome = status.get("outcome")
-    if outcome not in WRAPPER_OUTCOMES:
+    if not isinstance(outcome, str) or outcome not in WRAPPER_OUTCOMES:
         # the vocabulary is the wrapper's (DL-209); an outcome outside it is
-        # refused here rather than falling through four `==` comparisons
+        # refused here rather than falling through four `==` comparisons.
+        # The isinstance guard is load-bearing: `outcome` comes out of a
+        # decoded status.json, where it can be a list or a dict, and a set
+        # membership test on an unhashable value raises instead of refusing
+        # -- which would crash the reader this function exists to keep
+        # truthful.
         return Failed(f"unrecognized status record outcome {outcome!r}")
     if outcome == "exited":
         exit_code = status.get("exit_code")

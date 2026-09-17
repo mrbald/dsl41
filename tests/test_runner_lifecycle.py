@@ -1051,6 +1051,13 @@ def test_m3_malformed_status_records_map_truthfully() -> None:
     assert unsigned == Terminated("killed by signal (unrecorded)")
     unknown = outcome_from_status({"outcome": "gremlins"})
     assert isinstance(unknown, Failed) and "unrecognized" in unknown.cause
+    # a corrupt record's outcome need not be a STRING: `load_json` admits
+    # nested JSON, so a list or a dict reaches this function and must still
+    # degrade to a truthful FAILURE rather than crash the reader
+    for corrupt in ([], {"a": 1}, ["exited"], 7, None):
+        refused = outcome_from_status({"outcome": corrupt})
+        assert isinstance(refused, Failed), corrupt
+        assert "unrecognized" in refused.cause, corrupt
 
 
 def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None:

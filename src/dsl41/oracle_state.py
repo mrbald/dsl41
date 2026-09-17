@@ -103,7 +103,13 @@ class Event(BaseModel):
     #: provenance of an externally injected event -- the engine's ss7 input
     #: alphabet; None for oracle-internal and script events. Start causes
     #: surface it (DL-68).
-    source: EventSource | None = None
+    #: DELIBERATELY `str`, not `EventSource`: this field is persisted (WAL
+    #: attempts, scenario files) and `docs/protocol-evolution.md` holds a
+    #: long-lived artifact to its own schema. A foreign or older journal
+    #: naming a provenance this build does not know must still REPLAY; the
+    #: Literal above is what the engine annotates and what the coverage
+    #: register derives from, not a validation gate on the wire.
+    source: str | None = None
 
     def job(self) -> str | None:
         job = self.payload.get("job")

@@ -93,7 +93,7 @@ a row fails the suite.
 | job_attr:auto_delete | passthrough | dossier ss5, DL-32 | - | generic | the definition is never deleted; the catalog is static for the run |
 | job_attr:auto_hold | supported | dossier ss5 | - | generic | the member enters ON_HOLD when its box starts, instead of starting with it |
 | job_attr:avg_runtime | passthrough | dossier ss5, DL-32 | - | generic | the statistics seed is carried; no runtime estimate is computed from it |
-| job_attr:box_failure | supported | SEM-12 | - | generic | overrides a box's failure verdict, evaluated on every member transition while the box is RUNNING; the default fold runs only if no override fired |
+| job_attr:box_failure | supported | SEM-12 | - | generic | overrides a box's failure verdict, evaluated on every member transition while the box is RUNNING; DECLARING it suppresses the matching default fold, so an override that never becomes true leaves the box RUNNING (SEM-12) |
 | job_attr:box_name | supported | SEM-11 | - | generic | names the box this job is a member of; the box's start starts the member |
 | job_attr:box_success | supported | SEM-12 | - | generic | overrides a box's success verdict, evaluated on every member transition while the box is RUNNING, so an internal reference can finish the box early |
 | job_attr:box_success#iced-member | provisional | SEM-12, SEM-20 | Q6 | none | an iced member is read as satisfied inside box_success, the same way it is read inside an ordinary condition |
@@ -149,7 +149,7 @@ a row fails the suite.
 | job_attr:resources#duplicate | refused | runner_preflight._resource_preflight, DL-50 | - | none | a job naming one resource twice is refused at preflight as ambiguous demand; a direct oracle caller instead SUMS the quantities and takes the most restrictive release policy |
 | job_attr:run_calendar | supported | SEM-30, DL-56 | - | generic | the named calendar whose days are the schedule's day set |
 | job_attr:run_window | supported | SEM-33 | - | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early |
-| job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._run_window_permits | - | none | a window whose endpoints are equal is one minute wide, not zero and not all day; the pin is undocumented and no label was opened for it |
+| job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._run_window_permits | - | none | a window whose endpoints are equal ADMITS that one instant -- `lo <= now <= hi` is inclusive at both ends, so the window is not empty and not all day; the pin is undocumented and no label was opened for it |
 | job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._run_window_permits | - | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
 | job_attr:send_notification | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:start_mins | supported | SEM-32 | - | generic | the minutes past each hour a schedule tick fires at on an eligible day |
@@ -219,7 +219,7 @@ a row fails the suite.
 | calendar_attr:end_date | supported | SEM-39 | - | generic | closes the cycle period its preceding start_date opened |
 | calendar_attr:holcal | supported | SEM-36 | - | generic | names the standard calendar whose days are this calendar's holidays |
 | calendar_attr:holiday | supported | SEM-36, SEM-38 | - | generic | what happens to a generated day that is a holiday; it governs holcal dates outright |
-| calendar_attr:holiday#absent | supported | SEM-38, DL-58, autocal.CompiledCalendar._dispose | - | none | with no holiday action a holcal date is handled by the non_workday action, if there is one, and otherwise kept |
+| calendar_attr:holiday#absent | supported | SEM-38, DL-58, autocal.CompiledCalendar._dispose | - | none | with no holiday action a holcal date gets no treatment of its own: it falls through to the non_workday branch, which only acts on a day that is not a workday, so a holiday ON a workday is kept untouched |
 | calendar_attr:non_workday | supported | SEM-36, SEM-38 | - | generic | what happens to a generated day that is not a workday: filter or replacement |
 | calendar_attr:non_workday#absent | supported | SEM-38, autocal.CompiledCalendar._dispose | - | none | with no non_workday action a generated day is kept exactly as it falls |
 | calendar_attr:start_date | supported | SEM-39 | - | generic | opens one cycle period; it pairs positionally with the end_date after it |
@@ -376,7 +376,7 @@ a row fails the suite.
 | cond_terminal:STATUS_KW=terminated | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes STATUS_KW=terminated and the transformer gives it its SEM meaning |
 | cond_terminal:VALUE_KW=v | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes VALUE_KW=v and the transformer gives it its SEM meaning |
 | cond_terminal:VALUE_KW=value | supported | SEM-02, SEM-03, SEM-04 | - | generic | the grammar lexes VALUE_KW=value and the transformer gives it its SEM meaning |
-| cond_terminal:WS | supported | SEM-02, SEM-03, SEM-04 | - | generic | whitespace between tokens, ignored by the lexer and never a token |
+| cond_terminal:WS | supported | SEM-02, SEM-03, SEM-04 | - | generic | whitespace between tokens -- space, tab, form feed, carriage return or newline -- lexed and then discarded, so it is never a token |
 
 ### lookback_kind
 
@@ -482,7 +482,7 @@ a row fails the suite.
 | cal_action:holiday:s | supported | SEM-38 | - | generic | keep the holiday unchanged, and shield it from the non_workday action |
 | cal_action:holiday:w | supported | SEM-38 | - | generic | walk FORWARD to the next non-holiday workday and use that date |
 | cal_action:non_workday:n | supported | SEM-38 | - | generic | replace the date with the next workday that is also not a holiday |
-| cal_action:non_workday:n#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | every replacement target is final, for N and for W/P and in both categories: the date-conditions are not re-checked and a replaced date never re-enters the other category |
+| cal_action:non_workday:n#target-recheck | provisional | SEM-38, DL-59 | Q8c | none | a replacement target is final: the date-conditions are not re-checked and a replaced date never re-enters the other category. The categories differ in what they avoid -- a holiday walk skips holidays, a non_workday walk does not, so non_workday W/P can land on one |
 | cal_action:non_workday:o | supported | SEM-38 | - | generic | restrict to non-workdays: a generated day that IS a workday is dropped |
 | cal_action:non_workday:p | supported | SEM-38 | - | generic | walk BACKWARD to the previous workday and use that date |
 | cal_action:non_workday:s | supported | SEM-38 | - | generic | keep the date unchanged; the day is generated as it falls |
@@ -521,7 +521,7 @@ a row fails the suite.
 | event:ON_ICE | supported | ir-design ss7 | - | generic | ices a job: downstream conditions read it as satisfied and it never runs |
 | event:ON_ICE#armed | provisional | SEM-20, oracle.Oracle._handle_oob | Q3d | none | a pre-existing arm survives the ice round trip untouched |
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
-| event:ON_ICE#running | provisional | SEM-05, SEM-20, oracle.Oracle._atom_true | - | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes; no label was opened for the exception |
+| event:ON_ICE#running | provisional | SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true | - | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes (DL-13); no label was opened for the exception |
 | event:ON_NOEXEC | supported | ir-design ss7 | - | generic | marks a job as not executing; it completes without running |
 | event:SET_GLOBAL | supported | ir-design ss7 | - | generic | sets a global and wakes every job whose condition reads it |
 | event:STARTJOB | supported | ir-design ss7 | - | generic | a schedule tick or operator start; it arms must_start whether or not it starts |
