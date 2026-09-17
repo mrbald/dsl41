@@ -99,7 +99,7 @@ a row fails the suite.
 | job_attr:box_success#iced-member | provisional | SEM-12, SEM-20 | Q6 | none | an iced member is read as satisfied inside box_success, the same way it is read inside an ordinary condition |
 | job_attr:box_terminator | supported | SEM-14 | - | generic | this member's failure terminates the whole box |
 | job_attr:chk_files | passthrough | dossier ss5, DL-32 | - | generic | the pre-start disk-space gate is not evaluated; the job starts regardless |
-| job_attr:command | supported | dossier ss6 | - | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
+| job_attr:command | supported | runner-design ss6 | - | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
 | job_attr:condition | supported | SEM-02, SEM-08 | - | generic | the start gate: the job starts on the edge where its condition becomes true |
 | job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | none | a job admitted out of QUE_WAIT does not re-evaluate its condition |
 | job_attr:date_conditions | supported | SEM-30 | - | generic | the master switch: the time cluster is honoured only when it is truthy |
@@ -125,8 +125,10 @@ a row fails the suite.
 | job_attr:max_run_alarm | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:min_run_alarm | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:must_complete_times | supported | SEM-34 | - | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
+| job_attr:must_complete_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - | none | an ABSOLUTE must_complete_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
 | job_attr:must_complete_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - | none | an instant matching no start time uses the first offset; no label was opened for the corner |
 | job_attr:must_start_times | supported | SEM-34 | - | generic | the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and changes no status |
+| job_attr:must_start_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - | none | an ABSOLUTE must_start_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - | none | an instant matching no start time uses the first offset; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
 | job_attr:notification_alarm_types | passthrough | dossier ss5, DL-32 | - | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -161,11 +163,11 @@ a row fails the suite.
 | job_attr:timezone | supported | SEM-35 | - | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - | generic | no resource limit is applied to the child process |
-| job_attr:watch_file | supported | dossier ss6 | - | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
+| job_attr:watch_file | supported | runner-design ss6 | - | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
-| job_attr:watch_file_min_size | supported | dossier ss6 | - | generic | the size the watched file must reach before the FW job completes |
+| job_attr:watch_file_min_size | supported | runner-design ss6 | - | generic | the size the watched file must reach before the FW job completes |
 | job_attr:watch_file_min_size#steady-size | provisional | runner_adapters.FileWatcherAdapter | E6 | none | two consecutive qualifying polls must report the SAME size before the watch completes; a file still growing resets the count |
-| job_attr:watch_interval | supported | dossier ss6 | - | generic | the poll interval of an FW job, in seconds |
+| job_attr:watch_interval | supported | runner-design ss6 | - | generic | the poll interval of an FW job, in seconds |
 | job_attr:watch_interval#default | provisional | runner_adapters.FileWatcherAdapter | E6 | none | an FW job with no watch_interval polls at the profile's default interval |
 
 ### machine_attr
@@ -577,7 +579,7 @@ a row fails the suite.
 
 | id | class | cite | label | detector | effect |
 | --- | --- | --- | --- | --- | --- |
-| adapter_outcome:Failed | supported | dossier ss6 | - | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
+| adapter_outcome:Failed | supported | runner-design ss6 | - | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
 | adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - | generic | a dispatch whose run directory is gone provably never reached the host, so it fails rather than being retried blind |
 | adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | generic | a resumed run with no status record fails rather than guessing an exit code |
 | adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15 | E7 | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code; both the tethered and the supervised adapter build it |
@@ -585,11 +587,11 @@ a row fails the suite.
 | adapter_outcome:Failed=spawn failed: {} | supported | runner_adapters.outcome_from_status | - | generic | the wrapper recorded that the spawn itself failed; the run never started |
 | adapter_outcome:Failed=unrecognized status record outcome {} | refused | runner_adapters.outcome_from_status | - | generic | a status record whose outcome the protocol does not define is refused, never guessed |
 | adapter_outcome:Failed=wrapper spawn failed: {} | supported | runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run | - | generic | the engine could not spawn the wrapper at all; the run never started |
-| adapter_outcome:Terminated | supported | dossier ss6, DL-41a | - | generic | an OBSERVED kill; the engine injects STATUS TERMINATED for it |
+| adapter_outcome:Terminated | supported | runner-design ss6, DL-41a | - | generic | an OBSERVED kill; the engine injects STATUS TERMINATED for it |
 | adapter_outcome:Terminated#external-signal | provisional | runner_adapters | E8 | none | a kill by an external signal is reported as TERMINATED, the same verdict an oracle-ordered kill gets |
 | adapter_outcome:Terminated=<dynamic:outcome_from_status> | supported | runner_adapters.outcome_from_status, DL-41a | - | generic | a signalled or terminated status record carries its own cause text into the TERMINATED verdict |
 | adapter_outcome:Terminated=wrapper lost; killed at resume | supported | runner_adapters.resolve_spool | - | generic | a resume that finds the wrapper gone kills the surviving command group and reports the kill that happened |
-| adapter_outcome:int | supported | dossier ss6, SEM-09 | - | generic | a raw exit code; the SUCCESS/FAILURE verdict over it stays oracle-side |
+| adapter_outcome:int | supported | runner-design ss6, SEM-09 | - | generic | a raw exit code; the SUCCESS/FAILURE verdict over it stays oracle-side |
 
 ### wrapper_outcome
 
