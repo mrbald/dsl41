@@ -62,10 +62,24 @@ _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DAY_CODES2 = ("mo", "tu", "we", "th", "fr", "sa", "su")
 _MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
+#: `compile_calendar`'s attribute allow-list (SEM-36), lifted from a local
+#: so the simulation coverage register derives its calendar surface from the
+#: code object rather than from a second copy of the list (DL-209).
+CALENDAR_ATTRS = frozenset(
+    {"description", "workday", "non_workday", "holiday", "holcal", "cyccal", "adjust"}
+)
+
 #: Doc-defective tokens (SEM-37): WORKDXnn's text contradicts its
 #: month-scoped siblings; the CWEK family's definitions are garbled in
 #: the vendor's own render. Refused outright, no default, no switch.
-_DEFECTIVE_RE = re.compile(r"workdx\d+|cwek(#(\d|l)|m\d|x\d)", re.ASCII)
+#: Named per family (DL-209) so the register can carry a refusal row for each.
+_DEFECTIVE_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("workdx", re.compile(r"workdx\d+", re.ASCII)),
+    ("cwek", re.compile(r"cwek(#(\d|l)|m\d|x\d)", re.ASCII)),
+)
+_DEFECTIVE_RE = re.compile(
+    "|".join(pattern.pattern for _, pattern in _DEFECTIVE_FAMILIES), re.ASCII
+)
 
 
 def standard_rows(cal: CalendarIR) -> dict[date, frozenset[tuple[int, int]]]:
@@ -223,6 +237,270 @@ def _ordinal(cal: str, raw: str, letter: str, digits: str, *, lo: int, hi: int) 
     return n, back
 
 
+#: The rule-expression alphabet, lifted so the coverage register can derive
+#: the operator surface from it (DL-209). `{}` group exactly like `()` -- the
+#: observed export sample writes braces ({MNTHD#7} | {MNTHD#21}) where
+#: TechDocs shows parens; accepted as synonyms (Q9, DL-60).
+_GROUP_CHARS: dict[str, str] = {"(": "(", ")": ")", "{": "(", "}": ")"}
+#: `&`/`|` and their word synonyms (PENDING: Q8d), to the AST node kind.
+_BINARY_OPS: dict[str, Literal["and", "or"]] = {"&": "and", "|": "or", "and": "and", "or": "or"}
+_UNARY_OPS = frozenset({"not"})
+#: The X- prefix exclusion convention (SEM-37) and the rule-list separator.
+_EXCLUSION_PREFIX = "x"
+_RULE_SEPARATOR = ","
+
+
+def _workday_seq(day: date, ctx: _Ctx) -> list[date]:
+    """The month's workdays, in order -- the sequence WORKD#n counts into."""
+    return _month_matching(day, lambda d: d.weekday() in ctx.workdays)
+
+
+def _month_keyword(month: int) -> _Pred:
+    return lambda d, c: d.month == month
+
+
+def _weekday_keyword(weekday: int) -> _Pred:
+    return lambda d, c: d.weekday() == weekday
+
+
+#: SEM-37's bare keywords: body -> (day predicate, cycle_scoped). Lifted from
+#: `_parse_token`'s branch chain so the token inventory is a code object the
+#: coverage register derives its calendar surface from (DL-209). The month and
+#: day names are built from the tuples above; a keyword and a family pattern
+#: never match the same body, so testing the whole table before the family
+#: loop reads exactly as the interleaved branch chain did.
+_KEYWORDS: dict[str, tuple[_Pred, bool]] = {
+    "daily": (lambda d, c: True, False),
+    "workdays": (lambda d, c: d.weekday() in c.workdays, False),
+    # [V] auto-subtracts the holiday calendar (SEM-37 quote)
+    "weekdays": (lambda d, c: d.weekday() < 5 and d not in c.holidays, False),
+    "fomwork": (lambda d, c: bool(s := _workday_seq(d, c)) and d == s[0], False),
+    "eomwork": (lambda d, c: bool(s := _workday_seq(d, c)) and d == s[-1], False),
+    "fomweek": (
+        lambda d, c: bool(s := _month_matching(d, lambda x: x.weekday() < 5)) and d == s[0],
+        False,
+    ),
+    "eomweek": (
+        lambda d, c: bool(s := _month_matching(d, lambda x: x.weekday() < 5)) and d == s[-1],
+        False,
+    ),
+    "fom": (lambda d, c: d.day == 1, False),
+    "eom": (lambda d, c: d.day == _month_days(d), False),
+    "cycle": (lambda d, c: _period_of(d, c) is not None, True),
+    **{name: (_month_keyword(i + 1), False) for i, name in enumerate(_MONTH_NAMES)},
+    **{name: (_weekday_keyword(i), False) for i, name in enumerate(_DAY_NAMES)},
+}
+
+
+#: One family builder: (calendar name, raw token, the family match, the
+#: X-prefix flag) -> the token. Ordinal families accept a literal L count =
+#: "last" (from-end 1): the observed export sample uses WORKD#L, and the
+#: CWRK/Cddd families already documented the form -- extended uniformly
+#: (Q9, DL-60).
+_Builder = Callable[[str, str, "re.Match[str]", bool], _Token]
+
+
+def _mk(base: _Pred, *, excl: bool, cycle: bool = False) -> _Token:
+    """`excl` has NO default on purpose: the pre-table code closed over the
+    X-prefix flag, so a builder could not forget it. Required here restores
+    that -- a defaulted False would silently drop the exclusion."""
+    return _Token(base=base, exclusive=excl, cycle_scoped=cycle)
+
+
+def _b_workd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
+    return _mk(lambda d, c: _nth_of(_workday_seq(d, c), n, back=back) == d, excl=exclusive)
+
+
+def _b_weekd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=7)
+    pred: _Pred = (
+        (lambda d, c: (d - _week_start(d, _jan1_anchor(d))).days == 7 - n)
+        if back
+        else (lambda d, c: (d - _week_start(d, _jan1_anchor(d))).days == n - 1)
+    )
+    return _mk(pred, excl=exclusive or m.group(1) == "x")
+
+
+def _b_wekr(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    anchor = _DAY_NAMES.index(m.group(1))
+    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=7)
+    pred: _Pred = (
+        (lambda d, c: (d - _week_start(d, anchor)).days == 7 - n)
+        if back
+        else (lambda d, c: (d - _week_start(d, anchor)).days == n - 1)
+    )
+    return _mk(pred, excl=exclusive or m.group(2) == "x")
+
+
+def _b_week_parity(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    parity = 0 if m.group(1) == "e" else 1
+    return _mk(lambda d, c: _week_number(d) % 2 == parity, excl=exclusive)
+
+
+def _b_week(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
+    pred: _Pred = (
+        (lambda d, c: _week_number(d) == _year_weeks(d) - n + 1)
+        if back
+        else (lambda d, c: _week_number(d) == n)
+    )
+    return _mk(pred, excl=exclusive or m.group(1) == "x")
+
+
+def _b_mnthd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
+    pred: _Pred = (
+        (lambda d, c: d.day == _month_days(d) - n + 1) if back else (lambda d, c: d.day == n)
+    )
+    return _mk(pred, excl=exclusive or m.group(1) == "x")
+
+
+def _b_month_ordinal(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    month = _MONTH_NAMES.index(m.group(1)) + 1
+    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=31)
+    pred: _Pred = (
+        (lambda d, c: d.month == month and d.day == _month_days(d) - n + 1)
+        if back
+        else (lambda d, c: d.month == month and d.day == n)
+    )
+    return _mk(pred, excl=exclusive)
+
+
+def _b_day_ordinal(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    wd = _DAY_NAMES.index(m.group(1))
+    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=5)
+    return _mk(
+        lambda d, c: (
+            d.weekday() == wd
+            and _nth_of(_month_matching(d, lambda x: x.weekday() == wd), n, back=back) == d
+        ),
+        excl=exclusive,
+    )
+
+
+def _b_cycl(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
+
+    def cycl(d: date, c: _Ctx) -> bool:
+        hit = _period_of(d, c)
+        if hit is None:
+            return False
+        _, start, end = hit
+        idx = (end - d).days + 1 if back else (d - start).days + 1
+        return idx == n
+
+    return _mk(cycl, cycle=True, excl=exclusive or m.group(1) == "x")
+
+
+def _b_cycp(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n = _ord_in(cal, raw, m.group(1), 1, 30)
+    return _mk(
+        lambda d, c: (h := _period_of(d, c)) is not None and h[0] == n,
+        cycle=True,
+        excl=exclusive,
+    )
+
+
+def _b_cweek_parity(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    which = m.group(1)
+
+    def cweek_l(d: date, c: _Ctx) -> bool:
+        chunk = _period_chunk(d, c)
+        if chunk is None:
+            return False
+        wk, last = chunk
+        return wk == last if which == "l" else wk % 2 == (0 if which == "e" else 1)
+
+    return _mk(cweek_l, cycle=True, excl=exclusive)
+
+
+def _b_cweek(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    # no literal 'l' here -- `cweek#([eol])` above owns that spelling for
+    # this family; _ordinal's `last` branch is simply never taken
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
+
+    def cweek(d: date, c: _Ctx) -> bool:
+        chunk = _period_chunk(d, c)
+        if chunk is None:
+            return False
+        wk, last = chunk
+        return wk == (last - n + 1 if back else n)
+
+    return _mk(cweek, cycle=True, excl=exclusive or m.group(1) == "x")
+
+
+def _b_cwrk(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
+
+    def cwrk(d: date, c: _Ctx) -> bool:
+        seq = _period_matching(d, c, lambda x: x.weekday() in c.workdays)
+        if seq is None:
+            return False
+        return _nth_of(seq, n, back=back) == d
+
+    return _mk(cwrk, cycle=True, excl=exclusive or m.group(1) == "x")
+
+
+def _b_cddd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
+    wd = _DAY_NAMES.index(m.group(1))
+    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=53)
+
+    def cddd(d: date, c: _Ctx) -> bool:
+        if d.weekday() != wd:
+            return False
+        seq = _period_matching(d, c, lambda x: x.weekday() == wd)
+        if seq is None:
+            return False
+        return _nth_of(seq, n, back=back) == d
+
+    return _mk(cddd, cycle=True, excl=exclusive)
+
+
+#: SEM-37's regex token families, in the branch order `_parse_token` tested
+#: them in: name, pattern (matched against the X-stripped body), builder.
+#: Lifted for the same reason as `_KEYWORDS` (DL-209).
+_FAMILIES: tuple[tuple[str, re.Pattern[str], _Builder], ...] = (
+    ("workd", re.compile(r"workd([#m])(\d+|l)"), _b_workd),
+    ("weekd", re.compile(r"weekd([#mx])(\d+|l)"), _b_weekd),
+    ("wekr", re.compile(r"wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\d+|l)"), _b_wekr),
+    ("week_parity", re.compile(r"week#([eo])"), _b_week_parity),
+    ("week", re.compile(r"week([#mx])(\d+|l)"), _b_week),
+    ("mnthd", re.compile(r"mnthd([#mx])(\d+|l)"), _b_mnthd),
+    (
+        "month_ordinal",
+        re.compile(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)([#m])(\d+|l)"),
+        _b_month_ordinal,
+    ),
+    ("day_ordinal", re.compile(r"(mon|tue|wed|thu|fri|sat|sun)([#m])(\d|l)"), _b_day_ordinal),
+    ("cycl", re.compile(r"cycl([#mx])(\d+|l)"), _b_cycl),
+    ("cycp", re.compile(r"cycp#(\d+)"), _b_cycp),
+    ("cweek_parity", re.compile(r"cweek#([eol])"), _b_cweek_parity),
+    ("cweek", re.compile(r"cweek([#mx])(\d+)"), _b_cweek),
+    ("cwrk", re.compile(r"cwrk([#mx])(\d+|l)"), _b_cwrk),
+    ("cddd", re.compile(r"c(mon|tue|wed|thu|fri|sat|sun)([#m])(\d+|l)"), _b_cddd),
+)
+
+
+def classify_token(raw: str) -> tuple[str, str] | None:
+    """Which table `_parse_token` would read this token from, without
+    building a predicate: ("keyword"|"family"|"defective", name), or None for
+    a token the inventory does not hold. The coverage register's calendar
+    detectors and its SEM-37 domain test read this (DL-209); the parser
+    itself stays the authority on what a token MEANS."""
+    tok = raw.lower()
+    for name, pattern in _DEFECTIVE_FAMILIES:
+        if pattern.fullmatch(tok):
+            return "defective", name
+    body = tok[1:] if tok.startswith(_EXCLUSION_PREFIX) else tok
+    if body in _KEYWORDS:
+        return "keyword", body
+    for name, pattern, _builder in _FAMILIES:
+        if pattern.fullmatch(body):
+            return "family", name
+    return None
+
+
 def _parse_token(cal: str, raw: str) -> _Token:
     """One keyword to its day predicate. Case-insensitive (SEM-37 [V]);
     unknown and doc-defective tokens refuse loudly."""
@@ -232,165 +510,17 @@ def _parse_token(cal: str, raw: str) -> _Token:
 
     # the X- prefix exclusion convention; infix X-forms match per family.
     # No documented token starts with a non-exclusion 'x'.
-    exclusive = tok.startswith("x")
+    exclusive = tok.startswith(_EXCLUSION_PREFIX)
     body = tok[1:] if exclusive else tok
 
-    def mk(base: _Pred, *, cycle: bool = False, excl: bool = exclusive) -> _Token:
-        return _Token(base=base, exclusive=excl, cycle_scoped=cycle)
-
-    def workday_seq(day: date, ctx: _Ctx) -> list[date]:
-        return _month_matching(day, lambda d: d.weekday() in ctx.workdays)
-
-    if body == "daily":
-        return mk(lambda d, c: True)
-    if body == "workdays":
-        return mk(lambda d, c: d.weekday() in c.workdays)
-    if body == "weekdays":
-        # [V] auto-subtracts the holiday calendar (SEM-37 quote)
-        return mk(lambda d, c: d.weekday() < 5 and d not in c.holidays)
-    if body == "fomwork":
-        return mk(lambda d, c: bool(s := workday_seq(d, c)) and d == s[0])
-    if body == "eomwork":
-        return mk(lambda d, c: bool(s := workday_seq(d, c)) and d == s[-1])
-    if body == "fomweek":
-        return mk(
-            lambda d, c: bool(s := _month_matching(d, lambda x: x.weekday() < 5)) and d == s[0]
-        )
-    if body == "eomweek":
-        return mk(
-            lambda d, c: bool(s := _month_matching(d, lambda x: x.weekday() < 5)) and d == s[-1]
-        )
-    if body == "fom":
-        return mk(lambda d, c: d.day == 1)
-    if body == "eom":
-        return mk(lambda d, c: d.day == _month_days(d))
-    if body == "cycle":
-        return mk(lambda d, c: _period_of(d, c) is not None, cycle=True)
-
-    # ordinal families accept a literal L count = "last" (from-end 1): the
-    # observed export sample uses WORKD#L, and the CWRK/Cddd families already
-    # documented the form -- extended uniformly (Q9, DL-60)
-    if m := re.fullmatch(r"workd([#m])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
-        return mk(lambda d, c: _nth_of(workday_seq(d, c), n, back=back) == d)
-    if m := re.fullmatch(r"weekd([#mx])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=7)
-        pred: _Pred = (
-            (lambda d, c: (d - _week_start(d, _jan1_anchor(d))).days == 7 - n)
-            if back
-            else (lambda d, c: (d - _week_start(d, _jan1_anchor(d))).days == n - 1)
-        )
-        return mk(pred, excl=exclusive or m.group(1) == "x")
-    if m := re.fullmatch(r"wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\d+|l)", body):
-        anchor = _DAY_NAMES.index(m.group(1))
-        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=7)
-        pred = (
-            (lambda d, c: (d - _week_start(d, anchor)).days == 7 - n)
-            if back
-            else (lambda d, c: (d - _week_start(d, anchor)).days == n - 1)
-        )
-        return mk(pred, excl=exclusive or m.group(2) == "x")
-    if m := re.fullmatch(r"week#([eo])", body):
-        parity = 0 if m.group(1) == "e" else 1
-        return mk(lambda d, c: _week_number(d) % 2 == parity)
-    if m := re.fullmatch(r"week([#mx])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
-        pred = (
-            (lambda d, c: _week_number(d) == _year_weeks(d) - n + 1)
-            if back
-            else (lambda d, c: _week_number(d) == n)
-        )
-        return mk(pred, excl=exclusive or m.group(1) == "x")
-    if m := re.fullmatch(r"mnthd([#mx])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=31)
-        pred = (lambda d, c: d.day == _month_days(d) - n + 1) if back else (lambda d, c: d.day == n)
-        return mk(pred, excl=exclusive or m.group(1) == "x")
-    if body in _MONTH_NAMES:
-        month = _MONTH_NAMES.index(body) + 1
-        return mk(lambda d, c: d.month == month)
-    if m := re.fullmatch(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)([#m])(\d+|l)", body):
-        month = _MONTH_NAMES.index(m.group(1)) + 1
-        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=31)
-        pred = (
-            (lambda d, c: d.month == month and d.day == _month_days(d) - n + 1)
-            if back
-            else (lambda d, c: d.month == month and d.day == n)
-        )
-        return mk(pred)
-    if body in _DAY_NAMES:
-        wd = _DAY_NAMES.index(body)
-        return mk(lambda d, c: d.weekday() == wd)
-    if m := re.fullmatch(r"(mon|tue|wed|thu|fri|sat|sun)([#m])(\d|l)", body):
-        wd = _DAY_NAMES.index(m.group(1))
-        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=5)
-        return mk(
-            lambda d, c: (
-                d.weekday() == wd
-                and _nth_of(_month_matching(d, lambda x: x.weekday() == wd), n, back=back) == d
-            )
-        )
-    if m := re.fullmatch(r"cycl([#mx])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
-
-        def cycl(d: date, c: _Ctx) -> bool:
-            hit = _period_of(d, c)
-            if hit is None:
-                return False
-            _, start, end = hit
-            idx = (end - d).days + 1 if back else (d - start).days + 1
-            return idx == n
-
-        return mk(cycl, cycle=True, excl=exclusive or m.group(1) == "x")
-    if m := re.fullmatch(r"cycp#(\d+)", body):
-        n = _ord_in(cal, raw, m.group(1), 1, 30)
-        return mk(lambda d, c: (h := _period_of(d, c)) is not None and h[0] == n, cycle=True)
-    if m := re.fullmatch(r"cweek#([eol])", body):
-        which = m.group(1)
-
-        def cweek_l(d: date, c: _Ctx) -> bool:
-            chunk = _period_chunk(d, c)
-            if chunk is None:
-                return False
-            wk, last = chunk
-            return wk == last if which == "l" else wk % 2 == (0 if which == "e" else 1)
-
-        return mk(cweek_l, cycle=True)
-    if m := re.fullmatch(r"cweek([#mx])(\d+)", body):
-        # no literal 'l' here -- `cweek#([eol])` above owns that spelling for
-        # this family; _ordinal's `last` branch is simply never taken
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
-
-        def cweek(d: date, c: _Ctx) -> bool:
-            chunk = _period_chunk(d, c)
-            if chunk is None:
-                return False
-            wk, last = chunk
-            return wk == (last - n + 1 if back else n)
-
-        return mk(cweek, cycle=True, excl=exclusive or m.group(1) == "x")
-    if m := re.fullmatch(r"cwrk([#mx])(\d+|l)", body):
-        n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=365)
-
-        def cwrk(d: date, c: _Ctx) -> bool:
-            seq = _period_matching(d, c, lambda x: x.weekday() in c.workdays)
-            if seq is None:
-                return False
-            return _nth_of(seq, n, back=back) == d
-
-        return mk(cwrk, cycle=True, excl=exclusive or m.group(1) == "x")
-    if m := re.fullmatch(r"c(mon|tue|wed|thu|fri|sat|sun)([#m])(\d+|l)", body):
-        wd = _DAY_NAMES.index(m.group(1))
-        n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=53)
-
-        def cddd(d: date, c: _Ctx) -> bool:
-            if d.weekday() != wd:
-                return False
-            seq = _period_matching(d, c, lambda x: x.weekday() == wd)
-            if seq is None:
-                return False
-            return _nth_of(seq, n, back=back) == d
-
-        return mk(cddd, cycle=True)
+    entry = _KEYWORDS.get(body)
+    if entry is not None:
+        base, cycle_scoped = entry
+        return _Token(base=base, exclusive=exclusive, cycle_scoped=cycle_scoped)
+    for _name, pattern, builder in _FAMILIES:
+        m = pattern.fullmatch(body)
+        if m is not None:
+            return builder(cal, raw, m, exclusive)
 
     raise _err(cal, f"unknown date-condition token {raw!r} (SEM-37 inventory)")
 
@@ -405,11 +535,10 @@ def _tokenize(cal: str, rule: str) -> list[str]:
         ch = rule[i]
         if ch.isspace():
             i += 1
-        elif ch in "&|(){}":
-            # {} group exactly like () -- the observed export sample writes
-            # braces ({MNTHD#7} | {MNTHD#21}) where TechDocs shows parens;
-            # accepted as synonyms (Q9, DL-60)
-            out.append("(" if ch == "{" else ")" if ch == "}" else ch)
+        elif ch in _GROUP_CHARS or ch in _BINARY_OPS:
+            # braces normalize to parens here (see `_GROUP_CHARS`); `&`/`|`
+            # carry through as themselves
+            out.append(_GROUP_CHARS.get(ch, ch))
             i += 1
         elif m := _TOKEN_RE.match(rule, i):
             out.append(m.group(0))
@@ -442,7 +571,7 @@ def _parse_rule(cal: str, rule: str) -> _Node:
                 raise _err(cal, f"condition {rule!r}: missing ')'")
             pos += 1
             return node
-        if tok.lower() == "not":
+        if tok.lower() in _UNARY_OPS:
             pos += 1
             return ("not", term(depth + 1))
         if tok in ("&", "|", ")"):
@@ -454,12 +583,10 @@ def _parse_rule(cal: str, rule: str) -> _Node:
         nonlocal pos
         node = term(depth)
         while (tok := peek()) is not None and tok != ")":
-            if tok in ("&", "|"):
-                op: Literal["and", "or"] = "and" if tok == "&" else "or"
-            elif tok.lower() in ("and", "or"):
-                op = "and" if tok.lower() == "and" else "or"
-            else:
+            found = _BINARY_OPS.get(tok) or _BINARY_OPS.get(tok.lower())
+            if found is None:
                 raise _err(cal, f"condition {rule!r}: expected an operator, got {tok!r}")
+            op: Literal["and", "or"] = found
             pos += 1
             node = (op, node, term(depth))
         return node
@@ -697,8 +824,7 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
     if "condition" in cal.attrs:
         raise _err(cal.name, "condition in attrs (hand-built IR?); lowering owns the lane")
 
-    known = {"description", "workday", "non_workday", "holiday", "holcal", "cyccal", "adjust"}
-    unknown = set(cal.attrs) - known
+    unknown = set(cal.attrs) - CALENDAR_ATTRS
     if unknown:
         raise _err(cal.name, f"unrecognized attribute(s) {sorted(unknown)!r} (SEM-36)")
 
@@ -747,7 +873,7 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
 
     rules: list[str] = []
     for line in cal.conditions:
-        rules.extend(part.strip() for part in line.split(",") if part.strip())
+        rules.extend(part.strip() for part in line.split(_RULE_SEPARATOR) if part.strip())
     include: list[_Node] = []
     exclude: list[_Node] = []
     cycle_scoped_only = True

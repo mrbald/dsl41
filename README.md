@@ -20,7 +20,8 @@ Read these documents in this order:
 4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - statement scanner spec
 5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
 6. [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md) - what every reference token in the sources means
-7. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - shared agent contract and task-specific reading routes
+7. [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md) - what the simulation models, refuses, or assumes: the coverage register
+8. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - shared agent contract and task-specific reading routes
 
 Agent setup, verification commands, and cross-vendor review recipes are in
 [docs/agent-workflow.md](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md).

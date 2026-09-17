@@ -40,6 +40,24 @@ _UNSET_PRIORITY = 1 << 31
 #: mode is 'acquire' (holds units) or 'gate' (threshold: check-only).
 DemandEntry = tuple[str, int, str, ReleasePolicy | None]
 
+#: DL-50's resource types, upper-cased: R renewable, D depletable, T
+#: threshold. Absent ("") reads as renewable; anything else has unknown
+#: release semantics and `runner_preflight` refuses the run over it. Named
+#: here because this module owns what each one MEANS (DL-209).
+RES_TYPES = frozenset({"R", "D", "T"})
+
+#: DL-50's per-request FREE overrides, upper-cased: Y release on SUCCESS
+#: only, N never release, A release on any terminal. A code outside the set
+#: is a lowering error (`ir._parse_resources`), so `release_policy` reads the
+#: set and falls back to the res_type default for anything else (DL-209).
+FREE_CODES = frozenset({"Y", "N", "A"})
+
+#: The two members of `RES_TYPES` this module branches on by name: T is a
+#: check-only threshold, D is the depletable whose default is never-release.
+#: R and "" take every other branch, so neither needs a name of its own.
+_THRESHOLD = "T"
+_DEPLETABLE = "D"
+
 
 class CapacityPool:
     """The DL-50 capacity subsystem of one Oracle: the sized buckets (machine
@@ -196,7 +214,7 @@ def requirement_demand(res_type: str, free: str | None) -> tuple[str, ReleasePol
     PUBLIC because the explore page states the same demand in words
     (DL-192), and the T branch is half the rule: reusing `release_policy`
     alone reported a threshold gate as held units released on completion."""
-    if res_type == "T":
+    if res_type == _THRESHOLD:
         return "gate", None
     return "acquire", release_policy(res_type, free)
 
@@ -245,13 +263,13 @@ def release_policy(res_type: str, free: str | None) -> ReleasePolicy:
     PUBLIC because the explore page states the same policy per lock member
     (DL-192), and a second copy of this table would drift from the pool's
     (DL-72). One owner, two readers."""
-    if free == "Y":
-        return "success"
-    if free == "N":
-        return "never"
-    if free == "A":
-        return "completion"
-    return "never" if res_type == "D" else "completion"  # FREE absent -> res_type default
+    if free in FREE_CODES:
+        if free == "Y":
+            return "success"
+        if free == "N":
+            return "never"
+        return "completion"  # "A", the third member
+    return "never" if res_type == _DEPLETABLE else "completion"  # FREE absent -> res_type default
 
 
 def _merge_policy(a: ReleasePolicy | None, b: ReleasePolicy | None) -> ReleasePolicy | None:
