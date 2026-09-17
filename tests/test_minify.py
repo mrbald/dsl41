@@ -787,8 +787,10 @@ def test_cli_properties_failure_is_exit_two_not_three(tmp_path: Path) -> None:
 def test_cli_help_lists_properties() -> None:
     result = runner.invoke(app, ["minify", "--help"])
     assert result.exit_code == 0
-    assert "--properties" in result.stdout
-    assert "-p" in result.stdout.replace("--properties", "")
+    # CI forces colour, and rich splits an option name with escape codes.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "--properties" in plain
+    assert "-p" in plain.replace("--properties", "")
 
 
 # ------------------------------------------------- the KEEP closed-space audit
