@@ -733,6 +733,66 @@ def test_cli_refuses_two_inputs_with_one_basename(tmp_path: Path) -> None:
     assert "basename" in result.stderr
 
 
+def test_cli_properties_resolve_placeholders_before_the_lanes(tmp_path: Path) -> None:
+    source = tmp_path / "estate.jil"
+    source.write_text(
+        "insert_job: A\njob_type: c\nmachine: h\ncommand: /x\n"
+        "max_run_alarm: ~{$ALARM}~\ntimezone: ~{$TZ}~\n",
+        encoding="utf-8",
+    )
+    unresolved = runner.invoke(app, ["minify", str(source)])
+    assert unresolved.exit_code == 3
+    assert "outside the closed value space" in unresolved.stderr
+
+    props = tmp_path / "estate.properties"
+    props.write_text("ALARM=30\nTZ=Europe/London\n", encoding="utf-8")
+    resolved = runner.invoke(app, ["minify", "-p", str(props), str(source)])
+    assert resolved.exit_code == 0
+    assert "max_run_alarm: 30" in resolved.stdout
+    assert "~{" not in resolved.stdout
+
+
+def test_cli_properties_a_bound_value_is_still_checked_against_its_space(tmp_path: Path) -> None:
+    source = tmp_path / "estate.jil"
+    source.write_text(
+        "insert_job: A\njob_type: c\nmachine: h\ncommand: /x\n"
+        "max_run_alarm: ~{$ALARM}~\ntimezone: ~{$TZ}~\n",
+        encoding="utf-8",
+    )
+    props = tmp_path / "estate.properties"
+    props.write_text("ALARM=thirty\nTZ=Europe/London\n", encoding="utf-8")
+    result = runner.invoke(app, ["minify", "-p", str(props), str(source)])
+    assert result.exit_code == 3
+    assert "max_run_alarm" in result.stderr
+
+
+def test_cli_properties_failure_is_exit_two_not_three(tmp_path: Path) -> None:
+    source = tmp_path / "estate.jil"
+    source.write_text(
+        "insert_job: A\njob_type: c\nmachine: h\ncommand: /x\n"
+        "max_run_alarm: ~{$ALARM}~\ntimezone: ~{$TZ}~\n",
+        encoding="utf-8",
+    )
+    props = tmp_path / "estate.properties"
+    props.write_text("ALARM=30\n", encoding="utf-8")
+    incomplete = runner.invoke(app, ["minify", "-p", str(props), str(source)])
+    assert incomplete.exit_code == 2
+    assert "unresolved placeholder" in incomplete.stderr
+
+    missing = runner.invoke(app, ["minify", "-p", str(tmp_path / "nope.properties"), str(source)])
+    assert missing.exit_code == 2
+    assert "nope.properties" in missing.stderr
+
+
+def test_cli_help_lists_properties() -> None:
+    result = runner.invoke(app, ["minify", "--help"])
+    assert result.exit_code == 0
+    # CI forces colour, and rich splits an option name with escape codes.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "--properties" in plain
+    assert "-p" in plain.replace("--properties", "")
+
+
 # ------------------------------------------------- the KEEP closed-space audit
 
 #: Values a site could choose that no KEEP predicate may accept. The POSIX
