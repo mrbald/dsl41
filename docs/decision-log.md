@@ -13221,3 +13221,90 @@ relitigate an entry; append a new one.
   value that resolves outside its closed space still refuses with exit 3.
   Normative text: cli.py's "Templated estates" paragraph, `minify`'s docstring
   and the `--properties` help; no docs section covers `minify`.
+- DL-209 Simulation closure by classification: the coverage register (S1 of
+  five) (2026-09-18)
+  The compiler side fails closed (DL-07, the UC R-rows and A-row records,
+  DL-207's minify refusals). The simulation side did not: eleven pinned
+  defaults carried `PENDING` markers (Q3c, Q3d, Qr6, E5, E6, E7, E8, E9,
+  Qr3, Qr4, Qr2) and further choices carried none (Q6, Qr1, Qr5, E10, the
+  Q8 family, the SLA offset broadcast, the inert `chk_files` carry, the
+  opaque machine, resource and xinst attributes, the calendar row seconds
+  truncation, the 60-year scan horizon, the unmodelled retries). A run that
+  crossed one applied the default silently and nothing said which. The
+  owner's rule for closing this: no probabilistic development. Nothing is
+  prioritised by how often an estate touches it. If a construct can occur,
+  it is modelled, refused, or listed as an explicit assumption. A census of
+  a real estate was considered and rejected on that rule.
+  The plan was reviewed over five rounds with a second vendor's frontier
+  model and settled seventeen rulings. The order is register, advisory
+  ledger, replay contract, enforcement, probe protocols. Closure means every
+  relevant behaviour is classified and each is supported, refused, or
+  explicitly accepted. Static findings are exposure ("may apply"); only
+  runtime findings are applications. History proves that history only, a
+  probe binds to version, platform, configuration and preconditions, and a
+  bounded search proves absence within its bound only.
+  This entry lands the register. `simulation_register.py` holds the row
+  model and the renderer; `simulation_register_rows.py` holds 470 rows as
+  literal data across 40 surfaces (351 supported, 46 refused, 37
+  provisional, 36 passthrough), each with a class, a citation a reader can
+  follow, and a triggering and a quiet scope fixture. Row ids are
+  `surface:member[#facet]` and carry a revision for R9. The domain of each
+  of the 38 derived surfaces is read at test time from the code's own
+  objects: the ir.py attribute sets and every attribute read the lowering
+  and preflight scanners find, the statement inventory, the condition
+  grammar's rules and terminals, the autocal tables, the oracle's event
+  kinds, statuses, trace markers and timer shapes, the adapter and wrapper
+  outcome kinds with their cause templates, the event provenance sources,
+  the preflight codes, the demand modes and machine verdicts, every
+  RuntimeProfile field, and every closed Literal alternative in the
+  estate-facing modules. A member without a row fails the suite, and so
+  does a stale row. Two mechanisms close what derivation alone could not.
+  A regex-bodied member (a calendar family, a grammar terminal) is pinned:
+  its row carries the pattern text, 24 of them, and an edit to the pattern
+  fails until the row is revisited and its effect says what the pattern now
+  admits. A `PENDING` marker is bound to its site: the suite derives every
+  (label, function) pair from the sources, 33 today, and a provisional row
+  must claim each one, so a second marker under an already-rowed label
+  still needs its own claim. The autocal keyword branches, regex families,
+  workday and row-time forms, and action categories became tables for the
+  same reason (R17): a branch chain cannot be enumerated, a table can. Each
+  lift was proven behaviour-preserving by differential fuzzing against the
+  previous code. `docs/simulation-coverage.md` is rendered from the rows and
+  checked by the suite, never hand-edited below its preamble.
+  Two limits are stated rather than closed. Facet rows and the two free
+  surfaces (`runtime`, `adapter_policy`) have no derivable domain; they are
+  closed by review, and the marker binding and the pattern pins shrink that
+  space. The runner's host states and verbs, effect kinds and
+  acknowledgements, and the period model's layout sentinel are protocol
+  vocabularies under the frozen concurrency and supervisor contracts, which
+  close them with their own obligations; the register covers estate-facing
+  semantics and does not restate them. Regex-internal alternation beyond
+  the pin is not enumerated.
+  The register found two defects it does not fix, each with a row:
+  preflight reads calendar days in the job's zone with a UTC fallback and
+  never consults the run-level base timezone the scheduler uses, so the two
+  can name different days (`runtime:preflight-date-basis-utc`); and a
+  preflight with no run anchor skips the calendar-exhaustion probe
+  entirely (`runtime:preflight-no-start-skips-probe`). A fix is a behaviour
+  change and belongs to its own entry. The register also made visible that
+  `envvars` is lowered onto the exec spec and applied by no adapter; it is a
+  passthrough row until a decision says otherwise. `Event.source` gained a
+  Literal owner for derivation but stays `str` on the wire: typing the
+  persisted field would have refused an older journal at replay, which
+  `docs/protocol-evolution.md` forbids.
+  Not built here, deliberately: no collector, no output banner, no
+  enforcement. S2 lands the Qr4 collector through the existing preflight
+  WARN path, with "Qr4 assessed; other behaviours not assessed" printed only
+  when a recorded assessment exists (R11, R15), and fixes the two-year
+  exclusion warning's "never fires" overstatement (R12). S3 writes the
+  replay contract as a doc section: an offline versioned processed-event
+  export in an evidence bundle, outcomes and operator actions as inputs,
+  recorded statuses as expectations, INCONCLUSIVE on missing state or
+  provenance, no reader. S4 revises the enforcement contract after two
+  owner decisions this entry does not take: whether Q8-exposed calendars
+  refuse by default, which reverses DL-59, and which exit code a refusal
+  takes, since 3 is committed sealing. Acceptance will be a canonically
+  ordered field of the hashed RuntimeProfile added through protocol
+  evolution (R9). S5 writes probe protocols for the labels without one.
+  The rows module is over the 1200-line advisory size; it is data, one row
+  per behaviour, and splitting it would put one register in two files.
