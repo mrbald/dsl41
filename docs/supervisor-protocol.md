@@ -322,10 +322,10 @@ an exclusive non-blocking flock held for the process lifetime. The file is
 never unlinked. Under that lock it sweeps leftover `.s.*` socket files,
 probes the published endpoint with three PING attempts across one second,
 and checks the pid file before reclaiming anything. A PING answer or a live
-recorded process refuses startup with exit 1; a zombie, exited and unreaped, is
-absent, because it holds no descriptor, no lock and no socket and
-`another supervisor owns this root`. Runtime `OSError` failures also exit 1
-so the service can retry. Configuration refusals remain exit 2.
+recorded process refuses startup with exit 1 and the message
+`another supervisor owns this root`. A zombie, exited and unreaped, is
+absent: it holds no descriptor, no lock and no socket. Runtime `OSError`
+failures also exit 1 so the service can retry. Configuration refusals remain exit 2.
 The pid file adds `start_time`, the opaque `runner_procid.proc_start_token`
 value; PID reuse is checked against it. A failed token lookup alone is not
 proof of absence. A live legacy pid without that token also refuses, so an
