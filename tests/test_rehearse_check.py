@@ -1348,7 +1348,9 @@ def test_run_fail_sweep_findings_carry_the_case_tag_happy_path_carries_none() ->
     assert sweep_finding.case == "fail:cs_b"
 
 
-def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding() -> None:
+def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A scheduled `kicker` feeds BOTH members of a two-job condition SCC
     (the CYCLE_JIL shape) via s(kicker). Failing kicker's own run is quiet:
     neither cy_a nor cy_b is ever woken, so nothing spins. But in ANY OTHER
@@ -1358,14 +1360,21 @@ def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding(
     THAT case's play. `case.cycle` is set and the zero_delay_cycle finding
     carries the case tag.
 
-    NOTE: the fail:cy_a case spins ~13s of virtual-time before the guard
-    trips -- deliberately the ONE spin test in the suite (this slice's
-    review folded play_once's own guard test into it: run_fail_sweep can
-    only see result.cycle because play_once caught it, so this pins the
-    catch, the jobs/instant payload, AND the case tagging in one spin).
-    baseline_runs is a stub pinning both producers as reached: a real
+    NOTE: the fail:cy_a case spins before the guard trips -- deliberately
+    the ONE spin test in the suite (this slice's review folded play_once's
+    own guard test into it: run_fail_sweep can only see result.cycle
+    because play_once caught it, so this pins the catch, the jobs/instant
+    payload, AND the case tagging in one spin). DL-211:
+    `INSTANT_BUDGET_FLOOR` is monkeypatched low so the spin is short; the
+    event count asserted below (301 = max(floor, 100 * 3) + 1, for this
+    three-job catalog with the floor patched to 200) proves the patch was
+    read, so an unapplied patch fails loudly here instead of just running
+    slow. baseline_runs is a stub pinning both producers as reached: a real
     baseline here would ALSO spin, doubling the runtime for no additional
     assertion -- this test checks case.cycle/findings, not suppression."""
+    import dsl41.runner as runner
+
+    monkeypatch.setattr(runner, "INSTANT_BUDGET_FLOOR", 200)
     text = (
         "insert_job: kicker\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
@@ -1401,6 +1410,7 @@ def test_run_fail_sweep_a_case_that_trips_the_zero_delay_guard_tags_the_finding(
     # jobs and the frozen instant (kicker completes at its 01:00 tick)
     assert cycle_finding.jobs == ["cy_a", "cy_b", "kicker"]
     assert "2026-09-01 01:00:00" in cycle_finding.detail
+    assert "after 301 events" in cycle_finding.detail
     (finding,) = findings
     assert finding.kind == "zero_delay_cycle"
     assert finding.case == "fail:cy_a"

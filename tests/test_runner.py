@@ -800,12 +800,24 @@ def test_hypothesis_engine_bisimulation_startjob_and_term_run_time(script: list[
 # cannot regress silently.
 
 
-def test_zero_delay_cycle_raises_engine_error_instead_of_livelocking() -> None:
+def test_zero_delay_cycle_raises_engine_error_instead_of_livelocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A condition cycle over instant completions (the
     AutoSys tight-loop pattern, L010, compressed to zero duration) generated
     unbounded work at one frozen virtual instant -- run_until_quiescent never
     returned. The engine now refuses with EngineError after a catalog-scaled
-    same-instant event budget (runner.py frontier/guard docstring)."""
+    same-instant event budget (runner.py frontier/guard docstring).
+
+    DL-211: `INSTANT_BUDGET_FLOOR` is monkeypatched low so this pins the
+    guard's behavior (it fires, and its finding carries the jobs and
+    instant), not the size of the production budget. Asserting the event
+    count in the message means an unapplied patch fails loudly here
+    instead of just running slow: this two-job catalog's budget is
+    max(floor, 100 * 2), so a floor of 200 trips at 201 events."""
+    import dsl41.runner as runner
+
+    monkeypatch.setattr(runner, "INSTANT_BUDGET_FLOOR", 200)
     text = (
         "insert_job: cyc_a\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(cyc_b)\n\n"
         "insert_job: cyc_b\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(cyc_a)\n"
@@ -819,7 +831,7 @@ def test_zero_delay_cycle_raises_engine_error_instead_of_livelocking() -> None:
             adapters={"CMD": adapter, "FW": adapter},
         )
         engine.inject(ev("STATUS", 0, job="cyc_b", status="SUCCESS"))
-        with pytest.raises(EngineError, match="zero-delay"):
+        with pytest.raises(EngineError, match="after 201 events.*zero-delay"):
             await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         await engine.shutdown()
 

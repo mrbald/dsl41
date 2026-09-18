@@ -13308,3 +13308,50 @@ relitigate an entry; append a new one.
   evolution (R9). S5 writes probe protocols for the labels without one.
   The rows module is over the 1200-line advisory size; it is data, one row
   per behaviour, and splitting it would put one register in two files.
+- DL-211 CI measures coverage once, on the interpreter where measuring is
+  free; the two spin tests stop spinning (2026-09-18)
+  The DL-209 merge's `tests` run on main was cancelled by the job's
+  15-minute timeout on the Python 3.12 leg while 3.13, 3.14 and the explore
+  page passed the same commit; the re-run passed with six seconds to spare.
+  The cause is not the tests. Measured on one laptop: 876 compiler tests
+  run in 7.0 s bare on both 3.12 and 3.14, eight milliseconds each. Under
+  branch coverage the same tests take 6.3 s on 3.14, where coverage 7.15
+  uses the `sys.monitoring` core, and 16.3 s on 3.12, where that core
+  cannot measure branches and the C tracer runs instead; runner tests pay
+  3.4x. Narrowing the measured scope to the nine reported modules changes
+  nothing: the tracer's cost is per frame. The GitHub runner is about twice
+  as slow as the laptop on top of that. So the 3.12 leg spent 870 s in
+  pytest for a measurement the 3.14 leg produced in 440 s.
+  Ruling: coverage is a property of the code, not of the interpreter that
+  runs it, so it is measured once. `ci.yml`'s `test` matrix keeps 3.12 and
+  3.13 with the lint, type, architecture and plain pytest gates; a separate
+  `coverage` job on 3.14 runs the same gates under `coverage run` and the
+  `coverage report` step is what fails the build, unchanged from DL-105.
+  The reviewer checked that the two cores produce byte-identical line and
+  branch data on 3.14 across 346 tests including the async engine, so the
+  gate means what it meant. A separate job, not an `if:` on the matrix, so
+  a later matrix edit cannot silently delete the gate. The local gate list
+  in `docs/agent-workflow.md` is unchanged.
+  Two tests spun on purpose: the zero-delay-cycle guard fires after
+  `max(10_000, 100 * jobs)` same-instant events, and both tests that pin it
+  drove a two- or three-job catalog through ten thousand events, fifteen
+  seconds each. DL-184 declined shortening them and named the trigger for
+  reopening it: "shortening needs the instant budget as an Engine
+  parameter". The trigger has fired and the mechanism is different: the
+  floor is the module constant `INSTANT_BUDGET_FLOOR`, read where the guard
+  computes its budget, and the two tests lower it to 200. The budget is a
+  guard tuning no caller should choose per run, and a parameter would have
+  threaded through `rehearse_check`'s play path for the sake of one test.
+  Both tests now assert the event count the guard reports (201 and 301), so
+  a patch that did not apply fails instead of running slow and green.
+  Monkeypatching a module constant is house style (`LINE_LIMIT`,
+  `_LIST_COMPLETED_WINDOW`). Production behaviour is unchanged.
+  The register test's `surface_domains()` is cached: it is pure over the
+  source tree and one loop called it 46 times for the same answer.
+  Measured: 14.1 s and 13.6 s to 0.2 s and 0.3 s for the two spin tests;
+  15.6 s to 2.5 s for the register module.
+  Declined: pytest-xdist (a dependency, and the isolation risk of running
+  socket-binding and subprocess tests side by side) and a timeout bump
+  (after this change every leg has headroom). Revisit only if a leg runs
+  long again. The 70 s of real-clock waits in the supervisor, leadership,
+  TUI and subprocess tests are left alone.
