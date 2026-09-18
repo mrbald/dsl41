@@ -1005,3 +1005,47 @@ def test_a_running_box_is_not_a_start_the_barrier_can_have_lost(tmp_path: Path) 
         if r.get("rec") == "input" and r.get("source") == "reconcile"
     }
     assert reconciled == {"member"}
+
+
+def test_dl210_flock_exclusive_is_shared_and_keeps_the_lock_file(tmp_path: Path):
+    from dsl41.runner_procid import LockHeld, flock_exclusive
+
+    path = tmp_path / "shared.lock"
+    fd = flock_exclusive(path)
+    inode = path.stat().st_ino
+    try:
+        assert path.stat().st_mode & 0o777 == 0o600
+        with pytest.raises(LockHeld):
+            flock_exclusive(path)
+    finally:
+        os.close(fd)
+    successor = flock_exclusive(path)
+    try:
+        assert path.stat().st_ino == inode
+    finally:
+        os.close(successor)
+
+
+def test_dl210_flock_exclusive_closes_fd_on_stat_failure(tmp_path: Path):
+    from dsl41 import runner_procid
+
+    path = tmp_path / "shared.lock"
+    opened = []
+    original = os.open
+
+    def track(*args, **kwargs):
+        fd = original(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    with (
+        mock.patch.object(runner_procid.os, "open", track),
+        mock.patch.object(runner_procid.os, "stat", side_effect=PermissionError("stat refused")),
+        pytest.raises(PermissionError),
+    ):
+        runner_procid.flock_exclusive(path)
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    fd = runner_procid.flock_exclusive(path)
+    os.close(fd)

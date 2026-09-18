@@ -317,6 +317,31 @@ start, if a live supervisor already holds the socket (connect probe), the
 supervisor refuses to run. It unlinks a stale socket — parity with the
 engine's control-socket gate (runner-design §10).
 
+*(Amended by DL-210.)* Startup first takes `<run_root>/supervisor.lock`,
+an exclusive non-blocking flock held for the process lifetime. The file is
+never unlinked. Under that lock it sweeps leftover `.s.*` socket files,
+probes the published endpoint with three PING attempts across one second,
+and checks the pid file before reclaiming anything. A PING answer or a live
+recorded process refuses startup with exit 1 and
+`another supervisor owns this root`. Configuration refusals remain exit 2.
+The pid file adds `start_time`, the opaque `runner_procid.proc_start_token`
+value; PID reuse is checked against it. A failed token lookup alone is not
+proof of absence. A live legacy pid without that token also refuses, so an
+older supervisor that holds no lock still owns its root. An unreadable pid
+record, or a published socket with no pid record, is ambiguous and refuses
+reclamation; resolve the owner before removing such leftovers manually.
+Do not launch old and new binaries concurrently on one root during upgrade:
+a lockless old starter that appears after the guards cannot be excluded by
+the new lock. The guards protect an already published legacy owner.
+
+After both guards, the supervisor reclaims the stale published socket,
+binds and listens on `<run_root>/.s.<pid>`, chmods it to 0600, records that
+path's inode, and renames it to `supervisor.sock`. Teardown removes the
+published socket only while its path still names that inode, or its own
+private socket if publication failed. The client never unlinks either path.
+One startup line goes to stderr:
+`supervisor: started pid=<pid> incarnation=<hex> boot_id=<id>`.
+
 Linux hardening: the supervisor sets `PR_SET_CHILD_SUBREAPER` (prctl 36)
 at startup, best-effort. The supervisor never restarts itself. Survival
 across ITS death is the job of Tier 2.

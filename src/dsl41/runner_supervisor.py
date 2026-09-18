@@ -80,6 +80,7 @@ import re
 import selectors
 import signal
 import socket
+import stat
 import struct
 import sys
 import time
@@ -120,7 +121,11 @@ if TYPE_CHECKING:
     from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, is_wire_int
     from dsl41.canon import decode as canon_decode
     from dsl41.runner_procid import (
+        LockHeld,
         current_boot_id,
+        flock_exclusive,
+        proc_start_token,
+        start_tokens_match,
         durable_write,
         durable_write_json,
         fsync_dir,
@@ -138,7 +143,11 @@ else:
     )
     from canon import decode as canon_decode  # noqa: E402
     from runner_procid import (  # noqa: E402
+        LockHeld,
         current_boot_id,
+        flock_exclusive,
+        proc_start_token,
+        start_tokens_match,
         durable_write,
         durable_write_json,
         fsync_dir,
@@ -350,6 +359,11 @@ class Supervisor:
         self._unleased_since: float | None = None
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
+        self._lock_fd: int | None = None
+        self._private_path = os.path.join(run_root, f".s.{os.getpid()}")
+        self._private_bound = False
+        self._published = False
+        self._socket_inode: int | None = None
         self.boot_id = current_boot_id()
         #: DL-80: identity of THIS supervisor process, minted per start. The
         #: fencing counter below is in-memory (spec ss5), so a restart mints
@@ -397,40 +411,124 @@ class Supervisor:
         except (OSError, AttributeError):
             pass
 
-    def _refuse_if_live(self) -> None:
-        """Parity with the engine's control-socket gate (ss10): a connect that
-        succeeds means a live supervisor already serves this run_root -- refuse;
-        a refused/absent socket is a crashed run's leftover -- unlink."""
-        if not os.path.exists(self.sock_path):
-            return
-        probe = socket.socket(socket.AF_UNIX)
-        probe.settimeout(0.2)
+    def _probe_answered(self, deadline: float) -> bool:
+        """PING within this attempt's budget; connect alone is not liveness."""
+        with socket.socket(socket.AF_UNIX) as probe:
+            try:
+                probe.settimeout(max(0.001, deadline - time.monotonic()))
+                probe.connect(self.sock_path)
+                probe.settimeout(max(0.001, deadline - time.monotonic()))
+                probe.sendall(b'{"v":1,"cmd":"PING"}\n')
+                reply = b""
+                while b"\n" not in reply and len(reply) < 4096:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        return False
+                    probe.settimeout(left)
+                    chunk = probe.recv(4096 - len(reply))
+                    if not chunk:
+                        return False
+                    reply += chunk
+                if b"\n" not in reply:
+                    return False
+                answer = json.loads(reply.split(b"\n", 1)[0])
+                return isinstance(answer, dict) and isinstance(answer.get("ok"), bool)
+            except (OSError, ValueError, RecursionError):
+                return False
+
+    def _pid_owner_absent(self) -> bool:
+        """Only positive absence or PID reuse can clear a recorded owner.
+
+        Old supervisors have no start_time field. A live legacy pid is
+        therefore enough to refuse. A failed token lookup is not absence:
+        kill(pid, 0) must confirm ESRCH before reclamation.
+        """
         try:
-            probe.connect(self.sock_path)
+            record = _load_json(self.pid_path)
+        except RecursionError:
+            return False
+        if record is None:
+            # No published endpoint needs no reclaim. A socket without an
+            # owner record is ambiguous, including an interrupted old startup.
+            return not os.path.lexists(self.sock_path)
+        pid = record.get("pid")
+        if not is_wire_int(pid) or pid <= 0:
+            return False
+        boot = record.get("boot_id")
+        if isinstance(boot, str) and boot not in ("", "unknown", self.boot_id):
+            if self.boot_id != "unknown":
+                return True
+        current = proc_start_token(pid)
+        recorded = record.get("start_time")
+        if current is not None:
+            # Equality alone accepts arbitrary ticks: strings. Such a string
+            # cannot prove PID reuse when it differs from a real live token.
+            if isinstance(recorded, str) and recorded.startswith("ticks:"):
+                if re.fullmatch(r"ticks:(0|[1-9][0-9]*)", recorded) is None:
+                    return False
+            return (
+                isinstance(recorded, str)
+                and start_tokens_match(recorded, recorded)
+                and not start_tokens_match(current, recorded)
+            )
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
         except OSError:
-            with contextlib.suppress(OSError):
-                os.unlink(self.sock_path)
-        else:
-            probe.close()
-            raise SystemExit(f"supervisor: {self.sock_path} is live; another supervisor serves it")
-        finally:
-            probe.close()
+            pass
+        return False
+
+    def _refuse_if_live(self) -> None:
+        if os.path.lexists(self.sock_path):
+            # Three attempts across one second. macOS can refuse a full
+            # listen backlog, so the first refusal never authorizes unlink.
+            started = time.monotonic()
+            for attempt in range(3):
+                deadline = started + (attempt + 1) / 3
+                if self._probe_answered(deadline):
+                    raise SystemExit("another supervisor owns this root")
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+        if not self._pid_owner_absent():
+            raise SystemExit("another supervisor owns this root")
 
     def _bind(self) -> None:
+        try:
+            self._lock_fd = flock_exclusive(os.path.join(self.run_root, "supervisor.lock"))
+        except LockHeld as exc:
+            raise SystemExit("another supervisor owns this root") from exc
+        # Sweep private sockets only, under the exclusion lock. Ordinary
+        # files or symlinks with this prefix are not ours to remove.
+        with os.scandir(self.run_root) as entries:
+            for entry in entries:
+                if entry.name.startswith(".s."):
+                    with contextlib.suppress(FileNotFoundError):
+                        if stat.S_ISSOCK(entry.stat(follow_symlinks=False).st_mode):
+                            os.unlink(entry.path)
         self._refuse_if_live()
-        old_umask = os.umask(0o177)  # 0600 from birth
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.sock_path)
+        old_umask = os.umask(0o177)
         try:
             self._listen = socket.socket(socket.AF_UNIX)
-            self._listen.bind(self.sock_path)
+            self._listen.bind(self._private_path)
+            self._private_bound = True
             self._listen.listen(64)
         finally:
             os.umask(old_umask)
-        os.chmod(self.sock_path, 0o600)  # belt: some platforms ignore umask on bind
+        os.chmod(self._private_path, 0o600)
+        self._socket_inode = os.stat(self._private_path).st_ino
+        os.rename(self._private_path, self.sock_path)
+        self._private_bound = False
+        self._published = True
         self._listen.setblocking(False)
         durable_write_json(
             self.pid_path,
             {
                 "pid": os.getpid(),
+                "start_time": proc_start_token(os.getpid()),
                 "boot_id": self.boot_id,
                 "incarnation": self.incarnation,
                 "started_at": utc_now_iso(),
@@ -462,14 +560,20 @@ class Supervisor:
     # -- the loop -----------------------------------------------------------
 
     def run(self) -> int:
-        self._set_subreaper()
-        self._bind()
-        self._install_signals()
-        assert self._listen is not None
-        self._sel.register(self._listen, selectors.EVENT_READ, ("listen", None))
-        self._sel.register(self._chld_r, selectors.EVENT_READ, ("chld", None))
-        self._unleased_since = time.monotonic()
         try:
+            self._set_subreaper()
+            self._bind()
+            self._install_signals()
+            assert self._listen is not None
+            self._sel.register(self._listen, selectors.EVENT_READ, ("listen", None))
+            self._sel.register(self._chld_r, selectors.EVENT_READ, ("chld", None))
+            self._unleased_since = time.monotonic()
+            print(
+                f"supervisor: started pid={os.getpid()} incarnation={self.incarnation}"
+                f" boot_id={self.boot_id}",
+                file=sys.stderr,
+                flush=True,
+            )
             while self._running:
                 for key, mask in self._sel.select(timeout=1.0):
                     tag, payload = key.data
@@ -1447,10 +1551,28 @@ class Supervisor:
         if self._listen is not None:
             with contextlib.suppress(Exception):
                 self._listen.close()
-        with contextlib.suppress(OSError):
-            os.unlink(self.sock_path)
-        with contextlib.suppress(OSError):
-            os.unlink(self.pid_path)
+        if self._published:
+            with contextlib.suppress(OSError):
+                if os.stat(self.sock_path).st_ino == self._socket_inode:
+                    os.unlink(self.sock_path)
+            record = _load_json(self.pid_path)
+            if record is not None and record.get("incarnation") == self.incarnation:
+                with contextlib.suppress(OSError):
+                    os.unlink(self.pid_path)
+        if self._private_bound:
+            with contextlib.suppress(OSError):
+                os.unlink(self._private_path)
+        for run in self.runs.values():
+            if run.wrapper_rc is None:
+                with contextlib.suppress(OSError):
+                    os.close(run.lifeline_w)
+        for fd in (self._chld_r, self._chld_w):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        self._sel.close()
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
 
 #: the frozen ss2 wrapper-input schema, as (key, predicate) -- the whole of
@@ -1656,7 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return Supervisor(args.run_root, deadman_s=args.deadman_seconds).run()
-    except SystemExit as exc:  # the live-supervisor gate
+    except (OSError, ValueError) as exc:
+        print(f"supervisor: {exc}", file=sys.stderr)
+        return 2
+    except SystemExit as exc:  # lock contention or the legacy live-owner gate
         print(str(exc), file=sys.stderr)
         return exc.code if isinstance(exc.code, int) else 1
 

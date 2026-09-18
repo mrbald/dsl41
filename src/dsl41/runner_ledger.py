@@ -38,7 +38,7 @@ a fencing token that moves.
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import json
 import os
 import socket
@@ -51,7 +51,7 @@ from typing import Any, Literal, Protocol, overload
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
 from dsl41.period import catalog_hash_for
-from dsl41.runner_procid import mkdir_durable
+from dsl41.runner_procid import LockHeld, flock_exclusive, mkdir_durable
 from dsl41.runner_clock import EngineError
 
 #: ss7 ledger header, the half `catalog_hash` does not cover: the version of
@@ -122,30 +122,19 @@ class LeaderLock:
         return self._fd is not None
 
     def acquire(self) -> None:
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(fd)
+            fd = flock_exclusive(self.path)
+        except LockHeld as exc:
+            if exc.errno == errno.ESTALE:
+                raise EngineError(
+                    f"{self.path} was replaced while acquiring it: the lock excludes nobody;"
+                    " retry, and find out what is deleting it"
+                ) from exc
             raise EngineError(
                 f"{self.path.parent} is held by another {self.held_by} ({self._holder()}):"
                 f" one leader per {self.of} (concurrency-model ss7)"
             ) from exc
-        ino = os.fstat(fd).st_ino
-        try:
-            current = os.stat(self.path).st_ino
-        except FileNotFoundError:
-            current = None
-        if current != ino:
-            # the file we locked is no longer the file at that name: our lock
-            # is on an unlinked inode and excludes nobody. Refuse rather than
-            # run as a leader that cannot prove it is one.
-            os.close(fd)
-            raise EngineError(
-                f"{self.path} was replaced while acquiring it: the lock excludes nobody;"
-                " retry, and find out what is deleting it"
-            )
-        self._fd, self._ino = fd, ino
+        self._fd, self._ino = fd, os.fstat(fd).st_ino
 
     def note(self, *, epoch: int, at: datetime) -> None:
         """Record who holds this term, for the refusal another process will

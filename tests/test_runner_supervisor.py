@@ -21,6 +21,7 @@ import shutil
 import selectors
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -215,7 +216,7 @@ def test_supervisor_procid_calls_are_type_checked() -> None:
     same helpers, or the static types describe an import that never runs."""
     type_time, runtime = procid_import_branches(SUPERVISOR)
     assert type_time == runtime
-    assert {"verify_alive", "killpg_quiet"} <= set(runtime)
+    assert {"verify_alive", "killpg_quiet", "flock_exclusive", "LockHeld"} <= set(runtime)
 
 
 def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:
@@ -2255,3 +2256,279 @@ def test_dl210_accept_closes_peer_on_credential_error_or_other_uid(
         server.close()
         peer.close()
         sup._listen = None
+
+
+@pytest.mark.parametrize(
+    ("record", "current", "kill_error", "absent"),
+    [
+        ({"pid": 123, "start_time": "ticks:1"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:1"}, "ticks:2", None, True),
+        ({"pid": 123}, "ticks:1", None, False),
+        ({"pid": 123}, None, ProcessLookupError(), True),
+        ({"pid": 123}, None, None, False),
+        ({"pid": 123}, None, PermissionError(), False),
+        ({"pid": True}, "ticks:1", None, False),
+        ({"pid": -1}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "broken"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:not-a-number"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:-1"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:01"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "lstart:invalid"}, "ticks:1", None, False),
+        ({"pid": 123, "boot_id": "previous-boot"}, "ticks:1", None, True),
+        ({}, None, None, False),
+    ],
+)
+def test_dl210_pid_guard_requires_proven_absence(
+    queued_supervisor, monkeypatch, record, current, kill_error, absent
+):
+    sup, _ = queued_supervisor
+    sup.boot_id = "current-boot"
+    monkeypatch.setattr(runner_supervisor, "_load_json", lambda _path: record)
+    monkeypatch.setattr(runner_supervisor, "proc_start_token", lambda _pid: current)
+
+    def kill(_pid, _sig):
+        if kill_error is not None:
+            raise kill_error
+
+    monkeypatch.setattr(runner_supervisor.os, "kill", kill)
+    assert sup._pid_owner_absent() is absent
+
+
+def test_dl210_missing_pid_file_is_ambiguous_only_with_published_socket(queued_supervisor):
+    sup, _ = queued_supervisor
+    assert sup._pid_owner_absent()
+    endpoint = socket.socket(socket.AF_UNIX)
+    try:
+        endpoint.bind(sup.sock_path)
+        assert not sup._pid_owner_absent()
+    finally:
+        endpoint.close()
+
+
+def test_dl210_probe_retries_refusals_before_pid_guard(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    Path(sup.sock_path).touch()
+    now = [10.0]
+    deadlines = []
+    checked = []
+    monkeypatch.setattr(runner_supervisor.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        runner_supervisor.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay)
+    )
+    monkeypatch.setattr(
+        sup, "_probe_answered", lambda deadline: deadlines.append(deadline) or False
+    )
+    monkeypatch.setattr(sup, "_pid_owner_absent", lambda: checked.append(len(deadlines)) or True)
+    sup._refuse_if_live()
+    assert deadlines == pytest.approx([10 + 1 / 3, 10 + 2 / 3, 11])
+    assert checked == [3] and now[0] == pytest.approx(11)
+    assert Path(sup.sock_path).exists()  # the gate itself never reclaims
+
+
+def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    Path(sup.sock_path).touch()
+    replies = iter([False, False, True])
+    monkeypatch.setattr(sup, "_probe_answered", lambda _deadline: next(replies))
+    monkeypatch.setattr(runner_supervisor.time, "sleep", lambda _delay: None)
+    with pytest.raises(SystemExit, match="another supervisor owns this root"):
+        sup._refuse_if_live()
+    assert Path(sup.sock_path).exists()
+
+
+def test_dl210_lock_loser_exits_one_and_can_retry(short_root: Path):
+    proc = start_supervisor(short_root)
+    inode = (short_root / "supervisor.sock").stat().st_ino
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 1
+        assert result.stderr.strip() == "another supervisor owns this root"
+        assert (short_root / "supervisor.sock").stat().st_ino == inode
+        assert _ping_ok(short_root)
+    finally:
+        teardown_supervisor(short_root, proc)
+    assert (short_root / "supervisor.lock").exists()
+    retry = start_supervisor(short_root)
+    try:
+        assert _ping_ok(short_root)
+        lines = (short_root / "supervisor.log").read_text().splitlines()
+        assert sum(line.startswith("supervisor: started pid=") for line in lines) == 2
+        record = json.loads((short_root / "supervisor.pid").read_text())
+        assert record["start_time"]
+    finally:
+        teardown_supervisor(short_root, retry)
+
+
+def test_dl210_legacy_live_pid_protects_a_silent_socket(short_root: Path):
+    endpoint = socket.socket(socket.AF_UNIX)
+    endpoint.bind(str(short_root / "supervisor.sock"))
+    endpoint.listen(1)  # never accepts or answers PING; legacy owner has no lock
+    (short_root / "supervisor.pid").write_text(json.dumps({"pid": os.getpid()}))
+    inode = (short_root / "supervisor.sock").stat().st_ino
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 1 and "another supervisor owns this root" in result.stderr
+        assert (short_root / "supervisor.sock").stat().st_ino == inode
+        assert json.loads((short_root / "supervisor.pid").read_text())["pid"] == os.getpid()
+    finally:
+        endpoint.close()
+
+
+def test_dl210_bind_sweeps_private_sockets_and_publishes_chmodded_inode(short_root, monkeypatch):
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(short_root / ".s.123456"))
+    stale.close()
+    ordinary = short_root / ".s.notes"
+    ordinary.write_text("synthetic non-socket")
+    sup = runner_supervisor.Supervisor(str(short_root))
+    rename = runner_supervisor.os.rename
+    published = []
+
+    def inspect(source, destination):
+        if destination == sup.sock_path:
+            path = Path(source)
+            assert path.name == f".s.{os.getpid()}"
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            published.append(path.stat().st_ino)
+        rename(source, destination)
+
+    monkeypatch.setattr(runner_supervisor.os, "rename", inspect)
+    try:
+        sup._bind()
+        assert not (short_root / ".s.123456").exists() and ordinary.exists()
+        assert Path(sup.sock_path).stat().st_ino == published[0] == sup._socket_inode
+        assert not Path(sup._private_path).exists()
+    finally:
+        sup._teardown()
+    assert not Path(sup.sock_path).exists()
+    assert (short_root / "supervisor.lock").exists()
+
+
+def test_dl210_teardown_keeps_replacement_socket_and_pid(short_root):
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sup._bind()
+    Path(sup.sock_path).unlink()
+    successor = socket.socket(socket.AF_UNIX)
+    try:
+        successor.bind(sup.sock_path)
+        inode = Path(sup.sock_path).stat().st_ino
+        Path(sup.pid_path).write_text(json.dumps({"incarnation": "successor"}))
+        sup._teardown()
+        assert Path(sup.sock_path).stat().st_ino == inode
+        assert json.loads(Path(sup.pid_path).read_text())["incarnation"] == "successor"
+    finally:
+        successor.close()
+
+
+def test_dl210_failed_private_publish_cleans_up_and_releases_lock(short_root, monkeypatch):
+    sup = runner_supervisor.Supervisor(str(short_root))
+    chmod = runner_supervisor.os.chmod
+
+    def fail_private(path, mode):
+        if path == sup._private_path:
+            raise PermissionError("synthetic chmod refusal")
+        chmod(path, mode)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner_supervisor.os, "chmod", fail_private)
+        with pytest.raises(PermissionError):
+            sup.run()
+    assert not Path(sup._private_path).exists() and not Path(sup.sock_path).exists()
+    successor = runner_supervisor.Supervisor(str(short_root))
+    try:
+        successor._bind()
+    finally:
+        successor._teardown()
+
+
+@pytest.mark.parametrize(
+    ("chunks", "answered"),
+    [
+        ([b'{"ok":', b"true}\n"], True),
+        ([b'{"ok":false}\n'], True),
+        ([b"{}\n"], False),
+        ([b"[]\n"], False),
+        ([b"not-json\n"], False),
+        ([b"x" * 4096], False),
+        ([b""], False),
+        ([TimeoutError()], False),
+    ],
+)
+def test_dl210_probe_requires_a_complete_ping_answer(
+    queued_supervisor, monkeypatch, chunks, answered
+):
+    sup, _ = queued_supervisor
+    replies = iter(chunks)
+    sent = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, path):
+            assert path == sup.sock_path
+
+        def sendall(self, data):
+            sent.append(json.loads(data))
+
+        def recv(self, _size):
+            result = next(replies)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    monkeypatch.setattr(runner_supervisor.socket, "socket", lambda *_args: Probe())
+    assert sup._probe_answered(time.monotonic() + 1) is answered
+    assert sent == [{"v": 1, "cmd": "PING"}]
+
+
+def test_dl210_expired_probe_budget_does_not_wait_for_a_reply(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    endpoint = socket.socket(socket.AF_UNIX)
+    try:
+        endpoint.bind(sup.sock_path)
+        endpoint.listen(1)
+        assert not sup._probe_answered(time.monotonic() - 1)
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize("value", ["0", "not-an-integer"])
+def test_dl210_invalid_test_bound_is_configuration_refusal(short_root, value):
+    result = subprocess.run(
+        [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)],
+        env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": value},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 2 and not (short_root / "supervisor.sock").exists()
+
+
+def test_dl210_deep_pid_record_cannot_authorize_reclaim(queued_supervisor):
+    sup, _ = queued_supervisor
+    Path(sup.pid_path).write_text("[" * 2000 + "]" * 2000)
+    assert not sup._pid_owner_absent()
+
+
+def test_dl210_unknown_current_boot_cannot_prove_recorded_owner_absent(
+    queued_supervisor, monkeypatch
+):
+    sup, _ = queued_supervisor
+    sup.boot_id = "unknown"
+    Path(sup.pid_path).write_text(json.dumps({"pid": 123, "boot_id": "previous-boot"}))
+    monkeypatch.setattr(runner_supervisor, "proc_start_token", lambda _pid: "ticks:1")
+    assert not sup._pid_owner_absent()
