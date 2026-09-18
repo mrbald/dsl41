@@ -549,8 +549,13 @@ def supervise(
             raise typer.Exit(refuse("--deadman-seconds must be a finite positive number"))
     if verb == "start":
         try:
-            run_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            run_root.chmod(0o700)
+            try:
+                run_root.mkdir(mode=0o700, parents=True)
+            except FileExistsError:
+                if not run_root.is_dir():
+                    raise
+            else:
+                run_root.chmod(0o700)
             argv = [
                 sys.executable,
                 str(Path(__file__).with_name("runner_supervisor.py")),

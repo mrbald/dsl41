@@ -720,7 +720,7 @@ def test_dl210_any_reply_arms_one_list_net_for_several_waits(
 ) -> None:
     from dsl41 import runner_adapters
 
-    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.05)
 
     async def scenario() -> None:
         client = SupervisorClient(tmp_path)
@@ -743,7 +743,7 @@ def test_dl210_any_reply_arms_one_list_net_for_several_waits(
             assert client._list_task is net
             for rid in ("a", "b", "c"):
                 client.forget_exit(rid)
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.1)
             assert wire.sent.empty()  # no LIST per waiter and none while dormant
             assert not net.done()
             # A later wait wakes the SAME task without another hint.
@@ -948,6 +948,27 @@ def test_dl210_reconnect_arms_net_without_drop_hint(tmp_path: Path, monkeypatch)
     asyncio.run(scenario())
 
 
+def test_dl210_noop_reconnect_does_not_arm_the_list_net(tmp_path: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        dead = client.watch_exit("run")
+
+        async def connect() -> bool:
+            pytest.fail("an already connected client must not reconnect")
+
+        monkeypatch.setattr(client, "_try_connect", connect)
+        try:
+            assert await client.reconnect()
+            assert client._list_task is None
+            assert not dead.is_set()
+            assert wire.sent.empty()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_dl210_forget_does_not_cancel_list_and_close_cancels_outside_request(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -993,10 +1014,62 @@ def test_dl210_forget_does_not_cancel_list_and_close_cancels_outside_request(
     asyncio.run(scenario())
 
 
-def test_dl210_malformed_shared_list_fails_the_adapter_loudly(tmp_path: Path, monkeypatch) -> None:
+def test_dl210_close_cancels_list_queued_behind_a_stuck_writer(tmp_path: Path, monkeypatch) -> None:
+    from dsl41 import runner_adapters
+    from dsl41.runner_adapters import SupervisorUnavailable
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.05)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        draining, release_drain, listing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def drain() -> None:
+            draining.set()
+            await release_drain.wait()
+
+        original_list = client.list_runs
+
+        async def list_runs() -> dict[str, Any]:
+            listing.set()
+            return await original_list()
+
+        monkeypatch.setattr(wire, "drain", drain)
+        monkeypatch.setattr(client, "list_runs", list_runs)
+        ping = asyncio.create_task(client._request({"cmd": "PING"}))
+        try:
+            await asyncio.wait_for(draining.wait(), 3.0)
+            await wire.expect("PING")
+            client.watch_exit("run")
+            client._arm_list_recheck()
+            await asyncio.wait_for(listing.wait(), 3.0)
+            net = client._list_task
+            assert net is not None and not client._list_idle.is_set()
+            assert client._lock.locked() and wire.sent.empty()
+            # The real five-second close deadline must cancel the queued LIST
+            # even though the writer continues to hold the request lock.
+            await asyncio.wait_for(client.close(), 15.0)
+            assert not ping.done()
+            assert net.cancelled()
+            assert client._list_idle.is_set()
+            assert client._list_task is None and client._writer is None
+        finally:
+            await client.close()
+            release_drain.set()
+            [result] = await asyncio.wait_for(asyncio.gather(ping, return_exceptions=True), 3.0)
+        assert isinstance(result, SupervisorUnavailable)
+        assert str(result) == "connection lost"
+
+    asyncio.run(scenario())
+
+
+def test_dl210_malformed_shared_list_fails_loudly_then_later_waits_recover(
+    tmp_path: Path, monkeypatch
+) -> None:
     from dsl41 import runner_adapters
 
-    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.05)
 
     async def scenario() -> None:
         client = SupervisorClient(tmp_path)
@@ -1006,11 +1079,23 @@ def test_dl210_malformed_shared_list_fails_the_adapter_loudly(tmp_path: Path, mo
         task = asyncio.create_task(adapter._await_outcome("run", tmp_path / "j.1", "j", 1))
         try:
             await wire.expect("LIST")
+            failed_net = client._list_task
             wire.reply({"ok": True, "runs": [{**_list_row("run"), "run_number": "1"}]})
             with pytest.raises(EngineError, match="malformed run row"):
                 await asyncio.wait_for(task, 3.0)
             assert client._exit_futures == {}
             assert client._listed_dead == {}
+            replacement = client._list_task
+            assert replacement is not None and replacement is not failed_net
+            await asyncio.sleep(0.1)
+            assert not replacement.done() and wire.sent.empty()
+            future = client.exit_future("later")
+            dead = client.watch_exit("later")
+            await wire.expect("LIST")
+            wire.reply({"ok": True, "runs": []})
+            await asyncio.wait_for(dead.wait(), 3.0)
+            assert not future.done()
+            assert client._list_task is replacement
         finally:
             await client.close()
 

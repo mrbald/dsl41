@@ -265,7 +265,8 @@ two service shapes before relying on engine restarts to preserve jobs.
 service before the engine. Its wrappers and commands then belong to that
 service, so stopping the engine's cgroup leaves them running. Use the same
 OS user and run root for both services. The supervisor command creates the
-root with mode 0700, runs in the foreground with the same pid, and appends
+root with mode 0700 if it is missing. It leaves an existing root's mode alone.
+It runs in the foreground with the same pid and appends
 stdout and stderr to `<root>/supervisor.log`.
 
 ```ini

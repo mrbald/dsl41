@@ -1242,9 +1242,9 @@ class SupervisorClient:
         async with self._reconnect_lock:
             if self._closed:
                 return False
-            self._arm_list_recheck()
             if self._writer is not None and not self.lost.is_set():
                 return True  # another caller already reconnected
+            self._arm_list_recheck()
             if not await self._try_connect():
                 return False
             if self.token is not None:
@@ -1375,7 +1375,11 @@ class SupervisorClient:
         must never send the run to the spool ladder.
         """
         if self._list_task is not None and self._list_task.done():
-            self._list_task.result()  # a malformed LIST must fail the adapter loudly
+            try:
+                self._list_task.result()  # a malformed LIST must fail the adapter loudly
+            finally:
+                self._list_task = None
+                self._arm_list_recheck()  # later waits must not inherit the failed task
         dead = self._listed_dead.setdefault(run_id, asyncio.Event())
         if self._list_task is not None:
             self._list_wakeup.set()
@@ -1548,8 +1552,10 @@ class SupervisorClient:
         if self._list_task is not None:
             # Reader shutdown fails any pending LIST. Wait for its request to
             # unwind before cancelling: cancellation in _request poisons the
-            # uncorrelated stream. Ordinary forget_exit never cancels this task.
-            await self._list_idle.wait()
+            # uncorrelated stream. Bound this wait in case LIST is queued behind
+            # a stuck writer. Ordinary forget_exit never cancels this task.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._list_idle.wait(), timeout=5.0)
             self._list_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._list_task

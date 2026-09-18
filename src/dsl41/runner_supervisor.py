@@ -175,6 +175,20 @@ def _test_limit(name: str, default: int) -> int:
     return value
 
 
+def _valid_start_token(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.startswith("ticks:"):
+        return re.fullmatch(r"ticks:(0|[1-9][0-9]*)", value) is not None
+    if value.startswith("lstart:"):
+        try:
+            time.strptime(value[len("lstart:") :], "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            return False
+        return True
+    return False
+
+
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
 #: relative to THIS file so the supervisor never imports dsl41 to find it.
 _WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_wrapper.py")
@@ -326,7 +340,7 @@ class _Lease:
 
 
 class _Conn:
-    __slots__ = ("sock", "buf", "out", "backlog", "paused", "discarding", "read_eof")
+    __slots__ = ("sock", "buf", "out", "backlog", "paused", "discarding")
 
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
@@ -335,7 +349,6 @@ class _Conn:
         self.backlog = 0
         self.paused = False
         self.discarding = False
-        self.read_eof = False
 
 
 class Supervisor:
@@ -448,9 +461,9 @@ class Supervisor:
         except RecursionError:
             return False
         if record is None:
-            # No published endpoint needs no reclaim. A socket without an
-            # owner record is ambiguous, including an interrupted old startup.
-            return not os.path.lexists(self.sock_path)
+            # A missing record names no owner. A present but unreadable one
+            # cannot authorize reclamation, even after unanswered probes.
+            return not os.path.lexists(self.pid_path)
         pid = record.get("pid")
         if not is_wire_int(pid) or pid <= 0:
             return False
@@ -461,14 +474,9 @@ class Supervisor:
         current = proc_start_token(pid)
         recorded = record.get("start_time")
         if current is not None:
-            # Equality alone accepts arbitrary ticks: strings. Such a string
-            # cannot prove PID reuse when it differs from a real live token.
-            if isinstance(recorded, str) and recorded.startswith("ticks:"):
-                if re.fullmatch(r"ticks:(0|[1-9][0-9]*)", recorded) is None:
-                    return False
             return (
                 isinstance(recorded, str)
-                and start_tokens_match(recorded, recorded)
+                and _valid_start_token(recorded)
                 and not start_tokens_match(current, recorded)
             )
         try:
@@ -520,10 +528,6 @@ class Supervisor:
             os.umask(old_umask)
         os.chmod(self._private_path, 0o600)
         self._socket_inode = os.stat(self._private_path).st_ino
-        os.rename(self._private_path, self.sock_path)
-        self._private_bound = False
-        self._published = True
-        self._listen.setblocking(False)
         durable_write_json(
             self.pid_path,
             {
@@ -534,6 +538,10 @@ class Supervisor:
                 "started_at": utc_now_iso(),
             },
         )
+        os.rename(self._private_path, self.sock_path)
+        self._private_bound = False
+        self._published = True
+        self._listen.setblocking(False)
 
     def _install_signals(self) -> None:
         signal.signal(signal.SIGCHLD, self._on_chld_signal)
@@ -667,16 +675,32 @@ class Supervisor:
 
     def _readable(self, conn: _Conn) -> None:
         """A client's framing failure must not kill its siblings' lifelines."""
-        if not self._connected(conn) or conn.paused or conn.read_eof:
+        if not self._connected(conn) or conn.paused:
             return
         try:
             self._read_conn(conn)
-        except (BlockingIOError, InterruptedError):
-            return
+        except OSError as exc:
+            self._client_error(conn, exc)
         except Exception as exc:  # noqa: BLE001 -- isolate this connection
-            if not isinstance(exc, OSError):
-                print(f"supervisor: client read: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(f"supervisor: client read: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    def _client_error(self, conn: _Conn, exc: OSError) -> None:
+        """DL-210: only a named GONE error may close an accepted socket."""
+        if isinstance(exc, (BlockingIOError, InterruptedError)) or exc.errno in (
+            errno.ENOBUFS,
+            errno.ENOMEM,
+        ):
+            return
+        if exc.errno in (
+            errno.EPIPE,
+            errno.ECONNRESET,
+            errno.ECONNABORTED,
+            errno.ENOTCONN,
+            errno.EBADF,
+        ):
             self._drop_conn(conn)
+        else:
+            print(f"supervisor: client socket: errno={exc.errno}", file=sys.stderr, flush=True)
 
     def _read_conn(self, conn: _Conn) -> None:
         self._dispatch_buffer(conn)
@@ -685,12 +709,7 @@ class Supervisor:
         room = self._request_line_limit - len(conn.buf)
         chunk = conn.sock.recv(min(65536, room))
         if not chunk:
-            # shutdown(SHUT_WR) still leaves a reader entitled to replies.
-            conn.read_eof = True
-            if conn.out:
-                self._interest(conn)
-            else:
-                self._drop_conn(conn)
+            self._drop_conn(conn)
             return
         conn.buf += chunk
         self._dispatch_buffer(conn)
@@ -743,7 +762,7 @@ class Supervisor:
 
     def _interest(self, conn: _Conn) -> None:
         events = selectors.EVENT_WRITE if conn.out else 0
-        if not conn.paused and not conn.read_eof and self._running:
+        if not conn.paused and self._running:
             events |= selectors.EVENT_READ
         if events:
             self._sel.modify(conn.sock, events, ("conn", conn))
@@ -757,7 +776,6 @@ class Supervisor:
                 frame, dropped = conn.out[0]
                 count = conn.sock.send(memoryview(frame)[:budget])
                 if count == 0:
-                    self._drop_conn(conn)
                     return
                 conn.backlog -= count
                 budget -= count
@@ -769,13 +787,8 @@ class Supervisor:
                             lease.pushes_dropped = False
                 else:
                     conn.out[0] = (frame[count:], dropped)
-        except (BlockingIOError, InterruptedError):
-            pass
-        except OSError:
-            self._drop_conn(conn)
-            return
-        if conn.read_eof and not conn.out:
-            self._drop_conn(conn)
+        except OSError as exc:
+            self._client_error(conn, exc)
             return
         was_paused = conn.paused
         conn.paused = conn.backlog >= self._backlog_bytes
@@ -1555,10 +1568,12 @@ class Supervisor:
             with contextlib.suppress(OSError):
                 if os.stat(self.sock_path).st_ino == self._socket_inode:
                     os.unlink(self.sock_path)
-            record = _load_json(self.pid_path)
-            if record is not None and record.get("incarnation") == self.incarnation:
-                with contextlib.suppress(OSError):
-                    os.unlink(self.pid_path)
+        if self._published or self._private_bound:
+            with contextlib.suppress(RecursionError):
+                record = _load_json(self.pid_path)
+                if record is not None and record.get("incarnation") == self.incarnation:
+                    with contextlib.suppress(OSError):
+                        os.unlink(self.pid_path)
         if self._private_bound:
             with contextlib.suppress(OSError):
                 os.unlink(self._private_path)
@@ -1571,7 +1586,8 @@ class Supervisor:
                 os.close(fd)
         self._sel.close()
         if self._lock_fd is not None:
-            os.close(self._lock_fd)
+            with contextlib.suppress(OSError):
+                os.close(self._lock_fd)
             self._lock_fd = None
 
 
@@ -1777,10 +1793,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"supervisor: run-root {args.run_root!r} does not exist", file=sys.stderr)
         return 2
     try:
-        return Supervisor(args.run_root, deadman_s=args.deadman_seconds).run()
-    except (OSError, ValueError) as exc:
+        supervisor = Supervisor(args.run_root, deadman_s=args.deadman_seconds)
+    except ValueError as exc:
         print(f"supervisor: {exc}", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"supervisor: {exc}", file=sys.stderr)
+        return 1
+    try:
+        return supervisor.run()
+    except OSError as exc:
+        print(f"supervisor: {exc}", file=sys.stderr)
+        return 1
     except SystemExit as exc:  # lock contention or the legacy live-owner gate
         print(str(exc), file=sys.stderr)
         return exc.code if isinstance(exc.code, int) else 1
