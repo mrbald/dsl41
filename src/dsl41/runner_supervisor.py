@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -151,6 +152,19 @@ if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
 
 PROTOCOL_VERSION = 1
+
+# DL-210: limits are per connection. One reply may cross the output bound.
+REQUEST_LINE_LIMIT = 2**20
+BACKLOG_BYTES = 2**24
+
+
+def _test_limit(name: str, default: int) -> int:
+    """Read an opt-in test seam once at startup; production uses the constant."""
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
 
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
 #: relative to THIS file so the supervisor never imports dsl41 to find it.
@@ -288,7 +302,7 @@ class _Run:
 
 
 class _Lease:
-    __slots__ = ("holder", "token", "deadline", "expires_at", "conn")
+    __slots__ = ("holder", "token", "deadline", "expires_at", "conn", "pushes_dropped", "drops")
 
     def __init__(
         self, holder: str, token: int, deadline: float, expires_at: str, conn: _Conn | None
@@ -298,14 +312,21 @@ class _Lease:
         self.deadline = deadline  # time.monotonic() basis (immune to clock steps)
         self.expires_at = expires_at
         self.conn = conn
+        self.pushes_dropped = False
+        self.drops = 0  # a queued reply must not acknowledge a later dropped push
 
 
 class _Conn:
-    __slots__ = ("sock", "buf")
+    __slots__ = ("sock", "buf", "out", "backlog", "paused", "discarding", "read_eof")
 
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
         self.buf = b""
+        self.out: deque[tuple[bytes, tuple[_Lease, int] | None]] = deque()
+        self.backlog = 0
+        self.paused = False
+        self.discarding = False
+        self.read_eof = False
 
 
 class Supervisor:
@@ -356,6 +377,11 @@ class Supervisor:
         os.set_blocking(self._chld_w, False)
         self._running = True
         self._shutdown_requested = False
+        self._backlog_bytes = _test_limit("DSL41_SUPERVISOR_TEST_BACKLOG_BYTES", BACKLOG_BYTES)
+        self._request_line_limit = _test_limit(
+            "DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT", REQUEST_LINE_LIMIT
+        )
+        self._accept_log_at = float("-inf")
 
     # -- startup ------------------------------------------------------------
 
@@ -445,7 +471,7 @@ class Supervisor:
         self._unleased_since = time.monotonic()
         try:
             while self._running:
-                for key, _mask in self._sel.select(timeout=1.0):
+                for key, mask in self._sel.select(timeout=1.0):
                     tag, payload = key.data
                     if tag == "listen":
                         self._accept()
@@ -455,7 +481,10 @@ class Supervisor:
                         if self._shutdown_requested:
                             self._orderly_shutdown()
                     elif tag == "conn":
-                        self._readable(payload)
+                        if mask & selectors.EVENT_WRITE:
+                            self._writable(payload)
+                        if mask & selectors.EVENT_READ and self._connected(payload):
+                            self._readable(payload)
                 # a stray SIGCHLD can be coalesced away by the self-pipe under
                 # load; the select timeout gives an unconditional reap tick
                 self._reap()
@@ -512,63 +541,173 @@ class Supervisor:
         assert self._listen is not None
         try:
             conn_sock, _ = self._listen.accept()
-        except OSError:
+        except OSError as exc:
+            if exc.errno in (errno.EMFILE, errno.ENFILE):
+                now = time.monotonic()
+                if now - self._accept_log_at >= 60:
+                    print(f"supervisor: accept: {exc}", file=sys.stderr, flush=True)
+                    self._accept_log_at = now
             return
-        uid = peer_uid(conn_sock)
+        try:
+            uid = peer_uid(conn_sock)
+        except OSError:
+            conn_sock.close()
+            return
         if uid is not None and uid != os.getuid():
             conn_sock.close()  # same-uid gate (ss1)
             return
-        conn_sock.setblocking(True)  # small line writes; blocking is simplest
+        conn_sock.setblocking(False)
         conn = _Conn(conn_sock)
         self._conns[conn_sock.fileno()] = conn
         self._sel.register(conn_sock, selectors.EVENT_READ, ("conn", conn))
 
     def _readable(self, conn: _Conn) -> None:
-        try:
-            chunk = conn.sock.recv(65536)
-        except OSError:
-            self._drop_conn(conn)
+        """A client's framing failure must not kill its siblings' lifelines."""
+        if not self._connected(conn) or conn.paused or conn.read_eof:
             return
-        if not chunk:
+        try:
+            self._read_conn(conn)
+        except (BlockingIOError, InterruptedError):
+            return
+        except Exception as exc:  # noqa: BLE001 -- isolate this connection
+            if not isinstance(exc, OSError):
+                print(f"supervisor: client read: {type(exc).__name__}: {exc}", file=sys.stderr)
             self._drop_conn(conn)
+
+    def _read_conn(self, conn: _Conn) -> None:
+        self._dispatch_buffer(conn)
+        if conn.paused or not self._running or not self._connected(conn):
+            return
+        room = self._request_line_limit - len(conn.buf)
+        chunk = conn.sock.recv(min(65536, room))
+        if not chunk:
+            # shutdown(SHUT_WR) still leaves a reader entitled to replies.
+            conn.read_eof = True
+            if conn.out:
+                self._interest(conn)
+            else:
+                self._drop_conn(conn)
             return
         conn.buf += chunk
-        while b"\n" in conn.buf:
+        self._dispatch_buffer(conn)
+
+    def _dispatch_buffer(self, conn: _Conn) -> None:
+        while not conn.paused and self._connected(conn):
+            if b"\n" not in conn.buf:
+                if len(conn.buf) >= self._request_line_limit:
+                    if not conn.discarding:
+                        self._dispatch(conn, b"", too_large=True)
+                    conn.discarding = True
+                    conn.buf = b""
+                elif conn.discarding:
+                    conn.buf = b""
+                return
             line, conn.buf = conn.buf.split(b"\n", 1)
-            self._dispatch(conn, line)
-            if not self._running:  # SHUTDOWN reply already sent
+            if conn.discarding:
+                conn.discarding = False
+            else:
+                self._dispatch(conn, line)
+            if not self._running:
                 return
 
+    def _connected(self, conn: _Conn) -> bool:
+        return self._conns.get(conn.sock.fileno()) is conn
+
     def _drop_conn(self, conn: _Conn) -> None:
-        with contextlib.suppress(KeyError):
+        if not self._connected(conn):
+            return
+        with contextlib.suppress(KeyError, OSError, ValueError):
             self._sel.unregister(conn.sock)
         self._conns.pop(conn.sock.fileno(), None)
         if self.lease is not None and self.lease.conn is conn:
             self.lease.conn = None  # pushes drop until the holder re-ACQUIREs
         conn.sock.close()
+        conn.buf = b""
+        conn.out.clear()
+        conn.backlog = 0
 
-    @staticmethod
-    def _send(conn: _Conn, obj: dict[str, Any]) -> None:
+    def _send(
+        self, conn: _Conn, obj: dict[str, Any], *, dropped: tuple[_Lease, int] | None = None
+    ) -> None:
+        if not self._connected(conn):
+            return
+        frame = json.dumps(obj, sort_keys=True).encode("utf-8") + b"\n"
+        conn.out.append((frame, dropped))
+        conn.backlog += len(frame)
+        conn.paused = conn.backlog >= self._backlog_bytes
+        self._interest(conn)
+
+    def _interest(self, conn: _Conn) -> None:
+        events = selectors.EVENT_WRITE if conn.out else 0
+        if not conn.paused and not conn.read_eof and self._running:
+            events |= selectors.EVENT_READ
+        if events:
+            self._sel.modify(conn.sock, events, ("conn", conn))
+
+    def _writable(self, conn: _Conn, *, resume: bool = True) -> None:
+        if not self._connected(conn):
+            return
+        budget = 65536  # yield to reaping, other clients and the deadman
         try:
-            conn.sock.sendall(json.dumps(obj, sort_keys=True).encode("utf-8") + b"\n")
+            while conn.out and budget > 0:
+                frame, dropped = conn.out[0]
+                count = conn.sock.send(memoryview(frame)[:budget])
+                if count == 0:
+                    self._drop_conn(conn)
+                    return
+                conn.backlog -= count
+                budget -= count
+                if count == len(frame):
+                    conn.out.popleft()
+                    if dropped is not None:
+                        lease, drops = dropped
+                        if lease.drops == drops:
+                            lease.pushes_dropped = False
+                else:
+                    conn.out[0] = (frame[count:], dropped)
+        except (BlockingIOError, InterruptedError):
+            pass
         except OSError:
-            pass  # a client that hung up mid-write is its own problem
+            self._drop_conn(conn)
+            return
+        if conn.read_eof and not conn.out:
+            self._drop_conn(conn)
+            return
+        was_paused = conn.paused
+        conn.paused = conn.backlog >= self._backlog_bytes
+        if was_paused and not conn.paused and resume and self._running:
+            # Kernel readability may be false: pipelined requests already
+            # in our buffer still go first when the output pause clears.
+            self._readable(conn)
+        if self._connected(conn):
+            self._interest(conn)
 
     # -- request dispatch ---------------------------------------------------
 
-    def _dispatch(self, conn: _Conn, line: bytes) -> None:
-        if not line.strip():
+    def _dispatch(self, conn: _Conn, line: bytes, *, too_large: bool = False) -> None:
+        if not too_large and not line.strip():
             return
+        previous = self.lease
+        answer = (
+            {"ok": False, "error": "request_too_large"} if too_large else self._answer(conn, line)
+        )
+        dropped = None
+        # RELEASE's final reply still acknowledges the lease it just ended.
+        lease = self.lease if self.lease is not None else previous
+        if lease is not None and lease.conn is conn and lease.pushes_dropped:
+            answer["pushes_dropped"] = True
+            dropped = (lease, lease.drops)
+        self._send(conn, answer, dropped=dropped)
+
+    def _answer(self, conn: _Conn, line: bytes) -> dict[str, Any]:
         try:
             req = json.loads(line)
             if not isinstance(req, dict):
                 raise ValueError("request must be a JSON object")
-        except (json.JSONDecodeError, ValueError):
-            self._send(conn, {"ok": False, "error": "malformed_json"})
-            return
+        except (ValueError, RecursionError):
+            return {"ok": False, "error": "malformed_json"}
         if not _is_wire_int_equal(req.get("v"), PROTOCOL_VERSION):
-            self._send(conn, {"ok": False, "error": "unsupported_version"})
-            return
+            return {"ok": False, "error": "unsupported_version"}
         cmd = req.get("cmd")
         handler = {
             "PING": self._h_ping,
@@ -581,8 +720,7 @@ class Supervisor:
             "SHUTDOWN": self._h_shutdown,
         }.get(cmd if isinstance(cmd, str) else "")
         if handler is None:
-            self._send(conn, {"ok": False, "error": "unknown_verb"})
-            return
+            return {"ok": False, "error": "unknown_verb"}
         try:
             answer = handler(conn, req)
         except Exception as exc:  # noqa: BLE001 -- the belt under every verb
@@ -591,7 +729,7 @@ class Supervisor:
             # wrong is ONE request's problem; it is answered, and the tier
             # that must outlive the engine keeps running.
             answer = {"ok": False, "error": f"internal: {type(exc).__name__}: {exc}"}
-        self._send(conn, answer)
+        return answer
 
     def _h_ping(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
         # `deadman_s` rides the two READ verbs (S5b): the leader records what
@@ -698,7 +836,11 @@ class Supervisor:
         token = self._next_token
         self._next_token += 1  # monotonic: never regresses while any run is alive
         expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
+        previous = self.lease
         self.lease = _Lease(controller_id, token, time.monotonic() + ttl_s, expires_at, conn)
+        if previous is not None and previous.holder == controller_id:
+            self.lease.pushes_dropped = previous.pushes_dropped
+            self.lease.drops = previous.drops
         return {
             "ok": True,
             "token": token,
@@ -1259,7 +1401,11 @@ class Supervisor:
             self._evict_completed(run)
 
     def _push_exit(self, run: _Run) -> None:
-        if self.lease is None or self.lease.conn is None or not self._lease_active():
+        if self.lease is None:
+            return
+        if not self._lease_active() or self.lease.conn is None or self.lease.conn.paused:
+            self.lease.pushes_dropped = True
+            self.lease.drops += 1
             return
         self._send(
             self.lease.conn,
@@ -1285,9 +1431,19 @@ class Supervisor:
             self.runs.pop(self._completed.popleft(), None)
 
     def _teardown(self) -> None:
+        # One deadline for all clients, including a SHUTDOWN reply. No
+        # requests are dispatched after shutdown, even if reads are ready.
+        self._running = False
+        deadline = time.monotonic() + 2.0
+        while any(conn.out for conn in self._conns.values()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for key, mask in self._sel.select(timeout=remaining):
+                if key.data[0] == "conn" and mask & selectors.EVENT_WRITE:
+                    self._writable(key.data[1], resume=False)
         for conn in list(self._conns.values()):
-            with contextlib.suppress(Exception):
-                conn.sock.close()
+            self._drop_conn(conn)
         if self._listen is not None:
             with contextlib.suppress(Exception):
                 self._listen.close()

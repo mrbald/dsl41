@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import shutil
+import selectors
 import signal
 import socket
 import subprocess
@@ -1899,3 +1901,357 @@ def _kill_group(run_root: Path) -> None:
     if sup.exists():
         with contextlib.suppress(Exception):
             os.kill(json.loads(sup.read_text())["pid"], signal.SIGKILL)
+
+
+@pytest.fixture
+def queued_supervisor(short_root: Path):
+    """In-process selector with real sockets and explicit descriptor cleanup."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    peers = []
+
+    def connect():
+        server, peer = socket.socketpair()
+        server.setblocking(False)
+        peer.settimeout(1)
+        conn = runner_supervisor._Conn(server)
+        sup._conns[server.fileno()] = conn
+        sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
+        peers.append(peer)
+        return conn, peer
+
+    yield sup, connect
+    for conn in list(sup._conns.values()):
+        sup._drop_conn(conn)
+    for peer in peers:
+        peer.close()
+    for fd in (sup._chld_r, sup._chld_w):
+        os.close(fd)
+    sup._sel.close()
+
+
+def _flush_reply(sup, conn, peer):
+    sup._writable(conn)
+    return json.loads(peer.recv(65536).split(b"\n")[0])
+
+
+def test_dl210_deep_json_and_invalid_utf8_leave_supervisor_alive(short_root: Path) -> None:
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        assert cli.raw(b"[" * 2000 + b"]" * 2000 + b"\n")["error"] == "malformed_json"
+        assert cli.raw(b'"\xff"\n')["error"] == "malformed_json"
+        assert cli.send({"v": 1, "cmd": "PING"})["ok"]
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_line_bound_discards_one_line_and_retains_next(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root, env={**os.environ, "DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT": "128"}
+    )
+    cli = RawClient(short_root)
+    try:
+        exact = b'{"v":1,"cmd":"PING"}'
+        assert cli.raw(exact + b" " * (127 - len(exact)) + b"\n")["ok"]
+        # No newline yet: refuse once without retaining the oversized body.
+        assert cli.raw(b"x" * 128)["error"] == "request_too_large"
+        cli.sock.sendall(b"x" * 500 + b'\n{"v":1,"cmd":"PING"}\n')
+        assert cli._read()["ok"]
+        assert cli.send({"v": 1, "cmd": "PING"})["ok"]
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_pause_resumes_retained_requests_in_order(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._backlog_bytes = 1
+    peer.sendall(b'{"v":1,"cmd":"PING"}\n{"v":1,"cmd":"LIST"}\n')
+    sup._readable(conn)
+    assert conn.paused and b"LIST" in conn.buf
+    assert sup._sel.get_key(conn.sock).events == selectors.EVENT_WRITE
+    first = _flush_reply(sup, conn, peer)
+    assert "runs" not in first and conn.paused
+    assert conn.buf == b""
+    second = _flush_reply(sup, conn, peer)
+    assert second["runs"] == [] and not conn.paused
+    assert sup._sel.get_key(conn.sock).events == selectors.EVENT_READ
+
+
+class _FaultSocket:
+    def __init__(self, sock, *, sends=(), reads=()):
+        self.sock = sock
+        self.sends = iter(sends)
+        self.reads = iter(reads)
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def close(self):
+        self.sock.close()
+
+    def send(self, data):
+        result = next(self.sends, None)
+        if isinstance(result, BaseException):
+            raise result
+        return self.sock.send(data if result is None else data[:result]) if result != 0 else 0
+
+    def recv(self, count):
+        result = next(self.reads, None)
+        if isinstance(result, BaseException):
+            raise result
+        return self.sock.recv(count) if result is None else result
+
+
+def test_dl210_partial_flush_and_transient_errors_keep_frame(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    conn.sock = _FaultSocket(conn.sock, sends=[3, BlockingIOError(), InterruptedError()])
+    sup._send(conn, {"ok": True})
+    size = conn.backlog
+    sup._writable(conn)
+    assert conn.backlog == size - 3
+    prefix = peer.recv(3)
+    sup._writable(conn)
+    assert conn.backlog == size - 3
+    sup._writable(conn)
+    assert json.loads(prefix + peer.recv(1024)) == {"ok": True}
+    assert conn.backlog == 0
+
+
+@pytest.mark.parametrize("error", [BrokenPipeError(), ConnectionResetError(), OSError(), 0])
+def test_dl210_write_failure_drops_only_its_connection(queued_supervisor, error) -> None:
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    other, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    conn.sock = _FaultSocket(conn.sock, sends=[error])
+    sup._send(conn, {"ok": True})
+    sup._writable(conn)
+    sup._drop_conn(conn)  # repeated cleanup cannot touch a reused fd
+    assert sup.lease.conn is None and not sup._connected(conn)
+    sup._dispatch(other, b'{"v":1,"cmd":"PING"}')
+    assert _flush_reply(sup, other, peer)["ok"]
+
+
+@pytest.mark.parametrize("error", [BlockingIOError(), InterruptedError()])
+def test_dl210_read_retry_keeps_connection(queued_supervisor, error) -> None:
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    conn.sock = _FaultSocket(conn.sock, reads=[error])
+    sup._readable(conn)
+    assert sup._connected(conn)
+
+
+@pytest.mark.parametrize("error", [ConnectionResetError(), RuntimeError("read belt"), b""])
+def test_dl210_read_failure_isolated(queued_supervisor, error, capsys) -> None:
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    conn.sock = _FaultSocket(conn.sock, reads=[error])
+    sup._readable(conn)
+    assert not sup._connected(conn)
+    if isinstance(error, RuntimeError):
+        assert "read belt" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["paused", "inactive", "disconnected"])
+def test_dl210_dropped_push_stays_on_lease_until_reply_flushed(queued_supervisor, state) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    lease = sup.lease
+    assert lease is not None
+    if state == "paused":
+        conn.paused = True
+    elif state == "inactive":
+        lease.deadline = 0
+    else:
+        sup._drop_conn(conn)
+    sup._push_exit(None)  # suppressed before the run is inspected
+    assert lease.pushes_dropped
+    if state == "disconnected":
+        conn, peer = connect()
+        sup._dispatch(conn, b'{"v":1,"cmd":"ACQUIRE","controller_id":"holder"}')
+        lease = sup.lease
+    else:
+        conn.paused = False
+        sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert lease.pushes_dropped  # enqueuing is not acknowledgement
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"] is True
+    assert not lease.pushes_dropped
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert "pushes_dropped" not in _flush_reply(sup, conn, peer)
+
+
+def test_dl210_queued_notice_cannot_clear_a_later_drop(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    conn.paused = True
+    sup._push_exit(None)
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    conn.paused = True
+    sup._push_exit(None)
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert sup.lease.pushes_dropped
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert not sup.lease.pushes_dropped
+
+
+def test_dl210_dropped_notice_never_goes_to_observer_or_new_holder(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    holder, _ = connect()
+    observer, peer = connect()
+    sup._h_acquire(holder, {"controller_id": "holder"})
+    sup.lease.deadline = 0
+    sup._push_exit(None)
+    sup._dispatch(observer, b'{"v":1,"cmd":"LIST"}')
+    assert "pushes_dropped" not in _flush_reply(sup, observer, peer)
+    sup._dispatch(observer, b'{"v":1,"cmd":"ACQUIRE","controller_id":"different"}')
+    assert "pushes_dropped" not in _flush_reply(sup, observer, peer)
+    sup.lease = None
+    sup._push_exit(None)  # there is no holder to notify
+
+
+def test_dl210_accept_resource_errors_are_rate_limited(queued_supervisor, monkeypatch, capsys):
+    sup, _ = queued_supervisor
+
+    class Exhausted:
+        def accept(self):
+            raise OSError(errno.EMFILE, "too many open files")
+
+    sup._listen = Exhausted()
+    now = [100.0]
+    monkeypatch.setattr(runner_supervisor.time, "monotonic", lambda: now[0])
+    sup._accept()
+    sup._accept()
+    assert capsys.readouterr().err.count("accept:") == 1
+    now[0] += 60
+    sup._accept()
+    assert capsys.readouterr().err.count("accept:") == 1
+    sup._listen = None
+
+
+def _flood_without_reading(root: Path):
+    peer = socket.socket(socket.AF_UNIX)
+    peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+    peer.settimeout(0.2)
+    peer.connect(str(root / "supervisor.sock"))
+    try:
+        peer.sendall(b'{"v":1,"cmd":"PING"}\n' * 30000)
+    except TimeoutError:
+        pass  # a write-side pause is the expected backpressure
+    return peer
+
+
+def test_dl210_nonreader_cannot_block_reaping_ping_or_shutdown(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root, env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": "512"}
+    )
+    holder = RawClient(short_root)
+    flood = _flood_without_reading(short_root)
+    try:
+        token = holder.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "holder"})["token"]
+        spec = _spec(short_root / "runs" / "j.1", command="exit 7")
+        assert holder.send({"v": 1, "cmd": "SPAWN", "token": token, "spec": spec})["ok"]
+        wait_for(lambda: Path(spec["run_dir"], "status.json").exists())
+
+        def reaped():
+            answer = holder.send({"v": 1, "cmd": "LIST"})
+            return answer if any(not row["wrapper_alive"] for row in answer["runs"]) else None
+
+        listing = wait_for(reaped)
+        assert listing["runs"][0]["wrapper_rc"] == 0
+        assert holder.send({"v": 1, "cmd": "PING"})["ok"]
+        assert holder.send({"v": 1, "cmd": "SHUTDOWN", "token": token})["ok"]
+        proc.wait(timeout=5)
+    finally:
+        holder.close()
+        flood.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_nonreader_cannot_block_deadman(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root,
+        env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": "512"},
+        deadman_s=0.2,
+    )
+    flood = _flood_without_reading(short_root)
+    try:
+        assert proc.wait(timeout=5) == 0
+        assert "deadman fired" in (short_root / "supervisor.log").read_text()
+    finally:
+        flood.close()
+        teardown_supervisor(short_root, proc)
+
+
+@pytest.mark.parametrize("verb", ["RENEW", "RELEASE", "oversized", "malformed"])
+def test_dl210_every_holder_reply_carries_unflushed_notice(queued_supervisor, verb):
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    acquired = sup._h_acquire(conn, {"controller_id": "holder"})
+    lease = sup.lease
+    conn.paused = True
+    sup._push_exit(None)
+    conn.paused = False
+    if verb == "oversized":
+        sup._request_line_limit = 8
+        peer.sendall(b"x" * 8)
+        sup._readable(conn)
+    else:
+        payload = json.dumps(
+            {"v": 1, "cmd": verb, "token": acquired["token"], "incarnation": sup.incarnation}
+        ).encode()
+        sup._dispatch(conn, b"{" if verb == "malformed" else payload)
+    assert lease.pushes_dropped
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert not lease.pushes_dropped
+
+
+def test_dl210_half_closed_client_receives_whole_queued_reply(queued_supervisor):
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+    answer = {"ok": True, "body": "x" * 100000}
+    sup._send(conn, answer)
+    peer.shutdown(socket.SHUT_WR)
+    sup._readable(conn)
+    assert conn.read_eof and sup._connected(conn)
+    assert sup._sel.get_key(conn.sock).events == selectors.EVENT_WRITE
+    received = b""
+    while sup._connected(conn):
+        sup._writable(conn)
+        received += peer.recv(65536)
+    assert received.endswith(b"\n") and json.loads(received) == answer
+    assert peer.recv(1) == b""
+
+
+@pytest.mark.parametrize("uid_error", [PermissionError(), None])
+def test_dl210_accept_closes_peer_on_credential_error_or_other_uid(
+    queued_supervisor, monkeypatch, uid_error
+):
+    sup, _connect = queued_supervisor
+    server, peer = socket.socketpair()
+
+    class Listener:
+        def accept(self):
+            return server, None
+
+    def get_uid(_sock):
+        if uid_error is not None:
+            raise uid_error
+        return os.getuid() + 1
+
+    sup._listen = Listener()
+    monkeypatch.setattr(runner_supervisor, "peer_uid", get_uid)
+    try:
+        sup._accept()
+        assert server.fileno() == -1 and not sup._conns
+    finally:
+        server.close()
+        peer.close()
+        sup._listen = None

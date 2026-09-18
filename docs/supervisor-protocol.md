@@ -326,6 +326,35 @@ line → one response line, except async pushes (below). Every request
 carries `"v": 1`. Responses are `{"ok": true, …}` or
 `{"ok": false, "error": "<code>", …}`.
 
+*(Amended by DL-210.)* Accepted sockets are non-blocking. Replies and pushes
+are queued in order and flushed on write readiness. `REQUEST_LINE_LIMIT`
+is 1 MiB, including the newline. An oversized request gets one
+`request_too_large` refusal; its remaining bytes are discarded through the
+newline, and the next line is read normally. Invalid UTF-8 and excessively
+nested JSON answer `malformed_json`. A connection's read failure closes
+that connection, not the supervisor. A transient interrupted or would-block
+read or write retries on readiness; a terminal socket error drops the connection.
+A client that half-closes its writer still receives its queued replies before
+the supervisor closes the connection.
+
+`BACKLOG_BYTES` is 16 MiB per connection. At that queued-output bound, reads
+pause. Already buffered lines are dispatched first when output drains below
+the bound. Retained wire buffers are bounded per connection by
+`BACKLOG_BYTES + REQUEST_LINE_LIMIT + one frame`; one large reply may cross
+the output bound. Observers remain unlimited, so the connection count and
+aggregate memory are unbounded by design. The same-uid check is a trust
+boundary, not a memory bound. Accept failures `EMFILE` and `ENFILE` are logged
+at most once per minute. A reply at or above the shipped client's own line
+limit still poisons that client's connection; this slice does not change it.
+
+A client that stops reading stops being read; later requests wait. A paused
+holder's unrenewed lease expires normally. A reading client can pause across
+one large reply and resumes as that reply drains. Shutdown drains pending
+output under one shared two-second deadline, then drops all connections.
+The test-only environment variables `DSL41_SUPERVISOR_TEST_BACKLOG_BYTES`
+and `DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT` override these bounds once at
+startup. Leave them unset in production, like `DSL41_WRAPPER_TEST_PAUSE`.
+
 **Incarnation** (DL-80). The supervisor mints an `incarnation` id at every
 start and returns it from `PING`, `LIST` and `ACQUIRE`. Every verb that
 changes lease or run state must carry it — `SPAWN`, `SIGNAL`, `SHUTDOWN`,
@@ -591,6 +620,26 @@ holds the current lease receives async lines
 only — droppable, never the data channel. A disconnected controller
 loses them. On reconnect, it recovers with LIST + status.json (the spool
 is the truth, the same philosophy as the wrapper exit code).
+
+*(Amended by DL-210.)* An exit push suppressed because the lease is inactive,
+its holder connection is absent, or that connection is paused sets
+`pushes_dropped` on the lease. The next reply to its holder carries
+`"pushes_dropped": true`; pushes never carry it. Re-granting the lease to
+the same `controller_id` preserves the notice, including on the ACQUIRE
+reply after reconnect. Queuing a reply does not clear the notice. Fully
+flushing it to the kernel clears the drops it reports; a later drop still
+requires a later reply.
+
+The client arms one shared LIST task on this reply field and on reconnect.
+It checks armed waits once per `_LIST_RECHECK_EVERY` interval, only after
+their SPAWN or duplicate reply. A successful listing that no longer shows
+a live run marks that wait for the existing spool-resolution ladder,
+including its settle window and surviving-command checks. LIST never
+resolves an exit future. An `ok: false` listing is unknown and marks nothing.
+The task remains available while idle and is cancelled only at close,
+outside any in-flight request. A dropped exit push can make `kill()` pay both
+existing grace waits, after TERM and after KILL, even if the command has
+already exited. The LIST net does not resolve that push future.
 
 The engine's OWN control socket (runner-design §10) deliberately keeps
 no lease: sendevent is multi-writer by AutoSys nature, and the
