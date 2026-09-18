@@ -1325,6 +1325,7 @@ class RunnerApp(App[None]):
         self._selected: str | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
         self._trace_seq = 0
+        self._trace_baseline: str | None = None
         self._alarms: dict[str, int] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
@@ -1444,13 +1445,32 @@ class RunnerApp(App[None]):
                 self._set_query_fault(
                     "trace", None if trace.get("ok") else str(trace.get("error", "")).strip()
                 )
+                trace_baseline = trace.get("baseline_id")
+                status_baseline = status.get("baseline_id")
+                if isinstance(trace_baseline, str) and trace_baseline:
+                    baseline_changed = (
+                        self._trace_baseline is not None and trace_baseline != self._trace_baseline
+                    )
+                    mixed_baselines = (
+                        status_baseline is not None and status_baseline != trace_baseline
+                    )
+                    self._trace_baseline = trace_baseline
+                    if baseline_changed or mixed_baselines:
+                        self._trace_seq = 0
+                        self._alarms.clear()
+                        self._console_write(
+                            Text(
+                                "trace baseline changed; reading from the start next poll", "yellow"
+                            )
+                        )
+                        return
                 if trace.get("ok"):
                     last_seq = trace.get("last_seq")
                     if isinstance(last_seq, int) and last_seq < self._trace_seq:
-                        # the engine serving this socket has a SHORTER trace
-                        # than our cut: the run root was re-baselined under a
-                        # reattaching viewer -- restart the commentary and the
-                        # alarm tally from the fresh oracle's top
+                        # Defensive fallback for a shorter trace. A baseline
+                        # change above resets even when the new trace is longer;
+                        # a same-period resume replays the existing prefix, so
+                        # an epoch change alone does not invalidate the cursor.
                         self._trace_seq = 0
                         self._alarms.clear()
                         self._dirty = True

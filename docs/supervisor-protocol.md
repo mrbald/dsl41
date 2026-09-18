@@ -317,6 +317,37 @@ start, if a live supervisor already holds the socket (connect probe), the
 supervisor refuses to run. It unlinks a stale socket — parity with the
 engine's control-socket gate (runner-design §10).
 
+*(Amended by DL-210.)* Startup first takes `<run_root>/supervisor.lock`,
+an exclusive non-blocking flock held for the process lifetime. The file is
+never unlinked. Under that lock it sweeps leftover `.s.*` socket files,
+probes the published endpoint with three PING attempts across one second,
+and checks the pid file before reclaiming anything. A PING answer or a live
+recorded process refuses startup with exit 1 and the message
+`another supervisor owns this root`. A zombie, exited and unreaped, is
+absent: it holds no descriptor, no lock and no socket. Runtime `OSError`
+failures also exit 1 so the service can retry. Configuration refusals remain exit 2.
+The pid file adds `start_time`, the opaque `runner_procid.proc_start_token`
+value; PID reuse is checked against it. A failed token lookup alone is not
+proof of absence. A live legacy pid without that token also refuses, so an
+older supervisor that holds no lock still owns its root. An unreadable pid
+record is ambiguous and refuses reclamation; resolve the owner before
+removing it manually. A missing pid record names no owner: after all three
+PING attempts fail, the published socket can be reclaimed.
+Do not launch old and new binaries concurrently on one root during upgrade:
+a lockless old starter that appears after the guards cannot be excluded by
+the new lock. The guards protect an already published legacy owner.
+
+After both guards, the supervisor reclaims the stale published socket,
+binds and listens on `<run_root>/.s.<pid>`, chmods it to 0600, records that
+path's inode, durably writes the pid record including `start_time`, and then
+renames the socket to `supervisor.sock`. Teardown removes the
+published socket only while its path still names that inode, or its own
+private socket if publication failed. It removes the pid record only if its
+incarnation matches, including when publication failed after that write.
+The client never unlinks either path.
+One startup line goes to stderr:
+`supervisor: started pid=<pid> incarnation=<hex> boot_id=<id>`.
+
 Linux hardening: the supervisor sets `PR_SET_CHILD_SUBREAPER` (prctl 36)
 at startup, best-effort. The supervisor never restarts itself. Survival
 across ITS death is the job of Tier 2.
@@ -325,6 +356,43 @@ across ITS death is the job of Tier 2.
 line → one response line, except async pushes (below). Every request
 carries `"v": 1`. Responses are `{"ok": true, …}` or
 `{"ok": false, "error": "<code>", …}`.
+
+*(Amended by DL-210.)* Accepted sockets are non-blocking. Replies and pushes
+are queued in order and flushed on write readiness. `REQUEST_LINE_LIMIT`
+is 1 MiB, including the newline. An oversized request gets one
+`request_too_large` refusal; its remaining bytes are discarded through the
+newline, and the next line is read normally. Invalid UTF-8 and excessively
+nested JSON answer `malformed_json`. Both reads and writes on accepted
+sockets use the same error rule:
+
+- LATER: `BlockingIOError`, `InterruptedError`, and `OSError` with errno
+  `ENOBUFS` or `ENOMEM` keep the connection, change nothing, and retry on readiness.
+- GONE: a receive returning `b""` (EOF), or `OSError` with errno `EPIPE`,
+  `ECONNRESET`, `ECONNABORTED`, `ENOTCONN` or `EBADF`, drops the connection once.
+- UNKNOWN: any other `OSError` keeps the connection and logs one stderr line
+  with the errno.
+
+A live client is never dropped for an error outside the GONE list. A send
+returning zero leaves the connection and pending output unchanged. EOF drops
+even a half-closed connection with queued replies.
+
+`BACKLOG_BYTES` is 16 MiB per connection. At that queued-output bound, reads
+pause. Already buffered lines are dispatched first when output drains below
+the bound. Retained wire buffers are bounded per connection by
+`BACKLOG_BYTES + REQUEST_LINE_LIMIT + one frame`; one large reply may cross
+the output bound. Observers remain unlimited, so the connection count and
+aggregate memory are unbounded by design. The same-uid check is a trust
+boundary, not a memory bound. Accept failures `EMFILE` and `ENFILE` are logged
+at most once per minute. A reply at or above the shipped client's own line
+limit still poisons that client's connection; this slice does not change it.
+
+A client that stops reading stops being read; later requests wait. A paused
+holder's unrenewed lease expires normally. A reading client can pause across
+one large reply and resumes as that reply drains. Shutdown drains pending
+output under one shared two-second deadline, then drops all connections.
+The test-only environment variables `DSL41_SUPERVISOR_TEST_BACKLOG_BYTES`
+and `DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT` override these bounds once at
+startup. Leave them unset in production, like `DSL41_WRAPPER_TEST_PAUSE`.
 
 **Incarnation** (DL-80). The supervisor mints an `incarnation` id at every
 start and returns it from `PING`, `LIST` and `ACQUIRE`. Every verb that
@@ -353,7 +421,8 @@ public (any reader gets it from `PING`); the token is the secret half.
 The supervisor ignores unknown fields (forward compatibility). An
 unknown verb → `unknown_verb`. A missing/wrong `v` →
 `unsupported_version`. A malformed line → `malformed_json` (the stream
-is not desynced).
+is not desynced). *(Amended by DL-210.)* An oversized line answers
+`request_too_large`; the reader discards through its newline and resumes.
 
 *(Amended by DL-151.)* `v` and `token` are **integers**, and neither JSON
 `true` nor `1.0` is one. Both were compared with `==`, which in Python
@@ -569,7 +638,8 @@ checked first, and then a stale/expired token →
   survivors. **Lifelines stay open until wrappers exit**, so wrappers
   observe the command deaths and record `signaled`/`exited` truthfully
   (never "parent lost"). The supervisor waits for the wrappers, replies
-  `{ok}`, exits, and unlinks the socket + pidfile. SIGTERM/SIGINT also
+  `{ok}`, exits, and unlinks the socket + pidfile. *(Amended by DL-210.)*
+  Both removals require the ownership checks above. SIGTERM/SIGINT also
   trigger this shutdown (Tier 2 / `supervise shutdown` fallback). Only
   SIGKILL (unhandleable) leaves the wrappers to their own EOF.
 
@@ -591,6 +661,28 @@ holds the current lease receives async lines
 only — droppable, never the data channel. A disconnected controller
 loses them. On reconnect, it recovers with LIST + status.json (the spool
 is the truth, the same philosophy as the wrapper exit code).
+
+*(Amended by DL-210.)* An exit push suppressed because the lease is inactive,
+its holder connection is absent, or that connection is paused sets
+`pushes_dropped` on the lease. The next reply to its holder carries
+`"pushes_dropped": true`; pushes never carry it. Re-granting the lease to
+the same `controller_id` preserves the notice, including on the ACQUIRE
+reply after reconnect. Queuing a reply does not clear the notice. Fully
+flushing it to the kernel clears the drops it reports; a later drop still
+requires a later reply.
+
+The client arms one shared LIST task on this reply field and on reconnect.
+It checks armed waits once per `_LIST_RECHECK_EVERY` interval, only after
+their SPAWN or duplicate reply. A successful listing that no longer shows
+a live run marks that wait for the existing spool-resolution ladder,
+including its settle window and surviving-command checks. LIST never
+resolves an exit future. An `ok: false` listing is unknown and marks nothing.
+The task remains available while idle. A malformed LIST fails the observing
+wait and replaces the failed task so later waits can recover. Close waits
+up to five seconds for an in-flight request to unwind, then cancels the task
+even if it is still waiting on that request. A dropped exit push can make
+`kill()` pay both existing grace waits, after TERM and after KILL, even if
+the command has already exited. The LIST net does not resolve that push future.
 
 The engine's OWN control socket (runner-design §10) deliberately keeps
 no lease: sendevent is multi-writer by AutoSys nature, and the
@@ -615,6 +707,8 @@ Its exit is the whole mechanism: the process dying EOFs every lifeline it
 owns, and each wrapper then runs §4 step 5 — TERM, grace, KILL, record
 `terminated / parent lost`. *(DL-150:)* step 5 checks the command first,
 so a command that already ended records its own outcome instead.
+*(Amended by DL-210.)* Teardown explicitly closes the lifelines of unreaped
+wrappers. This gives an in-process supervisor the same EOF behavior as process exit.
 That is the existing kill path, not a new one,
 and the supervisor still decides nothing about what should run. Omitted, a
 supervisor tolerates an absent controller forever, which is what lets an

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import shutil
+import selectors
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -213,7 +216,7 @@ def test_supervisor_procid_calls_are_type_checked() -> None:
     same helpers, or the static types describe an import that never runs."""
     type_time, runtime = procid_import_branches(SUPERVISOR)
     assert type_time == runtime
-    assert {"verify_alive", "killpg_quiet"} <= set(runtime)
+    assert {"verify_alive", "killpg_quiet", "flock_exclusive", "LockHeld"} <= set(runtime)
 
 
 def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:
@@ -1899,3 +1902,1061 @@ def _kill_group(run_root: Path) -> None:
     if sup.exists():
         with contextlib.suppress(Exception):
             os.kill(json.loads(sup.read_text())["pid"], signal.SIGKILL)
+
+
+@pytest.fixture
+def queued_supervisor(short_root: Path):
+    """In-process selector with real sockets and explicit descriptor cleanup."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    peers = []
+
+    def connect():
+        server, peer = socket.socketpair()
+        server.setblocking(False)
+        peer.settimeout(1)
+        conn = runner_supervisor._Conn(server)
+        sup._conns[server.fileno()] = conn
+        sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
+        peers.append(peer)
+        return conn, peer
+
+    yield sup, connect
+    for conn in list(sup._conns.values()):
+        sup._drop_conn(conn)
+    for peer in peers:
+        peer.close()
+    for fd in (sup._chld_r, sup._chld_w):
+        os.close(fd)
+    sup._sel.close()
+
+
+def _flush_reply(sup, conn, peer):
+    sup._writable(conn)
+    return json.loads(peer.recv(65536).split(b"\n")[0])
+
+
+def test_dl210_deep_json_and_invalid_utf8_leave_supervisor_alive(short_root: Path) -> None:
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        assert cli.raw(b"[" * 2000 + b"]" * 2000 + b"\n")["error"] == "malformed_json"
+        assert cli.raw(b'"\xff"\n')["error"] == "malformed_json"
+        assert cli.send({"v": 1, "cmd": "PING"})["ok"]
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_line_bound_discards_one_line_and_retains_next(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root, env={**os.environ, "DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT": "128"}
+    )
+    cli = RawClient(short_root)
+    try:
+        exact = b'{"v":1,"cmd":"PING"}'
+        assert cli.raw(exact + b" " * (127 - len(exact)) + b"\n")["ok"]
+        # No newline yet: refuse once without retaining the oversized body.
+        assert cli.raw(b"x" * 128)["error"] == "request_too_large"
+        cli.sock.sendall(b"x" * 500 + b'\n{"v":1,"cmd":"PING"}\n')
+        assert cli._read()["ok"]
+        assert cli.send({"v": 1, "cmd": "PING"})["ok"]
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_pause_resumes_retained_requests_in_order(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._backlog_bytes = 1
+    peer.sendall(b'{"v":1,"cmd":"PING"}\n{"v":1,"cmd":"LIST"}\n')
+    sup._readable(conn)
+    assert conn.paused and b"LIST" in conn.buf
+    assert sup._sel.get_key(conn.sock).events == selectors.EVENT_WRITE
+    first = _flush_reply(sup, conn, peer)
+    assert "runs" not in first and conn.paused
+    assert conn.buf == b""
+    second = _flush_reply(sup, conn, peer)
+    assert second["runs"] == [] and not conn.paused
+    assert sup._sel.get_key(conn.sock).events == selectors.EVENT_READ
+
+
+class _FaultSocket:
+    def __init__(self, sock, *, sends=(), reads=()):
+        self.sock = sock
+        self.sends = iter(sends)
+        self.reads = iter(reads)
+        self.closes = 0
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def close(self):
+        self.closes += 1
+        self.sock.close()
+
+    def send(self, data):
+        result = next(self.sends, None)
+        if isinstance(result, BaseException):
+            raise result
+        return self.sock.send(data if result is None else data[:result]) if result != 0 else 0
+
+    def recv(self, count):
+        result = next(self.reads, None)
+        if isinstance(result, BaseException):
+            raise result
+        return self.sock.recv(count) if result is None else result
+
+
+def test_dl210_partial_flush_and_transient_errors_keep_frame(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    conn.sock = _FaultSocket(conn.sock, sends=[3, BlockingIOError(), InterruptedError()])
+    sup._send(conn, {"ok": True})
+    size = conn.backlog
+    sup._writable(conn)
+    assert conn.backlog == size - 3
+    prefix = peer.recv(3)
+    sup._writable(conn)
+    assert conn.backlog == size - 3
+    sup._writable(conn)
+    assert json.loads(prefix + peer.recv(1024)) == {"ok": True}
+    assert conn.backlog == 0
+
+
+@pytest.mark.parametrize("direction", ["send", "recv"])
+@pytest.mark.parametrize(
+    "error_number", [errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED, errno.ENOTCONN, errno.EBADF]
+)
+def test_dl210_gone_error_drops_only_its_connection_once(
+    queued_supervisor, direction, error_number
+) -> None:
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    other, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    error = OSError(error_number, "synthetic socket failure")
+    conn.sock = _FaultSocket(
+        conn.sock,
+        sends=[error] if direction == "send" else (),
+        reads=[error] if direction == "recv" else (),
+    )
+    faulty = conn.sock
+    sup._send(conn, {"ok": True})
+    callback = sup._writable if direction == "send" else sup._readable
+    callback(conn)
+    callback(conn)
+    sup._drop_conn(conn)  # repeated cleanup cannot touch a reused fd
+    assert sup.lease.conn is None and not sup._connected(conn)
+    assert faulty.closes == 1
+    sup._dispatch(other, b'{"v":1,"cmd":"PING"}')
+    assert _flush_reply(sup, other, peer)["ok"]
+
+
+@pytest.mark.parametrize("direction", ["send", "recv"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        BlockingIOError(),
+        InterruptedError(),
+        OSError(errno.ENOBUFS, "buffers"),
+        OSError(errno.ENOMEM, "memory"),
+        OSError(errno.EAGAIN, "again"),
+        OSError(errno.EINTR, "interrupted"),
+    ],
+)
+def test_dl210_later_error_keeps_connection_and_state(queued_supervisor, direction, error, capsys):
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    conn.sock = _FaultSocket(
+        conn.sock,
+        sends=[error] if direction == "send" else (),
+        reads=[error] if direction == "recv" else (),
+    )
+    sup._send(conn, {"ok": True})
+    before = (conn.buf, list(conn.out), conn.backlog, conn.paused, sup.lease.deadline)
+    (sup._writable if direction == "send" else sup._readable)(conn)
+    assert sup._connected(conn)
+    assert sup.lease.conn is conn
+    assert (conn.buf, list(conn.out), conn.backlog, conn.paused, sup.lease.deadline) == before
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("direction", ["send", "recv"])
+@pytest.mark.parametrize("error_number", [errno.EIO, None])
+def test_dl210_unknown_error_keeps_connection_and_logs_errno(
+    queued_supervisor, direction, error_number, capsys
+) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    error = OSError(error_number, "unknown failure")
+    conn.sock = _FaultSocket(
+        conn.sock,
+        sends=[error] if direction == "send" else (),
+        reads=[error] if direction == "recv" else (),
+    )
+    sup._send(conn, {"ok": True})
+    before = (conn.buf, list(conn.out), conn.backlog, conn.paused)
+    (sup._writable if direction == "send" else sup._readable)(conn)
+    assert sup._connected(conn) and sup.lease.conn is conn
+    assert (conn.buf, list(conn.out), conn.backlog, conn.paused) == before
+    assert capsys.readouterr().err.splitlines() == [
+        f"supervisor: client socket: errno={error_number}"
+    ]
+    assert _flush_reply(sup, conn, peer)["ok"]
+
+
+def test_dl210_read_belt_logs_and_keeps_live_client(queued_supervisor, capsys):
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    conn.sock = _FaultSocket(conn.sock, reads=[RuntimeError("read belt")])
+    sup._readable(conn)
+    assert sup._connected(conn)
+    assert "read belt" in capsys.readouterr().err
+
+
+def test_dl210_zero_send_keeps_frame_for_next_readiness(queued_supervisor):
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    conn.sock = _FaultSocket(conn.sock, sends=[0])
+    sup._send(conn, {"ok": True})
+    before = (list(conn.out), conn.backlog, conn.paused)
+    sup._writable(conn)
+    assert sup._connected(conn)
+    assert (list(conn.out), conn.backlog, conn.paused) == before
+    assert _flush_reply(sup, conn, peer)["ok"]
+
+
+@pytest.mark.parametrize("state", ["paused", "inactive", "disconnected"])
+def test_dl210_dropped_push_stays_on_lease_until_reply_flushed(queued_supervisor, state) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    lease = sup.lease
+    assert lease is not None
+    if state == "paused":
+        conn.paused = True
+    elif state == "inactive":
+        lease.deadline = 0
+    else:
+        sup._drop_conn(conn)
+    sup._push_exit(None)  # suppressed before the run is inspected
+    assert lease.pushes_dropped
+    if state == "disconnected":
+        conn, peer = connect()
+        sup._dispatch(conn, b'{"v":1,"cmd":"ACQUIRE","controller_id":"holder"}')
+        lease = sup.lease
+    else:
+        conn.paused = False
+        sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert lease.pushes_dropped  # enqueuing is not acknowledgement
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"] is True
+    assert not lease.pushes_dropped
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert "pushes_dropped" not in _flush_reply(sup, conn, peer)
+
+
+def test_dl210_queued_notice_cannot_clear_a_later_drop(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    conn.paused = True
+    sup._push_exit(None)
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    conn.paused = True
+    sup._push_exit(None)
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert sup.lease.pushes_dropped
+    sup._dispatch(conn, b'{"v":1,"cmd":"PING"}')
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert not sup.lease.pushes_dropped
+
+
+def test_dl210_dropped_notice_never_goes_to_observer_or_new_holder(queued_supervisor) -> None:
+    sup, connect = queued_supervisor
+    holder, _ = connect()
+    observer, peer = connect()
+    sup._h_acquire(holder, {"controller_id": "holder"})
+    sup.lease.deadline = 0
+    sup._push_exit(None)
+    sup._dispatch(observer, b'{"v":1,"cmd":"LIST"}')
+    assert "pushes_dropped" not in _flush_reply(sup, observer, peer)
+    sup._dispatch(observer, b'{"v":1,"cmd":"ACQUIRE","controller_id":"different"}')
+    assert "pushes_dropped" not in _flush_reply(sup, observer, peer)
+    sup.lease = None
+    sup._push_exit(None)  # there is no holder to notify
+
+
+def test_dl210_accept_resource_errors_are_rate_limited(queued_supervisor, monkeypatch, capsys):
+    sup, _ = queued_supervisor
+
+    class Exhausted:
+        def accept(self):
+            raise OSError(errno.EMFILE, "too many open files")
+
+    sup._listen = Exhausted()
+    now = [100.0]
+    monkeypatch.setattr(runner_supervisor.time, "monotonic", lambda: now[0])
+    sup._accept()
+    sup._accept()
+    assert capsys.readouterr().err.count("accept:") == 1
+    now[0] += 60
+    sup._accept()
+    assert capsys.readouterr().err.count("accept:") == 1
+    sup._listen = None
+
+
+def _flood_without_reading(root: Path, peer=None):
+    if peer is None:
+        peer = socket.socket(socket.AF_UNIX)
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        peer.connect(str(root / "supervisor.sock"))
+    # Keep an established holder's receive capacity: shrinking it below the
+    # peer's write low-water mark can strand macOS write readiness.
+    peer.settimeout(0.2)
+    try:
+        for _ in range(30000):
+            peer.sendall(b'{"v":1,"cmd":"PING"}\n')
+    except TimeoutError:
+        pass  # a write-side pause is the expected backpressure
+    return peer
+
+
+def test_dl210_nonreader_cannot_block_reaping_ping_or_shutdown(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root, env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": "512"}
+    )
+    holder = RawClient(short_root)
+    flood = _flood_without_reading(short_root)
+    try:
+        token = holder.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "holder"})["token"]
+        spec = _spec(short_root / "runs" / "j.1", command="exit 7")
+        assert holder.send({"v": 1, "cmd": "SPAWN", "token": token, "spec": spec})["ok"]
+        wait_for(lambda: Path(spec["run_dir"], "status.json").exists())
+
+        def reaped():
+            answer = holder.send({"v": 1, "cmd": "LIST"})
+            return answer if any(not row["wrapper_alive"] for row in answer["runs"]) else None
+
+        listing = wait_for(reaped)
+        assert listing["runs"][0]["wrapper_rc"] == 0
+        assert holder.send({"v": 1, "cmd": "PING"})["ok"]
+        assert holder.send({"v": 1, "cmd": "SHUTDOWN", "token": token})["ok"]
+        proc.wait(timeout=5)
+    finally:
+        holder.close()
+        flood.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_paused_holder_loses_real_exit_push_and_gets_one_notice(short_root: Path):
+    proc = start_supervisor(
+        short_root, env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": "1"}
+    )
+    holder = RawClient(short_root)
+    observer = RawClient(short_root)
+    release = short_root / "release"
+    try:
+        acquired = holder.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "holder", "ttl_s": 60})
+        spec = _spec(
+            short_root / "runs" / "j.1",
+            command=f"while test ! -f {release}; do sleep 0.02; done; exit 7",
+        )
+        assert holder.send({"v": 1, "cmd": "SPAWN", "token": acquired["token"], "spec": spec})["ok"]
+        _flood_without_reading(short_root, holder.sock)
+        release.touch()
+
+        def reaped():
+            rows = observer.send({"v": 1, "cmd": "LIST"})["runs"]
+            return any(row["run_id"] == spec["run_id"] and not row["wrapper_alive"] for row in rows)
+
+        wait_for(reaped)
+        assert json.loads(Path(spec["run_dir"], "status.json").read_text())["exit_code"] == 7
+        holder.sock.settimeout(5)
+
+        def read_line():
+            while b"\n" not in holder.buf:
+                chunk = holder.sock.recv(65536)
+                assert chunk
+                holder.buf += chunk
+            line, holder.buf = holder.buf.split(b"\n", 1)
+            answer = json.loads(line)
+            assert "push" not in answer  # inspect every frame, including pushes
+            return answer
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            answer = read_line()
+            if answer.get("pushes_dropped"):
+                break
+        else:
+            pytest.fail("reaped exit was not reported as a dropped push")
+        assert answer["ok"] and answer["pushes_dropped"] is True
+        assert "pushes_dropped" not in read_line()
+    finally:
+        release.touch()
+        holder.close()
+        observer.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_dl210_nonreader_cannot_block_deadman(short_root: Path) -> None:
+    proc = start_supervisor(
+        short_root,
+        env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": "512"},
+        deadman_s=0.2,
+    )
+    flood = _flood_without_reading(short_root)
+    try:
+        assert proc.wait(timeout=5) == 0
+        assert "deadman fired" in (short_root / "supervisor.log").read_text()
+    finally:
+        flood.close()
+        teardown_supervisor(short_root, proc)
+
+
+@pytest.mark.parametrize("verb", ["RENEW", "RELEASE", "oversized", "malformed"])
+def test_dl210_every_holder_reply_carries_unflushed_notice(queued_supervisor, verb):
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    acquired = sup._h_acquire(conn, {"controller_id": "holder"})
+    lease = sup.lease
+    conn.paused = True
+    sup._push_exit(None)
+    conn.paused = False
+    if verb == "oversized":
+        sup._request_line_limit = 8
+        peer.sendall(b"x" * 8)
+        sup._readable(conn)
+    else:
+        payload = json.dumps(
+            {"v": 1, "cmd": verb, "token": acquired["token"], "incarnation": sup.incarnation}
+        ).encode()
+        sup._dispatch(conn, b"{" if verb == "malformed" else payload)
+    assert lease.pushes_dropped
+    assert _flush_reply(sup, conn, peer)["pushes_dropped"]
+    assert not lease.pushes_dropped
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_dl210_eof_drops_connection_once_even_with_queued_reply(queued_supervisor, queued):
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    sup._h_acquire(conn, {"controller_id": "holder"})
+    conn.sock = _FaultSocket(conn.sock)
+    if queued:
+        sup._send(conn, {"ok": True, "body": "x" * 100000})
+    peer.shutdown(socket.SHUT_WR)
+    sup._readable(conn)
+    sup._readable(conn)
+    assert not sup._connected(conn) and sup.lease.conn is None
+    assert conn.sock.closes == 1
+    assert peer.recv(1) == b""
+
+
+@pytest.mark.parametrize("uid_error", [PermissionError(), None])
+def test_dl210_accept_closes_peer_on_credential_error_or_other_uid(
+    queued_supervisor, monkeypatch, uid_error
+):
+    sup, _connect = queued_supervisor
+    server, peer = socket.socketpair()
+
+    class Listener:
+        def accept(self):
+            return server, None
+
+    def get_uid(_sock):
+        if uid_error is not None:
+            raise uid_error
+        return os.getuid() + 1
+
+    sup._listen = Listener()
+    monkeypatch.setattr(runner_supervisor, "peer_uid", get_uid)
+    try:
+        sup._accept()
+        assert server.fileno() == -1 and not sup._conns
+    finally:
+        server.close()
+        peer.close()
+        sup._listen = None
+
+
+@pytest.mark.parametrize(
+    ("record", "current", "kill_error", "absent"),
+    [
+        ({"pid": 123, "start_time": "ticks:1"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:1"}, "ticks:2", None, True),
+        ({"pid": 123}, "ticks:1", None, False),
+        ({"pid": 123}, None, ProcessLookupError(), True),
+        ({"pid": 123}, None, None, False),
+        ({"pid": 123}, None, PermissionError(), False),
+        ({"pid": True}, "ticks:1", None, False),
+        ({"pid": -1}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "broken"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:not-a-number"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:-1"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "ticks:01"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": "lstart:invalid"}, "ticks:1", None, False),
+        ({"pid": 123, "start_time": 123}, "ticks:1", None, False),
+        (
+            {"pid": 123, "start_time": "lstart:Fri Sep 18 12:00:00 2026"},
+            "lstart:Fri Sep 18 12:00:00 2026",
+            None,
+            False,
+        ),
+        (
+            {"pid": 123, "start_time": "lstart:Fri Sep 18 12:00:00 2026"},
+            "lstart:Fri Sep 18 12:00:10 2026",
+            None,
+            True,
+        ),
+        ({"pid": 123, "boot_id": "previous-boot"}, "ticks:1", None, True),
+        ({}, None, None, False),
+    ],
+)
+def test_dl210_pid_guard_requires_proven_absence(
+    queued_supervisor, monkeypatch, record, current, kill_error, absent
+):
+    sup, _ = queued_supervisor
+    sup.boot_id = "current-boot"
+    monkeypatch.setattr(runner_supervisor, "_load_json", lambda _path: record)
+    monkeypatch.setattr(runner_supervisor, "proc_start_token", lambda _pid: current)
+
+    def kill(_pid, _sig):
+        if kill_error is not None:
+            raise kill_error
+
+    monkeypatch.setattr(runner_supervisor.os, "kill", kill)
+    assert sup._pid_owner_absent() is absent
+
+
+def test_dl210_missing_pid_file_allows_reclaim_but_unreadable_record_does_not(queued_supervisor):
+    sup, _ = queued_supervisor
+    assert sup._pid_owner_absent()
+    endpoint = socket.socket(socket.AF_UNIX)
+    try:
+        endpoint.bind(sup.sock_path)
+        assert sup._pid_owner_absent()
+        Path(sup.pid_path).write_text("unreadable JSON")
+        assert not sup._pid_owner_absent()
+    finally:
+        endpoint.close()
+
+
+def test_dl210_probe_retries_refusals_before_pid_guard(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    Path(sup.sock_path).touch()
+    now = [10.0]
+    deadlines = []
+    checked = []
+    monkeypatch.setattr(runner_supervisor.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        runner_supervisor.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay)
+    )
+    monkeypatch.setattr(
+        sup, "_probe_answered", lambda deadline: deadlines.append(deadline) or False
+    )
+    monkeypatch.setattr(sup, "_pid_owner_absent", lambda: checked.append(len(deadlines)) or True)
+    sup._refuse_if_live()
+    assert deadlines == pytest.approx([10 + 1 / 3, 10 + 2 / 3, 11])
+    assert checked == [3] and now[0] == pytest.approx(11)
+    assert Path(sup.sock_path).exists()  # the gate itself never reclaims
+
+
+def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    Path(sup.sock_path).touch()
+    replies = iter([False, False, True])
+    monkeypatch.setattr(sup, "_probe_answered", lambda _deadline: next(replies))
+    monkeypatch.setattr(runner_supervisor.time, "sleep", lambda _delay: None)
+    with pytest.raises(SystemExit, match="another supervisor owns this root"):
+        sup._refuse_if_live()
+    assert Path(sup.sock_path).exists()
+
+
+def test_dl210_lock_loser_exits_one_and_can_retry(short_root: Path):
+    proc = start_supervisor(short_root)
+    inode = (short_root / "supervisor.sock").stat().st_ino
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 1
+        assert result.stderr.strip() == "another supervisor owns this root"
+        assert (short_root / "supervisor.sock").stat().st_ino == inode
+        assert _ping_ok(short_root)
+    finally:
+        teardown_supervisor(short_root, proc)
+    assert (short_root / "supervisor.lock").exists()
+    retry = start_supervisor(short_root)
+    try:
+        assert _ping_ok(short_root)
+        lines = (short_root / "supervisor.log").read_text().splitlines()
+        assert sum(line.startswith("supervisor: started pid=") for line in lines) == 2
+        record = json.loads((short_root / "supervisor.pid").read_text())
+        assert record["start_time"]
+    finally:
+        teardown_supervisor(short_root, retry)
+
+
+def test_dl210_crashed_supervisor_socket_without_pid_record_is_reclaimed(short_root: Path):
+    crashed = start_supervisor(short_root)
+    crashed.kill()
+    crashed.wait(timeout=5)
+    (short_root / "supervisor.pid").unlink()
+    assert (short_root / "supervisor.sock").exists()
+    retry = start_supervisor(short_root)
+    try:
+        record = runner_supervisor._load_json(str(short_root / "supervisor.pid"))
+        assert record["pid"] == retry.pid and record["start_time"]
+        assert _ping_ok(short_root)
+    finally:
+        teardown_supervisor(short_root, retry)
+
+
+@pytest.mark.parametrize("with_start_time", [False, True])
+def test_dl210_live_pid_protects_a_silent_socket(short_root: Path, with_start_time):
+    endpoint = socket.socket(socket.AF_UNIX)
+    endpoint.bind(str(short_root / "supervisor.sock"))
+    endpoint.listen(1)  # never accepts or answers PING; legacy owner has no lock
+    record = {"pid": os.getpid()}
+    if with_start_time:
+        record["start_time"] = runner_procid.proc_start_token(os.getpid())
+        assert record["start_time"] is not None
+    runner_procid.durable_write_json(str(short_root / "supervisor.pid"), record)
+    inode = (short_root / "supervisor.sock").stat().st_ino
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 1 and "another supervisor owns this root" in result.stderr
+        assert (short_root / "supervisor.sock").stat().st_ino == inode
+        assert json.loads((short_root / "supervisor.pid").read_text())["pid"] == os.getpid()
+    finally:
+        endpoint.close()
+
+
+def test_dl210_bind_sweeps_private_sockets_and_publishes_chmodded_inode(short_root, monkeypatch):
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(short_root / ".s.123456"))
+    stale.close()
+    ordinary = short_root / ".s.notes"
+    ordinary.write_text("synthetic non-socket")
+    sup = runner_supervisor.Supervisor(str(short_root))
+    rename = runner_supervisor.os.rename
+    published = []
+
+    def inspect(source, destination):
+        if destination == sup.sock_path:
+            record = runner_supervisor._load_json(sup.pid_path)
+            assert record["pid"] == os.getpid()
+            assert runner_procid.start_tokens_match(
+                record["start_time"], runner_procid.proc_start_token(os.getpid())
+            )
+            assert record["incarnation"] == sup.incarnation
+            assert not sup._pid_owner_absent()
+            path = Path(source)
+            assert path.name == f".s.{os.getpid()}"
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            published.append(path.stat().st_ino)
+        rename(source, destination)
+
+    monkeypatch.setattr(runner_supervisor.os, "rename", inspect)
+    try:
+        sup._bind()
+        assert not (short_root / ".s.123456").exists() and ordinary.exists()
+        assert Path(sup.sock_path).stat().st_ino == published[0] == sup._socket_inode
+        assert not Path(sup._private_path).exists()
+    finally:
+        sup._teardown()
+    assert not Path(sup.sock_path).exists()
+    assert (short_root / "supervisor.lock").exists()
+
+
+def test_dl210_teardown_keeps_replacement_socket_and_pid(short_root):
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sup._bind()
+    Path(sup.sock_path).unlink()
+    successor = socket.socket(socket.AF_UNIX)
+    try:
+        successor.bind(sup.sock_path)
+        inode = Path(sup.sock_path).stat().st_ino
+        Path(sup.pid_path).write_text(json.dumps({"incarnation": "successor"}))
+        sup._teardown()
+        assert Path(sup.sock_path).stat().st_ino == inode
+        assert json.loads(Path(sup.pid_path).read_text())["incarnation"] == "successor"
+    finally:
+        successor.close()
+
+
+@pytest.mark.parametrize("failure", ["chmod", "rename"])
+def test_dl210_failed_private_publish_cleans_up_and_releases_lock(short_root, monkeypatch, failure):
+    sup = runner_supervisor.Supervisor(str(short_root))
+    chmod = runner_supervisor.os.chmod
+    rename = runner_supervisor.os.rename
+
+    def fail_private(path, mode):
+        if path == sup._private_path:
+            raise PermissionError("synthetic chmod refusal")
+        chmod(path, mode)
+
+    def fail_rename(source, destination):
+        if destination == sup.sock_path:
+            assert runner_supervisor._load_json(sup.pid_path)["incarnation"] == sup.incarnation
+            raise OSError(errno.EIO, "synthetic publication failure")
+        rename(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            runner_supervisor.os, failure, fail_private if failure == "chmod" else fail_rename
+        )
+        with pytest.raises(OSError):
+            sup.run()
+    assert not Path(sup._private_path).exists() and not Path(sup.sock_path).exists()
+    assert not Path(sup.pid_path).exists()
+    successor = runner_supervisor.Supervisor(str(short_root))
+    try:
+        successor._bind()
+    finally:
+        successor._teardown()
+
+
+@pytest.mark.parametrize(
+    ("chunks", "answered"),
+    [
+        ([b'{"ok":', b"true}\n"], True),
+        ([b'{"ok":false}\n'], True),
+        ([b"{}\n"], False),
+        ([b"[]\n"], False),
+        ([b"not-json\n"], False),
+        ([b"x" * 4096], False),
+        ([b""], False),
+        ([TimeoutError()], False),
+    ],
+)
+def test_dl210_probe_requires_a_complete_ping_answer(
+    queued_supervisor, monkeypatch, chunks, answered
+):
+    sup, _ = queued_supervisor
+    replies = iter(chunks)
+    sent = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, path):
+            assert path == sup.sock_path
+
+        def sendall(self, data):
+            sent.append(json.loads(data))
+
+        def recv(self, _size):
+            result = next(replies)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    monkeypatch.setattr(runner_supervisor.socket, "socket", lambda *_args: Probe())
+    assert sup._probe_answered(time.monotonic() + 1) is answered
+    assert sent == [{"v": 1, "cmd": "PING"}]
+
+
+def test_dl210_expired_probe_budget_does_not_wait_for_a_reply(queued_supervisor, monkeypatch):
+    sup, _ = queued_supervisor
+    endpoint = socket.socket(socket.AF_UNIX)
+    try:
+        endpoint.bind(sup.sock_path)
+        endpoint.listen(1)
+        assert not sup._probe_answered(time.monotonic() - 1)
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize("value", ["0", "not-an-integer"])
+def test_dl210_invalid_test_bound_is_configuration_refusal(short_root, value):
+    result = subprocess.run(
+        [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)],
+        env={**os.environ, "DSL41_SUPERVISOR_TEST_BACKLOG_BYTES": value},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 2 and not (short_root / "supervisor.sock").exists()
+
+
+@pytest.mark.parametrize("phase", ["construct", "bind", "loop"])
+def test_dl210_main_os_error_is_retryable(short_root, monkeypatch, capsys, phase):
+    def fail(*_args, **_kwargs):
+        raise OSError(errno.EIO, "synthetic runtime failure")
+
+    if phase == "construct":
+        monkeypatch.setattr(runner_supervisor, "Supervisor", fail)
+    else:
+        sup = runner_supervisor.Supervisor(str(short_root))
+        monkeypatch.setattr(runner_supervisor, "Supervisor", lambda *_args, **_kwargs: sup)
+        monkeypatch.setattr(sup, "_install_signals", lambda: None)
+        monkeypatch.setattr(
+            sup if phase == "bind" else sup._sel, "_bind" if phase == "bind" else "select", fail
+        )
+    assert runner_supervisor.main(["--run-root", str(short_root)]) == 1
+    log = capsys.readouterr().err
+    assert "synthetic runtime failure" in log
+    assert ("supervisor: started" in log) is (phase == "loop")
+
+
+@pytest.mark.parametrize("case", ["missing-root", "bad-deadman", "usage"])
+def test_dl210_main_configuration_and_usage_refuse_with_two(short_root, capsys, case):
+    argv = ["--run-root", str(short_root)]
+    if case == "missing-root":
+        argv = ["--run-root", str(short_root / "absent")]
+    elif case == "bad-deadman":
+        argv += ["--deadman-seconds", "0"]
+    else:
+        with pytest.raises(SystemExit) as caught:
+            runner_supervisor.main([])
+        assert caught.value.code == 2
+        return
+    assert runner_supervisor.main(argv) == 2
+    assert "supervisor:" in capsys.readouterr().err
+
+
+def test_dl210_lock_close_error_does_not_mask_clean_exit(short_root, monkeypatch):
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sup._running = False
+    close = runner_supervisor.os.close
+
+    def close_lock(fd):
+        close(fd)
+        if fd == sup._lock_fd:
+            raise OSError(errno.EBADF, "synthetic close error")
+
+    monkeypatch.setattr(runner_supervisor.os, "close", close_lock)
+    monkeypatch.setattr(sup, "_install_signals", lambda: None)
+    assert sup.run() == 0
+    assert sup._lock_fd is None
+
+
+def test_dl210_deep_pid_record_cannot_authorize_reclaim(queued_supervisor):
+    sup, _ = queued_supervisor
+    Path(sup.pid_path).write_text("[" * 2000 + "]" * 2000)
+    assert not sup._pid_owner_absent()
+
+
+def test_dl210_deep_pid_record_refuses_without_masking_owner_error(short_root, capsys):
+    record = short_root / "supervisor.pid"
+    record.write_text("[" * 2000 + "]" * 2000)
+    assert runner_supervisor.main(["--run-root", str(short_root)]) == 1
+    assert capsys.readouterr().err.strip() == "another supervisor owns this root"
+    assert record.exists()
+    lock_fd = runner_procid.flock_exclusive(str(short_root / "supervisor.lock"))
+    os.close(lock_fd)
+
+
+def test_dl210_unknown_current_boot_cannot_prove_recorded_owner_absent(
+    queued_supervisor, monkeypatch
+):
+    sup, _ = queued_supervisor
+    sup.boot_id = "unknown"
+    Path(sup.pid_path).write_text(json.dumps({"pid": 123, "boot_id": "previous-boot"}))
+    monkeypatch.setattr(runner_supervisor, "proc_start_token", lambda _pid: "ticks:1")
+    assert not sup._pid_owner_absent()
+
+
+@pytest.mark.parametrize(
+    "action,extra,message",
+    [
+        ("unknown", [], "start|list|shutdown"),
+        ("list", ["--deadman-seconds", "1"], "only valid for supervise start"),
+        ("shutdown", ["--deadman-seconds", "1"], "only valid for supervise start"),
+        ("start", ["--deadman-seconds", "0"], "finite positive number"),
+        ("start", ["--deadman-seconds", "-1"], "finite positive number"),
+        ("start", ["--deadman-seconds", "nan"], "finite positive number"),
+        ("start", ["--deadman-seconds", "inf"], "finite positive number"),
+    ],
+)
+def test_dl210_supervise_usage_refuses_before_creating_root(tmp_path, action, extra, message):
+    from typer.testing import CliRunner
+
+    from dsl41.cli import app
+
+    root = tmp_path / "absent"
+    result = CliRunner().invoke(app, ["supervise", action, "--run-root", str(root), *extra])
+    assert result.exit_code == 2
+    assert message in result.output
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("low_fds,deadman", [(False, None), (True, 5.0)])
+def test_dl210_supervise_start_execs_by_path_with_redirected_stdio(
+    tmp_path, monkeypatch, low_fds, deadman, existing
+):
+    from dsl41.cli_control import supervise
+
+    class Executed(Exception):
+        pass
+
+    root = tmp_path / "root"
+    if existing:
+        root.mkdir()
+        root.chmod(0o755)
+    log_fd, null_fd = (1, 0) if low_fds else (12, 13)
+    opened, duplicated, closed, inherited, executed = [], [], [], [], []
+
+    def open_fd(path, flags, mode=None):
+        opened.append((path, flags, mode))
+        return log_fd if len(opened) == 1 else null_fd
+
+    def execv(path, argv):
+        executed.append((path, argv))
+        raise Executed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", open_fd)
+        patch.setattr(os, "dup2", lambda src, dest: duplicated.append((src, dest)))
+        patch.setattr(os, "close", closed.append)
+        patch.setattr(os, "set_inheritable", lambda fd, flag: inherited.append((fd, flag)))
+        patch.setattr(os, "execv", execv)
+        with pytest.raises(Executed):
+            supervise("start", root, deadman)
+    assert stat.S_IMODE(root.stat().st_mode) == (0o755 if existing else 0o700)
+    assert opened == [
+        (root / "supervisor.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+        (os.devnull, os.O_RDONLY, None),
+    ]
+    assert duplicated == [(log_fd, 1), (log_fd, 2), (null_fd, 0)]
+    assert closed == ([] if low_fds else [log_fd, null_fd])
+    assert inherited == [(0, True), (1, True), (2, True)]
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(root.resolve())]
+    if deadman is not None:
+        argv += ["--deadman-seconds", str(deadman)]
+    assert executed == [(sys.executable, argv)]
+
+
+@pytest.mark.parametrize("failure", ["mkdir", "open", "dup2", "set_inheritable", "execv"])
+def test_dl210_supervise_start_os_error_is_configuration_refusal(tmp_path, monkeypatch, failure):
+    import typer
+
+    from dsl41.cli_control import supervise
+
+    def fail(*args, **kwargs):
+        raise PermissionError("synthetic start failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", lambda *args: 12)
+        patch.setattr(os, "dup2", lambda *args: None)
+        patch.setattr(os, "close", lambda *args: None)
+        patch.setattr(os, "set_inheritable", lambda *args: None)
+        patch.setattr(os, "execv", fail)
+        patch.setattr(Path if failure == "mkdir" else os, failure, fail)
+        with pytest.raises(typer.Exit) as caught:
+            supervise("start", tmp_path / "root", None)
+    assert caught.value.exit_code == 2
+
+
+def test_dl210_supervise_start_real_exec_logging_and_owner_refusal(short_root):
+    root = short_root / "new"
+    argv = [sys.executable, "-m", "dsl41", "supervise", "start", "--run-root", str(root)]
+    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_for(lambda: _ping_ok(root))
+        record = json.loads((root / "supervisor.pid").read_text())
+        assert record["pid"] == proc.pid  # exec retains the service's main pid
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE((root / "supervisor.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((root / "supervisor.sock").stat().st_mode) == 0o600
+        startup = f"supervisor: started pid={proc.pid} incarnation={record['incarnation']}"
+        assert startup in (root / "supervisor.log").read_text()
+        loser = subprocess.run(argv, capture_output=True, timeout=10)
+        assert loser.returncode == 1
+        log = (root / "supervisor.log").read_text()
+        assert startup in log and "another supervisor owns this root" in log
+        assert _supervise_cli(root, "list").returncode == 0
+        assert _supervise_cli(root, "shutdown").returncode == 0
+        assert proc.wait(timeout=10) == 0
+        assert not (root / "supervisor.sock").exists()
+    finally:
+        teardown_supervisor(root, proc)
+
+
+def test_dl210_supervise_start_passes_deadman_and_exits_cleanly(short_root):
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "dsl41",
+            "supervise",
+            "start",
+            "--run-root",
+            str(short_root),
+            "--deadman-seconds",
+            "0.1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert proc.wait(timeout=10) == 0
+        assert "supervisor: started pid=" in (short_root / "supervisor.log").read_text()
+        assert not (short_root / "supervisor.sock").exists()
+    finally:
+        teardown_supervisor(short_root, proc)
+
+
+@pytest.mark.parametrize("closed", [[], [1], [2], [0, 1, 2]])
+def test_dl210_supervise_stdio_survives_real_exec_with_closed_descriptors(tmp_path, closed):
+    script = r"""
+import os
+import sys
+from pathlib import Path
+from dsl41.cli_control import supervise
+
+real_exec = os.execv
+def inspect_after_exec(executable, argv):
+    real_exec(executable, [executable, '-c',
+        "import os; assert os.read(0, 1) == b''; "
+        "os.write(1, b'stdout survived\\n'); os.write(2, b'stderr survived\\n')"])
+os.execv = inspect_after_exec
+for fd in map(int, sys.argv[2:]):
+    os.close(fd)
+supervise('start', Path(sys.argv[1]), None)
+"""
+    root = tmp_path / "root"
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(root), *map(str, closed)],
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (root / "supervisor.log").read_text() == "stdout survived\nstderr survived\n"
+
+
+def test_dl210_a_killed_unreaped_supervisor_is_absent_not_an_owner(short_root: Path) -> None:
+    """Breaks when the reclaim guard reads a zombie as the live owner. A
+    SIGKILLed supervisor lingers as a zombie until its parent waits: its
+    /proc entry (or ps row) and start token survive, so the token guard
+    matched, the restarted supervisor exited 1 and the engine's spawn timed
+    out (CI on the DL-210 branch). A zombie holds no descriptor, no lock and
+    no socket: it is absent, and the restart reclaims its root."""
+    from dsl41.runner_procid import proc_is_zombie
+
+    old = start_supervisor(short_root)
+    os.kill(old.pid, signal.SIGKILL)
+    wait_for(lambda: proc_is_zombie(old.pid))  # deliberately NOT old.wait()
+    try:
+        new = start_supervisor(short_root)  # waits for a real PING inside
+    finally:
+        old.wait()
+    teardown_supervisor(short_root, new)

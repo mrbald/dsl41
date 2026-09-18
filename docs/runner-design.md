@@ -919,6 +919,10 @@ members, and the revision the request will name, frozen when the modal
 opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate.
+*(Amended by DL-210.)* The trace cursor and alarm tally reset on a changed
+`baseline_id` or disagreement between the status and trace baselines, with one
+console notice and a read from zero on the next poll; a same-period restart
+preserves the cursor because replay restores the whole trace prefix.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal, and
 that terminal owns the run. `dsl41 ui --socket <path>` attaches the same app

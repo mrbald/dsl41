@@ -938,6 +938,205 @@ def test_pilot_f1_reaches_the_maximized_pager_and_the_triggers_screen(short_root
     asyncio.run(scenario())
 
 
+class _TraceReplies:
+    """Controlled query pairs; trace filtering follows the wire's exclusive cursor."""
+
+    def __init__(self) -> None:
+        self.status = {
+            "ok": True,
+            "baseline_id": "period-a",
+            "epoch": 1,
+            "jobs": {"trace_job": {"status": "INACTIVE", "job_type": "CMD"}},
+        }
+        self.trace = {
+            "ok": True,
+            "baseline_id": "period-a",
+            "epoch": 1,
+            "last_seq": 2,
+            "entries": self.entries("old", 2),
+        }
+        self.requests: list[dict] = []
+        self.disconnected = False
+
+    @staticmethod
+    def entries(cause: str, count: int) -> list[dict]:
+        return [
+            {
+                "seq": seq,
+                "at": "2026-07-01T08:00:00",
+                "job": "trace_job",
+                "transition": "MUST_START_ALARM",
+                "cause": f"{cause}-{seq}",
+            }
+            for seq in range(1, count + 1)
+        ]
+
+    async def request(self, request):
+        self.requests.append(dict(request))
+        if self.disconnected:
+            raise ControlClientError("test disconnect")
+        if request["cmd"] == "status":
+            return self.status
+        if request["cmd"] == "trace":
+            if not self.trace["ok"]:
+                return self.trace
+            return {
+                **self.trace,
+                "entries": [
+                    entry for entry in self.trace["entries"] if entry["seq"] > request["since"]
+                ],
+            }
+        assert request["cmd"] == "explain"
+        return {"ok": True, "condition": None}
+
+
+@contextlib.asynccontextmanager
+async def _trace_poll_app(short_root: Path):
+    """Mount the real widgets, with polling driven only by each test's r key."""
+    replies = _TraceReplies()
+    app = RunnerApp(short_root / "control.sock")
+    app._client.request = replies.request
+
+    async def no_journal_wakeups():
+        return
+
+    app._follow_journal = no_journal_wakeups
+    set_interval = app.set_interval
+
+    def controlled_interval(interval, callback, **kwargs):
+        timer = set_interval(interval, callback, **kwargs)
+        if callback == app._poll:
+            timer.pause()
+        return timer
+
+    app.set_interval = controlled_interval
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _wait_for_ui(pilot, lambda: app._trace_seq == 2)
+        yield app, pilot, replies
+
+
+def test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll(
+    short_root: Path,
+) -> None:
+    """First sight seeds identity; a longer replacement trace still starts from zero."""
+
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            table = app.query_one("#jobs", DataTable)
+            # u4: mounting consumed the first trace, without a reset pass or notice.
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [0]
+            assert app._alarms == {"trace_job": 2}
+            assert not any("trace baseline" in line.text for line in console.lines)
+            old_row = table.get_row("trace_job")
+            before = len(console.lines)
+            replies.requests.clear()
+            replies.status.update(baseline_id="period-b", jobs={"new_job": {"status": "SUCCESS"}})
+            replies.trace.update(
+                baseline_id="period-b", last_seq=4, entries=replies.entries("new", 4)
+            )
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert replies.requests == [{"cmd": "status"}, {"cmd": "trace", "since": 2}]
+            assert app._trace_seq == 0 and app._alarms == {}
+            assert table.get_row("trace_job") == old_row and "new_job" not in app._rows
+            assert app._baseline == "period-a"
+            assert len(console.lines) == before + 1
+            assert "trace baseline changed" in console.lines[-1].text
+            assert not any("[new-" in line.text for line in console.lines)
+
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 4)
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2, 0]
+            assert app._alarms == {"trace_job": 4}
+            assert app._rows == {"new_job"}
+            assert sum("[new-" in line.text for line in console.lines) == 4
+            assert sum("trace baseline changed" in line.text for line in console.lines) == 1
+
+    asyncio.run(scenario())
+
+
+def test_dl210_u3_mixed_read_baselines_return_without_updating_the_table(short_root: Path) -> None:
+    """A status/trace race also resets when the trace identity itself stayed the same."""
+
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            table = app.query_one("#jobs", DataTable)
+            old_row = table.get_row("trace_job")
+            before = len(console.lines)
+            replies.requests.clear()
+            replies.status.update(baseline_id="period-b", jobs={"mixed_job": {"status": "SUCCESS"}})
+            replies.trace.update(last_seq=3, entries=replies.entries("mixed", 3))
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert replies.requests == [{"cmd": "status"}, {"cmd": "trace", "since": 2}]
+            assert app._trace_seq == 0 and app._alarms == {}
+            assert app._baseline == "period-a"
+            assert table.get_row("trace_job") == old_row and "mixed_job" not in app._rows
+            assert len(console.lines) == before + 1
+            assert not any("[mixed-" in line.text for line in console.lines)
+
+    asyncio.run(scenario())
+
+
+def test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_new_epoch(short_root: Path) -> None:
+    """Disconnect preserves alarms and cursor; the next epoch resumes a longer prefix."""
+
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            replies.disconnected = True
+            await pilot.press("r")
+            await pilot.pause()
+            assert app._connected is False
+            assert app._trace_seq == 2 and app._alarms == {"trace_job": 2}
+
+            replies.disconnected = False
+            replies.requests.clear()
+            replies.status["epoch"] = 2
+            replies.trace.update(epoch=2, last_seq=3, entries=replies.entries("old", 3))
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2]
+            assert app._alarms == {"trace_job": 3}
+            assert app._epoch == 2
+            assert sum("[old-" in line.text for line in console.lines) == 3
+            assert not any("trace baseline" in line.text for line in console.lines)
+
+    asyncio.run(scenario())
+
+
+def test_dl210_headerless_trace_refusal_preserves_cursor(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            replies.status["baseline_id"] = "period-b"
+            replies.trace = {"ok": False, "error": "lineage proof lost"}
+            await pilot.press("r")
+            await pilot.pause()
+            assert app._trace_seq == 2 and app._alarms == {"trace_job": 2}
+            console = app.query_one("#console", RichLog)
+            assert any("trace query refused" in line.text for line in console.lines)
+            assert not any("trace baseline" in line.text for line in console.lines)
+
+    asyncio.run(scenario())
+
+
+def test_dl210_shorter_trace_still_restarts_from_zero(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            replies.requests.clear()
+            replies.trace.update(last_seq=1, entries=replies.entries("shorter", 1))
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 1)
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2, 0]
+            assert app._alarms == {"trace_job": 1}
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("verb", ["status", "trace"])
 def test_pilot_a_refused_query_is_visible_once_and_recovers(verb: str, short_root: Path) -> None:
     """F4 (DL-187 item 6): an ok:false status OR trace answer is a query

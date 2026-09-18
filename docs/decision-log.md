@@ -13308,6 +13308,104 @@ relitigate an entry; append a new one.
   evolution (R9). S5 writes probe protocols for the labels without one.
   The rows module is over the 1200-line advisory size; it is data, one row
   per behaviour, and splitting it would put one register in two files.
+- DL-210 Production readiness, first slice: the supervisor survives its
+  clients and its service manager; the TUI survives a period roll
+  (2026-09-18)
+  Three findings from the 2026-09-18 modularity review, verified against
+  the code before this entry, and two latent defects found while planning
+  the fix. The plan went through five review rounds with both vendors'
+  frontier models; each round removed a mechanism rather than added one,
+  and this entry records what survived.
+  THE SUPERVISOR AND ITS CLIENTS. `Supervisor.run` is one thread and one
+  selector loop that also renews leases, reaps wrappers and checks the
+  deadman. Accepted sockets were blocking and replies went out through
+  `sendall`, so a client that stopped reading blocked the loop for as long
+  as it stayed silent, and with it every other client, every reap and the
+  deadman. DL-48 booked this as accepted debt and named the fix, a
+  non-blocking send queue; this entry discharges it. Sockets are
+  non-blocking; each connection owns one outbound buffer flushed under
+  `EVENT_WRITE`, so reply order is kept. Two bounds, both module constants
+  stated in `docs/supervisor-protocol.md` §5 and overridable only by named
+  test-hook environment variables that are inert in production: a request
+  line over 1 MiB answers `request_too_large` once, a new code beside
+  `malformed_json`, and is discarded to its newline; an unread outbound backlog over 16 MiB, the shipped client's
+  own line limit, pauses reading on that connection until it drains, with
+  the lines already buffered dispatched first on resume. Nothing is closed
+  for slowness: §5 and DL-95 rest on "EOF proves the holder is gone", which
+  holds only while the supervisor never closes a live client itself, so a
+  paused holder keeps its connection and simply lapses its lease like any
+  unrenewed one. Observers stay unlimited as §5 says; memory is bounded
+  per connection and the count by the same-uid boundary the socket already
+  has. The error taxonomy names three classes, one classifier for both
+  directions: would-block, interrupted, `ENOBUFS` and `ENOMEM` mean later;
+  EOF, `EPIPE`, `ECONNRESET`, `ECONNABORTED`, `ENOTCONN` and `EBADF` mean
+  gone; anything else is logged and the connection kept. The first
+  implementation landed this inverted and the adversarial review caught
+  it; §5's earlier promise to serve a half-closed client's queued replies
+  is retired, since EOF is gone. A runtime `OSError` in the supervisor's
+  main exits 1, retryable; 2 stays for configuration refusals. `RecursionError` from a deeply nested line, a
+  live defect that ended the supervisor and EOF'd every wrapper, is now
+  `malformed_json`. Shutdown's `{ok}` is queued on an open connection and
+  the teardown drains every backlog under one two-second deadline, best
+  effort.
+  PUSHES. A push to a paused holder is dropped, as §5 always allowed; so is
+  a push suppressed because the lease is inactive. The lease remembers
+  that it dropped one, and the next reply the supervisor writes to the
+  holder, the re-granting `ACQUIRE` included, carries `pushes_dropped:
+  true` until that reply has reached the kernel. The client answers the
+  flag, and every reconnect, by arming one shared LIST task that feeds the
+  existing spool ladder: an `ok: true` listing without a run marks that
+  wait, and `_await_outcome` breaks to `resolve_spool` exactly as its
+  reattach branch does, settle window included; a wait is eligible only
+  after its SPAWN reply, and any `ok: false` LIST marks nothing. That
+  last rule fixes the second latent defect: `_listed_alive` read any
+  failed LIST, the internal-error belt's included, as "nothing alive" and
+  walked a ladder that can TERM and KILL a live command. `kill()`'s double
+  grace on a paused holder is a named cost, not changed.
+  STARTUP AND THE SERVICE MANAGER. The runbook prescribed `Type=simple` and
+  nothing about kill mode, and `--detached` spawns the supervisor into the
+  engine's own cgroup, so a routine `systemctl restart` ended every job.
+  `dsl41 supervise start` now execs the supervisor by file path (DL-42's
+  boundary; `-m` starts anyway and silently imports the package), creating
+  the run root 0700 when it creates it, leaving an existing root as it is,
+  and pointing stderr at `supervisor.log`, so a unit can
+  own the supervisor. With a second spawner DL-48's "unlink race is
+  unreachable while the engine is the only spawner" stopped being true:
+  the supervisor now takes `<root>/supervisor.lock` for life with the
+  ledger's inode-rechecked flock, moved into `runner_procid` so one
+  primitive serves both tiers; it writes its pid record, with the process start token, BEFORE
+  publishing its socket by renaming a shorter private name into place, so
+  a crash between the two never leaves a socket with no owner record; so a connecting client never meets a
+  bound-but-not-listening socket; and it reclaims a published path only
+  after a retried PING probe fails and the pid file's process is provably
+  gone, while a killed supervisor that lingers unreaped as a zombie is
+  absent, since it holds no descriptor, lock or socket; the engine respawns
+  a supervisor that exits before publishing, up to three times inside its
+  connect window, because exit 1 means retry, which is also the upgrade boundary against an old supervisor that
+  holds no lock. The client never unlinks a socket path again: macOS
+  refuses when a listen backlog is full, so a refusal never proved
+  absence. Ownership refusals exit 1, retryable; configuration refusals
+  keep 2. The runbook's shape 1 is a supervisor unit with `Restart=always`,
+  a readiness gate on `supervise list`, and an engine unit that requires
+  it; it states that the period pins the deadman interval so a unit edit
+  is a new run root, that the engine fails dispatches while the supervisor
+  is down and quarantines the host after five failed renewals so recovery
+  is a restart of the engine unit, and how `systemctl stop` differs from
+  `supervise shutdown`. Shape 2 is `KillMode=process`, discouraged and
+  documented.
+  THE TUI. It reset its trace cursor only when the trace got shorter, so a
+  roll whose new trace was already as long lost the new period's first
+  entries and kept stale alarms. It now resets on a `baseline_id` change
+  in the trace reply's read header, or on status and trace disagreeing,
+  and returns without consuming that reply; once per pass. An in-period
+  restart needs no reset: resume replays the whole segment, so the trace
+  prefix is rebuilt identically and the cursor stays valid, a property now
+  pinned by a test. A disconnect resets nothing. The unbounded `since=0`
+  trace reply on a long run is an existing limit of the `trace` verb,
+  named here and left to the GUI contract work.
+  Left alone, deliberately: per-run cgroup scopes, the wrapper's
+  parent-lost path, and the supervisor's client-visible protocol version,
+  which is unchanged.
 - DL-211 CI measures coverage once, on the interpreter where measuring is
   free; the two spin tests stop spinning (2026-09-18)
   The DL-209 merge's `tests` run on main was cancelled by the job's

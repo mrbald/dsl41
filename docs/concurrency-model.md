@@ -709,6 +709,11 @@ mutex. The rule reaches further than the engine's own entry points: the CLI
 takes leadership before it starts a supervisor and takes its lease, because
 that is an act on an estate this process may turn out not to lead.
 
+*(Amended by DL-210.)* This ordering applies to `run` and resume. The
+independent `supervise start` service takes the supervisor's root lock,
+but takes neither engine leadership nor a controller lease. The engine
+still takes leadership before acquiring that supervisor's lease.
+
 **The state-machine version is a number of its own,** not `dsl41_version`.
 The package version moves for a docs typo, and refusing to resume a live
 estate after a patch release would be an outage manufactured by

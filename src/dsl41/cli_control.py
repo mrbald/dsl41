@@ -4,8 +4,9 @@
 `sendevent`, `host` and `query` speak the ss10 control protocol over the
 run root's socket (docs/control-protocol.md); `ui` and `serve` attach the
 ss11 TUI to it; `supervise` speaks the other protocol, the Tier-1
-supervisor's (docs/supervisor-protocol.md). Every one of them is a CLIENT
--- nothing here holds engine state. Registered on the app in `cli.py`.
+supervisor's (docs/supervisor-protocol.md). `supervise start` execs that
+supervisor; the other verbs are clients. Nothing here holds engine state.
+Registered on the app in `cli.py`.
 
 The four mutation exit codes (0/2/3/4) are DL-92's and are read in one
 place, `cli_common.command_outcome`.
@@ -515,25 +516,75 @@ def query(
 
 
 def supervise(
-    action: str = typer.Argument(..., help="list|shutdown"),
+    action: str = typer.Argument(..., help="start|list|shutdown"),
     run_root: Path = typer.Option(
         ..., "--run-root", help="Run directory holding supervisor.sock (ss6a Tier 1)."
     ),
+    deadman_seconds: float | None = typer.Option(
+        None, "--deadman-seconds", help="Start only: exit after this many seconds without a holder."
+    ),
 ) -> None:
-    """Observe or stop a run-root's supervisor (runner-design ss6a; DL-42 item
+    """Start, observe or stop a run-root's supervisor (runner-design ss6a; DL-42 item
     4 -- read-only by default). `list` prints its live runs and lease; `shutdown`
     ACQUIREs the lease (failing loudly with holder info while an engine holds an
     unexpired one), then SHUTDOWNs: TERM->grace->KILL each command, wrappers
     record truthfully, socket + pidfile removed. Exit 2 when there is no
-    supervisor or the lease could not be taken; 0 on a clean shutdown."""
+    supervisor or the lease could not be taken; 0 on a clean shutdown.
+    `start` execs the supervisor in the foreground: ownership refusal is 1,
+    configuration or usage refusal is 2, and orderly exit is 0 (DL-210)."""
     import json as json_mod
+    import math
     import os
+    import sys
 
     from dsl41.runner_adapters import SupervisorConn
 
     verb = action.lower()
-    if verb not in ("list", "shutdown"):
-        raise typer.Exit(refuse(f"unknown supervise action {action!r} (list|shutdown)"))
+    if verb not in ("start", "list", "shutdown"):
+        raise typer.Exit(refuse(f"unknown supervise action {action!r} (start|list|shutdown)"))
+    if deadman_seconds is not None:
+        if verb != "start":
+            raise typer.Exit(refuse("--deadman-seconds is only valid for supervise start"))
+        if not (math.isfinite(deadman_seconds) and deadman_seconds > 0):
+            raise typer.Exit(refuse("--deadman-seconds must be a finite positive number"))
+    if verb == "start":
+        try:
+            try:
+                run_root.mkdir(mode=0o700, parents=True)
+            except FileExistsError:
+                if not run_root.is_dir():
+                    raise
+            else:
+                run_root.chmod(0o700)
+            argv = [
+                sys.executable,
+                str(Path(__file__).with_name("runner_supervisor.py")),
+                "--run-root",
+                str(run_root.resolve()),
+            ]
+            if deadman_seconds is not None:
+                argv.extend(["--deadman-seconds", str(deadman_seconds)])
+            log_fd = os.open(
+                run_root / "supervisor.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            )
+            try:
+                os.dup2(log_fd, 1)
+                os.dup2(log_fd, 2)
+            finally:
+                if log_fd > 2:
+                    os.close(log_fd)
+            null_fd = os.open(os.devnull, os.O_RDONLY)
+            try:
+                os.dup2(null_fd, 0)
+            finally:
+                if null_fd > 2:
+                    os.close(null_fd)
+            # dup2(fd, fd) leaves O_CLOEXEC intact when open reused stdio.
+            for fd in (0, 1, 2):
+                os.set_inheritable(fd, True)
+            os.execv(sys.executable, argv)
+        except OSError as exc:
+            raise typer.Exit(refuse(exc, prefix="supervisor start")) from exc
     sock_path = run_root / "supervisor.sock"
     if not sock_path.exists():
         raise typer.Exit(refuse(f"no supervisor at {sock_path}"))

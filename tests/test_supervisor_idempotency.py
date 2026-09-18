@@ -871,6 +871,9 @@ class _StubClient:
     def forget_exit(self, run_id: str) -> None:
         self.forgotten.append(run_id)
 
+    def watch_exit(self, run_id: str) -> asyncio.Event:
+        return asyncio.Event()
+
     async def spawn(self, spec: dict) -> dict:
         self.seen_run_dir = spec["run_dir"]
         self.existed_at_spawn = Path(spec["run_dir"]).exists()
@@ -1236,6 +1239,9 @@ def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: P
         def exit_future(self, _run_id):  # registered before spawn
             return _asyncio.get_event_loop().create_future()
 
+        def watch_exit(self, _run_id):
+            return _asyncio.Event()
+
         def forget_exit(self, _run_id):
             pass
 
@@ -1249,7 +1255,7 @@ def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: P
             }
 
         async def list_runs(self):
-            return {"runs": []}  # nothing alive anywhere
+            return {"ok": True, "runs": []}  # nothing alive anywhere
 
     adapter = SupervisedCommandAdapter(_Client(), grace_seconds=0.0, settle_seconds=0.0)  # type: ignore[arg-type]
     catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
@@ -1378,6 +1384,9 @@ def test_pr36_a_transient_list_failure_still_ends_in_the_spool(tmp_path: Path) -
         def exit_future(self, _run_id):
             return _asyncio.get_event_loop().create_future()
 
+        def watch_exit(self, _run_id):
+            return _asyncio.Event()
+
         def forget_exit(self, _run_id):
             pass
 
@@ -1397,7 +1406,7 @@ def test_pr36_a_transient_list_failure_still_ends_in_the_spool(tmp_path: Path) -
             self.asked += 1
             if self.asked == 1:
                 raise SupervisorUnavailable("transient")  # the first ask fails
-            return {"runs": []}
+            return {"ok": True, "runs": []}
 
     client = _Client()
     adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.0)  # type: ignore[arg-type]

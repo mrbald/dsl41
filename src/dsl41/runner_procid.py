@@ -24,6 +24,8 @@ importing process. The engine imports this module as ``dsl41.runner_procid``.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
 import subprocess
@@ -63,6 +65,35 @@ def spool_version_supported(doc: Mapping[str, Any]) -> bool:
         return True
     version = doc["version"]
     return isinstance(version, int) and not isinstance(version, bool) and version == SPOOL_VERSION
+
+
+class LockHeld(OSError):
+    """A nonblocking exclusive lock was unavailable or its path moved (DL-210)."""
+
+
+def flock_exclusive(path: str | os.PathLike[str]) -> int:
+    """Return the caller-owned fd only while it locks the file still at path.
+
+    The file is never unlinked. ESTALE distinguishes replacement from
+    contention so the ledger can retain its existing refusal messages.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise LockHeld(exc.errno, str(exc), os.fspath(path)) from exc
+        held = os.fstat(fd)
+        try:
+            current = os.stat(path)
+        except FileNotFoundError:
+            current = None
+        if current is None or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+            raise LockHeld(errno.ESTALE, "lock path moved", os.fspath(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 # ------------------------------------------------------------------ durability
@@ -280,6 +311,31 @@ def proc_start_token(pid: int) -> str | None:
     if out.returncode != 0 or not lstart:
         return None
     return f"lstart:{lstart}"
+
+
+def proc_is_zombie(pid: int) -> bool:
+    """Whether `pid` is a zombie: exited, unreaped, holding no descriptors
+    and no locks. A zombie still has a /proc entry and a `ps` row, so the
+    start-token guard would read it as the recorded live owner; the
+    supervisor's reclaim treats it as absent (DL-210). Linux: the state
+    field is the first field after the last ')' in /proc/<pid>/stat. macOS:
+    `ps -o stat=` starts with Z."""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                raw = f.read().decode("ascii", "replace")
+        except OSError:
+            return False
+        fields = raw.rsplit(")", 1)[1].split()
+        return bool(fields) and fields[0] == "Z"
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+        check=False,
+    )
+    return out.returncode == 0 and out.stdout.strip().startswith("Z")
 
 
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
