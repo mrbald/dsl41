@@ -13378,7 +13378,10 @@ relitigate an entry; append a new one.
   a crash between the two never leaves a socket with no owner record; so a connecting client never meets a
   bound-but-not-listening socket; and it reclaims a published path only
   after a retried PING probe fails and the pid file's process is provably
-  gone, which is also the upgrade boundary against an old supervisor that
+  gone, while a killed supervisor that lingers unreaped as a zombie is
+  absent, since it holds no descriptor, lock or socket; the engine respawns
+  a supervisor that exits before publishing, up to three times inside its
+  connect window, because exit 1 means retry, which is also the upgrade boundary against an old supervisor that
   holds no lock. The client never unlinks a socket path again: macOS
   refuses when a listen backlog is full, so a refusal never proved
   absence. Ownership refusals exit 1, retryable; configuration refusals
