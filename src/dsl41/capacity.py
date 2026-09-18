@@ -22,7 +22,7 @@ in-memory list.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from dsl41.oracle_state import CapacityReservation, ReleasePolicy
 
@@ -36,9 +36,32 @@ if TYPE_CHECKING:
 #: catalog no longer has at all -- behind every declared priority.
 _UNSET_PRIORITY = 1 << 31
 
+#: What one requirement DOES to a bucket: 'acquire' holds units until the
+#: release policy gives them back, 'gate' only checks a level and holds
+#: nothing. Named (DL-209) so the pair is a code object, not two strings
+#: spelled in four places.
+DemandMode = Literal["acquire", "gate"]
+
 #: The demand vector's entry shape: (bucket key, units, mode, release policy).
-#: mode is 'acquire' (holds units) or 'gate' (threshold: check-only).
-DemandEntry = tuple[str, int, str, ReleasePolicy | None]
+DemandEntry = tuple[str, int, DemandMode, ReleasePolicy | None]
+
+#: DL-50's resource types, upper-cased: R renewable, D depletable, T
+#: threshold. Absent ("") reads as renewable; anything else has unknown
+#: release semantics and `runner_preflight` refuses the run over it. Named
+#: here because this module owns what each one MEANS (DL-209).
+RES_TYPES = frozenset({"R", "D", "T"})
+
+#: DL-50's per-request FREE overrides, upper-cased: Y release on SUCCESS
+#: only, N never release, A release on any terminal. A code outside the set
+#: is a lowering error (`ir._parse_resources`), so `release_policy` reads the
+#: set and falls back to the res_type default for anything else (DL-209).
+FREE_CODES = frozenset({"Y", "N", "A"})
+
+#: The two members of `RES_TYPES` this module branches on by name: T is a
+#: check-only threshold, D is the depletable whose default is never-release.
+#: R and "" take every other branch, so neither needs a name of its own.
+_THRESHOLD = "T"
+_DEPLETABLE = "D"
 
 
 class CapacityPool:
@@ -185,7 +208,7 @@ def resource_type(resource: ResourceIR | None) -> str:
     return (resource.res_type or "").strip().upper() if resource is not None else ""
 
 
-def requirement_demand(res_type: str, free: str | None) -> tuple[str, ReleasePolicy | None]:
+def requirement_demand(res_type: str, free: str | None) -> tuple[DemandMode, ReleasePolicy | None]:
     """What one `resources:` group DEMANDS: the mode and, when it holds units,
     the policy that gives them back.
 
@@ -196,12 +219,14 @@ def requirement_demand(res_type: str, free: str | None) -> tuple[str, ReleasePol
     PUBLIC because the explore page states the same demand in words
     (DL-192), and the T branch is half the rule: reusing `release_policy`
     alone reported a threshold gate as held units released on completion."""
-    if res_type == "T":
+    if res_type == _THRESHOLD:
         return "gate", None
     return "acquire", release_policy(res_type, free)
 
 
-def job_demand(res_type: str, refs: Sequence[ResourceRef]) -> tuple[int, str, ReleasePolicy | None]:
+def job_demand(
+    res_type: str, refs: Sequence[ResourceRef]
+) -> tuple[int, DemandMode, ReleasePolicy | None]:
     """One job's WHOLE demand on one resource: the groups it states there,
     classified by `requirement_demand` and coalesced by `merge_requirements`.
 
@@ -210,18 +235,19 @@ def job_demand(res_type: str, refs: Sequence[ResourceRef]) -> tuple[int, str, Re
     job that lists one resource twice must not read as two single-unit
     demands on the page while the pool holds their sum. `refs` is never
     empty -- both callers group by a name a ref stated."""
-    total: tuple[int, str, ReleasePolicy | None] | None = None
+    total: tuple[int, DemandMode, ReleasePolicy | None] | None = None
     for ref in refs:
         mode, policy = requirement_demand(res_type, ref.free)
-        entry: tuple[int, str, ReleasePolicy | None] = (ref.quantity, mode, policy)
+        entry: tuple[int, DemandMode, ReleasePolicy | None] = (ref.quantity, mode, policy)
         total = entry if total is None else merge_requirements(total, entry)
     assert total is not None
     return total
 
 
 def merge_requirements(
-    left: tuple[int, str, ReleasePolicy | None], right: tuple[int, str, ReleasePolicy | None]
-) -> tuple[int, str, ReleasePolicy | None]:
+    left: tuple[int, DemandMode, ReleasePolicy | None],
+    right: tuple[int, DemandMode, ReleasePolicy | None],
+) -> tuple[int, DemandMode, ReleasePolicy | None]:
     """Coalesce two requirements on ONE bucket -- a job listing the same
     resource twice. The demand SUMS (two `(LOCK, QUANTITY=2)` groups want
     four units, not two), a bucket any group holds is held, and the release
@@ -245,13 +271,13 @@ def release_policy(res_type: str, free: str | None) -> ReleasePolicy:
     PUBLIC because the explore page states the same policy per lock member
     (DL-192), and a second copy of this table would drift from the pool's
     (DL-72). One owner, two readers."""
-    if free == "Y":
-        return "success"
-    if free == "N":
-        return "never"
-    if free == "A":
-        return "completion"
-    return "never" if res_type == "D" else "completion"  # FREE absent -> res_type default
+    if free in FREE_CODES:
+        if free == "Y":
+            return "success"
+        if free == "N":
+            return "never"
+        return "completion"  # "A", the third member
+    return "never" if res_type == _DEPLETABLE else "completion"  # FREE absent -> res_type default
 
 
 def _merge_policy(a: ReleasePolicy | None, b: ReleasePolicy | None) -> ReleasePolicy | None:

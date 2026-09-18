@@ -299,6 +299,13 @@ EMPTY_BUNDLE_HASH: Final[str] = source_bundle_hash(())
 # ------------------------------------------------------------ runtime profile
 
 
+#: How the one ambiguous machine verdict resolves (DL-49). Declared here
+#: because the profile is what PINS it into a period's identity;
+#: `runner_preflight` imports this name rather than restating the pair,
+#: so the two cannot drift (DL-209).
+MachinePolicy = Literal["strict", "local-eligible"]
+
+
 class RuntimeProfile(BaseModel):
     """ss2.1: the launch options that change interpretation or dispatch, as
     a typed frozen model.
@@ -336,7 +343,7 @@ class RuntimeProfile(BaseModel):
             return tuple(sorted(set(items)))
         return value
 
-    machine_policy: Literal["strict", "local-eligible"] = "strict"
+    machine_policy: MachinePolicy = "strict"
     execution_mode: Literal["tethered", "detached"] = "tethered"
     deadman_us: Annotated[int, Field(gt=0)] | None = None
     fw_default_interval_us: Annotated[int, Field(gt=0)] = 60_000_000

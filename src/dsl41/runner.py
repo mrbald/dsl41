@@ -150,7 +150,7 @@ from pathlib import Path
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CarriedRows, Event
+from dsl41.oracle_state import CarriedRows, Event, EventSource
 from dsl41.boundary import (
     BoundaryFailStop,
     CommittedBoundary,
@@ -279,7 +279,7 @@ class _Pending:
     request_id: str | None
     ev: Event | None = None
     host: HostCommand | None = None
-    source: str | None = None
+    source: EventSource | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
 
@@ -506,7 +506,7 @@ class Engine:
         return frozenset(self._live)
 
     def inject(
-        self, ev: Event, *, source: str | None = "control", request_id: str | None = None
+        self, ev: Event, *, source: EventSource | None = "control", request_id: str | None = None
     ) -> None:
         """Queue an external event (test scripts; ss10 sendevent verbs).
         External events are never gated: injected STATUS keeps its
@@ -521,7 +521,7 @@ class Engine:
         self._enqueue(ev, source=source, request_id=request_id)
 
     def submit(
-        self, ev: Event, envelope: Envelope, *, source: str = "control"
+        self, ev: Event, envelope: Envelope, *, source: EventSource = "control"
     ) -> Awaitable[ApplyResult]:
         """Queue one EXTERNALLY REQUESTED mutation and hand back its
         decision (concurrency-model ss0/ss4).
@@ -544,7 +544,7 @@ class Engine:
         return future
 
     def submit_host(
-        self, cmd: HostCommand, envelope: Envelope, *, source: str = "control"
+        self, cmd: HostCommand, envelope: Envelope, *, source: EventSource = "control"
     ) -> Awaitable[ApplyResult]:
         """Queue one routing-table change and hand back its decision
         (concurrency-model ss8).
@@ -1048,7 +1048,7 @@ class Engine:
         self,
         ev: Event,
         *,
-        source: str | None = "adapter",
+        source: EventSource | None = "adapter",
         request_id: str | None = None,
         envelope: Envelope | None = None,
         future: asyncio.Future[ApplyResult] | None = None,

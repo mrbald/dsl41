@@ -346,6 +346,7 @@ class Attempt(BaseModel):
     fingerprint: str
     kind: str | None = None
     payload: dict[str, Any] = {}
+    # `str`, not `EventSource`: replayed from the WAL (see `Event.source`)
     source: str | None = None
     expect: dict[str, int] | None = None
     epoch: int = INERT_EPOCH

@@ -32,9 +32,11 @@ from dsl41.autocal import (
     compile_calendar,
     standard_days,
 )
+from dsl41.capacity import RES_TYPES
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
+from dsl41.period import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
 from dsl41.timezones import city_candidates, resolve_timezone, to_local
@@ -81,7 +83,8 @@ _KNOWN_MACHINE_TYPES = frozenset({"a", "r", "n", "v"})
 
 MachineVerdict = Literal["local", "foreign", "mixed", "error"]
 
-MachinePolicy = Literal["strict", "local-eligible"]
+#: Re-exported: `period.RuntimeProfile.machine_policy` is the owner (DL-209).
+MachinePolicy = _MachinePolicy
 
 
 @dataclass(frozen=True)
@@ -285,7 +288,7 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
                 " -- can never be satisfied, the job would hang in QUE_WAIT forever (DL-50)"
             )
         res_type = (resource.res_type or "").strip().upper()
-        if res_type not in ("", "R", "D", "T"):
+        if res_type and res_type not in RES_TYPES:
             err(
                 f"resource {ref.name!r} res_type {resource.res_type!r} is not R/D/T --"
                 " unknown release semantics (DL-50)"
