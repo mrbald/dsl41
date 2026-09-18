@@ -2,7 +2,8 @@
 # bisimulation gate included), ruff check, ruff format --check (the whole tree
 # adopted formatter output at the 1.0.0 boundary), mypy, and the DL-75
 # architecture gate (scripts/arch_check.py), on every leg; a separate
-# `coverage` job (DL-211) runs the same gates plus the branch-coverage report;
+# `coverage` job (DL-211) runs the same gates plus the branch-coverage report
+# on 3.14, which is therefore the suite's only 3.14 leg;
 # a third job runs the emitted explore page in three browser engines (DL-77).
 # README's "tests" brick badges this workflow.
 #
