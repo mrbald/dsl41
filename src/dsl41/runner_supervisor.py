@@ -124,6 +124,7 @@ if TYPE_CHECKING:
         LockHeld,
         current_boot_id,
         flock_exclusive,
+        proc_is_zombie,
         proc_start_token,
         start_tokens_match,
         durable_write,
@@ -146,6 +147,7 @@ else:
         LockHeld,
         current_boot_id,
         flock_exclusive,
+        proc_is_zombie,
         proc_start_token,
         start_tokens_match,
         durable_write,
@@ -471,6 +473,11 @@ class Supervisor:
         if isinstance(boot, str) and boot not in ("", "unknown", self.boot_id):
             if self.boot_id != "unknown":
                 return True
+        if proc_is_zombie(pid):
+            # exited and unreaped: no descriptors, no lock, no socket. Its
+            # /proc entry and start token survive until the parent waits,
+            # which is exactly how a killed supervisor read as live (DL-210).
+            return True
         current = proc_start_token(pid)
         recorded = record.get("start_time")
         if current is not None:

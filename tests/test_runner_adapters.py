@@ -1146,3 +1146,52 @@ def test_dl210_close_during_connect_never_publishes_a_new_reader(tmp_path: Path,
             reader.feed_eof()
 
     asyncio.run(scenario())
+
+
+def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing(
+    monkeypatch,
+) -> None:
+    """Breaks when `ensure_running` waits its whole window on one spawn that
+    already exited. Exit 1 is "another supervisor owns this root", a
+    transient (an old one still tearing down) that the runbook retries
+    through systemd; the engine's own spawn retries it inside its window.
+    A short root: pytest's tmp_path exceeds sun_path on macOS, so a real
+    supervisor could never bind there (the reason test_runner_supervisor.py
+    has `short_root`)."""
+    import shutil
+    import tempfile
+
+    tmp_path = Path(tempfile.mkdtemp(prefix="dsl41a-", dir="/tmp"))
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "logs").mkdir()
+    client = SupervisorClient(tmp_path)
+    real = client._spawn_supervisor
+    spawns: list[int] = []
+
+    def flaky() -> subprocess.Popen[bytes]:
+        spawns.append(1)
+        if len(spawns) == 1:
+            return subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])
+        return real()
+
+    monkeypatch.setattr(client, "_spawn_supervisor", flaky)
+
+    async def scenario() -> None:
+        await client.ensure_running()
+        try:
+            assert (await client.list_runs())["ok"] is True
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(scenario())
+        assert len(spawns) == 2
+    finally:
+        # the second spawn is a real detached supervisor: end it by its pid
+        # record, the same identity the reclaim guard reads
+        record = json.loads((tmp_path / "supervisor.pid").read_text())
+        os.kill(int(record["pid"]), signal.SIGTERM)
+        deadline = time.monotonic() + 10.0
+        while (tmp_path / "supervisor.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        shutil.rmtree(tmp_path, ignore_errors=True)

@@ -313,6 +313,31 @@ def proc_start_token(pid: int) -> str | None:
     return f"lstart:{lstart}"
 
 
+def proc_is_zombie(pid: int) -> bool:
+    """Whether `pid` is a zombie: exited, unreaped, holding no descriptors
+    and no locks. A zombie still has a /proc entry and a `ps` row, so the
+    start-token guard would read it as the recorded live owner; the
+    supervisor's reclaim treats it as absent (DL-210). Linux: the state
+    field is the first field after the last ')' in /proc/<pid>/stat. macOS:
+    `ps -o stat=` starts with Z."""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                raw = f.read().decode("ascii", "replace")
+        except OSError:
+            return False
+        fields = raw.rsplit(")", 1)[1].split()
+        return bool(fields) and fields[0] == "Z"
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+        check=False,
+    )
+    return out.returncode == 0 and out.stdout.strip().startswith("Z")
+
+
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
 
 

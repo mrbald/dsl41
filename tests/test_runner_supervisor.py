@@ -2941,3 +2941,22 @@ supervise('start', Path(sys.argv[1]), None)
     )
     assert result.returncode == 0, result.stderr
     assert (root / "supervisor.log").read_text() == "stdout survived\nstderr survived\n"
+
+
+def test_dl210_a_killed_unreaped_supervisor_is_absent_not_an_owner(short_root: Path) -> None:
+    """Breaks when the reclaim guard reads a zombie as the live owner. A
+    SIGKILLed supervisor lingers as a zombie until its parent waits: its
+    /proc entry (or ps row) and start token survive, so the token guard
+    matched, the restarted supervisor exited 1 and the engine's spawn timed
+    out (CI on the DL-210 branch). A zombie holds no descriptor, no lock and
+    no socket: it is absent, and the restart reclaims its root."""
+    from dsl41.runner_procid import proc_is_zombie
+
+    old = start_supervisor(short_root)
+    os.kill(old.pid, signal.SIGKILL)
+    wait_for(lambda: proc_is_zombie(old.pid))  # deliberately NOT old.wait()
+    try:
+        new = start_supervisor(short_root)  # waits for a real PING inside
+    finally:
+        old.wait()
+    teardown_supervisor(short_root, new)

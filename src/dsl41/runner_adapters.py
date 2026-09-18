@@ -87,6 +87,9 @@ _SUPERVISOR_PATH = Path(_supervisor.__file__)
 # (this one, runner_control's server AND client) and a shared constant
 # imported through a private name is a boundary that was never real.
 LINE_LIMIT: int = 2**24
+#: spawns `ensure_running` makes inside its 10 s window when a fresh
+#: supervisor exits before publishing its socket (DL-210: exit 1 is retryable)
+_SPAWN_ATTEMPTS = 3
 
 
 @dataclass
@@ -1161,13 +1164,24 @@ class SupervisorClient:
         socket is reused -- that reuse IS reattachment (spec ss1)."""
         if await self._try_connect():
             return
-        self._spawn_supervisor()
+        child = self._spawn_supervisor()
+        spawns = 1
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             await asyncio.sleep(0.1)
             if await self._try_connect():
                 return
-        raise SupervisorUnavailable("supervisor did not come up within 10s")
+            if child.poll() is not None and not self.sock_path.exists():
+                # the supervisor exited before publishing: exit 1 is the
+                # retryable "another supervisor owns this root" (an old one
+                # still tearing down, DL-210), so try again within the window
+                if spawns >= _SPAWN_ATTEMPTS:
+                    break
+                child = self._spawn_supervisor()
+                spawns += 1
+        raise SupervisorUnavailable(
+            f"supervisor did not come up within 10s ({spawns} spawn attempt(s))"
+        )
 
     async def _try_connect(self) -> bool:
         if not self.sock_path.exists():
@@ -1201,13 +1215,13 @@ class SupervisorClient:
             self._note_contact(resp)  # PING is where a REATTACH learns the deadman
         return bool(resp.get("ok"))
 
-    def _spawn_supervisor(self) -> None:
+    def _spawn_supervisor(self) -> subprocess.Popen[bytes]:
         argv = [sys.executable, str(_SUPERVISOR_PATH), "--run-root", str(self.run_root)]
         if self.deadman_s is not None:
             argv += ["--deadman-seconds", str(self.deadman_s)]
         logf = (self.run_root / "supervisor.log").open("ab")
         try:
-            subprocess.Popen(
+            return subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=logf,
