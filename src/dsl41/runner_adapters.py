@@ -910,7 +910,7 @@ class FileWatcherAdapter:
             next_at = at + timedelta(seconds=interval)
 
 
-#: how many 1-second waits between LIST re-checks on a duplicate-born await
+#: seconds between LIST re-checks (also the duplicate await's 1-second polls)
 _LIST_RECHECK_EVERY = 5
 
 
@@ -1147,6 +1147,11 @@ class SupervisorClient:
         self._closed = False
         self._pending: asyncio.Future[dict[str, Any]] | None = None
         self._exit_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._listed_dead: dict[str, asyncio.Event] = {}
+        self._list_task: asyncio.Task[None] | None = None
+        self._list_wakeup = asyncio.Event()
+        self._list_idle = asyncio.Event()
+        self._list_idle.set()
 
     # -- connection ---------------------------------------------------------
 
@@ -1171,11 +1176,12 @@ class SupervisorClient:
             reader, writer = await asyncio.open_unix_connection(
                 str(self.sock_path), limit=LINE_LIMIT
             )
-        except ConnectionRefusedError:
-            with contextlib.suppress(OSError):
-                self.sock_path.unlink()  # stale: nobody is listening (parity with ss10)
-            return False
         except OSError:
+            # Only the supervisor owns this pathname. A refusal can race its
+            # bind/listen window; unlinking here would hide a live successor.
+            return False
+        if self._closed:
+            writer.close()
             return False
         # supersede any previous connection's remains BEFORE swapping identity:
         # the epoch guard (each reader carries its own `lost` event) keeps a
@@ -1236,6 +1242,7 @@ class SupervisorClient:
         async with self._reconnect_lock:
             if self._closed:
                 return False
+            self._arm_list_recheck()
             if self._writer is not None and not self.lost.is_set():
                 return True  # another caller already reconnected
             if not await self._try_connect():
@@ -1322,9 +1329,12 @@ class SupervisorClient:
                     continue
                 if isinstance(obj, dict) and obj.get("push") == "exit":
                     self._deliver_push(obj)  # true exit facts: epoch-independent
-                elif self._pending is not None and not self._pending.done():
-                    pending, self._pending = self._pending, None
-                    pending.set_result(obj if isinstance(obj, dict) else {})
+                else:
+                    if isinstance(obj, dict) and "pushes_dropped" in obj:
+                        self._arm_list_recheck()
+                    if self._pending is not None and not self._pending.done():
+                        pending, self._pending = self._pending, None
+                        pending.set_result(obj if isinstance(obj, dict) else {})
         except (OSError, asyncio.IncompleteReadError):
             pass
         finally:
@@ -1355,6 +1365,57 @@ class SupervisorClient:
 
     def forget_exit(self, run_id: str) -> None:
         self._exit_futures.pop(run_id, None)
+        self._listed_dead.pop(run_id, None)
+
+    def watch_exit(self, run_id: str) -> asyncio.Event:
+        """Make a wait LIST-eligible only after its SPAWN reply, or at reattach.
+
+        Registering the exit future before SPAWN does not prove that the
+        supervisor has seen the run. A successful empty LIST in that window
+        must never send the run to the spool ladder.
+        """
+        if self._list_task is not None and self._list_task.done():
+            self._list_task.result()  # a malformed LIST must fail the adapter loudly
+        dead = self._listed_dead.setdefault(run_id, asyncio.Event())
+        if self._list_task is not None:
+            self._list_wakeup.set()
+        return dead
+
+    def _arm_list_recheck(self) -> None:
+        """One persistent safety net after a dropped push or any reconnect."""
+        if self._closed:
+            return
+        if self._list_task is None:
+            self._list_task = asyncio.create_task(self._list_recheck_loop())
+        if self._listed_dead:
+            self._list_wakeup.set()
+
+    async def _list_recheck_loop(self) -> None:
+        while not self._closed:
+            if not self._listed_dead:
+                self._list_wakeup.clear()
+            await self._list_wakeup.wait()
+            await asyncio.sleep(_LIST_RECHECK_EVERY)
+            if self._closed:
+                return
+            # Snapshot BEFORE the request: waits accepted while this LIST is
+            # in flight cannot be judged against its older view of the runs.
+            eligible = dict(self._listed_dead)
+            if not eligible:
+                continue
+            self._list_idle.clear()
+            try:
+                listing = await self.list_runs()
+            except SupervisorUnavailable:
+                continue  # the adapters own reconnect failure and spool recovery
+            finally:
+                self._list_idle.set()
+            if listing.get("ok") is not True:
+                continue
+            alive = {row.run_id for row in listing.get("runs", []) if row.wrapper_alive}
+            for run_id, dead in eligible.items():
+                if self._listed_dead.get(run_id) is dead and run_id not in alive:
+                    dead.set()  # evidence for the spool ladder, never an exit push
 
     # -- verbs --------------------------------------------------------------
 
@@ -1484,6 +1545,15 @@ class SupervisorClient:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
         self._renew_task = self._reader_task = None
+        if self._list_task is not None:
+            # Reader shutdown fails any pending LIST. Wait for its request to
+            # unwind before cancelling: cancellation in _request poisons the
+            # uncorrelated stream. Ordinary forget_exit never cancels this task.
+            await self._list_idle.wait()
+            self._list_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._list_task
+            self._list_task = None
         if self._writer is not None:
             self._writer.close()
             with contextlib.suppress(Exception):
@@ -1529,8 +1599,8 @@ class SupervisedCommandAdapter:
         # and a reattach's wrapper can die in the window between the startup
         # LIST and the future registration below -- its push then lands on
         # no consumer and is dropped (pushes are droppable notifications,
-        # ss5). Only a fresh spawn's push is promised: its future is
-        # registered BEFORE the fork.
+        # ss5). Fresh spawns use the shared client net after a dropped-push
+        # hint or reconnect; their futures are registered BEFORE the fork.
         recheck = False
         reattach_id = self.reattach.pop(key, None)
         if reattach_id is not None:
@@ -1615,6 +1685,8 @@ class SupervisedCommandAdapter:
             listing = await self.client.list_runs()
         except SupervisorUnavailable:
             return True
+        if listing.get("ok") is not True:
+            return True
         return any(
             r.get("run_id") == run_id and r.get("wrapper_alive") for r in listing.get("runs", [])
         )
@@ -1635,11 +1707,12 @@ class SupervisedCommandAdapter:
         # reattach (the wrapper can die before the future above existed, and
         # a push with no consumer is dropped). The LIST is re-asked
         # periodically and a definitive "not alive" falls to the spool
-        # ladder. A fresh spawn never needs it: its future is registered
-        # before the fork, so its push is guaranteed.
+        # ladder. Fresh spawns are also covered by the shared client net
+        # after a dropped-push hint or reconnect.
         recheck_countdown = _LIST_RECHECK_EVERY
         try:
             while True:
+                listed_dead = self.client.watch_exit(run_id)
                 # post-poison a lost connection no longer implies a dead
                 # supervisor (review fix, DL-48): try to reconnect first --
                 # falling straight to the spool ladder would kill a healthy
@@ -1649,17 +1722,21 @@ class SupervisedCommandAdapter:
                 status = load_json(status_path)
                 if status is not None:
                     return outcome_from_status(_named(status, run_id, job, run_number))
+                if listed_dead.is_set():
+                    break
                 lost_wait = asyncio.ensure_future(self.client.lost.wait())
                 exit_wait = asyncio.ensure_future(asyncio.shield(fut))
+                listed_wait = asyncio.ensure_future(listed_dead.wait())
                 try:
                     await asyncio.wait(
-                        {exit_wait, lost_wait},
+                        {exit_wait, lost_wait, listed_wait},
                         timeout=1.0,  # re-poll status.json (a missed push at reattach)
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
                     lost_wait.cancel()
                     exit_wait.cancel()  # cancels the shield, never fut
+                    listed_wait.cancel()
                 if fut.done() and not fut.cancelled():
                     status = load_json(status_path)
                     if status is not None:

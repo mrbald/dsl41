@@ -48,6 +48,8 @@ from dsl41.runner_adapters import (
     Failed,
     FileWatcherAdapter,
     LocalCommandAdapter,
+    SupervisedCommandAdapter,
+    SupervisorClient,
     Terminated,
     spool_names_run,
 )
@@ -645,3 +647,417 @@ def test_start_tokens_match_ticks_exact_only_and_mixed_forms_never_match() -> No
     assert _procid.start_tokens_match("ticks:100", "ticks:101") is False
     assert _procid.start_tokens_match("ticks:100", "lstart:Sat Jul 11 14:19:32 2026") is False
     assert _procid.start_tokens_match("lstart:Sat Jul 11 14:19:32 2026", "ticks:100") is False
+
+
+# ---------------------------------------------- 6. shared supervisor LIST net
+
+
+class _ClientWire:
+    """In-memory transport with the real request lock and reply/push reader."""
+
+    def __init__(self, client: SupervisorClient) -> None:
+        self.client = client
+        self.stream = asyncio.StreamReader()
+        self.sent: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        client._writer = self  # type: ignore[assignment]
+        client.lost = asyncio.Event()
+        client._reader_task = asyncio.create_task(client._reader(self.stream, client.lost))
+
+    def write(self, data: bytes) -> None:
+        self.sent.put_nowait(json.loads(data))
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.stream.feed_eof()
+
+    async def wait_closed(self) -> None:
+        pass
+
+    async def expect(self, command: str) -> dict[str, Any]:
+        request = await asyncio.wait_for(self.sent.get(), timeout=3.0)
+        assert request["cmd"] == command
+        return request
+
+    def reply(self, value: dict[str, Any]) -> None:
+        self.stream.feed_data(json.dumps(value).encode() + b"\n")
+
+
+def _list_row(run_id: str, *, alive: bool = True) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "job": "j",
+        "run_number": 1,
+        "run_dir": "/synthetic/run/j.1",
+        "wrapper_pid": 123,
+        "wrapper_alive": alive,
+        "spawned_at": "2026-09-18T08:00:00+00:00",
+        "wrapper_rc": None if alive else 0,
+    }
+
+
+def test_dl210_client_never_unlinks_a_refused_supervisor_socket(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async def refused(*args, **kwargs):
+        raise ConnectionRefusedError("bind happened; listen has not")
+
+    monkeypatch.setattr(asyncio, "open_unix_connection", refused)
+    path = tmp_path / "supervisor.sock"
+    path.write_bytes(b"supervisor owns this pathname")
+    inode = path.stat().st_ino
+    assert asyncio.run(SupervisorClient(tmp_path)._try_connect()) is False
+    assert path.stat().st_ino == inode
+    assert path.read_bytes() == b"supervisor owns this pathname"
+
+
+@pytest.mark.parametrize(
+    "command", ["PING", "ACQUIRE", "RENEW", "SPAWN", "SIGNAL", "LIST", "RELEASE", "SHUTDOWN"]
+)
+def test_dl210_any_reply_arms_one_list_net_for_several_waits(
+    tmp_path: Path, monkeypatch, command: str
+) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        futures = [client.exit_future(rid) for rid in ("a", "b", "c")]
+        marks = [client.watch_exit(rid) for rid in ("a", "b", "c")]
+        try:
+            request = asyncio.create_task(client._request({"cmd": command}))
+            await wire.expect(command)
+            wire.reply({"ok": False, "error": "synthetic refusal", "pushes_dropped": 2})
+            assert (await request)["ok"] is False
+            net = client._list_task
+            assert net is not None
+            await wire.expect("LIST")
+            wire.reply({"ok": True, "runs": [_list_row("b")], "pushes_dropped": 1})
+            await asyncio.wait_for(marks[0].wait(), 3.0)
+            await asyncio.wait_for(marks[2].wait(), 3.0)
+            assert not marks[1].is_set()
+            assert all(not future.done() for future in futures)
+            assert client._list_task is net
+            for rid in ("a", "b", "c"):
+                client.forget_exit(rid)
+            await asyncio.sleep(0.03)
+            assert wire.sent.empty()  # no LIST per waiter and none while dormant
+            assert not net.done()
+            # A later wait wakes the SAME task without another hint.
+            later = client.watch_exit("later")
+            await wire.expect("LIST")
+            wire.reply({"ok": True, "runs": []})
+            await asyncio.wait_for(later.wait(), 3.0)
+            assert client._list_task is net
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [{"ok": False}, {"ok": None}, {}, {"ok": 1}, {"ok": "true"}, [], None],
+)
+def test_dl210_refused_list_marks_nothing_and_duplicate_probe_stays_alive(
+    tmp_path: Path, monkeypatch, reply
+) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        dead = client.watch_exit("run")
+        client._arm_list_recheck()
+        try:
+            await wire.expect("LIST")
+            wire.reply(reply)
+            await wire.expect("LIST")
+            assert not dead.is_set()
+            wire.reply({"ok": True, "runs": [_list_row("run")]})
+            probe = asyncio.create_task(SupervisedCommandAdapter(client)._listed_alive("run"))
+            await wire.expect("LIST")
+            wire.reply(reply)
+            assert await probe is True
+            assert not dead.is_set()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl210_list_snapshot_cannot_judge_a_wait_accepted_during_its_request(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        old = client.watch_exit("old")
+        client._arm_list_recheck()
+        future = client.exit_future("new")  # registered BEFORE SPAWN
+        try:
+            await wire.expect("LIST")
+            spawn = asyncio.create_task(client.spawn({"run_id": "new"}))
+            wire.reply({"ok": True, "runs": []})
+            await wire.expect("SPAWN")
+            assert "new" not in client._listed_dead
+            assert not future.done()
+            wire.reply({"ok": True, "run_id": "new"})
+            await spawn
+            dead = client.watch_exit("new")
+            await asyncio.wait_for(old.wait(), 3.0)
+            assert not dead.is_set()
+            # A reattached wait registered while LIST is in flight must also
+            # be excluded from that request's older eligibility snapshot.
+            client.forget_exit("old")
+            await wire.expect("LIST")
+            late = client.watch_exit("late")
+            wire.reply({"ok": True, "runs": []})
+            await asyncio.wait_for(dead.wait(), 3.0)
+            assert not late.is_set()
+            assert not future.done()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ladder", ["unobservable", "settle", "surviving_command"])
+def test_dl210_dropped_fresh_exit_reaches_the_existing_spool_ladder(
+    tmp_path: Path, monkeypatch, ladder: str
+) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+    monkeypatch.setattr(_procid, "current_boot_id", lambda: "synthetic-boot")
+    rid = str(uuid.uuid4())
+    run_dir = tmp_path / "runs" / "j.1"
+    run_dir.mkdir(parents=True)
+    status = {
+        "version": 1,
+        "run_id": rid,
+        "job": "j",
+        "run_number": 1,
+        "outcome": "exited",
+        "exit_code": 7,
+        "ended_at": "2026-09-18T08:00:00+00:00",
+    }
+    (run_dir / "spawn.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": rid,
+                "job": "j",
+                "run_number": 1,
+                "boot_id": "synthetic-boot",
+                "wrapper_pid": 111,
+                "wrapper_start_time": "ticks:111",
+                "command_pid": 222,
+                "command_pgid": 222,
+                "command_start_time": "ticks:222",
+            }
+        )
+    )
+    checked: list[int] = []
+    signals: list[tuple[int, int]] = []
+
+    def alive(pid: int, token: str) -> bool:
+        checked.append(pid)
+        if ladder == "settle" and pid == 111:
+            if checked.count(111) == 2:
+                (run_dir / "status.json").write_text(json.dumps(status))
+            return True
+        return ladder == "surviving_command" and pid == 222
+
+    monkeypatch.setattr(_procid, "verify_alive", alive)
+    monkeypatch.setattr(_procid, "killpg_quiet", lambda pid, sig: signals.append((pid, sig)))
+
+    async def scenario() -> AdapterResult:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.5)
+        job = lower_source("insert_job: j\njob_type: c\ncommand: true\n").jobs["j"]
+        ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id=rid)
+        task = asyncio.create_task(adapter.run(job, 1, ctx))
+        try:
+            await wire.expect("SPAWN")
+            future = client.exit_future(rid)
+            assert rid not in client._listed_dead
+            wire.reply({"ok": True, "run_id": rid, "pushes_dropped": 1})
+            await wire.expect("LIST")
+            # No exit push and no status record: only this LIST can release
+            # the fresh wait, and it must not fabricate wrapper_rc.
+            wire.reply({"ok": True, "runs": []})
+            result = await asyncio.wait_for(task, 3.0)
+            assert not future.done()
+            assert client._listed_dead == {}
+            return result
+        finally:
+            if not task.done():
+                task.cancel()
+            await client.close()
+
+    result = asyncio.run(scenario())
+    assert checked  # resolution reached the existing liveness ladder
+    if ladder == "unobservable":
+        assert result == Failed("exit_status_unobservable")
+        assert signals == []
+    elif ladder == "settle":
+        assert result == 7
+        assert checked.count(111) >= 2
+        assert signals == []
+    else:
+        assert result == Terminated("wrapper lost; killed at resume")
+        assert signals == [(222, signal.SIGTERM), (222, signal.SIGKILL)]
+
+
+def test_dl210_reconnect_arms_net_without_drop_hint(tmp_path: Path, monkeypatch) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wires: list[_ClientWire] = []
+
+        async def connect() -> bool:
+            wires.append(_ClientWire(client))
+            return True
+
+        monkeypatch.setattr(client, "_try_connect", connect)
+        future = client.exit_future("run")
+        dead = client.watch_exit("run")
+        try:
+            assert await client.reconnect()
+            await wires[-1].expect("LIST")
+            wires[-1].reply({"ok": True, "runs": []})
+            await asyncio.wait_for(dead.wait(), 3.0)
+            assert not future.done()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl210_forget_does_not_cancel_list_and_close_cancels_outside_request(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        cancelled_in_request: list[bool] = []
+        original = client._request
+
+        async def request(obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+            try:
+                return await original(obj, _connect=_connect)
+            except asyncio.CancelledError:
+                cancelled_in_request.append(True)
+                raise
+
+        monkeypatch.setattr(client, "_request", request)
+        client.watch_exit("run")
+        client._arm_list_recheck()
+        await wire.expect("LIST")
+        net = client._list_task
+        client.forget_exit("run")
+        assert net is not None and not net.done()
+        # A normal request queues behind LIST. Forgetting the last wait must
+        # leave that reply aligned with LIST, then PING gets its own reply.
+        ping = asyncio.create_task(client._request({"cmd": "PING"}))
+        wire.reply({"ok": True, "runs": []})
+        await wire.expect("PING")
+        wire.reply({"ok": True, "ping_marker": "own reply"})
+        assert (await ping)["ping_marker"] == "own reply"
+        client.watch_exit("other")
+        await wire.expect("LIST")
+        await asyncio.wait_for(client.close(), 3.0)  # pending LIST is failed by reader shutdown
+        assert cancelled_in_request == []
+        assert net.done()
+        assert client._list_task is None
+        assert client._writer is None
+
+    asyncio.run(scenario())
+
+
+def test_dl210_malformed_shared_list_fails_the_adapter_loudly(tmp_path: Path, monkeypatch) -> None:
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        client._arm_list_recheck()
+        adapter = SupervisedCommandAdapter(client)
+        task = asyncio.create_task(adapter._await_outcome("run", tmp_path / "j.1", "j", 1))
+        try:
+            await wire.expect("LIST")
+            wire.reply({"ok": True, "runs": [{**_list_row("run"), "run_number": "1"}]})
+            with pytest.raises(EngineError, match="malformed run row"):
+                await asyncio.wait_for(task, 3.0)
+            assert client._exit_futures == {}
+            assert client._listed_dead == {}
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl210_close_during_connect_never_publishes_a_new_reader(tmp_path: Path, monkeypatch):
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.01)
+    (tmp_path / "supervisor.sock").touch()
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        reader = asyncio.StreamReader()
+
+        class Writer:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+            def write(self, _data):
+                pytest.fail("a connection completing during close must send nothing")
+
+        writer = Writer()
+
+        async def connect(*_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            return reader, writer
+
+        monkeypatch.setattr(asyncio, "open_unix_connection", connect)
+        client = SupervisorClient(tmp_path)
+        client.watch_exit("run")
+        client._arm_list_recheck()
+        await asyncio.wait_for(entered.wait(), 3)
+        closing = asyncio.create_task(client.close())
+        await asyncio.sleep(0)  # close reaches its in-flight request barrier
+        assert client._closed and not client._list_idle.is_set()
+        release.set()
+        try:
+            await asyncio.wait_for(closing, 3)
+            assert writer.closed
+            assert client._reader_task is None and client._writer is None
+            assert client._list_task is None
+        finally:
+            reader.feed_eof()
+
+    asyncio.run(scenario())
