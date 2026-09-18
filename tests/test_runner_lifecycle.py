@@ -671,6 +671,67 @@ def test_boot_id_flip_voids_liveness_and_resolves_from_records(tmp_path: Path) -
 # ------------------------------------------- crash recovery (ss13 item 3)
 
 
+def test_dl210_u2_same_period_resume_preserves_the_trace_prefix(tmp_path: Path) -> None:
+    """A TUI cursor remains valid after replay, including a later appended trace."""
+    from datetime import timedelta
+
+    from dsl41.oracle_state import Event
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_startup import start_run
+
+    catalog = lower_source("insert_job: prefix_job\njob_type: c\ncommand: x\n")
+    started = datetime(2026, 7, 1, 8, 0)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=started),
+            adapters={"CMD": FakeAdapter()},
+        )
+        try:
+            engine.inject(Event(at=started, kind="STARTJOB", payload={"job": "prefix_job"}))
+            await engine.run_until_quiescent(started + timedelta(seconds=1))
+            assert engine.oracle.store.job["prefix_job"].status == "SUCCESS"
+            before = [entry.model_dump() for entry in engine.oracle.trace()]
+            assert before
+            baseline, epoch = engine.baseline_id, engine.epoch
+        finally:
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+        resumed = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=started + timedelta(seconds=2)),
+            adapters={"CMD": FakeAdapter()},
+        )
+        try:
+            assert resumed.baseline_id == baseline
+            assert resumed.epoch > epoch
+            assert [entry.model_dump() for entry in resumed.oracle.trace()] == before
+            resumed.inject(
+                Event(
+                    at=started + timedelta(seconds=3),
+                    kind="STARTJOB",
+                    payload={"job": "prefix_job"},
+                )
+            )
+            await resumed.run_until_quiescent(started + timedelta(seconds=4))
+            after = [entry.model_dump() for entry in resumed.oracle.trace()]
+            assert len(after) > len(before)
+            assert after[: len(before)] == before
+        finally:
+            await resumed.shutdown()
+            assert resumed.journal is not None
+            resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
 def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
     """The flagship 11b test: a real engine (RealClock + wrapper adapters)
     is SIGKILLed mid-run. Tethered semantics record everything: the fast
