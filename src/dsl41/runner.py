@@ -147,6 +147,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
+from typing import Final
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
@@ -222,6 +223,13 @@ from dsl41.timezones import alias_table
 #: its own turn. The client's other route is the committed seal in the next
 #: period (period-model ss2.2), so this is courtesy, never the contract.
 _ANSWER_TURNS = 3
+
+#: Floor for the zero-delay-cycle guard's same-instant event budget
+#: (`run_until_quiescent`'s frontier-rule docstring): `max(INSTANT_BUDGET_FLOOR,
+#: 100 * len(catalog.jobs))`. A module constant, not an Engine parameter, so
+#: tests can lower it without threading a new parameter through
+#: `rehearse_check`'s play path for the sake of one test (DL-211).
+INSTANT_BUDGET_FLOOR: Final = 10_000
 
 
 @dataclass
@@ -1218,11 +1226,12 @@ class Engine:
         (AutoSys's own tight-loop pattern, L010's concern, compressed to
         zero duration). The engine refuses with EngineError after a
         catalog-scaled event budget at a single instant rather than hanging
-        -- loud, not silent."""
+        -- loud, not silent. The budget's floor is the module constant
+        `INSTANT_BUDGET_FLOOR`."""
         emitted: list[Event] = []
         instant: datetime | None = None
         instant_events = 0
-        instant_budget = max(10_000, 100 * len(self.oracle.catalog.jobs))
+        instant_budget = max(INSTANT_BUDGET_FLOOR, 100 * len(self.oracle.catalog.jobs))
         while True:
             await self._settle()
             if self._seal is not None:

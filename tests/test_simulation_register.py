@@ -508,8 +508,14 @@ def _cal_operator_domain() -> set[str]:
     )
 
 
+@cache
 def surface_domains() -> dict[str, set[str]]:
-    """Every derived surface's member set, computed from code objects."""
+    """Every derived surface's member set, computed from code objects.
+
+    Cached: the derivation is pure over the source tree, every caller in
+    this module reads it read-only, and the loop in
+    `test_facet_rows_name_a_member_of_their_surface` called it once per
+    facet row (46 times) for the same result each time."""
     return {
         "statement": set(ast_jil.SUBCOMMANDS),
         "job_attr": (

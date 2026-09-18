@@ -1,8 +1,9 @@
 # The project's quality gates on every push/PR: pytest (the CLAUDE.md suite,
 # bisimulation gate included), ruff check, ruff format --check (the whole tree
 # adopted formatter output at the 1.0.0 boundary), mypy, and the DL-75
-# architecture gate (scripts/arch_check.py), plus a second job that runs the
-# emitted explore page in three browser engines (DL-77).
+# architecture gate (scripts/arch_check.py), on every leg; a separate
+# `coverage` job (DL-211) runs the same gates plus the branch-coverage report;
+# a third job runs the emitted explore page in three browser engines (DL-77).
 # README's "tests" brick badges this workflow.
 #
 # The python matrix is deliberate, not ceremony: the v0.2.0 release hang was a
@@ -23,12 +24,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13", "3.14"]
+        python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
+      - run: uv sync --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests scripts examples
+      # DL-193: tests/uc_oracle.py is named because it is a fully annotated
+      # executable spec (stonebranch Part IV) that left src/ with DL-189, and
+      # nothing else held it to the type gate afterwards.
+      - run: uv run mypy src tests/uc_oracle.py
+      # DL-75: blocking checks only decide the exit code (duplicate bodies,
+      # new private cross-module imports in src/, unresolvable citations, an
+      # IR-F shape change without an IR_VERSION bump). The "review due" escalation
+      # it can also print is for the developer; checkout is shallow here, so
+      # the arch-review/<date> tags it measures from are usually absent and
+      # the diff half stays quiet in CI.
+      - run: uv run python scripts/arch_check.py
+      # DL-211: this leg runs the suite plainly. Coverage is measured in the
+      # `coverage` job below, on 3.14 only, where it is nearly free; below
+      # 3.14 the same measurement costs 2-3x on this suite (no sys.monitoring
+      # branch support), for a gate this leg does not need to also pay for.
+      - run: uv run pytest -q
+
+  # DL-211: coverage is a property of the code, not of the interpreter running
+  # it, so it is measured once, where measuring is free. On 3.14, `coverage`
+  # picks its `sys.monitoring` core, which produced byte-identical line and
+  # branch data to the C tracer used below 3.14 across the suite when checked;
+  # below 3.14 sys.monitoring cannot measure branches, so the C tracer is 2-3x
+  # slower for the same result. `coverage report` -- not the run step -- is
+  # what fails the build.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
       - run: uv sync --extra dev
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests scripts examples

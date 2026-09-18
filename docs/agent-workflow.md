@@ -52,6 +52,10 @@ else held it to the type gate (DL-193).
 The coverage invocation runs the full suite once.
 The coverage report enforces the scoped branch-coverage requirement.
 Keep this list aligned with `.github/workflows/ci.yml`.
+CI measures coverage in a separate `coverage` job on Python 3.14 only
+(DL-211): `sys.monitoring` makes branch measurement nearly free there, and
+the same measurement costs 2-3x on the C tracer every other supported
+version uses.
 For browser changes, also follow its browser job: collect the opt-in tests,
 verify that they ran, and exercise the interactions in Chromium, WebKit,
 and Firefox. A skipped suite is not validation.
