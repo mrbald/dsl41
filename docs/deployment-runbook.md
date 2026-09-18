@@ -257,6 +257,80 @@ Decisions to make once, per site:
   restart loop (§6a). A unit that still says `=2` alone restart-loops
   every boundary.
 
+*(Amended by DL-210.)* A detached supervisor stays in the cgroup of the
+process that started it. `setsid` does not move it out. Choose one of these
+two service shapes before relying on engine restarts to preserve jobs.
+
+**Shape 1: a separate supervisor unit.** Start the supervisor in its own
+service before the engine. Its wrappers and commands then belong to that
+service, so stopping the engine's cgroup leaves them running. Use the same
+OS user and run root for both services. The supervisor command creates the
+root with mode 0700, runs in the foreground with the same pid, and appends
+stdout and stderr to `<root>/supervisor.log`.
+
+```ini
+# dsl41-supervisor.service — adjust these synthetic installation paths.
+[Unit]
+Description=dsl41 supervisor
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=dsl41
+ExecStart=/opt/dsl41/.venv/bin/dsl41 supervise start --run-root /srv/dsl41/run
+ExecStartPost=/bin/sh -c 'for attempt in 1 2 3 4 5 6 7 8 9 10; do /opt/dsl41/.venv/bin/dsl41 supervise list --run-root /srv/dsl41/run >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+TimeoutStartSec=30
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=2
+LimitNOFILE=65536
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Order the engine unit after this unit and require its successful start:
+`After=dsl41-supervisor.service` and `Requires=dsl41-supervisor.service`.
+Do not add `PartOf=` or `BindsTo=` from the supervisor to the engine.
+Keep the engine's existing restart and resume rules above. The readiness
+loop checks a real LIST answer. Set the supervisor's `TimeoutStopSec` to
+cover its longest command grace plus the documented shutdown waits
+(`supervisor-protocol.md` §5); the service manager's final cgroup kill can
+otherwise silence a wrapper before it records the command's ending.
+
+Under shape 1, stop the supervisor with
+`systemctl stop dsl41-supervisor.service`.
+`dsl41 supervise shutdown` exits it cleanly,
+then `Restart=always` starts it again. A deadman exit is also clean and is
+restarted on purpose. An ownership refusal exits 1 and retries after two
+seconds; `StartLimitIntervalSec=0` keeps that retry loop from hitting the
+start limit. Exit 2 is a configuration refusal and is not restarted.
+Stopping the supervisor ends its running jobs. Restarting it does not
+resurrect them; the engine reconciles the spool.
+
+The optional `supervise start --deadman-seconds N` sets a finite positive
+unwatched interval. Omit it for no deadman. The engine reads the running
+supervisor's actual value through PING/LIST. The option is refused on
+`supervise list` and `supervise shutdown`. Do not race an old, lockless
+supervisor binary against a new starter during upgrade: the startup probes
+protect an already published owner, not a concurrent legacy launch.
+
+**Shape 2: supervisor started by the engine.** Keep `run --detached` and
+set `KillMode=process` on the engine unit. It limits service-stop signals
+to the engine's main process, so the supervisor and jobs can survive that
+stop in the same cgroup. This gives up the unit's normal whole-cgroup stop
+containment. A killed or stopped engine can leave these processes running;
+monitor the supervisor and its log separately. To stop the estate, stop
+the engine first, then use
+`dsl41 supervise shutdown --run-root /srv/dsl41/run`.
+If that cannot reach the supervisor, inspect the remaining
+processes before using a whole-cgroup kill; killing wrappers can leave
+`exit_status_unobservable` outcomes. Keep the engine's restart exclusions
+and resume rules above. This shape has no separate supervisor restart
+service; a later engine start can start a replacement after proving the
+old owner is absent.
+
 Exit codes: 0 = clean stop, 1 = engine/estate failure, 2 = refused
 before start (used run root, a resume gate — catalog hash, clock domain
 or runtime profile — preflight ERROR, a root another engine already

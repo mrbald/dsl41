@@ -2532,3 +2532,169 @@ def test_dl210_unknown_current_boot_cannot_prove_recorded_owner_absent(
     Path(sup.pid_path).write_text(json.dumps({"pid": 123, "boot_id": "previous-boot"}))
     monkeypatch.setattr(runner_supervisor, "proc_start_token", lambda _pid: "ticks:1")
     assert not sup._pid_owner_absent()
+
+
+@pytest.mark.parametrize(
+    "action,extra,message",
+    [
+        ("unknown", [], "start|list|shutdown"),
+        ("list", ["--deadman-seconds", "1"], "only valid for supervise start"),
+        ("shutdown", ["--deadman-seconds", "1"], "only valid for supervise start"),
+        ("start", ["--deadman-seconds", "0"], "finite positive number"),
+        ("start", ["--deadman-seconds", "-1"], "finite positive number"),
+        ("start", ["--deadman-seconds", "nan"], "finite positive number"),
+        ("start", ["--deadman-seconds", "inf"], "finite positive number"),
+    ],
+)
+def test_dl210_supervise_usage_refuses_before_creating_root(tmp_path, action, extra, message):
+    from typer.testing import CliRunner
+
+    from dsl41.cli import app
+
+    root = tmp_path / "absent"
+    result = CliRunner().invoke(app, ["supervise", action, "--run-root", str(root), *extra])
+    assert result.exit_code == 2
+    assert message in result.output
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("low_fds,deadman", [(False, None), (True, 5.0)])
+def test_dl210_supervise_start_execs_by_path_with_redirected_stdio(
+    tmp_path, monkeypatch, low_fds, deadman
+):
+    from dsl41.cli_control import supervise
+
+    class Executed(Exception):
+        pass
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o755)
+    log_fd, null_fd = (1, 0) if low_fds else (12, 13)
+    opened, duplicated, closed, inherited, executed = [], [], [], [], []
+
+    def open_fd(path, flags, mode=None):
+        opened.append((path, flags, mode))
+        return log_fd if len(opened) == 1 else null_fd
+
+    def execv(path, argv):
+        executed.append((path, argv))
+        raise Executed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", open_fd)
+        patch.setattr(os, "dup2", lambda src, dest: duplicated.append((src, dest)))
+        patch.setattr(os, "close", closed.append)
+        patch.setattr(os, "set_inheritable", lambda fd, flag: inherited.append((fd, flag)))
+        patch.setattr(os, "execv", execv)
+        with pytest.raises(Executed):
+            supervise("start", root, deadman)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert opened == [
+        (root / "supervisor.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+        (os.devnull, os.O_RDONLY, None),
+    ]
+    assert duplicated == [(log_fd, 1), (log_fd, 2), (null_fd, 0)]
+    assert closed == ([] if low_fds else [log_fd, null_fd])
+    assert inherited == [(0, True), (1, True), (2, True)]
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(root.resolve())]
+    if deadman is not None:
+        argv += ["--deadman-seconds", str(deadman)]
+    assert executed == [(sys.executable, argv)]
+
+
+@pytest.mark.parametrize("failure", ["mkdir", "open", "dup2", "set_inheritable", "execv"])
+def test_dl210_supervise_start_os_error_is_configuration_refusal(tmp_path, monkeypatch, failure):
+    import typer
+
+    from dsl41.cli_control import supervise
+
+    def fail(*args, **kwargs):
+        raise PermissionError("synthetic start failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", lambda *args: 12)
+        patch.setattr(os, "dup2", lambda *args: None)
+        patch.setattr(os, "close", lambda *args: None)
+        patch.setattr(os, "set_inheritable", lambda *args: None)
+        patch.setattr(os, "execv", fail)
+        patch.setattr(Path if failure == "mkdir" else os, failure, fail)
+        with pytest.raises(typer.Exit) as caught:
+            supervise("start", tmp_path / "root", None)
+    assert caught.value.exit_code == 2
+
+
+def test_dl210_supervise_start_real_exec_logging_and_owner_refusal(short_root):
+    root = short_root / "new"
+    argv = [sys.executable, "-m", "dsl41", "supervise", "start", "--run-root", str(root)]
+    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_for(lambda: _ping_ok(root))
+        record = json.loads((root / "supervisor.pid").read_text())
+        assert record["pid"] == proc.pid  # exec retains the service's main pid
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE((root / "supervisor.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((root / "supervisor.sock").stat().st_mode) == 0o600
+        startup = f"supervisor: started pid={proc.pid} incarnation={record['incarnation']}"
+        assert startup in (root / "supervisor.log").read_text()
+        loser = subprocess.run(argv, capture_output=True, timeout=10)
+        assert loser.returncode == 1
+        log = (root / "supervisor.log").read_text()
+        assert startup in log and "another supervisor owns this root" in log
+        assert _supervise_cli(root, "list").returncode == 0
+        assert _supervise_cli(root, "shutdown").returncode == 0
+        assert proc.wait(timeout=10) == 0
+        assert not (root / "supervisor.sock").exists()
+    finally:
+        teardown_supervisor(root, proc)
+
+
+def test_dl210_supervise_start_passes_deadman_and_exits_cleanly(short_root):
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "dsl41",
+            "supervise",
+            "start",
+            "--run-root",
+            str(short_root),
+            "--deadman-seconds",
+            "0.1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert proc.wait(timeout=10) == 0
+        assert "supervisor: started pid=" in (short_root / "supervisor.log").read_text()
+        assert not (short_root / "supervisor.sock").exists()
+    finally:
+        teardown_supervisor(short_root, proc)
+
+
+@pytest.mark.parametrize("closed", [[], [1], [2], [0, 1, 2]])
+def test_dl210_supervise_stdio_survives_real_exec_with_closed_descriptors(tmp_path, closed):
+    script = r"""
+import os
+import sys
+from pathlib import Path
+from dsl41.cli_control import supervise
+
+real_exec = os.execv
+def inspect_after_exec(executable, argv):
+    real_exec(executable, [executable, '-c',
+        "import os; assert os.read(0, 1) == b''; "
+        "os.write(1, b'stdout survived\\n'); os.write(2, b'stderr survived\\n')"])
+os.execv = inspect_after_exec
+for fd in map(int, sys.argv[2:]):
+    os.close(fd)
+supervise('start', Path(sys.argv[1]), None)
+"""
+    root = tmp_path / "root"
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(root), *map(str, closed)],
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (root / "supervisor.log").read_text() == "stdout survived\nstderr survived\n"
