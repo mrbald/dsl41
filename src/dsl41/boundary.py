@@ -107,6 +107,7 @@ from dsl41.period import (
     sentinel_path,
     stage_manifest,
     staging_dir,
+    tz_aliases_of,
     wal_path,
     write_bundle,
     write_period_manifest,
@@ -1807,7 +1808,12 @@ def _preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: dateti
             machine_policy=profile.machine_policy,
             as_machine=frozenset(profile.as_machine),
             start=at,
-            tz_aliases=dict(profile.tz_aliases),
+            default_tz=profile.default_tz,
+            # the profile cannot spell "no map" -- an absent --timezone-map is
+            # an EMPTY table on it, and passing that dict on would retire
+            # SEM-35's unique-city rung for the base zone AND for every
+            # per-job zone, refusing a boundary the engine runs (DL-151/DL-163)
+            tz_aliases=tz_aliases_of(profile),
         )
         if item.severity == "ERROR"
     ]
