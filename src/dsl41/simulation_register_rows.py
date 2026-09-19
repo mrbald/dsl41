@@ -1215,64 +1215,65 @@ GLOBAL_ATTR_ROWS: tuple[Row, ...] = (
 
 # ------------------------------------------------------------- calendar_attr
 
-_CALENDAR_ATTRS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the calendar body line its trigger carries)
-    "description": (
-        "SEM-36",
-        "carried on the calendar record; no rule reads it",
-        "description: quarter ends",
-    ),
-    "workday": (
-        "SEM-36",
-        "the weekday mask every workday-scoped token and W/P walk counts in",
-        "workday: xxxxx..",
-    ),
-    "non_workday": (
-        "SEM-36, SEM-38",
-        "what happens to a generated day that is not a workday: filter or replacement",
-        "non_workday: O",
-    ),
-    "holiday": (
-        "SEM-36, SEM-38",
-        "what happens to a generated day that is a holiday; it governs holcal dates outright",
-        "holiday: S",
-    ),
-    "holcal": (
-        "SEM-36",
-        "names the standard calendar whose days are this calendar's holidays",
-        "",
-    ),
-    "cyccal": (
-        "SEM-36, SEM-39",
-        "names the cycle whose periods the cycle-scoped tokens count in",
-        "",
-    ),
-    "adjust": (
-        "SEM-36, SEM-38",
-        "a uniform blind day shift applied to every surviving day; the documented"
-        " range is -9..+9 and anything outside it refuses the calendar",
-        "adjust: 1",
-    ),
-}
-
-#: Calendar attributes the engine carries and never reads.
-_CALENDAR_PASSTHROUGH = frozenset({"description"})
-
-CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
+CALENDAR_ATTR_ROWS: tuple[Row, ...] = (
     _row(
         surface="calendar_attr",
-        member=member,
-        klass=PASSTHROUGH if member in _CALENDAR_PASSTHROUGH else SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=_cal(
-            "condition: DAILY",
-            *([line] if line else []),
-            cyccal=member == "cyccal",
-            holcal=member == "holcal",
-        ),
-    )
-    for member, (cite, effect, line) in _CALENDAR_ATTRS.items()
+        member="description",
+        klass=PASSTHROUGH,
+        cite="SEM-36",
+        effect="carried on the calendar record; no rule reads it",
+        trigger=_cal("condition: DAILY", "description: quarter ends"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="workday",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="the weekday mask every workday-scoped token and W/P walk counts in",
+        trigger=_cal("condition: DAILY", "workday: xxxxx.."),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="non_workday",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="what happens to a generated day that is not a workday: filter or replacement",
+        trigger=_cal("condition: DAILY", "non_workday: O"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="holiday",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="what happens to a generated day that is a holiday; it governs holcal"
+        " dates outright",
+        trigger=_cal("condition: DAILY", "holiday: S"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="holcal",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="names the standard calendar whose days are this calendar's holidays",
+        trigger=_cal("condition: DAILY", holcal=True),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="cyccal",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-39",
+        effect="names the cycle whose periods the cycle-scoped tokens count in",
+        trigger=_cal("condition: DAILY", cyccal=True),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="adjust",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="a uniform blind day shift applied to every surviving day; the documented"
+        " range is -9..+9 and anything outside it refuses the calendar",
+        trigger=_cal("condition: DAILY", "adjust: 1"),
+    ),
 ) + (
     _row(
         surface="calendar_attr",
