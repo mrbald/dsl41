@@ -2751,64 +2751,19 @@ SCENARIO_ROWS: tuple[Row, ...] = (
 
 # ------------------------------------------------------------------ profile
 
-_PROFILE_FIELDS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the override JSON)
-    "default_tz": (
-        "period-model ss2.1, SEM-35",
-        "the zone a job with no timezone of its own is read in",
-        '{"default_tz": "Europe/Berlin"}',
-    ),
-    "tz_aliases": (
-        "period-model ss2.1, DL-62",
-        "the site-local zone-name table; a name only it resolves fails without it",
-        '{"tz_aliases": {"EST5EDT": "America/New_York"}}',
-    ),
-    "as_machine": (
-        "period-model ss2.1, DL-52",
-        "the machine names this runner answers to, sorted and de-duplicated",
-        '{"as_machine": ["greezy_spoon"]}',
-    ),
-    "machine_policy": (
-        "period-model ss2.1, DL-49",
-        "how the one ambiguous machine verdict resolves",
-        '{"machine_policy": "local-eligible"}',
-    ),
-    "execution_mode": (
-        "period-model ss2.1",
-        "whether the engine owns the child processes or a supervisor does",
-        '{"execution_mode": "detached"}',
-    ),
-    "deadman_us": (
-        "period-model ss2.1, DL-126",
-        "the supervisor's observed deadman interval; null means there is no deadman",
-        '{"deadman_us": 30000000}',
-    ),
-    "fw_default_interval_us": (
-        "period-model ss2.1",
-        "the poll interval an FW job with no watch_interval uses",
-        '{"fw_default_interval_us": 30000000}',
-    ),
-    "cmd_grace_us": (
-        "period-model ss2.1",
-        "the grace between SIGTERM and SIGKILL on a cancelled command",
-        '{"cmd_grace_us": 5000000}',
-    ),
-    "reconcile_settle_us": (
-        "period-model ss2.1",
-        "how long reconcile waits for late evidence before it decides",
-        '{"reconcile_settle_us": 1000000}',
-    ),
-    "spawn_window_us": (
-        "period-model ss2.1",
-        "the window a spawn has to produce its receipt",
-        '{"spawn_window_us": 1000000}',
-    ),
-    "retry_horizon_us": (
-        "period-model ss2.1",
-        "how far ahead a deferred dispatch retry may be scheduled",
-        '{"retry_horizon_us": 30000000}',
-    ),
-}
+
+def _profile_row(member: str, value: str, cite: str, effect: str) -> Row:
+    """One profile_field row. `value` is the JSON value literal for
+    `member`, so the fixture does not repeat the field name."""
+    return _row(
+        surface="profile_field",
+        member=member,
+        klass=SUPPORTED,
+        cite=cite,
+        effect=effect,
+        trigger='{"%s": %s}' % (member, value),
+    )
+
 
 _PROFILE_FACETS: tuple[Row, ...] = (
     _row(
@@ -2825,36 +2780,109 @@ _PROFILE_FACETS: tuple[Row, ...] = (
     ),
 )
 
-_PROFILE_ALTS: dict[str, str] = {
-    "machine_policy=strict": "a job whose machine does not resolve local is refused",
-    "machine_policy=local-eligible": "only a MIXED pool runs here, with a warning that"
-    " pool placement was ignored; a foreign or unreadable machine still refuses",
-    "execution_mode=tethered": "the engine owns the child processes; there is no supervisor",
-    "execution_mode=detached": "a supervisor owns the child processes across engine restarts",
-}
-
 PROFILE_ROWS: tuple[Row, ...] = (
-    tuple(
-        _row(
-            surface="profile_field",
-            member=member,
-            klass=SUPPORTED,
-            cite=cite,
-            effect=effect,
-            trigger=override,
-        )
-        for member, (cite, effect, override) in _PROFILE_FIELDS.items()
+    (
+        _profile_row(
+            "default_tz",
+            '"Europe/Berlin"',
+            "period-model ss2.1, SEM-35",
+            "the zone a job with no timezone of its own is read in",
+        ),
+        _profile_row(
+            "tz_aliases",
+            '{"EST5EDT": "America/New_York"}',
+            "period-model ss2.1, DL-62",
+            "the site-local zone-name table; a name only it resolves fails without it",
+        ),
+        _profile_row(
+            "as_machine",
+            '["greezy_spoon"]',
+            "period-model ss2.1, DL-52",
+            "the machine names this runner answers to, sorted and de-duplicated",
+        ),
+        _profile_row(
+            "machine_policy",
+            '"local-eligible"',
+            "period-model ss2.1, DL-49",
+            "how the one ambiguous machine verdict resolves",
+        ),
+        _profile_row(
+            "execution_mode",
+            '"detached"',
+            "period-model ss2.1",
+            "whether the engine owns the child processes or a supervisor does",
+        ),
+        _profile_row(
+            "deadman_us",
+            "30000000",
+            "period-model ss2.1, DL-126",
+            "the supervisor's observed deadman interval; null means there is no deadman",
+        ),
+        _profile_row(
+            "fw_default_interval_us",
+            "30000000",
+            "period-model ss2.1",
+            "the poll interval an FW job with no watch_interval uses",
+        ),
+        _profile_row(
+            "cmd_grace_us",
+            "5000000",
+            "period-model ss2.1",
+            "the grace between SIGTERM and SIGKILL on a cancelled command",
+        ),
+        _profile_row(
+            "reconcile_settle_us",
+            "1000000",
+            "period-model ss2.1",
+            "how long reconcile waits for late evidence before it decides",
+        ),
+        _profile_row(
+            "spawn_window_us",
+            "1000000",
+            "period-model ss2.1",
+            "the window a spawn has to produce its receipt",
+        ),
+        _profile_row(
+            "retry_horizon_us",
+            "30000000",
+            "period-model ss2.1",
+            "how far ahead a deferred dispatch retry may be scheduled",
+        ),
     )
-    + tuple(
+    + (
         _row(
             surface="profile_alt",
-            member=member,
+            member="machine_policy=strict",
             klass=SUPPORTED,
             cite="period-model ss2.1",
-            effect=effect,
-            trigger='{"%s": "%s"}' % tuple(member.split("=", 1)),
-        )
-        for member, effect in _PROFILE_ALTS.items()
+            effect="a job whose machine does not resolve local is refused",
+            trigger='{"machine_policy": "strict"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="machine_policy=local-eligible",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="only a MIXED pool runs here, with a warning that pool placement was"
+            " ignored; a foreign or unreadable machine still refuses",
+            trigger='{"machine_policy": "local-eligible"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="execution_mode=tethered",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="the engine owns the child processes; there is no supervisor",
+            trigger='{"execution_mode": "tethered"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="execution_mode=detached",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="a supervisor owns the child processes across engine restarts",
+            trigger='{"execution_mode": "detached"}',
+        ),
     )
     + _PROFILE_FACETS
 )
@@ -2872,75 +2900,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
 #: qualified by the function that builds it (DL-209, R-a).
 _UNOBSERVABLE = "exit_status_unobservable"
 
-#: Which E7 site each unobservable-exit template owns: the bare cause is the
-#: resume ladder's, the rc-bearing one belongs to the two live adapters.
-_E7_SITES: dict[str, tuple[str, ...]] = {
-    f"Failed={_UNOBSERVABLE}": (
-        "runner_adapters.resolve_spool#1",
-        "runner_startup.<module>#1",
-    ),
-    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
-        "runner_adapters.LocalCommandAdapter.run#1",
-        "runner_adapters.SupervisedCommandAdapter._await_outcome#1",
-    ),
-}
 _CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
-
-_OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
-    # "Kind=template": (class, cite, effect)
-    f"Failed={_UNOBSERVABLE}": (
-        PROVISIONAL,
-        "runner_adapters.resolve_spool, runner-design ss15",
-        "a resumed run with no status record fails rather than guessing an exit code",
-    ),
-    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
-        PROVISIONAL,
-        "runner_adapters.LocalCommandAdapter.run,"
-        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
-        "a wrapper that exited without writing a status record fails the run and"
-        " names the wrapper's own exit code; both the tethered and the supervised"
-        " adapter build it",
-    ),
-    f"Failed={_CRASH_CAUSE}": (
-        SUPPORTED,
-        "runner_adapters.resolve_spool, DL-118",
-        "a dispatch whose run directory is gone provably never reached the host,"
-        " so it fails rather than being retried blind",
-    ),
-    "Failed=malformed status record: outcome 'exited' with exit_code={}": (
-        REFUSED,
-        "runner_adapters.outcome_from_status",
-        "an 'exited' record with no integer exit code is refused as a truthful"
-        " FAILURE, never mapped to something a downstream success could consume",
-    ),
-    "Failed=unrecognized status record outcome {}": (
-        REFUSED,
-        "runner_adapters.outcome_from_status",
-        "a status record whose outcome the protocol does not define is refused, never guessed",
-    ),
-    "Failed=spawn failed: {}": (
-        SUPPORTED,
-        "runner_adapters.outcome_from_status",
-        "the wrapper recorded that the spawn itself failed; the run never started",
-    ),
-    "Failed=wrapper spawn failed: {}": (
-        SUPPORTED,
-        "runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
-        "the engine could not spawn the wrapper at all; the run never started",
-    ),
-    "Terminated=<dynamic:outcome_from_status>": (
-        SUPPORTED,
-        "runner_adapters.outcome_from_status, DL-41a",
-        "a signalled or terminated status record carries its own cause text into"
-        " the TERMINATED verdict",
-    ),
-    "Terminated=wrapper lost; killed at resume": (
-        SUPPORTED,
-        "runner_adapters.resolve_spool",
-        "a resume that finds the wrapper gone kills the surviving command group"
-        " and reports the kill that happened",
-    ),
-}
 
 ADAPTER_ROWS: tuple[Row, ...] = (
     _row(
@@ -2969,19 +2929,92 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         " with the cause",
         trigger="Failed",
     ),
-    *(
-        _row(
-            surface="adapter_outcome",
-            member=member,
-            klass=klass,
-            cite=cite,
-            # the E7 label sits on every unobservable-exit template
-            label="E7" if _UNOBSERVABLE in member else None,
-            sites=_E7_SITES.get(member, ()),
-            effect=effect,
-            trigger=member,
-        )
-        for member, (klass, cite, effect) in _OUTCOME_TEMPLATES.items()
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_UNOBSERVABLE}",
+        klass=PROVISIONAL,
+        cite="runner_adapters.resolve_spool, runner-design ss15",
+        label="E7",
+        sites=("runner_adapters.resolve_spool#1", "runner_startup.<module>#1"),
+        effect="a resumed run with no status record fails rather than guessing an exit code",
+        trigger=f"Failed={_UNOBSERVABLE}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
+        klass=PROVISIONAL,
+        cite="runner_adapters.LocalCommandAdapter.run,"
+        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
+        label="E7",
+        sites=(
+            "runner_adapters.LocalCommandAdapter.run#1",
+            "runner_adapters.SupervisedCommandAdapter._await_outcome#1",
+        ),
+        effect="a wrapper that exited without writing a status record fails the run and"
+        " names the wrapper's own exit code; both the tethered and the supervised"
+        " adapter build it",
+        trigger=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_CRASH_CAUSE}",
+        klass=SUPPORTED,
+        cite="runner_adapters.resolve_spool, DL-118",
+        effect="a dispatch whose run directory is gone provably never reached the host,"
+        " so it fails rather than being retried blind",
+        trigger=f"Failed={_CRASH_CAUSE}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=malformed status record: outcome 'exited' with exit_code={}",
+        klass=REFUSED,
+        cite="runner_adapters.outcome_from_status",
+        effect="an 'exited' record with no integer exit code is refused as a truthful"
+        " FAILURE, never mapped to something a downstream success could consume",
+        trigger="Failed=malformed status record: outcome 'exited' with exit_code={}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=unrecognized status record outcome {}",
+        klass=REFUSED,
+        cite="runner_adapters.outcome_from_status",
+        effect="a status record whose outcome the protocol does not define is refused,"
+        " never guessed",
+        trigger="Failed=unrecognized status record outcome {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=spawn failed: {}",
+        klass=SUPPORTED,
+        cite="runner_adapters.outcome_from_status",
+        effect="the wrapper recorded that the spawn itself failed; the run never started",
+        trigger="Failed=spawn failed: {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=wrapper spawn failed: {}",
+        klass=SUPPORTED,
+        cite="runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
+        effect="the engine could not spawn the wrapper at all; the run never started",
+        trigger="Failed=wrapper spawn failed: {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Terminated=<dynamic:outcome_from_status>",
+        klass=SUPPORTED,
+        cite="runner_adapters.outcome_from_status, DL-41a",
+        effect="a signalled or terminated status record carries its own cause text into"
+        " the TERMINATED verdict",
+        trigger="Terminated=<dynamic:outcome_from_status>",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Terminated=wrapper lost; killed at resume",
+        klass=SUPPORTED,
+        cite="runner_adapters.resolve_spool",
+        effect="a resume that finds the wrapper gone kills the surviving command group"
+        " and reports the kill that happened",
+        trigger="Terminated=wrapper lost; killed at resume",
     ),
     _row(
         surface="adapter_outcome",
