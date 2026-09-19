@@ -1148,6 +1148,66 @@ def test_dl210_close_during_connect_never_publishes_a_new_reader(tmp_path: Path,
     asyncio.run(scenario())
 
 
+def test_dl75_the_per_wait_list_recheck_interval_is_seconds_not_poll_counts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`_LIST_RECHECK_EVERY` is seconds in the shared net and used to be a
+    COUNT OF POLLS in the per-wait net. The two agreed only while the poll
+    was 1.0 s, so shortening the poll moved one cadence and not the other.
+
+    Constructed, not timed: the poll is 100x shorter than the interval here,
+    so a poll-count reading re-asks LIST on the very first pass and a seconds
+    reading has not asked at all. The assertions are COUNTS with a 30x
+    margin, never a measured duration."""
+    from dsl41 import runner_adapters
+
+    monkeypatch.setattr(runner_adapters, "_LIST_RECHECK_EVERY", 0.5)
+    monkeypatch.setattr(runner_adapters, "_OUTCOME_POLL_S", 0.005)
+    run_dir = tmp_path / "j.1"
+    run_dir.mkdir()  # no status.json, and none coming: only a re-check ends this
+
+    class _Client:
+        def __init__(self) -> None:
+            self.lost = asyncio.Event()
+            self.asked = 0
+
+        def exit_future(self, _run_id: str):
+            return asyncio.get_running_loop().create_future()
+
+        def watch_exit(self, _run_id: str) -> asyncio.Event:
+            return asyncio.Event()
+
+        def forget_exit(self, _run_id: str) -> None:
+            pass
+
+        async def reconnect(self) -> bool:
+            return True
+
+        async def list_runs(self) -> dict[str, Any]:
+            self.asked += 1
+            return {"ok": True, "runs": [_list_row("run")]}  # still alive: keep waiting
+
+    async def scenario() -> tuple[int, int]:
+        client = _Client()
+        adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.0)  # type: ignore[arg-type]
+        task = asyncio.create_task(
+            adapter._await_outcome("run", run_dir, "j", 1, recheck_listing=True)
+        )
+        try:
+            await asyncio.sleep(0.25)  # ~50 polls, half the interval
+            early = client.asked
+            await asyncio.sleep(0.5)  # now past it
+            return early, client.asked
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    early, later = asyncio.run(scenario())
+    assert early == 0, "a poll-count reading would have re-asked LIST on the first pass"
+    assert later >= 1, "the interval elapsed and the re-check never happened"
+
+
 def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing(
     monkeypatch,
 ) -> None:

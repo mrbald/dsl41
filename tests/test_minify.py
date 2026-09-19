@@ -32,6 +32,11 @@ from dsl41.minify import (
 )
 from dsl41.minify_rules import INERT_COMMAND, Klass, class_counts, classify
 
+# The reader that turns grammars/condition.lark into terminal name -> body.
+# Imported, not re-spelled: it is one grammar and this file pins four of its
+# terminals (DL-75 review 2026-09-19).
+from test_simulation_register import _terminal_bodies
+
 runner = CliRunner()
 
 CORPUS = Path(__file__).parent / "corpus"
@@ -948,3 +953,84 @@ def test_the_calendar_condition_predicate_cannot_escape() -> None:
 
     for hostile in ("EOMWORK" * 400, "(" * 300 + "EOMWORK" + ")" * 300, "\x00", "&&&"):
         assert validate_keep("condition", hostile) in (True, False)
+
+
+# --------------------------------------- the copies, pinned to their sources
+#
+# minify's policy half hand-copies three closed sets and four grammar
+# terminals. Every one of those copies is REQUIRED: the sources are private
+# names in `dsl41.ir` and `dsl41.conditions`, and a private cross-module
+# import in src/ is a coupling neither module promised (DL-74, gate 2 of
+# scripts/arch_check.py). Tests are exempt from that gate, so the pin lives
+# here -- the house pattern from tests/test_simulation_register.py (DL-75
+# review 2026-09-19). Without it the copies are true only until someone edits
+# one side.
+
+
+def test_the_bool_spellings_copy_the_ir_set() -> None:
+    """`minify_rules._BOOLS` is `ir._TRUTHY | ir._FALSY`, re-stated."""
+    from dsl41 import ir
+    from dsl41.minify_rules import _BOOLS
+
+    assert _BOOLS == ir._TRUTHY | ir._FALSY
+
+
+def test_the_day_tokens_copy_the_ir_sets() -> None:
+    """`minify_rules._DAY_TOKENS` is `ir._DAY_TOKENS | set(ir._DAY_FULL)`,
+    re-stated. `_VALUE_KEYWORDS` derives its long spellings from this copy, so
+    a drift here is a drift in the leak guard's vocabulary too."""
+    from dsl41 import ir
+    from dsl41.minify_rules import _DAY_TOKENS
+
+    assert _DAY_TOKENS == ir._DAY_TOKENS | set(ir._DAY_FULL)
+
+
+def _terminal_regex(body: str) -> str:
+    """The body of a terminal written as one `/regex/`, without the slashes."""
+    match = re.fullmatch(r"\s*/((?:[^/\\]|\\.)*)/\s*", body)
+    assert match is not None, body
+    return match.group(1)
+
+
+def test_the_condition_regexes_copy_the_grammar_terminals() -> None:
+    """minify re-lexes the identifier inside an atom, because the parser
+    throws the lark token's offsets away. The four regexes that do it are
+    condition.lark's terminals character for character, so a grammar edit that
+    widens JOB_NAME mis-splices here unless it is made in both files. The leak
+    guard is a backstop, not a check of this."""
+    from dsl41 import minify
+
+    bodies = _terminal_bodies()
+    assert minify._JOB_NAME_RE.pattern == _terminal_regex(bodies["JOB_NAME"])
+    assert minify._INSTANCE_RE.pattern == _terminal_regex(bodies["INSTANCE_NAME"])
+    assert minify._GLOBAL_NAME_RE.pattern == _terminal_regex(bodies["GLOBAL_NAME"])
+
+    operators = re.findall(r'"((?:[^"\\]|\\.)*)"', bodies["CMP_OP"])
+    assert operators, bodies["CMP_OP"]
+    quoted = _terminal_regex(bodies["QUOTED"])
+    bare = _terminal_regex(bodies["BARE_VALUE"])
+    expected = r"\)\s*(?:" + "|".join(operators) + r")\s*(" + quoted + "|" + bare + ")"
+    # The source spells the quote character `\"` inside a `"`-delimited raw
+    # string; the grammar spells the same character bare. Nothing else differs.
+    assert minify._COMPARAND_RE.pattern.replace('\\"', '"') == expected
+
+
+def test_every_modelled_job_attribute_is_classified() -> None:
+    """Both minify docstrings say the four-class table is derived from what
+    the IR models. Nothing derives it, so this asserts the claim instead: a
+    new row in any of those inventories that nobody classifies leaves the
+    minifier refusing every estate that writes the attribute."""
+    from dsl41 import ir
+
+    modelled = (
+        set(ir.ANNOTATION_ATTRS)
+        | set(ir.PASSTHROUGH_ALLOWED)
+        | set(ir.TIME_CLUSTER)
+        | set(ir.EXEC_BASE_ATTRS)
+        | set(ir._BOX_INERT_ATTRS)
+    )
+    unclassified = sorted(key for key in modelled if classify("insert_job", key) is None)
+    assert not unclassified, (
+        f"the IR models {unclassified} on a job and minify_rules classifies none of them;"
+        " every key needs a KEEP/RENAME/REPLACE/DROP row or minify refuses the estate"
+    )
