@@ -2447,121 +2447,123 @@ CALENDAR_ROWS: tuple[Row, ...] = (
 
 # ------------------------------------------------------------------ scenarios
 
-_EVENT_SCRIPTS: dict[str, tuple[str, str]] = {
-    # member: (effect, the event line that carries the kind)
-    "STATUS": (
-        "sets a job's status and wakes every job whose condition names it",
-        "0 STATUS job=J0 status=SUCCESS",
-    ),
-    "STARTJOB": (
-        "a schedule tick or operator start; it arms must_start whether or not it starts",
-        "0 STARTJOB job=J0",
-    ),
-    "FORCE_STARTJOB": ("starts a job past its condition gate", "0 FORCE_STARTJOB job=J0"),
-    "SET_GLOBAL": (
-        "sets a global and wakes every job whose condition reads it",
-        "0 SET_GLOBAL name=G0 value=1",
-    ),
-    "ON_ICE": (
-        "ices a job: downstream conditions read it as satisfied and it never runs",
-        "0 ON_ICE job=J0",
-    ),
-    "OFF_ICE": ("un-ices a job; conditions are deliberately NOT re-evaluated", "0 OFF_ICE job=J0"),
-    "ON_HOLD": ("holds a job: it stays startable but does not start", "0 ON_HOLD job=J0"),
-    "OFF_HOLD": ("releases a hold and re-attempts the start immediately", "0 OFF_HOLD job=J0"),
-    "ON_NOEXEC": (
-        "marks a job as not executing; it completes without running",
-        "0 ON_NOEXEC job=J0",
-    ),
-    "OFF_NOEXEC": ("clears the noexec flag", "0 OFF_NOEXEC job=J0"),
-    "DISARM": ("drops a latched tick; no status moves, nothing wakes", "0 DISARM job=J0"),
-    "KILLJOB": (
-        "terminates a running job, or dequeues and terminates a queued one",
-        "0 KILLJOB job=J0",
-    ),
-    "TIMER": ("a due deadline or deferred start firing off the timer heap", "0 TIMER job=J0"),
-}
-
-_STATUS_SCENARIOS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    # member: (effect, the jil, the event script)
-    "INACTIVE": (
-        "the resting status; a live job driven back to it releases everything it held",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 STATUS job=J0 status=INACTIVE"),
-    ),
-    "STARTING": (
-        "the gate has cleared and the adapter has been handed the run",
-        BASE_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "RUNNING": (
-        "the command is live and holds whatever capacity it acquired",
-        BASE_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "SUCCESS": (
-        "a terminal verdict; SEM-09 decides it from the exit code",
-        BASE_JIL,
-        ("0 STATUS job=J0 status=SUCCESS",),
-    ),
-    "FAILURE": (
-        "a terminal verdict; SEM-09 decides it from the exit code",
-        BASE_JIL,
-        ("0 STATUS job=J0 status=FAILURE",),
-    ),
-    "TERMINATED": (
-        "a kill that actually happened, never inferred from a missing record",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 KILLJOB job=J0"),
-    ),
-    "QUE_WAIT": (
-        "the start cleared its condition gate but not its capacity gate",
-        _estate(
-            "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
-            "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-            "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-        ),
-        ("0 STARTJOB job=J0", "0 STARTJOB job=J1"),
-    ),
-}
-
 _SLA_JIL = _job(date_conditions="1", start_times='"08:00"', must_start_times='"+30"')
 _MC_JIL = _job(date_conditions="1", start_times='"08:00"', must_complete_times='"+20"')
 
-_TIMER_SCENARIOS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    "must_start": (
-        "armed by the schedule tick; it raises MUST_START_ALARM if no new run began",
-        _SLA_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "must_complete": (
-        "armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
-        _MC_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "term_run_time": (
-        "armed by the start; it TERMINATEs a run still live at the deadline",
-        _job(term_run_time="15"),
-        ("0 STARTJOB job=J0",),
-    ),
-    "deferred_cause": (
-        "the fourth timer shape: a run_window-deferred start replaying its own provenance",
-        _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-}
+#: the QUE_WAIT status scenario's own estate: two job_load=1 starts against a
+#: machine sized for one, so the second clears its condition gate and queues.
+_QUE_WAIT_JIL = _estate(
+    "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
+    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+)
 
 SCENARIO_ROWS: tuple[Row, ...] = (
-    tuple(
+    (
         _row(
             surface="event",
-            member=member,
+            member="STATUS",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect=effect,
-            trigger=_scn(BASE_JIL, line),
-        )
-        for member, (effect, line) in _EVENT_SCRIPTS.items()
+            effect="sets a job's status and wakes every job whose condition names it",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
+        ),
+        _row(
+            surface="event",
+            member="STARTJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a schedule tick or operator start; it arms must_start whether or not it starts",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="FORCE_STARTJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="starts a job past its condition gate",
+            trigger=_scn(BASE_JIL, "0 FORCE_STARTJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="SET_GLOBAL",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="sets a global and wakes every job whose condition reads it",
+            trigger=_scn(BASE_JIL, "0 SET_GLOBAL name=G0 value=1"),
+        ),
+        _row(
+            surface="event",
+            member="ON_ICE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="ices a job: downstream conditions read it as satisfied and it never runs",
+            trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_ICE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="un-ices a job; conditions are deliberately NOT re-evaluated",
+            trigger=_scn(BASE_JIL, "0 OFF_ICE job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_HOLD",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="holds a job: it stays startable but does not start",
+            trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_HOLD",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="releases a hold and re-attempts the start immediately",
+            trigger=_scn(BASE_JIL, "0 OFF_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_NOEXEC",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="marks a job as not executing; it completes without running",
+            trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_NOEXEC",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="clears the noexec flag",
+            trigger=_scn(BASE_JIL, "0 OFF_NOEXEC job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="DISARM",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="drops a latched tick; no status moves, nothing wakes",
+            trigger=_scn(BASE_JIL, "0 DISARM job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="KILLJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="terminates a running job, or dequeues and terminates a queued one",
+            trigger=_scn(BASE_JIL, "0 KILLJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="TIMER",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a due deadline or deferred start firing off the timer heap",
+            trigger=_scn(BASE_JIL, "0 TIMER job=J0"),
+        ),
     )
     + (
         _row(
@@ -2624,7 +2626,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             effect="icing a queued job dequeues it and settles it INACTIVE now, rather than"
             " leaving it in QUE_WAIT",
             trigger=_scn(
-                _STATUS_SCENARIOS["QUE_WAIT"][1],
+                _QUE_WAIT_JIL,
                 "0 STARTJOB job=J0",
                 "0 STARTJOB job=J1",
                 "1 ON_ICE job=J1",
@@ -2640,7 +2642,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             label="Qr5",
             effect="killing a queued job dequeues it, consumes its arm and TERMINATEs it",
             trigger=_scn(
-                _STATUS_SCENARIOS["QUE_WAIT"][1],
+                _QUE_WAIT_JIL,
                 "0 STARTJOB job=J0",
                 "0 STARTJOB job=J1",
                 "1 KILLJOB job=J1",
@@ -2648,27 +2650,101 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             quiet=_scn(BASE_JIL, "0 KILLJOB job=J0"),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="status",
-            member=member,
+            member="INACTIVE",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect=effect,
-            trigger=_scn(jil, *events),
-        )
-        for member, (effect, jil, events) in _STATUS_SCENARIOS.items()
+            effect="the resting status; a live job driven back to it releases everything it held",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 STATUS job=J0 status=INACTIVE"),
+        ),
+        _row(
+            surface="status",
+            member="STARTING",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the gate has cleared and the adapter has been handed the run",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="RUNNING",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the command is live and holds whatever capacity it acquired",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="SUCCESS",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a terminal verdict; SEM-09 decides it from the exit code",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
+        ),
+        _row(
+            surface="status",
+            member="FAILURE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a terminal verdict; SEM-09 decides it from the exit code",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=FAILURE"),
+        ),
+        _row(
+            surface="status",
+            member="TERMINATED",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a kill that actually happened, never inferred from a missing record",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 KILLJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="QUE_WAIT",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the start cleared its condition gate but not its capacity gate",
+            trigger=_scn(_QUE_WAIT_JIL, "0 STARTJOB job=J0", "0 STARTJOB job=J1"),
+        ),
     )
-    + tuple(
+    + (
         _row(
             surface="timer",
-            member=member,
+            member="must_start",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect=effect,
-            trigger=_scn(jil, *events),
-        )
-        for member, (effect, jil, events) in _TIMER_SCENARIOS.items()
+            effect="armed by the schedule tick; it raises MUST_START_ALARM if no new run began",
+            trigger=_scn(_SLA_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="must_complete",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
+            trigger=_scn(_MC_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="term_run_time",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="armed by the start; it TERMINATEs a run still live at the deadline",
+            trigger=_scn(_job(term_run_time="15"), "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="deferred_cause",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="the fourth timer shape: a run_window-deferred start replaying its"
+            " own provenance",
+            trigger=_scn(
+                _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+                "0 STARTJOB job=J0",
+            ),
+        ),
     )
 )
 
