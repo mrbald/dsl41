@@ -297,188 +297,6 @@ _ANNOTATION_ATTRS: tuple[str, ...] = (
     "send_notification",
 )
 
-#: PASSTHROUGH_ALLOWED minus the two DL-50 honours (job_load, priority),
-#: each with the effect it does NOT have.
-_PASSTHROUGH_ATTRS: dict[str, str] = {
-    "application": "the application tag is carried; nothing schedules or reports by it",
-    "auto_delete": "the definition is never deleted; the catalog is static for the run",
-    "avg_runtime": "the statistics seed is carried; no runtime estimate is computed from it",
-    "chk_files": "the pre-start disk-space gate is not evaluated; the job starts regardless",
-    "elevated": "no privilege elevation happens; the child runs as the invoking user",
-    "group": "the group tag is carried; nothing schedules or reports by group",
-    "interactive": "no interactive terminal is attached to the child process",
-    "job_class": "job classes are not implemented; no class quota gates a start",
-    "machine_method": "per-member placement method is not implemented; DL-49 resolves placement",
-    "permission": "job permissions are not enforced; the run uses the invoking user's own",
-    "ulimit": "no resource limit is applied to the child process",
-}
-
-_TIME_CLUSTER_ATTRS: dict[str, tuple[str, str, dict[str, str]]] = {
-    # member: (cite, effect, the extra attributes its trigger needs)
-    "days_of_week": (
-        "SEM-30, SEM-31",
-        "the days a schedule tick may fall on, as two-letter tokens or `all`",
-        {"days_of_week": "all"},
-    ),
-    "run_calendar": (
-        "SEM-30, DL-56",
-        "the named calendar whose days are the schedule's day set",
-        {"run_calendar": f'"{HOLCAL_NAME}"'},
-    ),
-    "exclude_calendar": (
-        "SEM-30, DL-56",
-        "the named calendar whose days are subtracted from the schedule's day set",
-        {"exclude_calendar": f'"{HOLCAL_NAME}"'},
-    ),
-    "start_times": (
-        "SEM-32",
-        "the wall-clock times a schedule tick fires at on an eligible day",
-        {"start_times": '"08:00"'},
-    ),
-    "start_mins": (
-        "SEM-32",
-        "the minutes past each hour a schedule tick fires at on an eligible day",
-        {"start_mins": "0,30"},
-    ),
-    "run_window": (
-        "SEM-33",
-        "a gate, not a trigger: a start outside the window defers or drops, never fires early",
-        {"run_window": '"09:00-10:00"'},
-    ),
-    "timezone": (
-        "SEM-35",
-        "the zone every schedule time on this job is read in",
-        {"timezone": "UTC"},
-    ),
-    "must_start_times": (
-        "SEM-34",
-        "the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and"
-        " changes no status",
-        {"start_times": '"08:00"', "must_start_times": '"+30"'},
-    ),
-    "must_complete_times": (
-        "SEM-34",
-        "the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM"
-        " and changes no status",
-        {"start_times": '"08:00"', "must_complete_times": '"+45"'},
-    ),
-}
-
-_EXEC_ATTRS: dict[str, tuple[str, str, str, dict[str, str | None]]] = {
-    # member: (klass, cite, effect, the trigger's attribute overrides)
-    "machine": (
-        SUPPORTED,
-        "DL-49, DL-52",
-        "names the machine the job runs on; the resolver refuses a foreign one"
-        "; inert on a BOX (SEM-10)",
-        {},
-    ),
-    "owner": (
-        REFUSED,
-        "runner_preflight._owner_preflight",
-        "an owner other than the invoking user is refused at preflight: there is no setuid"
-        "; inert on a BOX (SEM-10)",
-        {"owner": "someone_else"},
-    ),
-    "profile": (
-        SUPPORTED,
-        "runner_adapters._build_run_spec",
-        "sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10)",
-        {"profile": "/tmp/profile.sh"},
-    ),
-    "std_out_file": (
-        SUPPORTED,
-        "runner_adapters.job_log_paths",
-        "the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10)",
-        {"std_out_file": "/tmp/out.log"},
-    ),
-    "std_err_file": (
-        SUPPORTED,
-        "runner_adapters.job_log_paths",
-        "the child's stderr appends here instead of the default run log; inert on a BOX (SEM-10)",
-        {"std_err_file": "/tmp/err.log"},
-    ),
-    "std_in_file": (
-        SUPPORTED,
-        "runner_adapters._build_run_spec",
-        "the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10)",
-        {"std_in_file": "/tmp/in.txt"},
-    ),
-    "envvars": (
-        PASSTHROUGH,
-        "ir._Lowerer._exec_spec, DL-32",
-        "carried verbatim on the exec spec; the child process environment is not modified"
-        "; inert on a BOX (SEM-10)",
-        {"envvars": "A=1"},
-    ),
-}
-
-_SEMANTICS_ATTRS: dict[str, tuple[str, str, str, dict[str, str | None]]] = {
-    "condition": (
-        SUPPORTED,
-        "SEM-02, SEM-08",
-        "the start gate: the job starts on the edge where its condition becomes true",
-        {"condition": "s(J1)"},
-    ),
-    "box_success": (
-        SUPPORTED,
-        "SEM-12",
-        "overrides a box's success verdict, evaluated on every member transition while"
-        " the box is RUNNING, so an internal reference can finish the box early",
-        {"job_type": "b", "command": None, "machine": None, "box_success": "s(J1)"},
-    ),
-    "box_failure": (
-        SUPPORTED,
-        "SEM-12",
-        "overrides a box's failure verdict, evaluated on every member transition while"
-        " the box is RUNNING; DECLARING it suppresses the matching default fold, so an"
-        " override that never becomes true leaves the box RUNNING (SEM-12)",
-        {"job_type": "b", "command": None, "machine": None, "box_failure": "f(J1)"},
-    ),
-    "max_exit_success": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success",
-        {"max_exit_success": "2"},
-    ),
-    "success_codes": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "the explicit success set; with no fail_codes beside it, it alone decides the verdict",
-        {"success_codes": "0,3-5"},
-    ),
-    "fail_codes": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "the explicit failure set; present, it is the only verdict source (Q7, DL-58)",
-        {"fail_codes": "1,9"},
-    ),
-    "term_run_time": (
-        SUPPORTED,
-        "dossier ss5, oracle.Oracle._arm_sla_and_term",
-        "arms a timer that TERMINATEs the run after n minutes",
-        {"term_run_time": "10"},
-    ),
-    "n_retrys": (
-        PASSTHROUGH,
-        "DL-53",
-        "the job runs without retries; preflight WARNs that the attribute is unmodelled",
-        {"n_retrys": "2"},
-    ),
-    "auto_hold": (
-        SUPPORTED,
-        "dossier ss5",
-        "the member enters ON_HOLD when its box starts, instead of starting with it",
-        {"auto_hold": "1"},
-    ),
-    "status": (
-        SUPPORTED,
-        "SEM-24",
-        "the definition-time status: only the out-of-band states are modelled, run states refuse",
-        {"status": "ON_HOLD"},
-    ),
-}
-
 _FW_JOB = {"job_type": "f", "command": None, "watch_file": "/tmp/watched"}
 
 JOB_ATTR_ROWS: tuple[Row, ...] = (
@@ -490,16 +308,95 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         effect="observability only: no alarm, notification or heartbeat is raised",
         trigger=lambda m: _job(**{m: "x"}),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
+            member="application",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect=effect,
-            trigger=_job(**{member: "1"}),
-        )
-        for member, effect in _PASSTHROUGH_ATTRS.items()
+            effect="the application tag is carried; nothing schedules or reports by it",
+            trigger=_job(application="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="auto_delete",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the definition is never deleted; the catalog is static for the run",
+            trigger=_job(auto_delete="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="avg_runtime",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the statistics seed is carried; no runtime estimate is computed from it",
+            trigger=_job(avg_runtime="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="chk_files",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the pre-start disk-space gate is not evaluated; the job starts regardless",
+            trigger=_job(chk_files="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="elevated",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no privilege elevation happens; the child runs as the invoking user",
+            trigger=_job(elevated="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="group",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the group tag is carried; nothing schedules or reports by group",
+            trigger=_job(group="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="interactive",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no interactive terminal is attached to the child process",
+            trigger=_job(interactive="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="job_class",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="job classes are not implemented; no class quota gates a start",
+            trigger=_job(job_class="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="machine_method",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="per-member placement method is not implemented; DL-49 resolves placement",
+            trigger=_job(machine_method="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="permission",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="job permissions are not enforced; the run uses the invoking user's own",
+            trigger=_job(permission="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="ulimit",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no resource limit is applied to the child process",
+            trigger=_job(ulimit="1"),
+        ),
     )
     + (
         _row(
@@ -548,16 +445,92 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             quiet=_job(priority="99"),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
+            member="days_of_week",
             klass=SUPPORTED,
-            cite=cite,
-            effect=effect,
-            trigger=_job(HOLCAL_BLOCK, date_conditions="1", **extra),
-        )
-        for member, (cite, effect, extra) in _TIME_CLUSTER_ATTRS.items()
+            cite="SEM-30, SEM-31",
+            effect="the days a schedule tick may fall on, as two-letter tokens or `all`",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", days_of_week="all"),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_calendar",
+            klass=SUPPORTED,
+            cite="SEM-30, DL-56",
+            effect="the named calendar whose days are the schedule's day set",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="exclude_calendar",
+            klass=SUPPORTED,
+            cite="SEM-30, DL-56",
+            effect="the named calendar whose days are subtracted from the schedule's day set",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", exclude_calendar=f'"{HOLCAL_NAME}"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="start_times",
+            klass=SUPPORTED,
+            cite="SEM-32",
+            effect="the wall-clock times a schedule tick fires at on an eligible day",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", start_times='"08:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="start_mins",
+            klass=SUPPORTED,
+            cite="SEM-32",
+            effect="the minutes past each hour a schedule tick fires at on an eligible day",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", start_mins="0,30"),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            klass=SUPPORTED,
+            cite="SEM-33",
+            effect="a gate, not a trigger: a start outside the window defers or drops,"
+            " never fires early",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_window='"09:00-10:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="timezone",
+            klass=SUPPORTED,
+            cite="SEM-35",
+            effect="the zone every schedule time on this job is read in",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", timezone="UTC"),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            klass=SUPPORTED,
+            cite="SEM-34",
+            effect="the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM"
+            " and changes no status",
+            trigger=_job(
+                HOLCAL_BLOCK,
+                date_conditions="1",
+                start_times='"08:00"',
+                must_start_times='"+30"',
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            klass=SUPPORTED,
+            cite="SEM-34",
+            effect="the RELATIVE form arms an alarm: a missed completion raises"
+            " MUST_COMPLETE_ALARM and changes no status",
+            trigger=_job(
+                HOLCAL_BLOCK,
+                date_conditions="1",
+                start_times='"08:00"',
+                must_complete_times='"+45"',
+            ),
+        ),
     )
     + (
         _row(
@@ -652,17 +625,70 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
-            klass=klass,
-            cite=cite,
-            effect=effect,
-            trigger=_job(**extra) if extra else BASE_JIL,
-            quiet=_job(machine=None) if member == "machine" else None,
-        )
-        for member, (klass, cite, effect, extra) in _EXEC_ATTRS.items()
+            member="machine",
+            klass=SUPPORTED,
+            cite="DL-49, DL-52",
+            effect="names the machine the job runs on; the resolver refuses a foreign one"
+            "; inert on a BOX (SEM-10)",
+            trigger=BASE_JIL,
+            quiet=_job(machine=None),
+        ),
+        _row(
+            surface="job_attr",
+            member="owner",
+            klass=REFUSED,
+            cite="runner_preflight._owner_preflight",
+            effect="an owner other than the invoking user is refused at preflight: there is"
+            " no setuid; inert on a BOX (SEM-10)",
+            trigger=_job(owner="someone_else"),
+        ),
+        _row(
+            surface="job_attr",
+            member="profile",
+            klass=SUPPORTED,
+            cite="runner_adapters._build_run_spec",
+            effect="sourced before the command runs (`. <profile> && <command>`); inert on"
+            " a BOX (SEM-10)",
+            trigger=_job(profile="/tmp/profile.sh"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_out_file",
+            klass=SUPPORTED,
+            cite="runner_adapters.job_log_paths",
+            effect="the child's stdout appends here instead of the default run log; inert"
+            " on a BOX (SEM-10)",
+            trigger=_job(std_out_file="/tmp/out.log"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_err_file",
+            klass=SUPPORTED,
+            cite="runner_adapters.job_log_paths",
+            effect="the child's stderr appends here instead of the default run log; inert"
+            " on a BOX (SEM-10)",
+            trigger=_job(std_err_file="/tmp/err.log"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_in_file",
+            klass=SUPPORTED,
+            cite="runner_adapters._build_run_spec",
+            effect="the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10)",
+            trigger=_job(std_in_file="/tmp/in.txt"),
+        ),
+        _row(
+            surface="job_attr",
+            member="envvars",
+            klass=PASSTHROUGH,
+            cite="ir._Lowerer._exec_spec, DL-32",
+            effect="carried verbatim on the exec spec; the child process environment is"
+            " not modified; inert on a BOX (SEM-10)",
+            trigger=_job(envvars="A=1"),
+        ),
     )
     + (
         _row(
@@ -681,18 +707,118 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             quiet=_job(),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
-            klass=klass,
-            cite=cite,
-            effect=effect,
-            trigger=_job(BOX_BLOCK, box_name="BOX0", **extra)
-            if member in ("box_success", "box_failure")
-            else _job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", **extra),
-        )
-        for member, (klass, cite, effect, extra) in _SEMANTICS_ATTRS.items()
+            member="condition",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-08",
+            effect="the start gate: the job starts on the edge where its condition becomes true",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", condition="s(J1)"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="box_success",
+            klass=SUPPORTED,
+            cite="SEM-12",
+            effect="overrides a box's success verdict, evaluated on every member transition"
+            " while the box is RUNNING, so an internal reference can finish the box early",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                job_type="b",
+                command=None,
+                machine=None,
+                box_success="s(J1)",
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="box_failure",
+            klass=SUPPORTED,
+            cite="SEM-12",
+            effect="overrides a box's failure verdict, evaluated on every member transition"
+            " while the box is RUNNING; DECLARING it suppresses the matching default fold,"
+            " so an override that never becomes true leaves the box RUNNING (SEM-12)",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                job_type="b",
+                command=None,
+                machine=None,
+                box_failure="f(J1)",
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="max_exit_success",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", max_exit_success="2"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="success_codes",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="the explicit success set; with no fail_codes beside it, it alone decides"
+            " the verdict",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", success_codes="0,3-5"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="fail_codes",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="the explicit failure set; present, it is the only verdict source (Q7, DL-58)",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", fail_codes="1,9"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="term_run_time",
+            klass=SUPPORTED,
+            cite="dossier ss5, oracle.Oracle._arm_sla_and_term",
+            effect="arms a timer that TERMINATEs the run after n minutes",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", term_run_time="10"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="n_retrys",
+            klass=PASSTHROUGH,
+            cite="DL-53",
+            effect="the job runs without retries; preflight WARNs that the attribute is unmodelled",
+            trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", n_retrys="2"),
+        ),
+        _row(
+            surface="job_attr",
+            member="auto_hold",
+            klass=SUPPORTED,
+            cite="dossier ss5",
+            effect="the member enters ON_HOLD when its box starts, instead of starting with it",
+            trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", auto_hold="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="status",
+            klass=SUPPORTED,
+            cite="SEM-24",
+            effect="the definition-time status: only the out-of-band states are modelled,"
+            " run states refuse",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", status="ON_HOLD"
+            ),
+        ),
     )
     + (
         _row(
