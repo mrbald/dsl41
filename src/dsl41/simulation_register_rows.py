@@ -3067,45 +3067,47 @@ ADAPTER_ROWS: tuple[Row, ...] = (
 #: on purpose: the fixture names WHERE the provenance is stamped, and the
 #: domain is derived from every `source=` constant in the package, so a new
 #: provenance with no row still fails.
-_SOURCE_SITES: dict[str, tuple[str, str, str]] = {
-    # member: (the stamping site, a site that stamps something else, effect)
-    "scheduler": (
-        "runner.Engine.run_until_quiescent",
-        "runner.Engine.inject_host",
-        "the start came from a calendar tick, so a journal reader can tell it from"
-        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
-    ),
-    "control": (
-        "runner.Engine.inject",
-        "runner.Engine._enqueue",
-        "the event crossed the ss10 control socket, or a rehearsal script stood in"
-        " for one; it is not something the engine raised itself",
-    ),
-    "reconcile": (
-        "runner_startup._inject_completion",
-        "runner.Engine._cutoff",
-        "the completion came from resolving an incomplete run at resume, not from a"
-        " live adapter; it still goes through the ss4 stale gate",
-    ),
-    "adapter": (
-        "runner.Engine._enqueue",
-        "runner.Engine._cutoff",
-        "the event is a live adapter completion -- the stamp that subjects it to the"
-        " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
-    ),
-}
-
-EVENT_SOURCE_ROWS: tuple[Row, ...] = tuple(
+EVENT_SOURCE_ROWS: tuple[Row, ...] = (
     _row(
         surface="event_source",
-        member=member,
+        member="scheduler",
         klass=SUPPORTED,
-        cite=f"ir-design ss7, DL-68, {site}",
-        effect=effect,
-        trigger=site,
-        quiet=other,
-    )
-    for member, (site, other, effect) in _SOURCE_SITES.items()
+        cite="ir-design ss7, DL-68, runner.Engine.run_until_quiescent",
+        effect="the start came from a calendar tick, so a journal reader can tell it from"
+        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
+        trigger="runner.Engine.run_until_quiescent",
+        quiet="runner.Engine.inject_host",
+    ),
+    _row(
+        surface="event_source",
+        member="control",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner.Engine.inject",
+        effect="the event crossed the ss10 control socket, or a rehearsal script stood in"
+        " for one; it is not something the engine raised itself",
+        trigger="runner.Engine.inject",
+        quiet="runner.Engine._enqueue",
+    ),
+    _row(
+        surface="event_source",
+        member="reconcile",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner_startup._inject_completion",
+        effect="the completion came from resolving an incomplete run at resume, not from a"
+        " live adapter; it still goes through the ss4 stale gate",
+        trigger="runner_startup._inject_completion",
+        quiet="runner.Engine._cutoff",
+    ),
+    _row(
+        surface="event_source",
+        member="adapter",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner.Engine._enqueue",
+        effect="the event is a live adapter completion -- the stamp that subjects it to the"
+        " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
+        trigger="runner.Engine._enqueue",
+        quiet="runner.Engine._cutoff",
+    ),
 )
 
 
@@ -3130,90 +3132,135 @@ SLA_COMPLETE_JIL = _estate(
 #: Every out-of-band marker `Oracle._record` can write: a trace line that is
 #: not a status transition. The status surface derives `JobStatus`; this one
 #: derives the vocabulary beside it.
-_TRACE_MARKERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    # member: (effect, the jil, the event script)
-    "ON_ICE": (
-        "the job is iced: downstream conditions read it as satisfied and it never runs",
-        BASE_JIL,
-        ("0 ON_ICE job=J0",),
-    ),
-    "OFF_ICE": (
-        "the ice is cleared; conditions are deliberately NOT re-evaluated",
-        BASE_JIL,
-        ("0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
-    ),
-    "ON_HOLD": (
-        "the job is held: it stays startable but no start goes through",
-        BASE_JIL,
-        ("0 ON_HOLD job=J0",),
-    ),
-    "OFF_HOLD": (
-        "the hold is released and the start is re-attempted immediately",
-        BASE_JIL,
-        ("0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
-    ),
-    "ON_NOEXEC": (
-        "the job is marked not-executing; it completes without running",
-        BASE_JIL,
-        ("0 ON_NOEXEC job=J0",),
-    ),
-    "OFF_NOEXEC": (
-        "the noexec flag is cleared",
-        BASE_JIL,
-        ("0 ON_NOEXEC job=J0", "1 OFF_NOEXEC job=J0"),
-    ),
-    "DISARM": (
-        "an explicit journaled disarm: the latched tick is dropped and nothing else moves",
-        BASE_JIL,
-        ("0 DISARM job=J0",),
-    ),
-    "START_REFUSED": (
-        "a start request the oracle declined, with the reason it declined it",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 STARTJOB job=J0"),
-    ),
-    "SCHED_ARM": (
-        "a schedule tick that could not start the job latched instead",
-        SLA_START_JIL,
-        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0"),
-    ),
-    "SCHED_DISARM": (
-        "an unconsumed member arm died with the box run that armed it",
-        BOX_ARM_JIL,
-        ("0 STARTJOB job=BOX0", "1 STARTJOB job=MEM", "2 STATUS job=BOX0 status=SUCCESS"),
-    ),
-    "MUST_START_ALARM": (
-        "the must_start deadline passed with no new run; no status moved",
-        SLA_START_JIL,
-        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0", "31 STATUS job=TICK status=SUCCESS"),
-    ),
-    "MUST_COMPLETE_ALARM": (
-        "the must_complete deadline passed with the run still live; no status moved",
-        SLA_COMPLETE_JIL,
-        ("0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
-    ),
-    "RUN_WINDOW_DEFER": (
-        "a start outside the run_window, closer to the next opening, was queued for it",
-        _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-    "RUN_WINDOW_SKIP": (
-        "a start outside the run_window, closer to the previous close, was dropped",
-        _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-}
-
-TRACE_MARKER_ROWS: tuple[Row, ...] = tuple(
+TRACE_MARKER_ROWS: tuple[Row, ...] = (
     _row(
         surface="trace_marker",
-        member=member,
+        member="ON_ICE",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect=effect,
-        trigger=_scn(jil, *events),
-    )
-    for member, (effect, jil, events) in _TRACE_MARKERS.items()
+        effect="the job is iced: downstream conditions read it as satisfied and it never runs",
+        trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_ICE",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the ice is cleared; conditions are deliberately NOT re-evaluated",
+        trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="ON_HOLD",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the job is held: it stays startable but no start goes through",
+        trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_HOLD",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the hold is released and the start is re-attempted immediately",
+        trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="ON_NOEXEC",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the job is marked not-executing; it completes without running",
+        trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_NOEXEC",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the noexec flag is cleared",
+        trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0", "1 OFF_NOEXEC job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="DISARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="an explicit journaled disarm: the latched tick is dropped and nothing else moves",
+        trigger=_scn(BASE_JIL, "0 DISARM job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="START_REFUSED",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start request the oracle declined, with the reason it declined it",
+        trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 STARTJOB job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="SCHED_ARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a schedule tick that could not start the job latched instead",
+        trigger=_scn(SLA_START_JIL, "0 ON_HOLD job=J0", "0 STARTJOB job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="SCHED_DISARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="an unconsumed member arm died with the box run that armed it",
+        trigger=_scn(
+            BOX_ARM_JIL,
+            "0 STARTJOB job=BOX0",
+            "1 STARTJOB job=MEM",
+            "2 STATUS job=BOX0 status=SUCCESS",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="MUST_START_ALARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the must_start deadline passed with no new run; no status moved",
+        trigger=_scn(
+            SLA_START_JIL,
+            "0 ON_HOLD job=J0",
+            "0 STARTJOB job=J0",
+            "31 STATUS job=TICK status=SUCCESS",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="MUST_COMPLETE_ALARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the must_complete deadline passed with the run still live; no status moved",
+        trigger=_scn(SLA_COMPLETE_JIL, "0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="RUN_WINDOW_DEFER",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start outside the run_window, closer to the next opening, was queued for it",
+        trigger=_scn(
+            _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+            "0 STARTJOB job=J0",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="RUN_WINDOW_SKIP",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start outside the run_window, closer to the previous close, was dropped",
+        trigger=_scn(
+            _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
+            "0 STARTJOB job=J0",
+        ),
+    ),
 )
 
 
@@ -3343,26 +3390,25 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
 
 
 #: What each mode does to the bucket, per `capacity.requirement_demand`.
-_DEMAND_EFFECTS = {
-    "acquire": "the start HOLDS its units until the release policy gives them back;"
-    " a bucket short of them queues the job in QUE_WAIT",
-    "gate": "a threshold check only (res_type T): the level is read, nothing is held"
-    " and so nothing is ever released",
-}
-
-DEMAND_ROWS: tuple[Row, ...] = tuple(
+DEMAND_ROWS: tuple[Row, ...] = (
     _row(
         surface="demand_mode",
-        member=member,
+        member="acquire",
         klass=SUPPORTED,
         cite="DL-50, capacity.requirement_demand",
-        effect=effect,
-        trigger=_job(
-            f"insert_resource: R0\nres_type: {'T' if member == 'gate' else 'R'}\namount: 4",
-            resources="(R0, QUANTITY=1)",
-        ),
-    )
-    for member, effect in _DEMAND_EFFECTS.items()
+        effect="the start HOLDS its units until the release policy gives them back;"
+        " a bucket short of them queues the job in QUE_WAIT",
+        trigger=_job("insert_resource: R0\nres_type: R\namount: 4", resources="(R0, QUANTITY=1)"),
+    ),
+    _row(
+        surface="demand_mode",
+        member="gate",
+        klass=SUPPORTED,
+        cite="DL-50, capacity.requirement_demand",
+        effect="a threshold check only (res_type T): the level is read, nothing is held"
+        " and so nothing is ever released",
+        trigger=_job("insert_resource: R0\nres_type: T\namount: 4", resources="(R0, QUANTITY=1)"),
+    ),
 )
 
 MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
@@ -3410,44 +3456,43 @@ MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
 
 # ----------------------------------------------- wrapper, calendar and literal forms
 
-_WRAPPER_OUTCOMES: dict[str, tuple[str, str, str]] = {
-    # member: (class, cite, effect)
-    "exited": (
-        SUPPORTED,
-        "runner-design ss6, supervisor-protocol ss3, SEM-09",
-        "the command ended on its own; the raw exit code goes to the oracle and"
-        " SEM-09 decides the verdict",
-    ),
-    "signaled": (
-        SUPPORTED,
-        "runner-design ss6, DL-41a",
-        "the command was killed by a signal; the engine injects STATUS TERMINATED"
-        " because a kill actually happened",
-    ),
-    "terminated": (
-        SUPPORTED,
-        "runner-design ss6, DL-41a",
-        "the wrapper killed the command when it lost its parent; the engine injects"
-        " STATUS TERMINATED with the recorded cause",
-    ),
-    "spawn_failed": (
-        SUPPORTED,
-        "runner-design ss6",
-        "/bin/sh could never be spawned; the engine injects STATUS FAILURE and the"
-        " run never started",
-    ),
-}
-
-WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = tuple(
+WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = (
     _row(
         surface="wrapper_outcome",
-        member=member,
-        klass=klass,
-        cite=cite,
-        effect=effect,
-        trigger=f"wrapper={member}",
-    )
-    for member, (klass, cite, effect) in _WRAPPER_OUTCOMES.items()
+        member="exited",
+        klass=SUPPORTED,
+        cite="runner-design ss6, supervisor-protocol ss3, SEM-09",
+        effect="the command ended on its own; the raw exit code goes to the oracle and"
+        " SEM-09 decides the verdict",
+        trigger="wrapper=exited",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="signaled",
+        klass=SUPPORTED,
+        cite="runner-design ss6, DL-41a",
+        effect="the command was killed by a signal; the engine injects STATUS TERMINATED"
+        " because a kill actually happened",
+        trigger="wrapper=signaled",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="terminated",
+        klass=SUPPORTED,
+        cite="runner-design ss6, DL-41a",
+        effect="the wrapper killed the command when it lost its parent; the engine injects"
+        " STATUS TERMINATED with the recorded cause",
+        trigger="wrapper=terminated",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="spawn_failed",
+        klass=SUPPORTED,
+        cite="runner-design ss6",
+        effect="/bin/sh could never be spawned; the engine injects STATUS FAILURE and the"
+        " run never started",
+        trigger="wrapper=spawn_failed",
+    ),
 ) + (
     _row(
         surface="wrapper_outcome",
