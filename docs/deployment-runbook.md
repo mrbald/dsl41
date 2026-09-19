@@ -313,9 +313,8 @@ resurrect them; the engine reconciles the spool.
 The optional `supervise start --deadman-seconds N` sets a finite positive
 unwatched interval. Omit it for no deadman. The engine reads the running
 supervisor's actual value through PING/LIST. The option is refused on
-`supervise list` and `supervise shutdown`. Do not race an old, lockless
-supervisor binary against a new starter during upgrade: the startup probes
-protect an already published owner, not a concurrent legacy launch.
+`supervise list` and `supervise shutdown`. The upgrade rule for an old,
+lockless supervisor binary is stated in `supervisor-protocol.md` §5.
 
 **Shape 2: supervisor started by the engine.** Keep `run --detached` and
 set `KillMode=process` on the engine unit. It limits service-stop signals

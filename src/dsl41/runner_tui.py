@@ -1416,6 +1416,15 @@ class RunnerApp(App[None]):
     def action_refresh(self) -> None:
         self._poll()
 
+    def _reset_trace_cursor(self) -> None:
+        """Read the trace from the start again, and forget what the old cursor
+        indexed. Two triggers reach this -- a baseline change and the shorter-
+        trace fallback -- and the two bodies had to be kept equal by hand
+        (DL-75 review 2026-09-19). The alarms go WITH the cursor: they are
+        keyed by the sequence numbers that are about to be re-read."""
+        self._trace_seq = 0
+        self._alarms.clear()
+
     async def _refresh(self) -> None:
         """Re-query status/trace/explain. Coalescing guard: refreshes
         triggered while one is in flight fold into a single trailing pass."""
@@ -1456,8 +1465,7 @@ class RunnerApp(App[None]):
                     )
                     self._trace_baseline = trace_baseline
                     if baseline_changed or mixed_baselines:
-                        self._trace_seq = 0
-                        self._alarms.clear()
+                        self._reset_trace_cursor()
                         self._console_write(
                             Text(
                                 "trace baseline changed; reading from the start next poll", "yellow"
@@ -1471,8 +1479,7 @@ class RunnerApp(App[None]):
                         # change above resets even when the new trace is longer;
                         # a same-period resume replays the existing prefix, so
                         # an epoch change alone does not invalidate the cursor.
-                        self._trace_seq = 0
-                        self._alarms.clear()
+                        self._reset_trace_cursor()
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):

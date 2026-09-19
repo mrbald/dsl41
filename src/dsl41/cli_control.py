@@ -537,7 +537,7 @@ def supervise(
     import os
     import sys
 
-    from dsl41.runner_adapters import SupervisorConn
+    from dsl41.runner_adapters import SupervisorConn, supervisor_argv, supervisor_log_path
 
     verb = action.lower()
     if verb not in ("start", "list", "shutdown"):
@@ -556,16 +556,9 @@ def supervise(
                     raise
             else:
                 run_root.chmod(0o700)
-            argv = [
-                sys.executable,
-                str(Path(__file__).with_name("runner_supervisor.py")),
-                "--run-root",
-                str(run_root.resolve()),
-            ]
-            if deadman_seconds is not None:
-                argv.extend(["--deadman-seconds", str(deadman_seconds)])
+            argv = supervisor_argv(run_root.resolve(), deadman_seconds)
             log_fd = os.open(
-                run_root / "supervisor.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+                supervisor_log_path(run_root), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
             )
             try:
                 os.dup2(log_fd, 1)
