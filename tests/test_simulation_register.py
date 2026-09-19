@@ -56,7 +56,6 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41 import simulation_register_rows as rows_mod
 from dsl41.simulation_register import (
     FREE_SURFACES,
-    UNREACHABLE,
     REGISTER,
     SURFACES,
     Behaviour,
@@ -618,14 +617,22 @@ SURFACE_KIND: dict[str, str] = {
     "preflight_code": "jil",
     "demand_mode": "jil",
     "machine_verdict": "jil",
+    # every `runtime` row's fixture is JIL today. The day one needs another
+    # kind, the fix is a `kind` field on the row -- not a `kind:` line inside
+    # the fixture, which the body-stripper discarded unread on the quiet half
+    # (DL-75 review 2026-09-19).
+    "runtime": "jil",
 }
 
+#: The default quiet fixture per kind -- what a row that omits `quiet` is
+#: held against. The JIL and scenario estates come from the module that owns
+#: the estate builders: a second spelling here would let the base estate move
+#: and a large class of rows quietly start proving a different negative.
 BASE_FIXTURE: dict[str, str] = {
-    "jil": "insert_machine: M0\ntype: a\nnode_name: localhost\n\n"
-    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\n",
+    "jil": rows_mod.BASE_JIL,
+    # a job with no condition string at all: nothing parses, so nothing is seen
     "cond": "",
-    "scenario": "insert_machine: M0\ntype: a\nnode_name: localhost\n\n"
-    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\n--\n",
+    "scenario": rows_mod._scn(rows_mod.BASE_JIL),
     "profile": "{}",
     "outcome": "int",
     # a `wrapper=` fixture names a status-record outcome; `int` is the base
@@ -639,25 +646,28 @@ CALENDAR_SUBCOMMANDS = frozenset({"calendar", "ext_calendar", "extended_calendar
 
 
 def fixture_kind(row: Behaviour) -> str:
-    """The fixture kind of a row's trigger/quiet strings. A `runtime` row
-    says its own in a leading `kind:` line; every other surface has one."""
-    if row.surface == "runtime":
-        head = row.trigger.splitlines()[0]
-        assert head.startswith("kind: "), f"{row.id}: runtime rows need a `kind:` prefix line"
-        return head[len("kind: ") :].strip()
+    """The fixture kind of a row's trigger/quiet strings. One per surface."""
     return SURFACE_KIND[row.surface]
-
-
-def fixture_body(row: Behaviour, text: str) -> str:
-    if row.surface == "runtime":
-        return text.split("\n", 1)[1]
-    return text
 
 
 def quiet_of(row: Behaviour) -> str:
     if row.quiet is not None:
-        return fixture_body(row, row.quiet)
+        return row.quiet
     return BASE_FIXTURE[fixture_kind(row)]
+
+
+def test_every_surface_is_spelled_in_all_three_places() -> None:
+    """Breaks when a surface reaches one of the three lists and not the other
+    two. `SURFACE_KIND` and `surface_domains()` used to fail on the missing
+    one with a bare `KeyError` that named nothing."""
+    surfaces = set(SURFACES)
+    odd = set(SURFACE_KIND) ^ surfaces
+    assert odd == set(), f"SURFACE_KIND and SURFACES disagree on: {sorted(odd)}"
+    # a FREE surface has no derived domain, by the definition of free -- and
+    # the difference is taken against SURFACES rather than unioned into it, so
+    # a domain wrongly derived FOR a free surface fails here too
+    odd = set(surface_domains()) ^ (surfaces - FREE_SURFACES)
+    assert odd == set(), f"surface_domains() and SURFACES disagree on: {sorted(odd)}"
 
 
 # ------------------------------------------------------------------ detectors
@@ -1101,10 +1111,9 @@ def test_ids_are_unique() -> None:
 
 
 def test_rows_are_well_formed() -> None:
-    """Breaks on an unknown surface, a zero revision, or an empty effect."""
+    """Breaks on an unknown surface, an empty effect, or an empty member."""
     for row in REGISTER:
         assert row.surface in SURFACES, row.id
-        assert row.revision >= 1, row.id
         assert row.effect.strip(), row.id
         assert row.member.strip(), row.id
 
@@ -1226,8 +1235,10 @@ def test_every_marker_site_is_claimed_by_exactly_one_row() -> None:
     sites = marker_sites()
     claims: dict[str, list[str]] = {}
     for row in REGISTER:
+        # the JOIN lives here: a row's site is a bare `module.qualname#n`
+        # and the label in front of it is the row's own
         for site in row.sites:
-            claims.setdefault(site, []).append(row.id)
+            claims.setdefault(f"{row.label}@{site}", []).append(row.id)
     assert sorted(set(claims) - set(sites)) == [], (
         f"rows claim marker sites the sources do not carry: {sorted(set(claims) - set(sites))}"
     )
@@ -1239,14 +1250,16 @@ def test_every_marker_site_is_claimed_by_exactly_one_row() -> None:
 
 
 def test_marked_rows_claim_their_sites() -> None:
-    """Breaks when a row says it has a code marker and names no site."""
+    """Breaks when a row claims marker sites and names no question, or spells
+    a label inside a site. `marker` is now `bool(sites)`, so the two can no
+    longer disagree; what is left to check is the half the claim join above
+    assumes -- a bare site, and a label to join it to."""
     for row in REGISTER:
-        if row.marker:
-            assert row.sites, f"{row.id}: marker=True with no sites"
         if row.sites:
-            assert row.marker, f"{row.id}: sites without marker=True"
-            assert row.label is not None, row.id
-            assert all(site.startswith(f"{row.label}@") for site in row.sites), row.id
+            assert row.label is not None, f"{row.id}: marker sites with no label"
+            assert all("@" not in site for site in row.sites), (
+                f"{row.id}: a site is a bare `module.qualname#n`; the label is the row's"
+            )
 
 
 def test_marked_rows_have_a_marker_in_the_sources() -> None:
@@ -1392,21 +1405,24 @@ def test_stated_protocols_exist_in_the_runbook() -> None:
 MEMBER_ROWS = tuple(
     row
     for row in REGISTER
-    if row.facet == "" and row.surface not in FREE_SURFACES and row.id not in UNREACHABLE
+    if row.facet == "" and row.surface not in FREE_SURFACES and row.reachable
 )
+
+UNREACHABLE_IDS = frozenset(row.id for row in REGISTER if not row.reachable)
 
 
 def test_the_unreachable_set_is_only_what_cannot_be_reached() -> None:
-    """Breaks when the unreachable set grows a member a fixture COULD
-    exercise. `preflight_code:job-type` is proven here: lowering maps every
-    accepted job_type into the runner's executable universe, so the preflight
-    gate behind it cannot fire on any JIL. `preflight_code:oracle` has no
-    such one-line proof -- it guards `Oracle(catalog)` raising over a catalog
-    lowering does not build -- so it is pinned as the only other member."""
+    """Breaks when a row claims `reachable=False` for a member a fixture
+    COULD exercise. The set is derived from the rows and pinned here, because
+    the pin is the proof: `preflight_code:job-type` is proven on the line
+    below -- lowering maps every accepted job_type into the runner's
+    executable universe, so the preflight gate behind it cannot fire on any
+    JIL. `preflight_code:oracle` has no such one-line proof -- it guards
+    `Oracle(catalog)` raising over a catalog lowering does not build -- so it
+    is pinned as the only other member. A third row that claims it fails here
+    until somebody writes its proof."""
     assert set(ir._JOB_TYPE_MAP.values()) <= runner_preflight._RUNNABLE_TYPES
-    assert UNREACHABLE == {"preflight_code:job-type", "preflight_code:oracle"}
-    for row_id in UNREACHABLE:
-        assert row_id in by_id(), row_id
+    assert UNREACHABLE_IDS == {"preflight_code:job-type", "preflight_code:oracle"}
 
 
 @pytest.mark.parametrize("row_id", [row.id for row in MEMBER_ROWS])
@@ -1415,7 +1431,7 @@ def test_member_rows_are_proven_by_the_generic_detector(row_id: str) -> None:
     behaviour, or its quiet fixture does."""
     row = by_id()[row_id]
     kind = fixture_kind(row)
-    assert detect(row.surface, row.member, kind, fixture_body(row, row.trigger)), (
+    assert detect(row.surface, row.member, kind, row.trigger), (
         f"{row.id}: trigger fixture does not expose the member"
     )
     assert not detect(row.surface, row.member, kind, quiet_of(row)), (
@@ -1493,7 +1509,7 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
     row claims a refusal that does not happen."""
     row = by_id()[row_id]
     refused_here: list[str] = []
-    for text in (fixture_body(row, row.trigger), quiet_of(row)):
+    for text in (row.trigger, quiet_of(row)):
         try:
             catalog = ir.lower_source(text)
         except ir.LoweringError as exc:
@@ -1514,7 +1530,7 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
             for item in _preflight_under(catalog, "strict")
             if item.severity == "ERROR"
         ]
-    if row.id in UNREACHABLE:
+    if not row.reachable:
         # no input reaches the gate this row describes, which is the row's
         # own claim; `test_the_unreachable_set_is_only_what_cannot_be_reached`
         # is what holds that claim honest
@@ -1531,9 +1547,9 @@ def test_every_row_carries_well_formed_scope_fixtures(row_id: str) -> None:
     -- a scope fixture nobody can execute proves nothing."""
     row = by_id()[row_id]
     kind = fixture_kind(row)
-    _assert_well_formed(row, kind, fixture_body(row, row.trigger))
+    _assert_well_formed(row, kind, row.trigger)
     _assert_well_formed(row, kind, quiet_of(row))
-    assert fixture_body(row, row.trigger) != quiet_of(row), f"{row.id}: trigger == quiet"
+    assert row.trigger != quiet_of(row), f"{row.id}: trigger == quiet"
 
 
 # --------------------------------------------------------------------- 4. doc

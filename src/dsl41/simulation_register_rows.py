@@ -8,8 +8,8 @@ with no row -- and on a row whose member the code no longer has.
 
 Fixture strings are interpreted by `tests/test_simulation_register.py`
 according to the surface's fixture kind (jil, cond, scenario, profile,
-outcome). A `runtime` row says its kind in a leading `kind: <name>` line,
-because that surface is free and its rows pick their own.
+outcome) -- one kind per surface, the test's own table. A row does not say
+its kind (DL-75 review 2026-09-19).
 
 This module imports nothing from `simulation_register`: the data is plain,
 so the dependency runs one way and the two files never form a cycle.
@@ -120,11 +120,6 @@ def _scn(jil: str, *events: str) -> str:
 BASE_JIL = _estate(MACHINE_BLOCK, JOB_BLOCK)
 #: the quiet estate for rows the base estate itself would trigger
 GLOBAL_JIL = "insert_global: G0\nvalue: 0\n"
-#: a job with no condition string at all: nothing parses, so nothing is seen
-BASE_COND = ""
-BASE_SCENARIO = _scn(BASE_JIL)
-BASE_PROFILE = "{}"
-BASE_OUTCOME = "int"
 
 TICKER_BLOCK = "insert_job: TICK\njob_type: c\ncommand: true\nmachine: M0"
 SCHEDULED_JOB = _job(date_conditions="1", days_of_week="all", start_times='"08:00"')
@@ -506,8 +501,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, ir.JobIR.job_load_units",
             label="Qr4",
-            marker=True,
-            sites=("Qr4@ir.JobIR.job_load_units#1",),
+            sites=("ir.JobIR.job_load_units#1",),
             effect="a job with no job_load demands zero machine-load units, so an unsized"
             " job never queues behind max_load",
             trigger=_job(),
@@ -529,10 +523,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, capacity.CapacityPool.sorted_waiters",
             label="Qr2",
-            marker=True,
             sites=(
-                "Qr2@capacity.CapacityPool.sorted_waiters.key#1",
-                "Qr2@ir.JobIR.priority_value#1",
+                "capacity.CapacityPool.sorted_waiters.key#1",
+                "ir.JobIR.priority_value#1",
             ),
             effect="a lower priority number is assumed to mean higher priority",
             trigger=_job(priority="1"),
@@ -558,8 +551,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-30, runner_scheduler",
             label="E10",
-            marker=True,
-            sites=("E10@runner_scheduler.<module>#1",),
+            sites=("runner_scheduler.<module>#1",),
             effect="a schedule with no days_of_week is read as every day",
             trigger=_job(date_conditions="1", start_times='"08:00"'),
             quiet=_job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
@@ -571,8 +563,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-35, runner_scheduler",
             label="E10",
-            marker=True,
-            sites=("E10@runner_scheduler.Scheduler#1",),
+            sites=("runner_scheduler.Scheduler#1",),
             effect="a start time inside a DST fold or gap resolves by the pinned"
             " interpretation, not by a vendor-verified rule",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
@@ -665,10 +656,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters._build_run_spec",
             label="E5",
-            marker=True,
             sites=(
-                "E5@runner_adapters.LocalCommandAdapter#1",
-                "E5@runner_adapters._build_run_spec#1",
+                "runner_adapters.LocalCommandAdapter#1",
+                "runner_adapters._build_run_spec#1",
             ),
             effect="a profile that fails to source fails the job with sh's exit code",
             trigger=_job(profile="/tmp/missing.sh"),
@@ -744,8 +734,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._readmit",
             label="Qr6",
-            marker=True,
-            sites=("Qr6@oracle.<module>#1", "Qr6@oracle.Oracle._readmit#1"),
+            sites=("oracle.<module>#1", "oracle.Oracle._readmit#1"),
             effect="a job admitted out of QUE_WAIT does not re-evaluate its condition",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
@@ -763,7 +752,6 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-12, SEM-20",
             label="Q6",
-            marker=False,
             protocol="Q6",
             effect="an iced member is read as satisfied inside box_success, the same way"
             " it is read inside an ordinary condition",
@@ -845,8 +833,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
-            marker=True,
-            sites=("E6@runner_adapters.FileWatcherAdapter.__init__#1",),
+            sites=("runner_adapters.FileWatcherAdapter.__init__#1",),
             effect="an FW job with no watch_interval polls at the profile's default interval",
             trigger=_job(**_FW_JOB),
             quiet=_job(watch_interval="30", **_FW_JOB),
@@ -866,8 +853,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
-            marker=True,
-            sites=("E6@runner_adapters.FileWatcherAdapter#1",),
+            sites=("runner_adapters.FileWatcherAdapter#1",),
             effect="two consecutive qualifying polls must report the SAME size before the"
             " watch completes; a file still growing resets the count",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
@@ -962,8 +948,7 @@ MACHINE_ATTR_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="DL-49, runner_preflight._resource_preflight",
         label="Qr3",
-        marker=True,
-        sites=("Qr3@runner_preflight._resource_preflight#1",),
+        sites=("runner_preflight._resource_preflight#1",),
         effect="a pool machine carries no load throttle; preflight WARNs and the job runs",
         trigger=_estate(
             "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1178,8 +1163,7 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
         klass=PROVISIONAL,
         cite="SEM-38, DL-59",
         label="Q8b",
-        marker=True,
-        sites=("Q8b@autocal.compile_calendar#1",),
+        sites=("autocal.compile_calendar#1",),
         protocol="Q8b",
         effect="disposition replaces first, then the blind adjust shifts every survivor",
         trigger=_cal("condition: DAILY", "adjust: 1", "non_workday: N"),
@@ -1339,8 +1323,7 @@ VALUE_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-49, ir.MachineIR.max_load_units",
             label="Qr3",
-            marker=True,
-            sites=("Qr3@ir.MachineIR.max_load_units#1",),
+            sites=("ir.MachineIR.max_load_units#1",),
             effect="a virtual machine carries no machine-load throttle of its own",
             trigger=_estate(
                 "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1391,7 +1374,6 @@ VALUE_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, capacity.release_policy",
             label="Qr1",
-            marker=False,
             effect="a request with no FREE takes the res_type default, renewable for an"
             " absent res_type",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
@@ -1819,8 +1801,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal._exclusion_base#1",),
+            sites=("autocal._exclusion_base#1",),
             protocol=_CAL_PROTOCOL,
             effect="the rules of one calendar union; an exclusion-only rule subtracts from"
             " that union",
@@ -1834,8 +1815,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal._parse_rule#1",),
+            sites=("autocal._parse_rule#1",),
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON & JAN | TUE"),
@@ -1850,7 +1830,6 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             label="Q8d",
             # the SAME pinned choice as `&#flat-precedence`, whose row owns
             # the `_parse_rule` marker; a sibling facet claims no site
-            marker=False,
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON | JAN & TUE"),
@@ -1873,8 +1852,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal.<module>#1",),
+            sites=("autocal.<module>#1",),
             protocol=_CAL_PROTOCOL,
             effect="OR is pinned as an exact synonym of |",
             trigger=_cal("condition: MON OR TUE"),
@@ -1902,10 +1880,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-38, DL-59",
             label="Q8c",
-            marker=True,
             sites=(
-                "Q8c@autocal.CompiledCalendar._replace#1",
-                "Q8c@autocal.CompiledCalendar._replace#2",
+                "autocal.CompiledCalendar._replace#1",
+                "autocal.CompiledCalendar._replace#2",
             ),
             protocol=_CAL_PROTOCOL,
             effect="a replacement target is final: the date-conditions are not"
@@ -2071,8 +2048,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-20, oracle.Oracle._handle_oob",
             label="Q3d",
-            marker=True,
-            sites=("Q3d@oracle.Oracle._handle_oob#1",),
+            sites=("oracle.Oracle._handle_oob#1",),
             protocol="Q3d",
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
@@ -2097,7 +2073,6 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._handle_oob",
             label="Qr5",
-            marker=False,
             effect="icing a queued job dequeues it and settles it INACTIVE now, rather than"
             " leaving it in QUE_WAIT",
             trigger=_scn(
@@ -2115,7 +2090,6 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._dispatch",
             label="Qr5",
-            marker=False,
             effect="killing a queued job dequeues it, consumes its arm and TERMINATEs it",
             trigger=_scn(
                 _STATUS_SCENARIOS["QUE_WAIT"][1],
@@ -2278,12 +2252,12 @@ _UNOBSERVABLE = "exit_status_unobservable"
 #: resume ladder's, the rc-bearing one belongs to the two live adapters.
 _E7_SITES: dict[str, tuple[str, ...]] = {
     f"Failed={_UNOBSERVABLE}": (
-        "E7@runner_adapters.resolve_spool#1",
-        "E7@runner_startup.<module>#1",
+        "runner_adapters.resolve_spool#1",
+        "runner_startup.<module>#1",
     ),
     f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
-        "E7@runner_adapters.LocalCommandAdapter.run#1",
-        "E7@runner_adapters.SupervisedCommandAdapter._await_outcome#1",
+        "runner_adapters.LocalCommandAdapter.run#1",
+        "runner_adapters.SupervisedCommandAdapter._await_outcome#1",
     ),
 }
 _CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
@@ -2379,7 +2353,6 @@ ADAPTER_ROWS: tuple[Row, ...] = (
             cite=cite,
             # the E7 label sits on every unobservable-exit template
             label="E7" if _UNOBSERVABLE in member else None,
-            marker=_UNOBSERVABLE in member,
             sites=_E7_SITES.get(member, ()),
             effect=effect,
             trigger=member,
@@ -2393,8 +2366,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_adapters",
         label="E8",
-        marker=True,
-        sites=("E8@runner_adapters.outcome_from_status#1",),
+        sites=("runner_adapters.outcome_from_status#1",),
         protocol="E8",
         effect="a kill by an external signal is reported as TERMINATED, the same verdict"
         " an oracle-ordered kill gets",
@@ -2670,27 +2642,13 @@ _PREFLIGHT_CODES: dict[str, tuple[str, str, str, str]] = {
             "insert_job: B\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(A)",
         ),
     ),
-    "job-type": (
-        REFUSED,
-        "runner_preflight._job_type_preflight",
-        "a job_type with no adapter refuses the run; no JIL reaches this gate,"
-        " because lowering already refuses every type outside CMD/BOX/FW",
-        BASE_JIL,
-    ),
-    "oracle": (
-        REFUSED,
-        "runner_preflight._oracle_preflight",
-        "an oracle that will not construct over this catalog refuses the run;"
-        " no JIL reaches this gate, because lowering builds no such catalog",
-        BASE_JIL,
-    ),
 }
 
-#: The two codes no JIL can reach: their fixtures are ordinary estates that
-#: show the gate passing, and the row says so rather than pretending to
-#: trigger it (`simulation_register.UNREACHABLE`).
-_UNREACHABLE_CODES = frozenset({"job-type", "oracle"})
-
+#: The codes above, plus the two no JIL can reach. An unreachable row says so
+#: on the row (`reachable=False`); both its fixtures are ordinary estates that
+#: show the gate passing, so it names its quiet explicitly -- the base estate
+#: is already its trigger, and a row's two fixtures must differ
+#: (DL-75 review 2026-09-19).
 PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
     _row(
         surface="preflight_code",
@@ -2699,9 +2657,31 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
         cite=cite,
         effect=effect,
         trigger=estate,
-        quiet=GLOBAL_JIL if member in _UNREACHABLE_CODES else None,
     )
     for member, (klass, cite, effect, estate) in _PREFLIGHT_CODES.items()
+) + (
+    _row(
+        surface="preflight_code",
+        member="job-type",
+        klass=REFUSED,
+        cite="runner_preflight._job_type_preflight",
+        reachable=False,
+        effect="a job_type with no adapter refuses the run; no JIL reaches this gate,"
+        " because lowering already refuses every type outside CMD/BOX/FW",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="preflight_code",
+        member="oracle",
+        klass=REFUSED,
+        cite="runner_preflight._oracle_preflight",
+        reachable=False,
+        effect="an oracle that will not construct over this catalog refuses the run;"
+        " no JIL reaches this gate, because lowering builds no such catalog",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
 )
 
 
@@ -3016,12 +2996,11 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="oracle.Oracle._after_transition",
         label="Q3c",
-        marker=True,
-        sites=("Q3c@oracle.<module>#1", "Q3c@oracle.Oracle._after_transition#1"),
+        sites=("oracle.<module>#1", "oracle.Oracle._after_transition#1"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
-        trigger="kind: jil\n" + _job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
-        quiet="kind: jil\n" + BASE_JIL,
+        trigger=_job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
+        quiet=BASE_JIL,
     ),
     _row(
         surface="runtime",
@@ -3029,17 +3008,16 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_startup, runner_scheduler.Scheduler.pop_due",
         label="E9",
-        marker=True,
         sites=(
-            "E9@runner_scheduler.<module>#1",
-            "E9@runner_scheduler.Scheduler.pop_due#1",
-            "E9@runner_startup._resume_under_lock#1",
-            "E9@runner_startup.resume_run#1",
+            "runner_scheduler.<module>#1",
+            "runner_scheduler.Scheduler.pop_due#1",
+            "runner_startup._resume_under_lock#1",
+            "runner_startup.resume_run#1",
         ),
         effect="a tick whose instant passed while the engine was down is journaled and"
         " dropped, never fired late",
-        trigger="kind: jil\n" + SCHEDULED_JOB,
-        quiet="kind: jil\n" + BASE_JIL,
+        trigger=SCHEDULED_JOB,
+        quiet=BASE_JIL,
     ),
     _row(
         surface="runtime",
@@ -3047,16 +3025,15 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="autocal.compile_calendar, DL-59",
         label="Q8d",
-        marker=True,
         sites=(
-            "Q8d@autocal.compile_calendar#1",
-            "Q8d@autocal.compile_calendar#2",
+            "autocal.compile_calendar#1",
+            "autocal.compile_calendar#2",
         ),
         protocol=_CAL_PROTOCOL,
         effect="a compound rule with no inclusive leaf is evaluated literally as an include,"
         " which makes it near-universal",
-        trigger="kind: jil\n" + _cal("condition: XTUE|XWED"),
-        quiet="kind: jil\n" + _cal("condition: DAILY"),
+        trigger=_cal("condition: XTUE|XWED"),
+        quiet=_cal("condition: DAILY"),
     ),
     _row(
         surface="runtime",
@@ -3066,8 +3043,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="60 years",
         effect="a calendar that generates nothing within 60 years reads as exhausted;"
         " dormancy is proven within that bound only",
-        trigger="kind: jil\n" + _cal("condition: FEB#29 & MON"),
-        quiet="kind: jil\n" + _cal("condition: DAILY"),
+        trigger=_cal("condition: FEB#29 & MON"),
+        quiet=_cal("condition: DAILY"),
     ),
     _row(
         surface="runtime",
@@ -3077,16 +3054,14 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="366 days",
         effect="a W/P replacement that finds no valid day within 366 days is degenerate"
         " and refuses the calendar",
-        trigger="kind: jil\n"
-        + _estate(
+        trigger=_estate(
             MACHINE_BLOCK,
             JOB_BLOCK,
             "extended_calendar: EC0\ncondition: DAILY\nworkday: x......\n"
             f"holiday: W\nholcal: {HOLCAL_NAME}",
             STARVED_HOLCAL_BLOCK,
         ),
-        quiet="kind: jil\n"
-        + _estate(
+        quiet=_estate(
             MACHINE_BLOCK,
             JOB_BLOCK,
             "extended_calendar: EC0\ncondition: DAILY\nworkday: x......\n"
@@ -3101,8 +3076,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         cite="autocal.compile_calendar",
         effect="a W/P action with an all-non-workday mask has nowhere to walk and"
         " refuses the calendar before any day is generated",
-        trigger="kind: jil\n" + _cal("condition: DAILY", "non_workday: W", "workday: ......."),
-        quiet="kind: jil\n" + _cal("condition: DAILY", "non_workday: W", "workday: x......"),
+        trigger=_cal("condition: DAILY", "non_workday: W", "workday: ......."),
+        quiet=_cal("condition: DAILY", "non_workday: W", "workday: x......"),
     ),
     _row(
         surface="runtime",
@@ -3113,9 +3088,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="the eligible-day probe advances at most 732 candidates, not 732 days:"
         " a sparse calendar's 732 candidates can span decades, so the bound is on"
         " what was examined and not on the time it covered",
-        trigger="kind: jil\n"
-        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+        trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet=_job(date_conditions="1", days_of_week="all"),
     ),
     _row(
         surface="runtime",
@@ -3125,14 +3099,13 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="the calendar probes read the run anchor on the scheduler's own ladder:"
         " the JOB's local day, else the run-level base timezone, else UTC. Preflight and"
         " the engine name the same day",
-        trigger="kind: jil\n"
-        + _job(
+        trigger=_job(
             HOLCAL_BLOCK,
             date_conditions="1",
             run_calendar=f'"{HOLCAL_NAME}"',
             start_times='"08:00"',
         ),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
+        quiet=_job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
     ),
     _row(
         surface="runtime",
@@ -3143,9 +3116,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         " exhaustion and dormancy probes run on every call; a caller that wants a fixed"
         " answer passes a fixed anchor. The probe is day-granular: a last eligible day"
         " equal to the anchor's day passes even when its start times have passed",
-        trigger="kind: jil\n"
-        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+        trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet=_job(date_conditions="1", days_of_week="all"),
     ),
     _row(
         surface="runtime",
@@ -3155,8 +3127,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="100 levels",
         effect="a rule nested deeper than 100 levels is refused; the bound is the"
         " parser's own recursion budget, not a documented vendor limit",
-        trigger="kind: jil\n" + _cal("condition: " + _nested("DAILY", 101)),
-        quiet="kind: jil\n" + _cal("condition: " + _nested("DAILY", 3)),
+        trigger=_cal("condition: " + _nested("DAILY", 101)),
+        quiet=_cal("condition: " + _nested("DAILY", 3)),
     ),
     _row(
         surface="runtime",
@@ -3167,9 +3139,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         " bypasses that guard and runs unthrottled, and there the malformed values go"
         " quiet -- a malformed job_load reads as zero demand, a malformed priority as"
         " unset, and a malformed amount omits the bucket altogether",
-        trigger="kind: jil\n"
-        + _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
-        quiet="kind: jil\n" + _job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
+        trigger=_job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
+        quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
     ),
     _row(
         surface="runtime",
@@ -3177,8 +3148,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=SUPPORTED,
         cite="autocal.standard_rows, DL-60",
         effect="a date row's seconds are dropped: ticks are minute-grained",
-        trigger="kind: jil\n" + _stmt("calendar: SC0\n01/01/2026 08:30:45"),
-        quiet="kind: jil\n" + _stmt("calendar: SC0\n01/01/2026 08:30"),
+        trigger=_stmt("calendar: SC0\n01/01/2026 08:30:45"),
+        quiet=_stmt("calendar: SC0\n01/01/2026 08:30"),
     ),
     _row(
         surface="runtime",
@@ -3188,10 +3159,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="one relative offset broadcasts to every start slot, which SEM-34 marks"
         " open -- the strict count rule and the vendor's own example disagree; no label"
         " was opened for it",
-        trigger="kind: jil\n"
-        + _job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
-        quiet="kind: jil\n"
-        + _job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
+        trigger=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
+        quiet=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
     ),
 )
 
