@@ -72,13 +72,17 @@ def _preflight_or_exit(
     machine_policy: str = "strict",
     as_machine: "list[str] | None" = None,
     start: "datetime | None" = None,
+    default_tz: "str | None" = None,
     tz_aliases: "dict[str, str] | None" = None,
     warns_to_stderr: bool = False,
 ) -> list:
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
     journals them next to the run -- WARN prints, journals, and runs).
-    `start` anchors the DL-56 calendar-exhaustion WARN: run passes wall-now,
-    rehearse its virtual --start. `warns_to_stderr` moves the WARN lines off
+    `start` anchors the DL-56 calendar probes: run passes wall-now, rehearse
+    its virtual --start, and an omitted one means now (DL-213) -- both verbs
+    pass one. `default_tz` is the --timezone base zone
+    the calendar probes fall back to (DL-212); `check_base_tz` has already
+    refused an unresolvable one. `warns_to_stderr` moves the WARN lines off
     stdout -- rehearse --format json owns stdout as ONE parseable document,
     and a WARN printed ahead of it broke every `| jq` (DL-180 review)."""
     from dsl41.runner_preflight import MachinePolicy, preflight
@@ -93,6 +97,7 @@ def _preflight_or_exit(
         machine_policy=cast("MachinePolicy", machine_policy),
         as_machine=frozenset(as_machine or ()),
         start=start,
+        default_tz=default_tz,
         tz_aliases=tz_aliases,
     )
     for item in items:
@@ -239,15 +244,16 @@ def run(
         estate_anchor = open_from
     catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     tz_aliases = load_tz_aliases(timezone_map)
+    check_base_tz(timezone, tz_aliases)
     warns = _preflight_or_exit(
         catalog,
         execution=True,
         machine_policy=machine_policy,
         as_machine=as_machine,
         start=datetime.now(UTC).replace(tzinfo=None),
+        default_tz=timezone,
         tz_aliases=tz_aliases,
     )
-    check_base_tz(timezone, tz_aliases)
     if deadman is not None and not detached:
         # loud, not silent: without a supervisor there is nothing to hold the
         # lifelines, so nothing a deadman could bound (concurrency-model ss8)
@@ -1161,14 +1167,15 @@ def rehearse(
         else datetime.now(UTC).replace(tzinfo=None, microsecond=0)
     )
     tz_aliases = load_tz_aliases(timezone_map)
+    check_base_tz(timezone, tz_aliases)
     warns = _preflight_or_exit(
         catalog,
         execution=False,
         start=start_dt,
+        default_tz=timezone,
         tz_aliases=tz_aliases,
         warns_to_stderr=output is RehearseFormat.json,
     )
-    check_base_tz(timezone, tz_aliases)
     try:
         adapter, events = _scenario_adapter(scenario)
     except (OSError, ValueError, TypeError, KeyError) as exc:

@@ -18,8 +18,9 @@ import asyncio
 import getpass
 import json
 import socket as socket_mod
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -1307,9 +1308,9 @@ def test_preflight_calendar_errors_on_defective_extended_and_bad_row() -> None:
 
 def test_preflight_calendar_warns_when_exhausted_or_fully_excluded() -> None:
     """(ss8 DL-56): silent-never-fires is preflight's business -- WARN when
-    the run set minus exclude set is empty, and (given a start anchor) when
-    the last eligible date lies before the run start. No anchor, no
-    exhaustion check."""
+    the run set minus exclude set is empty, and when the last eligible date
+    lies before the run start. An omitted anchor means now (DL-213), not no
+    check."""
     excluded = (
         "calendar: runs\n07/03/2026 00:00\n\ncalendar: skips\n07/03/2026 00:00\n\n"
         "insert_job: w1\njob_type: c\ncommand: x\nmachine: localhost\n"
@@ -1330,9 +1331,60 @@ def test_preflight_calendar_warns_when_exhausted_or_fully_excluded() -> None:
         i.severity == "WARN" and i.code == "calendar" and "exhausted" in i.message for i in items
     )
     assert not any(i.severity == "ERROR" and i.code == "calendar" for i in items)
-    # no anchor: the same catalog is silent (bare-construction callers)
+    # no anchor: now is the anchor (DL-213), and 2026-07-03 is behind any
+    # wall clock that can run this test, so the same catalog still WARNs
     items = preflight(lower_source(stale))
-    assert not any(i.code == "calendar" for i in items)
+    assert any(
+        i.severity == "WARN" and i.code == "calendar" and "exhausted" in i.message for i in items
+    )
+
+
+def _exhausted(items: list) -> bool:
+    return any(
+        i.severity == "WARN" and i.code == "calendar" and "exhausted" in i.message for i in items
+    )
+
+
+def test_preflight_day_basis_falls_back_to_the_base_zone() -> None:
+    """(ss8 DL-212): the calendar probes read the anchor on the scheduler's
+    ladder -- the job's zone, else the run's base zone, else UTC. At 23:30Z
+    on 2026-03-10 an Auckland base zone is already on the 11th, so a
+    calendar whose last date is the 10th is exhausted under it and is not
+    exhausted under the naive UTC basis."""
+    anchor = datetime(2026, 3, 10, 23, 30)
+    # NZDT that day, verified here rather than asserted from memory
+    local = anchor.replace(tzinfo=UTC).astimezone(ZoneInfo("Pacific/Auckland"))
+    assert local.date() == date(2026, 3, 11) and local.utcoffset() == timedelta(hours=13)
+    text = (
+        "calendar: lastday\n03/10/2026 00:00\n\n"
+        "insert_job: bz\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\nrun_calendar: lastday\nstart_times: "08:00"\n'
+    )
+    assert _exhausted(preflight(lower_source(text), start=anchor, default_tz="Pacific/Auckland"))
+    assert not _exhausted(preflight(lower_source(text), start=anchor))
+    # the job's own zone wins the ladder's first rung
+    declared = text + "timezone: UTC\n"
+    assert not _exhausted(
+        preflight(lower_source(declared), start=anchor, default_tz="Pacific/Auckland")
+    )
+
+
+def test_preflight_without_an_anchor_probes_from_now() -> None:
+    """(ss8 DL-213): `start` omitted means now, so the exhaustion probe runs
+    on every call -- a calendar whose only date is in 2020 never fires
+    again, one dated 2099 still can."""
+
+    def catalog(day: str) -> CatalogIR:
+        return lower_source(
+            f"calendar: only\n{day} 00:00\n\n"
+            "insert_job: na\njob_type: c\ncommand: x\nmachine: localhost\n"
+            'date_conditions: 1\nrun_calendar: only\nstart_times: "08:00"\n'
+        )
+
+    # both literals are read against the WALL clock, not a fixture anchor:
+    # 2020 is behind every run of this test, 2099 ahead of it
+    assert _exhausted(preflight(catalog("01/01/2020")))
+    assert not _exhausted(preflight(catalog("12/31/2099")))
 
 
 def test_preflight_timezone_errors_on_a_bogus_zone() -> None:

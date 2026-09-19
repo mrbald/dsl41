@@ -759,9 +759,8 @@ ERROR:
   tokens, missing holcal/cyccal dependencies).
   The ERROR carries the interpreter's reason. A valid extended calendar
   passes and is honored (§5). Open composition corners compile on pinned
-  defaults and never refuse. With a `start` anchor, the probe also
-  surfaces generation-time refusals (for example, an exhausted replacement
-  walk) as ERRORs.
+  defaults and never refuse. The probe also surfaces generation-time
+  refusals (for example, an exhausted replacement walk) as ERRORs.
 - `timezone` not resolvable through the SEM-35 ladder (DL-62): not a
   `zoneinfo` name (case-insensitive), not in the supplied `--timezone-map`,
   not a POSIX fixed offset, and -- without a map -- not a unique zoneinfo
@@ -782,12 +781,14 @@ ERROR:
 
 WARN:
 - `run_calendar` whose eligible day set (run minus exclude) is empty, or
-  lies entirely before the run/rehearse `start` anchor when the caller
-  passes it (run: wall-now, rehearse: virtual `--start`, the only consumer
-  of the parameter). Then the job never fires (DL-56 dormant semantics —
-  silent-never-fires is preflight's business). Extended sources probe
-  their generator from the anchor instead (DL-57). Without an anchor
-  there is no probe, only compile validation.
+  lies entirely before the run/rehearse `start` anchor (run: wall-now,
+  rehearse: virtual `--start`). Then the job never fires (DL-56 dormant
+  semantics — silent-never-fires is preflight's business). Extended
+  sources probe their generator from the anchor instead (DL-57). An
+  omitted anchor means now, so the probes run on every call (DL-213).
+  The anchor is read as the job's local day, else the run's base zone,
+  else UTC — the scheduler's own ladder, so the WARN names the day the
+  engine names (DL-212).
 - an **extended** `exclude_calendar` that covers every eligible day within
   two years of the anchor, on a job whose source is `days_of_week` — a
   standard exclusion can never cover a weekly source, an extended one can

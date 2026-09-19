@@ -13453,3 +13453,50 @@ relitigate an entry; append a new one.
   (after this change every leg has headroom). Revisit only if a leg runs
   long again. The 70 s of real-clock waits in the supervisor, leadership,
   TUI and subprocess tests are left alone.
+- DL-212 Preflight names the day the scheduler names: the base zone is the
+  fallback before UTC (2026-09-19)
+  DL-56 gave the scheduler its day basis: the job's zone, else the run's
+  base zone from `--timezone`, else UTC. Preflight's calendar probes got a
+  shorter ladder in the same entry, the job's zone else UTC, with the note
+  that the base zone is not consulted because the WARN is advisory.
+  DL-209's register recorded the gap that opens
+  (`runtime:preflight-date-basis-utc`): a job with no zone of its own, in
+  an estate run under a base zone east of UTC, can be told at preflight
+  that its calendar is exhausted while the scheduler still has a day to
+  fire it, or told nothing while the scheduler is already past it. A WARN
+  that names a different day from the engine's is not advisory, it is
+  wrong.
+  Ruling: `preflight` takes `default_tz`, the value the scheduler is built
+  with, and `_preflight_local_day` resolves the job's zone, then the base
+  zone, then UTC, through `resolve_timezone` as the scheduler does. `run`
+  and `rehearse` pass their `--timezone`; the boundary's
+  `_preflight_errors` passes the profile's `default_tz`. `check_base_tz`
+  runs before preflight in both verbs, so the base zone preflight receives
+  has already been refused if it cannot resolve. The boundary's re-check,
+  `_preflight_errors`, had passed the profile's alias table as a dict, and
+  an absent `--timezone-map` is an empty table on a profile, which retires
+  SEM-35's unique-city rung: it refused a per-job city name the engine's
+  scheduler resolved, and it would have left the new base-zone rung dead.
+  It now reads the table through `tz_aliases_of` as `runner_startup` does.
+  A pinned base zone that stops resolving after the run started falls to
+  UTC in preflight and is refused by the scheduler's construction, the
+  backstop DL-62 named; the boundary adds no guard of its own. Two changes
+  are visible: a bad `--timezone` is refused before preflight prints, and a
+  boundary no longer refuses a city-named zone the run accepted. The
+  register row moves to supported and cites this entry.
+- DL-213 Preflight always probes the calendars: the anchor defaults to now
+  (2026-09-19)
+  DL-56 made the run anchor optional so bare-construction callers stayed
+  unchanged, and DL-57 kept the rule as "no anchor, no probe". Every
+  production caller passes one: `run` passes wall-now, `rehearse` its
+  virtual `--start`, the boundary the period's instant. The optional form
+  survived only in the library signature and in tests, and DL-209's
+  register recorded what it permits
+  (`runtime:preflight-no-start-skips-probe`): a caller that omits the
+  anchor is told nothing about a run_calendar that can never fire again.
+  Ruling: `start` stays optional in the signature and means now when
+  omitted, the naive-UTC wall clock `run` already passes. The exhaustion
+  and dormancy probes run on every call. A test that wants a fixed answer
+  passes a fixed anchor. No caller changes. The "no anchor, no probe"
+  clauses of DL-56 (5) and DL-57 (5) are superseded by this entry. The
+  register row moves to supported and cites this entry.

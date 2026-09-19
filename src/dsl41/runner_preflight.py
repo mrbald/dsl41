@@ -21,7 +21,7 @@ import socket as socket_mod
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
@@ -297,13 +297,21 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
 
 
 def _preflight_local_day(
-    tz_name: str | None, start: datetime, aliases: Mapping[str, str] | None = None
+    tz_name: str | None,
+    start: datetime,
+    aliases: Mapping[str, str] | None = None,
+    default_tz: str | None = None,
 ) -> date:
-    """The run anchor as the job's LOCAL day (E10 basis; unresolvable
-    zones fall back to the naive basis -- they carry their own ERROR)."""
+    """The run anchor as the job's LOCAL day, on the scheduler's ladder
+    (E10 basis; DL-212): the job's zone, else the run's base zone, else the
+    naive basis. An unresolvable zone falls through to the next rung rather
+    than raising as the scheduler does -- it already carries its own ERROR,
+    and the run it would have named a day for is refused."""
     tz = None
-    if tz_name and (resolved := resolve_timezone(tz_name, aliases)) is not None:
-        tz = resolved.tz
+    for name in (tz_name, default_tz):
+        if name and (resolved := resolve_timezone(name, aliases)) is not None:
+            tz = resolved.tz
+            break
     return to_local(start, tz).date()
 
 
@@ -413,8 +421,9 @@ def _calendar_preflight(
     name: str,
     job: JobIR,
     catalog: CatalogIR,
-    start: datetime | None,
+    start: datetime,
     tz_aliases: Mapping[str, str] | None,
+    default_tz: str | None = None,
 ) -> list[PreflightItem]:
     """ERROR/WARN: `run_calendar`/`exclude_calendar` resolution, exhaustion
     and dormancy (DL-56/DL-57) -- every finding here carries `code="calendar"`."""
@@ -467,19 +476,18 @@ def _calendar_preflight(
                     " dates after exclude_calendar subtraction -- the job never"
                     " fires (DL-56)"
                 )
-            elif start is not None:
-                local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+            else:
+                local_day = _preflight_local_day(sched.timezone, start, tz_aliases, default_tz)
                 if max(eligible) < local_day:
                     warn(
                         f"run_calendar {sched.run_calendar!r} is exhausted:"
                         f" last eligible date {max(eligible).isoformat()} lies before"
                         f" the run start -- the job never fires (DL-56)"
                     )
-        elif start is not None:
+        else:
             # an extended source probes its generator from the run anchor
-            # (run: wall-now; rehearse: --start); anchorless construction
-            # gets compile validation only (DL-56/57)
-            local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+            # (run: wall-now; rehearse: --start; omitted: now -- DL-213)
+            local_day = _preflight_local_day(sched.timezone, start, tz_aliases, default_tz)
             try:
                 nxt = _next_eligible_day(run_src, exclude_src, local_day)
             except CalendarRuleError as exc:
@@ -496,14 +504,13 @@ def _calendar_preflight(
     exclude_only = resolved.get("exclude_calendar")
     if (
         sched.run_calendar is None
-        and start is not None
         and (sched.start_times or sched.start_mins)
         and isinstance(exclude_only, CompiledCalendar)
     ):
         # a days_of_week source under an extended exclusion: a standard
         # exclude set can never cover a weekly source, an extended one can
         # (DL-57) -- probe two years of it
-        local_day = _preflight_local_day(sched.timezone, start, tz_aliases)
+        local_day = _preflight_local_day(sched.timezone, start, tz_aliases, default_tz)
         tokens = (
             frozenset(_DAY_CODES)
             if (sched.days_of_week is None or "all" in sched.days_of_week)
@@ -630,6 +637,7 @@ def preflight(
     machine_policy: MachinePolicy = "strict",
     as_machine: frozenset[str] = frozenset(),
     start: datetime | None = None,
+    default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
@@ -638,10 +646,15 @@ def preflight(
     depend on (calendars, timezones, construction) still gates.
 
     `start` (DL-56) is the run/rehearse anchor (naive UTC, the engine
-    basis); its only consumer is the calendar-exhaustion WARN -- a
-    run_calendar whose last eligible day lies before it never fires. None
-    skips that check (the base-zone --timezone flag is NOT consulted here:
-    the comparison uses the per-job zone else UTC, advisory only).
+    basis); its consumers are the calendar-exhaustion and dormancy probes
+    -- a run_calendar whose last eligible day lies before it never fires.
+    Omitted, it means now (DL-213), so the probes run on every call; a
+    caller that wants a fixed answer passes a fixed anchor.
+
+    `default_tz` (DL-212) is the run-level base zone the scheduler is built
+    with (--timezone). The calendar probes read the anchor as the job's
+    zone, else this base zone, else UTC -- the scheduler's own ladder, so
+    the WARN names the day the engine names.
 
     `tz_aliases` (DL-62) is the instance's ujo_timezones table (parsed
     `autotimezone -l` output, --timezone-map). SEM-35 names resolve through
@@ -664,6 +677,9 @@ def preflight(
     Each rule below is independent (DL-178t): the per-job rules run in the
     same fixed order every call, one `_*_preflight` helper each, all
     following `_resource_preflight`'s `err`/`warn` closure precedent."""
+    if start is None:
+        # DL-213: no anchor means now, the naive-UTC wall clock `run` passes
+        start = datetime.now(UTC).replace(tzinfo=None)
     items: list[PreflightItem] = []
     local = _local_identity(as_machine)
     user = getpass.getuser()
@@ -672,7 +688,7 @@ def preflight(
         if execution:
             items.extend(_machine_preflight(name, job, catalog, local, machine_policy))
             items.extend(_owner_preflight(name, job, user))
-        items.extend(_calendar_preflight(name, job, catalog, start, tz_aliases))
+        items.extend(_calendar_preflight(name, job, catalog, start, tz_aliases, default_tz))
         items.extend(_timezone_preflight(name, job, tz_aliases))
         items.extend(_retry_preflight(name, job))
         items.extend(_resource_preflight(name, job, catalog))

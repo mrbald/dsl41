@@ -2343,3 +2343,47 @@ def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
     monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _boom)
     with pytest.raises(EngineError, match="supervisor unavailable: no socket answered"):
         asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW))
+
+
+_CAL_JIL = (
+    "calendar: lastday\n03/10/2026 00:00\n\n"
+    "insert_job: bz\njob_type: c\ncommand: echo hi\nmachine: localhost\n"
+    'date_conditions: 1\nrun_calendar: lastday\nstart_times: "08:00"\n'
+)
+
+
+def test_rehearse_reads_the_calendar_day_in_the_base_zone(tmp_path: Path) -> None:
+    """DL-212 end to end: `--timezone` is the fallback preflight's calendar
+    probes read the anchor in, so the WARN names the day the scheduler will.
+    At 23:30Z on 2026-03-10 Auckland is already on the 11th and the calendar
+    is spent; under the naive UTC basis it is not."""
+    jil = tmp_path / "cal.jil"
+    jil.write_text(_CAL_JIL)
+    args = ["rehearse", str(jil), "--start", "2026-03-10T23:30:00", "--hours", "1"]
+    plain = CliRunner().invoke(app, [*args, "--run-root", str(tmp_path / "utc")])
+    assert plain.exit_code == 0, plain.output
+    assert "exhausted" not in plain.output
+    zoned = CliRunner().invoke(
+        app, [*args, "--run-root", str(tmp_path / "nz"), "--timezone", "Pacific/Auckland"]
+    )
+    assert zoned.exit_code == 0, zoned.output
+    assert "preflight WARN [calendar] bz: run_calendar 'lastday' is exhausted" in zoned.output
+
+
+def test_an_unresolvable_base_zone_is_refused_before_preflight_prints(tmp_path: Path) -> None:
+    """DL-212's one visible change: `check_base_tz` runs BEFORE the preflight
+    in `run` and `rehearse`, so the zone preflight falls back to has already
+    been refused. The control is the same estate without the flag, which
+    does print the WARN."""
+    jil = tmp_path / "stale.jil"
+    jil.write_text(_CAL_JIL.replace("03/10/2026", "01/01/2020"))
+    args = ["rehearse", str(jil), "--start", "2026-03-10T23:30:00", "--hours", "1"]
+    warned = CliRunner().invoke(app, [*args, "--run-root", str(tmp_path / "ok")])
+    assert warned.exit_code == 0, warned.output
+    assert "is exhausted" in warned.output
+    refused = CliRunner().invoke(
+        app, [*args, "--run-root", str(tmp_path / "bad"), "--timezone", "Bogus/Zone"]
+    )
+    assert refused.exit_code == 2
+    assert "--timezone 'Bogus/Zone' is not resolvable" in refused.stderr
+    assert "preflight" not in refused.stdout and "preflight" not in refused.stderr

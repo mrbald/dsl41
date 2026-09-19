@@ -3120,28 +3120,29 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     _row(
         surface="runtime",
         member="preflight-date-basis-utc",
-        klass=PROVISIONAL,
-        cite="SEM-35, runner_preflight._preflight_local_day",
-        effect="preflight reads the run anchor as the JOB's local day and falls back to"
-        " UTC for an unresolvable zone, never consulting the run-level base timezone the"
-        " scheduler uses; the two can name different days. No label was opened for it",
+        klass=SUPPORTED,
+        cite="DL-212, runner_preflight._preflight_local_day",
+        effect="the calendar probes read the run anchor on the scheduler's own ladder:"
+        " the JOB's local day, else the run-level base timezone, else UTC. Preflight and"
+        " the engine name the same day",
         trigger="kind: jil\n"
         + _job(
+            HOLCAL_BLOCK,
             date_conditions="1",
-            days_of_week="all",
+            run_calendar=f'"{HOLCAL_NAME}"',
             start_times='"08:00"',
-            timezone="Pacific/Auckland",
         ),
         quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
     ),
     _row(
         surface="runtime",
         member="preflight-no-start-skips-probe",
-        klass=PROVISIONAL,
-        cite="DL-56, runner_preflight.preflight",
-        effect="preflight with no run anchor skips the calendar-exhaustion probe"
-        " entirely, so a run_calendar that can never fire again passes unremarked."
-        " No label was opened for it",
+        klass=SUPPORTED,
+        cite="DL-213, runner_preflight.preflight",
+        effect="a preflight called with no run anchor takes now as the anchor, so the"
+        " exhaustion and dormancy probes run on every call; a caller that wants a fixed"
+        " answer passes a fixed anchor. The probe is day-granular: a last eligible day"
+        " equal to the anchor's day passes even when its start times have passed",
         trigger="kind: jil\n"
         + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
         quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
