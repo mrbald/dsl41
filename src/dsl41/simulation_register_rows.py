@@ -162,55 +162,6 @@ def _rows(
 
 # ------------------------------------------------------------------ statement
 
-_SUPPORTED_STATEMENTS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the statement text the trigger appends)
-    "insert_job": (
-        "DL-29",
-        "a job definition is lowered whole: linkage, semantics, schedule and exec spec",
-        "",
-    ),
-    "insert_machine": (
-        "DL-49",
-        "a machine definition is lowered to its type, node_name and pool members",
-        "",
-    ),
-    "insert_global": (
-        "SEM-08",
-        "a global variable's declared value seeds the oracle's global store",
-        "insert_global: G0\nvalue: 0",
-    ),
-    "insert_resource": (
-        "DL-50",
-        "a resource definition sizes one capacity bucket",
-        RESOURCE_BLOCK,
-    ),
-    "insert_xinst": (
-        "SEM-07",
-        "an external-instance definition is carried; cross-instance atoms read it by name",
-        "insert_xinst: X0\nxtype: a",
-    ),
-    "calendar": (
-        "SEM-36, DL-36",
-        "a standard calendar's date rows become the day set holcal and run_calendar read",
-        "calendar: SC0\n01/01/2026",
-    ),
-    "extended_calendar": (
-        "SEM-36, DL-36",
-        "an extended calendar's rules compile to a day generator",
-        "extended_calendar: EC0\ncondition: DAILY",
-    ),
-    "ext_calendar": (
-        "SEM-36, DL-60",
-        "the Manage Calendars spelling of extended_calendar, accepted as input leniency",
-        "ext_calendar: EC1\ncondition: DAILY",
-    ),
-    "cycle": (
-        "SEM-39",
-        "a cycle's start_date/end_date pairs become the periods cycle-scoped tokens count in",
-        "cycle: CY0\nstart_date: 01/01/2026\nend_date: 03/31/2026",
-    ),
-}
-
 _REFUSED_STATEMENTS: tuple[str, ...] = (
     "delete_blob",
     "delete_box",
@@ -239,17 +190,82 @@ _REFUSED_STATEMENTS: tuple[str, ...] = (
     "update_xinst",
 )
 
-STATEMENT_ROWS: tuple[Row, ...] = tuple(
+STATEMENT_ROWS: tuple[Row, ...] = (
     _row(
         surface="statement",
-        member=member,
+        member="insert_job",
         klass=SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=_stmt(extra) if extra else BASE_JIL,
-        quiet=GLOBAL_JIL if member in ("insert_job", "insert_machine") else None,
-    )
-    for member, (cite, effect, extra) in _SUPPORTED_STATEMENTS.items()
+        cite="DL-29",
+        effect="a job definition is lowered whole: linkage, semantics, schedule and exec spec",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="statement",
+        member="insert_machine",
+        klass=SUPPORTED,
+        cite="DL-49",
+        effect="a machine definition is lowered to its type, node_name and pool members",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="statement",
+        member="insert_global",
+        klass=SUPPORTED,
+        cite="SEM-08",
+        effect="a global variable's declared value seeds the oracle's global store",
+        trigger=_stmt("insert_global: G0\nvalue: 0"),
+    ),
+    _row(
+        surface="statement",
+        member="insert_resource",
+        klass=SUPPORTED,
+        cite="DL-50",
+        effect="a resource definition sizes one capacity bucket",
+        trigger=_stmt(RESOURCE_BLOCK),
+    ),
+    _row(
+        surface="statement",
+        member="insert_xinst",
+        klass=SUPPORTED,
+        cite="SEM-07",
+        effect="an external-instance definition is carried; cross-instance atoms read it by name",
+        trigger=_stmt("insert_xinst: X0\nxtype: a"),
+    ),
+    _row(
+        surface="statement",
+        member="calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a standard calendar's date rows become the day set holcal and run_calendar read",
+        trigger=_stmt("calendar: SC0\n01/01/2026"),
+    ),
+    _row(
+        surface="statement",
+        member="extended_calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="an extended calendar's rules compile to a day generator",
+        trigger=_stmt("extended_calendar: EC0\ncondition: DAILY"),
+    ),
+    _row(
+        surface="statement",
+        member="ext_calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-60",
+        effect="the Manage Calendars spelling of extended_calendar, accepted as input leniency",
+        trigger=_stmt("ext_calendar: EC1\ncondition: DAILY"),
+    ),
+    _row(
+        surface="statement",
+        member="cycle",
+        klass=SUPPORTED,
+        cite="SEM-39",
+        effect="a cycle's start_date/end_date pairs become the periods cycle-scoped"
+        " tokens count in",
+        trigger=_stmt("cycle: CY0\nstart_date: 01/01/2026\nend_date: 03/31/2026"),
+    ),
 ) + _rows(
     "statement",
     _REFUSED_STATEMENTS,
