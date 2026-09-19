@@ -158,7 +158,6 @@ from dsl41.ir import (
 )
 from dsl41.minify_rules import (
     BOX_JOB_TYPES,
-    INERT_COMMAND,
     JOB_SUBCOMMANDS,
     SUBJECT_NAMESPACE,
     Klass,
@@ -168,17 +167,17 @@ from dsl41.minify_rules import (
     vocabulary_words,
 )
 
+#: The mechanism half's own surface. The policy names this module imports are
+#: NOT re-exported: the policy/mechanism cut is the point of the split
+#: (DL-207), and a second import path to `classify` or `validate_keep` loses it
+#: (DL-75 review 2026-09-19). Policy is imported from `minify_rules`.
 __all__ = [
-    "INERT_COMMAND",
-    "Klass",
     "MinifyRefusal",
     "MinifyResult",
     "NameMap",
-    "classify",
     "leak_findings",
     "minify_files",
     "output_paths",
-    "validate_keep",
     "verify_findings",
 ]
 

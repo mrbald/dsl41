@@ -79,16 +79,26 @@ def load_catalog_or_exit_2(
     return load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)[0]
 
 
-def load_catalog_and_ast_or_exit_2(
+#: The exit-2 class: every way an input can fail to reach the tool, in one
+#: place. Two spellings of it decided that question before (DL-75 review
+#: 2026-09-19); `LoweringError` is in the tuple because the door below lowers,
+#: and the read/parse half cannot raise it.
+_EXIT_2_ERRORS = (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError)
+
+
+def parse_files_or_exit_2(
     files: Iterable[Path],
-    permit_unknown: bool,
     properties: list[Path] | None = None,
-) -> tuple[CatalogIR, list[JilFile], dict[str, str]]:
-    """Returns (catalog, parsed ASTs, input fingerprint). The fingerprint --
-    path -> sha256 -- is the ss10 spec_drift baseline (DL-65) and hashes the
-    SAME bytes this load parsed (review: a separate re-read could baseline
-    bytes the run never loaded, inverting the drift hint's one job), inside
-    the same guarded try so an unreadable input stays an exit-2 refusal."""
+) -> tuple[list[JilFile], dict[str, str]]:
+    """Read, substitute and parse; returns (parsed ASTs, input fingerprint).
+
+    The door's body minus lowering, so a verb that wants the AST and not the
+    catalog -- `minify` -- asks the same question in the same words. The
+    fingerprint -- path -> sha256 -- is the ss10 spec_drift baseline (DL-65)
+    and hashes the SAME bytes this load parsed (review: a separate re-read
+    could baseline bytes the run never loaded, inverting the drift hint's one
+    job), inside the same guarded try so an unreadable input stays an exit-2
+    refusal."""
     try:
         parsed: list[JilFile] = []
         fingerprint: dict[str, str] = {}
@@ -102,10 +112,25 @@ def load_catalog_and_ast_or_exit_2(
             if bindings is not None:
                 text, _ = substitute(text, bindings, file=str(path))
             parsed.append(parse(text, file=str(path)))
-        return lower_catalog(parsed, permit_unknown=permit_unknown), parsed, fingerprint
-    except (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
+        return parsed, fingerprint
+    except _EXIT_2_ERRORS as exc:
         # OSError/UnicodeDecodeError: unreadable input (missing file, directory,
         # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
+        raise typer.Exit(refuse(exc)) from exc
+
+
+def load_catalog_and_ast_or_exit_2(
+    files: Iterable[Path],
+    permit_unknown: bool,
+    properties: list[Path] | None = None,
+) -> tuple[CatalogIR, list[JilFile], dict[str, str]]:
+    """Returns (catalog, parsed ASTs, input fingerprint): the door every
+    catalog-consuming verb loads through. Parsing is `parse_files_or_exit_2`;
+    lowering is guarded here, under the same exit-2 class."""
+    parsed, fingerprint = parse_files_or_exit_2(files, properties)
+    try:
+        return lower_catalog(parsed, permit_unknown=permit_unknown), parsed, fingerprint
+    except _EXIT_2_ERRORS as exc:
         raise typer.Exit(refuse(exc)) from exc
 
 

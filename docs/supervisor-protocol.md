@@ -312,10 +312,7 @@ perimeter deliberately does not copy that fallback: it fails closed
 (`docs/access-model.md` §3). The supervisor also writes `<run_root>/supervisor.pid` (JSON:
 `pid`, `boot_id`, `incarnation`, `started_at`). *(Amended by DL-150.)* It
 logs to its own stderr and opens no log file. The spawner is what points
-that stderr at `<run_root>/supervisor.log`. On
-start, if a live supervisor already holds the socket (connect probe), the
-supervisor refuses to run. It unlinks a stale socket — parity with the
-engine's control-socket gate (runner-design §10).
+that stderr at `<run_root>/supervisor.log`.
 
 *(Amended by DL-210.)* Startup first takes `<run_root>/supervisor.lock`,
 an exclusive non-blocking flock held for the process lifetime. The file is
