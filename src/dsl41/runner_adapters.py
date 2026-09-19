@@ -933,8 +933,17 @@ class FileWatcherAdapter:
             next_at = at + timedelta(seconds=interval)
 
 
-#: seconds between LIST re-checks (also the duplicate await's 1-second polls)
+#: SECONDS between LIST re-checks, in both nets and in no other unit. The
+#: per-wait net counted it as ITERATIONS of the poll below, so the two
+#: readings agreed only while that poll was 1.0 s: shortening the poll would
+#: have moved one net's cadence and not the other's (DL-75 review
+#: 2026-09-19). The per-wait net now spends a budget of seconds.
 _LIST_RECHECK_EVERY = 5
+
+#: How long `_await_outcome` waits on one pass before re-reading status.json
+#: (a push missed at reattach). Named so a test can shorten it and see that
+#: `_LIST_RECHECK_EVERY` above still means seconds.
+_OUTCOME_POLL_S = 1.0
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -1747,7 +1756,15 @@ class SupervisedCommandAdapter:
         # periodically and a definitive "not alive" falls to the spool
         # ladder. Fresh spawns are also covered by the shared client net
         # after a dropped-push hint or reconnect.
-        recheck_countdown = _LIST_RECHECK_EVERY
+        #
+        # A BUDGET of seconds, spent on the loop's own clock -- the clock the
+        # poll below is measured against. It used to be a count of polls,
+        # which made `_LIST_RECHECK_EVERY` seconds in the shared net and
+        # iterations here. Only CONNECTED time is spent: a lost connection
+        # skipped the countdown, and the reconnect at the top of the loop
+        # owns that window, so an outage must not consume the interval.
+        loop = asyncio.get_running_loop()
+        recheck_left = float(_LIST_RECHECK_EVERY)
         try:
             while True:
                 listed_dead = self.client.watch_exit(run_id)
@@ -1765,10 +1782,11 @@ class SupervisedCommandAdapter:
                 lost_wait = asyncio.ensure_future(self.client.lost.wait())
                 exit_wait = asyncio.ensure_future(asyncio.shield(fut))
                 listed_wait = asyncio.ensure_future(listed_dead.wait())
+                polled_at = loop.time()
                 try:
                     await asyncio.wait(
                         {exit_wait, lost_wait, listed_wait},
-                        timeout=1.0,  # re-poll status.json (a missed push at reattach)
+                        timeout=_OUTCOME_POLL_S,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
@@ -1784,9 +1802,9 @@ class SupervisedCommandAdapter:
                         f"exit_status_unobservable (wrapper exited rc={rc} without a status record)"
                     )
                 if recheck_listing and not self.client.lost.is_set():
-                    recheck_countdown -= 1
-                    if recheck_countdown <= 0:
-                        recheck_countdown = _LIST_RECHECK_EVERY
+                    recheck_left -= loop.time() - polled_at
+                    if recheck_left <= 0:
+                        recheck_left = float(_LIST_RECHECK_EVERY)
                         if not await self._listed_alive(run_id):
                             # definitive: the supervisor answered and the run
                             # is not alive anywhere. Dead evidence is the
