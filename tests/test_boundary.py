@@ -4698,3 +4698,34 @@ def test_sem35_every_replay_of_a_map_only_zone_reads_the_periods_own_table(
     records = read_journal(wal_path(run_root, 1))
     replay_trace(run_root, records, catalog)  # the history fold
     audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))  # audit
+
+
+def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
+    tmp_path: Path,
+) -> None:
+    """DL-212 wired the base zone into the boundary's preflight, and the
+    profile cannot spell "no map": an absent `--timezone-map` is an EMPTY
+    table on it. Passing that dict on retires SEM-35's unique-city rung, so
+    a city name refuses a boundary the `Scheduler` builds happily
+    (DL-151/DL-163) -- `tz_aliases_of` is what the two must share."""
+    from dsl41.boundary import _preflight_errors
+    from dsl41.ir import lower_source
+    from dsl41.period import runtime_profile_from_cli, tz_aliases_of
+
+    catalog = lower_source(
+        "calendar: lastday\n03/10/2026 00:00\n\n"
+        "insert_job: bz\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\nrun_calendar: lastday\nstart_times: "08:00"\n'
+        "timezone: Zurich\n"
+    )
+    profile = runtime_profile_from_cli(timezone="Zurich")
+    assert dict(profile.tz_aliases) == {}  # the empty table, not an absent one
+    at = datetime(2026, 3, 10, 23, 30)
+    assert _preflight_errors(catalog, profile, at=at) == []
+    # the engine resolves both zones on the same inputs and builds
+    Scheduler(
+        catalog,
+        start=at,
+        default_tz=profile.default_tz,
+        tz_aliases=tz_aliases_of(profile),
+    )
