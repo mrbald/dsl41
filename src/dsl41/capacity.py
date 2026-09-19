@@ -52,10 +52,13 @@ DemandEntry = tuple[str, int, DemandMode, ReleasePolicy | None]
 RES_TYPES = frozenset({"R", "D", "T"})
 
 #: DL-50's per-request FREE overrides, upper-cased: Y release on SUCCESS
-#: only, N never release, A release on any terminal. A code outside the set
-#: is a lowering error (`ir._parse_resources`), so `release_policy` reads the
-#: set and falls back to the res_type default for anything else (DL-209).
-FREE_CODES = frozenset({"Y", "N", "A"})
+#: only, N never release, A release on any terminal. A code outside the
+#: mapping is a lowering error (`ir._parse_resources`), so `release_policy`
+#: falls back to the res_type default for anything else (DL-209).
+_FREE_POLICY: dict[str, ReleasePolicy] = {"Y": "success", "N": "never", "A": "completion"}
+#: The domain the register's `free_code` surface enumerates, derived from the
+#: mapping so a fourth code needs one edit, not two (DL-75 review 2026-09-19).
+FREE_CODES = frozenset(_FREE_POLICY)
 
 #: The two members of `RES_TYPES` this module branches on by name: T is a
 #: check-only threshold, D is the depletable whose default is never-release.
@@ -271,13 +274,9 @@ def release_policy(res_type: str, free: str | None) -> ReleasePolicy:
     PUBLIC because the explore page states the same policy per lock member
     (DL-192), and a second copy of this table would drift from the pool's
     (DL-72). One owner, two readers."""
-    if free in FREE_CODES:
-        if free == "Y":
-            return "success"
-        if free == "N":
-            return "never"
-        return "completion"  # "A", the third member
-    return "never" if res_type == _DEPLETABLE else "completion"  # FREE absent -> res_type default
+    # FREE absent, or a code the mapping does not define -> res_type default
+    default: ReleasePolicy = "never" if res_type == _DEPLETABLE else "completion"
+    return _FREE_POLICY.get(free or "", default)
 
 
 def _merge_policy(a: ReleasePolicy | None, b: ReleasePolicy | None) -> ReleasePolicy | None:
