@@ -20,6 +20,7 @@ from dsl41.cli_common import (
     PERMIT_UNKNOWN,
     PROPERTIES,
     load_catalog_or_exit_2,
+    parse_files_or_exit_2,
     refuse,
 )
 from dsl41.ir import CatalogIR
@@ -680,20 +681,9 @@ def minify(
     value outside its closed space, or an existing output file without
     --force. A refusal quotes the estate on stderr and says so.
     """
-    from dsl41.ast_jil import JilFile, JilParseError
-    from dsl41.ast_jil import parse as parse_jil
     from dsl41.minify import MinifyRefusal, minify_files, output_paths
 
-    try:
-        bindings = load_properties(properties) if properties else None
-        parsed: list[JilFile] = []
-        for path in files:
-            text = path.read_bytes().decode("utf-8")
-            if bindings is not None:
-                text, _ = substitute(text, bindings, file=str(path))
-            parsed.append(parse_jil(text, file=str(path)))
-    except (JilParseError, PlaceholderError, OSError, UnicodeDecodeError) as exc:
-        raise typer.Exit(refuse(exc)) from exc
+    parsed, _fingerprint = parse_files_or_exit_2(files, properties)
     try:
         targets = output_paths(list(files), out) if out is not None else []
         if not force:

@@ -127,6 +127,7 @@ if TYPE_CHECKING:
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
+        valid_start_token,
         durable_write,
         durable_write_json,
         fsync_dir,
@@ -150,6 +151,7 @@ else:
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
+        valid_start_token,
         durable_write,
         durable_write_json,
         fsync_dir,
@@ -175,20 +177,6 @@ def _test_limit(name: str, default: int) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
-
-
-def _valid_start_token(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    if value.startswith("ticks:"):
-        return re.fullmatch(r"ticks:(0|[1-9][0-9]*)", value) is not None
-    if value.startswith("lstart:"):
-        try:
-            time.strptime(value[len("lstart:") :], "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            return False
-        return True
-    return False
 
 
 #: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
@@ -483,7 +471,7 @@ class Supervisor:
         if current is not None:
             return (
                 isinstance(recorded, str)
-                and _valid_start_token(recorded)
+                and valid_start_token(recorded)
                 and not start_tokens_match(current, recorded)
             )
         try:

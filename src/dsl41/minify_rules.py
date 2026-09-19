@@ -302,7 +302,12 @@ _REL_RE = re.compile(r"\+\d+")
 _CODE_RE = re.compile(r"\d+(?:-\d+)?")
 _ONE_CHAR_RE = re.compile(r"[A-Za-z0-9]")
 _DATE_RE = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
+#: `ir._TRUTHY | ir._FALSY`. Re-stated rather than imported: a private
+#: cross-module import is a coupling neither module promised (DL-74). The copy
+#: is pinned to its source by a test (DL-75 review 2026-09-19).
 _BOOLS = frozenset({"0", "1", "y", "n", "yes", "no", "true", "false"})
+#: `ir._DAY_TOKENS | set(ir._DAY_FULL)`, re-stated and pinned on the same
+#: terms as `_BOOLS` above.
 _DAY_TOKENS = frozenset(
     {
         "su",
@@ -553,34 +558,33 @@ def validate_date_rows(rows: list[str]) -> str | None:
 #: preserves verbatim, plus the inert command. Attribute keys and subcommand
 #: names join them in `_vocabulary`. Without this set every estate whose
 #: comments quote its own JIL -- which is every estate -- refuses.
-_VALUE_KEYWORDS = frozenset(
-    {
-        "quantity",
-        "free",
-        "sleep",
-        "true",
-        "false",
-        # SEM-02 condition keywords and SEM-24 definition-time statuses
-        "success",
-        "failure",
-        "done",
-        "terminated",
-        "notrunning",
-        "exitcode",
-        "value",
-        "inactive",
-        "on_hold",
-        "on_ice",
-        "on_noexec",
-        # day tokens in their long spelling (the short ones are under the floor)
-        "sunday",
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-    }
+#:
+#: The statuses and the day tokens are DERIVED from the sets this module
+#: already holds, never spelled again: a second lowercase copy had to be kept
+#: equal to `_DEFINITION_STATUSES` by hand and by case, and the long day names
+#: were `_DAY_TOKENS` re-typed twenty lines later (DL-75 review 2026-09-19).
+#: The short day spellings come along and cost nothing: `_vocabulary` tokenises
+#: this set at the leak guard's 4-character floor, which they are under.
+_VALUE_KEYWORDS = (
+    frozenset(
+        {
+            "quantity",
+            "free",
+            "sleep",
+            "true",
+            "false",
+            # SEM-02 condition keywords
+            "success",
+            "failure",
+            "done",
+            "terminated",
+            "notrunning",
+            "exitcode",
+            "value",
+        }
+    )
+    | frozenset(status.lower() for status in _DEFINITION_STATUSES)  # SEM-24
+    | _DAY_TOKENS
 )
 
 

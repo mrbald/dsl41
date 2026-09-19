@@ -28,6 +28,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -339,6 +340,28 @@ def proc_is_zombie(pid: int) -> bool:
 
 
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+_TICKS_TOKEN_RE = re.compile(r"ticks:(0|[1-9][0-9]*)")
+
+
+def valid_start_token(value: object) -> bool:
+    """Is `value` a start token THIS module could have minted?
+
+    The distinction `start_tokens_match` cannot draw: a token that will not
+    parse is not evidence of reuse, so a reader that must decide "absent" from
+    a recorded token has to know the vocabulary first. It lived in the
+    supervisor, which re-spelled the `lstart:` format `proc_start_token` writes
+    (DL-75 review 2026-09-19); the grammar belongs beside the minting."""
+    if not isinstance(value, str):
+        return False
+    if value.startswith("ticks:"):
+        return _TICKS_TOKEN_RE.fullmatch(value) is not None
+    if value.startswith("lstart:"):
+        try:
+            time.strptime(value[len("lstart:") :], _LSTART_FORMAT)
+        except ValueError:
+            return False
+        return True
+    return False
 
 
 def start_tokens_match(a: str, b: str, *, tolerance_s: float = 2.0) -> bool:
