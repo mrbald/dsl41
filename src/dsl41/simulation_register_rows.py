@@ -3283,86 +3283,89 @@ FOREIGN_ESTATE = _placed("FAR", FOREIGN_MACHINE)
 
 #: Preflight's own verdict vocabulary. Fixtures here deliberately produce
 #: preflight findings -- that is what the surface enumerates.
-_PREFLIGHT_CODES: dict[str, tuple[str, str, str, str]] = {
-    # member: (class, cite, effect, the estate)
-    "resources": (
-        REFUSED,
-        "runner_preflight._resource_preflight, DL-50",
-        "a resource the oracle cannot model faithfully refuses the run",
-        _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
+#: The codes below, plus the two no JIL can reach. An unreachable row says so
+#: on the row (`reachable=False`); both its fixtures are ordinary estates that
+#: show the gate passing, so it names its quiet explicitly -- the base estate
+#: is already its trigger, and a row's two fixtures must differ
+#: (DL-75 review 2026-09-19).
+PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
+    _row(
+        surface="preflight_code",
+        member="resources",
+        klass=REFUSED,
+        cite="runner_preflight._resource_preflight, DL-50",
+        effect="a resource the oracle cannot model faithfully refuses the run",
+        trigger=_job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
     ),
-    "owner": (
-        REFUSED,
-        "runner_preflight._owner_preflight",
-        "an owner other than the invoking user refuses the run: there is no setuid",
-        _job(owner="someone_else"),
+    _row(
+        surface="preflight_code",
+        member="owner",
+        klass=REFUSED,
+        cite="runner_preflight._owner_preflight",
+        effect="an owner other than the invoking user refuses the run: there is no setuid",
+        trigger=_job(owner="someone_else"),
     ),
-    "machine": (
-        REFUSED,
-        "runner_preflight._machine_preflight, DL-49",
-        "a job whose machine does not resolve to this host refuses the run:"
+    _row(
+        surface="preflight_code",
+        member="machine",
+        klass=REFUSED,
+        cite="runner_preflight._machine_preflight, DL-49",
+        effect="a job whose machine does not resolve to this host refuses the run:"
         " there is no remote fabric",
-        FOREIGN_ESTATE,
+        trigger=FOREIGN_ESTATE,
     ),
-    "machine-mixed": (
-        SUPPORTED,
-        "runner_preflight._machine_preflight, DL-49",
-        "a pool with some members here and some elsewhere runs here under"
+    _row(
+        surface="preflight_code",
+        member="machine-mixed",
+        klass=SUPPORTED,
+        cite="runner_preflight._machine_preflight, DL-49",
+        effect="a pool with some members here and some elsewhere runs here under"
         " local-eligible, with a warning that pool placement was ignored",
-        _placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
+        trigger=_placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
     ),
-    "calendar": (
-        REFUSED,
-        "runner_preflight._calendar_preflight, DL-56",
-        "a calendar the scheduler cannot read or that can never fire refuses the run",
-        _job(date_conditions="1", run_calendar="MISSING"),
+    _row(
+        surface="preflight_code",
+        member="calendar",
+        klass=REFUSED,
+        cite="runner_preflight._calendar_preflight, DL-56",
+        effect="a calendar the scheduler cannot read or that can never fire refuses the run",
+        trigger=_job(date_conditions="1", run_calendar="MISSING"),
     ),
-    "timezone": (
-        REFUSED,
-        "runner_preflight._timezone_preflight, SEM-35",
-        "a timezone name the SEM-35 ladder cannot resolve refuses the run",
-        _job(
+    _row(
+        surface="preflight_code",
+        member="timezone",
+        klass=REFUSED,
+        cite="runner_preflight._timezone_preflight, SEM-35",
+        effect="a timezone name the SEM-35 ladder cannot resolve refuses the run",
+        trigger=_job(
             date_conditions="1",
             days_of_week="all",
             start_times='"08:00"',
             timezone="Mars/Olympus",
         ),
     ),
-    "n-retrys": (
-        SUPPORTED,
-        "runner_preflight._retry_preflight, DL-53",
-        "the run is warned, not refused: n_retrys is carried and never applied,"
+    _row(
+        surface="preflight_code",
+        member="n-retrys",
+        klass=SUPPORTED,
+        cite="runner_preflight._retry_preflight, DL-53",
+        effect="the run is warned, not refused: n_retrys is carried and never applied,"
         " so the job runs exactly once",
-        _job(n_retrys="2"),
+        trigger=_job(n_retrys="2"),
     ),
-    "skeleton-cycle": (
-        SUPPORTED,
-        "runner_preflight._skeleton_cycle_preflight, DL-13",
-        "a cycle in the AND-success skeleton is legal AutoSys; it warns and"
+    _row(
+        surface="preflight_code",
+        member="skeleton-cycle",
+        klass=SUPPORTED,
+        cite="runner_preflight._skeleton_cycle_preflight, DL-13",
+        effect="a cycle in the AND-success skeleton is legal AutoSys; it warns and"
         " disables `plan` rather than refusing the run",
-        _estate(
+        trigger=_estate(
             MACHINE_BLOCK,
             "insert_job: A\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(B)",
             "insert_job: B\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(A)",
         ),
     ),
-}
-
-#: The codes above, plus the two no JIL can reach. An unreachable row says so
-#: on the row (`reachable=False`); both its fixtures are ordinary estates that
-#: show the gate passing, so it names its quiet explicitly -- the base estate
-#: is already its trigger, and a row's two fixtures must differ
-#: (DL-75 review 2026-09-19).
-PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
-    _row(
-        surface="preflight_code",
-        member=member,
-        klass=klass,
-        cite=cite,
-        effect=effect,
-        trigger=estate,
-    )
-    for member, (klass, cite, effect, estate) in _PREFLIGHT_CODES.items()
 ) + (
     _row(
         surface="preflight_code",
@@ -3570,122 +3573,186 @@ CAL_FORM_ROWS: tuple[Row, ...] = (
 #: Every closed alternative set a Literal declares in the estate-facing
 #: modules that no dedicated surface already owns. The fixture kind is
 #: `site`: most of these are discriminators and shapes a JIL estate cannot
-#: select directly, so the row names the declaring module instead.
-_LITERAL_ALTS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the declaring site)
-    "And.kind=and": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that makes an AND node readable back from JSON",
-        "conditions.And",
-    ),
-    "Or.kind=or": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that makes an OR node readable back from JSON",
-        "conditions.Or",
-    ),
-    "Paren.kind=paren": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that keeps explicit grouping in the model",
-        "conditions.Paren",
-    ),
-    "StatusAtom.kind=status": (
-        "SEM-02, ir-design ss3",
-        "the discriminator of a job-status atom",
-        "conditions.StatusAtom",
-    ),
-    "ExitCodeAtom.kind=exitcode": (
-        "SEM-02, ir-design ss3",
-        "the discriminator of an exit-code atom",
-        "conditions.ExitCodeAtom",
-    ),
-    "GlobalAtom.kind=global": (
-        "SEM-08, ir-design ss3",
-        "the discriminator of a global-variable atom",
-        "conditions.GlobalAtom",
-    ),
-    "ExecSpec.kind=cmd": (
-        "SEM-10, ir-design ss4",
-        "the discriminator that selects the command exec spec",
-        "ir.ExecSpec",
-    ),
-    "FwSpec.kind=fw": (
-        "SEM-10, ir-design ss4",
-        "the discriminator that selects the file-watcher exec spec",
-        "ir.FwSpec",
-    ),
-    "CalendarIR.kind=standard": (
-        "SEM-36, DL-36",
-        "a calendar of date rows; `standard_days` reads it and `holcal` requires it",
-        "ir.CalendarIR",
-    ),
-    "CalendarIR.kind=extended": (
-        "SEM-36, DL-36",
-        "a calendar of rules; `compile_calendar` reads it and refuses a standard one",
-        "ir.CalendarIR",
-    ),
-    "CatalogIR.ir_version=0.2": (
-        "ir-design ss4",
-        "the IR version stamped on every catalog; a reader that meets another refuses",
-        "ir.CatalogIR",
-    ),
-    "SlaSpec.kind=absolute": (
-        "SEM-34, oracle.Oracle._arm_sla_and_term",
-        "an absolute must_*_times is lowered and carried, and arms nothing: the oracle"
-        " owns no calendar, so no absolute deadline exists v1",
-        "ir.SlaSpec",
-    ),
-    "SlaSpec.kind=relative": (
-        "SEM-34, oracle.Oracle._arm_sla_and_term",
-        "a relative `+n` must_*_times is what arms the alarm timer",
-        "ir.SlaSpec",
-    ),
-    "PreflightItem.severity=ERROR": (
-        "runner-design ss8",
-        "the finding refuses the run",
-        "runner_preflight.PreflightItem",
-    ),
-    "PreflightItem.severity=WARN": (
-        "runner-design ss8",
-        "the finding is printed and journaled, and the run goes ahead",
-        "runner_preflight.PreflightItem",
-    ),
-    "ResolvedTz.how=os": (
-        "SEM-35",
-        "the zone name resolved straight out of the OS database",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=map": (
-        "SEM-35, DL-62",
-        "the name resolved through the estate's ujo_timezones alias table, chained at"
-        " most five hops with an OS lookup per hop",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=city": (
-        "SEM-35",
-        "the unique-city default, which applies ONLY when the estate supplied no alias"
-        " table at all",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=posix": (
-        "SEM-35",
-        "a POSIX fixed-offset spelling, resolved without the zone database",
-        "timezones.ResolvedTz",
-    ),
-}
-
-LITERAL_ALT_ROWS: tuple[Row, ...] = tuple(
+#: select directly, so the row names the declaring module instead. Each
+#: row's quiet is a site in ANOTHER module: the detector reads what the
+#: module declares, so the quiet has to be somewhere that declares none
+#: of it -- `conditions.parse_condition` for a row whose own site is
+#: `ir.*`, `ir.unquote_jil_value` otherwise.
+LITERAL_ALT_ROWS: tuple[Row, ...] = (
     _row(
         surface="literal_alt",
-        member=member,
+        member="And.kind=and",
         klass=SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=site,
-        # a site in ANOTHER module: the detector reads what the module
-        # declares, so the quiet has to be somewhere that declares none of it
-        quiet="conditions.parse_condition" if site.startswith("ir.") else "ir.unquote_jil_value",
-    )
-    for member, (cite, effect, site) in _LITERAL_ALTS.items()
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that makes an AND node readable back from JSON",
+        trigger="conditions.And",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="Or.kind=or",
+        klass=SUPPORTED,
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that makes an OR node readable back from JSON",
+        trigger="conditions.Or",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="Paren.kind=paren",
+        klass=SUPPORTED,
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that keeps explicit grouping in the model",
+        trigger="conditions.Paren",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="StatusAtom.kind=status",
+        klass=SUPPORTED,
+        cite="SEM-02, ir-design ss3",
+        effect="the discriminator of a job-status atom",
+        trigger="conditions.StatusAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ExitCodeAtom.kind=exitcode",
+        klass=SUPPORTED,
+        cite="SEM-02, ir-design ss3",
+        effect="the discriminator of an exit-code atom",
+        trigger="conditions.ExitCodeAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="GlobalAtom.kind=global",
+        klass=SUPPORTED,
+        cite="SEM-08, ir-design ss3",
+        effect="the discriminator of a global-variable atom",
+        trigger="conditions.GlobalAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ExecSpec.kind=cmd",
+        klass=SUPPORTED,
+        cite="SEM-10, ir-design ss4",
+        effect="the discriminator that selects the command exec spec",
+        trigger="ir.ExecSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="FwSpec.kind=fw",
+        klass=SUPPORTED,
+        cite="SEM-10, ir-design ss4",
+        effect="the discriminator that selects the file-watcher exec spec",
+        trigger="ir.FwSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CalendarIR.kind=standard",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a calendar of date rows; `standard_days` reads it and `holcal` requires it",
+        trigger="ir.CalendarIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CalendarIR.kind=extended",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a calendar of rules; `compile_calendar` reads it and refuses a standard one",
+        trigger="ir.CalendarIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CatalogIR.ir_version=0.2",
+        klass=SUPPORTED,
+        cite="ir-design ss4",
+        effect="the IR version stamped on every catalog; a reader that meets another refuses",
+        trigger="ir.CatalogIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="SlaSpec.kind=absolute",
+        klass=SUPPORTED,
+        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        effect="an absolute must_*_times is lowered and carried, and arms nothing: the"
+        " oracle owns no calendar, so no absolute deadline exists v1",
+        trigger="ir.SlaSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="SlaSpec.kind=relative",
+        klass=SUPPORTED,
+        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        effect="a relative `+n` must_*_times is what arms the alarm timer",
+        trigger="ir.SlaSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="PreflightItem.severity=ERROR",
+        klass=SUPPORTED,
+        cite="runner-design ss8",
+        effect="the finding refuses the run",
+        trigger="runner_preflight.PreflightItem",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="PreflightItem.severity=WARN",
+        klass=SUPPORTED,
+        cite="runner-design ss8",
+        effect="the finding is printed and journaled, and the run goes ahead",
+        trigger="runner_preflight.PreflightItem",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=os",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="the zone name resolved straight out of the OS database",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=map",
+        klass=SUPPORTED,
+        cite="SEM-35, DL-62",
+        effect="the name resolved through the estate's ujo_timezones alias table, chained"
+        " at most five hops with an OS lookup per hop",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=city",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="the unique-city default, which applies ONLY when the estate supplied no"
+        " alias table at all",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=posix",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="a POSIX fixed-offset spelling, resolved without the zone database",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
 )
 
 
