@@ -2199,21 +2199,6 @@ _DEFECTIVE_FAMILIES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-_CAL_OPERATORS: dict[str, tuple[str, str]] = {
-    # member: (effect, the condition line its trigger carries)
-    "(": ("groups a subexpression", "condition: (DAILY | MON)"),
-    ")": ("closes a grouped subexpression", "condition: (DAILY | MON)"),
-    "{": ("the observed brace spelling of `(`", "condition: {DAILY} | {MON}"),
-    "}": ("the observed brace spelling of `)`", "condition: {DAILY} | {MON}"),
-    "&": ("intersects two operands", "condition: MON & JAN"),
-    "|": ("unions two operands", "condition: MON | TUE"),
-    "and": ("the word synonym of `&`", "condition: MON AND JAN"),
-    "or": ("the word synonym of `|`", "condition: MON OR TUE"),
-    "not": ("complements its operand", "condition: NOT MON"),
-    "x": ("the X- prefix reads a token as its complement", "condition: DAILY & XMON"),
-    ",": ("separates the rules of one calendar", "condition: MON,TUE"),
-}
-
 #: What each (category, action) pair DOES (SEM-38). The pair is the
 #: behaviour, not the letter: N advances exactly one calendar day for a
 #: holiday and walks to the next non-holiday workday for a non-workday, and
@@ -2266,16 +2251,95 @@ CALENDAR_ROWS: tuple[Row, ...] = (
         )
         for member, (token, pattern, words) in _DEFECTIVE_FAMILIES.items()
     )
-    + tuple(
+    + (
         _row(
             surface="cal_operator",
-            member=member,
+            member="(",
             klass=SUPPORTED,
             cite="SEM-37, DL-60",
-            effect=effect,
-            trigger=_cal(line),
-        )
-        for member, (effect, line) in _CAL_OPERATORS.items()
+            effect="groups a subexpression",
+            trigger=_cal("condition: (DAILY | MON)"),
+        ),
+        _row(
+            surface="cal_operator",
+            member=")",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="closes a grouped subexpression",
+            trigger=_cal("condition: (DAILY | MON)"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="{",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the observed brace spelling of `(`",
+            trigger=_cal("condition: {DAILY} | {MON}"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="}",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the observed brace spelling of `)`",
+            trigger=_cal("condition: {DAILY} | {MON}"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="&",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="intersects two operands",
+            trigger=_cal("condition: MON & JAN"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="|",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="unions two operands",
+            trigger=_cal("condition: MON | TUE"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="and",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the word synonym of `&`",
+            trigger=_cal("condition: MON AND JAN"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="or",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the word synonym of `|`",
+            trigger=_cal("condition: MON OR TUE"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="not",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="complements its operand",
+            trigger=_cal("condition: NOT MON"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="x",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the X- prefix reads a token as its complement",
+            trigger=_cal("condition: DAILY & XMON"),
+        ),
+        _row(
+            surface="cal_operator",
+            member=",",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="separates the rules of one calendar",
+            trigger=_cal("condition: MON,TUE"),
+        ),
     )
     + (
         _row(
