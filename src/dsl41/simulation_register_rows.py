@@ -8,8 +8,8 @@ with no row -- and on a row whose member the code no longer has.
 
 Fixture strings are interpreted by `tests/test_simulation_register.py`
 according to the surface's fixture kind (jil, cond, scenario, profile,
-outcome). A `runtime` row says its kind in a leading `kind: <name>` line,
-because that surface is free and its rows pick their own.
+outcome) -- one kind per surface, the test's own table. A row does not say
+its kind (DL-75 review 2026-09-19).
 
 This module imports nothing from `simulation_register`: the data is plain,
 so the dependency runs one way and the two files never form a cycle.
@@ -120,11 +120,6 @@ def _scn(jil: str, *events: str) -> str:
 BASE_JIL = _estate(MACHINE_BLOCK, JOB_BLOCK)
 #: the quiet estate for rows the base estate itself would trigger
 GLOBAL_JIL = "insert_global: G0\nvalue: 0\n"
-#: a job with no condition string at all: nothing parses, so nothing is seen
-BASE_COND = ""
-BASE_SCENARIO = _scn(BASE_JIL)
-BASE_PROFILE = "{}"
-BASE_OUTCOME = "int"
 
 TICKER_BLOCK = "insert_job: TICK\njob_type: c\ncommand: true\nmachine: M0"
 SCHEDULED_JOB = _job(date_conditions="1", days_of_week="all", start_times='"08:00"')
@@ -167,55 +162,6 @@ def _rows(
 
 # ------------------------------------------------------------------ statement
 
-_SUPPORTED_STATEMENTS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the statement text the trigger appends)
-    "insert_job": (
-        "DL-29",
-        "a job definition is lowered whole: linkage, semantics, schedule and exec spec",
-        "",
-    ),
-    "insert_machine": (
-        "DL-49",
-        "a machine definition is lowered to its type, node_name and pool members",
-        "",
-    ),
-    "insert_global": (
-        "SEM-08",
-        "a global variable's declared value seeds the oracle's global store",
-        "insert_global: G0\nvalue: 0",
-    ),
-    "insert_resource": (
-        "DL-50",
-        "a resource definition sizes one capacity bucket",
-        RESOURCE_BLOCK,
-    ),
-    "insert_xinst": (
-        "SEM-07",
-        "an external-instance definition is carried; cross-instance atoms read it by name",
-        "insert_xinst: X0\nxtype: a",
-    ),
-    "calendar": (
-        "SEM-36, DL-36",
-        "a standard calendar's date rows become the day set holcal and run_calendar read",
-        "calendar: SC0\n01/01/2026",
-    ),
-    "extended_calendar": (
-        "SEM-36, DL-36",
-        "an extended calendar's rules compile to a day generator",
-        "extended_calendar: EC0\ncondition: DAILY",
-    ),
-    "ext_calendar": (
-        "SEM-36, DL-60",
-        "the Manage Calendars spelling of extended_calendar, accepted as input leniency",
-        "ext_calendar: EC1\ncondition: DAILY",
-    ),
-    "cycle": (
-        "SEM-39",
-        "a cycle's start_date/end_date pairs become the periods cycle-scoped tokens count in",
-        "cycle: CY0\nstart_date: 01/01/2026\nend_date: 03/31/2026",
-    ),
-}
-
 _REFUSED_STATEMENTS: tuple[str, ...] = (
     "delete_blob",
     "delete_box",
@@ -244,17 +190,82 @@ _REFUSED_STATEMENTS: tuple[str, ...] = (
     "update_xinst",
 )
 
-STATEMENT_ROWS: tuple[Row, ...] = tuple(
+STATEMENT_ROWS: tuple[Row, ...] = (
     _row(
         surface="statement",
-        member=member,
+        member="insert_job",
         klass=SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=_stmt(extra) if extra else BASE_JIL,
-        quiet=GLOBAL_JIL if member in ("insert_job", "insert_machine") else None,
-    )
-    for member, (cite, effect, extra) in _SUPPORTED_STATEMENTS.items()
+        cite="DL-29",
+        effect="a job definition is lowered whole: linkage, semantics, schedule and exec spec",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="statement",
+        member="insert_machine",
+        klass=SUPPORTED,
+        cite="DL-49",
+        effect="a machine definition is lowered to its type, node_name and pool members",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="statement",
+        member="insert_global",
+        klass=SUPPORTED,
+        cite="SEM-08",
+        effect="a global variable's declared value seeds the oracle's global store",
+        trigger=_stmt("insert_global: G0\nvalue: 0"),
+    ),
+    _row(
+        surface="statement",
+        member="insert_resource",
+        klass=SUPPORTED,
+        cite="DL-50",
+        effect="a resource definition sizes one capacity bucket",
+        trigger=_stmt(RESOURCE_BLOCK),
+    ),
+    _row(
+        surface="statement",
+        member="insert_xinst",
+        klass=SUPPORTED,
+        cite="SEM-07",
+        effect="an external-instance definition is carried; cross-instance atoms read it by name",
+        trigger=_stmt("insert_xinst: X0\nxtype: a"),
+    ),
+    _row(
+        surface="statement",
+        member="calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a standard calendar's date rows become the day set holcal and run_calendar read",
+        trigger=_stmt("calendar: SC0\n01/01/2026"),
+    ),
+    _row(
+        surface="statement",
+        member="extended_calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="an extended calendar's rules compile to a day generator",
+        trigger=_stmt("extended_calendar: EC0\ncondition: DAILY"),
+    ),
+    _row(
+        surface="statement",
+        member="ext_calendar",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-60",
+        effect="the Manage Calendars spelling of extended_calendar, accepted as input leniency",
+        trigger=_stmt("ext_calendar: EC1\ncondition: DAILY"),
+    ),
+    _row(
+        surface="statement",
+        member="cycle",
+        klass=SUPPORTED,
+        cite="SEM-39",
+        effect="a cycle's start_date/end_date pairs become the periods cycle-scoped"
+        " tokens count in",
+        trigger=_stmt("cycle: CY0\nstart_date: 01/01/2026\nend_date: 03/31/2026"),
+    ),
 ) + _rows(
     "statement",
     _REFUSED_STATEMENTS,
@@ -286,188 +297,6 @@ _ANNOTATION_ATTRS: tuple[str, ...] = (
     "send_notification",
 )
 
-#: PASSTHROUGH_ALLOWED minus the two DL-50 honours (job_load, priority),
-#: each with the effect it does NOT have.
-_PASSTHROUGH_ATTRS: dict[str, str] = {
-    "application": "the application tag is carried; nothing schedules or reports by it",
-    "auto_delete": "the definition is never deleted; the catalog is static for the run",
-    "avg_runtime": "the statistics seed is carried; no runtime estimate is computed from it",
-    "chk_files": "the pre-start disk-space gate is not evaluated; the job starts regardless",
-    "elevated": "no privilege elevation happens; the child runs as the invoking user",
-    "group": "the group tag is carried; nothing schedules or reports by group",
-    "interactive": "no interactive terminal is attached to the child process",
-    "job_class": "job classes are not implemented; no class quota gates a start",
-    "machine_method": "per-member placement method is not implemented; DL-49 resolves placement",
-    "permission": "job permissions are not enforced; the run uses the invoking user's own",
-    "ulimit": "no resource limit is applied to the child process",
-}
-
-_TIME_CLUSTER_ATTRS: dict[str, tuple[str, str, dict[str, str]]] = {
-    # member: (cite, effect, the extra attributes its trigger needs)
-    "days_of_week": (
-        "SEM-30, SEM-31",
-        "the days a schedule tick may fall on, as two-letter tokens or `all`",
-        {"days_of_week": "all"},
-    ),
-    "run_calendar": (
-        "SEM-30, DL-56",
-        "the named calendar whose days are the schedule's day set",
-        {"run_calendar": f'"{HOLCAL_NAME}"'},
-    ),
-    "exclude_calendar": (
-        "SEM-30, DL-56",
-        "the named calendar whose days are subtracted from the schedule's day set",
-        {"exclude_calendar": f'"{HOLCAL_NAME}"'},
-    ),
-    "start_times": (
-        "SEM-32",
-        "the wall-clock times a schedule tick fires at on an eligible day",
-        {"start_times": '"08:00"'},
-    ),
-    "start_mins": (
-        "SEM-32",
-        "the minutes past each hour a schedule tick fires at on an eligible day",
-        {"start_mins": "0,30"},
-    ),
-    "run_window": (
-        "SEM-33",
-        "a gate, not a trigger: a start outside the window defers or drops, never fires early",
-        {"run_window": '"09:00-10:00"'},
-    ),
-    "timezone": (
-        "SEM-35",
-        "the zone every schedule time on this job is read in",
-        {"timezone": "UTC"},
-    ),
-    "must_start_times": (
-        "SEM-34",
-        "the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and"
-        " changes no status",
-        {"start_times": '"08:00"', "must_start_times": '"+30"'},
-    ),
-    "must_complete_times": (
-        "SEM-34",
-        "the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM"
-        " and changes no status",
-        {"start_times": '"08:00"', "must_complete_times": '"+45"'},
-    ),
-}
-
-_EXEC_ATTRS: dict[str, tuple[str, str, str, dict[str, str | None]]] = {
-    # member: (klass, cite, effect, the trigger's attribute overrides)
-    "machine": (
-        SUPPORTED,
-        "DL-49, DL-52",
-        "names the machine the job runs on; the resolver refuses a foreign one"
-        "; inert on a BOX (SEM-10)",
-        {},
-    ),
-    "owner": (
-        REFUSED,
-        "runner_preflight._owner_preflight",
-        "an owner other than the invoking user is refused at preflight: there is no setuid"
-        "; inert on a BOX (SEM-10)",
-        {"owner": "someone_else"},
-    ),
-    "profile": (
-        SUPPORTED,
-        "runner_adapters._build_run_spec",
-        "sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10)",
-        {"profile": "/tmp/profile.sh"},
-    ),
-    "std_out_file": (
-        SUPPORTED,
-        "runner_adapters.job_log_paths",
-        "the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10)",
-        {"std_out_file": "/tmp/out.log"},
-    ),
-    "std_err_file": (
-        SUPPORTED,
-        "runner_adapters.job_log_paths",
-        "the child's stderr appends here instead of the default run log; inert on a BOX (SEM-10)",
-        {"std_err_file": "/tmp/err.log"},
-    ),
-    "std_in_file": (
-        SUPPORTED,
-        "runner_adapters._build_run_spec",
-        "the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10)",
-        {"std_in_file": "/tmp/in.txt"},
-    ),
-    "envvars": (
-        PASSTHROUGH,
-        "ir._Lowerer._exec_spec, DL-32",
-        "carried verbatim on the exec spec; the child process environment is not modified"
-        "; inert on a BOX (SEM-10)",
-        {"envvars": "A=1"},
-    ),
-}
-
-_SEMANTICS_ATTRS: dict[str, tuple[str, str, str, dict[str, str | None]]] = {
-    "condition": (
-        SUPPORTED,
-        "SEM-02, SEM-08",
-        "the start gate: the job starts on the edge where its condition becomes true",
-        {"condition": "s(J1)"},
-    ),
-    "box_success": (
-        SUPPORTED,
-        "SEM-12",
-        "overrides a box's success verdict, evaluated on every member transition while"
-        " the box is RUNNING, so an internal reference can finish the box early",
-        {"job_type": "b", "command": None, "machine": None, "box_success": "s(J1)"},
-    ),
-    "box_failure": (
-        SUPPORTED,
-        "SEM-12",
-        "overrides a box's failure verdict, evaluated on every member transition while"
-        " the box is RUNNING; DECLARING it suppresses the matching default fold, so an"
-        " override that never becomes true leaves the box RUNNING (SEM-12)",
-        {"job_type": "b", "command": None, "machine": None, "box_failure": "f(J1)"},
-    ),
-    "max_exit_success": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success",
-        {"max_exit_success": "2"},
-    ),
-    "success_codes": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "the explicit success set; with no fail_codes beside it, it alone decides the verdict",
-        {"success_codes": "0,3-5"},
-    ),
-    "fail_codes": (
-        SUPPORTED,
-        "SEM-09, DL-33",
-        "the explicit failure set; present, it is the only verdict source (Q7, DL-58)",
-        {"fail_codes": "1,9"},
-    ),
-    "term_run_time": (
-        SUPPORTED,
-        "dossier ss5, oracle.Oracle._arm_sla_and_term",
-        "arms a timer that TERMINATEs the run after n minutes",
-        {"term_run_time": "10"},
-    ),
-    "n_retrys": (
-        PASSTHROUGH,
-        "DL-53",
-        "the job runs without retries; preflight WARNs that the attribute is unmodelled",
-        {"n_retrys": "2"},
-    ),
-    "auto_hold": (
-        SUPPORTED,
-        "dossier ss5",
-        "the member enters ON_HOLD when its box starts, instead of starting with it",
-        {"auto_hold": "1"},
-    ),
-    "status": (
-        SUPPORTED,
-        "SEM-24",
-        "the definition-time status: only the out-of-band states are modelled, run states refuse",
-        {"status": "ON_HOLD"},
-    ),
-}
-
 _FW_JOB = {"job_type": "f", "command": None, "watch_file": "/tmp/watched"}
 
 JOB_ATTR_ROWS: tuple[Row, ...] = (
@@ -479,16 +308,95 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         effect="observability only: no alarm, notification or heartbeat is raised",
         trigger=lambda m: _job(**{m: "x"}),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
+            member="application",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect=effect,
-            trigger=_job(**{member: "1"}),
-        )
-        for member, effect in _PASSTHROUGH_ATTRS.items()
+            effect="the application tag is carried; nothing schedules or reports by it",
+            trigger=_job(application="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="auto_delete",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the definition is never deleted; the catalog is static for the run",
+            trigger=_job(auto_delete="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="avg_runtime",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the statistics seed is carried; no runtime estimate is computed from it",
+            trigger=_job(avg_runtime="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="chk_files",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the pre-start disk-space gate is not evaluated; the job starts regardless",
+            trigger=_job(chk_files="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="elevated",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no privilege elevation happens; the child runs as the invoking user",
+            trigger=_job(elevated="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="group",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="the group tag is carried; nothing schedules or reports by group",
+            trigger=_job(group="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="interactive",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no interactive terminal is attached to the child process",
+            trigger=_job(interactive="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="job_class",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="job classes are not implemented; no class quota gates a start",
+            trigger=_job(job_class="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="machine_method",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="per-member placement method is not implemented; DL-49 resolves placement",
+            trigger=_job(machine_method="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="permission",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="job permissions are not enforced; the run uses the invoking user's own",
+            trigger=_job(permission="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="ulimit",
+            klass=PASSTHROUGH,
+            cite="dossier ss5, DL-32",
+            effect="no resource limit is applied to the child process",
+            trigger=_job(ulimit="1"),
+        ),
     )
     + (
         _row(
@@ -506,8 +414,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, ir.JobIR.job_load_units",
             label="Qr4",
-            marker=True,
-            sites=("Qr4@ir.JobIR.job_load_units#1",),
+            sites=("ir.JobIR.job_load_units#1",),
             effect="a job with no job_load demands zero machine-load units, so an unsized"
             " job never queues behind max_load",
             trigger=_job(),
@@ -529,26 +436,101 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, capacity.CapacityPool.sorted_waiters",
             label="Qr2",
-            marker=True,
             sites=(
-                "Qr2@capacity.CapacityPool.sorted_waiters.key#1",
-                "Qr2@ir.JobIR.priority_value#1",
+                "capacity.CapacityPool.sorted_waiters.key#1",
+                "ir.JobIR.priority_value#1",
             ),
             effect="a lower priority number is assumed to mean higher priority",
             trigger=_job(priority="1"),
             quiet=_job(priority="99"),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
+            member="days_of_week",
             klass=SUPPORTED,
-            cite=cite,
-            effect=effect,
-            trigger=_job(HOLCAL_BLOCK, date_conditions="1", **extra),
-        )
-        for member, (cite, effect, extra) in _TIME_CLUSTER_ATTRS.items()
+            cite="SEM-30, SEM-31",
+            effect="the days a schedule tick may fall on, as two-letter tokens or `all`",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", days_of_week="all"),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_calendar",
+            klass=SUPPORTED,
+            cite="SEM-30, DL-56",
+            effect="the named calendar whose days are the schedule's day set",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="exclude_calendar",
+            klass=SUPPORTED,
+            cite="SEM-30, DL-56",
+            effect="the named calendar whose days are subtracted from the schedule's day set",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", exclude_calendar=f'"{HOLCAL_NAME}"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="start_times",
+            klass=SUPPORTED,
+            cite="SEM-32",
+            effect="the wall-clock times a schedule tick fires at on an eligible day",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", start_times='"08:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="start_mins",
+            klass=SUPPORTED,
+            cite="SEM-32",
+            effect="the minutes past each hour a schedule tick fires at on an eligible day",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", start_mins="0,30"),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            klass=SUPPORTED,
+            cite="SEM-33",
+            effect="a gate, not a trigger: a start outside the window defers or drops,"
+            " never fires early",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_window='"09:00-10:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="timezone",
+            klass=SUPPORTED,
+            cite="SEM-35",
+            effect="the zone every schedule time on this job is read in",
+            trigger=_job(HOLCAL_BLOCK, date_conditions="1", timezone="UTC"),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            klass=SUPPORTED,
+            cite="SEM-34",
+            effect="the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM"
+            " and changes no status",
+            trigger=_job(
+                HOLCAL_BLOCK,
+                date_conditions="1",
+                start_times='"08:00"',
+                must_start_times='"+30"',
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            klass=SUPPORTED,
+            cite="SEM-34",
+            effect="the RELATIVE form arms an alarm: a missed completion raises"
+            " MUST_COMPLETE_ALARM and changes no status",
+            trigger=_job(
+                HOLCAL_BLOCK,
+                date_conditions="1",
+                start_times='"08:00"',
+                must_complete_times='"+45"',
+            ),
+        ),
     )
     + (
         _row(
@@ -558,8 +540,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-30, runner_scheduler",
             label="E10",
-            marker=True,
-            sites=("E10@runner_scheduler.<module>#1",),
+            sites=("runner_scheduler.<module>#1",),
             effect="a schedule with no days_of_week is read as every day",
             trigger=_job(date_conditions="1", start_times='"08:00"'),
             quiet=_job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
@@ -571,8 +552,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-35, runner_scheduler",
             label="E10",
-            marker=True,
-            sites=("E10@runner_scheduler.Scheduler#1",),
+            sites=("runner_scheduler.Scheduler#1",),
             effect="a start time inside a DST fold or gap resolves by the pinned"
             " interpretation, not by a vendor-verified rule",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
@@ -645,17 +625,70 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
-            klass=klass,
-            cite=cite,
-            effect=effect,
-            trigger=_job(**extra) if extra else BASE_JIL,
-            quiet=_job(machine=None) if member == "machine" else None,
-        )
-        for member, (klass, cite, effect, extra) in _EXEC_ATTRS.items()
+            member="machine",
+            klass=SUPPORTED,
+            cite="DL-49, DL-52",
+            effect="names the machine the job runs on; the resolver refuses a foreign one"
+            "; inert on a BOX (SEM-10)",
+            trigger=BASE_JIL,
+            quiet=_job(machine=None),
+        ),
+        _row(
+            surface="job_attr",
+            member="owner",
+            klass=REFUSED,
+            cite="runner_preflight._owner_preflight",
+            effect="an owner other than the invoking user is refused at preflight: there is"
+            " no setuid; inert on a BOX (SEM-10)",
+            trigger=_job(owner="someone_else"),
+        ),
+        _row(
+            surface="job_attr",
+            member="profile",
+            klass=SUPPORTED,
+            cite="runner_adapters._build_run_spec",
+            effect="sourced before the command runs (`. <profile> && <command>`); inert on"
+            " a BOX (SEM-10)",
+            trigger=_job(profile="/tmp/profile.sh"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_out_file",
+            klass=SUPPORTED,
+            cite="runner_adapters.job_log_paths",
+            effect="the child's stdout appends here instead of the default run log; inert"
+            " on a BOX (SEM-10)",
+            trigger=_job(std_out_file="/tmp/out.log"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_err_file",
+            klass=SUPPORTED,
+            cite="runner_adapters.job_log_paths",
+            effect="the child's stderr appends here instead of the default run log; inert"
+            " on a BOX (SEM-10)",
+            trigger=_job(std_err_file="/tmp/err.log"),
+        ),
+        _row(
+            surface="job_attr",
+            member="std_in_file",
+            klass=SUPPORTED,
+            cite="runner_adapters._build_run_spec",
+            effect="the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10)",
+            trigger=_job(std_in_file="/tmp/in.txt"),
+        ),
+        _row(
+            surface="job_attr",
+            member="envvars",
+            klass=PASSTHROUGH,
+            cite="ir._Lowerer._exec_spec, DL-32",
+            effect="carried verbatim on the exec spec; the child process environment is"
+            " not modified; inert on a BOX (SEM-10)",
+            trigger=_job(envvars="A=1"),
+        ),
     )
     + (
         _row(
@@ -665,28 +698,127 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters._build_run_spec",
             label="E5",
-            marker=True,
             sites=(
-                "E5@runner_adapters.LocalCommandAdapter#1",
-                "E5@runner_adapters._build_run_spec#1",
+                "runner_adapters.LocalCommandAdapter#1",
+                "runner_adapters._build_run_spec#1",
             ),
             effect="a profile that fails to source fails the job with sh's exit code",
             trigger=_job(profile="/tmp/missing.sh"),
             quiet=_job(),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="job_attr",
-            member=member,
-            klass=klass,
-            cite=cite,
-            effect=effect,
-            trigger=_job(BOX_BLOCK, box_name="BOX0", **extra)
-            if member in ("box_success", "box_failure")
-            else _job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", **extra),
-        )
-        for member, (klass, cite, effect, extra) in _SEMANTICS_ATTRS.items()
+            member="condition",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-08",
+            effect="the start gate: the job starts on the edge where its condition becomes true",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", condition="s(J1)"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="box_success",
+            klass=SUPPORTED,
+            cite="SEM-12",
+            effect="overrides a box's success verdict, evaluated on every member transition"
+            " while the box is RUNNING, so an internal reference can finish the box early",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                job_type="b",
+                command=None,
+                machine=None,
+                box_success="s(J1)",
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="box_failure",
+            klass=SUPPORTED,
+            cite="SEM-12",
+            effect="overrides a box's failure verdict, evaluated on every member transition"
+            " while the box is RUNNING; DECLARING it suppresses the matching default fold,"
+            " so an override that never becomes true leaves the box RUNNING (SEM-12)",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                job_type="b",
+                command=None,
+                machine=None,
+                box_failure="f(J1)",
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="max_exit_success",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", max_exit_success="2"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="success_codes",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="the explicit success set; with no fail_codes beside it, it alone decides"
+            " the verdict",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", success_codes="0,3-5"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="fail_codes",
+            klass=SUPPORTED,
+            cite="SEM-09, DL-33",
+            effect="the explicit failure set; present, it is the only verdict source (Q7, DL-58)",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", fail_codes="1,9"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="term_run_time",
+            klass=SUPPORTED,
+            cite="dossier ss5, oracle.Oracle._arm_sla_and_term",
+            effect="arms a timer that TERMINATEs the run after n minutes",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", term_run_time="10"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="n_retrys",
+            klass=PASSTHROUGH,
+            cite="DL-53",
+            effect="the job runs without retries; preflight WARNs that the attribute is unmodelled",
+            trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", n_retrys="2"),
+        ),
+        _row(
+            surface="job_attr",
+            member="auto_hold",
+            klass=SUPPORTED,
+            cite="dossier ss5",
+            effect="the member enters ON_HOLD when its box starts, instead of starting with it",
+            trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", auto_hold="1"),
+        ),
+        _row(
+            surface="job_attr",
+            member="status",
+            klass=SUPPORTED,
+            cite="SEM-24",
+            effect="the definition-time status: only the out-of-band states are modelled,"
+            " run states refuse",
+            trigger=_job(
+                "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", status="ON_HOLD"
+            ),
+        ),
     )
     + (
         _row(
@@ -744,8 +876,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._readmit",
             label="Qr6",
-            marker=True,
-            sites=("Qr6@oracle.<module>#1", "Qr6@oracle.Oracle._readmit#1"),
+            sites=("oracle.<module>#1", "oracle.Oracle._readmit#1"),
             effect="a job admitted out of QUE_WAIT does not re-evaluate its condition",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
@@ -763,7 +894,6 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-12, SEM-20",
             label="Q6",
-            marker=False,
             protocol="Q6",
             effect="an iced member is read as satisfied inside box_success, the same way"
             " it is read inside an ordinary condition",
@@ -845,8 +975,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
-            marker=True,
-            sites=("E6@runner_adapters.FileWatcherAdapter.__init__#1",),
+            sites=("runner_adapters.FileWatcherAdapter.__init__#1",),
             effect="an FW job with no watch_interval polls at the profile's default interval",
             trigger=_job(**_FW_JOB),
             quiet=_job(watch_interval="30", **_FW_JOB),
@@ -866,8 +995,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
-            marker=True,
-            sites=("E6@runner_adapters.FileWatcherAdapter#1",),
+            sites=("runner_adapters.FileWatcherAdapter#1",),
             effect="two consecutive qualifying polls must report the SAME size before the"
             " watch completes; a file still growing resets the count",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
@@ -962,8 +1090,7 @@ MACHINE_ATTR_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="DL-49, runner_preflight._resource_preflight",
         label="Qr3",
-        marker=True,
-        sites=("Qr3@runner_preflight._resource_preflight#1",),
+        sites=("runner_preflight._resource_preflight#1",),
         effect="a pool machine carries no load throttle; preflight WARNs and the job runs",
         trigger=_estate(
             "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1088,64 +1215,65 @@ GLOBAL_ATTR_ROWS: tuple[Row, ...] = (
 
 # ------------------------------------------------------------- calendar_attr
 
-_CALENDAR_ATTRS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the calendar body line its trigger carries)
-    "description": (
-        "SEM-36",
-        "carried on the calendar record; no rule reads it",
-        "description: quarter ends",
-    ),
-    "workday": (
-        "SEM-36",
-        "the weekday mask every workday-scoped token and W/P walk counts in",
-        "workday: xxxxx..",
-    ),
-    "non_workday": (
-        "SEM-36, SEM-38",
-        "what happens to a generated day that is not a workday: filter or replacement",
-        "non_workday: O",
-    ),
-    "holiday": (
-        "SEM-36, SEM-38",
-        "what happens to a generated day that is a holiday; it governs holcal dates outright",
-        "holiday: S",
-    ),
-    "holcal": (
-        "SEM-36",
-        "names the standard calendar whose days are this calendar's holidays",
-        "",
-    ),
-    "cyccal": (
-        "SEM-36, SEM-39",
-        "names the cycle whose periods the cycle-scoped tokens count in",
-        "",
-    ),
-    "adjust": (
-        "SEM-36, SEM-38",
-        "a uniform blind day shift applied to every surviving day; the documented"
-        " range is -9..+9 and anything outside it refuses the calendar",
-        "adjust: 1",
-    ),
-}
-
-#: Calendar attributes the engine carries and never reads.
-_CALENDAR_PASSTHROUGH = frozenset({"description"})
-
-CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
+CALENDAR_ATTR_ROWS: tuple[Row, ...] = (
     _row(
         surface="calendar_attr",
-        member=member,
-        klass=PASSTHROUGH if member in _CALENDAR_PASSTHROUGH else SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=_cal(
-            "condition: DAILY",
-            *([line] if line else []),
-            cyccal=member == "cyccal",
-            holcal=member == "holcal",
-        ),
-    )
-    for member, (cite, effect, line) in _CALENDAR_ATTRS.items()
+        member="description",
+        klass=PASSTHROUGH,
+        cite="SEM-36",
+        effect="carried on the calendar record; no rule reads it",
+        trigger=_cal("condition: DAILY", "description: quarter ends"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="workday",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="the weekday mask every workday-scoped token and W/P walk counts in",
+        trigger=_cal("condition: DAILY", "workday: xxxxx.."),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="non_workday",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="what happens to a generated day that is not a workday: filter or replacement",
+        trigger=_cal("condition: DAILY", "non_workday: O"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="holiday",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="what happens to a generated day that is a holiday; it governs holcal"
+        " dates outright",
+        trigger=_cal("condition: DAILY", "holiday: S"),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="holcal",
+        klass=SUPPORTED,
+        cite="SEM-36",
+        effect="names the standard calendar whose days are this calendar's holidays",
+        trigger=_cal("condition: DAILY", holcal=True),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="cyccal",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-39",
+        effect="names the cycle whose periods the cycle-scoped tokens count in",
+        trigger=_cal("condition: DAILY", cyccal=True),
+    ),
+    _row(
+        surface="calendar_attr",
+        member="adjust",
+        klass=SUPPORTED,
+        cite="SEM-36, SEM-38",
+        effect="a uniform blind day shift applied to every surviving day; the documented"
+        " range is -9..+9 and anything outside it refuses the calendar",
+        trigger=_cal("condition: DAILY", "adjust: 1"),
+    ),
 ) + (
     _row(
         surface="calendar_attr",
@@ -1178,8 +1306,7 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = tuple(
         klass=PROVISIONAL,
         cite="SEM-38, DL-59",
         label="Q8b",
-        marker=True,
-        sites=("Q8b@autocal.compile_calendar#1",),
+        sites=("autocal.compile_calendar#1",),
         protocol="Q8b",
         effect="disposition replaces first, then the blind adjust shifts every survivor",
         trigger=_cal("condition: DAILY", "adjust: 1", "non_workday: N"),
@@ -1339,8 +1466,7 @@ VALUE_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-49, ir.MachineIR.max_load_units",
             label="Qr3",
-            marker=True,
-            sites=("Qr3@ir.MachineIR.max_load_units#1",),
+            sites=("ir.MachineIR.max_load_units#1",),
             effect="a virtual machine carries no machine-load throttle of its own",
             trigger=_estate(
                 "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
@@ -1391,7 +1517,6 @@ VALUE_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, capacity.release_policy",
             label="Qr1",
-            marker=False,
             effect="a request with no FREE takes the res_type default, renewable for an"
             " absent res_type",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
@@ -1407,166 +1532,507 @@ VALUE_ROWS: tuple[Row, ...] = (
 #: `atom`), so no non-empty condition can be their quiet fixture; they fall
 #: back to the no-condition base, where nothing parses and nothing is seen.
 #: Every other row names a condition that discriminates.
-_COND_RULES: dict[str, tuple[str, str, str | None]] = {
-    # member: (effect, the condition that produces the node, a quiet condition)
-    "start": ("the whole condition expression is one parse", "s(J1)", None),
-    "expr": ("an expression, flat left-to-right over & and |", "s(J1)", None),
-    "atom_or_group": ("an atom or a parenthesised expression", "s(J1)", None),
-    "atom": ("one of the three atom kinds", "s(J1)", None),
-    "op": ("the operator between two operands", "s(J1) & f(J2)", "s(J1)"),
-    "status_atom": (
-        "a job-status test, optionally qualified by a lookback",
-        "s(J1)",
-        "v(G0)=1",
-    ),
-    "exitcode_atom": (
-        "an exit-code comparison against a job's last run",
-        "e(J1)=0",
-        "s(J1)",
-    ),
-    "global_atom": ("a global-variable comparison", "v(G0)=1", "s(J1)"),
-    "job_ref": (
-        "a job name, with an optional cross-instance suffix",
-        "s(J1)",
-        "v(G0)=1",
-    ),
-    "lookback": ("the SEM-04 lookback qualifier on an atom", "s(J1,1.30)", "s(J1)"),
-    "global_name": ("the global variable's name", "v(G0)=1", "s(J1)"),
-    "global_value": ("the comparand, quoted or bare", "v(G0)=1", "s(J1)"),
-    "binop": ("two operands joined by one operator", "s(J1) & f(J2)", "s(J1)"),
-    "paren": ("an explicitly grouped subexpression", "(s(J1))", "s(J1)"),
-}
-
-_COND_TERMINALS: dict[str, tuple[str, str | None]] = {
-    # member: (a condition whose lexing yields it, one that does not)
-    "STATUS_KW=success": ("success(J1)", "s(J1)"),
-    "STATUS_KW=failure": ("failure(J1)", "s(J1)"),
-    "STATUS_KW=done": ("done(J1)", "s(J1)"),
-    "STATUS_KW=terminated": ("terminated(J1)", "s(J1)"),
-    "STATUS_KW=notrunning": ("notrunning(J1)", "s(J1)"),
-    "STATUS_KW=s": ("s(J1)", "f(J1)"),
-    "STATUS_KW=f": ("f(J1)", "s(J1)"),
-    "STATUS_KW=d": ("d(J1)", "s(J1)"),
-    "STATUS_KW=t": ("t(J1)", "s(J1)"),
-    "STATUS_KW=n": ("n(J1)", "s(J1)"),
-    "EXITCODE_KW=exitcode": ("exitcode(J1)=0", "e(J1)=0"),
-    "EXITCODE_KW=e": ("e(J1)=0", "exitcode(J1)=0"),
-    "VALUE_KW=value": ("value(G0)=1", "v(G0)=1"),
-    "VALUE_KW=v": ("v(G0)=1", "value(G0)=1"),
-    "JOB_NAME": ("s(J1)", "v(G0)=1"),
-    "INSTANCE_NAME": ("s(J1^PROD)", "s(J1)"),
-    "LOOKBACK_TOKEN": ("s(J1,1.30)", "s(J1)"),
-    "CMP_OP==": ("v(G0)=1", "s(J1)"),
-    "CMP_OP=!=": ("v(G0)!=1", "v(G0)=1"),
-    "CMP_OP=<": ("v(G0)<1", "v(G0)=1"),
-    "CMP_OP=>": ("v(G0)>1", "v(G0)=1"),
-    "CMP_OP=<=": ("v(G0)<=1", "v(G0)=1"),
-    "CMP_OP=>=": ("v(G0)>=1", "v(G0)=1"),
-    "GLOBAL_NAME": ("v(G0)=1", "s(J1)"),
-    "QUOTED": ('v(G0)="x"', "v(G0)=1"),
-    "BARE_VALUE": ("v(G0)=1", 'v(G0)="x"'),
-    "AND=&": ("s(J1)&f(J2)", "s(J1)|f(J2)"),
-    "AND=and": ("s(J1) and f(J2)", "s(J1)&f(J2)"),
-    "OR=|": ("s(J1)|f(J2)", "s(J1)&f(J2)"),
-    "OR=or": ("s(J1) or f(J2)", "s(J1)|f(J2)"),
-    # terminals the grammar TEXT does not define: two %import-ed from
-    # lark's common set, four anonymous ones lark builds from the quoted
-    # punctuation inside the rules (R-b, DL-209)
-    "INT": ("e(J1)=0", "s(J1)"),
-    "WS": ("s(J1) & f(J2)", "s(J1)&f(J2)"),
-    # every atom form carries its own parentheses, so no parseable
-    # condition can be their quiet: they fall back to the no-condition base
-    "LPAR": ("s(J1)", None),
-    "RPAR": ("s(J1)", None),
-    "COMMA": ("s(J1,1.30)", "s(J1)"),
-    "CIRCUMFLEX": ("s(J1^PROD)", "s(J1)"),
-}
-
-#: The regex-bodied terminals, with the pattern PINNED as the built parser
-#: reports it and what it admits in words (DL-209). An edit to any of these
-#: regexes fails until somebody re-reads what the new one accepts.
-_TERMINAL_PATTERNS: dict[str, tuple[str, str]] = {
-    "JOB_NAME": (
-        r"(?:[^\s(),^&|:\\]|\\:)+",
-        "a job name: any run of characters except whitespace, parentheses, comma,"
-        " caret, the operators and a bare colon; a colon inside a name is escaped",
-    ),
-    "INSTANCE_NAME": (
-        r"[A-Za-z0-9_#@$]+",
-        "a cross-instance suffix: letters, digits, underscore, hash, at or dollar",
-    ),
-    "LOOKBACK_TOKEN": (
-        r"\d{1,4}(\.\d{1,2}|\\:\d{1,2})?",
-        "three lookback spellings: bare hours, `hhhh.mm` and `hhhh\\:mm`, with one to"
-        " four hour digits and one or two minute digits; the mm RANGE is checked at"
-        " lowering, not here",
-    ),
-    "GLOBAL_NAME": (
-        r"[^\s(),=<>!&|]+",
-        "a global variable name: anything but whitespace, parentheses, comma, the"
-        " comparison characters and the operators",
-    ),
-    "QUOTED": (
-        r'"[^"]*"',
-        "a double-quoted comparand with no interior quote; the quotes are stripped"
-        " from the semantic value",
-    ),
-    "BARE_VALUE": (
-        r"[^\s()&|]+",
-        "an unquoted comparand: anything but whitespace, parentheses and the operators",
-    ),
-    "INT": (
-        r"(?:[0-9])+",
-        "the integer an exitcode_atom compares against, ASCII digits only",
-    ),
-    "WS": (
-        "(?:[ \t\x0c\r\n])+",
-        "whitespace between tokens -- space, tab, form feed, carriage return"
-        " or newline -- lexed and then discarded, so it is never a token",
-    ),
-}
-
-#: What each of those six punctuates or carries, for the row's effect.
-_IMPLICIT_TERMINAL_EFFECTS: dict[str, str] = {
-    "INT": "the integer an exitcode_atom compares against (SEM-02)",
-    "LPAR": "opens an atom's argument list and a parenthesised group",
-    "RPAR": "closes an atom's argument list and a parenthesised group",
-    "COMMA": "separates a job reference from its lookback qualifier (SEM-04)",
-    "CIRCUMFLEX": "introduces the cross-instance suffix of a job reference (SEM-07)",
-}
-
 COND_ROWS: tuple[Row, ...] = (
-    tuple(
+    (
         _row(
             surface="cond_rule",
-            member=member,
+            member="start",
             klass=SUPPORTED,
             cite="SEM-02, SEM-03",
-            effect=effect,
-            trigger=text,
-            quiet=quiet,
-        )
-        for member, (effect, text, quiet) in _COND_RULES.items()
+            effect="the whole condition expression is one parse",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_rule",
+            member="expr",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="an expression, flat left-to-right over & and |",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_rule",
+            member="atom_or_group",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="an atom or a parenthesised expression",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_rule",
+            member="atom",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="one of the three atom kinds",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_rule",
+            member="op",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="the operator between two operands",
+            trigger="s(J1) & f(J2)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="status_atom",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="a job-status test, optionally qualified by a lookback",
+            trigger="s(J1)",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_rule",
+            member="exitcode_atom",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="an exit-code comparison against a job's last run",
+            trigger="e(J1)=0",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="global_atom",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="a global-variable comparison",
+            trigger="v(G0)=1",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="job_ref",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="a job name, with an optional cross-instance suffix",
+            trigger="s(J1)",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_rule",
+            member="lookback",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="the SEM-04 lookback qualifier on an atom",
+            trigger="s(J1,1.30)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="global_name",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="the global variable's name",
+            trigger="v(G0)=1",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="global_value",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="the comparand, quoted or bare",
+            trigger="v(G0)=1",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="binop",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="two operands joined by one operator",
+            trigger="s(J1) & f(J2)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_rule",
+            member="paren",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03",
+            effect="an explicitly grouped subexpression",
+            trigger="(s(J1))",
+            quiet="s(J1)",
+        ),
     )
-    + tuple(
+    + (
         _row(
             surface="cond_terminal",
-            member=member,
+            member="STATUS_KW=success",
             klass=SUPPORTED,
             cite="SEM-02, SEM-03, SEM-04",
-            pattern=_TERMINAL_PATTERNS[member][0] if member in _TERMINAL_PATTERNS else None,
-            effect=(
-                _TERMINAL_PATTERNS[member][1]
-                if member in _TERMINAL_PATTERNS
-                else _IMPLICIT_TERMINAL_EFFECTS.get(
-                    member,
-                    f"the grammar lexes {member} and the transformer gives it its SEM meaning",
-                )
-            ),
-            trigger=text,
-            quiet=quiet,
-        )
-        for member, (text, quiet) in _COND_TERMINALS.items()
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=success and the transformer gives it its"
+            " SEM meaning",
+            trigger="success(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=failure",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=failure and the transformer gives it its"
+            " SEM meaning",
+            trigger="failure(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=done",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=done and the transformer gives it its SEM meaning",
+            trigger="done(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=terminated",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=terminated and the transformer gives it its"
+            " SEM meaning",
+            trigger="terminated(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=notrunning",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=notrunning and the transformer gives it its"
+            " SEM meaning",
+            trigger="notrunning(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=s",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=s and the transformer gives it its SEM meaning",
+            trigger="s(J1)",
+            quiet="f(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=f",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=f and the transformer gives it its SEM meaning",
+            trigger="f(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=d",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=d and the transformer gives it its SEM meaning",
+            trigger="d(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=t",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=t and the transformer gives it its SEM meaning",
+            trigger="t(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="STATUS_KW=n",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes STATUS_KW=n and the transformer gives it its SEM meaning",
+            trigger="n(J1)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="EXITCODE_KW=exitcode",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes EXITCODE_KW=exitcode and the transformer gives it its"
+            " SEM meaning",
+            trigger="exitcode(J1)=0",
+            quiet="e(J1)=0",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="EXITCODE_KW=e",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes EXITCODE_KW=e and the transformer gives it its SEM meaning",
+            trigger="e(J1)=0",
+            quiet="exitcode(J1)=0",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="VALUE_KW=value",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes VALUE_KW=value and the transformer gives it its SEM meaning",
+            trigger="value(G0)=1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="VALUE_KW=v",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes VALUE_KW=v and the transformer gives it its SEM meaning",
+            trigger="v(G0)=1",
+            quiet="value(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="JOB_NAME",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=r"(?:[^\s(),^&|:\\]|\\:)+",
+            effect="a job name: any run of characters except whitespace, parentheses, comma,"
+            " caret, the operators and a bare colon; a colon inside a name is escaped",
+            trigger="s(J1)",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="INSTANCE_NAME",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern="[A-Za-z0-9_#@$]+",
+            effect="a cross-instance suffix: letters, digits, underscore, hash, at or dollar",
+            trigger="s(J1^PROD)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="LOOKBACK_TOKEN",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=r"\d{1,4}(\.\d{1,2}|\\:\d{1,2})?",
+            effect="three lookback spellings: bare hours, `hhhh.mm` and `hhhh\\:mm`, with one to"
+            " four hour digits and one or two minute digits; the mm RANGE is checked at"
+            " lowering, not here",
+            trigger="s(J1,1.30)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP==",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP== and the transformer gives it its SEM meaning",
+            trigger="v(G0)=1",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP=!=",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP=!= and the transformer gives it its SEM meaning",
+            trigger="v(G0)!=1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP=<",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP=< and the transformer gives it its SEM meaning",
+            trigger="v(G0)<1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP=>",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP=> and the transformer gives it its SEM meaning",
+            trigger="v(G0)>1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP=<=",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP=<= and the transformer gives it its SEM meaning",
+            trigger="v(G0)<=1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CMP_OP=>=",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes CMP_OP=>= and the transformer gives it its SEM meaning",
+            trigger="v(G0)>=1",
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="GLOBAL_NAME",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=r"[^\s(),=<>!&|]+",
+            effect="a global variable name: anything but whitespace, parentheses, comma, the"
+            " comparison characters and the operators",
+            trigger="v(G0)=1",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="QUOTED",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern='"[^"]*"',
+            effect="a double-quoted comparand with no interior quote; the quotes are stripped"
+            " from the semantic value",
+            trigger='v(G0)="x"',
+            quiet="v(G0)=1",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="BARE_VALUE",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=r"[^\s()&|]+",
+            effect="an unquoted comparand: anything but whitespace, parentheses and the operators",
+            trigger="v(G0)=1",
+            quiet='v(G0)="x"',
+        ),
+        _row(
+            surface="cond_terminal",
+            member="AND=&",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes AND=& and the transformer gives it its SEM meaning",
+            trigger="s(J1)&f(J2)",
+            quiet="s(J1)|f(J2)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="AND=and",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes AND=and and the transformer gives it its SEM meaning",
+            trigger="s(J1) and f(J2)",
+            quiet="s(J1)&f(J2)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="OR=|",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes OR=| and the transformer gives it its SEM meaning",
+            trigger="s(J1)|f(J2)",
+            quiet="s(J1)&f(J2)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="OR=or",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="the grammar lexes OR=or and the transformer gives it its SEM meaning",
+            trigger="s(J1) or f(J2)",
+            quiet="s(J1)|f(J2)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="INT",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern="(?:[0-9])+",
+            effect="the integer an exitcode_atom compares against, ASCII digits only",
+            trigger="e(J1)=0",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="WS",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern="(?:[ \t\x0c\r\n])+",
+            effect="whitespace between tokens -- space, tab, form feed, carriage return"
+            " or newline -- lexed and then discarded, so it is never a token",
+            trigger="s(J1) & f(J2)",
+            quiet="s(J1)&f(J2)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="LPAR",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="opens an atom's argument list and a parenthesised group",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_terminal",
+            member="RPAR",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="closes an atom's argument list and a parenthesised group",
+            trigger="s(J1)",
+            quiet=None,
+        ),
+        _row(
+            surface="cond_terminal",
+            member="COMMA",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="separates a job reference from its lookback qualifier (SEM-04)",
+            trigger="s(J1,1.30)",
+            quiet="s(J1)",
+        ),
+        _row(
+            surface="cond_terminal",
+            member="CIRCUMFLEX",
+            klass=SUPPORTED,
+            cite="SEM-02, SEM-03, SEM-04",
+            pattern=None,
+            effect="introduces the cross-instance suffix of a job reference (SEM-07)",
+            trigger="s(J1^PROD)",
+            quiet="s(J1)",
+        ),
     )
     + _rows(
         "lookback_kind",
@@ -1733,21 +2199,6 @@ _DEFECTIVE_FAMILIES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-_CAL_OPERATORS: dict[str, tuple[str, str]] = {
-    # member: (effect, the condition line its trigger carries)
-    "(": ("groups a subexpression", "condition: (DAILY | MON)"),
-    ")": ("closes a grouped subexpression", "condition: (DAILY | MON)"),
-    "{": ("the observed brace spelling of `(`", "condition: {DAILY} | {MON}"),
-    "}": ("the observed brace spelling of `)`", "condition: {DAILY} | {MON}"),
-    "&": ("intersects two operands", "condition: MON & JAN"),
-    "|": ("unions two operands", "condition: MON | TUE"),
-    "and": ("the word synonym of `&`", "condition: MON AND JAN"),
-    "or": ("the word synonym of `|`", "condition: MON OR TUE"),
-    "not": ("complements its operand", "condition: NOT MON"),
-    "x": ("the X- prefix reads a token as its complement", "condition: DAILY & XMON"),
-    ",": ("separates the rules of one calendar", "condition: MON,TUE"),
-}
-
 #: What each (category, action) pair DOES (SEM-38). The pair is the
 #: behaviour, not the letter: N advances exactly one calendar day for a
 #: holiday and walks to the next non-holiday workday for a non-workday, and
@@ -1800,16 +2251,95 @@ CALENDAR_ROWS: tuple[Row, ...] = (
         )
         for member, (token, pattern, words) in _DEFECTIVE_FAMILIES.items()
     )
-    + tuple(
+    + (
         _row(
             surface="cal_operator",
-            member=member,
+            member="(",
             klass=SUPPORTED,
             cite="SEM-37, DL-60",
-            effect=effect,
-            trigger=_cal(line),
-        )
-        for member, (effect, line) in _CAL_OPERATORS.items()
+            effect="groups a subexpression",
+            trigger=_cal("condition: (DAILY | MON)"),
+        ),
+        _row(
+            surface="cal_operator",
+            member=")",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="closes a grouped subexpression",
+            trigger=_cal("condition: (DAILY | MON)"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="{",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the observed brace spelling of `(`",
+            trigger=_cal("condition: {DAILY} | {MON}"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="}",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the observed brace spelling of `)`",
+            trigger=_cal("condition: {DAILY} | {MON}"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="&",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="intersects two operands",
+            trigger=_cal("condition: MON & JAN"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="|",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="unions two operands",
+            trigger=_cal("condition: MON | TUE"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="and",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the word synonym of `&`",
+            trigger=_cal("condition: MON AND JAN"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="or",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the word synonym of `|`",
+            trigger=_cal("condition: MON OR TUE"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="not",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="complements its operand",
+            trigger=_cal("condition: NOT MON"),
+        ),
+        _row(
+            surface="cal_operator",
+            member="x",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="the X- prefix reads a token as its complement",
+            trigger=_cal("condition: DAILY & XMON"),
+        ),
+        _row(
+            surface="cal_operator",
+            member=",",
+            klass=SUPPORTED,
+            cite="SEM-37, DL-60",
+            effect="separates the rules of one calendar",
+            trigger=_cal("condition: MON,TUE"),
+        ),
     )
     + (
         _row(
@@ -1819,8 +2349,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal._exclusion_base#1",),
+            sites=("autocal._exclusion_base#1",),
             protocol=_CAL_PROTOCOL,
             effect="the rules of one calendar union; an exclusion-only rule subtracts from"
             " that union",
@@ -1834,8 +2363,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal._parse_rule#1",),
+            sites=("autocal._parse_rule#1",),
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON & JAN | TUE"),
@@ -1850,7 +2378,6 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             label="Q8d",
             # the SAME pinned choice as `&#flat-precedence`, whose row owns
             # the `_parse_rule` marker; a sibling facet claims no site
-            marker=False,
             protocol=_CAL_PROTOCOL,
             effect="& and | evaluate flat left-to-right, with no precedence between them",
             trigger=_cal("condition: MON | JAN & TUE"),
@@ -1873,8 +2400,7 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-37, DL-59",
             label="Q8d",
-            marker=True,
-            sites=("Q8d@autocal.<module>#1",),
+            sites=("autocal.<module>#1",),
             protocol=_CAL_PROTOCOL,
             effect="OR is pinned as an exact synonym of |",
             trigger=_cal("condition: MON OR TUE"),
@@ -1902,10 +2428,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-38, DL-59",
             label="Q8c",
-            marker=True,
             sites=(
-                "Q8c@autocal.CompiledCalendar._replace#1",
-                "Q8c@autocal.CompiledCalendar._replace#2",
+                "autocal.CompiledCalendar._replace#1",
+                "autocal.CompiledCalendar._replace#2",
             ),
             protocol=_CAL_PROTOCOL,
             effect="a replacement target is final: the date-conditions are not"
@@ -1922,121 +2447,123 @@ CALENDAR_ROWS: tuple[Row, ...] = (
 
 # ------------------------------------------------------------------ scenarios
 
-_EVENT_SCRIPTS: dict[str, tuple[str, str]] = {
-    # member: (effect, the event line that carries the kind)
-    "STATUS": (
-        "sets a job's status and wakes every job whose condition names it",
-        "0 STATUS job=J0 status=SUCCESS",
-    ),
-    "STARTJOB": (
-        "a schedule tick or operator start; it arms must_start whether or not it starts",
-        "0 STARTJOB job=J0",
-    ),
-    "FORCE_STARTJOB": ("starts a job past its condition gate", "0 FORCE_STARTJOB job=J0"),
-    "SET_GLOBAL": (
-        "sets a global and wakes every job whose condition reads it",
-        "0 SET_GLOBAL name=G0 value=1",
-    ),
-    "ON_ICE": (
-        "ices a job: downstream conditions read it as satisfied and it never runs",
-        "0 ON_ICE job=J0",
-    ),
-    "OFF_ICE": ("un-ices a job; conditions are deliberately NOT re-evaluated", "0 OFF_ICE job=J0"),
-    "ON_HOLD": ("holds a job: it stays startable but does not start", "0 ON_HOLD job=J0"),
-    "OFF_HOLD": ("releases a hold and re-attempts the start immediately", "0 OFF_HOLD job=J0"),
-    "ON_NOEXEC": (
-        "marks a job as not executing; it completes without running",
-        "0 ON_NOEXEC job=J0",
-    ),
-    "OFF_NOEXEC": ("clears the noexec flag", "0 OFF_NOEXEC job=J0"),
-    "DISARM": ("drops a latched tick; no status moves, nothing wakes", "0 DISARM job=J0"),
-    "KILLJOB": (
-        "terminates a running job, or dequeues and terminates a queued one",
-        "0 KILLJOB job=J0",
-    ),
-    "TIMER": ("a due deadline or deferred start firing off the timer heap", "0 TIMER job=J0"),
-}
-
-_STATUS_SCENARIOS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    # member: (effect, the jil, the event script)
-    "INACTIVE": (
-        "the resting status; a live job driven back to it releases everything it held",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 STATUS job=J0 status=INACTIVE"),
-    ),
-    "STARTING": (
-        "the gate has cleared and the adapter has been handed the run",
-        BASE_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "RUNNING": (
-        "the command is live and holds whatever capacity it acquired",
-        BASE_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "SUCCESS": (
-        "a terminal verdict; SEM-09 decides it from the exit code",
-        BASE_JIL,
-        ("0 STATUS job=J0 status=SUCCESS",),
-    ),
-    "FAILURE": (
-        "a terminal verdict; SEM-09 decides it from the exit code",
-        BASE_JIL,
-        ("0 STATUS job=J0 status=FAILURE",),
-    ),
-    "TERMINATED": (
-        "a kill that actually happened, never inferred from a missing record",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 KILLJOB job=J0"),
-    ),
-    "QUE_WAIT": (
-        "the start cleared its condition gate but not its capacity gate",
-        _estate(
-            "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
-            "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-            "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-        ),
-        ("0 STARTJOB job=J0", "0 STARTJOB job=J1"),
-    ),
-}
-
 _SLA_JIL = _job(date_conditions="1", start_times='"08:00"', must_start_times='"+30"')
 _MC_JIL = _job(date_conditions="1", start_times='"08:00"', must_complete_times='"+20"')
 
-_TIMER_SCENARIOS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    "must_start": (
-        "armed by the schedule tick; it raises MUST_START_ALARM if no new run began",
-        _SLA_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "must_complete": (
-        "armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
-        _MC_JIL,
-        ("0 STARTJOB job=J0",),
-    ),
-    "term_run_time": (
-        "armed by the start; it TERMINATEs a run still live at the deadline",
-        _job(term_run_time="15"),
-        ("0 STARTJOB job=J0",),
-    ),
-    "deferred_cause": (
-        "the fourth timer shape: a run_window-deferred start replaying its own provenance",
-        _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-}
+#: the QUE_WAIT status scenario's own estate: two job_load=1 starts against a
+#: machine sized for one, so the second clears its condition gate and queues.
+_QUE_WAIT_JIL = _estate(
+    "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
+    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+)
 
 SCENARIO_ROWS: tuple[Row, ...] = (
-    tuple(
+    (
         _row(
             surface="event",
-            member=member,
+            member="STATUS",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect=effect,
-            trigger=_scn(BASE_JIL, line),
-        )
-        for member, (effect, line) in _EVENT_SCRIPTS.items()
+            effect="sets a job's status and wakes every job whose condition names it",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
+        ),
+        _row(
+            surface="event",
+            member="STARTJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a schedule tick or operator start; it arms must_start whether or not it starts",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="FORCE_STARTJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="starts a job past its condition gate",
+            trigger=_scn(BASE_JIL, "0 FORCE_STARTJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="SET_GLOBAL",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="sets a global and wakes every job whose condition reads it",
+            trigger=_scn(BASE_JIL, "0 SET_GLOBAL name=G0 value=1"),
+        ),
+        _row(
+            surface="event",
+            member="ON_ICE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="ices a job: downstream conditions read it as satisfied and it never runs",
+            trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_ICE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="un-ices a job; conditions are deliberately NOT re-evaluated",
+            trigger=_scn(BASE_JIL, "0 OFF_ICE job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_HOLD",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="holds a job: it stays startable but does not start",
+            trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_HOLD",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="releases a hold and re-attempts the start immediately",
+            trigger=_scn(BASE_JIL, "0 OFF_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_NOEXEC",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="marks a job as not executing; it completes without running",
+            trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="OFF_NOEXEC",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="clears the noexec flag",
+            trigger=_scn(BASE_JIL, "0 OFF_NOEXEC job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="DISARM",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="drops a latched tick; no status moves, nothing wakes",
+            trigger=_scn(BASE_JIL, "0 DISARM job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="KILLJOB",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="terminates a running job, or dequeues and terminates a queued one",
+            trigger=_scn(BASE_JIL, "0 KILLJOB job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="TIMER",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a due deadline or deferred start firing off the timer heap",
+            trigger=_scn(BASE_JIL, "0 TIMER job=J0"),
+        ),
     )
     + (
         _row(
@@ -2071,8 +2598,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="SEM-20, oracle.Oracle._handle_oob",
             label="Q3d",
-            marker=True,
-            sites=("Q3d@oracle.Oracle._handle_oob#1",),
+            sites=("oracle.Oracle._handle_oob#1",),
             protocol="Q3d",
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
@@ -2097,11 +2623,10 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._handle_oob",
             label="Qr5",
-            marker=False,
             effect="icing a queued job dequeues it and settles it INACTIVE now, rather than"
             " leaving it in QUE_WAIT",
             trigger=_scn(
-                _STATUS_SCENARIOS["QUE_WAIT"][1],
+                _QUE_WAIT_JIL,
                 "0 STARTJOB job=J0",
                 "0 STARTJOB job=J1",
                 "1 ON_ICE job=J1",
@@ -2115,10 +2640,9 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=PROVISIONAL,
             cite="DL-50, oracle.Oracle._dispatch",
             label="Qr5",
-            marker=False,
             effect="killing a queued job dequeues it, consumes its arm and TERMINATEs it",
             trigger=_scn(
-                _STATUS_SCENARIOS["QUE_WAIT"][1],
+                _QUE_WAIT_JIL,
                 "0 STARTJOB job=J0",
                 "0 STARTJOB job=J1",
                 "1 KILLJOB job=J1",
@@ -2126,91 +2650,120 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             quiet=_scn(BASE_JIL, "0 KILLJOB job=J0"),
         ),
     )
-    + tuple(
+    + (
         _row(
             surface="status",
-            member=member,
+            member="INACTIVE",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect=effect,
-            trigger=_scn(jil, *events),
-        )
-        for member, (effect, jil, events) in _STATUS_SCENARIOS.items()
+            effect="the resting status; a live job driven back to it releases everything it held",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 STATUS job=J0 status=INACTIVE"),
+        ),
+        _row(
+            surface="status",
+            member="STARTING",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the gate has cleared and the adapter has been handed the run",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="RUNNING",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the command is live and holds whatever capacity it acquired",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="SUCCESS",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a terminal verdict; SEM-09 decides it from the exit code",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
+        ),
+        _row(
+            surface="status",
+            member="FAILURE",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a terminal verdict; SEM-09 decides it from the exit code",
+            trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=FAILURE"),
+        ),
+        _row(
+            surface="status",
+            member="TERMINATED",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="a kill that actually happened, never inferred from a missing record",
+            trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 KILLJOB job=J0"),
+        ),
+        _row(
+            surface="status",
+            member="QUE_WAIT",
+            klass=SUPPORTED,
+            cite="ir-design ss7",
+            effect="the start cleared its condition gate but not its capacity gate",
+            trigger=_scn(_QUE_WAIT_JIL, "0 STARTJOB job=J0", "0 STARTJOB job=J1"),
+        ),
     )
-    + tuple(
+    + (
         _row(
             surface="timer",
-            member=member,
+            member="must_start",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect=effect,
-            trigger=_scn(jil, *events),
-        )
-        for member, (effect, jil, events) in _TIMER_SCENARIOS.items()
+            effect="armed by the schedule tick; it raises MUST_START_ALARM if no new run began",
+            trigger=_scn(_SLA_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="must_complete",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
+            trigger=_scn(_MC_JIL, "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="term_run_time",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="armed by the start; it TERMINATEs a run still live at the deadline",
+            trigger=_scn(_job(term_run_time="15"), "0 STARTJOB job=J0"),
+        ),
+        _row(
+            surface="timer",
+            member="deferred_cause",
+            klass=SUPPORTED,
+            cite="PR-09, oracle.Oracle._schedule_timer",
+            effect="the fourth timer shape: a run_window-deferred start replaying its"
+            " own provenance",
+            trigger=_scn(
+                _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+                "0 STARTJOB job=J0",
+            ),
+        ),
     )
 )
 
 
 # ------------------------------------------------------------------ profile
 
-_PROFILE_FIELDS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the override JSON)
-    "default_tz": (
-        "period-model ss2.1, SEM-35",
-        "the zone a job with no timezone of its own is read in",
-        '{"default_tz": "Europe/Berlin"}',
-    ),
-    "tz_aliases": (
-        "period-model ss2.1, DL-62",
-        "the site-local zone-name table; a name only it resolves fails without it",
-        '{"tz_aliases": {"EST5EDT": "America/New_York"}}',
-    ),
-    "as_machine": (
-        "period-model ss2.1, DL-52",
-        "the machine names this runner answers to, sorted and de-duplicated",
-        '{"as_machine": ["greezy_spoon"]}',
-    ),
-    "machine_policy": (
-        "period-model ss2.1, DL-49",
-        "how the one ambiguous machine verdict resolves",
-        '{"machine_policy": "local-eligible"}',
-    ),
-    "execution_mode": (
-        "period-model ss2.1",
-        "whether the engine owns the child processes or a supervisor does",
-        '{"execution_mode": "detached"}',
-    ),
-    "deadman_us": (
-        "period-model ss2.1, DL-126",
-        "the supervisor's observed deadman interval; null means there is no deadman",
-        '{"deadman_us": 30000000}',
-    ),
-    "fw_default_interval_us": (
-        "period-model ss2.1",
-        "the poll interval an FW job with no watch_interval uses",
-        '{"fw_default_interval_us": 30000000}',
-    ),
-    "cmd_grace_us": (
-        "period-model ss2.1",
-        "the grace between SIGTERM and SIGKILL on a cancelled command",
-        '{"cmd_grace_us": 5000000}',
-    ),
-    "reconcile_settle_us": (
-        "period-model ss2.1",
-        "how long reconcile waits for late evidence before it decides",
-        '{"reconcile_settle_us": 1000000}',
-    ),
-    "spawn_window_us": (
-        "period-model ss2.1",
-        "the window a spawn has to produce its receipt",
-        '{"spawn_window_us": 1000000}',
-    ),
-    "retry_horizon_us": (
-        "period-model ss2.1",
-        "how far ahead a deferred dispatch retry may be scheduled",
-        '{"retry_horizon_us": 30000000}',
-    ),
-}
+
+def _profile_row(member: str, value: str, cite: str, effect: str) -> Row:
+    """One profile_field row. `value` is the JSON value literal for
+    `member`, so the fixture does not repeat the field name."""
+    return _row(
+        surface="profile_field",
+        member=member,
+        klass=SUPPORTED,
+        cite=cite,
+        effect=effect,
+        trigger='{"%s": %s}' % (member, value),
+    )
+
 
 _PROFILE_FACETS: tuple[Row, ...] = (
     _row(
@@ -2227,36 +2780,109 @@ _PROFILE_FACETS: tuple[Row, ...] = (
     ),
 )
 
-_PROFILE_ALTS: dict[str, str] = {
-    "machine_policy=strict": "a job whose machine does not resolve local is refused",
-    "machine_policy=local-eligible": "only a MIXED pool runs here, with a warning that"
-    " pool placement was ignored; a foreign or unreadable machine still refuses",
-    "execution_mode=tethered": "the engine owns the child processes; there is no supervisor",
-    "execution_mode=detached": "a supervisor owns the child processes across engine restarts",
-}
-
 PROFILE_ROWS: tuple[Row, ...] = (
-    tuple(
-        _row(
-            surface="profile_field",
-            member=member,
-            klass=SUPPORTED,
-            cite=cite,
-            effect=effect,
-            trigger=override,
-        )
-        for member, (cite, effect, override) in _PROFILE_FIELDS.items()
+    (
+        _profile_row(
+            "default_tz",
+            '"Europe/Berlin"',
+            "period-model ss2.1, SEM-35",
+            "the zone a job with no timezone of its own is read in",
+        ),
+        _profile_row(
+            "tz_aliases",
+            '{"EST5EDT": "America/New_York"}',
+            "period-model ss2.1, DL-62",
+            "the site-local zone-name table; a name only it resolves fails without it",
+        ),
+        _profile_row(
+            "as_machine",
+            '["greezy_spoon"]',
+            "period-model ss2.1, DL-52",
+            "the machine names this runner answers to, sorted and de-duplicated",
+        ),
+        _profile_row(
+            "machine_policy",
+            '"local-eligible"',
+            "period-model ss2.1, DL-49",
+            "how the one ambiguous machine verdict resolves",
+        ),
+        _profile_row(
+            "execution_mode",
+            '"detached"',
+            "period-model ss2.1",
+            "whether the engine owns the child processes or a supervisor does",
+        ),
+        _profile_row(
+            "deadman_us",
+            "30000000",
+            "period-model ss2.1, DL-126",
+            "the supervisor's observed deadman interval; null means there is no deadman",
+        ),
+        _profile_row(
+            "fw_default_interval_us",
+            "30000000",
+            "period-model ss2.1",
+            "the poll interval an FW job with no watch_interval uses",
+        ),
+        _profile_row(
+            "cmd_grace_us",
+            "5000000",
+            "period-model ss2.1",
+            "the grace between SIGTERM and SIGKILL on a cancelled command",
+        ),
+        _profile_row(
+            "reconcile_settle_us",
+            "1000000",
+            "period-model ss2.1",
+            "how long reconcile waits for late evidence before it decides",
+        ),
+        _profile_row(
+            "spawn_window_us",
+            "1000000",
+            "period-model ss2.1",
+            "the window a spawn has to produce its receipt",
+        ),
+        _profile_row(
+            "retry_horizon_us",
+            "30000000",
+            "period-model ss2.1",
+            "how far ahead a deferred dispatch retry may be scheduled",
+        ),
     )
-    + tuple(
+    + (
         _row(
             surface="profile_alt",
-            member=member,
+            member="machine_policy=strict",
             klass=SUPPORTED,
             cite="period-model ss2.1",
-            effect=effect,
-            trigger='{"%s": "%s"}' % tuple(member.split("=", 1)),
-        )
-        for member, effect in _PROFILE_ALTS.items()
+            effect="a job whose machine does not resolve local is refused",
+            trigger='{"machine_policy": "strict"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="machine_policy=local-eligible",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="only a MIXED pool runs here, with a warning that pool placement was"
+            " ignored; a foreign or unreadable machine still refuses",
+            trigger='{"machine_policy": "local-eligible"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="execution_mode=tethered",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="the engine owns the child processes; there is no supervisor",
+            trigger='{"execution_mode": "tethered"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="execution_mode=detached",
+            klass=SUPPORTED,
+            cite="period-model ss2.1",
+            effect="a supervisor owns the child processes across engine restarts",
+            trigger='{"execution_mode": "detached"}',
+        ),
     )
     + _PROFILE_FACETS
 )
@@ -2274,75 +2900,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
 #: qualified by the function that builds it (DL-209, R-a).
 _UNOBSERVABLE = "exit_status_unobservable"
 
-#: Which E7 site each unobservable-exit template owns: the bare cause is the
-#: resume ladder's, the rc-bearing one belongs to the two live adapters.
-_E7_SITES: dict[str, tuple[str, ...]] = {
-    f"Failed={_UNOBSERVABLE}": (
-        "E7@runner_adapters.resolve_spool#1",
-        "E7@runner_startup.<module>#1",
-    ),
-    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
-        "E7@runner_adapters.LocalCommandAdapter.run#1",
-        "E7@runner_adapters.SupervisedCommandAdapter._await_outcome#1",
-    ),
-}
 _CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
-
-_OUTCOME_TEMPLATES: dict[str, tuple[str, str, str]] = {
-    # "Kind=template": (class, cite, effect)
-    f"Failed={_UNOBSERVABLE}": (
-        PROVISIONAL,
-        "runner_adapters.resolve_spool, runner-design ss15",
-        "a resumed run with no status record fails rather than guessing an exit code",
-    ),
-    f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)": (
-        PROVISIONAL,
-        "runner_adapters.LocalCommandAdapter.run,"
-        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
-        "a wrapper that exited without writing a status record fails the run and"
-        " names the wrapper's own exit code; both the tethered and the supervised"
-        " adapter build it",
-    ),
-    f"Failed={_CRASH_CAUSE}": (
-        SUPPORTED,
-        "runner_adapters.resolve_spool, DL-118",
-        "a dispatch whose run directory is gone provably never reached the host,"
-        " so it fails rather than being retried blind",
-    ),
-    "Failed=malformed status record: outcome 'exited' with exit_code={}": (
-        REFUSED,
-        "runner_adapters.outcome_from_status",
-        "an 'exited' record with no integer exit code is refused as a truthful"
-        " FAILURE, never mapped to something a downstream success could consume",
-    ),
-    "Failed=unrecognized status record outcome {}": (
-        REFUSED,
-        "runner_adapters.outcome_from_status",
-        "a status record whose outcome the protocol does not define is refused, never guessed",
-    ),
-    "Failed=spawn failed: {}": (
-        SUPPORTED,
-        "runner_adapters.outcome_from_status",
-        "the wrapper recorded that the spawn itself failed; the run never started",
-    ),
-    "Failed=wrapper spawn failed: {}": (
-        SUPPORTED,
-        "runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
-        "the engine could not spawn the wrapper at all; the run never started",
-    ),
-    "Terminated=<dynamic:outcome_from_status>": (
-        SUPPORTED,
-        "runner_adapters.outcome_from_status, DL-41a",
-        "a signalled or terminated status record carries its own cause text into"
-        " the TERMINATED verdict",
-    ),
-    "Terminated=wrapper lost; killed at resume": (
-        SUPPORTED,
-        "runner_adapters.resolve_spool",
-        "a resume that finds the wrapper gone kills the surviving command group"
-        " and reports the kill that happened",
-    ),
-}
 
 ADAPTER_ROWS: tuple[Row, ...] = (
     _row(
@@ -2371,20 +2929,92 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         " with the cause",
         trigger="Failed",
     ),
-    *(
-        _row(
-            surface="adapter_outcome",
-            member=member,
-            klass=klass,
-            cite=cite,
-            # the E7 label sits on every unobservable-exit template
-            label="E7" if _UNOBSERVABLE in member else None,
-            marker=_UNOBSERVABLE in member,
-            sites=_E7_SITES.get(member, ()),
-            effect=effect,
-            trigger=member,
-        )
-        for member, (klass, cite, effect) in _OUTCOME_TEMPLATES.items()
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_UNOBSERVABLE}",
+        klass=PROVISIONAL,
+        cite="runner_adapters.resolve_spool, runner-design ss15",
+        label="E7",
+        sites=("runner_adapters.resolve_spool#1", "runner_startup.<module>#1"),
+        effect="a resumed run with no status record fails rather than guessing an exit code",
+        trigger=f"Failed={_UNOBSERVABLE}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
+        klass=PROVISIONAL,
+        cite="runner_adapters.LocalCommandAdapter.run,"
+        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
+        label="E7",
+        sites=(
+            "runner_adapters.LocalCommandAdapter.run#1",
+            "runner_adapters.SupervisedCommandAdapter._await_outcome#1",
+        ),
+        effect="a wrapper that exited without writing a status record fails the run and"
+        " names the wrapper's own exit code; both the tethered and the supervised"
+        " adapter build it",
+        trigger=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member=f"Failed={_CRASH_CAUSE}",
+        klass=SUPPORTED,
+        cite="runner_adapters.resolve_spool, DL-118",
+        effect="a dispatch whose run directory is gone provably never reached the host,"
+        " so it fails rather than being retried blind",
+        trigger=f"Failed={_CRASH_CAUSE}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=malformed status record: outcome 'exited' with exit_code={}",
+        klass=REFUSED,
+        cite="runner_adapters.outcome_from_status",
+        effect="an 'exited' record with no integer exit code is refused as a truthful"
+        " FAILURE, never mapped to something a downstream success could consume",
+        trigger="Failed=malformed status record: outcome 'exited' with exit_code={}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=unrecognized status record outcome {}",
+        klass=REFUSED,
+        cite="runner_adapters.outcome_from_status",
+        effect="a status record whose outcome the protocol does not define is refused,"
+        " never guessed",
+        trigger="Failed=unrecognized status record outcome {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=spawn failed: {}",
+        klass=SUPPORTED,
+        cite="runner_adapters.outcome_from_status",
+        effect="the wrapper recorded that the spawn itself failed; the run never started",
+        trigger="Failed=spawn failed: {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=wrapper spawn failed: {}",
+        klass=SUPPORTED,
+        cite="runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
+        effect="the engine could not spawn the wrapper at all; the run never started",
+        trigger="Failed=wrapper spawn failed: {}",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Terminated=<dynamic:outcome_from_status>",
+        klass=SUPPORTED,
+        cite="runner_adapters.outcome_from_status, DL-41a",
+        effect="a signalled or terminated status record carries its own cause text into"
+        " the TERMINATED verdict",
+        trigger="Terminated=<dynamic:outcome_from_status>",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Terminated=wrapper lost; killed at resume",
+        klass=SUPPORTED,
+        cite="runner_adapters.resolve_spool",
+        effect="a resume that finds the wrapper gone kills the surviving command group"
+        " and reports the kill that happened",
+        trigger="Terminated=wrapper lost; killed at resume",
     ),
     _row(
         surface="adapter_outcome",
@@ -2393,8 +3023,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_adapters",
         label="E8",
-        marker=True,
-        sites=("E8@runner_adapters.outcome_from_status#1",),
+        sites=("runner_adapters.outcome_from_status#1",),
         protocol="E8",
         effect="a kill by an external signal is reported as TERMINATED, the same verdict"
         " an oracle-ordered kill gets",
@@ -2438,45 +3067,47 @@ ADAPTER_ROWS: tuple[Row, ...] = (
 #: on purpose: the fixture names WHERE the provenance is stamped, and the
 #: domain is derived from every `source=` constant in the package, so a new
 #: provenance with no row still fails.
-_SOURCE_SITES: dict[str, tuple[str, str, str]] = {
-    # member: (the stamping site, a site that stamps something else, effect)
-    "scheduler": (
-        "runner.Engine.run_until_quiescent",
-        "runner.Engine.inject_host",
-        "the start came from a calendar tick, so a journal reader can tell it from"
-        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
-    ),
-    "control": (
-        "runner.Engine.inject",
-        "runner.Engine._enqueue",
-        "the event crossed the ss10 control socket, or a rehearsal script stood in"
-        " for one; it is not something the engine raised itself",
-    ),
-    "reconcile": (
-        "runner_startup._inject_completion",
-        "runner.Engine._cutoff",
-        "the completion came from resolving an incomplete run at resume, not from a"
-        " live adapter; it still goes through the ss4 stale gate",
-    ),
-    "adapter": (
-        "runner.Engine._enqueue",
-        "runner.Engine._cutoff",
-        "the event is a live adapter completion -- the stamp that subjects it to the"
-        " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
-    ),
-}
-
-EVENT_SOURCE_ROWS: tuple[Row, ...] = tuple(
+EVENT_SOURCE_ROWS: tuple[Row, ...] = (
     _row(
         surface="event_source",
-        member=member,
+        member="scheduler",
         klass=SUPPORTED,
-        cite=f"ir-design ss7, DL-68, {site}",
-        effect=effect,
-        trigger=site,
-        quiet=other,
-    )
-    for member, (site, other, effect) in _SOURCE_SITES.items()
+        cite="ir-design ss7, DL-68, runner.Engine.run_until_quiescent",
+        effect="the start came from a calendar tick, so a journal reader can tell it from"
+        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
+        trigger="runner.Engine.run_until_quiescent",
+        quiet="runner.Engine.inject_host",
+    ),
+    _row(
+        surface="event_source",
+        member="control",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner.Engine.inject",
+        effect="the event crossed the ss10 control socket, or a rehearsal script stood in"
+        " for one; it is not something the engine raised itself",
+        trigger="runner.Engine.inject",
+        quiet="runner.Engine._enqueue",
+    ),
+    _row(
+        surface="event_source",
+        member="reconcile",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner_startup._inject_completion",
+        effect="the completion came from resolving an incomplete run at resume, not from a"
+        " live adapter; it still goes through the ss4 stale gate",
+        trigger="runner_startup._inject_completion",
+        quiet="runner.Engine._cutoff",
+    ),
+    _row(
+        surface="event_source",
+        member="adapter",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-68, runner.Engine._enqueue",
+        effect="the event is a live adapter completion -- the stamp that subjects it to the"
+        " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
+        trigger="runner.Engine._enqueue",
+        quiet="runner.Engine._cutoff",
+    ),
 )
 
 
@@ -2501,90 +3132,135 @@ SLA_COMPLETE_JIL = _estate(
 #: Every out-of-band marker `Oracle._record` can write: a trace line that is
 #: not a status transition. The status surface derives `JobStatus`; this one
 #: derives the vocabulary beside it.
-_TRACE_MARKERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    # member: (effect, the jil, the event script)
-    "ON_ICE": (
-        "the job is iced: downstream conditions read it as satisfied and it never runs",
-        BASE_JIL,
-        ("0 ON_ICE job=J0",),
-    ),
-    "OFF_ICE": (
-        "the ice is cleared; conditions are deliberately NOT re-evaluated",
-        BASE_JIL,
-        ("0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
-    ),
-    "ON_HOLD": (
-        "the job is held: it stays startable but no start goes through",
-        BASE_JIL,
-        ("0 ON_HOLD job=J0",),
-    ),
-    "OFF_HOLD": (
-        "the hold is released and the start is re-attempted immediately",
-        BASE_JIL,
-        ("0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
-    ),
-    "ON_NOEXEC": (
-        "the job is marked not-executing; it completes without running",
-        BASE_JIL,
-        ("0 ON_NOEXEC job=J0",),
-    ),
-    "OFF_NOEXEC": (
-        "the noexec flag is cleared",
-        BASE_JIL,
-        ("0 ON_NOEXEC job=J0", "1 OFF_NOEXEC job=J0"),
-    ),
-    "DISARM": (
-        "an explicit journaled disarm: the latched tick is dropped and nothing else moves",
-        BASE_JIL,
-        ("0 DISARM job=J0",),
-    ),
-    "START_REFUSED": (
-        "a start request the oracle declined, with the reason it declined it",
-        BASE_JIL,
-        ("0 STARTJOB job=J0", "1 STARTJOB job=J0"),
-    ),
-    "SCHED_ARM": (
-        "a schedule tick that could not start the job latched instead",
-        SLA_START_JIL,
-        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0"),
-    ),
-    "SCHED_DISARM": (
-        "an unconsumed member arm died with the box run that armed it",
-        BOX_ARM_JIL,
-        ("0 STARTJOB job=BOX0", "1 STARTJOB job=MEM", "2 STATUS job=BOX0 status=SUCCESS"),
-    ),
-    "MUST_START_ALARM": (
-        "the must_start deadline passed with no new run; no status moved",
-        SLA_START_JIL,
-        ("0 ON_HOLD job=J0", "0 STARTJOB job=J0", "31 STATUS job=TICK status=SUCCESS"),
-    ),
-    "MUST_COMPLETE_ALARM": (
-        "the must_complete deadline passed with the run still live; no status moved",
-        SLA_COMPLETE_JIL,
-        ("0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
-    ),
-    "RUN_WINDOW_DEFER": (
-        "a start outside the run_window, closer to the next opening, was queued for it",
-        _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-    "RUN_WINDOW_SKIP": (
-        "a start outside the run_window, closer to the previous close, was dropped",
-        _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
-        ("0 STARTJOB job=J0",),
-    ),
-}
-
-TRACE_MARKER_ROWS: tuple[Row, ...] = tuple(
+TRACE_MARKER_ROWS: tuple[Row, ...] = (
     _row(
         surface="trace_marker",
-        member=member,
+        member="ON_ICE",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect=effect,
-        trigger=_scn(jil, *events),
-    )
-    for member, (effect, jil, events) in _TRACE_MARKERS.items()
+        effect="the job is iced: downstream conditions read it as satisfied and it never runs",
+        trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_ICE",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the ice is cleared; conditions are deliberately NOT re-evaluated",
+        trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="ON_HOLD",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the job is held: it stays startable but no start goes through",
+        trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_HOLD",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the hold is released and the start is re-attempted immediately",
+        trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="ON_NOEXEC",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the job is marked not-executing; it completes without running",
+        trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="OFF_NOEXEC",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the noexec flag is cleared",
+        trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0", "1 OFF_NOEXEC job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="DISARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="an explicit journaled disarm: the latched tick is dropped and nothing else moves",
+        trigger=_scn(BASE_JIL, "0 DISARM job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="START_REFUSED",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start request the oracle declined, with the reason it declined it",
+        trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 STARTJOB job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="SCHED_ARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a schedule tick that could not start the job latched instead",
+        trigger=_scn(SLA_START_JIL, "0 ON_HOLD job=J0", "0 STARTJOB job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="SCHED_DISARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="an unconsumed member arm died with the box run that armed it",
+        trigger=_scn(
+            BOX_ARM_JIL,
+            "0 STARTJOB job=BOX0",
+            "1 STARTJOB job=MEM",
+            "2 STATUS job=BOX0 status=SUCCESS",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="MUST_START_ALARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the must_start deadline passed with no new run; no status moved",
+        trigger=_scn(
+            SLA_START_JIL,
+            "0 ON_HOLD job=J0",
+            "0 STARTJOB job=J0",
+            "31 STATUS job=TICK status=SUCCESS",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="MUST_COMPLETE_ALARM",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="the must_complete deadline passed with the run still live; no status moved",
+        trigger=_scn(SLA_COMPLETE_JIL, "0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="RUN_WINDOW_DEFER",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start outside the run_window, closer to the next opening, was queued for it",
+        trigger=_scn(
+            _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
+            "0 STARTJOB job=J0",
+        ),
+    ),
+    _row(
+        surface="trace_marker",
+        member="RUN_WINDOW_SKIP",
+        klass=SUPPORTED,
+        cite="ir-design ss7, oracle.Oracle._record",
+        effect="a start outside the run_window, closer to the previous close, was dropped",
+        trigger=_scn(
+            _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
+            "0 STARTJOB job=J0",
+        ),
+    ),
 )
 
 
@@ -2607,125 +3283,135 @@ FOREIGN_ESTATE = _placed("FAR", FOREIGN_MACHINE)
 
 #: Preflight's own verdict vocabulary. Fixtures here deliberately produce
 #: preflight findings -- that is what the surface enumerates.
-_PREFLIGHT_CODES: dict[str, tuple[str, str, str, str]] = {
-    # member: (class, cite, effect, the estate)
-    "resources": (
-        REFUSED,
-        "runner_preflight._resource_preflight, DL-50",
-        "a resource the oracle cannot model faithfully refuses the run",
-        _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
+#: The codes below, plus the two no JIL can reach. An unreachable row says so
+#: on the row (`reachable=False`); both its fixtures are ordinary estates that
+#: show the gate passing, so it names its quiet explicitly -- the base estate
+#: is already its trigger, and a row's two fixtures must differ
+#: (DL-75 review 2026-09-19).
+PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
+    _row(
+        surface="preflight_code",
+        member="resources",
+        klass=REFUSED,
+        cite="runner_preflight._resource_preflight, DL-50",
+        effect="a resource the oracle cannot model faithfully refuses the run",
+        trigger=_job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
     ),
-    "owner": (
-        REFUSED,
-        "runner_preflight._owner_preflight",
-        "an owner other than the invoking user refuses the run: there is no setuid",
-        _job(owner="someone_else"),
+    _row(
+        surface="preflight_code",
+        member="owner",
+        klass=REFUSED,
+        cite="runner_preflight._owner_preflight",
+        effect="an owner other than the invoking user refuses the run: there is no setuid",
+        trigger=_job(owner="someone_else"),
     ),
-    "machine": (
-        REFUSED,
-        "runner_preflight._machine_preflight, DL-49",
-        "a job whose machine does not resolve to this host refuses the run:"
+    _row(
+        surface="preflight_code",
+        member="machine",
+        klass=REFUSED,
+        cite="runner_preflight._machine_preflight, DL-49",
+        effect="a job whose machine does not resolve to this host refuses the run:"
         " there is no remote fabric",
-        FOREIGN_ESTATE,
+        trigger=FOREIGN_ESTATE,
     ),
-    "machine-mixed": (
-        SUPPORTED,
-        "runner_preflight._machine_preflight, DL-49",
-        "a pool with some members here and some elsewhere runs here under"
+    _row(
+        surface="preflight_code",
+        member="machine-mixed",
+        klass=SUPPORTED,
+        cite="runner_preflight._machine_preflight, DL-49",
+        effect="a pool with some members here and some elsewhere runs here under"
         " local-eligible, with a warning that pool placement was ignored",
-        _placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
+        trigger=_placed("POOL", LOCAL_MACHINE, FOREIGN_MACHINE, POOL_MACHINE),
     ),
-    "calendar": (
-        REFUSED,
-        "runner_preflight._calendar_preflight, DL-56",
-        "a calendar the scheduler cannot read or that can never fire refuses the run",
-        _job(date_conditions="1", run_calendar="MISSING"),
+    _row(
+        surface="preflight_code",
+        member="calendar",
+        klass=REFUSED,
+        cite="runner_preflight._calendar_preflight, DL-56",
+        effect="a calendar the scheduler cannot read or that can never fire refuses the run",
+        trigger=_job(date_conditions="1", run_calendar="MISSING"),
     ),
-    "timezone": (
-        REFUSED,
-        "runner_preflight._timezone_preflight, SEM-35",
-        "a timezone name the SEM-35 ladder cannot resolve refuses the run",
-        _job(
+    _row(
+        surface="preflight_code",
+        member="timezone",
+        klass=REFUSED,
+        cite="runner_preflight._timezone_preflight, SEM-35",
+        effect="a timezone name the SEM-35 ladder cannot resolve refuses the run",
+        trigger=_job(
             date_conditions="1",
             days_of_week="all",
             start_times='"08:00"',
             timezone="Mars/Olympus",
         ),
     ),
-    "n-retrys": (
-        SUPPORTED,
-        "runner_preflight._retry_preflight, DL-53",
-        "the run is warned, not refused: n_retrys is carried and never applied,"
+    _row(
+        surface="preflight_code",
+        member="n-retrys",
+        klass=SUPPORTED,
+        cite="runner_preflight._retry_preflight, DL-53",
+        effect="the run is warned, not refused: n_retrys is carried and never applied,"
         " so the job runs exactly once",
-        _job(n_retrys="2"),
+        trigger=_job(n_retrys="2"),
     ),
-    "skeleton-cycle": (
-        SUPPORTED,
-        "runner_preflight._skeleton_cycle_preflight, DL-13",
-        "a cycle in the AND-success skeleton is legal AutoSys; it warns and"
+    _row(
+        surface="preflight_code",
+        member="skeleton-cycle",
+        klass=SUPPORTED,
+        cite="runner_preflight._skeleton_cycle_preflight, DL-13",
+        effect="a cycle in the AND-success skeleton is legal AutoSys; it warns and"
         " disables `plan` rather than refusing the run",
-        _estate(
+        trigger=_estate(
             MACHINE_BLOCK,
             "insert_job: A\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(B)",
             "insert_job: B\njob_type: c\ncommand: true\nmachine: M0\ncondition: s(A)",
         ),
     ),
-    "job-type": (
-        REFUSED,
-        "runner_preflight._job_type_preflight",
-        "a job_type with no adapter refuses the run; no JIL reaches this gate,"
-        " because lowering already refuses every type outside CMD/BOX/FW",
-        BASE_JIL,
-    ),
-    "oracle": (
-        REFUSED,
-        "runner_preflight._oracle_preflight",
-        "an oracle that will not construct over this catalog refuses the run;"
-        " no JIL reaches this gate, because lowering builds no such catalog",
-        BASE_JIL,
-    ),
-}
-
-#: The two codes no JIL can reach: their fixtures are ordinary estates that
-#: show the gate passing, and the row says so rather than pretending to
-#: trigger it (`simulation_register.UNREACHABLE`).
-_UNREACHABLE_CODES = frozenset({"job-type", "oracle"})
-
-PREFLIGHT_CODE_ROWS: tuple[Row, ...] = tuple(
+) + (
     _row(
         surface="preflight_code",
-        member=member,
-        klass=klass,
-        cite=cite,
-        effect=effect,
-        trigger=estate,
-        quiet=GLOBAL_JIL if member in _UNREACHABLE_CODES else None,
-    )
-    for member, (klass, cite, effect, estate) in _PREFLIGHT_CODES.items()
+        member="job-type",
+        klass=REFUSED,
+        cite="runner_preflight._job_type_preflight",
+        reachable=False,
+        effect="a job_type with no adapter refuses the run; no JIL reaches this gate,"
+        " because lowering already refuses every type outside CMD/BOX/FW",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
+    _row(
+        surface="preflight_code",
+        member="oracle",
+        klass=REFUSED,
+        cite="runner_preflight._oracle_preflight",
+        reachable=False,
+        effect="an oracle that will not construct over this catalog refuses the run;"
+        " no JIL reaches this gate, because lowering builds no such catalog",
+        trigger=BASE_JIL,
+        quiet=GLOBAL_JIL,
+    ),
 )
 
 
 #: What each mode does to the bucket, per `capacity.requirement_demand`.
-_DEMAND_EFFECTS = {
-    "acquire": "the start HOLDS its units until the release policy gives them back;"
-    " a bucket short of them queues the job in QUE_WAIT",
-    "gate": "a threshold check only (res_type T): the level is read, nothing is held"
-    " and so nothing is ever released",
-}
-
-DEMAND_ROWS: tuple[Row, ...] = tuple(
+DEMAND_ROWS: tuple[Row, ...] = (
     _row(
         surface="demand_mode",
-        member=member,
+        member="acquire",
         klass=SUPPORTED,
         cite="DL-50, capacity.requirement_demand",
-        effect=effect,
-        trigger=_job(
-            f"insert_resource: R0\nres_type: {'T' if member == 'gate' else 'R'}\namount: 4",
-            resources="(R0, QUANTITY=1)",
-        ),
-    )
-    for member, effect in _DEMAND_EFFECTS.items()
+        effect="the start HOLDS its units until the release policy gives them back;"
+        " a bucket short of them queues the job in QUE_WAIT",
+        trigger=_job("insert_resource: R0\nres_type: R\namount: 4", resources="(R0, QUANTITY=1)"),
+    ),
+    _row(
+        surface="demand_mode",
+        member="gate",
+        klass=SUPPORTED,
+        cite="DL-50, capacity.requirement_demand",
+        effect="a threshold check only (res_type T): the level is read, nothing is held"
+        " and so nothing is ever released",
+        trigger=_job("insert_resource: R0\nres_type: T\namount: 4", resources="(R0, QUANTITY=1)"),
+    ),
 )
 
 MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
@@ -2773,44 +3459,43 @@ MACHINE_VERDICT_ROWS: tuple[Row, ...] = (
 
 # ----------------------------------------------- wrapper, calendar and literal forms
 
-_WRAPPER_OUTCOMES: dict[str, tuple[str, str, str]] = {
-    # member: (class, cite, effect)
-    "exited": (
-        SUPPORTED,
-        "runner-design ss6, supervisor-protocol ss3, SEM-09",
-        "the command ended on its own; the raw exit code goes to the oracle and"
-        " SEM-09 decides the verdict",
-    ),
-    "signaled": (
-        SUPPORTED,
-        "runner-design ss6, DL-41a",
-        "the command was killed by a signal; the engine injects STATUS TERMINATED"
-        " because a kill actually happened",
-    ),
-    "terminated": (
-        SUPPORTED,
-        "runner-design ss6, DL-41a",
-        "the wrapper killed the command when it lost its parent; the engine injects"
-        " STATUS TERMINATED with the recorded cause",
-    ),
-    "spawn_failed": (
-        SUPPORTED,
-        "runner-design ss6",
-        "/bin/sh could never be spawned; the engine injects STATUS FAILURE and the"
-        " run never started",
-    ),
-}
-
-WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = tuple(
+WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = (
     _row(
         surface="wrapper_outcome",
-        member=member,
-        klass=klass,
-        cite=cite,
-        effect=effect,
-        trigger=f"wrapper={member}",
-    )
-    for member, (klass, cite, effect) in _WRAPPER_OUTCOMES.items()
+        member="exited",
+        klass=SUPPORTED,
+        cite="runner-design ss6, supervisor-protocol ss3, SEM-09",
+        effect="the command ended on its own; the raw exit code goes to the oracle and"
+        " SEM-09 decides the verdict",
+        trigger="wrapper=exited",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="signaled",
+        klass=SUPPORTED,
+        cite="runner-design ss6, DL-41a",
+        effect="the command was killed by a signal; the engine injects STATUS TERMINATED"
+        " because a kill actually happened",
+        trigger="wrapper=signaled",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="terminated",
+        klass=SUPPORTED,
+        cite="runner-design ss6, DL-41a",
+        effect="the wrapper killed the command when it lost its parent; the engine injects"
+        " STATUS TERMINATED with the recorded cause",
+        trigger="wrapper=terminated",
+    ),
+    _row(
+        surface="wrapper_outcome",
+        member="spawn_failed",
+        klass=SUPPORTED,
+        cite="runner-design ss6",
+        effect="/bin/sh could never be spawned; the engine injects STATUS FAILURE and the"
+        " run never started",
+        trigger="wrapper=spawn_failed",
+    ),
 ) + (
     _row(
         surface="wrapper_outcome",
@@ -2888,122 +3573,186 @@ CAL_FORM_ROWS: tuple[Row, ...] = (
 #: Every closed alternative set a Literal declares in the estate-facing
 #: modules that no dedicated surface already owns. The fixture kind is
 #: `site`: most of these are discriminators and shapes a JIL estate cannot
-#: select directly, so the row names the declaring module instead.
-_LITERAL_ALTS: dict[str, tuple[str, str, str]] = {
-    # member: (cite, effect, the declaring site)
-    "And.kind=and": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that makes an AND node readable back from JSON",
-        "conditions.And",
-    ),
-    "Or.kind=or": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that makes an OR node readable back from JSON",
-        "conditions.Or",
-    ),
-    "Paren.kind=paren": (
-        "SEM-03, ir-design ss3",
-        "the discriminator that keeps explicit grouping in the model",
-        "conditions.Paren",
-    ),
-    "StatusAtom.kind=status": (
-        "SEM-02, ir-design ss3",
-        "the discriminator of a job-status atom",
-        "conditions.StatusAtom",
-    ),
-    "ExitCodeAtom.kind=exitcode": (
-        "SEM-02, ir-design ss3",
-        "the discriminator of an exit-code atom",
-        "conditions.ExitCodeAtom",
-    ),
-    "GlobalAtom.kind=global": (
-        "SEM-08, ir-design ss3",
-        "the discriminator of a global-variable atom",
-        "conditions.GlobalAtom",
-    ),
-    "ExecSpec.kind=cmd": (
-        "SEM-10, ir-design ss4",
-        "the discriminator that selects the command exec spec",
-        "ir.ExecSpec",
-    ),
-    "FwSpec.kind=fw": (
-        "SEM-10, ir-design ss4",
-        "the discriminator that selects the file-watcher exec spec",
-        "ir.FwSpec",
-    ),
-    "CalendarIR.kind=standard": (
-        "SEM-36, DL-36",
-        "a calendar of date rows; `standard_days` reads it and `holcal` requires it",
-        "ir.CalendarIR",
-    ),
-    "CalendarIR.kind=extended": (
-        "SEM-36, DL-36",
-        "a calendar of rules; `compile_calendar` reads it and refuses a standard one",
-        "ir.CalendarIR",
-    ),
-    "CatalogIR.ir_version=0.2": (
-        "ir-design ss4",
-        "the IR version stamped on every catalog; a reader that meets another refuses",
-        "ir.CatalogIR",
-    ),
-    "SlaSpec.kind=absolute": (
-        "SEM-34, oracle.Oracle._arm_sla_and_term",
-        "an absolute must_*_times is lowered and carried, and arms nothing: the oracle"
-        " owns no calendar, so no absolute deadline exists v1",
-        "ir.SlaSpec",
-    ),
-    "SlaSpec.kind=relative": (
-        "SEM-34, oracle.Oracle._arm_sla_and_term",
-        "a relative `+n` must_*_times is what arms the alarm timer",
-        "ir.SlaSpec",
-    ),
-    "PreflightItem.severity=ERROR": (
-        "runner-design ss8",
-        "the finding refuses the run",
-        "runner_preflight.PreflightItem",
-    ),
-    "PreflightItem.severity=WARN": (
-        "runner-design ss8",
-        "the finding is printed and journaled, and the run goes ahead",
-        "runner_preflight.PreflightItem",
-    ),
-    "ResolvedTz.how=os": (
-        "SEM-35",
-        "the zone name resolved straight out of the OS database",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=map": (
-        "SEM-35, DL-62",
-        "the name resolved through the estate's ujo_timezones alias table, chained at"
-        " most five hops with an OS lookup per hop",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=city": (
-        "SEM-35",
-        "the unique-city default, which applies ONLY when the estate supplied no alias"
-        " table at all",
-        "timezones.ResolvedTz",
-    ),
-    "ResolvedTz.how=posix": (
-        "SEM-35",
-        "a POSIX fixed-offset spelling, resolved without the zone database",
-        "timezones.ResolvedTz",
-    ),
-}
-
-LITERAL_ALT_ROWS: tuple[Row, ...] = tuple(
+#: select directly, so the row names the declaring module instead. Each
+#: row's quiet is a site in ANOTHER module: the detector reads what the
+#: module declares, so the quiet has to be somewhere that declares none
+#: of it -- `conditions.parse_condition` for a row whose own site is
+#: `ir.*`, `ir.unquote_jil_value` otherwise.
+LITERAL_ALT_ROWS: tuple[Row, ...] = (
     _row(
         surface="literal_alt",
-        member=member,
+        member="And.kind=and",
         klass=SUPPORTED,
-        cite=cite,
-        effect=effect,
-        trigger=site,
-        # a site in ANOTHER module: the detector reads what the module
-        # declares, so the quiet has to be somewhere that declares none of it
-        quiet="conditions.parse_condition" if site.startswith("ir.") else "ir.unquote_jil_value",
-    )
-    for member, (cite, effect, site) in _LITERAL_ALTS.items()
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that makes an AND node readable back from JSON",
+        trigger="conditions.And",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="Or.kind=or",
+        klass=SUPPORTED,
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that makes an OR node readable back from JSON",
+        trigger="conditions.Or",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="Paren.kind=paren",
+        klass=SUPPORTED,
+        cite="SEM-03, ir-design ss3",
+        effect="the discriminator that keeps explicit grouping in the model",
+        trigger="conditions.Paren",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="StatusAtom.kind=status",
+        klass=SUPPORTED,
+        cite="SEM-02, ir-design ss3",
+        effect="the discriminator of a job-status atom",
+        trigger="conditions.StatusAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ExitCodeAtom.kind=exitcode",
+        klass=SUPPORTED,
+        cite="SEM-02, ir-design ss3",
+        effect="the discriminator of an exit-code atom",
+        trigger="conditions.ExitCodeAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="GlobalAtom.kind=global",
+        klass=SUPPORTED,
+        cite="SEM-08, ir-design ss3",
+        effect="the discriminator of a global-variable atom",
+        trigger="conditions.GlobalAtom",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ExecSpec.kind=cmd",
+        klass=SUPPORTED,
+        cite="SEM-10, ir-design ss4",
+        effect="the discriminator that selects the command exec spec",
+        trigger="ir.ExecSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="FwSpec.kind=fw",
+        klass=SUPPORTED,
+        cite="SEM-10, ir-design ss4",
+        effect="the discriminator that selects the file-watcher exec spec",
+        trigger="ir.FwSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CalendarIR.kind=standard",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a calendar of date rows; `standard_days` reads it and `holcal` requires it",
+        trigger="ir.CalendarIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CalendarIR.kind=extended",
+        klass=SUPPORTED,
+        cite="SEM-36, DL-36",
+        effect="a calendar of rules; `compile_calendar` reads it and refuses a standard one",
+        trigger="ir.CalendarIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="CatalogIR.ir_version=0.2",
+        klass=SUPPORTED,
+        cite="ir-design ss4",
+        effect="the IR version stamped on every catalog; a reader that meets another refuses",
+        trigger="ir.CatalogIR",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="SlaSpec.kind=absolute",
+        klass=SUPPORTED,
+        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        effect="an absolute must_*_times is lowered and carried, and arms nothing: the"
+        " oracle owns no calendar, so no absolute deadline exists v1",
+        trigger="ir.SlaSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="SlaSpec.kind=relative",
+        klass=SUPPORTED,
+        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        effect="a relative `+n` must_*_times is what arms the alarm timer",
+        trigger="ir.SlaSpec",
+        quiet="conditions.parse_condition",
+    ),
+    _row(
+        surface="literal_alt",
+        member="PreflightItem.severity=ERROR",
+        klass=SUPPORTED,
+        cite="runner-design ss8",
+        effect="the finding refuses the run",
+        trigger="runner_preflight.PreflightItem",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="PreflightItem.severity=WARN",
+        klass=SUPPORTED,
+        cite="runner-design ss8",
+        effect="the finding is printed and journaled, and the run goes ahead",
+        trigger="runner_preflight.PreflightItem",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=os",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="the zone name resolved straight out of the OS database",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=map",
+        klass=SUPPORTED,
+        cite="SEM-35, DL-62",
+        effect="the name resolved through the estate's ujo_timezones alias table, chained"
+        " at most five hops with an OS lookup per hop",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=city",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="the unique-city default, which applies ONLY when the estate supplied no"
+        " alias table at all",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="ResolvedTz.how=posix",
+        klass=SUPPORTED,
+        cite="SEM-35",
+        effect="a POSIX fixed-offset spelling, resolved without the zone database",
+        trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
 )
 
 
@@ -3016,12 +3765,11 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="oracle.Oracle._after_transition",
         label="Q3c",
-        marker=True,
-        sites=("Q3c@oracle.<module>#1", "Q3c@oracle.Oracle._after_transition#1"),
+        sites=("oracle.<module>#1", "oracle.Oracle._after_transition#1"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
-        trigger="kind: jil\n" + _job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
-        quiet="kind: jil\n" + BASE_JIL,
+        trigger=_job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
+        quiet=BASE_JIL,
     ),
     _row(
         surface="runtime",
@@ -3029,17 +3777,16 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_startup, runner_scheduler.Scheduler.pop_due",
         label="E9",
-        marker=True,
         sites=(
-            "E9@runner_scheduler.<module>#1",
-            "E9@runner_scheduler.Scheduler.pop_due#1",
-            "E9@runner_startup._resume_under_lock#1",
-            "E9@runner_startup.resume_run#1",
+            "runner_scheduler.<module>#1",
+            "runner_scheduler.Scheduler.pop_due#1",
+            "runner_startup._resume_under_lock#1",
+            "runner_startup.resume_run#1",
         ),
         effect="a tick whose instant passed while the engine was down is journaled and"
         " dropped, never fired late",
-        trigger="kind: jil\n" + SCHEDULED_JOB,
-        quiet="kind: jil\n" + BASE_JIL,
+        trigger=SCHEDULED_JOB,
+        quiet=BASE_JIL,
     ),
     _row(
         surface="runtime",
@@ -3047,16 +3794,15 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="autocal.compile_calendar, DL-59",
         label="Q8d",
-        marker=True,
         sites=(
-            "Q8d@autocal.compile_calendar#1",
-            "Q8d@autocal.compile_calendar#2",
+            "autocal.compile_calendar#1",
+            "autocal.compile_calendar#2",
         ),
         protocol=_CAL_PROTOCOL,
         effect="a compound rule with no inclusive leaf is evaluated literally as an include,"
         " which makes it near-universal",
-        trigger="kind: jil\n" + _cal("condition: XTUE|XWED"),
-        quiet="kind: jil\n" + _cal("condition: DAILY"),
+        trigger=_cal("condition: XTUE|XWED"),
+        quiet=_cal("condition: DAILY"),
     ),
     _row(
         surface="runtime",
@@ -3066,8 +3812,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="60 years",
         effect="a calendar that generates nothing within 60 years reads as exhausted;"
         " dormancy is proven within that bound only",
-        trigger="kind: jil\n" + _cal("condition: FEB#29 & MON"),
-        quiet="kind: jil\n" + _cal("condition: DAILY"),
+        trigger=_cal("condition: FEB#29 & MON"),
+        quiet=_cal("condition: DAILY"),
     ),
     _row(
         surface="runtime",
@@ -3077,16 +3823,14 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="366 days",
         effect="a W/P replacement that finds no valid day within 366 days is degenerate"
         " and refuses the calendar",
-        trigger="kind: jil\n"
-        + _estate(
+        trigger=_estate(
             MACHINE_BLOCK,
             JOB_BLOCK,
             "extended_calendar: EC0\ncondition: DAILY\nworkday: x......\n"
             f"holiday: W\nholcal: {HOLCAL_NAME}",
             STARVED_HOLCAL_BLOCK,
         ),
-        quiet="kind: jil\n"
-        + _estate(
+        quiet=_estate(
             MACHINE_BLOCK,
             JOB_BLOCK,
             "extended_calendar: EC0\ncondition: DAILY\nworkday: x......\n"
@@ -3101,8 +3845,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         cite="autocal.compile_calendar",
         effect="a W/P action with an all-non-workday mask has nowhere to walk and"
         " refuses the calendar before any day is generated",
-        trigger="kind: jil\n" + _cal("condition: DAILY", "non_workday: W", "workday: ......."),
-        quiet="kind: jil\n" + _cal("condition: DAILY", "non_workday: W", "workday: x......"),
+        trigger=_cal("condition: DAILY", "non_workday: W", "workday: ......."),
+        quiet=_cal("condition: DAILY", "non_workday: W", "workday: x......"),
     ),
     _row(
         surface="runtime",
@@ -3113,9 +3857,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="the eligible-day probe advances at most 732 candidates, not 732 days:"
         " a sparse calendar's 732 candidates can span decades, so the bound is on"
         " what was examined and not on the time it covered",
-        trigger="kind: jil\n"
-        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+        trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet=_job(date_conditions="1", days_of_week="all"),
     ),
     _row(
         surface="runtime",
@@ -3125,14 +3868,13 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="the calendar probes read the run anchor on the scheduler's own ladder:"
         " the JOB's local day, else the run-level base timezone, else UTC. Preflight and"
         " the engine name the same day",
-        trigger="kind: jil\n"
-        + _job(
+        trigger=_job(
             HOLCAL_BLOCK,
             date_conditions="1",
             run_calendar=f'"{HOLCAL_NAME}"',
             start_times='"08:00"',
         ),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
+        quiet=_job(date_conditions="1", days_of_week="all", start_times='"08:00"'),
     ),
     _row(
         surface="runtime",
@@ -3143,9 +3885,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         " exhaustion and dormancy probes run on every call; a caller that wants a fixed"
         " answer passes a fixed anchor. The probe is day-granular: a last eligible day"
         " equal to the anchor's day passes even when its start times have passed",
-        trigger="kind: jil\n"
-        + _job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
-        quiet="kind: jil\n" + _job(date_conditions="1", days_of_week="all"),
+        trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
+        quiet=_job(date_conditions="1", days_of_week="all"),
     ),
     _row(
         surface="runtime",
@@ -3155,8 +3896,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         bound="100 levels",
         effect="a rule nested deeper than 100 levels is refused; the bound is the"
         " parser's own recursion budget, not a documented vendor limit",
-        trigger="kind: jil\n" + _cal("condition: " + _nested("DAILY", 101)),
-        quiet="kind: jil\n" + _cal("condition: " + _nested("DAILY", 3)),
+        trigger=_cal("condition: " + _nested("DAILY", 101)),
+        quiet=_cal("condition: " + _nested("DAILY", 3)),
     ),
     _row(
         surface="runtime",
@@ -3167,9 +3908,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         " bypasses that guard and runs unthrottled, and there the malformed values go"
         " quiet -- a malformed job_load reads as zero demand, a malformed priority as"
         " unset, and a malformed amount omits the bucket altogether",
-        trigger="kind: jil\n"
-        + _job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
-        quiet="kind: jil\n" + _job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
+        trigger=_job("insert_resource: R0\nres_type: R", resources="(R0, QUANTITY=1)"),
+        quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
     ),
     _row(
         surface="runtime",
@@ -3177,8 +3917,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         klass=SUPPORTED,
         cite="autocal.standard_rows, DL-60",
         effect="a date row's seconds are dropped: ticks are minute-grained",
-        trigger="kind: jil\n" + _stmt("calendar: SC0\n01/01/2026 08:30:45"),
-        quiet="kind: jil\n" + _stmt("calendar: SC0\n01/01/2026 08:30"),
+        trigger=_stmt("calendar: SC0\n01/01/2026 08:30:45"),
+        quiet=_stmt("calendar: SC0\n01/01/2026 08:30"),
     ),
     _row(
         surface="runtime",
@@ -3188,10 +3928,8 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="one relative offset broadcasts to every start slot, which SEM-34 marks"
         " open -- the strict count rule and the vendor's own example disagree; no label"
         " was opened for it",
-        trigger="kind: jil\n"
-        + _job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
-        quiet="kind: jil\n"
-        + _job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
+        trigger=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
+        quiet=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
     ),
 )
 

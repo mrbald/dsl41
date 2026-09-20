@@ -13500,3 +13500,94 @@ relitigate an entry; append a new one.
   passes a fixed anchor. No caller changes. The "no anchor, no probe"
   clauses of DL-56 (5) and DL-57 (5) are superseded by this entry. The
   register row moves to supported and cites this entry.
+- DL-214 Architecture review of DL-203 through DL-213: twenty findings
+  acted, seven items declined with their re-find triggers (2026-09-19)
+  The DL-75 gate had been due since DL-207 and stood at 13,691 changed lines
+  when the review ran; the last stamp, `arch-review/2026-09-14T194354Z`,
+  sits on a PR #5 branch commit that was squash-merged, so it is off main's
+  history. That does not inflate the gate: its drift is a tree diff from the
+  reviewed tree, and every line it counts was unreviewed. Stamps go on main
+  after the squash merge from now on. Two fresh reviewers read the window in
+  two clusters, the simulation register (A) and runner readiness, minify and
+  CI (B); the records are outside the repository. Nothing here reopens a
+  ruling: each acted item is a rule the code stated twice, or a concept the
+  ruling did not ask for.
+  Acted, cluster B, slice 1 (one PR): `cli_common.parse_files_or_exit_2` is
+  the catalog door's body minus lowering and `minify` calls it, so one place
+  decides which failures mean the input never reached the tool, and `minify`
+  is back under the 120-line advisory; `minify_rules` derives its value
+  keywords from the status and day sets it already holds, and its two hand
+  copies of `ir` sets say why they are copies (DL-74) and are pinned by a
+  test each; a test pins minify's four condition regexes to the grammar's
+  terminals through `conditions._grammar_text()`; a test ties the
+  KEEP/RENAME/REPLACE/DROP table to the IR attribute sets, which the
+  docstrings had claimed in prose; `runner_adapters.supervisor_argv` and
+  `supervisor_log_path` hold the launch rule for both spawners, which had
+  located `runner_supervisor.py` two different ways; `_valid_start_token`
+  moves to `runner_procid` as `valid_start_token`, beside the
+  `_LSTART_FORMAT` it had re-spelled; the TUI's two trace-reset triggers
+  share one `_reset_trace_cursor`; supervisor-protocol.md ss5 drops the two
+  sentences the DL-210 amendment contradicted (a connect probe that refuses,
+  a stale socket unlinked) and the runbook cites ss5 instead of paraphrasing
+  its upgrade warning; `minify.__all__` stops re-exporting four
+  `minify_rules` names, so policy has one import path.
+  Acted, cluster B, slice 2: `_LIST_RECHECK_EVERY` was seconds in the shared
+  LIST net and a count of one-second polls in the per-wait net, so the two
+  cadences agreed only while that poll was one second; the per-wait net now
+  spends a budget of seconds, debited only on connected passes on the loop's
+  own clock, so an outage still pauses it as the countdown did, and the poll
+  length is the named `_OUTCOME_POLL_S` so a test can shorten it and count
+  LIST requests instead of waiting.
+  Acted, cluster A (the register), one PR: `marker` becomes the property
+  `bool(sites)` and a site is a bare `module.qualname#n`, the label being
+  the row's; the `runtime` surface's fixture kind moves into the test's
+  `SURFACE_KIND` map like every other surface's, replacing the in-band
+  `kind:` line that `fixture_body` stripped from every runtime trigger and
+  quiet without checking it was there, which let a quiet fixture lose its
+  first real line and still pass (a `kind` field on the row is the fix the
+  day a runtime row needs a non-JIL fixture); the unreachable fact lives on
+  the row instead of in two constants and a test literal; the test imports
+  the base fixtures from the rows module instead of re-spelling all five,
+  four of which were dead in the source; `render_markdown` gains `marker`,
+  `protocol` and `bound` columns, so the preamble's promise of a `marker`
+  column is true and the runbook heading a provisional row names reaches the
+  reader; `capacity._FREE_POLICY` owns the free-code mapping and
+  `FREE_CODES` derives from it; the vacuous `revision >= 1` clause goes (S4
+  writes the real one); one test asserts `SURFACES`, the fixture-kind map
+  and the domain map name the same surfaces. The same PR's second half turns
+  every positional table but two into keyword rows and deletes twenty-one of
+  the twenty-three comprehensions that unpacked fourteen tuple layouts, one
+  commit per surface group, the rendered document byte-identical throughout;
+  `_CAL_FAMILIES` and `_DEFECTIVE_FAMILIES` stay tuples because the test
+  reads them for its token inventory and a second copy of their data would
+  go uncross-checked. Code comments cite this review by its date.
+  Declined, each with the trigger that reopens it: one LIST net for every
+  wait, tried and stopped, because the duplicate verdict is judged before
+  `_await_outcome` is entered and the shared net answers only from inside a
+  wait after sleeping its interval, so a merge costs an immediate spool
+  resolution five seconds (the duplicate verdict moving inside the wait);
+  `_CYCLE_SCOPED_FAMILIES` hand-copies six autocal families under a fixture
+  guard, and deriving it puts parser calls in the data module (a second
+  autocal fact copied into the rows module); the four class strings are
+  spelled in both register modules to avoid an import cycle, and a
+  misspelling fails at import (a third spelling); name spans on `JobRef` and
+  `GlobalAtom` would delete the four pinned regexes at the price of an IR-F
+  change (the next IR_VERSION bump taken for another reason); moving the
+  supervisor's 230-line ownership gate into `runner_procid`, because a
+  socket probe is not process identity and the probe-and-pid half of the
+  gate is due to go at DL-210's upgrade boundary, which shrinks it without a
+  move (the gate gaining a fourth proof); one baseline field for the TUI's
+  TRACE and STATUS replies, because their order inside the poll is
+  load-bearing (a third reader of the baseline); a composite action for
+  ci.yml's four gate steps, a new file and an indirection for two copies in
+  one file (a third job needing the gates).
+  The removal trigger for the supervisor's legacy startup proofs is now
+  written down: the PING probe and the pid check answer a question
+  `supervisor.lock` already answers, at about one second of sleep on every
+  restart after an unclean exit, and they go in the first release after
+  every deployed supervisor takes the lock.
+  Size advisories: the rows module's growth is inherent at 6.9 lines per row
+  and DL-209's no-split ruling stands; the supervisor's growth is DL-210's
+  gate and connection tier, and the seam is the declined move above; the
+  other four runner files moved by under thirty lines each. The baseline is
+  re-armed after the last slice lands.

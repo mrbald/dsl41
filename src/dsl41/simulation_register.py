@@ -111,8 +111,6 @@ class Behaviour(BaseModel):
     cite: str
     #: the open question this row pins a default for (Q3c, Qr4, E7, ...)
     label: str | None = None
-    #: True when `src/dsl41` carries a `PENDING: <label>` marker for it
-    marker: bool = False
     #: substring of a `### ` heading in `docs/live-instance-runbook.md`
     protocol: str | None = None
     #: a bounded search states its bound ("731 days", "60 years")
@@ -121,12 +119,19 @@ class Behaviour(BaseModel):
     #: A row carrying one is held to the code's pattern, so an edit to the
     #: regex fails until somebody re-reads what it now admits.
     pattern: str | None = None
-    #: `<label>@<module>.<qualname>` for each `PENDING` marker this row
-    #: claims. The marker SITES are a derived domain of their own, checked
-    #: by claim rather than by a fixture -- every site the sources carry
-    #: must be claimed by exactly one row, so a SECOND default pinned under
-    #: an already-used label needs its own row instead of riding the first.
+    #: `<module>.<qualname>#<n>` for each `PENDING` marker this row claims;
+    #: the label is the row's, so a site never spells it twice. The marker
+    #: SITES are a derived domain of their own, checked by claim rather than
+    #: by a fixture -- every site the sources carry must be claimed by
+    #: exactly one row, so a SECOND default pinned under an already-used
+    #: label needs its own row instead of riding the first.
     sites: tuple[str, ...] = ()
+    #: False for a member no input can reach: the code can still emit it --
+    #: a defensive second gate standing behind a refusal that fires earlier
+    #: -- so it is a row, but no fixture can make it fire, so it has no
+    #: detector and the doc says so rather than claiming one. Setting it is
+    #: a claim the test holds you to.
+    reachable: bool = True
     #: one sentence: what is modelled, or what is not
     effect: str
     #: scope fixture where the behaviour MAY apply
@@ -138,18 +143,17 @@ class Behaviour(BaseModel):
     def id(self) -> str:
         return f"{self.surface}:{self.member}" + (f"#{self.facet}" if self.facet else "")
 
+    @property
+    def marker(self) -> bool:
+        """True when `src/dsl41` carries a `PENDING: <label>` marker for this
+        row -- which is exactly "this row claims marker sites"."""
+        return bool(self.sites)
+
 
 REGISTER: tuple[Behaviour, ...] = tuple(Behaviour.model_validate(row) for row in ROWS)
 
 #: Surfaces whose member set no inventory enumerates (see SURFACES).
 FREE_SURFACES: frozenset[str] = frozenset({"runtime", "adapter_policy"})
-
-#: Members no input can reach. The code can still emit them -- they are
-#: defensive second gates standing behind a refusal that fires earlier -- so
-#: they are rows; but no fixture can make one fire, so they have no detector
-#: and the doc says so rather than claiming one. Adding to this set is a
-#: claim the test holds you to (`job-type` is proven unreachable there).
-UNREACHABLE: frozenset[str] = frozenset({"preflight_code:job-type", "preflight_code:oracle"})
 
 
 def by_id() -> dict[str, Behaviour]:
@@ -167,15 +171,15 @@ def detector_of(row: Behaviour) -> str:
     surface has the surface's generic detector; a member no input can reach
     has none and never will; everything else waits for a collector, and
     until one lands no run output may claim the row was assessed."""
-    if row.id in UNREACHABLE:
+    if not row.reachable:
         return "unreachable"
     if row.facet == "" and row.surface not in FREE_SURFACES:
         return "generic"
     return "none"
 
 
-def _cell(text: str | None) -> str:
-    return (text or "-").replace("|", "\\|")
+def _cell(text: str | None, empty: str = "-") -> str:
+    return (text or empty).replace("|", "\\|")
 
 
 def render_markdown() -> str:
@@ -190,12 +194,14 @@ def render_markdown() -> str:
             continue
         out.append(f"### {surface}")
         out.append("")
-        out.append("| id | class | cite | label | detector | effect |")
-        out.append("| --- | --- | --- | --- | --- | --- |")
+        out.append("| id | class | cite | label | marker | protocol | bound | detector | effect |")
+        out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for row in rows:
             out.append(
                 f"| {_cell(row.id)} | {row.klass.value} | {_cell(row.cite)}"
-                f" | {_cell(row.label)} | {detector_of(row)} | {_cell(row.effect)} |"
+                f" | {_cell(row.label)} | {'yes' if row.marker else ''}"
+                f" | {_cell(row.protocol, '')} | {_cell(row.bound, '')}"
+                f" | {detector_of(row)} | {_cell(row.effect)} |"
             )
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
