@@ -15,6 +15,7 @@ place, `cli_common.command_outcome`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -41,7 +42,7 @@ from dsl41.runner_access import REQUIRED_TIER, Tier
 # meaning and no other verb uses 3 or 4.
 
 
-def _control_roundtrip(socket_path: Path, request: dict) -> dict:
+def _control_roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
     """Exit-code shell around runner_control.roundtrip (DL-78): the protocol
     client raises, the CLI decides that a failed READ is exit 2.
 
@@ -56,7 +57,7 @@ def _control_roundtrip(socket_path: Path, request: dict) -> dict:
         raise typer.Exit(refuse(exc)) from exc
 
 
-def _answer_or_exit(response: dict) -> None:
+def _answer_or_exit(response: dict[str, Any]) -> None:
     """Print one control answer and exit on its `ok` flag: `host list`,
     `query`'s non-brief read, and `supervise list`/`shutdown` all did this
     by hand, two of them indented and two not (DL-178h).
@@ -70,7 +71,7 @@ def _answer_or_exit(response: dict) -> None:
     raise typer.Exit(0 if response.get("ok") else 2)
 
 
-def _mutate(socket_path: Path, request: dict) -> None:
+def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
     """`sendevent`'s and `host`'s exit: one ss6 command envelope, its
     outcome as this process's status.
 
@@ -201,7 +202,7 @@ def sendevent(
     from dsl41.runner_control import claimed_actor, command
 
     verb = event.upper()
-    payload: dict = {}
+    payload: dict[str, Any] = {}
     if job is not None:
         payload["job"] = job
     if status is not None:
@@ -456,7 +457,7 @@ _QUERY_PREDICATES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _stream_subscribe(socket_path: Path, request: dict) -> None:
+def _stream_subscribe(socket_path: Path, request: dict[str, Any]) -> None:
     """`query subscribe`: print the ack, then journal records, until the
     engine hangs up or the operator interrupts.
 
@@ -532,7 +533,7 @@ def query(
         raise typer.Exit(refuse(f"{verb} requires --name (repeat it for several)"))
     if verb == "global" and len(name or ()) > 1:
         raise typer.Exit(refuse("global names one; use `globals` for several"))
-    request: dict = {"cmd": verb}
+    request: dict[str, Any] = {"cmd": verb}
     if job is not None:
         request["job"] = job
     if since is not None:

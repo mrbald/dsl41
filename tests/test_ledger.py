@@ -43,10 +43,11 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from supervisor_list_doubles import stub_listing, stub_row
 
 from dsl41.ir import lower_source
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_adapters import FakeAdapter, SupervisorListReply
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_effects import OUTCOME_UNAVAILABLE
 from dsl41.period import catalog_hash_v2
@@ -617,8 +618,10 @@ def test_a_run_the_host_admits_to_is_never_re_driven(tmp_path: Path) -> None:
         one is a different scenario, the DL-118 identity split, which resume
         REFUSES rather than reconciles."""
 
-        async def list_runs(self) -> dict:
-            return {"runs": [{"job": "j", "run_number": 1, "run_id": bound, "wrapper_alive": True}]}
+        async def list_runs(self) -> SupervisorListReply:
+            return stub_listing(
+                runs=[stub_row(job="j", run_number=1, run_id=bound, wrapper_alive=True)]
+            )
 
     async def scenario():
         resumed = await resume_run(

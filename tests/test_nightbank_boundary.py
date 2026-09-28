@@ -75,7 +75,12 @@ from dsl41.period import (
     write_bundle,
 )
 from dsl41.placeholders import load_properties, substitute
-from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter, LocalCommandAdapter
+from dsl41.runner_adapters import (
+    FakeAdapter,
+    FileWatcherAdapter,
+    LocalCommandAdapter,
+    SupervisorListSuccess,
+)
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
     EnvelopeError,
@@ -1381,8 +1386,9 @@ def test_b1_the_boundary_commits_over_a_night_in_flight(night_base: Path, monkey
             # ... and the supervisor holds ONE wrapper for it, not a second
             # one the boundary spawned beside the run it carried
             listed = await night.wiring.client.list_runs()
-            mine = [row for row in listed["runs"] if row["job"] == B_LONG]
-            assert [row["run_id"] for row in mine] == [spawn["run_id"]]
+            assert isinstance(listed, SupervisorListSuccess)
+            mine = [row for row in listed.runs if row.job == B_LONG]
+            assert [row.run_id for row in mine] == [spawn["run_id"]]
             assert after.runtime(B_BOX).status == "RUNNING"
             assert after.runtime(B_MEMBER).status == "INACTIVE"
             assert after.runtime(B_HOLDER).status == "RUNNING"
@@ -1726,7 +1732,9 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
             )
             with pytest.raises(EngineError, match="leased incarnation's LIST"):
                 await _seal_live(night, _seal_request(night, staged))
-            assert (await client.list_runs())["runs"] == []
+            after_restart = await client.list_runs()
+            assert isinstance(after_restart, SupervisorListSuccess)
+            assert after_restart.runs == []
             # the ESTATE is untouched, and the supervisor proof is ss6 step
             # 7's -- AFTER the cutoff -- so C1 keeps the cutoff's own
             # admitted work. `_assert_untouched` is the wrong helper here on

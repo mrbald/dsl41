@@ -258,7 +258,7 @@ class _TableSync:
 
     def refresh(
         self,
-        table: DataTable,
+        table: DataTable[Any],
         *,
         identity: Sequence[Any],
         keys: Sequence[str],
@@ -688,7 +688,7 @@ class TriggersScreen(ModalScreen[None]):
         table.border_title = f"triggers ({len(rows)})"
 
 
-class _JobsTable(DataTable):
+class _JobsTable(DataTable[Any]):
     """The jobs table, and the ONLY place the operator verbs are bound
     (DL-187).
 

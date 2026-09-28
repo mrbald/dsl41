@@ -262,14 +262,14 @@ def peer_uid(sock: socket.socket) -> int | None:
     if hasattr(socket, "SO_PEERCRED"):  # Linux
         data = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
         _pid, uid, _gid = struct.unpack("iII", data)
-        return uid
+        return int(uid)
     if sys.platform == "darwin":
         sol_local, local_peercred = 0, 0x001
         # struct xucred: u_int cr_version; uid_t cr_uid; short cr_ngroups;
         # gid_t cr_groups[16] -> 76 bytes; cr_uid is the second u_int
         raw = sock.getsockopt(sol_local, local_peercred, 76)
         _version, cr_uid = struct.unpack("=II", raw[:8])
-        return cr_uid
+        return int(cr_uid)
     return None  # pragma: no cover -- POSIX-only tier
 
 

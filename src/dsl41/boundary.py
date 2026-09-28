@@ -60,7 +60,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -1533,7 +1533,10 @@ def read_staged_manifest(directory: Path) -> StagedManifest | None:
     return manifest
 
 
-def _read_artifact(path: Path, model: type[Any]) -> Any:
+_ArtifactModel = TypeVar("_ArtifactModel", bound=BaseModel)
+
+
+def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | None:
     """Read and validate one closed artifact, or None when this path holds
     none. A field with a construction default (`artifact_format_version`)
     would otherwise take that default silently on an artifact that never

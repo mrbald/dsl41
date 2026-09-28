@@ -13920,3 +13920,97 @@ relitigate an entry; append a new one.
   `root` to the `--run-root` actually passed, only the estate id. Whether
   resume should compare and refuse is undecided; no test here pins the
   current, unrefused behavior as something to preserve.
+
+- DL-220 Two mypy flags, not `strict`: `warn_return_any` and
+  `disallow_any_generics`, and `list_runs()` returns a typed reply (2026-09-28)
+  `[tool.mypy]` had no table at all; the gate's two flags now sit there,
+  scoped to whatever file set `docs/agent-workflow.md`'s `mypy src
+  tests/uc_oracle.py` already checks -- not `strict = true`, which raises
+  unrelated findings (`no-untyped-def`, `attr-defined` on re-exports,
+  `no-untyped-call`, `unused-ignore`, `redundant-cast`) this slice did not
+  scope and does not fix here.
+  Before: 0 findings under the gate's then-current (flagless) settings.
+  Enabling the two flags alone found 44: 8 `no-any-return` and 36
+  `type-arg`, across 12 files -- 1 of the 44 in `runner_adapters.py`
+  (`SupervisorConn.send`'s `no-any-return`), none in `runner.py` or
+  `runner_startup.py`. After: 0, fixed with real types.
+  `type-arg`: `tuple[Any, ...]` for a recursive condition-AST node
+  (`autocal._Node`) and for a heterogeneous compare key
+  (`equiv._machine_key`), `dict[str, Any]`/`list[T]`/`asyncio.Task[Any]`
+  for JSON-shaped control-protocol payloads across the CLI modules, and
+  `Any` parameters for textual's generic `DataTable` (`runner_tui.py`,
+  kept minimal: a sibling branch, PR #28, also touches that file).
+  `no-any-return`: a `TypeVar` bound to `BaseModel` for a generic artifact
+  reader (`boundary._read_artifact`, both its callers), a widened return
+  type on `classify._cond_key` so its caller's `!=` compares two known
+  types instead of `Any`, the same widening on `attest._opened_runtime`
+  (`OpenedRuntime | None`, already `seal.py`'s real return type), and an
+  `int(...)`/`isinstance`-narrowing fix each on the remaining four sites
+  (`runner_supervisor.peer_uid`'s two `struct.unpack` returns,
+  `seal.SealedState.to_payload`'s `_canon_ready` result, and
+  `runner_adapters.SupervisorConn.send`'s raw `json.loads` result -- the
+  narrowing fix and the rework below's `EngineError` on a non-dict reply
+  land on the same line).
+  Nothing was fixed with `cast`, `# type: ignore`, or a module exclusion.
+  `list_runs()` itself was not one of the 44: its return type,
+  `dict[str, Any]`, was already honest. Its redesign is items 2 and 3 of
+  this slice's brief, not a mypy finding -- it carried a compatibility
+  shim (`SupervisorRunRow.get`/`__getitem__`) so four readers could keep
+  reading a parsed row like the raw dict it replaced (DL-137's deferred
+  slice). It now returns `SupervisorListSuccess | SupervisorRefusal`
+  (`SupervisorListReply`): the two LIST-reply shapes supervisor-protocol
+  ss5 actually sends, modeled separately so a refusal -- a malformed
+  envelope, an unsupported version, an unknown verb, or a handler exception
+  the dispatch loop turns into `internal: ...` -- is never rejected for
+  lacking a success reply's fields (`version`, `incarnation`, `runs`, ...).
+  Both models tolerate unknown wire fields (`extra="ignore"`, the existing
+  rule); `SupervisorRefusal` is built directly (`ok=False, error=...`)
+  rather than through `model_validate` on whatever the transport handed
+  back, because the shared LIST net's own reconnect loop (DL-210) already
+  tolerates a garbage or non-object reply as one unconfirmed answer, and a
+  strict `model_validate` of that garbage would raise where the loop
+  expects none. Parsing stays at the one boundary `list_runs` already
+  owned (`_parse_list_reply`); a malformed `runs` row still raises
+  `EngineError` through the pre-existing `_parse_run_rows`, unchanged --
+  and, since the first review round of this entry, a malformed or
+  mistyped HEADER field (`version`, `supervisor_pid`, `boot_id`,
+  `incarnation`, `deadman_s`, `lease`) on an otherwise `ok: true` reply
+  refuses the same way instead of raising a bare `ValidationError`
+  `list_runs`'s three callers do not expect, pinned by
+  `test_dl220_a_malformed_list_reply_header_field_refuses_with_engine_error`.
+  Garbage in a header and garbage in a row are both `EngineError`; a
+  refusal is the one shape this parse never raises on. The same round
+  also closed `SupervisorConn.send` (the blocking `dsl41 supervise`
+  transport): it used to degrade a non-object reply to `{}` rather than
+  return it untyped; it now raises `EngineError` instead, since
+  supervisor-protocol ss5 sends only JSON objects and a silently empty,
+  success-shaped reply was a worse answer than a loud one to a case that
+  should never fire.
+  Four production readers (`runner.py`'s ss8 supervisor proof,
+  `SupervisorClient`'s own shared LIST net in `runner_adapters.py`
+  (`_list_recheck_loop`), `SupervisedCommandAdapter._listed_alive`
+  (also `runner_adapters.py`, a different class), and
+  `runner_startup.py`'s reconcile/kill ladder) moved from `.get(...)`/
+  `[...]` to attribute access; dict-style access on a row is now a mypy
+  `[attr-defined]`/`[index]` finding (a bare wrong attribute already was,
+  shim or no shim), pinned by a fixture test
+  (`test_dl220_dict_style_supervisor_run_row_access_is_a_static_error`)
+  built on the same subprocess-mypy harness `test_runner_lifecycle.py`
+  already uses for a static negative. With no reader left holding a
+  dict-shaped row, `SupervisorRunRow.get`/`__getitem__` is deleted rather
+  than kept.
+  Every test double that stood in for `list_runs()` (seven files) now
+  returns real `SupervisorListSuccess`/`SupervisorRefusal`/`SupervisorRunRow`
+  instances, built through a small shared module,
+  `tests/supervisor_list_doubles.py` (`stub_row`, `stub_listing`,
+  `stub_refusal`), rather than a hand-rolled dict a consumer's `isinstance`
+  check would silently read as a refusal. The simulation coverage register
+  (DL-209) gained two `literal_alt` exclusions for the reply models' `ok`
+  discriminators, on the same rationale as the register's existing
+  protocol-vocabulary exclusions: the frozen supervisor contract closes
+  them, not this register.
+  What remained: `scripts/arch_check.py`'s size advisories
+  (`runner_adapters.py`'s growth past 1200 lines, most of it the two new
+  reply models and their docstrings) are pre-existing "architecture review
+  due" state this slice did not create and does not clear -- a separate
+  `/arch-review` pass owns that, not this entry.

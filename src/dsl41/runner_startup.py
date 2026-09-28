@@ -58,6 +58,7 @@ from dsl41.runner_adapters import (
     fsync_dir,
     SupervisedCommandAdapter,
     SupervisorClient,
+    SupervisorListSuccess,
     SupervisorRunRow,
     SupervisorUnavailable,
     Terminated,
@@ -1081,15 +1082,17 @@ async def _reconcile(
     spool ladder unchanged (the supervisor died, or the run predates it)."""
     assert engine.run_root is not None
     boot_now = _procid.current_boot_id()
-    #: DL-137 -- values are `SupervisorRunRow`, validated once at the
-    #: `SupervisorClient.list_runs` boundary; every reader below still reads
-    #: it like the raw dict it replaced (`.get`/`[]`), so this dict-of-rows
-    #: is the one decode the whole resume ladder shares.
+    #: DL-137/DL-220 -- values are `SupervisorRunRow`, validated once at the
+    #: `SupervisorClient.list_runs` boundary; every reader below reads it by
+    #: attribute, so this dict-of-rows is the one decode the whole resume
+    #: ladder shares. A refusal (or no supervisor) leaves this empty --
+    #: same degrade `.get("runs", [])` gave before DL-220 typed the reply.
     supervised_live: dict[tuple[str, int], SupervisorRunRow] = {}
     if supervisor is not None:
         with contextlib.suppress(SupervisorUnavailable):
             listing = await supervisor.list_runs()
-            supervised_live = {(r["job"], r["run_number"]): r for r in listing.get("runs", [])}
+            if isinstance(listing, SupervisorListSuccess):
+                supervised_live = {(r.job, r.run_number): r for r in listing.runs}
     # sweep = union(journal dispatch records, runs/ directory) (ss7)
     candidates: dict[tuple[str, int], Path | None] = {}
     for record in records:
@@ -1127,14 +1130,14 @@ async def _reconcile(
         if job_ir is None:
             continue
         reattach = supervised_live.get((job, run_number))
-        if reattach is not None and reattach.get("wrapper_alive"):
+        if reattach is not None and reattach.wrapper_alive:
             cmd_adapter = engine.adapters.get(job_ir.job_type)
             if isinstance(cmd_adapter, SupervisedCommandAdapter):
                 # REATTACH: the run's parent (the supervisor) never died, so it
                 # never stopped -- the adapter task just awaits its exit push,
                 # NO reconciliation injection (spec ss3). The LIST row's
                 # identity was checked against the WAL by the preflight.
-                cmd_adapter.reattach[(job, run_number)] = reattach["run_id"]
+                cmd_adapter.reattach[(job, run_number)] = reattach.run_id
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
         if job_ir.job_type == "FW":
@@ -1431,7 +1434,7 @@ def _preflight_identities(
                 _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
         listing = supervised_live.get((job, run_number))
         if listing is not None:  # alive or dead: a row is a claim either way
-            _refuse_identity_split(effect, listing.get("run_id"), "the supervisor's LIST")
+            _refuse_identity_split(effect, listing.run_id, "the supervisor's LIST")
 
 
 def _reconcile_applied_spawns(
@@ -1526,7 +1529,7 @@ async def _redrive_recorded_kills(
         if (
             job_ir is not None
             and listing is not None
-            and listing.get("wrapper_alive")
+            and listing.wrapper_alive
             and isinstance(adapter, SupervisedCommandAdapter)
         ):
             # the adapter's own TERM/grace/KILL ladder, driven directly. Not
@@ -1537,7 +1540,7 @@ async def _redrive_recorded_kills(
             # says this run is alive, which is why `_apply_effect`'s
             # supersession check (which reads `_live`) is not the right gate
             # at resume.
-            run_id = listing["run_id"]
+            run_id = listing.run_id
             redriven.add(run_id)
             await adapter.kill(run_id)
             engine._resolve_effect(
@@ -1567,8 +1570,8 @@ async def _redrive_orphans(
     an `applied`, `retired` or absent KILL effect cannot answer. A run this
     resume already killed is skipped rather than signalled twice."""
     for (job, run_number), listing in sorted(supervised_live.items()):
-        run_id = listing.get("run_id") or ""
-        if not listing.get("wrapper_alive") or not run_id or run_id in redriven:
+        run_id = listing.run_id
+        if not listing.wrapper_alive or not run_id or run_id in redriven:
             continue
         row = engine.oracle.store.job.get(job)
         if row is None or row.run_number != run_number or row.status not in TERMINAL:

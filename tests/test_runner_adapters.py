@@ -23,6 +23,7 @@ anything that surprised us or contradicted the design doc.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import signal
 import subprocess
@@ -36,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from supervisor_list_doubles import stub_listing, stub_row
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
@@ -50,6 +52,8 @@ from dsl41.runner_adapters import (
     LocalCommandAdapter,
     SupervisedCommandAdapter,
     SupervisorClient,
+    SupervisorListReply,
+    SupervisorListSuccess,
     Terminated,
     spool_names_run,
 )
@@ -697,6 +701,24 @@ def _list_row(run_id: str, *, alive: bool = True) -> dict[str, Any]:
     }
 
 
+def _list_reply(*, runs: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
+    """A full `{"ok": true, ...}` LIST reply (supervisor-protocol ss5): the
+    client's own `list_runs` parses every field below into
+    `SupervisorListSuccess`, so a wire double answering LIST must carry
+    them all, defaulted past what a given test does not exercise."""
+    return {
+        "ok": True,
+        "version": 1,
+        "supervisor_pid": 0,
+        "boot_id": "boot",
+        "incarnation": "inc-1",
+        "deadman_s": None,
+        "lease": None,
+        "runs": runs or [],
+        **extra,
+    }
+
+
 def test_dl210_client_never_unlinks_a_refused_supervisor_socket(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -735,7 +757,7 @@ def test_dl210_any_reply_arms_one_list_net_for_several_waits(
             net = client._list_task
             assert net is not None
             await wire.expect("LIST")
-            wire.reply({"ok": True, "runs": [_list_row("b")], "pushes_dropped": 1})
+            wire.reply(_list_reply(runs=[_list_row("b")], pushes_dropped=1))
             await asyncio.wait_for(marks[0].wait(), 3.0)
             await asyncio.wait_for(marks[2].wait(), 3.0)
             assert not marks[1].is_set()
@@ -749,7 +771,7 @@ def test_dl210_any_reply_arms_one_list_net_for_several_waits(
             # A later wait wakes the SAME task without another hint.
             later = client.watch_exit("later")
             await wire.expect("LIST")
-            wire.reply({"ok": True, "runs": []})
+            wire.reply(_list_reply())
             await asyncio.wait_for(later.wait(), 3.0)
             assert client._list_task is net
         finally:
@@ -779,7 +801,7 @@ def test_dl210_refused_list_marks_nothing_and_duplicate_probe_stays_alive(
             wire.reply(reply)
             await wire.expect("LIST")
             assert not dead.is_set()
-            wire.reply({"ok": True, "runs": [_list_row("run")]})
+            wire.reply(_list_reply(runs=[_list_row("run")]))
             probe = asyncio.create_task(SupervisedCommandAdapter(client)._listed_alive("run"))
             await wire.expect("LIST")
             wire.reply(reply)
@@ -807,7 +829,7 @@ def test_dl210_list_snapshot_cannot_judge_a_wait_accepted_during_its_request(
         try:
             await wire.expect("LIST")
             spawn = asyncio.create_task(client.spawn({"run_id": "new"}))
-            wire.reply({"ok": True, "runs": []})
+            wire.reply(_list_reply())
             await wire.expect("SPAWN")
             assert "new" not in client._listed_dead
             assert not future.done()
@@ -821,7 +843,7 @@ def test_dl210_list_snapshot_cannot_judge_a_wait_accepted_during_its_request(
             client.forget_exit("old")
             await wire.expect("LIST")
             late = client.watch_exit("late")
-            wire.reply({"ok": True, "runs": []})
+            wire.reply(_list_reply())
             await asyncio.wait_for(dead.wait(), 3.0)
             assert not late.is_set()
             assert not future.done()
@@ -896,7 +918,7 @@ def test_dl210_dropped_fresh_exit_reaches_the_existing_spool_ladder(
             await wire.expect("LIST")
             # No exit push and no status record: only this LIST can release
             # the fresh wait, and it must not fabricate wrapper_rc.
-            wire.reply({"ok": True, "runs": []})
+            wire.reply(_list_reply())
             result = await asyncio.wait_for(task, 3.0)
             assert not future.done()
             assert client._listed_dead == {}
@@ -939,7 +961,7 @@ def test_dl210_reconnect_arms_net_without_drop_hint(tmp_path: Path, monkeypatch)
         try:
             assert await client.reconnect()
             await wires[-1].expect("LIST")
-            wires[-1].reply({"ok": True, "runs": []})
+            wires[-1].reply(_list_reply())
             await asyncio.wait_for(dead.wait(), 3.0)
             assert not future.done()
         finally:
@@ -999,7 +1021,7 @@ def test_dl210_forget_does_not_cancel_list_and_close_cancels_outside_request(
         # A normal request queues behind LIST. Forgetting the last wait must
         # leave that reply aligned with LIST, then PING gets its own reply.
         ping = asyncio.create_task(client._request({"cmd": "PING"}))
-        wire.reply({"ok": True, "runs": []})
+        wire.reply(_list_reply())
         await wire.expect("PING")
         wire.reply({"ok": True, "ping_marker": "own reply"})
         assert (await ping)["ping_marker"] == "own reply"
@@ -1080,7 +1102,7 @@ def test_dl210_malformed_shared_list_fails_loudly_then_later_waits_recover(
         try:
             await wire.expect("LIST")
             failed_net = client._list_task
-            wire.reply({"ok": True, "runs": [{**_list_row("run"), "run_number": "1"}]})
+            wire.reply(_list_reply(runs=[{**_list_row("run"), "run_number": "1"}]))
             with pytest.raises(EngineError, match="malformed run row"):
                 await asyncio.wait_for(task, 3.0)
             assert client._exit_futures == {}
@@ -1092,7 +1114,7 @@ def test_dl210_malformed_shared_list_fails_loudly_then_later_waits_recover(
             future = client.exit_future("later")
             dead = client.watch_exit("later")
             await wire.expect("LIST")
-            wire.reply({"ok": True, "runs": []})
+            wire.reply(_list_reply())
             await asyncio.wait_for(dead.wait(), 3.0)
             assert not future.done()
             assert client._list_task is replacement
@@ -1183,9 +1205,12 @@ def test_dl75_the_per_wait_list_recheck_interval_is_seconds_not_poll_counts(
         async def reconnect(self) -> bool:
             return True
 
-        async def list_runs(self) -> dict[str, Any]:
+        async def list_runs(self) -> SupervisorListReply:
             self.asked += 1
-            return {"ok": True, "runs": [_list_row("run")]}  # still alive: keep waiting
+            # a real SupervisorListSuccess, not a wire dict: this double is
+            # called directly by _await_outcome/_listed_alive, never parsed
+            # through _parse_list_reply (DL-220 rework)
+            return stub_listing(runs=[stub_row(run_id="run", wrapper_alive=True)])
 
     async def scenario() -> tuple[int, int]:
         client = _Client()
@@ -1239,7 +1264,7 @@ def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing
     async def scenario() -> None:
         await client.ensure_running()
         try:
-            assert (await client.list_runs())["ok"] is True
+            assert isinstance(await client.list_runs(), SupervisorListSuccess)
         finally:
             await client.close()
 
@@ -1255,3 +1280,74 @@ def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing
         while (tmp_path / "supervisor.sock").exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_dl220_a_malformed_list_reply_header_field_refuses_with_engine_error() -> None:
+    """DL-220 rework: a malformed HEADER field on an otherwise `ok: true`
+    LIST reply refuses the same way a malformed ROW does -- `EngineError`,
+    naming the field -- not a raw `ValidationError` escaping `list_runs`'s
+    three callers, none of which expect anything but `SupervisorUnavailable`
+    or `EngineError`."""
+    from dsl41.runner_adapters import _parse_list_reply
+
+    raw = {
+        "ok": True,
+        "version": "not-an-int",  # malformed: the wire always sends an int
+        "supervisor_pid": 1,
+        "boot_id": "boot",
+        "incarnation": "inc-1",
+        "deadman_s": None,
+        "lease": None,
+        "runs": [],
+    }
+    with pytest.raises(EngineError, match="malformed header") as excinfo:
+        _parse_list_reply(raw)
+    assert "version" in str(excinfo.value)
+
+
+def test_dl220_dict_style_supervisor_run_row_access_is_a_static_error(tmp_path: Path) -> None:
+    """DL-220: a typo'd field name was already a mypy `[attr-defined]`
+    finding before this slice -- `SupervisorRunRow` never had a real
+    `wrapper_status` field, shim or no shim. What the shim's removal
+    actually makes newly static is DICT-STYLE access: `.get(...)` and
+    `row[...]`, which the shim used to make legal (and Any-typed) reads,
+    are now `[attr-defined]`/`[index]` findings too. Same harness as
+    test_runner_lifecycle.py's
+    test_type_checking_alias_is_what_types_the_by_path_helpers: a snippet,
+    one mypy invocation, MYPYPATH pointed at the source tree so `dsl41`
+    resolves without an install."""
+    if importlib.util.find_spec("mypy") is None:  # a dev dependency, not a runtime one
+        pytest.skip("mypy is not installed")  # pragma: no cover
+    (tmp_path / "wrong_attr.py").write_text(
+        "from dsl41.runner_adapters import SupervisorRunRow\n"
+        "row = SupervisorRunRow(\n"
+        "    run_id='r', job='j', run_number=1, run_dir='/tmp/j.1',\n"
+        "    wrapper_pid=1, wrapper_alive=True, spawned_at='x', wrapper_rc=None,\n"
+        ")\n"
+        "print(row.wrapper_status)\n"  # no such field: the wire's is wrapper_alive/wrapper_rc
+        "print(row.get('run_id'))\n"  # the removed shim's method
+        "print(row['run_id'])\n",  # the removed shim's __getitem__
+        encoding="utf-8",
+    )
+    src_root = Path(_procid.__file__).parent.parent
+    report = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            str(tmp_path / "wrong_attr.py"),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "MYPYPATH": str(src_root)},
+        timeout=60,
+    ).stdout
+    attr_errors = [line for line in report.splitlines() if "[attr-defined]" in line]
+    index_errors = [line for line in report.splitlines() if "[index]" in line]
+    assert len(attr_errors) == 2, report  # .wrapper_status, .get
+    assert len(index_errors) == 1, report  # row[...]
+    assert any("wrapper_status" in line for line in attr_errors), report
+    assert any('"get"' in line for line in attr_errors), report
+    assert "not indexable" in index_errors[0], report

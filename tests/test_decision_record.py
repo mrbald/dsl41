@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from supervisor_list_doubles import stub_refusal, stub_row
 
 from test_runner_control import (
     _serve,
@@ -56,7 +57,7 @@ from test_runner_control import (
 
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
-from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_adapters import FakeAdapter, SupervisorListReply
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
     ApplyResult,
@@ -670,7 +671,9 @@ def test_pr36a_the_preflight_refuses_every_identity_split_before_anything_moves(
     # a DEAD supervisor row with no local directory is a claim like any other
     with pytest.raises(EngineError, match="supervisor's LIST"):
         _preflight_identities(
-            engine, {("j", 1): None}, {("j", 1): {"run_id": "rid-else", "wrapper_alive": False}}
+            engine,
+            {("j", 1): None},
+            {("j", 1): stub_row(job="j", run_number=1, run_id="rid-else", wrapper_alive=False)},
         )
 
     # agreement everywhere: reconciliation then proceeds and resolves
@@ -822,6 +825,49 @@ def test_pr36a_the_reconcile_barrier_refuses_a_split_and_appends_nothing(tmp_pat
             # exactly as the crash left it
             assert read_journal(engine.journal.path) == before
             assert [e.effect_id for e in engine.outbox.pending()] == [spawned.effect_id]
+        finally:
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_pr36a_reconcile_reads_a_list_refusal_as_no_supervised_evidence(tmp_path: Path) -> None:
+    """DL-220: a LIST reply can be `SupervisorRefusal` (a malformed
+    envelope, an unsupported version, an unknown verb -- supervisor-
+    protocol ss5) without the transport itself failing, so `_reconcile`
+    must read it exactly as the unreachable-supervisor case does: no
+    supervised evidence, not a crash on the reply shape."""
+    run_root = tmp_path / "run"
+    engine = start_run(
+        lower_source(_SOLO_JIL),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+    )
+
+    class _RefusingSupervisor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_runs(self) -> SupervisorListReply:
+            self.calls += 1
+            return stub_refusal()
+
+    async def scenario() -> None:
+        supervisor = _RefusingSupervisor()
+        try:
+            await _reconcile(
+                engine,
+                [],
+                T0,
+                settle_seconds=0.0,
+                grace_seconds=0.0,
+                supervisor=supervisor,
+            )
+            assert supervisor.calls == 1  # the branch under test actually ran
+            assert engine.outbox.pending() == []  # nothing to reconcile, and no crash
         finally:
             await engine.shutdown()
             assert engine.journal is not None

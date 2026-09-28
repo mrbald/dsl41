@@ -707,7 +707,7 @@ def _trigger_moved(before: JobIR, after: JobIR) -> bool:
     return _cond_key(before.sem.condition) != _cond_key(after.sem.condition)
 
 
-def _cond_key(attr: CondAttr | None) -> Any:
+def _cond_key(attr: CondAttr | None) -> dict[str, Any] | None:
     return None if attr is None else canonical_cond(attr.cond).model_dump(mode="json")
 
 

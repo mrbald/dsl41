@@ -176,6 +176,7 @@ from dsl41.runner_adapters import (
     JobAdapter,
     SealBarrier,
     SupervisorClient,
+    SupervisorListSuccess,
     SupervisorUnavailable,
     status_payload,
 )
@@ -911,14 +912,16 @@ class Engine:
                 " (period-model ss8, PR-27)"
             ) from exc
         held = self.supervisor.incarnation
-        if held is None or listing.get("incarnation") != held:
+        got = listing.incarnation if isinstance(listing, SupervisorListSuccess) else None
+        if held is None or got != held:
             raise EngineError(
                 f"the supervisor's LIST is from incarnation"
-                f" {listing.get('incarnation')!r} but this engine's lease names"
+                f" {got!r} but this engine's lease names"
                 f" {held!r}: a restarted supervisor's history is not proof"
                 " (period-model ss8, PR-27)"
             )
-        rows = {(str(r["job"]), int(r["run_number"])): r for r in listing.get("runs", [])}
+        assert isinstance(listing, SupervisorListSuccess)  # narrowed: incarnation matched
+        rows = {(r.job, r.run_number): r for r in listing.runs}
         for key, entry in sorted(bound.items()):
             row = rows.get(key)
             if row is None:
@@ -927,20 +930,20 @@ class Engine:
                     " leased incarnation's LIST -- a carried non-terminal row the"
                     " sweep cannot account for refuses the seal (period-model ss8)"
                 )
-            if row.get("run_id") != entry.run_id:
+            if row.run_id != entry.run_id:
                 raise EngineError(
                     f"{key[0]}.{key[1]}: the supervisor's LIST names run_id"
-                    f" {row.get('run_id')!r} but the bound run is {entry.run_id!r} --"
+                    f" {row.run_id!r} but the bound run is {entry.run_id!r} --"
                     " an identity split at the seal refuses (DL-118)"
                 )
         for key, row in sorted(rows.items()):
-            if not row.get("wrapper_alive"):
+            if not row.wrapper_alive:
                 continue  # history: its outcome resolves from the spool
             ours = bound.get(key)
-            if ours is None or ours.run_id != row.get("run_id"):
+            if ours is None or ours.run_id != row.run_id:
                 raise EngineError(
                     f"{key[0]}.{key[1]}: the supervisor holds live run"
-                    f" {row.get('run_id')!r} the seal's executions do not carry --"
+                    f" {row.run_id!r} the seal's executions do not carry --"
                     " the sweep found evidence quiescence cannot account for"
                     " (period-model ss8, PR-27)"
                 )

@@ -324,7 +324,9 @@ class TierAResult(BaseModel):
     detail: dict[str, str] = {}  # job -> one-line what-differs summary
 
 
-def _machine_key(v: MachineIR) -> tuple:
+def _machine_key(
+    v: MachineIR,
+) -> tuple[str | None, dict[str, str], list[tuple[str, dict[str, str]]]]:
     # members are ordered (DL-49); compare order-sensitively -- a reorder
     # or a dropped component is a real difference, never false-equal.
     return (v.machine_type, v.attrs, [(mm.name, mm.attrs) for mm in v.members])
