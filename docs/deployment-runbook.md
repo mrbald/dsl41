@@ -251,6 +251,118 @@ engine. It cannot reach that engine's work: everything a running period
 creates belongs to a period that is not attested, and is floored for that
 reason alone.
 
+## 2b. Quiescent backup and restore
+
+*(Added by DL-219, derived from `tests/test_restore_drill.py`.)* Everything
+below is a rehearsal, not a new verb: there is no `dsl41 backup` or `dsl41
+restore`. Back up and restore with your own file copier, against the
+inventory, the precondition and the constraints below.
+
+**The inventory.** Four things, all of them:
+
+- **the anchor directory** — `<run-root>.anchor` by default (§2). It is a
+  sibling of the run root, so a copy that stops at the root's own tree
+  leaves the fence behind;
+- **every run root the retained lineage needs** — one per period-model
+  §1.1, or several once a physical roll has moved the lineage to a fresh
+  root. The anchor's registry names them (§6a); back up each one the
+  registry still points at, not just the newest;
+- **the retained evidence inside those roots** — seals, attestations,
+  archive receipts, and the WAL and spool of any period not yet archived
+  (§2a's floor table). This is not a separate step: it is what "back up
+  the run root" already means, because none of it lives outside the root
+  the bullet above names;
+- **the deployment inputs** — the estate's JIL, the properties file the
+  night ran with, and (if the estate uses one) the `--timezone-map` and
+  `--access-map` files (§1, §2, §4). A restored root's next opener still
+  loads its catalog from the JIL and properties by path, the way every
+  opener does, and a resumed profile re-reads `--timezone-map` the same
+  way; a DR host needs its own copy of the same checkout your estate
+  directory holds, plus whatever run-specific properties, timezone-map or
+  access-map file is not part of that checkout.
+
+**The quiescence precondition.** Nothing may still be writing into what you
+copy. Stopping the engine is necessary and not sufficient: a DETACHED
+period's commands run under the supervisor, which outlives the engine by
+design (runner-design §6a), so an engine that has exited still leaves
+`supervisor.sock` and `supervisor.pid` behind, held by a process that can
+still write into the run root. **The order matters and does not commute:**
+
+1. stop the engine (`dsl41 run`'s own SIGINT);
+2. if the period ran detached, confirm the supervisor is still there —
+   `dsl41 supervise list --run-root <root>` answers `ok` while it is;
+3. seal the period (§6a) — live or offline, whichever applies — and
+   `dsl41 audit` it, so what you back up is closed and attested rather
+   than open. Do this WHILE the detached period's supervisor from step 2
+   is still up: the offline `seal` command wires a DETACHED period's
+   supervisor client exactly as a live engine does
+   (`wire_from_profile`), and that client reconnects to a supervisor
+   that is still there but SPAWNS A FRESH ONE, with no deadman, if none
+   is — sealing after the supervisor is already down leaves a second,
+   unaccounted-for supervisor behind;
+4. NOW stop the supervisor — `dsl41 supervise shutdown --run-root
+   <root>`. It TERM→grace→KILLs anything still running first, so run it
+   only once you want every live command ended, not merely observed, and
+   only once the seal above no longer needs it;
+5. prove every writer is actually gone before you copy anything: no
+   `supervisor.pid`, no `supervisor.sock`, no engine holding
+   `leader.lock`. `tests/test_restore_drill.py` asserts both files are
+   absent at exactly this point.
+
+A tethered period has no supervisor and skips steps 2 and 4.
+
+**The path-equality constraint.** The anchor's registry names each
+period's run root by absolute path (§6a; period-model §1.3). Restoring
+the whole lineage — the anchor and every root — at a DIFFERENT absolute
+path does not make those rows repoint themselves: they still name the
+ORIGINAL path, which after a restore elsewhere holds nothing. For every
+**estate-wide read** — `dsl41 audit --estate-anchor`, `journal`, `runs`,
+`estate prune` — that is a **missing registered root**, the identical
+refusal an incomplete restore produces, not a distinct failure mode; this
+is what the drill checks. Restore each root at the SAME absolute path it
+was backed up from, mounts included: a DR host needs the same mount
+layout the original host had, at least for every path a run root or the
+anchor can sit at. `boundary.claim_id_for` does hash the target root's
+realpath into a physical roll's successor-claim digest, but only an
+INTERRUPTED roll's claim recovery ever recomputes and compares it
+(`test_nightbank_boundary.py`'s
+`test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed`); an ordinary,
+already-completed period's resume never revisits it — it just reads the
+registry row and opens what is at the path it names.
+
+**An open gap, not papered over.** `dsl41 run --resume` pointed DIRECTLY
+at a relocated copy (its own run root and its own copied anchor, both at
+the new path, named explicitly rather than found through a registry walk)
+is **not refused today**: nothing in the resume path compares the closed
+head's `root` to the `--run-root` actually passed, only the estate id.
+An operator must never resume a relocated copy by hand for this reason —
+the refusal above only fires when something walks the registry to get
+there. Whether resume should compare and refuse is a separate decision;
+it is not made here, and this section does not claim a protection that
+is not built. Recorded as an open item in DL-219; no test in this repo
+pins the current, unrefused behavior as something to preserve.
+
+**What archived inputs cannot get back.** `estate prune --archive-inputs`
+(§2a) is irreversible by design: once it has run, restoring an old copy of
+the deleted WAL beside the receipt does not move that period back to
+DERIVATION-verified (period-model §12a). The receipt governs, and
+`dsl41 audit` reports ATTESTATION-verified for that period regardless of
+what is on disk beside it (period-model §12a states the same for every
+other reader — `journal`, `runs`, the estate walk — though this drill
+checks only `audit`). Back up an archived period's receipt, attestation
+and sidecar like anything else the registry needs; do not expect backing
+up a stray copy of its deleted WAL to buy back the stronger tier.
+
+**What this does not prove.** Restoring a lineage does not decide who may
+run it. Nothing here checks that the ORIGINAL host is actually stopped for
+good, or arbitrates between two copies of one estate both claiming to
+lead it — that is an operational discipline outside the model, the same
+way a physical roll while jobs are live is a non-goal (period-model §12).
+Nor does it reconcile business effects a job produced after the backup was
+taken and before the restore: a job's `std_out_file`, its produced files,
+anything it wrote outside the run root, are not part of this inventory and
+this section says nothing about recovering or replaying them.
+
 ## 3. Starting the engine
 
 ```sh

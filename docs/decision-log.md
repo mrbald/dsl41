@@ -13870,3 +13870,53 @@ relitigate an entry; append a new one.
   It asserts what the CLI does today with a configured map that is missing
   or malformed on the resume path: exit 2, naming the map, before the root
   is read or written.
+||||||| parent of fef16f5 (test: DL-219 a quiescent backup and restore drill over a synthetic lineage, and the runbook procedure derived from it)
+
+- DL-219 A restoration drill: quiescent backup and restore, over the real
+  machinery, at a fixed path (2026-09-28)
+  `tests/test_restore_drill.py` builds a closed, quiescent, two-root
+  lineage from `examples/nightbank`'s small estate -- one period with a
+  real detached command finishing under a real supervisor, sealed offline
+  while that supervisor is still up, attested; a physical roll to a second
+  root; that period sealed and attested too; the first period then
+  archived (`estate prune --archive-inputs`), so the drill carries one
+  DERIVATION-verified period beside one ATTESTATION-verified one. The
+  estate's own JIL files are copied under the drill's base and loaded from
+  there throughout (`monkeypatch` on `test_nightbank_boundary.SMALL_FILES`,
+  house style), so they are part of what gets backed up and restored too.
+  It backs up the anchor, both roots, the copied JIL and the night's
+  properties file, deletes everything else under the base, restores at the
+  same absolute path, and reads the restored lineage with fresh CLI
+  invocations and a fresh `resume_run` -- nothing held over from before the
+  delete. Three refusals over `dsl41 audit --estate-anchor`, an
+  ESTATE-WIDE read, each a missing-registered-root case: no restored
+  anchor; a root the registry names but the restore omitted; and the whole
+  lineage restored intact at a DIFFERENT absolute path, which fails the
+  same way because the anchor's own registry rows still name the ORIGINAL
+  path -- not a `claim_id_for` mismatch, since a completed period's resume
+  never recomputes that digest; only an INTERRUPTED physical roll's claim
+  recovery does, and `test_nightbank_boundary.py`'s
+  `test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed` already covers
+  that path.
+  `docs/deployment-runbook.md` ss2b states the inventory; the quiescence
+  order (engine, then confirm the supervisor is still there, seal WHILE it
+  is still up -- an offline seal over a DETACHED period reconnects to it
+  or spawns a fresh deadman-less one if it is already down -- then stop
+  the supervisor, then poll for `supervisor.pid` and `supervisor.sock`
+  both gone before backing up, under a bounded deadline rather than on the
+  SHUTDOWN reply alone, since `_teardown` unlinks them after it answers
+  `ok`; the drill polls the same way); the path-equality constraint and
+  why an estate-wide read's refusal at the wrong path is
+  missing-registered-root rather than a digest mismatch; and that an
+  archived period's tier does not come back by putting its deleted WAL
+  back beside the receipt (period-model ss12a). It also names what the
+  drill does not prove: exclusive authority over which copy of a restored
+  estate actually runs, and reconciling a job's real-world effects
+  produced between the backup and the restore, are both outside it.
+  **Open item, not closed here:** `dsl41 run --resume` pointed directly at
+  a relocated copy -- its own run root and its own copied anchor, both
+  named explicitly rather than reached through a registry walk -- is NOT
+  refused today; nothing in the resume path compares the closed head's
+  `root` to the `--run-root` actually passed, only the estate id. Whether
+  resume should compare and refuse is undecided; no test here pins the
+  current, unrefused behavior as something to preserve.
