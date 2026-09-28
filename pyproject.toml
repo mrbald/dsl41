@@ -22,7 +22,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -71,7 +71,7 @@ Issues = "https://github.com/mrbald/dsl41/issues"
 dsl41 = "dsl41.cli:app"
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 # grammars/ lives at the repo root (docs reference it there); ship it inside the

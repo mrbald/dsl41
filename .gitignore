@@ -4,6 +4,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 dist/
+# the release's locked exports, when built locally (README "Make a release")
+/exports/
 *.egg-info/
 .idea/
 .hypothesis/
@@ -20,3 +22,6 @@ examples/nightbank/runs/
 .coverage
 .coverage.*
 .claude/settings.local.json
+
+# npm inputs of scripts/vendor_mermaid.sh; a pin bump in place creates this
+scripts/vendor/node_modules/

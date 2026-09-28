@@ -13591,3 +13591,94 @@ relitigate an entry; append a new one.
   gate and connection tier, and the seam is the declined move above; the
   other four runner files moved by under thirty lines each. The baseline is
   re-armed after the last slice lands.
+- DL-215 The release publishes only what passed the CI gates and an
+  installed-artifact smoke test, built from locked inputs (2026-09-28)
+  Before this entry `release.yml` ran its own pytest, build and `twine
+  check`, and published with no dependency on `ci.yml`. A tag could ship a
+  tree that failed ruff, mypy, the architecture gate, the coverage report or
+  the browser job. Every `uv sync --extra dev` silently re-locked when
+  `uv.lock` was stale. Nothing installed the built wheel before PyPI did.
+  Ruling, the gate: `ci.yml` gains `workflow_call`, and the release's
+  `gates` job calls it whole. DL-214 declined a shared gate action until a
+  third job needed the gates; release validation is that third job. The
+  workflow is reused instead of a composite action, so the release runs the
+  same jobs as a push, with no new file and no second list to keep aligned.
+  The call passes no secrets; `ci.yml` uses none.
+  Publication needs a tag. `publish` needs `gates`, `build` and `smoke`,
+  uploads the files `smoke` tested, and rebuilds nothing. It runs on a tag
+  push, or on a manual run from a tag whose `publish` input is true. A
+  manual run from any other ref, or without that input, is a rehearsal: it
+  runs `gates`, `build` and `smoke` and publishes nothing.
+  `release-assets` follows every publish and creates the GitHub release from
+  the tag message, with the sdist, the wheel, both requirements files and a
+  `SHA256SUMS` over them. Whenever the ref is a tag, `build` refuses a tag
+  that is not `v` plus the `pyproject.toml` version, and a lightweight tag,
+  since the annotation is the release note. `build` builds the sdist and
+  the wheel separately from the tree, so the wheel is not built from the
+  sdist and the smoke's rebuild comparison can catch a file the sdist lost.
+  Each job declares its own permissions; only `publish` gets `id-token` and
+  only `release-assets` gets `contents: write`. The release's own jobs keep
+  no git credentials and use no uv cache.
+  Locked inputs: all three `uv sync` sites in `ci.yml` and the one in
+  `release.yml` pass `--locked`, which fails when `uv.lock` no longer matches
+  `pyproject.toml`. `build` exports the non-dev closure with `uv export
+  --frozen`, hashes included, as `requirements-base.txt` and, with the `[ui]`
+  extra, `requirements-ui.txt`. The weekly audit exports with `--extra ui`,
+  so it covers what the second file ships.
+  The smoke contract, `scripts/release_smoke.sh <dist-dir> <exports-dir>`:
+  for each of `base` and `ui`, a fresh venv takes the exported closure with
+  `--require-hashes` and then the wheel with `--no-deps`, and `pip check`
+  passes. From a scratch directory with `PYTHONPATH` unset, the installed
+  package must import from the venv and not be editable; it must carry
+  `py.typed` and the four license files its metadata declares; `dsl41
+  --help` must exit 0; `uc` must compile `examples/nightbank/estate/small`
+  into a bundle with records and the installed version as `tool_version`;
+  `viz` must write the `html` and `html-chart` pages with the installed
+  `mermaid.min.js` and `mermaid-layout-elk.iife.min.js` inlined byte for
+  byte, and the `explore` page with `cytoscape-explore.iife.min.js` and
+  `custom-elements.min.js`; a detached `run` of one job must reach SUCCESS
+  through `sendevent`, with the supervisor running from the venv, and stop
+  cleanly on SIGINT and `supervise shutdown`. In `base`, `dsl41 ui` must
+  refuse with exit 2 and name the extra (`cli_common.import_tui_or_exit_2`).
+  In `ui`, `RunnerApp` must mount headless through Textual's `run_test` on
+  the live socket and show the job's row as SUCCESS. Last, a wheel rebuilt
+  from the sdist with `pip wheel --no-deps`, constrained to the hatchling
+  named in the candidate's WHEEL `Generator` line, must match the direct
+  wheel file for file by sha256; only `*.dist-info/RECORD` is excluded,
+  because it lists the other files' hashes. The inputs come from the
+  checkout; the code under test comes only from the candidate. When this
+  entry was written the script passed on macOS and in a Debian arm64
+  container (`python:3.12-slim`); the release runs it on Ubuntu with Python
+  3.12, the floor.
+  Tool pins: `[build-system]` requires `hatchling>=1.27,<2`. The upper
+  bound keeps a major release out of an unreviewed build. An exact pin is
+  unnecessary because the artifact is qualified, not the tool: the smoke
+  test and the sdist rebuild check the wheel whatever built it, and `build`
+  logs the wheel's `Generator` line (hatchling 1.32.4 when this entry was
+  written). `twine` is pinned exactly, `twine==7.0.0`, because it is the
+  check, and a check that moves with the tool is not a gate.
+  npm: the pins that `scripts/vendor_mermaid.sh` passed inline to `npm
+  install --no-save` move to `scripts/vendor/package.json`, and
+  `scripts/vendor/package-lock.json` fixes their transitive closure.
+  `scripts/vendor/.npmrc` sets `save-exact=true`, so a bump writes an exact
+  pin. The script copies the manifest and the lock into its scratch
+  directory and runs `npm ci`. Re-run after the change, it wrote the four
+  vendored files byte-identical to the tree. Their sha256 at this entry:
+  `mermaid.min.js`
+  18327bef70d96fb505fe7287d9f6a7362ebf07ff6576ddfaffb1a06f3e1a2954,
+  `mermaid-layout-elk.iife.min.js`
+  b0df1496a5095070aa8e46cfa5f4efb9a6321a53cefb04abe4903bb664eac085,
+  `cytoscape-explore.iife.min.js`
+  620fb76f8d5bb65a95d0704c321cddd13a323666eaebdadfc8a1bd39da550470,
+  `custom-elements.min.js`
+  cc14433db77c53e92706d93a0c8e3df870d9826c6c334044c9fe976c2726cb22.
+  Classifier: `Operating System :: OS Independent` becomes `Operating
+  System :: POSIX`. `import dsl41.cli` imports `cli_control`, which imports
+  `runner_access` (`cli_control.py:22`), and that module imports `grp` and
+  `pwd` unguarded (`runner_access.py:19,23`). Neither exists on Windows, so
+  the CLI cannot start there and the old classifier was false.
+  The runbook installs a release's `requirements-<profile>.txt` with
+  `--require-hashes` and then its wheel with `--no-deps`, from the release
+  after 1.7.0 on; releases through 1.7.0 carry no assets and keep the PyPI
+  install. A same-venv patch upgrade installs the same way instead of with
+  `pip install -U`.
