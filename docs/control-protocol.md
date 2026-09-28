@@ -54,6 +54,15 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
   overruns asyncio's 64 KiB default at roughly 300 jobs.
+  *(Amended by DL-216.)* A line ends at its `\n`. A request fragment
+  that reaches EOF without one is dropped unanswered and never parsed:
+  its client died mid-write, and a truncated command must not run.
+- *(Amended by DL-216.)* **A client that attempted a write cannot prove
+  the request did not arrive.** A write can fail after the peer took
+  every byte, or part of them. So a client treats any failure from its
+  first write attempt on as an unknown outcome (`delivered`), never as
+  "not sent". Only a failure before any write, such as a refused
+  connect, is undelivered.
 - **Every request carries `"v": 3`**, including queries and `subscribe`.
   The check runs before the request is routed at all, so `subscribe` —
   which owns its connection and never reaches the response path — is not
@@ -169,6 +178,41 @@ reached (`docs/access-model.md` §5, §7). A reused id under a *different*
 command is refused as a collision. `expect` participates in the
 fingerprint, so the same verb at two revisions is two commands.
 
+*(Amended by DL-217.)* **A `sendevent` or `host` collision refusal
+carries the id's earlier decision.** When the id already holds one, the
+refusal adds
+`"original_decision": {index, request_id, decision, reason, revisions}`,
+the decision's own fields. The answer stays a refusal of this request:
+`ok: false`, `refused: true`, and the read header of the engine that
+answered. The nested decision belongs to the earlier command and is never
+this request's outcome. An id admitted but not yet decided carries no
+`original_decision`. The `seal` verb keeps its own retry route (below) and
+never carries the field.
+
+**Recovering a lost answer.** The fingerprint covers `baseline_id`,
+`epoch` and `expect`. A retry must place the values its original placed,
+not values re-read after the loss. `dsl41 sendevent` and `dsl41 host`
+print the id and those three values on stderr before the first write, as
+the flags `--request-id`, `--expect`, `--epoch` and `--baseline`, and
+repeat them in the exit-4 advice. Re-running the original arguments with
+them gives these answers:
+
+- the original was decided: the retry is answered from that decision and
+  takes no index, in the same period, after the entity moved, and after a
+  same-period restart that rebuilt the index from the WAL;
+- the original was never admitted, and the engine has since restarted:
+  the retry names a superseded epoch and is refused as stale, "re-read
+  and re-compose". Nothing applies;
+- the original was never admitted, and the same engine still leads: the
+  retry is a fresh command at the pinned `expect`. It applies if the
+  entity is still at that revision and is rejected if it moved;
+- the actor claim changed, because it ran as another user or host, or an
+  access map now stamps a different principal: the envelope differs, and
+  the answer is a collision carrying `original_decision`, not a replay.
+
+The route is bounded. It holds within one protocol version, and within the
+period whose decision index holds the id.
+
 `baseline_id` must match the engine's. A revision read from another
 baseline names nothing here.
 
@@ -199,7 +243,7 @@ them apart from the answer alone:
 | outcome | on the wire | what happened | the caller's next move |
 |---|---|---|---|
 | applied | `ok: true` | the oracle applied it | — |
-| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the WAL** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, §7) | fix and re-send; unchanged is safe, since it never happened once |
+| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the WAL** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, §7) | this request never happened: fix and re-send. A refused retry says nothing about its original, which may have applied (DL-217) |
 | **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Journaled, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
 | **unknown** | `ok: false`, and neither marker | admission is uncertain: no decision arrived within the window below, or a handler raised | re-read. Retry **only** under the same `request_id` |
 
@@ -210,9 +254,10 @@ neither marker means uncertainty rather than a fourth kind of no. Two
 answers land there: the no-decision timeout below, and the internal-error
 answer of a handler that raised (§2). A client reads both as `unknown`.
 `dsl41 sendevent` spends a
-distinct exit code on each (0/2/3/4) and prints its `request_id` on
-stderr when the answer is `unknown`, which is the only thing that makes
-that retry safe.
+distinct exit code on each (0/2/3/4). *(Amended by DL-217.)* It prints its
+`request_id` and pins on stderr before every write, and repeats them as
+retry advice when the answer is `unknown`; they are the only thing that
+makes that retry safe.
 
 The server waits for the decision rather than acknowledging admission,
 because a precondition whose outcome the caller cannot see is not a
@@ -621,6 +666,10 @@ period costs one segment however long the lineage is.*)
   a **cancelled** exchange hands the unread response line to the next
   request and offsets every reply after it (DL-46). `ControlClient` drops
   on `OSError` and on any `BaseException` including `CancelledError`.
+- *(Amended by DL-216.)* A failure after a write was attempted is
+  `delivered` (§2). Both clients serialize the request before they touch
+  the connection, so an unencodable request is the caller's error and
+  never a transport outcome.
 - Open every connection with an explicit `LINE_LIMIT`; the default
   readline buffer fails on real estates.
 - A torn line in a `subscribe` stream is skippable — records are a

@@ -405,6 +405,14 @@ survive into operation.
   `dsl41 query status --brief -S $S`, `query is-success -J <job> -S $S`
   (shell exit codes), `query subscribe -S $S` (live journal stream) for
   feeding the site monitoring.
+- `sendevent` and `host` exit 4 when the answer was lost, and the recovery
+  reference is the retained CLI stderr plus the original arguments: re-run
+  those arguments with the `--request-id`, `--expect`, `--epoch` and
+  `--baseline` the stderr lines printed, so keep stderr in your job logs
+  (`docs/control-protocol.md` §3, DL-217). Retry as the same user on the
+  same host: another user or host, `sudo`, or a newly armed access map
+  changes the actor the envelope carries, and the retry is then refused as
+  a collision that shows what the original decided, not replayed.
 - Offline audit: `dsl41 journal <root> [estate files]` replays the WAL
   with no engine. *(Amended by DL-142.)* **The estate files are
   optional.** Omit them and every period's catalog is loaded from that

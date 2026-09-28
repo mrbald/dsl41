@@ -239,16 +239,76 @@ def read_header_of(response: dict) -> "tuple[str, int] | None":
     return baseline, epoch
 
 
-def _no_decision(request: dict) -> None:
+def _pins(request: dict) -> str:
+    """The flags that rebuild this envelope's read-header half: `--expect`,
+    `--epoch` and `--baseline`, as they were PLACED in it (DL-217).
+
+    Empty for an envelope that names no `expect` -- the seal, whose retry
+    route restores its own baseline and epoch from the committed record
+    (cli_estate), and so needs, and has, no such flags."""
+    import shlex
+
+    expect = request.get("expect")
+    if not isinstance(expect, dict) or len(expect) != 1:
+        return ""
+    (revision,) = expect.values()
+    return (
+        f" --expect {revision} --epoch {request.get('epoch')}"
+        f" --baseline {shlex.quote(str(request.get('baseline_id')))}"
+    )
+
+
+def _retry_as(request: dict, retry_verb: str | None) -> str:
+    """The exact retry: the id plus the pins, prefixed by the verb that
+    carries it when that is not the verb the operator typed."""
+    import shlex
+
+    flags = f"--request-id {shlex.quote(str(request['request_id']))}{_pins(request)}"
+    return f"{retry_verb} {flags}" if retry_verb else flags
+
+
+def _sending(request: dict, retry_verb: str | None) -> None:
+    """The pre-send line (DL-217): printed and flushed BEFORE the first
+    write, so it survives a client that dies mid-exchange -- killed,
+    interrupted, or reporting a transport failure. It is the exact-retry
+    flags themselves, quoted for a shell: the id and the values actually
+    placed in the envelope, which is everything an exact retry needs beside
+    the original arguments. Never the payload: the arguments already hold
+    it, and stderr is often a shared log.
+
+    A RECORD, printed before every mutation whatever its outcome. The
+    ADVICE to use it is the exit-4 line, which is the only one that says
+    "retry ONLY as"."""
+    typer.echo(f"sending: {_retry_as(request, retry_verb)}", err=True)  # echo flushes
+
+
+def _no_decision(request: dict, retry_verb: str | None = None) -> None:
     """DL-92's fourth outcome, said out loud. The id is on stderr because it
     is the only thing that makes the retry safe, and a caller that lost the
     round trip has nowhere else to get it: the answer that would have
-    carried it never came."""
+    carried it never came. The pins ride with it (DL-217): the verb re-reads
+    the revision, the epoch and the baseline when it is not given them, and
+    the fingerprint covers all three, so an id carried back alone is a
+    collision rather than a retry once any of them has moved."""
     typer.echo(
         f"no decision: this command may still apply. Re-read, then retry ONLY as"
-        f" --request-id {request['request_id']}",
+        f" {_retry_as(request, retry_verb)}",
         err=True,
     )
+
+
+def _collision(response: dict) -> None:
+    """Both facts of a collision refusal (DL-217): this request was
+    refused, and the id it carried already holds an earlier decision. The
+    nested decision is the earlier command's, never this one's -- the exit
+    stays the refusal's 2."""
+    from dsl41.runner_control import original_decision_text
+
+    original = original_decision_text(response)
+    if original is None:
+        return
+    typer.echo(f"refused: {response.get('error', 'request_id collision')}", err=True)
+    typer.echo(original, err=True)
 
 
 def command_outcome(
@@ -257,6 +317,7 @@ def command_outcome(
     *,
     on_applied: Callable[[], None] | None = None,
     rejected_as_unknown: bool = False,
+    retry_verb: str | None = None,
 ) -> int:
     """Send one ss6 command envelope and answer with its outcome: DL-92's
     four (0 applied / 2 refused / 3 rejected / 4 unknown).
@@ -289,6 +350,10 @@ def command_outcome(
     engine's `seal` handler happens to answer -- an argument that goes
     stale the day that handler grows a decision, while the test does not
     (DL-145). Widening ss7's table is ss7's call, not this slice's.
+
+    `retry_verb` names the verb an exact retry has to be sent as when it is
+    not the one the operator typed: `release-held` sends one OFF_HOLD per
+    job, and its retry is the one-job `sendevent` (DL-217).
     """
     import json as json_mod
 
@@ -302,13 +367,14 @@ def command_outcome(
         roundtrip,
     )
 
+    _sending(request, retry_verb)
     try:
         response = roundtrip(socket_path, request)
     except ControlClientError as exc:
         code = refuse(exc)
         if not exc.delivered:
             return code
-        _no_decision(request)
+        _no_decision(request, retry_verb)
         return 4
     typer.echo(json_mod.dumps(response, sort_keys=True))
     outcome = outcome_of(response)
@@ -316,8 +382,10 @@ def command_outcome(
         outcome = UNKNOWN
     if outcome == APPLIED and on_applied is not None:
         on_applied()
+    if outcome == REFUSED:
+        _collision(response)
     if outcome == UNKNOWN:
-        _no_decision(request)
+        _no_decision(request, retry_verb)
     return {REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0)
 
 

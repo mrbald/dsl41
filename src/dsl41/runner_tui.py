@@ -180,6 +180,7 @@ from dsl41.runner_control import (
     ControlClientError,
     claimed_actor,
     command,
+    original_decision_text,
     outcome_of,
     read_for,
     revision_in,
@@ -1112,6 +1113,9 @@ class _LogPane(Vertical):
 #: applied  -- the index, so the operator can find it in the journal.
 #: refused  -- "not sent" is the operator-facing truth: no index, no log
 #:             entry, nothing to look up later. Sending it again is safe.
+#:             The console mints a fresh id per command, so its refusal is
+#:             never a retry's; a collision, which only a reused id meets,
+#:             says instead what the id decided earlier (DL-217).
 #: rejected -- the table they typed against had already moved. It IS in the
 #:             log, and the refresh below the line is the re-read.
 #: unknown  -- yellow, not red: this is the one that has not failed. The
@@ -1131,6 +1135,10 @@ def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
     error = str(response.get("error", "")).strip()
     if outcome == APPLIED:
         body = f"applied @ #{response.get('index', '?')}"
+    elif outcome == REFUSED and (original := original_decision_text(response)) is not None:
+        # a collision: THIS request was refused, but its id is logged under
+        # an earlier decision, so "nothing logged" would be false (DL-217)
+        body = f"refused: {error or 'request_id collision'}; {original}"
     elif outcome == REFUSED:
         body = f"not sent, nothing logged: {error or 'refused'}"
     elif outcome == REJECTED:

@@ -13682,3 +13682,86 @@ relitigate an entry; append a new one.
   after 1.7.0 on; releases through 1.7.0 carry no assets and keep the PyPI
   install. A same-venv patch upgrade installs the same way instead of with
   `pip install -U`.
+||||||| parent of 766c11e (fix: DL-216 a write attempt makes the outcome unknown and an unterminated frame is dropped; DL-217 the pinned exact retry and the collision's original decision)
+
+- DL-216 A client that attempted a write reports any failure as delivered,
+  and the server drops an unterminated request (2026-09-28)
+  Both control clients split a failure into undelivered and delivered, and
+  both drew the line too late. The async client set its flag only after
+  `drain()`; the sync client counted any `sendall` failure as undelivered.
+  Neither can prove non-delivery once a write was attempted. A drain can
+  fail after the kernel took every byte. CPython's `sock_sendall`
+  (`Modules/socketmodule.c`) checks for signals after each successful send
+  and before its loop test, so a handler that raises makes `sendall` fail
+  after the whole line went out. A partial write is worse: the server reader
+  accepted an unterminated fragment at EOF as a request. So a client whose
+  `sendall` failed before the newline, and which then closed, reported "not
+  sent" for a command the engine applied. A probe reproduced it.
+  Ruling. The async client serializes the line before it touches the writer,
+  sets `sent` immediately before `write()`, and raises every later failure
+  with `delivered=True`. That covers any `Exception`, not only `OSError`: a
+  signal handler can raise anything out of the send. Connection teardown and
+  `CancelledError` propagation are unchanged, and a connection whose answer
+  may remain unread is never reused. Before it writes, the async client
+  drops an idle connection whose reader is already at EOF and reconnects, so
+  a request on a connection the engine closed in a restart reads as
+  undelivered rather than unknown. The sync client serializes before the
+  connect; a connect failure stays undelivered, and every `Exception` from
+  `sendall` on is delivered. `KeyboardInterrupt` still propagates, after the
+  socket is closed. The server's request reader drops a line without its
+  `\n` at EOF, unanswered and unparsed. `control-protocol.md` §2 states both
+  rules and §6 the client half. The `subscribe` stream readers are
+  unchanged.
+  Visible change: a client that died mid-write no longer runs a truncated or
+  whole command, and the CLI answers such a failure with exit 4 and the
+  retry advice instead of exit 2. A TUI whose engine closed its idle
+  connection says "not sent" and reconnects. A residual window remains: a
+  hang-up that lands between the EOF check and the write reads as "NO
+  DECISION", the side that claims less, until the next request reconnects.
+- DL-217 A lost answer is recovered by a pinned exact retry, and a
+  collision says what the id already decided (2026-09-28)
+  The exact-retry promise (control-protocol §3) was unreachable from the CLI
+  in the cases that need it. The fingerprint covers `baseline_id`, `epoch`
+  and `expect`. The CLI re-read all three on every compose, and only the
+  revision could be pinned. So a retry after another actor moved the job, or
+  after a restart took a new epoch, was a different envelope under a reused
+  id: a collision, which then told the operator nothing about what the first
+  command did. The exit-4 advice printed only the id, and `release-held`
+  minted a fresh id per job with no way to retry one.
+  Ruling. `sendevent` and the mutating `host` actions take `--epoch` and
+  `--baseline` beside `--expect`; each pin replaces its own read value and
+  the rest are read as before. Before the first write of a mutation the CLI
+  prints one stderr line, `sending: --request-id X --expect r --epoch E
+  --baseline B`, quoted for a shell and never carrying the payload. It is a
+  record printed before every mutation, whatever the outcome, because the
+  client may die before any outcome exists. The exit-4 advice repeats the
+  same flags: `retry ONLY as --request-id X ...`. For `release-held` both
+  lines name the one-job retry, `sendevent OFF_HOLD --job <name> --socket
+  <path>`, with that job's pins. Two ladder tests used to assert that the
+  bare `--request-id` flag appears only on outcomes that may still apply.
+  The record now puts it on every outcome, so they assert the advice phrase
+  instead, which is the claim they were making. The seal keeps its own route
+  (`cli_estate`), which restores baseline and epoch from the committed
+  record, so its advice is unchanged. `DecisionIndex.lookup` raises
+  `RequestCollision` carrying the id's decision, and the server adds it to
+  the refusal as `original_decision`: index, request_id, decision, reason,
+  revisions. Only `sendevent` and `host` carry it; the seal's collision
+  refusals come from its own route and do not. The answer stays a refusal
+  with the responding engine's header, and the CLI exit stays 2. The CLI and
+  the TUI print both facts, the refusal and "request_id X was decided
+  earlier: ...", and never promote the nested decision into the retry's
+  outcome. The sendevent help for exit 2 now says that a refused retry tells
+  nothing about its original, which may have applied.
+  No client-side request file. The engine's decision index already holds the
+  original decision and is rebuilt from the WAL on replay, so a second copy
+  on the client would be a second source of truth. The pinned line is
+  byte-exact: the flags rebuild the same envelope from the same arguments,
+  and the envelope is otherwise deterministic for the same user@host claim.
+  The route is bounded to one protocol version and to the period whose index
+  holds the id. An unseen original retried after a restart is refused as a
+  stale epoch; with the same engine still leading it is a fresh command at
+  the pinned expect. A changed actor claim is a collision, not a replay. The
+  field is additive under control-protocol §2's rule that consumers ignore
+  unknown fields: no version bump. `runner.py`'s docstring named
+  `Engine.inject` as the control door; it now names `submit`, `submit_host`
+  and `submit_seal`.

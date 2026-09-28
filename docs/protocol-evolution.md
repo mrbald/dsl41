@@ -238,6 +238,21 @@ connection is read normally. `subscribe` is the one request that outlives its
 answer — it owns its connection until hangup (`control-protocol.md` §5) — so
 that one instance ends with the connection.
 
+*(Amended by DL-217.)* **An additive answer field is not a new dialect.**
+The basis is `control-protocol.md` §2: consumers must ignore unknown
+fields. A field added to an answer is therefore read by every current
+client as it was before. It takes no version bump, and none of the four
+steps in this document's §2. The first one is
+`original_decision` on a `sendevent` or `host` collision refusal
+(`control-protocol.md` §3). It nests the earlier decision under its own
+key, so a client that ignores it still reads the refusal as a refusal.
+DL-217 records it, and two tests in `tests/test_recovery.py` hold it:
+`test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected`
+checks that the answer still classifies as `refused`, and
+`test_a_collision_with_an_undecided_original_carries_nothing_nested`
+checks the answer without the field. A field that changed how an answer is
+classified would not qualify: that is a new dialect.
+
 **The last row is semantics, not format.** `state_machine_version` names how the
 interpreter derives, not how a byte is laid out. §2.1 freezes it across a
 transition: one binary implements one version and can neither lead nor replay

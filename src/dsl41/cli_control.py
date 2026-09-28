@@ -89,6 +89,34 @@ _SOCKET_OPT = typer.Option(
 )
 
 
+_EPOCH_PIN_HELP = (
+    "PIN the envelope's epoch rather than reading it. An exact retry needs"
+    " the epoch the original carried: the CLI prints it before sending."
+)
+_BASELINE_PIN_HELP = (
+    "PIN the envelope's baseline_id rather than reading it. An exact retry"
+    " needs the baseline the original carried: the CLI prints it before sending."
+)
+
+
+def _pinned_read(
+    socket_path: Path, key: str, expect: int | None, epoch: int | None, baseline: str | None
+) -> tuple[str, int, int]:
+    """`_read_revision`, with each pin replacing its own read value (DL-217).
+
+    The fingerprint covers the revision, the epoch and the baseline, and the
+    read returns the CURRENT three. So an id carried back alone, after any of
+    them moved, is a different command under a reused id -- a collision, not
+    a retry. Each pin replaces one value independently; what is not pinned
+    is read as before."""
+    read_baseline, read_epoch, current = _read_revision(socket_path, key)
+    return (
+        read_baseline if baseline is None else baseline,
+        read_epoch if epoch is None else epoch,
+        current if expect is None else expect,
+    )
+
+
 def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
     """The ss6 read header (`baseline_id`, `epoch`) and the current revision
     of `key` -- the read half of a read-then-write, for an operator who did
@@ -137,8 +165,12 @@ def sendevent(
         help="RETRY the command that carried this id, rather than issuing a new one."
         " An exact retry -- same id, same envelope -- is answered from the original"
         " decision and applies nothing twice, which is the only safe response to"
-        " exit 4. A fresh uuid4 otherwise.",
+        " exit 4. Give it with the --expect, --epoch and --baseline the CLI"
+        " printed, or the re-read values make a different envelope. A fresh"
+        " uuid4 otherwise.",
     ),
+    epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
+    baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
 ) -> None:
     """Vendor-parity sendevent against a running engine (runner-design ss10),
     over the v3 protocol (concurrency-model ss6).
@@ -149,14 +181,21 @@ def sendevent(
     (control-protocol ss3):
 
       0  applied.
-      2  REFUSED: nothing admitted, no index consumed, and the log says
-         nothing about it. Fix it and send it again; unchanged is safe too.
+      2  REFUSED: this request was not admitted, no index consumed, and the
+         log says nothing about it. Fix it and send it again. A refused
+         RETRY says nothing about the original it retries: that one may
+         have applied, and a collision prints what it decided.
       3  REJECTED: a decision went against it -- the target moved between
          the read and the write. It IS in the log. Re-read and re-decide;
          resending the same envelope loses the same race.
       4  UNKNOWN: no decision arrived. NOT a failure -- the command may be
          durably admitted and about to apply. Re-read; if it must be sent
-         again, send it with --request-id and the id printed on stderr."""
+         again, re-run the same arguments with the --request-id, --expect,
+         --epoch and --baseline printed on stderr.
+
+    Before the first write, one stderr line prints the retry flags:
+    --request-id and the three values placed in the envelope. Keep it: with
+    the original arguments it is the whole recovery reference (DL-217)."""
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_clock import EngineError
     from dsl41.runner_control import claimed_actor, command
@@ -178,14 +217,14 @@ def sendevent(
         key = addressed_key(verb, payload)
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
-    baseline, epoch, current = _read_revision(socket_path, key)
+    baseline_id, epoch_value, revision = _pinned_read(socket_path, key, expect, epoch, baseline)
     request = command(
         verb,
         payload,
         key=key,
-        revision=current if expect is None else expect,
-        baseline_id=baseline,
-        epoch=epoch,
+        revision=revision,
+        baseline_id=baseline_id,
+        epoch=epoch_value,
         request_id=request_id,
         claimed_actor=claimed_actor(),
     )
@@ -212,7 +251,14 @@ def release_held(
     Exit codes: 2 when the status read failed (nothing was sent);
     otherwise 0 when every release applied, 1 when any per-job decision
     did not -- the per-job answers, each prefixed `-- <job>`, carry
-    `sendevent`'s 0/2/3/4 detail, which one aggregate number cannot."""
+    `sendevent`'s 0/2/3/4 detail, which one aggregate number cannot.
+
+    Each per-job id is fresh, so the sweep cannot be retried as a sweep. The
+    pre-send line and any exit-4 advice name each job's exact retry as the
+    one-job `sendevent OFF_HOLD --job <name> --socket <path>` with that
+    job's pins (DL-217)."""
+    import shlex
+
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_control import claimed_actor, command, revision_in
 
@@ -249,7 +295,10 @@ def release_held(
             claimed_actor=claimed_actor(),
         )
         typer.echo(f"-- {name}")
-        if command_outcome(socket_path, request) != 0:
+        retry_verb = (
+            f"sendevent OFF_HOLD --job {shlex.quote(name)} --socket {shlex.quote(str(socket_path))}"
+        )
+        if command_outcome(socket_path, request, retry_verb=retry_verb) != 0:
             all_applied = False
     raise typer.Exit(0 if all_applied else 1)
 
@@ -274,6 +323,8 @@ def host(
     request_id: str = typer.Option(
         None, "--request-id", help="RETRY the command that carried this id (see `sendevent`)."
     ),
+    epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
+    baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
 ) -> None:
     """The ss8 routing table: which execution hosts take new work
     (concurrency-model ss8).
@@ -299,14 +350,14 @@ def host(
     if not host_id:
         raise typer.Exit(refuse(f"`host {verb}` needs a host id"))
     key = RuntimeState.host_key(host_id)
-    baseline, epoch, current = _read_revision(socket_path, key)
+    baseline_id, epoch_value, revision = _pinned_read(socket_path, key, expect, epoch, baseline)
     request = command(
         verb,
         {"id": host_id, "force": force},
         key=key,
-        revision=current if expect is None else expect,
-        baseline_id=baseline,
-        epoch=epoch,
+        revision=revision,
+        baseline_id=baseline_id,
+        epoch=epoch_value,
         request_id=request_id,
         claimed_actor=claimed_actor(),
         cmd="host",

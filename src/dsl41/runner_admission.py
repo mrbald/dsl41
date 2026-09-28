@@ -469,7 +469,16 @@ class AdmissionRefused(EngineError):
 
 class RequestCollision(AdmissionRefused):
     """One `request_id`, two different commands. Loud rather than silent:
-    answering the second from the first's decision would apply neither."""
+    answering the second from the first's decision would apply neither.
+
+    `original` is the decision the id already holds, or None while its
+    attempt is undecided (DL-217). It rides on the refusal so the socket can
+    tell a caller whose retry no longer matches what happened to the first
+    command, without promoting that decision into the retry's own outcome."""
+
+    def __init__(self, message: str, *, original: ApplyResult | None = None) -> None:
+        super().__init__(message)
+        self.original = original
 
 
 class DecisionIndex:
@@ -493,19 +502,21 @@ class DecisionIndex:
 
     def lookup(self, request_id: str, fingerprint: str) -> ApplyResult | None:
         """The prior decision for an exact retry, or None for an unseen
-        request. Raises on a reused id, and on an id whose attempt has no
+        request. Raises on a reused id, carrying the decision that id already
+        holds (DL-217), and on an id whose attempt has no
         decision yet -- unreachable while one writer owns the oracle and
         steps 5-7 do not yield, which is exactly why meeting it would mean
         something else is writing."""
         seen = self._fingerprints.get(request_id)
         if seen is None:
             return None
+        result = self._results.get(request_id)
         if seen != fingerprint:
             raise RequestCollision(
                 f"request_id {request_id!r} was admitted for a different command"
-                " (fingerprint mismatch): reuse an id only for an exact retry"
+                " (fingerprint mismatch): reuse an id only for an exact retry",
+                original=result,
             )
-        result = self._results.get(request_id)
         if result is None:
             raise EngineError(
                 f"request_id {request_id!r} is admitted but undecided: a second writer"

@@ -113,6 +113,7 @@ from dsl41.runner_admission import (
     AdmissionRefused,
     ApplyResult,
     EnvelopeError,
+    RequestCollision,
     addressed_key,
     parse_envelope,
 )
@@ -333,7 +334,12 @@ class ControlServer:
                     return
             while True:
                 line = await reader.readline()
-                if not line:
+                if not line.endswith(b"\n"):
+                    # EOF, or EOF inside a line. ss2 frames a request as a
+                    # LINE, and a fragment with no terminator is a client
+                    # that died mid-write: it may be a truncated command, and
+                    # its client cannot know whether the bytes arrived. It is
+                    # dropped unanswered and never parsed (DL-216)
                     break
                 try:
                     request = json.loads(line)
@@ -675,6 +681,15 @@ class ControlServer:
         handle; the leader timestamp lives in the log next to it."""
         try:
             result = await asyncio.wait_for(submitted, timeout=self.DECISION_TIMEOUT_S)
+        except RequestCollision as exc:
+            # still a refusal of THIS request, whole. The id's earlier
+            # decision rides beside it, nested, so a caller whose retry no
+            # longer matches can learn what the first command did without
+            # that decision ever reading as this request's own (DL-217)
+            refusal: dict[str, Any] = {"ok": False, "error": str(exc), "refused": True}
+            if exc.original is not None:
+                refusal["original_decision"] = exc.original.model_dump(mode="json")
+            return refusal
         except AdmissionRefused as exc:
             return {"ok": False, "error": str(exc), "refused": True}
         except TimeoutError:
@@ -1293,13 +1308,14 @@ class ControlClientError(RuntimeError):
 
     `delivered` says which of those two it was, and it is the difference
     between the operator's two next moves (ss3, and `outcome_of`'s reading
-    of them). A request that never left this process changed nothing
+    of them). A request whose write was never attempted changed nothing
     anywhere: no index was taken, the log says nothing about it, and it is
-    safe to send again UNCHANGED. A request that left and got no answer
-    back promises neither -- the engine fsyncs the attempt before it feeds
-    it, so a connection that died after the write may well have died over a
-    command that is already durably admitted. That is `unknown`, and its
-    only safe retry is under the same `request_id`.
+    safe to send again UNCHANGED. A request whose write was attempted and
+    got no answer back promises neither -- the engine fsyncs the attempt
+    before it feeds it, so a connection that died during or after the write
+    may well have died over a command that is already durably admitted.
+    That is `unknown`, and its only safe retry is under the same
+    `request_id`, with the same envelope (DL-216, DL-217).
 
     Defaulted to False because the constructor is called from both clients
     and the safe default is the one that claims less: a caller that reads
@@ -1376,10 +1392,11 @@ def outcome_of(response: Mapping[str, Any]) -> str:
     """Classify one `sendevent` answer (control-protocol ss3, ss6).
 
     ``applied``   the oracle applied it; `revisions` says what moved.
-    ``refused``   nothing was admitted, no index consumed, and the log says
-                  NOTHING about it (DL-90). Safe to fix and send again --
-                  and safe to send again *unchanged*, since it never
-                  happened once.
+    ``refused``   THIS request was not admitted, no index consumed, and the
+                  log says NOTHING about it (DL-90): this request never
+                  happened, so it is safe to fix and send again. A refused
+                  RETRY says nothing about its original, which may have
+                  applied (DL-217).
     ``rejected``  a DECISION went against it. It took an index and its
                   batch's time half fired, so it is in the log and the
                   world moved underneath it. Re-READ and re-decide;
@@ -1402,6 +1419,28 @@ def outcome_of(response: Mapping[str, Any]) -> str:
     if response.get("decision") == REJECTED:
         return REJECTED
     return UNKNOWN
+
+
+def original_decision_text(response: Mapping[str, Any]) -> str | None:
+    """The second fact a collision refusal carries, in words, or None when
+    the answer carries none (DL-217).
+
+    The refusal is still the answer to THIS request: nothing of it was
+    admitted. This sentence is about the EARLIER command that holds the id,
+    and a surface prints it beside the refusal, never instead of it. One
+    spelling here because the CLI and the TUI both print it."""
+    original = response.get("original_decision")
+    if not isinstance(original, Mapping):
+        return None
+    head = (
+        f"request_id {original.get('request_id')} was decided earlier:"
+        f" {original.get('decision')} at index {original.get('index')}"
+    )
+    if original.get("decision") == REJECTED:
+        return f"{head}: {original.get('reason')}"
+    revisions = original.get("revisions") or {}
+    moved = ", ".join(f"{key}={rev}" for key, rev in sorted(revisions.items()))
+    return f"{head}, revisions {moved or 'none'}"
 
 
 def command(
@@ -1464,13 +1503,25 @@ class ControlClient:
         self._lock = asyncio.Lock()
 
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        payload = versioned(payload)
+        # serialized before the writer is touched, so an unencodable request
+        # fails as what it is and never as a transport outcome (DL-216)
+        encoded = json.dumps(versioned(payload)).encode("utf-8") + b"\n"
         async with self._lock:
-            #: whether this request reached the socket. Everything after the
-            #: drain is `delivered`, including the reads that fail: see
-            #: ControlClientError.
+            #: whether a write of this request was ATTEMPTED. It is set just
+            #: before `write()`, not after the drain: a drain that fails may
+            #: fail after the kernel took every byte, and nothing on this
+            #: side can prove otherwise. So every failure from the write on
+            #: is `delivered` (DL-216; see ControlClientError).
             sent = False
             try:
+                if self._reader is not None and self._reader.at_eof():
+                    # the engine hung up on this idle connection -- a restart,
+                    # most often. Writing into it would turn a request that
+                    # never reached an engine into `delivered`, so reconnect
+                    # first. The hang-up can still land between this check
+                    # and the write; that window reads as `delivered`, the
+                    # side that claims less (DL-216)
+                    await self._drop()
                 if self._writer is None:
                     # limit: one `status` response line covers every job and
                     # overruns asyncio's 64 KiB default at ~300 jobs
@@ -1478,9 +1529,9 @@ class ControlClient:
                         str(self.path), limit=LINE_LIMIT
                     )
                 assert self._reader is not None
-                self._writer.write(json.dumps(payload).encode("utf-8") + b"\n")
-                await self._writer.drain()
                 sent = True
+                self._writer.write(encoded)
+                await self._writer.drain()
                 line = await self._reader.readline()
             except OSError as exc:
                 await self._drop()
@@ -1493,6 +1544,17 @@ class ControlClient:
                 await self._drop()
                 raise ControlClientError(
                     f"unreadable response line: {exc}", delivered=sent
+                ) from exc
+            except Exception as exc:
+                # anything else raised once the write was attempted -- a
+                # signal handler's exception out of the drain, say -- is
+                # still a request that may have arrived (DL-216). Before the
+                # write it is not a transport outcome and propagates as is
+                await self._drop()
+                if not sent:
+                    raise
+                raise ControlClientError(
+                    f"control socket {self.path}: {exc!r}", delivered=True
                 ) from exc
             except BaseException:
                 # a CANCELLED exchange (an exclusive worker superseded
@@ -1574,18 +1636,25 @@ def roundtrip(
     transport or decode failure -- exit-code mapping is the CLI's job, so
     this stays free of typer (DL-78).
 
-    Split in two on purpose: everything up to and including the write is
-    UNDELIVERED and everything after it is DELIVERED, because that boundary
-    is what the failure means rather than where it happened."""
+    Split in two on purpose: everything before the write is UNDELIVERED and
+    everything from the write on is DELIVERED, because that boundary is what
+    the failure means rather than where it happened. A failed `sendall` is on
+    the delivered side (DL-216), whatever it raised: it can raise after the
+    peer took the whole line -- CPython runs signal handlers after the last
+    successful send, and a handler may raise anything -- or after a part of
+    it, and neither is a proof that nothing arrived. The
+    request is serialized before the connect for the same reason: an
+    unencodable request is a caller's error, not a transport outcome."""
+    encoded = json.dumps(versioned(request)).encode("utf-8") + b"\n"
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:
         try:
             conn.settimeout(timeout)
             conn.connect(str(socket_path))
-            conn.sendall(json.dumps(versioned(request)).encode("utf-8") + b"\n")
         except OSError as exc:
             raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
         try:
+            conn.sendall(encoded)
             buf = b""
             while not buf.endswith(b"\n"):
                 chunk = conn.recv(65536)
@@ -1601,6 +1670,14 @@ def roundtrip(
         except (OSError, ValueError, RecursionError) as exc:
             raise ControlClientError(
                 f"control socket {socket_path}: {exc}", delivered=True
+            ) from exc
+        except Exception as exc:
+            # any other exception from the write on -- a signal handler that
+            # raised inside `sendall`, after the peer took the line -- is the
+            # same unknown outcome (DL-216). KeyboardInterrupt and other
+            # BaseExceptions propagate, after the `finally` below closes
+            raise ControlClientError(
+                f"control socket {socket_path}: {exc!r}", delivered=True
             ) from exc
     finally:
         conn.close()
