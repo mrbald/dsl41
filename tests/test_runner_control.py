@@ -2273,8 +2273,12 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
         assert exit_info.value.exit_code == code, answer
         err = capsys.readouterr().err
         # the id is the only thing that makes a retry safe, so every outcome
-        # that may still apply has to carry it and no other outcome may
-        assert ("--request-id req-7" in err) is names_the_id, answer
+        # that may still apply has to carry the ADVICE to retry under it and
+        # no other outcome may. The bare flag is no longer the signal: since
+        # DL-217 the pre-send line prints it before every mutation, as a
+        # record, whatever the outcome
+        assert ("retry ONLY as --request-id req-7" in err) is names_the_id, answer
+        assert "sending: --request-id req-7" in err, answer
 
 
 def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
@@ -2337,7 +2341,9 @@ def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
         )
         assert got == code, answer
         printed = capsys.readouterr()
-        assert ("--request-id req-9" in printed.err) is names_the_id, answer
+        # the advice, not the bare flag: the pre-send record carries the
+        # flag on every outcome (DL-217)
+        assert ("retry ONLY as --request-id req-9" in printed.err) is names_the_id, answer
         assert ("dsl41 run --resume" in printed.out) is opens, answer
 
 

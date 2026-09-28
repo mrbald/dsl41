@@ -127,10 +127,10 @@ Phase 11c (ss5, ss8; DL-45 pins the decisions):
 
 The ss10 control plane -- the socket server, its wire vocabulary, and both
 clients -- moved to runner_control.py (DL-78) and is frozen in
-docs/control-protocol.md. What stays relevant here: control injections
-arrive through Engine.inject(source="control") and are journaled by the
-queued-input path (`_Do.EVENT`) like every other input, and the
-single-writer loop serializes them, which is why that tier deliberately
+docs/control-protocol.md. What stays relevant here: control mutations arrive
+through Engine.submit, submit_host (routes) and submit_seal (the boundary);
+the first two are journaled by the queued-input path (`_Do.EVENT`), and the
+single-writer loop serializes all three, which is why that tier deliberately
 carries no controller lease (DL-41a). Query handlers read the oracle
 store between feeds -- safe because feed() never yields.
 """
