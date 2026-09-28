@@ -13765,3 +13765,108 @@ relitigate an entry; append a new one.
   unknown fields: no version bump. `runner.py`'s docstring named
   `Engine.inject` as the control door; it now names `submit`, `submit_host`
   and `submit_seal`.
+||||||| parent of d442628 (feat: DL-218 example launcher and service units, a reattach line built from the real argv, a static unit gate, and a service drill left NOT RUN)
+
+- DL-218 The deployment example: one launcher holds the command line, the
+  reattach line is the process's own, the units are verified statically,
+  and the service drill is NOT RUN (2026-09-28)
+  deployment-runbook §3 described the two service shapes, and §5 required
+  the whole original command line on every resume, but nothing in the
+  repository assembled one. The engine's exit hint said `dsl41 run --resume
+  --detached --run-root R <files>`, which drops every `-p`, the runtime
+  profile and `--access-map`. §5 already says what an omitted map costs: the
+  engine comes back with no perimeter.
+  Ruling, the example: `examples/nightbank/deploy/` holds `dsl41-launch`,
+  `dsl41-engine.service`, `dsl41-supervisor.service` and
+  `nightbank-access.toml`. They are examples, not package data. A unit
+  names site paths and a service account, and a wheel that shipped them
+  would ship guesses. The repository is where they are reviewed and
+  checked. The launcher is POSIX sh and is the one place that names the
+  run root, the lineage anchor, the estate files in their order, every
+  `-p`, every run option and `--access-map`. POSIX sh has one array, and a
+  function cannot return it, so each command is built with `set --`,
+  printed as one line with every word shell-quoted, and split back with
+  `eval set --` before the exec; `--print` shows that same line. Two
+  limits are recorded: a configured value that ends in a newline does not
+  survive the round trip, and the reattach line prints argv[0] verbatim.
+  It passes `--resume` if and only if `<root>/journal.jsonl` exists, as §3
+  prescribes. It chooses a genesis only for a root that does not exist,
+  is empty, or holds nothing but a supervisor's own files, because the
+  shape-1 supervisor unit creates the root before the engine's first
+  start. A root it cannot read or search, a non-directory, or a root with
+  other contents and no sentinel is refused with exit 2: a missing mount
+  or a lost sentinel must not become a fresh estate. `--print` applies the
+  same guard. It execs dsl41, so the exit code is dsl41's own and no
+  refusal can be followed by a genesis, another root or the next period.
+  Genesis itself still refuses a root or anchor that holds an estate
+  (period-model §1.1). Its own
+  refusals, a usage error or a missing dsl41, exit 2, so the units'
+  `RestartPreventExitStatus` covers them; a failed `exec` would exit 127
+  and restart-loop. The supervisor unit calls the launcher too, in its
+  `supervisor` and `supervisor-ready` modes. Each unit repeats the run
+  root once, in `RequiresMountsFor=`, so it never starts on an unmounted
+  file system; a test holds that copy equal to the launcher's. The engine
+  unit adds `StartLimitIntervalSec=300` and `StartLimitBurst=5`, so a crash
+  that repeats, a launcher systemd cannot execute (203/EXEC) or a shell
+  that cannot run dsl41 (126, 127) stops after five starts in five minutes
+  instead of restarting forever. The supervisor unit keeps
+  `StartLimitIntervalSec=0`: DL-210 made the retry of an ownership refusal
+  unlimited on purpose, and a start limit there reopens that ruling; the
+  launcher's own checks turn a missing dsl41 into exit 2 for both units.
+  The units follow §3's shape 1 as
+  written: `KillMode=control-group` on the supervisor, which is safe
+  because wrappers ignore SIGTERM and record their commands, and
+  `RestartPreventExitStatus=2 3` on the engine. A sealed engine is left
+  `failed` with status 3 and no `SuccessExitStatus=3`, so monitoring sees
+  that a period waits for an operator. The supervisor's `TimeoutStopSec=60`
+  covers supervisor-protocol §5's waits at the default grace, and a test
+  pins it to `CMD_GRACE_S`. `--as-machine localhost`, `--machine-policy
+  strict` and `--timezone UTC` are spelled out although two are defaults,
+  so the reviewed line shows the whole runtime profile.
+  Ruling, the reattach line: `cli_run._reattach_line` builds it from
+  `sys.argv`. Every word stays in place with three edits. `--open-from X`
+  becomes `--estate-anchor X`, because the two openers are exclusive and
+  every later resume of a rolled root needs the lineage's anchor; where
+  `--estate-anchor` is already present it names the same directory, and
+  the `--open-from` words are dropped. `--resume` and `--detached` appear
+  once each; a missing one is added after `run`. The words are split
+  against the `run` command's own option table, so an option value is
+  never taken for a flag and a new option cannot be missed. The table is
+  read duck-typed, because typer 0.27 ships click as a private module.
+  `python -m dsl41` is spelled back as `sys.executable -m dsl41`. An argv
+  that is not a `run` invocation, which only an embedding caller has,
+  keeps the schematic line. The line is printed only when the period can
+  be resumed: a clean stop (0) or a crash (1). A sealed exit (3) prints
+  none, because its period is closed and `say_next` has already named the
+  opener of the next one.
+  Ruling, the static check: the `coverage` job runs `systemd-analyze
+  verify --man=no --recursive-errors=no` over both units. The units exec
+  `/opt/dsl41/bin/dsl41-launch`, and verify fails a unit whose executable
+  does not resolve. The step installs the real launcher at that path
+  rather than waiving the check with a `-` prefix or an alternate root,
+  so verify resolves the file the units will run. `--recursive-errors=no`
+  keeps a warning from a host unit out of the exit code; any warning about
+  these two units still fails it. The step had not run in CI when this
+  entry was written. Its command was run in an Ubuntu 24.04 container with
+  systemd 255: exit 1 without the launcher installed, exit 0 with it, and
+  exit 1 on a misspelled key.
+  Ruling, the drill: `.github/workflows/service-drill.yml` is
+  `workflow_dispatch` only and is not part of the default gate. It
+  installs the runtime closure from `uv export --frozen --no-dev
+  --no-emit-project` with pip's `--require-hashes`, then the package with
+  `--no-deps`, so a drill failure cannot come from dependency drift. That
+  recipe was run in an Ubuntu 24.04 container and `pip check` passed. Each
+  deliberate start clears the engine's start limit first, as an operator's
+  `systemctl reset-failed` would. The drill checks the first start, a
+  same-root restart, a detached job surviving an engine stop in the
+  supervisor's cgroup, a changed estate and a malformed or missing map each
+  refused with exit 2 and no restart, and a sealed engine that stays
+  stopped with exit 3 until an operator opens period 2 in place. Its claims
+  are NOT RUN until a dispatched run passes; the runbook says so where it
+  names the drill. What was run: `tests/test_nightbank_deploy.py` runs the
+  shipped launcher, and a copy whose configuration values alone are
+  replaced, against the real CLI: the printed line, the resume choice, the
+  refusals, a genesis, a resume, and the printed reattach line resuming.
+  It asserts what the CLI does today with a configured map that is missing
+  or malformed on the resume path: exit 2, naming the map, before the root
+  is read or written.
