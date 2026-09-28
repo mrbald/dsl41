@@ -45,6 +45,8 @@ from dsl41.runner_adapters import (
     FileWatcherAdapter,
     SupervisedCommandAdapter,
     SupervisorClient,
+    SupervisorListReply,
+    SupervisorListSuccess,
     SupervisorRunRow,
     load_json,
 )
@@ -825,7 +827,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
     token) and receive ITS OWN reply, never the orphan. Driven against a fake
     supervisor that holds one LIST reply hostage."""
 
-    async def scenario() -> tuple[dict, int, int | None]:
+    async def scenario() -> tuple[SupervisorListReply, int, int | None]:
         held: list[asyncio.StreamWriter] = []
         hold_next_list = True
         next_token = 1
@@ -847,7 +849,19 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
                             hold_next_list = False
                             held.append(writer)  # hold the reply: the client parks
                             continue
-                        resp = {"ok": True, "version": 1, "runs": [], "which": "fresh"}
+                        resp = {
+                            "ok": True,
+                            "version": 1,
+                            "supervisor_pid": 0,
+                            "boot_id": "boot",
+                            # the reply model keeps `incarnation`, not an
+                            # arbitrary extra field, so it carries this
+                            # test's fresh/orphan marker
+                            "incarnation": "fresh",
+                            "deadman_s": None,
+                            "lease": None,
+                            "runs": [],
+                        }
                     else:
                         resp = {"ok": True, "version": 1}
                     writer.write(json.dumps(resp).encode("utf-8") + b"\n")
@@ -873,7 +887,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
         # the orphan reply now arrives on the OLD (closed) connection: nowhere
         if held:
             with contextlib.suppress(OSError, ConnectionResetError):
-                held[0].write(json.dumps({"ok": True, "which": "orphan"}).encode() + b"\n")
+                held[0].write(json.dumps({"ok": True, "incarnation": "orphan"}).encode() + b"\n")
                 await held[0].drain()
         # next call: lazy reconnect + re-ACQUIRE, and it gets ITS OWN reply
         resp = await client.list_runs()
@@ -884,7 +898,8 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
         return resp, tok1, tok2
 
     resp, tok1, tok2 = asyncio.run(scenario())
-    assert resp.get("which") == "fresh"  # never the orphan
+    assert isinstance(resp, SupervisorListSuccess)
+    assert resp.incarnation == "fresh"  # never the orphan
     assert tok2 is not None and tok2 > tok1  # re-ACQUIRE minted a fresh fencing token
 
 
@@ -895,7 +910,7 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
     proc = start_supervisor(short_root)
     try:
 
-        async def scenario() -> tuple[int, int | None, dict]:
+        async def scenario() -> tuple[int, int | None, SupervisorListReply]:
             client = SupervisorClient(short_root)
             await client.ensure_running()
             client._RENEW_EVERY_S = 0.6  # first renew lands AFTER the lease lapses
@@ -909,7 +924,7 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
 
         tok1, tok2, listing = asyncio.run(scenario())
         assert tok2 is not None and tok2 > tok1  # renewal survived the lapse
-        assert listing["ok"] is True  # the client is still usable
+        assert isinstance(listing, SupervisorListSuccess)  # the client is still usable
     finally:
         teardown_supervisor(short_root, proc)
 

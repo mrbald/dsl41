@@ -806,7 +806,9 @@ class Seal(BaseModel):
             }
             for name, row in payload["state"]["jobs"].items()
         }
-        return _canon_ready(payload)
+        canon = _canon_ready(payload)
+        assert isinstance(canon, dict)  # narrowing only: _canon_ready(Mapping) -> dict
+        return canon
 
     @property
     def digest(self) -> str:

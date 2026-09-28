@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from supervisor_list_doubles import stub_listing, stub_row
 
 from dsl41.ast_jil import parse, render_preserve
 from dsl41.boundary import (
@@ -71,7 +72,7 @@ from dsl41.period import (
     write_bundle,
 )
 from dsl41.runner import Engine
-from dsl41.runner_adapters import FakeAdapter, SupervisorUnavailable
+from dsl41.runner_adapters import FakeAdapter, SupervisorListReply, SupervisorUnavailable
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
@@ -2474,7 +2475,9 @@ def test_pr33_an_orphan_on_an_unsupervised_adapter_is_left_alone(tmp_path: Path)
     )
     asyncio.run(engine.run_until_quiescent(T0))
     assert engine.oracle.store.runtime("a").status == "SUCCESS"
-    listing = {("a", 1): {"wrapper_alive": True, "run_id": "not-a-supervised-run"}}
+    listing = {
+        ("a", 1): stub_row(job="a", run_number=1, wrapper_alive=True, run_id="not-a-supervised-run")
+    }
     asyncio.run(_redrive_orphans(engine, listing, set()))  # no adapter to signal: a no-op
     _close(engine)
 
@@ -3150,7 +3153,7 @@ def test_pr33_a_live_wrapper_under_a_terminal_row_is_re_driven(tmp_path: Path, s
             signalled.append(run_id)
 
     engine.adapters["CMD"] = _Adapter()
-    listing = {("a", 1): {"wrapper_alive": True, "run_id": effect.run_id}}
+    listing = {("a", 1): stub_row(job="a", run_number=1, wrapper_alive=True, run_id=effect.run_id)}
     asyncio.run(_redrive_orphans(engine, listing, set()))
     assert signalled == [effect.run_id]  # whatever the KILL effect said
     # and a run this resume already killed is not signalled twice
@@ -3532,7 +3535,11 @@ def test_the_seal_refuses_a_strangers_spawn_binding(tmp_path: Path) -> None:
 
 class _StubSupervisor:
     """Just enough of SupervisorClient for the ss8 proof: an incarnation
-    and a LIST answer (or the refusal to give one)."""
+    and a LIST answer (or the refusal to give one).
+
+    `listing` stays the terse dict the tests already write -- `list_runs`
+    is where it becomes the real `SupervisorListSuccess`/`SupervisorRunRow`
+    the client itself returns (DL-220), through their own constructors."""
 
     def __init__(
         self,
@@ -3545,10 +3552,13 @@ class _StubSupervisor:
         self.listing = listing or {"incarnation": incarnation, "runs": []}
         self.unreachable = unreachable
 
-    async def list_runs(self) -> dict[str, Any]:
+    async def list_runs(self) -> SupervisorListReply:
         if self.unreachable:
             raise SupervisorUnavailable("socket gone")
-        return self.listing
+        return stub_listing(
+            incarnation=self.listing.get("incarnation"),
+            runs=[stub_row(**r) for r in self.listing.get("runs", [])],
+        )
 
 
 def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -> None:
@@ -3824,7 +3834,7 @@ def test_an_input_arriving_during_the_supervisor_proof_is_drained_before_the_sna
             super().__init__()
             self.injected = False
 
-        async def list_runs(self) -> dict[str, Any]:
+        async def list_runs(self) -> SupervisorListReply:
             if not self.injected:
                 self.injected = True
                 engine.inject(
@@ -3855,7 +3865,7 @@ def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Pat
             super().__init__()
             self.calls = 0
 
-        async def list_runs(self) -> dict[str, Any]:
+        async def list_runs(self) -> SupervisorListReply:
             self.calls += 1  # every call re-arms the queue: nothing ever settles
             engine.inject(
                 Event(at=T0, kind="SET_GLOBAL", payload={"name": "LATE", "value": str(self.calls)})
@@ -4036,7 +4046,7 @@ def test_an_input_stamped_after_t_refuses_the_boundary(tmp_path: Path) -> None:
     engine = _genesis(run_root)
 
     class _LateInjecting(_StubSupervisor):
-        async def list_runs(self) -> dict[str, Any]:
+        async def list_runs(self) -> SupervisorListReply:
             engine.inject(
                 Event(
                     at=T0 + timedelta(hours=1),  # strictly after the cutoff
@@ -4063,7 +4073,7 @@ def test_a_task_that_dies_during_the_proof_fails_the_boundary_loudly(tmp_path: P
     engine = _genesis(run_root)
 
     class _TaskKilling(_StubSupervisor):
-        async def list_runs(self) -> dict[str, Any]:
+        async def list_runs(self) -> SupervisorListReply:
             from dsl41.runner import _LiveRun
 
             async def boom() -> None:

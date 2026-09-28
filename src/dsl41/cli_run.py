@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
+    from dsl41.runner_preflight import PreflightItem
     from dsl41.runner_startup import Wiring
     from dsl41.seal import CarriedRows
 
@@ -77,7 +78,7 @@ def _preflight_or_exit(
     default_tz: "str | None" = None,
     tz_aliases: "dict[str, str] | None" = None,
     warns_to_stderr: bool = False,
-) -> list:
+) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
     journals them next to the run -- WARN prints, journals, and runs).
     `start` anchors the DL-56 calendar probes: run passes wall-now, rehearse
@@ -490,7 +491,7 @@ def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "
     return running
 
 
-def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task"]:
+def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task[Any]"]:
     """Construct the `--ui` TUI and start it as a task in this terminal,
     this loop -- still a client of the control socket ONLY (ss11). The
     guarded import stays local: the core package's three runtime deps are
@@ -503,7 +504,9 @@ def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task"]
     return tui, asyncio.ensure_future(tui.run_async())
 
 
-def _tui_failure(tui: Any, ui_task: "asyncio.Task | None", done: "set[asyncio.Task]") -> str | None:
+def _tui_failure(
+    tui: Any, ui_task: "asyncio.Task[Any] | None", done: "set[asyncio.Task[Any]]"
+) -> str | None:
     """F3 (DL-46 item 10): a raised exception is a crash. Otherwise a
     nonzero `return_code` is textual's fatal-error path returning normally
     from `run_async` (app.py's `_handle_exception`) -- a crash too, not a
@@ -524,7 +527,7 @@ async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
     resume: bool,
-    warns: list,
+    warns: "list[PreflightItem]",
     *,
     profile: "RuntimeProfile",
     ui: bool = False,
@@ -792,7 +795,7 @@ async def _serve_run(
             except (NotImplementedError, ValueError):
                 pass
         stop_task = asyncio.ensure_future(stop.wait())
-        ui_task: asyncio.Task | None = None
+        ui_task: asyncio.Task[Any] | None = None
         tui = None
         if ui:
             tui, ui_task = _attach_tui(server.path, owns_run=True)
@@ -942,7 +945,7 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     return FakeAdapter(script, default=default, park=park), events
 
 
-def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, dict]:
+def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, dict[str, Any]]:
     """The per-job rollup rows -- a run is a transition INTO STARTING; the
     final status is the last transition's target (out-of-band markers carry
     no "->" and count for neither). Never-started catalog jobs appear with
@@ -965,7 +968,7 @@ def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str,
     }
 
 
-def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict:
+def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, Any]:
     """The --format json document: the full trace plus the rollup rows.
     Built only on the json path -- text/summary never pay for the trace
     dump (the review's m6)."""
@@ -1601,7 +1604,7 @@ def _replay_lineage(
     )
 
     labelled = labelled or len(segments) > 1
-    previous: list[dict] | None = None
+    previous: list[dict[str, Any]] | None = None
     previous_segment: Path | None = None
     # the caller's catalog gates the first period this read actually
     # REPLAYS, which is not list slot 0 once a gap can sit in front of it:
@@ -1767,7 +1770,9 @@ def _announce_archived(segment: Path, *, where: str) -> None:
     )
 
 
-def _prove_crossing(root: Path, opening: dict, *, predecessor: "Path | None", where: str) -> None:
+def _prove_crossing(
+    root: Path, opening: dict[str, Any], *, predecessor: "Path | None", where: str
+) -> None:
     """ss11's "verified means RE-DERIVED, not self-consistent", asked of the
     seal this period opens from -- before the period is opened and before
     the crossing is announced.
@@ -1811,7 +1816,9 @@ def _prove_crossing(root: Path, opening: dict, *, predecessor: "Path | None", wh
         raise typer.Exit(refuse(exc, prefix=where)) from exc
 
 
-def _period_aliases(root: Path, opening: "dict", *, where: str) -> "dict[str, str] | None":
+def _period_aliases(
+    root: Path, opening: "dict[str, Any]", *, where: str
+) -> "dict[str, str] | None":
     """This period's SEM-35 alias table, from its own pin (period-model
     ss2.1). None where the root no longer holds the manifest, which is the
     same degrade `_period_catalog` makes for the same reason."""
@@ -1826,7 +1833,7 @@ def _period_aliases(root: Path, opening: "dict", *, where: str) -> "dict[str, st
 
 
 def _run_period(
-    records: list[dict],
+    records: list[dict[str, Any]],
     opened: "tuple[CatalogIR, CarriedRows | None]",
     *,
     where: str,
@@ -1864,7 +1871,7 @@ def _run_period(
 
 
 def _period_catalog(
-    root: Path, opening: dict, supplied: "CatalogIR | None", *, where: str
+    root: Path, opening: dict[str, Any], supplied: "CatalogIR | None", *, where: str
 ) -> CatalogIR:
     """This period's catalog: the caller's files when they gave any, else
     the estate's own bundle -- and in BOTH cases like for like against the
@@ -1915,7 +1922,7 @@ def _period_catalog(
     return supplied
 
 
-def _period_carry(root: Path, opening: dict, *, where: str) -> "CarriedRows | None":
+def _period_carry(root: Path, opening: dict[str, Any], *, where: str) -> "CarriedRows | None":
     """The rows this period OPENED with, or None for period 1.
 
     `attest.carried_from_opening` is the one derivation of that fact and

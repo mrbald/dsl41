@@ -172,7 +172,7 @@ class _Token:
 
 
 # expression AST: ("tok", _Token) | ("not", node) | ("and", l, r) | ("or", l, r)
-_Node = tuple
+_Node = tuple[Any, ...]
 
 
 def _err(cal: str, msg: str) -> CalendarRuleError:

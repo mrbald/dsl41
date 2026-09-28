@@ -46,7 +46,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Protocol, TYPE_CHECKING, get_args
+from typing import Any, Final, Literal, Protocol, TYPE_CHECKING, get_args
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -1005,7 +1005,14 @@ class SupervisorConn:
                 continue  # notifications are droppable (supervisor-protocol ss5)
             if isinstance(obj, dict):
                 self._learn_incarnation(obj)
-            return obj
+                return obj
+            # supervisor-protocol ss5 sends only JSON objects; this is the
+            # contract's own "cannot happen" made loud rather than
+            # silently degraded into an empty, misleading success-shaped
+            # reply (DL-220 rework).
+            raise EngineError(
+                f"the supervisor sent a non-object reply: {obj!r} (supervisor-protocol ss5)"
+            )
 
     def _learn_incarnation(self, reply: dict[str, Any]) -> None:
         """The supervisor names its own incarnation in every reply that
@@ -1043,12 +1050,12 @@ class SupervisorRunRow(BaseModel):
     protocol.md ss5's "ignores unknown fields", pinned as the "Supervisor
     socket" row of docs/protocol-evolution.md's table).
 
-    `.get`/`__getitem__` read like the raw dict every call site already
-    read: the migration this slice makes is in the PARSE, once, not in
-    rewriting four readers' access syntax (and in test doubles that stand
-    in for the client, whose hand-built rows never pass through here at
-    all -- this shim keeps them reading a validated row exactly as they
-    read a raw one)."""
+    DL-220 finished the migration DL-137 deferred: every reader now reads
+    a row by attribute, `SupervisorClient.list_runs` returns the typed
+    `SupervisorListSuccess`/`SupervisorRefusal` reply instead of a raw
+    dict, and the `.get`/`__getitem__` shim that let readers keep their
+    dict-style access is gone -- a wrong attribute name is a static error
+    instead of a silent `None`/`KeyError` at runtime."""
 
     model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
 
@@ -1060,15 +1067,6 @@ class SupervisorRunRow(BaseModel):
     wrapper_alive: bool
     spawned_at: str
     wrapper_rc: int | None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key) from None
 
 
 def _parse_run_rows(raw_rows: list[Any]) -> list[SupervisorRunRow]:
@@ -1089,6 +1087,92 @@ def _parse_run_rows(raw_rows: list[Any]) -> list[SupervisorRunRow]:
                 " (supervisor-protocol ss5)"
             ) from exc
     return rows
+
+
+class SupervisorLease(BaseModel):
+    """The `lease` object a LIST reply carries when a lease is unexpired
+    (supervisor-protocol ss5). NOT proof of a live controller -- it can
+    still name a holder whose connection is gone."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    holder: str
+    expires_at: str
+
+
+class SupervisorListSuccess(BaseModel):
+    """A LIST reply that answered (supervisor-protocol ss5): `ok: true`
+    plus every field the read-only verb always carries. `runs` is already
+    the parsed rows -- `_parse_list_reply` runs them through
+    `_parse_run_rows` before construction, so this model never re-decodes
+    them and the existing malformed-row `EngineError` is unchanged (DL-220).
+
+    Tolerant of unknown fields, per the wire's own rule."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    ok: Literal[True]
+    version: int
+    supervisor_pid: int
+    boot_id: str
+    incarnation: str
+    deadman_s: float | None
+    lease: SupervisorLease | None
+    runs: list[SupervisorRunRow]
+
+
+class SupervisorRefusal(BaseModel):
+    """A refused reply (supervisor-protocol ss5's `{"ok": false, "error":
+    ...}` shape): a malformed envelope, an unsupported version, an unknown
+    verb, or a handler exception the dispatch loop turns into `internal:
+    ...` rather than letting it kill the process. Carries none of a success
+    reply's fields, so parsing a refusal never fails for lacking them
+    (DL-220) -- `list_runs` returns this instead of raising for a reply
+    `_request` itself did not treat as a transport failure."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+
+    ok: Literal[False]
+    error: str
+
+
+#: `SupervisorClient.list_runs`'s return: the two reply shapes modeled
+#: separately (DL-220) rather than one model with optional success fields,
+#: so a caller that reads `.runs`/`.incarnation` off a refusal is a static
+#: error, not a silently-None success-shaped read.
+SupervisorListReply = SupervisorListSuccess | SupervisorRefusal
+
+
+def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
+    """The one parse of a LIST reply (DL-220), success or refusal. `runs`
+    validates through the pre-existing `_parse_run_rows` path (unchanged
+    `EngineError` on a malformed row) before the success model sees it,
+    and a malformed or mistyped HEADER field (`version`, `supervisor_pid`,
+    `boot_id`, `incarnation`, `deadman_s`, `lease`) on an otherwise-`ok:
+    true` reply refuses the same way, naming the field -- a raw
+    `ValidationError` there would otherwise escape `list_runs`'s three
+    callers (`_list_recheck_loop`, `_listed_alive`, `_reconcile`), none of
+    which expect anything but `SupervisorUnavailable` or `EngineError`.
+
+    Anything that is not the exact `{"ok": true, ...}` success shape
+    parses as a refusal, tolerantly: a non-object reply is already an
+    `EngineError` at the transport (`SupervisorConn.send`), and the shared
+    LIST net's own reconnect-and-retry loop (DL-210) requires that a
+    malformed or garbage reply be readable as ONE unconfirmed answer,
+    never an exception the loop does not expect. Garbage in a header and
+    garbage in a row are both `EngineError`; a refusal is the one
+    exception to that -- the ONE shape this parse never raises on."""
+    if raw.get("ok") is True:
+        rows = _parse_run_rows(raw.get("runs", []))
+        try:
+            return SupervisorListSuccess.model_validate({**raw, "runs": rows})
+        except ValidationError as exc:
+            raise EngineError(
+                f"the supervisor's LIST reply carries a malformed header: {exc}"
+                " (supervisor-protocol ss5)"
+            ) from exc
+    error = raw.get("error")
+    return SupervisorRefusal(ok=False, error=error if isinstance(error, str) else "")
 
 
 class SupervisorClient:
@@ -1455,9 +1539,9 @@ class SupervisorClient:
                 continue  # the adapters own reconnect failure and spool recovery
             finally:
                 self._list_idle.set()
-            if listing.get("ok") is not True:
+            if not isinstance(listing, SupervisorListSuccess):
                 continue
-            alive = {row.run_id for row in listing.get("runs", []) if row.wrapper_alive}
+            alive = {row.run_id for row in listing.runs if row.wrapper_alive}
             for run_id, dead in eligible.items():
                 if self._listed_dead.get(run_id) is dead and run_id not in alive:
                     dead.set()  # evidence for the spool ladder, never an exit push
@@ -1568,11 +1652,9 @@ class SupervisorClient:
     async def signal(self, run_id: str, sig: str) -> dict[str, Any]:
         return await self._request({"cmd": "SIGNAL", "run_id": run_id, "sig": sig})
 
-    async def list_runs(self) -> dict[str, Any]:
+    async def list_runs(self) -> SupervisorListReply:
         resp = await self._request({"cmd": "LIST"})
-        if "runs" in resp:
-            resp = {**resp, "runs": _parse_run_rows(resp["runs"])}
-        return resp
+        return _parse_list_reply(resp)
 
     async def shutdown(self) -> dict[str, Any]:
         return await self._request({"cmd": "SHUTDOWN"})
@@ -1732,11 +1814,9 @@ class SupervisedCommandAdapter:
             listing = await self.client.list_runs()
         except SupervisorUnavailable:
             return True
-        if listing.get("ok") is not True:
+        if not isinstance(listing, SupervisorListSuccess):
             return True
-        return any(
-            r.get("run_id") == run_id and r.get("wrapper_alive") for r in listing.get("runs", [])
-        )
+        return any(r.run_id == run_id and r.wrapper_alive for r in listing.runs)
 
     async def _await_outcome(
         self,

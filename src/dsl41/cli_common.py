@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -228,7 +228,7 @@ def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
     return 2
 
 
-def read_header_of(response: dict) -> "tuple[str, int] | None":
+def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
     """The ss6 read header off one control answer, or None after printing
     the refusal -- the ONE check (DL-137): two verbatim copies differed
     only in how they exited."""
@@ -239,7 +239,7 @@ def read_header_of(response: dict) -> "tuple[str, int] | None":
     return baseline, epoch
 
 
-def _pins(request: dict) -> str:
+def _pins(request: dict[str, Any]) -> str:
     """The flags that rebuild this envelope's read-header half: `--expect`,
     `--epoch` and `--baseline`, as they were PLACED in it (DL-217).
 
@@ -258,7 +258,7 @@ def _pins(request: dict) -> str:
     )
 
 
-def _retry_as(request: dict, retry_verb: str | None) -> str:
+def _retry_as(request: dict[str, Any], retry_verb: str | None) -> str:
     """The exact retry: the id plus the pins, prefixed by the verb that
     carries it when that is not the verb the operator typed."""
     import shlex
@@ -267,7 +267,7 @@ def _retry_as(request: dict, retry_verb: str | None) -> str:
     return f"{retry_verb} {flags}" if retry_verb else flags
 
 
-def _sending(request: dict, retry_verb: str | None) -> None:
+def _sending(request: dict[str, Any], retry_verb: str | None) -> None:
     """The pre-send line (DL-217): printed and flushed BEFORE the first
     write, so it survives a client that dies mid-exchange -- killed,
     interrupted, or reporting a transport failure. It is the exact-retry
@@ -282,7 +282,7 @@ def _sending(request: dict, retry_verb: str | None) -> None:
     typer.echo(f"sending: {_retry_as(request, retry_verb)}", err=True)  # echo flushes
 
 
-def _no_decision(request: dict, retry_verb: str | None = None) -> None:
+def _no_decision(request: dict[str, Any], retry_verb: str | None = None) -> None:
     """DL-92's fourth outcome, said out loud. The id is on stderr because it
     is the only thing that makes the retry safe, and a caller that lost the
     round trip has nowhere else to get it: the answer that would have
@@ -297,7 +297,7 @@ def _no_decision(request: dict, retry_verb: str | None = None) -> None:
     )
 
 
-def _collision(response: dict) -> None:
+def _collision(response: dict[str, Any]) -> None:
     """Both facts of a collision refusal (DL-217): this request was
     refused, and the id it carried already holds an earlier decision. The
     nested decision is the earlier command's, never this one's -- the exit
@@ -313,7 +313,7 @@ def _collision(response: dict) -> None:
 
 def command_outcome(
     socket_path: Path,
-    request: dict,
+    request: dict[str, Any],
     *,
     on_applied: Callable[[], None] | None = None,
     rejected_as_unknown: bool = False,

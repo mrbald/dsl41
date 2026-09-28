@@ -93,6 +93,17 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
 
+[tool.mypy]
+# DL-220: two non-strict flags, applied to whatever file set the gate
+# already checks (docs/agent-workflow.md's `mypy src tests/uc_oracle.py`).
+# `warn_return_any` catches a function that promises a real type and hands
+# back `Any` from something untyped underneath; `disallow_any_generics`
+# catches a bare `dict`/`list`/`tuple`/... standing in for its parameterized
+# form. Neither is `strict = true` (that finds unrelated findings this
+# slice did not scope -- see the decision log entry).
+warn_return_any = true
+disallow_any_generics = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # a wedged test dumps every thread's stack instead of hanging silently (the

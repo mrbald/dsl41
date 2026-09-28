@@ -359,6 +359,11 @@ LITERAL_ALT_EXCLUDED = frozenset(
         # contract, closed by that document's own obligations (DL-209)
         "period.Sentinel.rec",
         "period.Sentinel.see",
+        # the LIST reply's `ok` flag (supervisor-protocol ss5): a frozen
+        # supervisor-contract vocabulary, same rationale as the other two
+        # protocol discriminators above (DL-220)
+        "runner_adapters.SupervisorListSuccess.ok",
+        "runner_adapters.SupervisorRefusal.ok",
     }
 )
 

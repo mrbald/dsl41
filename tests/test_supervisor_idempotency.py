@@ -35,6 +35,7 @@ import pytest
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("supervisor tier is POSIX-only", allow_module_level=True)
 
+from supervisor_list_doubles import stub_listing, stub_row
 from test_runner_supervisor import RawClient, start_supervisor, teardown_supervisor, wait_for
 
 from dsl41 import runner_supervisor
@@ -1109,16 +1110,17 @@ def test_pr36a_a_supervisor_known_dead_run_with_no_local_trace_still_replays(
     import asyncio as _asyncio
     from datetime import timedelta
 
+    from dsl41.runner_adapters import SupervisorListReply
     from dsl41.runner_clock import VirtualClock
     from dsl41.runner_startup import resume_run
 
     catalog, t0, bound = _crashed_run_root(tmp_path)
 
     class _DeadListing:
-        async def list_runs(self) -> dict:
-            return {
-                "runs": [{"job": "j", "run_number": 1, "wrapper_alive": False, "run_id": bound}]
-            }
+        async def list_runs(self) -> SupervisorListReply:
+            return stub_listing(
+                runs=[stub_row(job="j", run_number=1, wrapper_alive=False, run_id=bound)]
+            )
 
     probe = _probe_adapter()
 
@@ -1255,7 +1257,7 @@ def test_pr36_a_dead_duplicate_resolves_through_the_spool_not_a_wait(tmp_path: P
             }
 
         async def list_runs(self):
-            return {"ok": True, "runs": []}  # nothing alive anywhere
+            return stub_listing()  # nothing alive anywhere
 
     adapter = SupervisedCommandAdapter(_Client(), grace_seconds=0.0, settle_seconds=0.0)  # type: ignore[arg-type]
     catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
@@ -1406,7 +1408,7 @@ def test_pr36_a_transient_list_failure_still_ends_in_the_spool(tmp_path: Path) -
             self.asked += 1
             if self.asked == 1:
                 raise SupervisorUnavailable("transient")  # the first ask fails
-            return {"ok": True, "runs": []}
+            return stub_listing()
 
     client = _Client()
     adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.0)  # type: ignore[arg-type]

@@ -103,6 +103,7 @@ from dsl41.runner_ledger import STATE_MACHINE_VERSION, next_epoch
 from dsl41.runner_procid import durable_create, make_durable
 from dsl41.seal import (
     BoundaryRequest,
+    OpenedRuntime,
     Seal,
     SealedHost,
     SealedState,
@@ -874,7 +875,9 @@ def carried_from_opening(
     return opened.carried_rows  # the ONE derivation (seal.py, DL-137)
 
 
-def _opened_runtime(run_root: Path, opening: Mapping[str, Any], closing: Manifest) -> Any:
+def _opened_runtime(
+    run_root: Path, opening: Mapping[str, Any], closing: Manifest
+) -> OpenedRuntime | None:
     link = opening.get("opens_from_seal")
     if not isinstance(link, Mapping):
         return None
