@@ -1,0 +1,41 @@
+# dsl41-supervisor.service -- the nightbank example (DL-218). Every path and
+# name here is synthetic; install as /etc/systemd/system/dsl41-supervisor.service.
+#
+# Shape 1 of deployment-runbook ss3: the supervisor has a unit of its own,
+# so its wrappers and commands live in THIS unit's cgroup and a stop or
+# restart of dsl41-engine.service leaves them running. The command comes
+# from dsl41-launch; this unit repeats only the run root, for
+# RequiresMountsFor=, and a test holds the two equal.
+[Unit]
+Description=dsl41 supervisor (nightbank example)
+# an ownership refusal exits 1 and retries every RestartSec; no start limit
+# may turn that retry into a permanent failure (deployment-runbook ss3)
+StartLimitIntervalSec=0
+# the run root dsl41-launch names; no start before its file system is mounted
+RequiresMountsFor=/srv/dsl41/runs/nightbank-01
+
+[Service]
+Type=simple
+User=dsl41
+Group=dsl41
+ExecStart=/opt/dsl41/bin/dsl41-launch supervisor
+# ready means a real LIST answer, not a socket file
+ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
+TimeoutStartSec=30
+# supervisor-protocol ss5: up to 5 s for a missing spawn.json, then the
+# longest per-run grace (10 s by default) plus 2 s, then a 2 s output
+# drain. 60 s covers that with room; raise it with any longer grace, or the
+# final cgroup kill can silence a wrapper before it records its command.
+TimeoutStopSec=60
+# a clean exit (`dsl41 supervise shutdown`, a deadman) restarts on purpose;
+# exit 2 is a configuration refusal and a retry cannot fix it
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=2
+LimitNOFILE=65536
+# stopping this unit ends its jobs: the commands take SIGTERM, the wrappers
+# ignore it and record what their commands did
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

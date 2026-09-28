@@ -10,6 +10,8 @@ folded out of one or more run roots. Registered on the app in `cli.py`.
 
 from __future__ import annotations
 
+import shlex
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -38,7 +40,7 @@ from dsl41.period import root_is_unused
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Collection, Iterable, Sequence
     from datetime import datetime
 
     from dsl41.boundary import EstateWalk
@@ -137,6 +139,7 @@ def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]"
 
 
 def run(
+    ctx: typer.Context,
     files: list[Path] = typer.Argument(..., help="JIL files forming the estate to execute"),
     run_root: Path = typer.Option(
         ..., "--run-root", help="Run directory (journal, runs/, logs/, control.sock)."
@@ -290,6 +293,11 @@ def run(
                     anchor_dir=estate_anchor,
                     open_from=open_from,
                     access_map=access_map,
+                    reattach=(
+                        _reattach_line(sys.argv, _value_options(ctx.command.params))
+                        if detached
+                        else None
+                    ),
                 )
             )
         )
@@ -297,6 +305,93 @@ def run(
         # start/resume gates (existing journal, hash/domain mismatch, live
         # socket): the run never started
         raise typer.Exit(refuse(exc)) from exc
+
+
+def _value_options(params: "Iterable[object]") -> frozenset[str]:
+    """Every spelling of a `run` option that takes a value -- the table
+    `_reattach_line` needs to tell an option's value from an input file.
+    Read from the running command's own parameters (`ctx.command.params`),
+    so a new option cannot be missed. Duck-typed: typer ships its click as
+    a private module, so there is no public class to test against."""
+    names: set[str] = set()
+    for param in params:
+        if getattr(param, "param_type_name", None) != "option":
+            continue
+        if getattr(param, "is_flag", False) or getattr(param, "count", False):
+            continue
+        names.update(getattr(param, "opts", ()), getattr(param, "secondary_opts", ()))
+    return frozenset(names)
+
+
+def _reattach_line(argv: "Sequence[str]", value_options: "Collection[str]") -> str | None:
+    """The command that reattaches this detached run, built from the argv
+    that started it, shell-quoted (DL-218).
+
+    A resume needs the whole original line: the files in their order, every
+    `-p`, the runtime profile and `--access-map` (deployment-runbook ss5).
+    So every word is kept in place, with three edits. `--open-from X`
+    becomes `--estate-anchor X`: the two openers are exclusive and the
+    anchor it named is the lineage's, which every later resume of this root
+    needs (period-model ss7); where `--estate-anchor` is already present it
+    names the same directory, and the `--open-from` words are dropped.
+    `--resume` and `--detached` are each present exactly once, the first
+    spelling kept and a missing one added after `run`. None when `argv` is
+    not a `run` invocation, which only an embedding caller produces."""
+    if len(argv) < 2 or argv[1] != "run":
+        return None
+    # `python -m dsl41` leaves the package's __main__.py in argv[0]
+    prog = [sys.executable, "-m", "dsl41"] if Path(argv[0]).name == "__main__.py" else [argv[0]]
+    words = list(argv[2:])
+    items: list[tuple[str | None, list[str]]] = []  # (option name or None, its words)
+    at = 0
+    while at < len(words):
+        word = words[at]
+        if word == "--":  # everything after it is an input
+            items.append((None, words[at:]))
+            break
+        if word.startswith("--") and "=" in word:
+            items.append((word.split("=", 1)[0], [word]))
+        elif word in value_options:
+            items.append((word, words[at : at + 2]))
+            at += 1
+        elif word[:1] == "-" and word[1:2] != "-" and word[:2] in value_options:
+            items.append((word[:2], [word]))  # a short option with its value attached
+        elif word.startswith("-"):
+            items.append((word, [word]))
+        else:
+            items.append((None, [word]))
+        at += 1
+    has_anchor = any(name == "--estate-anchor" for name, _ in items)
+    kept: list[str] = []
+    seen: set[str] = set()
+    for name, item in items:
+        if name == "--open-from":
+            if has_anchor:
+                continue
+            item = ["--estate-anchor" + item[0][len("--open-from") :], *item[1:]]
+        elif name in ("--resume", "--detached"):
+            if name in seen:
+                continue
+            seen.add(name)
+        kept.extend(item)
+    missing = [flag for flag in ("--resume", "--detached") if flag not in seen]
+    return shlex.join([*prog, "run", *missing, *kept])
+
+
+def _reattach_note(
+    reattach: str | None, run_root: Path, *, detached: bool, code: int
+) -> str | None:
+    """The line a detached run prints on its way out, or None (DL-218).
+
+    Only a detached run that can be resumed gets one: a clean stop (0) or a
+    crash (1). A sealed exit (3) does not -- its period is closed, and
+    `say_next` has already named the opener of the next one. `reattach` is
+    this process's own line; an embedding caller that has none gets the
+    schematic."""
+    if not detached or code not in (0, 1):
+        return None
+    line = reattach or f"dsl41 run --resume --detached --run-root {run_root} <files>"
+    return f"detached: reattach with `{line}`"
 
 
 def _observed_profile(
@@ -439,6 +534,7 @@ async def _serve_run(
     anchor_dir: "Path | None" = None,
     open_from: "Path | None" = None,
     access_map: "Path | None" = None,
+    reattach: "str | None" = None,
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -749,13 +845,11 @@ async def _serve_run(
                 await loop_task
         await server.close()
         await engine.shutdown()
-        if client is not None:
-            # a client exists exactly when the profile said detached, so the
-            # second half of the guard this replaced tested nothing; the
-            # lease itself is given back in the one teardown below
-            typer.echo(
-                f"detached: reattach with `dsl41 run --resume --detached --run-root {run_root} <files>`"
-            )
+        # a client exists exactly when the profile said detached; the lease
+        # itself is given back in the one teardown below
+        note = _reattach_note(reattach, run_root, detached=client is not None, code=code)
+        if note is not None:
+            typer.echo(note)
         return code
     finally:
         # EACH step guaranteed, whatever the one before it did (DL-145).

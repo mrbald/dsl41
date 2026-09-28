@@ -63,6 +63,9 @@ CI, so the exercises are checked rather than remembered.
   files under the run's `data/` and applies `incidents.conf` behaviors.
 - `estate/<profile>/incidents.conf` — each estate's scripted failures
   (bank targets are per-asset-class names that only exist there).
+- `deploy/` — the estate as a service: a launcher that holds the whole
+  `dsl41 run` line, two systemd units and a role map (deployment-runbook
+  §3, "A worked example").
 
 Each night is one directory under `runs/` (data, logs, properties, control
 socket). The engine's own run root is `<run>/engine` inside it: the

@@ -95,6 +95,17 @@ jobs:
       # a minute of CI for nothing. The report step is what fails the build.
       - run: uv run coverage run -m pytest -q
       - run: uv run coverage report
+      # DL-218: a static check of the example service units; no unit is
+      # started. The launcher is installed at the path both units exec, so
+      # verify's executable check resolves the real file rather than being
+      # waived; --recursive-errors=no keeps a host unit's warning from
+      # failing the build while any warning about these two still fails it.
+      - name: systemd-analyze verify examples/nightbank/deploy
+        run: |
+          set -euo pipefail
+          command -v systemd-analyze >/dev/null || { sudo apt-get update -q; sudo apt-get install -y -q systemd; }
+          sudo install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
+          systemd-analyze verify --man=no --recursive-errors=no examples/nightbank/deploy/*.service
 
   # DL-77: the viz --format explore page's controls exist only in a browser, and
   # byte assertions could not see a WebKit-fatal defect in them. Its own job, on

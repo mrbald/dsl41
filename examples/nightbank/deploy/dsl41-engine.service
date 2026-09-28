@@ -1,0 +1,41 @@
+# dsl41-engine.service -- the nightbank example (DL-218). Every path and name
+# here is synthetic; install as /etc/systemd/system/dsl41-engine.service.
+#
+# Shape 1 of deployment-runbook ss3: the engine runs `dsl41 run --detached`
+# against the supervisor dsl41-supervisor.service owns, so its jobs are in
+# that unit's cgroup and survive a stop of this one. The whole command line
+# lives in dsl41-launch; this unit repeats only the run root, for
+# RequiresMountsFor=, and a test holds the two equal.
+[Unit]
+Description=dsl41 engine (nightbank example)
+Requires=dsl41-supervisor.service
+After=dsl41-supervisor.service
+# the run root dsl41-launch names; no start before its file system is
+# mounted, so an absent mount is never read as an empty root
+RequiresMountsFor=/srv/dsl41/runs/nightbank-01
+# at most five starts in five minutes, then the unit stays failed: bounds
+# a crash that repeats (exit 1) and a launcher systemd cannot execute
+# (203/EXEC) or a shell that cannot run dsl41 (126, 127)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=dsl41
+Group=dsl41
+# --resume iff the root holds its sentinel; exec, so the exit code is dsl41's
+ExecStart=/opt/dsl41/bin/dsl41-launch engine
+# SIGTERM is a clean stop: detached jobs keep running under the supervisor
+KillSignal=SIGTERM
+TimeoutStopSec=60
+# restart a crash (exit 1, a signal) on the same root. Never restart exit 2,
+# a configuration refusal -- a resume gate, a missing or invalid access
+# map, a preflight ERROR, the launcher's own refusal -- or exit 3, a sealed
+# period that an operator opens (deployment-runbook ss3, ss6a)
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

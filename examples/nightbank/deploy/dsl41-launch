@@ -1,0 +1,170 @@
+#!/bin/sh
+# dsl41-launch -- the nightbank engine's command line, in one reviewed place.
+#
+# An example, not package data (DL-218). Every path and name below is
+# synthetic. Copy this file, edit the block marked CONFIGURATION, and review
+# the edit as you would review code: the run root, the estate files and
+# their ORDER, every -p, and every run option are what a resume is gated on
+# (deployment-runbook ss5). The two units beside this file call it; the
+# only thing they repeat is the run root's RequiresMountsFor=.
+#
+#   dsl41-launch engine              exec `dsl41 run` on the configured root
+#   dsl41-launch supervisor          exec `dsl41 supervise start` on that root
+#   dsl41-launch supervisor-ready    wait until the supervisor answers LIST
+#   dsl41-launch --print [MODE]      print MODE's command, shell-quoted, and
+#                                    run nothing (MODE defaults to engine)
+#
+# The engine mode passes --resume if and only if the run root holds its
+# sentinel, <root>/journal.jsonl (deployment-runbook ss3). It chooses a
+# genesis only for a root that does not exist or holds nothing but a
+# supervisor's own files (shape 1's supervisor unit creates the root first).
+# A root it cannot read, or one with other contents and no sentinel, is
+# refused: a missing mount or a lost sentinel must not become a fresh
+# estate. dsl41 itself refuses a genesis on a root or anchor that holds an
+# estate. The script then EXECS dsl41, so the service manager sees dsl41's
+# own exit code and nothing here can fall back to a new estate, another
+# root or the next period after a refusal.
+#
+# Exit 2 is this script's own configuration refusal, the code dsl41 uses
+# for one, so the units' RestartPreventExitStatus covers both.
+
+set -eu
+
+# ---- CONFIGURATION ---------------------------------------------------------
+DSL41=/opt/dsl41/venv/bin/dsl41
+# One estate's run root. A new baseline in a fresh root is an operator's
+# edit of this line, never an automatic choice (deployment-runbook ss6).
+RUN_ROOT=/srv/dsl41/runs/nightbank-01
+# The LINEAGE anchor: genesis creates it here. After a physical roll,
+# RUN_ROOT changes and this line does not (deployment-runbook ss6a).
+ESTATE_ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
+# Always passed. A configured map that is missing or invalid makes
+# `dsl41 run` refuse with exit 2; an omitted one would bring the engine up
+# with no perimeter (deployment-runbook ss4, ss5).
+ACCESS_MAP=/etc/dsl41/nightbank-access.toml
+ESTATE=/srv/dsl41/nightbank/estate/small
+PROPERTIES=/srv/dsl41/nightbank/night/night.properties
+
+engine_command() {
+    # the complete ordered argument list; the estate files are named one by
+    # one, because a glob's order is the locale's and the order is hashed
+    set -- "$DSL41" run \
+        "$ESTATE/amer.jil" \
+        "$ESTATE/apac.jil" \
+        "$ESTATE/calendars.jil" \
+        "$ESTATE/emea.jil" \
+        "$ESTATE/global.jil" \
+        "$ESTATE/infra.jil" \
+        -p "$PROPERTIES" \
+        --run-root "$RUN_ROOT" \
+        --estate-anchor "$ESTATE_ANCHOR" \
+        --detached \
+        --as-machine localhost \
+        --machine-policy strict \
+        --timezone UTC \
+        --access-map "$ACCESS_MAP"
+    opener=$(root_opener) || exit $?
+    if [ "$opener" = resume ]; then
+        set -- "$@" --resume
+    fi
+    quote_all "$@"
+}
+# ---- end of CONFIGURATION --------------------------------------------------
+
+# genesis or resume, decided from the run root alone; anything else refuses
+root_opener() {
+    if [ ! -e "$RUN_ROOT" ] && [ ! -L "$RUN_ROOT" ]; then
+        echo genesis
+        return
+    fi
+    [ -d "$RUN_ROOT" ] || refuse "$RUN_ROOT exists and is not a directory"
+    if [ ! -r "$RUN_ROOT" ] || [ ! -x "$RUN_ROOT" ]; then
+        refuse "$RUN_ROOT is not readable and searchable by $(id -un): cannot tell a resume from a genesis"
+    fi
+    if [ -e "$RUN_ROOT/journal.jsonl" ]; then
+        echo resume
+        return
+    fi
+    for entry in "$RUN_ROOT"/* "$RUN_ROOT"/.[!.]* "$RUN_ROOT"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue # an unmatched glob
+        case ${entry##*/} in
+            # what `dsl41 supervise start` puts in a root before any estate
+            supervisor.lock | supervisor.log | supervisor.pid | supervisor.sock | .s.*) ;;
+            *) refuse "$RUN_ROOT holds ${entry##*/} but no journal.jsonl: it is neither empty nor an estate to resume; inspect it" ;;
+        esac
+    done
+    echo genesis
+}
+
+supervisor_command() {
+    quote_all "$DSL41" supervise start --run-root "$RUN_ROOT"
+}
+
+# POSIX sh has one array, "$@", and a function cannot return it. Each
+# command is therefore built as one shell-quoted line and re-split with
+# `eval set --` below. The quoting leaves a word bare only when it holds
+# nothing but characters Python's shlex.quote also leaves bare.
+quote() {
+    case $1 in
+        '' | *[!A-Za-z0-9@%+=:,./_-]*)
+            printf "'%s'" "$(printf '%s\n' "$1" | sed "s/'/'\\\\''/g")"
+            ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+quote_all() {
+    sep=
+    for word in "$@"; do
+        printf '%s' "$sep"
+        quote "$word"
+        sep=' '
+    done
+}
+
+refuse() {
+    printf 'dsl41-launch: %s\n' "$1" >&2
+    exit 2
+}
+
+usage() {
+    refuse "usage: dsl41-launch [--print] [engine|supervisor|supervisor-ready]"
+}
+
+print=0
+if [ "${1-}" = --print ]; then
+    print=1
+    shift
+fi
+[ $# -le 1 ] || usage
+mode=${1-engine}
+
+case $mode in
+    engine) line=$(engine_command) || exit $? ;;
+    supervisor) line=$(supervisor_command) || exit $? ;;
+    supervisor-ready)
+        [ "$print" -eq 0 ] || usage
+        [ -x "$DSL41" ] || refuse "$DSL41 is not executable"
+        # a real LIST answer, not a socket file (deployment-runbook ss3)
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if "$DSL41" supervise list --run-root "$RUN_ROOT" >/dev/null 2>&1; then
+                exit 0
+            fi
+            sleep 1
+        done
+        printf 'dsl41-launch: no supervisor answered on %s after %s tries\n' \
+            "$RUN_ROOT" "$attempt" >&2
+        exit 1
+        ;;
+    *) usage ;;
+esac
+
+if [ "$print" -eq 1 ]; then
+    printf '%s\n' "$line"
+    exit 0
+fi
+[ -x "$DSL41" ] || refuse "$DSL41 is not executable"
+# one line in the service log names the command this start ran
+printf 'dsl41-launch: %s: %s\n' "$mode" "$line" >&2
+eval "set -- $line"
+exec "$@"

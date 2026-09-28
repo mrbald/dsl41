@@ -1,0 +1,22 @@
+# The nightbank example's role map (docs/access-model.md ss4). Synthetic.
+# dsl41-launch passes it on every start: missing or invalid, the engine
+# refuses to start (exit 2). Install it owned by the engine's user, mode
+# 0600, in a directory owned by root that no group or other can write.
+format_version = 1
+unmapped = "deny"
+# Naming a socket group opens the run root to 0710 and the socket to 0660
+# for that group (access-model ss8). The group must exist on the host.
+# socket_group = "nightbank-ops"
+
+# the service account the engine runs as: its own tooling, the drill's too
+[[binding]]
+subject = "user:os/dsl41"
+tier = "adm"
+
+[[binding]]
+subject = "group:os/nightbank-ops"
+tier = "ops"
+
+[[binding]]
+subject = "group:os/nightbank-observers"
+tier = "read"
