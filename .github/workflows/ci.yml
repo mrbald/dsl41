@@ -10,6 +10,10 @@
 # The python matrix is deliberate, not ceremony: the v0.2.0 release hang was a
 # 3.12-only asyncio Server.wait_closed() behavior that 3.14 dev boxes never see.
 # timeout-minutes converts any future hang into a fast red X instead of a 6h burn.
+#
+# DL-215: release.yml calls this workflow as its `gates` job, so a release
+# passes the same list, and `uv sync --locked` fails when uv.lock no longer
+# matches pyproject.toml instead of re-resolving.
 
 name: tests
 
@@ -17,6 +21,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -31,7 +39,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --extra dev
+      - run: uv sync --locked --extra dev
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests scripts examples
       # DL-193: tests/uc_oracle.py is named because it is a fully annotated
@@ -66,7 +74,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.14"
-      - run: uv sync --extra dev
+      - run: uv sync --locked --extra dev
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests scripts examples
       # DL-193: tests/uc_oracle.py is named because it is a fully annotated
@@ -102,7 +110,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
-      - run: uv sync --extra dev
+      - run: uv sync --locked --extra dev
       - run: uv run playwright install --with-deps chromium webkit firefox
       # The opt-in gate is a module-level skip, so a run that lost
       # DSL41_BROWSER_TESTS prints "1 skipped" and exits 0 -- green while

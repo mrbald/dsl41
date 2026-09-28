@@ -19,8 +19,9 @@ cadence for ~500 KiB deflated (DL-71).
 Full license texts and source URLs: `THIRD_PARTY_LICENSES` at the repo
 root (shipped in the wheel's dist-info).
 
-Regenerate with `scripts/vendor_mermaid.sh` (pins the versions; bump them
-there deliberately). Invariants the HTML embedding relies on, checked by
+Regenerate with `scripts/vendor_mermaid.sh`. The pins live in
+`scripts/vendor/package.json`, with `package-lock.json` beside it; bump them
+there deliberately (DL-215). Invariants the HTML embedding relies on, checked by
 the script and by `tests/test_viz_html.py` / `tests/test_viz_explore.py`:
 
 - no payload contains `</script` (they are inlined into `<script>`

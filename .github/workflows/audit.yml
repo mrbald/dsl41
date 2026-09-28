@@ -1,8 +1,9 @@
 # Dependency vulnerability audit: pip-audit over the locked, non-dev
 # dependency set (uv export pins the exact transitive closure; --no-deps
-# audits precisely that set with no re-resolution). Weekly schedule catches
-# advisories published between pushes. README's "vulnerabilities" brick
-# badges this workflow.
+# audits precisely that set with no re-resolution). The set includes the
+# [ui] extra, because the release ships requirements-ui.txt too (DL-215).
+# Weekly schedule catches advisories published between pushes. README's
+# "vulnerabilities" brick badges this workflow.
 
 name: vulnerabilities
 
@@ -19,5 +20,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - run: uv export --frozen --no-dev --no-emit-project -o requirements.txt
+      - run: uv export --frozen --no-dev --no-emit-project --extra ui -o requirements.txt
       - run: uvx pip-audit --no-deps -r requirements.txt

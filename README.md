@@ -1223,12 +1223,35 @@ designed-but-unbuilt item.
 ## Release
 
 Releases are tag-driven. A push of a tag that matches `v*` starts
-[.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml).
-The workflow runs the test suite. Then it builds the sdist and the wheel. Then
-it runs `twine check --strict` and publishes to PyPI. Publication uses trusted
-publishing (OIDC) in the `pypi` environment. The repository holds no PyPI
-token. The header comment of the workflow records the one-time setup on
-pypi.org.
+[.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml)
+(DL-215). Its jobs:
+
+- `gates` runs the whole CI workflow, every job and every gate.
+- `build` installs from `uv.lock` with `--locked`. It checks that the tag is
+  annotated and names the version in `pyproject.toml`. It builds the sdist
+  and the wheel separately from the tree, runs a pinned `twine check
+  --strict`, and logs the hatchling version that built the wheel. It exports the locked dependency
+  closure, with hashes, as `requirements-base.txt` and
+  `requirements-ui.txt`.
+- `smoke` runs
+  [scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh)
+  on those files. For the base install and the `[ui]` install, it makes a
+  fresh venv, installs the exported closure with `--require-hashes` and the
+  wheel with `--no-deps`, and drives the installed `dsl41`: `--help`, a
+  `uc` compile, the three HTML pages with the installed browser bundles
+  inlined byte for byte, a detached run of one job, the refusal of `dsl41
+  ui` without the extra, and a headless TUI mount with it. Last, it
+  rebuilds a wheel from the sdist, with the hatchling that built the
+  candidate, and compares the payloads.
+- `publish` needs the three jobs above and a tag. It runs on a tag push,
+  or on a manual run from a tag with the `publish` input set. It uploads
+  the files that `smoke` tested to PyPI and rebuilds nothing. Publication uses trusted publishing
+  (OIDC) in the `pypi` environment. The repository holds no PyPI token. The
+  header comment of the workflow records the one-time setup on pypi.org.
+- `release-assets` follows every publish and creates the GitHub release
+  for the tag. The release
+  notes are the tag message. The assets are the sdist, the wheel, the two
+  requirements files, and `SHA256SUMS` over them.
 
 Since 1.0.0 (2026-08-26) a minor bump (1.3.0 -> 1.4.0) carries one or more
 functional units. A patch bump (1.3.0 -> 1.3.1) carries documentation or a
@@ -1250,7 +1273,8 @@ The list follows CI, including format checking and the scoped **100%** branch
 coverage requirement (DL-105).
 
 If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
-This command writes the same version into `uv.lock`. Move the install pins in
+This command writes the same version into `uv.lock`. Move the install pin
+(`ver=`) in
 [docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
 to the same version, so the pinned-install procedure names the current
 release. Build locally and compare the wheel's file list with the previous
@@ -1261,6 +1285,28 @@ the tag message is about to say. Commit the three files and push them:
 git commit pyproject.toml uv.lock docs/deployment-runbook.md \
   -m "chore: X.Y.Z (one-line summary)"
 git push origin main
+```
+
+Rehearse the release on that commit before you tag it. A manual run of the
+workflow from a branch runs `gates`, `build` and `smoke` and publishes
+nothing, whatever its `publish` input says:
+
+```sh
+gh workflow run release.yml --ref main
+gh run list --workflow release.yml --limit 1
+```
+
+The tag checks in `build` run whenever the ref is a tag, on a push or a
+manual run.
+
+The smoke test also runs locally, on macOS or Linux, against a local build.
+`dist/` must hold only this build's two files:
+
+```sh
+uv build --sdist && uv build --wheel
+uv export --frozen --no-dev --no-emit-project -o exports/requirements-base.txt
+uv export --frozen --no-dev --no-emit-project --extra ui -o exports/requirements-ui.txt
+bash scripts/release_smoke.sh dist exports
 ```
 
 Then tag that commit and push the tag. The first `-m` is the summary; the
@@ -1274,13 +1320,16 @@ git push origin vX.Y.Z
 
 The tag must point at the commit that carries the same version in
 `pyproject.toml`. If the two disagree, the tag and the published artifact
-describe different trees.
+describe different trees. The `build` job refuses such a tag, and a
+lightweight one.
 
 Last, make sure that the `release` workflow is successful. Then read the
-project page at https://pypi.org/project/dsl41/.
+project page at https://pypi.org/project/dsl41/ and the GitHub release page
+for the tag.
 
-Note: a local `uv build` writes into the ignored `dist/` directory. It is a
-test of the build only. The workflow is the one publication path.
+Note: a local `uv build` writes into the ignored `dist/` directory, and the
+exports above into the ignored `exports/` directory. They are tests of the
+build only. The workflow is the one publication path.
 
 CAUTION: PyPI refuses a second upload of a version that exists. Do not move a
 tag after a successful publish. Release the next patch version instead.

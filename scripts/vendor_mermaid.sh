@@ -4,7 +4,12 @@
 # bundle, DL-71) inline into their emitted pages. Dev-time only: users never need
 # node.
 #
-# Pins (bump deliberately, re-run, re-check the invariants below):
+# Pins live in scripts/vendor/package.json, and scripts/vendor/package-lock.json
+# fixes their transitive closure (DL-215). The list below repeats them with
+# their licenses. To bump one, run
+# `npm install --package-lock-only --save-exact <pkg>@<ver>`
+# in scripts/vendor, update this list and the banners, re-run, and re-check the
+# invariants below:
 #   mermaid 11.16.1               (MIT; dist/mermaid.min.js copied byte-exact)
 #   @mermaid-js/layout-elk 0.2.2  (MIT)
 #   elkjs 0.9.3                   (EPL-2.0; dependency of both bundles,
@@ -39,14 +44,16 @@
 set -euo pipefail
 
 vendor="$(git rev-parse --show-toplevel)/src/dsl41/_vendor"
+manifest="$(git rev-parse --show-toplevel)/scripts/vendor"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 
-npm install --no-save --no-audit --no-fund \
-    mermaid@11.16.1 @mermaid-js/layout-elk@0.2.2 elkjs@0.9.3 \
-    cytoscape@3.33.1 cytoscape-elk@2.3.0 cytoscape-context-menus@4.1.0 \
-    cytoscape-expand-collapse@4.1.1 @ungap/custom-elements@1.3.0 esbuild@0.28.2
+# npm ci installs exactly the lockfile's closure and fails if the manifest and
+# the lock disagree. It runs in the scratch directory, so the checkout gains no
+# node_modules.
+cp "$manifest/package.json" "$manifest/package-lock.json" .
+npm ci --no-audit --no-fund
 
 banner='/*! @mermaid-js/layout-elk 0.2.2 (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
 banner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'

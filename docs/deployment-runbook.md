@@ -15,19 +15,54 @@ Everything below assumes a POSIX server with Python ≥ 3.12 on it.
 
 ## 1. Install
 
-Dedicated venv, pinned version, `[ui]` extra only where humans look:
+Dedicated venv, pinned version, `[ui]` extra only where humans look.
+Set the pin and the profile first:
+
+```sh
+ver=1.7.0
+profile=ui                                            # headless host: profile=base
+```
+
+Releases through 1.7.0 carry no release assets, so the asset install below
+applies from the next release on. For 1.7.0 and earlier, install from PyPI
+with the pin:
 
 ```sh
 python3.12 -m venv /opt/dsl41/venv
-/opt/dsl41/venv/bin/pip install 'dsl41[ui]==1.7.0'   # headless host: dsl41==1.7.0
+/opt/dsl41/venv/bin/pip install "dsl41[ui]==$ver"     # headless host: "dsl41==$ver"
+```
+
+`uv tool install "dsl41[ui]==$ver"` is the one-liner where uv is the site
+convention. Both resolve the dependencies at install time instead of
+installing the tested closure; keep the pin there too.
+
+From the next release on, install what the release tested (DL-215). Its
+GitHub release carries the wheel, the locked dependency closure per profile
+with hashes, and `SHA256SUMS`. The closure goes in first with
+`--require-hashes`, then the wheel with `--no-deps`, so pip resolves nothing
+of its own:
+
+```sh
+base=https://github.com/mrbald/dsl41/releases/download/v$ver
+mkdir -p /opt/dsl41/dl && cd /opt/dsl41/dl
+for f in SHA256SUMS "requirements-$profile.txt" "dsl41-$ver-py3-none-any.whl"; do
+  curl -fsSLO "$base/$f"
+done
+sha256sum -c --ignore-missing SHA256SUMS              # macOS: shasum -a 256 -c --ignore-missing
+python3.12 -m venv /opt/dsl41/venv
+/opt/dsl41/venv/bin/pip install --require-hashes -r "requirements-$profile.txt"
+/opt/dsl41/venv/bin/pip install --no-deps "dsl41-$ver-py3-none-any.whl"
+```
+
+Either way, link the command and smoke-test the install:
+
+```sh
 ln -s /opt/dsl41/venv/bin/dsl41 /usr/local/bin/dsl41  # or add the venv bin to PATH
 dsl41 --help                                          # smoke test
 /opt/dsl41/venv/bin/python -c 'from importlib.metadata import version; print(version("dsl41"))'
 ```
 
-(`uv tool install 'dsl41[ui]==1.7.0'` is the equivalent one-liner where
-uv is the site convention — keep the pin there too.) The package installs no
-services and has no runtime network dependencies —
+The package installs no services and has no runtime network dependencies —
 the engine is a foreground process you place under your init system. It
 writes into the run roots you name and their sibling anchor directories
 (§2). The one thing it writes elsewhere is job output: a job's
@@ -829,5 +864,8 @@ The conservative cycle, which needs no such promise:
 3. Old venv stays until the new one has run a full cycle; rollback is
    the symlink plus another fresh root.
 
-Same-venv `pip install -U` mid-life is for patch releases explicitly
-marked resume-safe, nothing else.
+A same-venv upgrade mid-life is for patch releases explicitly marked
+resume-safe, nothing else. It installs from the new release's assets as §1
+does, not with `pip install -U`, which would resolve dependencies afresh:
+`pip install --require-hashes -r requirements-<profile>.txt` from the new
+release, then `pip install --no-deps` of its wheel, then `pip check`.
