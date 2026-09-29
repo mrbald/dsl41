@@ -416,27 +416,11 @@ root with mode 0700 if it is missing. It leaves an existing root's mode alone.
 It runs in the foreground with the same pid and appends
 stdout and stderr to `<root>/supervisor.log`.
 
-```ini
-# dsl41-supervisor.service — adjust these synthetic installation paths.
-[Unit]
-Description=dsl41 supervisor
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-User=dsl41
-ExecStart=/opt/dsl41/.venv/bin/dsl41 supervise start --run-root /srv/dsl41/run
-ExecStartPost=/bin/sh -c 'for attempt in 1 2 3 4 5 6 7 8 9 10; do /opt/dsl41/.venv/bin/dsl41 supervise list --run-root /srv/dsl41/run >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
-TimeoutStartSec=30
-Restart=always
-RestartSec=2
-RestartPreventExitStatus=2
-LimitNOFILE=65536
-KillMode=control-group
-
-[Install]
-WantedBy=multi-user.target
-```
+The example unit
+`examples/nightbank/deploy/dsl41-supervisor.service` is a complete
+shape-1 supervisor unit; copy it and edit its paths. Its
+`ExecStartPost=` waits for a real LIST answer through the launcher's
+`supervisor-ready` mode.
 
 Order the engine unit after this unit and require its successful start:
 `After=dsl41-supervisor.service` and `Requires=dsl41-supervisor.service`.
@@ -499,43 +483,32 @@ of the nightbank training estate. The files are examples to copy. They are
 not package data, and the wheel does not ship them. Every path and name in
 them is synthetic.
 
-- `dsl41-launch` is a POSIX sh launcher. It is the one place that names the
-  run root, the lineage anchor, the estate files in their order, every
-  `-p`, every run option and `--access-map`. Edit its configuration block
-  and review the edit like code.
-  It passes `--resume` if and only if `<root>/journal.jsonl` exists. It
-  chooses a genesis only for a root that does not exist, is empty, or holds
-  only the supervisor's own files. A root it cannot read, or one with other
-  contents and no sentinel, is refused with exit 2, so a missing mount or a
-  lost sentinel never becomes a fresh estate. It then execs `dsl41`, so the
-  service manager sees dsl41's own exit code, and nothing can fall back to
-  a new estate, another root or the next period after a refusal. Its own
-  refusals exit 2.
-  `dsl41-launch --print` prints the command, shell-quoted, and runs nothing.
-- `dsl41-engine.service` and `dsl41-supervisor.service` are shape 1's two
-  units. Both call the launcher. Each repeats the run root once, in
-  `RequiresMountsFor=`, so neither starts before the root's file system is
-  mounted; edit it with the launcher's `RUN_ROOT`.
-  The engine unit never restarts exit 2 or 3. Anything else it restarts
-  at most five times in five minutes (`StartLimitIntervalSec=300`,
-  `StartLimitBurst=5`) and then stays failed. That bounds a crash that
-  repeats (exit 1) and a launcher that cannot run: systemd reports one it
-  cannot execute as 203/EXEC, and a shell that cannot run a command exits
-  126 or 127. Manual starts count against the same limit;
-  `systemctl reset-failed dsl41-engine.service` clears it.
-  The supervisor unit never restarts exit 2 and keeps
-  `StartLimitIntervalSec=0`, the unlimited retry of an ownership refusal
-  above.
-- `nightbank-access.toml` is the role map the launcher always configures.
-  A missing or invalid map refuses the start with exit 2 (§4).
+- `dsl41-launch` is a POSIX sh launcher. It is the one place that
+  names the run root, the lineage anchor, the estate files in their
+  order, every `-p`, every run option and `--access-map`. Edit its
+  configuration block and review the edit like code. Its header
+  states its rules: when it passes `--resume`, what it refuses, and
+  why it execs `dsl41`. `dsl41-launch --print` prints the command,
+  shell-quoted, and runs nothing.
+- `dsl41-engine.service` and `dsl41-supervisor.service` are shape 1's
+  two units. Both call the launcher. Each repeats the run root once,
+  in `RequiresMountsFor=`; edit it with the launcher's `RUN_ROOT`.
+  The exit codes each unit never restarts, and the engine's start
+  limit, are stated in the unit files beside the directives.
+- `nightbank-access.toml` is the role map the launcher always
+  configures. A missing or invalid map refuses the start with exit 2
+  (§4).
 
 Two checks stand behind them. CI runs `systemd-analyze verify` over both
 units; that is a static check and starts nothing.
 `.github/workflows/service-drill.yml` is a manual drill on a runner with
 systemd. It covers the first start, a same-root restart, a detached job
-that survives an engine stop, a changed estate and a malformed or missing
-access map each refused without a restart loop, and a sealed engine that
-stays stopped until the next period is opened. **The drill is NOT RUN.**
+that survives an engine stop, a changed estate refused without a restart
+loop, and a sealed engine that stays stopped until the next period is
+opened. Which inputs are refused, with what message and before what is
+touched, is the claim of `tests/test_nightbank_deploy.py`, which runs in
+CI; the drill's claim is that systemd does not restart a refusal.
+**The drill is NOT RUN.**
 No dispatched run has passed it, and it is not part of the default gate.
 Until one passes, those behaviors are what the units are built to do, not
 what has been observed under systemd.
@@ -639,7 +612,8 @@ runtime-profile mismatch — no silent semantic drift — and the runtime
 profile is `--timezone`, `--timezone-map`, `--as-machine`,
 `--machine-policy`, `--detached` and `--deadman`. `--access-map` is not in
 the profile and is not gated: omit it and the run comes back with no
-perimeter (§4). Keep the whole line in the unit file.
+perimeter (§4). Keep the whole line in the launcher (§3's worked
+example); the unit calls the launcher.
 *(Amended by DL-218.)* A detached engine prints that line on its way out:
 its own argv, shell-quoted, with `--resume` and `--detached` once each and
 `--open-from X` turned into `--estate-anchor X`.

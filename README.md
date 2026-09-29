@@ -1224,34 +1224,16 @@ designed-but-unbuilt item.
 
 Releases are tag-driven. A push of a tag that matches `v*` starts
 [.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml)
-(DL-215). Its jobs:
-
-- `gates` runs the whole CI workflow, every job and every gate.
-- `build` installs from `uv.lock` with `--locked`. It checks that the tag is
-  annotated and names the version in `pyproject.toml`. It builds the sdist
-  and the wheel separately from the tree, runs a pinned `twine check
-  --strict`, and logs the hatchling version that built the wheel. It exports the locked dependency
-  closure, with hashes, as `requirements-base.txt` and
-  `requirements-ui.txt`.
-- `smoke` runs
-  [scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh)
-  on those files. For the base install and the `[ui]` install, it makes a
-  fresh venv, installs the exported closure with `--require-hashes` and the
-  wheel with `--no-deps`, and drives the installed `dsl41`: `--help`, a
-  `uc` compile, the three HTML pages with the installed browser bundles
-  inlined byte for byte, a detached run of one job, the refusal of `dsl41
-  ui` without the extra, and a headless TUI mount with it. Last, it
-  rebuilds a wheel from the sdist, with the hatchling that built the
-  candidate, and compares the payloads.
-- `publish` needs the three jobs above and a tag. It runs on a tag push,
-  or on a manual run from a tag with the `publish` input set. It uploads
-  the files that `smoke` tested to PyPI and rebuilds nothing. Publication uses trusted publishing
-  (OIDC) in the `pypi` environment. The repository holds no PyPI token. The
-  header comment of the workflow records the one-time setup on pypi.org.
-- `release-assets` follows every publish and creates the GitHub release
-  for the tag. The release
-  notes are the tag message. The assets are the sdist, the wheel, the two
-  requirements files, and `SHA256SUMS` over them.
+(DL-215). The workflow runs the whole CI workflow as its first job, builds the
+sdist and the wheel from locked inputs, smoke-tests the installed wheel with
+[scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh),
+and publishes only what the smoke tested. Publication needs a tag
+and uses trusted publishing (OIDC) in the `pypi` environment. The
+repository holds no PyPI token; the workflow's header comment records
+the one-time setup on pypi.org. The GitHub release that follows
+carries the sdist, the wheel, the two requirements files and
+`SHA256SUMS`. The workflow's header comment lists its jobs, and DL-215
+states the smoke contract check by check.
 
 Since 1.0.0 (2026-08-26) a minor bump (1.3.0 -> 1.4.0) carries one or more
 functional units. A patch bump (1.3.0 -> 1.3.1) carries documentation or a
