@@ -911,8 +911,13 @@ class Engine:
                 f" work ({exc}): quiescence is unprovable, the seal refuses"
                 " (period-model ss8, PR-27)"
             ) from exc
+        if not isinstance(listing, SupervisorListSuccess):
+            raise EngineError(
+                f"the supervisor refused LIST ({listing.error}): quiescence is"
+                " unprovable, the seal refuses (period-model ss8, PR-27)"
+            )
         held = self.supervisor.incarnation
-        got = listing.incarnation if isinstance(listing, SupervisorListSuccess) else None
+        got = listing.incarnation
         if held is None or got != held:
             raise EngineError(
                 f"the supervisor's LIST is from incarnation"
@@ -920,7 +925,6 @@ class Engine:
                 f" {held!r}: a restarted supervisor's history is not proof"
                 " (period-model ss8, PR-27)"
             )
-        assert isinstance(listing, SupervisorListSuccess)  # narrowed: incarnation matched
         rows = {(r.job, r.run_number): r for r in listing.runs}
         for key, entry in sorted(bound.items()):
             row = rows.get(key)

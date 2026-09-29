@@ -257,4 +257,7 @@ def test_a_sealed_exit_prints_no_reattach_line() -> None:
 
 
 def test_a_tethered_run_prints_no_reattach_line() -> None:
-    assert _reattach_note(None, Path("/srv/R"), detached=False, code=0) is None
+    """A tethered run's `_serve_run` now receives a real line too (the CLI
+    stopped gating it on `detached`); `detached=False` is still the one
+    gate that suppresses it."""
+    assert _reattach_note(LINE, Path("/srv/R"), detached=False, code=0) is None

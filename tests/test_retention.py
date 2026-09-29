@@ -29,6 +29,7 @@ import pytest
 
 from typer.testing import CliRunner
 
+from supervisor_list_doubles import stub_listing, stub_row
 from dsl41.attest import audit_period, verify_attestation
 from dsl41.boundary import (
     ClaimedHead,
@@ -560,17 +561,17 @@ def _estate_with_runs(run_root: Path, *, carried: bool) -> dict[str, dict[str, A
         _tombstone(run_root, effect, terminal=not (carried and job == "a"))
     if carried:
         engine.supervisor = _StubSupervisor(  # ss8: a detached seal proves its supervisor
-            listing={
-                "incarnation": "inc-1",
-                "runs": [
-                    {
-                        "run_id": effects["a"]["run_id"],
-                        "job": "a",
-                        "run_number": effects["a"]["run_number"],
-                        "wrapper_alive": True,
-                    }
+            listing=stub_listing(
+                incarnation="inc-1",
+                runs=[
+                    stub_row(
+                        run_id=effects["a"]["run_id"],
+                        job="a",
+                        run_number=effects["a"]["run_number"],
+                        wrapper_alive=True,
+                    )
                 ],
-            }
+            )
         )  # type: ignore[assignment]
     staged = _stage(run_root, C2_JIL, profile=DETACHED if carried else None)
     asyncio.run(_seal(engine, _request(engine, staged)))

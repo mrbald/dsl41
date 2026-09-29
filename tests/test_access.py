@@ -20,12 +20,10 @@ import json
 import os
 import pwd
 import re
-import shutil
 import socket as socket_mod
 import stat as stat_mod
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -58,16 +56,6 @@ try:
     MY_GROUP: str | None = grp.getgrgid(os.getgid()).gr_name
 except KeyError:  # pragma: no cover -- a container without the gid in /etc/group
     MY_GROUP = None
-
-
-@pytest.fixture
-def short_root():
-    """Short-path base for AF_UNIX sockets (see test_runner_control)."""
-    d = tempfile.mkdtemp(prefix="dsl41a-", dir="/tmp")
-    try:
-        yield Path(d)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def _write_map(path: Path, body: str) -> Path:

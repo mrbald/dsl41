@@ -103,39 +103,32 @@ _BASELINE_PIN_HELP = (
 def _pinned_read(
     socket_path: Path, key: str, expect: int | None, epoch: int | None, baseline: str | None
 ) -> tuple[str, int, int]:
-    """`_read_revision`, with each pin replacing its own read value (DL-217).
+    """The ss6 read header (`baseline_id`, `epoch`) and the current revision
+    of `key`, with each pin replacing its own read value (DL-217).
 
     The fingerprint covers the revision, the epoch and the baseline, and the
     read returns the CURRENT three. So an id carried back alone, after any of
     them moved, is a different command under a reused id -- a collision, not
     a retry. Each pin replaces one value independently; what is not pinned
-    is read as before."""
-    read_baseline, read_epoch, current = _read_revision(socket_path, key)
-    return (
-        read_baseline if baseline is None else baseline,
-        read_epoch if epoch is None else epoch,
-        current if expect is None else expect,
-    )
-
-
-def _read_revision(socket_path: Path, key: str) -> tuple[str, int, int]:
-    """The ss6 read header (`baseline_id`, `epoch`) and the current revision
-    of `key` -- the read half of a read-then-write, for an operator who did
-    not carry a revision in by hand.
-
-    It narrows the race to one round trip; it does not remove it, and it
-    cannot: the value of a precondition is that it names what the DECIDER
-    saw, and a number this process fetched a millisecond ago is only a very
-    recent guess about that. Whoever looked at a status page and then chose
-    to act should pass --expect with the revision they looked at."""
+    is read as before. The read narrows the race to one round trip; it does
+    not remove it, and it cannot: the value of a precondition is that it
+    names what the DECIDER saw, and a number this process fetched a
+    millisecond ago is only a very recent guess about that. Whoever looked
+    at a status page and then chose to act should pass --expect with the
+    revision they looked at."""
     from dsl41.runner_control import read_for, revision_in
 
     response = _control_roundtrip(socket_path, read_for(key))
     header = read_header_of(response)
     if header is None:
         raise typer.Exit(2)
-    baseline, epoch = header
-    return baseline, epoch, revision_in(response, key)
+    read_baseline, read_epoch = header
+    current = revision_in(response, key)
+    return (
+        read_baseline if baseline is None else baseline,
+        read_epoch if epoch is None else epoch,
+        current if expect is None else expect,
+    )
 
 
 def sendevent(
@@ -296,10 +289,10 @@ def release_held(
             claimed_actor=claimed_actor(),
         )
         typer.echo(f"-- {name}")
-        retry_verb = (
+        retry_command = (
             f"sendevent OFF_HOLD --job {shlex.quote(name)} --socket {shlex.quote(str(socket_path))}"
         )
-        if command_outcome(socket_path, request, retry_verb=retry_verb) != 0:
+        if command_outcome(socket_path, request, retry_command=retry_command) != 0:
             all_applied = False
     raise typer.Exit(0 if all_applied else 1)
 

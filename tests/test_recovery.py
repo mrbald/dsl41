@@ -21,12 +21,10 @@ import asyncio
 import contextlib
 import json
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -55,32 +53,13 @@ from dsl41.runner_startup import resume_run
 from dsl41.runner_tui import _outcome_line, _transport_line
 from test_access import ME, _map_granting, _serve_armed
 from test_access import TEXT as _ACCESS_TEXT
-from test_preconditions import _SOLO_JIL, _call, _sendevent_cli, _serve, _teardown
+from test_preconditions import _SOLO_JIL, _call, _sendevent_cli, _serve, _serve_engine, _teardown
+from subprocess_harness import cli
 
 #: wording a refusal of a RETRY must never carry (R7): each one says or
 #: implies that the ORIGINAL request did not happen, which a retry's own
 #: refusal cannot know
 _NEVER_APPLIED_CLAIMS = ("never applied", "never happened", "not sent", "nothing logged")
-
-
-@pytest.fixture
-def short_root():
-    """AF_UNIX paths are length-limited (104 bytes on macOS), so these tests
-    use a short base directory rather than pytest's deep tmp_path."""
-    directory = tempfile.mkdtemp(prefix="dsl41r-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
-
-
-def _cli(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "dsl41", *args],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
 
 
 def _advice(stderr: str) -> list[str]:
@@ -139,7 +118,7 @@ async def _lose_the_reply(
 ) -> subprocess.CompletedProcess[str]:
     """Send `args` through the CLI with every answer of `kind` dropped."""
     with _dropping_replies(server, "kind", kind):
-        lost = await asyncio.to_thread(_cli, *args)
+        lost = await asyncio.to_thread(cli, *args)
     assert lost.returncode == 4, (lost.stdout, lost.stderr)
     return lost
 
@@ -167,7 +146,7 @@ def test_the_printed_advice_retries_a_lost_applied_reply_in_the_same_period(
             # the pre-send record carried the same id and the same three pins
             assert _sending(lost.stderr) == flags
             assert engine.oracle.store.job["j"].status == "SUCCESS"  # it DID apply
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             answer = json.loads(retry.stdout)
             assert [rid for rid, _ in engine.deduped] == [request_id]
@@ -197,14 +176,14 @@ def test_the_pinned_retry_survives_another_actor_moving_the_job(short_root: Path
             assert moved.returncode == 0, moved.stderr
             applied_before = engine.frontiers.applied_index
 
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             assert json.loads(retry.stdout)["index"] < applied_before
             assert engine.frontiers.applied_index == applied_before  # no second index
             assert [rid for rid, _ in engine.deduped] == [request_id]
 
             # the id alone, re-read against the moved job, is not the retry
-            unpinned = await asyncio.to_thread(_cli, *args, "--request-id", request_id)
+            unpinned = await asyncio.to_thread(cli, *args, "--request-id", request_id)
             assert unpinned.returncode == 2
             assert "decided earlier: applied" in unpinned.stderr
         finally:
@@ -223,10 +202,7 @@ async def _resume_served(run_root: Path) -> tuple[Engine, ControlServer, asyncio
         settle_seconds=0.0,
         grace_seconds=0.0,
     )
-    server = ControlServer(engine, run_root / "control.sock")
-    await server.start()
-    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-    return engine, server, loop_task
+    return await _serve_engine(engine)
 
 
 def test_the_pinned_retry_is_answered_after_a_same_period_restart(short_root: Path) -> None:
@@ -249,7 +225,7 @@ def test_the_pinned_retry_is_answered_after_a_same_period_restart(short_root: Pa
         resumed, server, loop_task = await _resume_served(run_root)
         try:
             assert resumed.epoch > old_epoch
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             assert [rid for rid, _ in resumed.deduped] == [flags[1]]
             assert _records_for(run_root, flags[1]) == ["input", "decision"]
@@ -275,7 +251,7 @@ def test_an_unseen_original_is_refused_as_stale_after_a_restart(short_root: Path
         server.DECISION_TIMEOUT_S = 0.2
         args = (*_STATUS_ARGS, "--socket", str(server.path))
         try:
-            lost = await asyncio.to_thread(_cli, *args)
+            lost = await asyncio.to_thread(cli, *args)
             assert lost.returncode == 4, lost.stderr
             flags = _advice(lost.stderr)
         finally:
@@ -286,7 +262,7 @@ def test_an_unseen_original_is_refused_as_stale_after_a_restart(short_root: Path
 
         resumed, server, loop_task = await _resume_served(run_root)
         try:
-            replay = await asyncio.to_thread(_cli, *args, *flags)
+            replay = await asyncio.to_thread(cli, *args, *flags)
             assert replay.returncode == 2, replay.stderr
             answer = json.loads(replay.stdout)
             assert answer["refused"] is True
@@ -314,7 +290,7 @@ def test_a_host_action_recovers_its_lost_reply_through_the_same_pins(short_root:
             lost = await _lose_the_reply(server, args, "drain")
             flags = _advice(lost.stderr)
             assert flags[2:7:2] == ["--expect", "--epoch", "--baseline"]
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             assert json.loads(retry.stdout)["kind"] == "drain"
             assert [rid for rid, _ in engine.deduped] == [flags[1]]
@@ -549,13 +525,13 @@ def test_a_reply_that_is_malformed_or_missing_is_delivered_and_exits_4(
             assert async_failed.value.delivered is True
             await client.close()
 
-            cli = await asyncio.to_thread(
-                _cli, "sendevent", "ON_HOLD", "--job", "j", "--socket", str(path)
+            sent = await asyncio.to_thread(
+                cli, "sendevent", "ON_HOLD", "--job", "j", "--socket", str(path)
             )
-            assert cli.returncode == 4, cli.stderr
-            flags = _advice(cli.stderr)
+            assert sent.returncode == 4, sent.stderr
+            flags = _advice(sent.stderr)
             assert flags[2:] == ["--expect", "2", "--epoch", "7", "--baseline", "base-1"]
-            assert _sending(cli.stderr) == flags
+            assert _sending(sent.stderr) == flags
         finally:
             server.close()
             await server.wait_closed()
@@ -579,10 +555,10 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
                 (("--expect", "9"), "--expect 9 --epoch 7 --baseline base-1"),
             ]
             for extra, pins in cases:
-                sent = await asyncio.to_thread(_cli, *base, *extra)
+                sent = await asyncio.to_thread(cli, *base, *extra)
                 assert shlex.join(_sending(sent.stderr)[2:]) == pins, (extra, sent.stderr)
             host = await asyncio.to_thread(
-                _cli, "host", "drain", "h1", "--epoch", "2", "--socket", str(path)
+                cli, "host", "drain", "h1", "--epoch", "2", "--socket", str(path)
             )
             assert host.returncode == 4, host.stderr
             assert shlex.join(_sending(host.stderr)[2:]) == "--expect 4 --epoch 2 --baseline base-1"
@@ -602,7 +578,7 @@ def test_release_held_names_the_one_job_retry_with_its_pins(short_root: Path) ->
     async def scenario() -> None:
         server = await _fake_engine(path, _hang_up)
         try:
-            swept = await asyncio.to_thread(_cli, "release-held", "--socket", str(path))
+            swept = await asyncio.to_thread(cli, "release-held", "--socket", str(path))
         finally:
             server.close()
             await server.wait_closed()
@@ -686,14 +662,14 @@ def test_a_retry_denied_by_a_changed_policy_does_not_claim_the_original_never_ap
         engine, server, loop_task, access = await _serve_armed(run_root, _ACCESS_TEXT, map_path)
         try:
             args = ("sendevent", "ON_HOLD", "--job", "acc_job", "--socket", str(server.path))
-            first = await asyncio.to_thread(_cli, *args, "--request-id", "acc-1")
+            first = await asyncio.to_thread(cli, *args, "--request-id", "acc-1")
             assert first.returncode == 0, first.stderr
             flags = _sending(first.stderr)
             assert flags[:2] == ["--request-id", "acc-1"]
 
             _map_granting(short_root / "roles.toml", "read")
             access.reload()
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 2, retry.stderr
             answer = json.loads(retry.stdout)
             assert answer["error"] == f"os/{ME} holds read tier; sendevent:ON_HOLD needs ops tier"
@@ -1011,7 +987,7 @@ def test_the_pre_send_record_precedes_the_write_and_survives_the_clients_death(
                     proc.stderr.close()
                     released.set()
             flags = shlex.split(record.removeprefix("sending: "))
-            retry = await asyncio.to_thread(_cli, *args, *flags)
+            retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             assert [rid for rid, _ in engine.deduped] == [flags[1]]
             assert _records_for(run_root, flags[1]) == ["input", "decision"]

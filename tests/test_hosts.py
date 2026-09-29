@@ -36,8 +36,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import shutil
-import tempfile
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,6 +63,7 @@ from dsl41.runner_hosts import (
     skew_allowance,
 )
 from dsl41.runner_journal import read_journal
+from test_preconditions import _serve_engine
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -491,17 +490,6 @@ def test_a_held_job_is_derived_from_state_the_engine_already_had() -> None:
 # ------------------------------------------------------------- 4. the wire
 
 
-@pytest.fixture
-def short_root():
-    """AF_UNIX paths are length-limited (104 bytes on macOS), so socket tests
-    use a short base directory rather than pytest's deep tmp_path."""
-    directory = tempfile.mkdtemp(prefix="dsl41h-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
-
-
 async def _call(sock_path: Path, request: dict) -> dict:
     reader, writer = await asyncio.open_unix_connection(str(sock_path))
     try:
@@ -515,6 +503,8 @@ async def _call(sock_path: Path, request: dict) -> dict:
 
 
 async def _serve(run_root: Path, text: str = _SOLO_JIL):
+    """Not `test_preconditions`' `_serve`: its default catalog omits
+    `machine: m1`, which every host test here needs."""
     engine = start_run(
         lower_source(text),
         run_root,
@@ -522,10 +512,7 @@ async def _serve(run_root: Path, text: str = _SOLO_JIL):
         adapters={"CMD": FakeAdapter(default=None)},
         hold_open=True,
     )
-    server = ControlServer(engine, run_root / "control.sock")
-    await server.start()
-    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-    return engine, server, loop_task
+    return await _serve_engine(engine)
 
 
 async def _teardown(engine: Engine, server: ControlServer, loop_task) -> None:

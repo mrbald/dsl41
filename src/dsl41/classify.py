@@ -60,7 +60,7 @@ from pydantic import BaseModel, ConfigDict
 
 from dsl41.autocal import CalendarRuleError, semantic_key, standard_rows
 from dsl41.capacity import CapacityPool
-from dsl41.conditions import GlobalAtom, iter_atoms
+from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.derive import BoxTree, derive_graph
 from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
@@ -707,8 +707,8 @@ def _trigger_moved(before: JobIR, after: JobIR) -> bool:
     return _cond_key(before.sem.condition) != _cond_key(after.sem.condition)
 
 
-def _cond_key(attr: CondAttr | None) -> dict[str, Any] | None:
-    return None if attr is None else canonical_cond(attr.cond).model_dump(mode="json")
+def _cond_key(attr: CondAttr | None) -> Cond | None:
+    return None if attr is None else canonical_cond(attr.cond)
 
 
 def _row_agrees(row: JobRuntime, initial: str | None) -> bool:

@@ -9,39 +9,19 @@ this repo drives end to end -- copy the estate's artifacts out, delete the
 originals, put them back at the SAME absolute path, and prove a fresh reader
 built from nothing but the restored files can pick the lineage back up.
 
-**Why the quiescence order matters.** A detached CMD job's wrapper lives
-under the supervisor, not the engine (runner-design ss6a). Stopping the
-engine ends the loop that watches the estate; it does not stop the
-supervisor process. And `wire_from_profile` (`runner_startup.py`), which the
-offline `seal` command calls for a DETACHED period exactly as a live engine
-does, reconnects to a supervisor that is still up but SPAWNS a fresh one --
-with no deadman, outliving the seal -- if none is. So the order is: stop the
-engine, seal OFFLINE while the supervisor from the detached run is still up
-(reusing it, never forcing a respawn), THEN stop the supervisor, then prove
-every writer is gone before backing up. Reordering the last two steps
-quietly leaves a second supervisor behind.
+See `docs/deployment-runbook.md` ss2b for the quiescence order (engine,
+then offline seal while the detached run's supervisor is still up, then
+the supervisor, only then back up) and the path-equality constraint (a
+restore must land at the SAME absolute path the backup came from, or
+every estate-wide reader refuses it as a missing registered root).
 
-**Why the path matters, and what actually breaks when it does not match.**
-The anchor's registry names each period's run root by absolute path
-(period-model ss1.3, ss6a). Restoring the whole lineage -- anchor and every
-root -- at a DIFFERENT absolute path does not make the registry's own rows
-repoint themselves: they still name the ORIGINAL path, which after a restore
-elsewhere no longer holds anything, so every estate-wide reader refuses it
-as a MISSING REGISTERED ROOT, the same refusal an incomplete restore
-produces. That is the negative case below; it is not a claim-digest
-mismatch. (`boundary.claim_id_for` does hash the target root's realpath, but
-only an INTERRUPTED physical roll's claim recovery ever recomputes and
-compares it -- `test_nightbank_boundary.py`'s own
-`test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed` already covers
-that path, and a completed roll never revisits it on restore.)
-
-One estate, one fixed absolute path (`night_base`, a `tempfile.mkdtemp`
-under `/tmp` for the same `sun_path` reason `test_nightbank_boundary.py`
-uses it): a period runs DETACHED with one real command under a real
-supervisor, is sealed offline, and is attested; a physical roll opens period
-2 into a second root under the same base; period 2 is sealed and attested
-too, so the estate carries one DERIVATION-verified period beside the one
-ATTESTATION-verified period the archive leaves behind. The estate's own JIL
+One estate, one fixed absolute path (`short_root`, conftest.py's
+AF_UNIX-safe `tempfile.mkdtemp` under `/tmp`): a period runs DETACHED
+with one real command under a real supervisor, is sealed offline, and is
+attested; a physical roll opens period 2 into a second root under the
+same base; period 2 is sealed and attested too, so the estate carries
+one DERIVATION-verified period beside the one ATTESTATION-verified
+period the archive leaves behind. The estate's own JIL
 files are copied under the base first and loaded from there throughout, so
 they are part of what gets backed up, deleted and restored too -- not read
 from the repo checkout, which a restore has no reason to depend on. Backup,
@@ -54,9 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import tempfile
-import time
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -65,19 +42,16 @@ import test_nightbank_boundary as tnb
 from dsl41.attest import ATTESTATION_VERIFIED, DERIVATION_VERIFIED, verified_tier
 from dsl41.boundary import EstateAnchor, OpenHead, default_anchor_dir
 from dsl41.period import wal_path
-from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
-from dsl41.runner_clock import RealClock
-from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import resume_run
 from test_nightbank_boundary import (
     _drive,
     _invoke,
-    _load,
+    _open_in_place,
     _roll,
     _seal_offline,
     _sendevent,
     _start_detached_night,
     _stop_engine,
+    _wait_for_evidence,
 )
 from test_runner_supervisor import _kill_group, wait_for
 
@@ -98,22 +72,6 @@ _JOB_TIMEOUT_S = 30.0
 #: spin out the full timeout on a signaled or failed run instead of failing
 #: fast with the status attached.
 _TERMINAL = ("SUCCESS", "FAILURE", "TERMINATED")
-
-
-@pytest.fixture
-def night_base():
-    """A SHORT base directory, for the reason `test_nightbank_boundary.py`
-    gives: the engine binds `<run-root>/control.sock` and pytest's
-    `tmp_path` overruns `sun_path`'s 104-byte macOS limit.
-
-    This IS the drill's one fixed absolute path: every root, the anchor,
-    the copied JIL inputs, the night's properties, and the backup itself
-    all live under it for the whole test."""
-    base = tempfile.mkdtemp(prefix="dsl41restore-", dir="/tmp")
-    try:
-        yield Path(base)
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
 
 
 def _copy_estate_locally(base: Path) -> list[Path]:
@@ -146,13 +104,12 @@ async def _build_root_a(base: Path):
     try:
         _sendevent(night, "FORCE_STARTJOB", job=JOB)
         await _drive(night)
-        deadline = time.monotonic() + _JOB_TIMEOUT_S
-        while night.engine.oracle.store.runtime(JOB).status not in _TERMINAL:
-            if time.monotonic() > deadline:
-                raise AssertionError(f"{JOB} never reached a terminal status")
-            await night.engine.run_until_quiescent(
-                night.engine.clock.now() + timedelta(milliseconds=100)
-            )
+        await _wait_for_evidence(
+            night,
+            lambda: night.engine.oracle.store.runtime(JOB).status in _TERMINAL,
+            f"{JOB} terminal",
+            _JOB_TIMEOUT_S,
+        )
         status = night.engine.oracle.store.runtime(JOB).status
         assert status == "SUCCESS", f"{JOB} did not finish cleanly: {status}"
         await _stop_engine(night)
@@ -162,37 +119,19 @@ async def _build_root_a(base: Path):
     return night.run_root
 
 
-def _resume_at(run_root: Path, props: Path, anchor_dir: Path):
-    """The in-place opener over a RESTORED (or rolled) root, with the
-    anchor named explicitly -- `resume_run`'s default sibling `.anchor`
-    only matches a root's OWN first-genesis convention, not a root a
-    physical roll or a restore populated under a shared lineage anchor."""
-    catalog, _ = _load(props)
-    clock = RealClock()
-    opened = asyncio.run(
-        resume_run(
-            catalog,
-            run_root,
-            clock=clock,
-            adapters={"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()},
-            scheduler=Scheduler(catalog, start=clock.now(), default_tz="UTC"),
-            anchor_dir=anchor_dir,
-        )
-    )
-    asyncio.run(opened.shutdown())
-    assert opened.journal is not None
-    opened.journal.close()
-
-
-def test_the_restoration_drill(night_base: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Build a closed, quiescent, two-root lineage with a physical roll and
     an archived period; back it up; destroy the originals; restore at the
     same absolute path; read it with nothing carried over from before the
     delete. Three refusals along the way: no anchor, a root the registry
     names but the disk does not have, and the whole lineage restored at a
     different absolute path (still a missing-registered-root refusal, not a
-    claim-digest one)."""
-    base = night_base
+    claim-digest one).
+
+    `short_root` IS the drill's one fixed absolute path: every root, the
+    anchor, the copied JIL inputs, the night's properties, and the backup
+    itself all live under it for the whole test."""
+    base = short_root
     local_jil = _copy_estate_locally(base)
     monkeypatch.setattr(tnb, "SMALL_FILES", local_jil)
 
@@ -205,9 +144,7 @@ def test_the_restoration_drill(night_base: Path, monkeypatch: pytest.MonkeyPatch
         still_up = _invoke("supervise", "list", "--run-root", str(run_root))
         assert still_up.exit_code == 0, still_up.output  # the engine-stop left this writer
 
-        # the offline seal reconnects to THIS still-live supervisor (DETACHED
-        # profile). Stopping the supervisor before this step would make it
-        # spawn a fresh, deadman-less one to prove the same thing.
+        # quiescence order: deployment-runbook.md ss2b
         sealed = _seal_offline(run_root, props, "--claimed-actor", "drill@nightbank")
         assert sealed.exit_code == 0, sealed.output
 
@@ -217,10 +154,7 @@ def test_the_restoration_drill(night_base: Path, monkeypatch: pytest.MonkeyPatch
         _kill_group(run_root)
         raise
 
-    # every writer is stopped now -- prove it on disk. SHUTDOWN replies `ok`
-    # before `_teardown` unlinks the pid and sock files (runner_supervisor.py),
-    # so the absence is polled under a bounded deadline, not asserted on the
-    # reply alone.
+    # quiescence order: deployment-runbook.md ss2b
     gone = _invoke("supervise", "list", "--run-root", str(run_root))
     assert gone.exit_code != 0
     wait_for(lambda: not (run_root / "supervisor.pid").exists())
@@ -300,11 +234,7 @@ def test_the_restoration_drill(night_base: Path, monkeypatch: pytest.MonkeyPatch
     shutil.rmtree(run_root)
 
     # ---- negative: the WHOLE lineage restored at a DIFFERENT absolute
-    # ---- path. Byte-for-byte the same anchor and roots; the registry
-    # ---- rows inside that anchor still name the ORIGINAL path, so this is
-    # ---- the same missing-registered-root refusal as above, not a
-    # ---- claim-digest one -- a completed period's resume never
-    # ---- recomputes a claim at all (see the module docstring). ----
+    # ---- path (path-equality constraint: deployment-runbook.md ss2b) ----
     wrong_base = base / "wrong-path"
     wrong_base.mkdir()
     shutil.copytree(backup_dir / "anchor", wrong_base / "engine.anchor")
@@ -358,7 +288,7 @@ def test_the_restoration_drill(night_base: Path, monkeypatch: pytest.MonkeyPatch
 
     # ---- open the next synthetic period once, from the restored files
     # ---- alone ----
-    _resume_at(rolled_root, props, anchor_dir)
+    _open_in_place(rolled_root, props, anchor_dir=anchor_dir)
     assert wal_path(rolled_root, 3).exists()
     head = EstateAnchor(anchor_dir).read()
     assert head is not None

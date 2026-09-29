@@ -17,14 +17,12 @@ import contextlib
 import errno
 import json
 import os
-import shutil
 import selectors
 import signal
 import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -56,18 +54,6 @@ from dsl41.period import active_wal
 
 SUPERVISOR = Path(runner_supervisor.__file__)
 DRIVER = Path(__file__).parent / "runner_detached_driver.py"
-
-
-@pytest.fixture
-def short_root():
-    """A short base dir for AF_UNIX supervisor sockets: pytest's tmp_path can
-    exceed sun_path's 104-byte macOS limit once supervisor.sock is appended
-    (same workaround as test_runner_control.py's fixture)."""
-    d = tempfile.mkdtemp(prefix="dsl41s-", dir="/tmp")
-    try:
-        yield Path(d)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def wait_for(predicate, timeout_s: float = 10.0, interval_s: float = 0.05):

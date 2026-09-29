@@ -294,11 +294,7 @@ def run(
                     anchor_dir=estate_anchor,
                     open_from=open_from,
                     access_map=access_map,
-                    reattach=(
-                        _reattach_line(sys.argv, _value_options(ctx.command.params))
-                        if detached
-                        else None
-                    ),
+                    reattach=_reattach_line(sys.argv, _value_options(ctx.command.params)),
                 )
             )
         )

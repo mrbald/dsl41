@@ -1069,26 +1069,6 @@ class SupervisorRunRow(BaseModel):
     wrapper_rc: int | None
 
 
-def _parse_run_rows(raw_rows: list[Any]) -> list[SupervisorRunRow]:
-    """The one decoder DL-137 asked for, in place of the four ad hoc ones:
-    every row a LIST reply carries validated the same way, refusing the
-    same way, wherever it is read. `EngineError`, not a bare
-    `ValidationError`, because a malformed row from the supervisor we hold
-    the lease against is exactly the kind of evidence this codebase refuses
-    rather than degrades past (DL-139's `decision_effects` is the same
-    idiom, for the same reason)."""
-    rows: list[SupervisorRunRow] = []
-    for raw in raw_rows:
-        try:
-            rows.append(SupervisorRunRow.model_validate(raw))
-        except ValidationError as exc:
-            raise EngineError(
-                f"the supervisor's LIST reply carries a malformed run row: {exc}"
-                " (supervisor-protocol ss5)"
-            ) from exc
-    return rows
-
-
 class SupervisorLease(BaseModel):
     """The `lease` object a LIST reply carries when a lease is unexpired
     (supervisor-protocol ss5). NOT proof of a live controller -- it can
@@ -1102,10 +1082,10 @@ class SupervisorLease(BaseModel):
 
 class SupervisorListSuccess(BaseModel):
     """A LIST reply that answered (supervisor-protocol ss5): `ok: true`
-    plus every field the read-only verb always carries. `runs` is already
-    the parsed rows -- `_parse_list_reply` runs them through
-    `_parse_run_rows` before construction, so this model never re-decodes
-    them and the existing malformed-row `EngineError` is unchanged (DL-220).
+    plus every field the read-only verb always carries. `_parse_list_reply`
+    validates the whole reply through this model in one pass, `runs`
+    included -- a malformed row is a nested-model validation failure the
+    same `ValidationError` handler turns into `EngineError` (DL-220).
 
     Tolerant of unknown fields, per the wire's own rule."""
 
@@ -1144,12 +1124,11 @@ SupervisorListReply = SupervisorListSuccess | SupervisorRefusal
 
 
 def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
-    """The one parse of a LIST reply (DL-220), success or refusal. `runs`
-    validates through the pre-existing `_parse_run_rows` path (unchanged
-    `EngineError` on a malformed row) before the success model sees it,
-    and a malformed or mistyped HEADER field (`version`, `supervisor_pid`,
-    `boot_id`, `incarnation`, `deadman_s`, `lease`) on an otherwise-`ok:
-    true` reply refuses the same way, naming the field -- a raw
+    """The one parse of a LIST reply (DL-220), success or refusal. An
+    otherwise-`ok: true` reply validates whole, in one pass: a malformed
+    row (nested under `runs`) and a malformed or mistyped HEADER field
+    (`version`, `supervisor_pid`, `boot_id`, `incarnation`, `deadman_s`,
+    `lease`) both refuse as `EngineError`, naming what was wrong -- a raw
     `ValidationError` there would otherwise escape `list_runs`'s three
     callers (`_list_recheck_loop`, `_listed_alive`, `_reconcile`), none of
     which expect anything but `SupervisorUnavailable` or `EngineError`.
@@ -1163,13 +1142,19 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
     garbage in a row are both `EngineError`; a refusal is the one
     exception to that -- the ONE shape this parse never raises on."""
     if raw.get("ok") is True:
-        rows = _parse_run_rows(raw.get("runs", []))
         try:
-            return SupervisorListSuccess.model_validate({**raw, "runs": rows})
+            return SupervisorListSuccess.model_validate(raw)
         except ValidationError as exc:
+            errors = exc.errors()
+            if any(len(error["loc"]) > 1 and error["loc"][0] == "runs" for error in errors):
+                raise EngineError(
+                    f"the supervisor's LIST reply carries a malformed run row: {exc}"
+                    " (supervisor-protocol ss5)"
+                ) from exc
+            field = errors[0]["loc"][0]
             raise EngineError(
-                f"the supervisor's LIST reply carries a malformed header: {exc}"
-                " (supervisor-protocol ss5)"
+                f"the supervisor's LIST reply carries a malformed header"
+                f" ({field}): {exc} (supervisor-protocol ss5)"
             ) from exc
     error = raw.get("error")
     return SupervisorRefusal(ok=False, error=error if isinstance(error, str) else "")

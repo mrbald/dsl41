@@ -18,12 +18,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import shutil
 import signal
 import socket as socket_mod
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -49,21 +47,6 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
 
 cli_runner = CliRunner()
-
-
-@pytest.fixture
-def short_root():
-    """A short-path base directory for AF_UNIX control sockets. pytest's
-    default tmp_path lives deep under the platform temp dir and can exceed
-    sun_path's length limit (104 bytes on macOS) once run_root/control.sock
-    is appended -- unlike ordinary files, unix-socket paths have no
-    workaround for that, so tests that bind a control socket use this
-    instead of tmp_path."""
-    d = tempfile.mkdtemp(prefix="dsl41c-", dir="/tmp")
-    try:
-        yield Path(d)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def wait_for(predicate, timeout_s: float = 5.0, interval_s: float = 0.02):

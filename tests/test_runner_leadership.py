@@ -47,11 +47,9 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -89,18 +87,6 @@ FENCE_JIL = (
     "insert_job: proof\njob_type: c\ncommand: sleep 600\n\n"
     "insert_job: after\njob_type: c\ncommand: sleep 600\n"
 )
-
-
-@pytest.fixture
-def short_root():
-    """A short base dir: an engine binds <run_root>/control.sock, and
-    pytest's tmp_path overruns sun_path's 104-byte macOS limit (same
-    workaround as the supervisor tier's fixture)."""
-    d = tempfile.mkdtemp(prefix="dsl41l-", dir="/tmp")
-    try:
-        yield Path(d)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def wait_for(predicate, timeout_s: float = 15.0, interval_s: float = 0.05):

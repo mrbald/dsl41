@@ -1338,6 +1338,15 @@ def versioned(request: dict[str, Any]) -> dict[str, Any]:
     return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
 
 
+def _frame(request: dict[str, Any]) -> bytes:
+    """The line-delimited wire encoding of `request`. The two command
+    clients call this before the transport is touched (DL-216): an
+    unencodable request fails as a caller's error, never as a transport
+    outcome. The subscribe clients frame where they always did -- inside
+    the connect, DL-216 left `subscribe` alone on purpose."""
+    return json.dumps(versioned(request)).encode("utf-8") + b"\n"
+
+
 # ------------------------------------------------ composing a command (ss6)
 #
 # The client half of the protocol lives here for the reason the server half
@@ -1505,7 +1514,7 @@ class ControlClient:
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         # serialized before the writer is touched, so an unencodable request
         # fails as what it is and never as a transport outcome (DL-216)
-        encoded = json.dumps(versioned(payload)).encode("utf-8") + b"\n"
+        encoded = _frame(payload)
         async with self._lock:
             #: whether a write of this request was ATTEMPTED. It is set just
             #: before `write()`, not after the drain: a drain that fails may
@@ -1589,7 +1598,7 @@ class ControlClient:
             request: dict[str, Any] = {"cmd": "subscribe", "v": PROTOCOL_VERSION}
             if since is not None:
                 request["since"] = since
-            writer.write(json.dumps(request).encode("utf-8") + b"\n")
+            writer.write(_frame(request))
             await writer.drain()
             ack_line = await reader.readline()
             if (why := _subscribe_refusal(ack_line)) is not None:
@@ -1645,7 +1654,7 @@ def roundtrip(
     it, and neither is a proof that nothing arrived. The
     request is serialized before the connect for the same reason: an
     unencodable request is a caller's error, not a transport outcome."""
-    encoded = json.dumps(versioned(request)).encode("utf-8") + b"\n"
+    encoded = _frame(request)
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:
         try:
@@ -1744,7 +1753,7 @@ def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:
         conn.connect(str(socket_path))
-        conn.sendall(json.dumps(versioned(request)).encode("utf-8") + b"\n")
+        conn.sendall(_frame(request))
         with conn.makefile("rb") as stream:
             ack = stream.readline(LINE_LIMIT + 1)
             if (why := _subscribe_refusal(ack)) is not None:

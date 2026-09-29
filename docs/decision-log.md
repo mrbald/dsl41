@@ -13682,7 +13682,6 @@ relitigate an entry; append a new one.
   after 1.7.0 on; releases through 1.7.0 carry no assets and keep the PyPI
   install. A same-venv patch upgrade installs the same way instead of with
   `pip install -U`.
-||||||| parent of 766c11e (fix: DL-216 a write attempt makes the outcome unknown and an unterminated frame is dropped; DL-217 the pinned exact retry and the collision's original decision)
 
 - DL-216 A client that attempted a write reports any failure as delivered,
   and the server drops an unterminated request (2026-09-28)
@@ -13765,7 +13764,6 @@ relitigate an entry; append a new one.
   unknown fields: no version bump. `runner.py`'s docstring named
   `Engine.inject` as the control door; it now names `submit`, `submit_host`
   and `submit_seal`.
-||||||| parent of d442628 (feat: DL-218 example launcher and service units, a reattach line built from the real argv, a static unit gate, and a service drill left NOT RUN)
 
 - DL-218 The deployment example: one launcher holds the command line, the
   reattach line is the process's own, the units are verified statically,
@@ -13870,7 +13868,6 @@ relitigate an entry; append a new one.
   It asserts what the CLI does today with a configured map that is missing
   or malformed on the resume path: exit 2, naming the map, before the root
   is read or written.
-||||||| parent of fef16f5 (test: DL-219 a quiescent backup and restore drill over a synthetic lineage, and the runbook procedure derived from it)
 
 - DL-219 A restoration drill: quiescent backup and restore, over the real
   machinery, at a fixed path (2026-09-28)
@@ -14014,3 +14011,144 @@ relitigate an entry; append a new one.
   reply models and their docstrings) are pre-existing "architecture review
   due" state this slice did not create and does not clear -- a separate
   `/arch-review` pass owns that, not this entry.
+
+- DL-221 Architecture review of DL-215 through DL-220: twenty-four
+  findings acted, five items declined with their re-find triggers
+  (2026-09-28)
+  The DL-75 gate stood at 6,853 changed lines since
+  `arch-review/2026-09-20T085004Z` when the review ran, with ten size
+  advisories and no blocking finding. Two fresh Opus reviewers read the
+  window in two clusters, the runtime and its clients (A: DL-216, DL-217,
+  DL-220 and the reattach line) and the release, the deployment example
+  and the drills (B: DL-215, DL-218, DL-219), and a Codex peer read cluster
+  A independently; the records are outside the repository. The peer's
+  three findings were three of Opus's twelve, and the two disagreed on
+  three items, each settled by reading the lines: a gate written twice is
+  a duplicate however small the growth it caused; one parse with a
+  location-routed message is shorter than two stages and a docstring
+  explaining their order; three `except` arms that name three causes stay.
+  Both named the same load-bearing set, and this entry confirms it: the
+  supervisor's LIST reply is built as a dict and modeled on the client
+  because the supervisor is stdlib-only and runs by file path (DL-42), and
+  round trips against the real supervisor hold the two in step; the three
+  pins are independent replacements, not a flag matrix, and `release-held`
+  reuses their builder; the collision's original decision has one
+  definition (`ApplyResult`), a derived wire form (`model_dump`) and one
+  reader (`original_decision_text`) that both the CLI and the TUI call;
+  the two delivery clients are two I/O idioms placing one rule, and
+  `delivered` is read once per surface; the launcher and `_reattach_line`
+  build two different lines from two different inputs and share no rule;
+  the `RequiresMountsFor=` copy of the run root has no cheaper shape, since
+  `EnvironmentFile=` expands only in `Exec*=` and a `%f` template would
+  make the unit's instance name the source of truth; the four
+  start-one-job-stop sequences (smoke, drill, restore drill, deploy test)
+  are four claims in four environments.
+  Acted, cluster A, tests (one commit): one `short_root` fixture in
+  `tests/conftest.py` replaces twelve module copies and the window's
+  two `night_base` copies (`test_runner_serve.py` keeps its own, whose
+  platform skip must run before the `mkdtemp`; `test_supervisor_idempotency.py`
+  keeps the name `sup_root` as a one-line alias, since every test there
+  takes it as a parameter), one of which had already drifted (no
+  `dir="/tmp"`, so a long `$TMPDIR` could overrun `sun_path`); one
+  `tests/subprocess_harness.py` holds the subprocess-mypy report and the
+  CLI runner that `tests/test_runner_adapters.py` had copied
+  from `tests/test_runner_lifecycle.py` (already differing on a timeout)
+  and that `tests/test_recovery.py` and `tests/test_nightbank_example.py`
+  each spelled;
+  `_StubSupervisor` takes the typed listing the client returns instead of
+  a dict it translated on every call; `_serve_engine` serves three test
+  files' engines; `_open_in_place` gains `anchor_dir` so the restore
+  drill's `_resume_at` copy goes, and its terminal-status loop is
+  `_wait_for_evidence`; the restore drill's docstring cites runbook ss2b
+  instead of restating it.
+  Acted, cluster A, source (one commit): `_read_revision` folds into its
+  one caller `_pinned_read`; `retry_verb` is `retry_command`, because it
+  carries a command prefix and "verb" is the envelope's; `run` passes the
+  reattach line unconditionally and `_reattach_note` is the one gate, which
+  takes `run` from 167 lines to 163; `_frame` names DL-216's
+  serialize-before-transport step at the three sites that spelled it; the
+  seal's supervisor proof narrows the LIST reply once and reports a refusal
+  as a refusal with its text, where it had said "incarnation None";
+  `_cond_key` returns the `Cond` that `canonical_cond` already builds
+  instead of its dump; the LIST reply is parsed once, by one
+  `model_validate` whose refusal names "malformed run row" or the header
+  field from the error's location, so `_parse_run_rows` and the docstring
+  that explained the two stages go. One behaviour change: a success reply
+  without `runs` refuses, as garbage in a header already did; the
+  supervisor always sends it. An adversarial review of the branch
+  returned nine non-blocking items; six were paid in a review round: a
+  test each for the seal's refusal report and for a reply without
+  `runs` (which refuses as a malformed header naming `runs`, not as a
+  row), the header message's field name pinned, the tethered-run test
+  fed the line production now passes, `_frame`'s docstring made true
+  and the async subscribe site using it, and the fixture comments the
+  consolidation had left stale.
+  Acted, cluster B, the release and the example (one commit): the drill's
+  `recover()` forwarded to `start_engine` and goes; `release-assets` drops
+  the tag condition `needs: publish` already carries; `build` no longer
+  syncs the dev environment to read one TOML key, so the release's lock
+  check is `gates`' (this amends DL-215's "and the one in release.yml");
+  the "record the build backend" step goes, since the smoke prints the
+  same Generator line when it constrains the rebuild (amending DL-215's
+  "`build` logs the wheel's Generator line"); the vendor script's two
+  banners read each version from the installed package's manifest and its
+  comment list keeps licenses and rationale without version numbers, the
+  four vendored files byte-identical after a re-run; a test holds
+  `drill-lib.sh`'s five paths and its file order equal to the launcher's,
+  and the drill's YAML uses drill-lib's variables for them; the unit test
+  drops its three pure copies (`Type`, `User`, `WantedBy`) and keeps every
+  cross-file invariant.
+  Acted, cluster B, the smoke and the drill (one commit): the smoke's four
+  poll loops are one `wait_until`, whose callers own their timeout
+  messages and diagnostics, and its two SIGINT-then-wait sequences one
+  `stop_engine`; the one-caller `between` hook and its `nothing` go;
+  the drill keeps one refusal step, the changed estate, and drops the two
+  access-map steps, which proved the same systemd claim (an exit 2 is not
+  restarted) with causes and messages `tests/test_nightbank_deploy.py`
+  already pins in a layer that runs. This amends DL-218's drill
+  enumeration and records the split: pytest owns which input is refused,
+  with what text, before what is touched; the drill owns that systemd does
+  not restart it. The drill remains NOT RUN.
+  Acted, cluster B, docs (one commit): runbook ss3's inline supervisor unit,
+  which had diverged from the example unit it predates, is a pointer to
+  that unit; the worked example's bullets name each file's purpose and
+  point at its header for its rules instead of restating them (the DL-214
+  B10 pattern); ss5's "keep the whole line in the unit file" says the
+  launcher; README's release section keeps the procedure and one paragraph
+  of what a release guarantees, pointing at the workflow header for the
+  job list and at DL-215 for the smoke contract (the script's header
+  describes the process, not the checks, so it is not the pointer's
+  target). An adversarial review of the branch returned nine
+  non-blocking items; eight were paid in a review round: the runbook
+  keeps the `systemctl reset-failed` instruction the trimmed bullets had
+  carried and claims only the access-map refusals for the deploy test,
+  and README and the workflow header say what `build` still does.
+  Declined, each with the trigger that reopens it: the async client's three
+  `except` arms name three causes with three messages, and merging them
+  saves ten lines for a conditional inside one arm (a fourth arm); the LIST
+  header fields nothing reads (`version`, `supervisor_pid`, `boot_id`,
+  `deadman_s`, `lease` and `SupervisorLease`) and the refusal model are
+  DL-220's rulings of this same day, the models declare the contract's
+  fields, and the refusal now has a reader; recorded cost about forty lines
+  and two register rows (the next change to these models); printing the
+  reattach note after `asyncio.run` to spare `_serve_run` a parameter
+  changes the output order (another teardown-only parameter); a shared
+  script for the four one-line `uv export` sites is a file and an
+  indirection for a command whose failure is loud at each site through
+  `--require-hashes` (a third flag variant, or a silent divergence); the
+  drill's bash `QUIESCE` beside the boundary test's Python one, two
+  runtimes reading the runbook's exercise 15 (a third copy).
+  Also here: three `||||||| parent of` lines, left by diff3 resolutions
+  before DL-216, DL-218 and DL-219, go.
+  Size advisories: all ten are files already over the limit. The window's
+  growth was `cli_run.py` +101 (the three reattach helpers; `run` is back
+  to 163), `runner_adapters.py` +80 (the reply models; the one-parse item
+  removes about twenty), `runner_control.py` +77 (the collision branch,
+  `original_decision_text`, DL-216), the rest under ten lines each; no
+  seam is ruled. The baseline is re-armed after the last slice lands.
+  `tests/test_nightbank_deploy.py`'s `base` fixture, the same idea under a
+  third name, stays in the file cluster B's PR owns; it is the next
+  copy to fold. Each branch: 5231 passed, 6 skipped, 2 xfailed (5232 on
+  cluster B's, whose equality test is new); ruff, mypy and the
+  arch_check blocking checks clean; an adversarial Opus review of each
+  branch before its PR.

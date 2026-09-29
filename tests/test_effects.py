@@ -34,8 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import tempfile
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -567,17 +565,6 @@ def test_the_held_set_is_the_outbox(tmp_path: Path) -> None:
 
 
 # ------------------------------------------- 5. the leak a recorded kill closes
-
-
-@pytest.fixture
-def short_root():
-    """AF_UNIX paths are length-limited, so supervisor tests use a short base
-    directory rather than pytest's deep tmp_path."""
-    directory = tempfile.mkdtemp(prefix="dsl41e-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
 
 
 def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path) -> None:
