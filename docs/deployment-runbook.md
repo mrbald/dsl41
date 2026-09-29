@@ -327,20 +327,38 @@ realpath into a physical roll's successor-claim digest, but only an
 INTERRUPTED roll's claim recovery ever recomputes and compares it
 (`test_nightbank_boundary.py`'s
 `test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed`); an ordinary,
-already-completed period's resume never revisits it — it just reads the
-registry row and opens what is at the path it names.
+already-completed period's resume never revisits it. *(Amended by DL-224.*
+This sentence used to end "it just reads the registry row and opens what is
+at the path it names". That was wrong: resume opens the `--run-root` it is
+given. Since DL-224 it then checks that the anchor names that root, and
+refuses a root it does not name.)*
 
-**An open gap, not papered over.** `dsl41 run --resume` pointed DIRECTLY
-at a relocated copy (its own run root and its own copied anchor, both at
-the new path, named explicitly rather than found through a registry walk)
-is **not refused today**: nothing in the resume path compares the closed
-head's `root` to the `--run-root` actually passed, only the estate id.
-An operator must never resume a relocated copy by hand for this reason —
-the refusal above only fires when something walks the registry to get
-there. Whether resume should compare and refuse is a separate decision;
-it is not made here, and this section does not claim a protection that
-is not built. Recorded as an open item in DL-219; no test in this repo
-pins the current, unrefused behavior as something to preserve.
+**Resume on a relocated copy is refused.** *(Amended by DL-224.* This
+paragraph recorded an open gap, DL-219's open item: `dsl41 run --resume`
+pointed directly at a relocated copy, with its own copied anchor, was not
+refused. DL-224 closes it.)* Resume applies period-model §1.3's resume rule:
+the anchor must name the `--run-root` given, and the registry row for the
+period of the root's newest OPENED segment must name it too. With no row for
+that period yet, the head must be this root's own claim: that is the window
+an opening crashed in between its segment and the head move, and resume
+finishes it. A copy or a restore at another path is refused with exit 2,
+whether it is resumed against its copied anchor or against the original
+one. The message names the anchor, the root and the recorded root. If the
+original engine holds the original's anchor at that moment, the refusal
+says that the anchor is held by another process instead.
+`dsl41 run --resume` and an offline `dsl41 seal` refuse such a root before
+they repair or stage anything or wire a supervisor, so no supervisor starts.
+That holds for a root that fails the rule when the command starts; if the
+lineage changes under it, for instance by an `estate reclaim` run at the
+same moment, the refusal can come after the supervisor is wired. A missing
+anchor or another estate's anchor keeps its earlier refusal and order.
+There is no override: restore at the recorded path. A roll that stopped
+before its claim is also refused; run the opener (`--open-from`) again. The
+recorded path, a symlink left there that leads to the restored root, a
+case-variant spelling of it on a case-insensitive filesystem and a bind
+mount of it are the same directory and are accepted.
+`tests/test_restore_drill.py` checks this refusal on the lineage restored at
+the wrong path.
 
 **What archived inputs cannot get back.** `estate prune --archive-inputs`
 (§2a) is irreversible by design: once it has run, restoring an old copy of

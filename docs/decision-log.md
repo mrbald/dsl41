@@ -14216,3 +14216,96 @@ relitigate an entry; append a new one.
   was cut.
   Also here: `tests/test_nightbank_deploy.py`'s `base` fixture folds into
   the shared `short_root`, the copy DL-221 named as the next to fold.
+
+- DL-224 `run --resume` refuses a root its anchor does not name; DL-219's
+  open item closes (2026-09-30)
+  Ruling: REFUSE, with no override. Resume applies a two-part rule, stated
+  in period-model ss1.3. NAMED: some registry row's `root`, the head's
+  `root` or `closing_root`, or a `claimed` head's `target_root` is this
+  root. OWNED: let P be the period of this root's newest opened segment,
+  read from its opening record; the registry row for P names this root,
+  or, with no row, the head is `claimed` with this root as target.
+  NAMED alone would admit a misplaced restore: root B's tree put back at
+  registered root A's path passes through A's row, and only OWNED refuses
+  it, because the row of the period its segment holds names B.
+  Same root: a recorded root is this root when the two normalized paths
+  are equal (`os.path.realpath`), or when the recorded path exists and is
+  the same directory (`os.path.samefile`). So a symlink left at the
+  recorded path, a case-variant spelling on a case-insensitive
+  filesystem, or a bind mount of the recorded path is the same root; a
+  copy is another directory, and a moved root's recorded path is gone. A
+  recorded path that cannot be stat'ed is not this root. NAMED stats
+  every recorded root on every resume, so a stale network path among
+  them can stall a resume. The head action's claim comparison and the
+  claim id still compare normalized strings, as before this entry.
+  P is read without repair. A newest segment whose first line is empty,
+  torn or nested too deep to parse never opened, so P comes from the
+  segment before it; this is the never-opened rule of ss11's matrix
+  without the removal. When no opening is readable, OWNED is not decided
+  and NAMED alone applies; the journal reader refuses such a root later
+  in its own words.
+  Where it runs: `resume_run` checks under both locks, after the
+  foreign-estate refusal and before any repair, so no torn tail is cut,
+  no never-opened segment is removed and no seal is selected first. Both
+  CLI routes that resume also check first, before they stage anything or
+  wire a supervisor: `dsl41 run --resume` before it takes the run-root
+  lock, and the offline `dsl41 seal` after taking it, which is how it
+  tells itself from a live engine. That first read takes no anchor lock,
+  so it can see a stale anchor; a refusal from it is confirmed under the
+  anchor lock, with the run-root lock held, before the CLI refuses. Exit
+  2 tells the units never to restart, so a stale refusal must not stand.
+  If the confirmation admits the root, the command continues as any
+  resume does.
+  The rule's refusal is `RootAuthorityError`, an `EngineError` subclass,
+  exit 2 through the CLI. The first read reports only that type. Any
+  other error it meets (a corrupt sentinel or anchor, a stray `wal/`
+  entry, an unreadable segment) passes it, as do a missing anchor and
+  another estate's anchor, so a root that passes the rule meets each in
+  its earlier order and words: a root another engine holds still says so
+  first. The confirmation swallows nothing. It runs `resume_run`'s own
+  steps, and any `EngineError` it meets is the command's refusal, in its
+  own words, before anything is staged or wired: a busy anchor lock, a
+  missing, corrupt or foreign anchor, or this rule. `resume_run` would
+  raise the same error after the wiring. So a copy resumed against the
+  original's anchor while the original engine holds it is refused as
+  holding a busy lock, with no supervisor started.
+  What a refusal by this rule may touch: `leader.lock` and `anchor.lock`,
+  created or taken; the `0700` tightening of the root and the anchor
+  directory; and the directory fsyncs those imply. A CLI refusal never
+  tightens the root; its confirmation takes the anchor lock, which
+  tightens the anchor directory. Nothing else is created, changed or
+  removed, and both locks are released. This holds for a root that fails
+  the rule when the CLI starts. If the anchor changes between the first
+  read and the locks, admission is still refused under both locks, and
+  what the CLI staged or wired before that may remain.
+  The refusal names the anchor, this root and the recorded roots (for
+  OWNED, period P and the root its row names). It gives the causes in one
+  clause: a copy or a restore at another path, a target whose claim was
+  reclaimed, or a roll that stopped before its claim. It says a restore
+  must land at the recorded path and that a stopped roll is finished by
+  running the opener (`--open-from`) again, and cites period-model ss1.3.
+  It does not call the root a copy. Precedence: the foreign-estate
+  refusal first, then this rule; a root that passes both reaches every
+  refusal it reached before, in the same words.
+  The default anchor is derived from the spelling of `--run-root`, so a
+  resume through a symlink with the default anchor is refused as having
+  no anchor, as before; naming the anchor explicitly admits it.
+  Obligation PR-57 (period-model ss13.1) holds the rule;
+  `tests/test_resume_root_authority.py` covers it, and
+  `tests/test_restore_drill.py` now also resumes the lineage it restores
+  at the wrong path, with the launch profile its period pins, and is
+  refused.
+  Amended: period-model ss1.3, ss11 step 2 and its recovery matrix and
+  refusal precedence; runner-design's permission and resume paragraphs;
+  deployment-runbook ss2b, whose open-gap paragraph this closes and whose
+  sentence on how resume finds its root was wrong.
+  Declined: an override switch, because a relocated lineage has no safe
+  meaning without moving its recorded paths; a re-home verb that rewrites
+  them is future work.
+  Declined: holding the anchor lock across supervisor wiring. It would
+  change the acquire/release pairing in `resume_run` and the lock order
+  the concurrency model documents, for a race that needs the break-glass
+  `estate reclaim` to run beside a resume of the very target it
+  reclaims. Admission is still refused under both locks. Reopen on a
+  second anchor-mutating verb that can run beside a resume, or on a stray
+  supervisor from this window seen in operation.

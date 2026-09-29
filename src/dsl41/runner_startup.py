@@ -110,6 +110,7 @@ from dsl41.boundary import (
     default_anchor_dir,
     open_next_period,
     open_wal,
+    require_resume_root,
     seal_record,
     select_seal,
 )
@@ -634,7 +635,13 @@ async def resume_run(
         if sentinel is not None:
             anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
             anchor.acquire()
-            anchor.require(sentinel.estate_id)
+            # ss1.3's resume rule (DL-224), after `require` and before
+            # `_resume_under_lock` repairs anything: a root this anchor does
+            # not name, or that does not own its newest period, is refused
+            # while the only writes behind it are the two locks
+            require_resume_root(
+                anchor.require(sentinel.estate_id), anchor_path=anchor.path, run_root=run_root
+            )
         engine = await _resume_under_lock(
             catalog,
             run_root,

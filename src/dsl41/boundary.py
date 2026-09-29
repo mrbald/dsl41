@@ -50,6 +50,7 @@ inside the interval fail-stops instead, on DL-101's rule.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -108,7 +109,9 @@ from dsl41.period import (
     stage_manifest,
     staging_dir,
     tz_aliases_of,
+    is_opening,
     wal_path,
+    wal_segments,
     write_bundle,
     write_period_manifest,
     write_sentinel,
@@ -2806,3 +2809,194 @@ def act_on_head(
         fsync_file(wal_path(run_root, head.period_id))  # same rule at genesis finalize
         return anchor.finalize(head.period_id)
     return current
+
+
+# ------------------------------------------- whose root this is (DL-224)
+
+#: the causes and the remedies every root-authority refusal states. One
+#: clause for the causes: a copy and an abandoned roll target meet the
+#: same rule, so the refusal does not call the root "a copy"
+_ROOT_REFUSAL_TAIL = (
+    " The usual causes are a copy or a restore at another path, a target"
+    " whose claim was reclaimed, or a roll that stopped before its claim."
+    " Resume refuses such a root; a restore must land at the recorded path,"
+    " and a roll that stopped before its claim is finished by running the"
+    " opener (`dsl41 run --open-from`) again (period-model ss1.3, DL-224)"
+)
+
+
+class RootAuthorityError(EngineError):
+    """ss1.3's resume rule refused this root (DL-224).
+
+    Its own type so the lock-free pre-check can report this refusal and
+    nothing else: every other error it meets while reading belongs to the
+    locked path, which raises it in its own order and words."""
+
+
+def same_root(recorded: str, here: str) -> bool:
+    """Whether a recorded root is the root at `here` (`normalized_root`).
+
+    The same when the normalized strings are equal, or when the recorded
+    path exists and is the same directory (`os.path.samefile`): a symlink,
+    a case-variant spelling or a bind mount of the recorded path is this
+    root. A copy is another directory, and a moved root's recorded path no
+    longer exists. A recorded path that cannot be stat'ed is not this
+    root."""
+    if normalized_root(recorded) == here:
+        return True
+    try:
+        return os.path.samefile(recorded, here)
+    except (OSError, ValueError):
+        return False
+
+
+def newest_opened_period(run_root: Path) -> int | None:
+    """The `period_id` of the opening record of this root's newest OPENED
+    segment, read without repairing anything (ss1.3's OWNED half, DL-224).
+
+    A newest segment whose first line is empty or torn never opened.
+    `_drop_never_opened_segment` removes such a file when an earlier
+    segment exists; this reads the same rule without the removal, from the
+    segment before it. None when no opening is readable here: the reader
+    that refuses that root is `read_journal`, later, in its own words."""
+    segments = wal_segments(run_root)
+    if not segments:
+        return None
+    first = _first_line(wal_path(run_root, segments[-1]))
+    if _never_opened(first) and len(segments) >= 2:
+        first = _first_line(wal_path(run_root, segments[-2]))
+    try:
+        record = json.loads(first)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict) or not is_opening(record):
+        return None
+    period = record.get("period_id")
+    return period if isinstance(period, int) and not isinstance(period, bool) else None
+
+
+def _first_line(path: Path) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            return handle.readline()
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+
+
+def _never_opened(first: bytes) -> bool:
+    """Empty, or torn: no newline and not a JSON document. These are the
+    first lines `repair_tail` cuts to nothing. A line nested too deep to
+    parse counts as not a document, as `period._is_period_root_line`
+    treats one."""
+    if first.endswith(b"\n"):
+        return False
+    try:
+        json.loads(first)
+    except (ValueError, RecursionError):
+        return True
+    return False
+
+
+def _recorded_roots(anchor: Anchor) -> list[str]:
+    """Every root the anchor records: each registry row's `root`, the
+    head's `root` or `closing_root`, and a `claimed` head's
+    `target_root`."""
+    head = anchor.head
+    recorded = [row.root for row in anchor.periods.values()]
+    if isinstance(head, OpenHead):
+        recorded.append(head.root)
+    elif isinstance(head, ClosedHead):
+        recorded.append(head.closing_root)
+    else:
+        recorded.append(head.target_root)
+    return recorded
+
+
+def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) -> None:
+    """ss1.3's resume rule (DL-224): the anchor NAMES this root, and this
+    root OWNS the period its newest opened segment holds. Roots compare by
+    `same_root`.
+
+    NAMED is the early filter: a root no row and no head names is refused.
+    OWNED is the authoritative half: the registry row for that period names
+    this root, or, with no row yet, the head is this root's claim. A
+    misplaced restore passes the first through an older row and fails the
+    second. Read-only; the caller runs it before any repair of the root."""
+    here = normalized_root(run_root)
+    recorded = _recorded_roots(anchor)
+    if not any(same_root(root, here) for root in recorded):
+        named = sorted({normalized_root(root) for root in recorded})
+        raise RootAuthorityError(
+            f"{anchor_path}: this anchor does not name {here} -- its registry and"
+            f" head name {', '.join(named)}." + _ROOT_REFUSAL_TAIL
+        )
+    period = newest_opened_period(run_root)
+    if period is None:
+        return
+    row = anchor.row(period)
+    if row is not None:
+        if not same_root(row.root, here):
+            raise RootAuthorityError(
+                f"{anchor_path}: this anchor does not hold period {period} for {here}"
+                f" -- its registry row for period {period} names"
+                f" {normalized_root(row.root)}." + _ROOT_REFUSAL_TAIL
+            )
+        return
+    head = anchor.head
+    if isinstance(head, ClaimedHead) and same_root(head.target_root, here):
+        return
+    raise RootAuthorityError(
+        f"{anchor_path}: this anchor does not hold period {period} for {here} -- no"
+        f" registry row names period {period}, and the head is {_spell(head)}, not a"
+        " claim by this root." + _ROOT_REFUSAL_TAIL
+    )
+
+
+def resume_root_refusal(
+    run_root: Path, anchor_dir: Path | None, *, locked: bool = False
+) -> EngineError | None:
+    """`require_resume_root` for a CLI route that resumes, before it stages
+    anything or wires a supervisor: the refusal, or None.
+
+    Unlocked (`locked=False`) it reads the sentinel and `anchor.json`,
+    writes nothing, and reports only this rule's refusal
+    (`RootAuthorityError`). Any other error on the way -- a corrupt
+    sentinel or anchor, a stray `wal/` entry, an unreadable segment --
+    passes silently, as do a missing anchor and another estate's anchor:
+    `resume_run` raises each of those in its own order and words.
+
+    A snapshot read without locks can be stale, so a caller that gets a
+    refusal holds the run-root lock and asks again with `locked=True`.
+    That runs `resume_run`'s own steps -- the sentinel, the anchor lock,
+    `require`, this rule -- and releases the anchor lock. Under the locks
+    nothing is swallowed: a busy anchor lock, a missing or corrupt anchor
+    and another estate's anchor are returned as the refusal too, because
+    `resume_run` would raise the same error after the caller had staged
+    and wired. Only an error that is not an `EngineError` propagates."""
+    anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
+    if locked:
+        try:
+            sentinel = read_sentinel(run_root)
+            if sentinel is None:
+                return None  # `resume_run` takes its no-sentinel path
+            anchor.acquire()
+            try:
+                current = anchor.require(sentinel.estate_id)
+                require_resume_root(current, anchor_path=anchor.path, run_root=run_root)
+            finally:
+                anchor.release()
+        except EngineError as refused:
+            return refused
+        return None
+    try:
+        sentinel = read_sentinel(run_root)
+        # read, never acquire: `acquire` creates a missing anchor
+        # directory, and a missing anchor is `require`'s refusal to make
+        stored = None if sentinel is None else anchor.read()
+        if sentinel is not None and stored is not None and stored.estate_id == sentinel.estate_id:
+            require_resume_root(stored, anchor_path=anchor.path, run_root=run_root)
+    except RootAuthorityError as refused:
+        return refused
+    except Exception:  # noqa: BLE001 -- every other error is the locked path's to raise
+        return None
+    return None
