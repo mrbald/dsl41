@@ -82,7 +82,9 @@ manual() { # manual start|restart
     sudo systemctl "$1" "$ENGINE"
 }
 
-start_engine() { # start, and wait until the engine answers
+# start, and wait until the engine answers. After a refusal, this clears
+# the failed state and starts on the repaired setup.
+start_engine() {
     manual start
     wait_up
 }
@@ -114,9 +116,6 @@ expect_refusal() { # expect_refusal FRAGMENT
     assert_stays_stopped 2 "$1" "$mark"
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the refused start was not a resume"
 }
-
-# after a refusal: clear the failed state and start on the repaired setup
-recover() { start_engine; }
 
 install_map() {
     sudo install -o dsl41 -g dsl41 -m 0600 \

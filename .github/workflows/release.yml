@@ -49,7 +49,6 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false
-      - run: uv sync --locked --extra dev
       # The tag and pyproject.toml must name one version, and the tag must be
       # annotated: its message is the release note. The explicit fetch keeps
       # the tag object, whatever the checkout did with it.
@@ -59,7 +58,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="$(uv run --locked python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           if [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG does not match pyproject.toml version $version"
             exit 1
@@ -78,10 +77,6 @@ jobs:
       - run: uv build --wheel
       # twine is pinned: a check that moves with the tool is not a gate.
       - run: uvx twine==7.0.0 check --strict dist/*
-      # hatchling is a range in [build-system]; the log keeps which one built
-      # this candidate.
-      - name: record the build backend
-        run: unzip -p dist/*.whl '*.dist-info/WHEEL' | grep '^Generator:'
       - name: export the locked closure (hashes included)
         run: |
           set -euo pipefail
@@ -146,7 +141,6 @@ jobs:
 
   release-assets:
     needs: publish
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

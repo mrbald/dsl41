@@ -57,21 +57,21 @@ jobs:
           sudo cp -R examples/nightbank "$NIGHTBANK"
           sudo chown -R root:root "$NIGHTBANK"
           sudo chmod -R go-w,a+rX "$NIGHTBANK"
-          sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night" /srv/dsl41/runs
+          sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night" "$(dirname "$ROOT")"
           # nightbank's own prepare_night: data directories, properties and
           # profile, the region anchors six hours out so no calendar fires
-          as_dsl41 /opt/dsl41/venv/bin/python - <<'PY'
+          as_dsl41 /opt/dsl41/venv/bin/python - <<PY
           import importlib.util
           from datetime import UTC, datetime, timedelta
           from importlib.machinery import SourceFileLoader
           from pathlib import Path
 
-          loader = SourceFileLoader("nightbank", "/srv/dsl41/nightbank/bin/nightbank")
+          loader = SourceFileLoader("nightbank", "$NIGHTBANK/bin/nightbank")
           spec = importlib.util.spec_from_loader(loader.name, loader)
           module = importlib.util.module_from_spec(spec)
           loader.exec_module(module)
           module.prepare_night(
-              Path("/srv/dsl41/nightbank/night"),
+              Path("$NIGHTBANK/night"),
               "small",
               anchor_utc=datetime.now(UTC) + timedelta(hours=6),
               incidents=True,
@@ -158,7 +158,7 @@ jobs:
           ! sudo cmp -s /tmp/apac.jil.orig "$ESTATE/apac.jil" || fail "the edit did not apply"
           expect_refusal "catalog hash mismatch"
           sudo cp /tmp/apac.jil.orig "$ESTATE/apac.jil"
-          recover
+          start_engine
 
       - name: a malformed access map is refused without a restart loop
         run: |
@@ -167,7 +167,7 @@ jobs:
           printf 'format_version = \n' | sudo tee "$MAP" >/dev/null
           expect_refusal "not valid TOML"
           install_map
-          recover
+          start_engine
 
       - name: a missing access map is refused without a restart loop
         run: |
@@ -176,7 +176,7 @@ jobs:
           sudo rm "$MAP"
           expect_refusal "cannot open"
           install_map
-          recover
+          start_engine
 
       - name: a sealed engine stays stopped until the next period is opened
         run: |
@@ -193,7 +193,7 @@ jobs:
               --next-timezone UTC --force-seal --claimed-actor drill@nightbank
           assert_stays_stopped 3 "sealed period 1" "$mark"
           mark=$(date +%s)
-          recover
+          start_engine
           launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the opener was not a resume"
           sudo test -e "$ROOT/wal/000002.jsonl" || fail "period 2 did not open in $ROOT"
           ok "period 2 opened in place"
@@ -201,8 +201,9 @@ jobs:
       - name: diagnostics and teardown
         if: always()
         run: |
+          source examples/nightbank/deploy/drill-lib.sh
           sudo systemctl status dsl41-engine.service dsl41-supervisor.service --no-pager || true
           sudo journalctl -u dsl41-engine.service -u dsl41-supervisor.service \
               -o short-precise --no-pager || true
-          sudo tail -n 100 /srv/dsl41/runs/nightbank-01/supervisor.log || true
+          sudo tail -n 100 "$ROOT/supervisor.log" || true
           sudo systemctl stop dsl41-engine.service dsl41-supervisor.service || true
