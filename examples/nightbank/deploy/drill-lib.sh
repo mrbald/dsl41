@@ -76,9 +76,11 @@ launch_line_since() {
 
 # The engine unit allows five starts in five minutes, and the drill's own
 # starts count against that. Every deliberate start clears the counter
-# first, as an operator's `systemctl reset-failed` would.
+# first, as an operator's `systemctl reset-failed` would. A unit systemd has
+# not loaded yet has no counter, and reset-failed refuses it ("not loaded"):
+# that refusal is not a failure of the drill.
 manual() { # manual start|restart
-    sudo systemctl reset-failed "$ENGINE"
+    sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
     sudo systemctl "$1" "$ENGINE"
 }
 
