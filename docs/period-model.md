@@ -625,6 +625,28 @@ unreachable cannot be told from one whose root is paused. Overriding it is
 `segment` record's `reclaimed` field with the claimed actor — loud, durable,
 attributable, and the one path here that can fork a lineage.
 
+*(Amended by DL-224: whose root a resume is.)* **Resume refuses a root the
+anchor does not name.** The rule has two parts, and recorded paths are
+normalized at comparison time (`os.path.realpath`), as the claim is:
+
+1. **NAMED.** Some registry row's `root`, the head's `root` or
+   `closing_root`, or a `claimed` head's `target_root` is this root. A root
+   the anchor does not name is refused. This is the early filter.
+2. **OWNED.** Let P be the period of this root's newest opened segment, read
+   from its opening record. If the registry has a row for P, that row's
+   `root` is this root. If it has none, the head is `claimed` with this root
+   as `target_root`. This is the authoritative half: root B's tree restored
+   at registered root A's path passes NAMED through A's row and fails here,
+   because the row of the period its segment holds names B.
+
+The usual causes of a refusal are a copy or a restore at another path, and
+an abandoned roll target whose claim was reclaimed; the rule refuses all of
+them and does not tell them apart. A restore must land at the recorded path
+(`deployment-runbook.md` §2b). A symlink left at the recorded path that leads
+to this root satisfies the rule, because the recorded path then names this
+root. The foreign-estate refusal (§11 step 2) comes first. There is no override;
+moving a lineage to another path is a verb this model does not have.
+
 **When the shared store arrives** (the withdrawn HA plan's S8a, DL-189) it
 **replaces** both this anchor and root leadership as the sole authority: one
 transaction consumes `expected_head_digest`, advances the head and allocates
@@ -1938,6 +1960,10 @@ new-format estate that crashes before its first seal with no path back:
    refuse unless it is a `period_root` record naming this estate (§1.1's
    ownership rule applies to resume as to creation);
 2. `flock` `anchor.lock`; read `anchor.json`; refuse on `estate_id` mismatch;
+   *(Amended by DL-224.)* then refuse a root the anchor does not name, or one
+   that does not own the period of its newest opened segment (§1.3's resume
+   rule). This runs before any repair below: no torn tail is cut, no
+   never-opened segment is removed, and no seal is selected before it;
 3. **select the seal by lineage, from what this root holds**: if the active
    segment exists, its `opens_from_seal` names the sidecar this period opened
    from — the imported one, in a rolled root — and that is the seal; if no
@@ -2103,6 +2129,19 @@ release discipline this implies, and it closes what draft 3 left open as PR-Q4.
 | `segment` pins ≠ preceding seal's `next_period` | refuse |
 | any record after a `seal` in the same segment | refuse |
 | legacy `header` journal, no `segment` | **refused** — a retired dialect, named with DL-138 (below) |
+| resume of a root the anchor does not name, or whose newest period's row names another root (DL-224) | **refused** by §1.3's resume rule, before any row above repairs anything. A refused resume may create or take `leader.lock` and `anchor.lock`, tighten the root and the anchor directory to `0700`, and fsync the directories those imply; it creates, changes or removes nothing else |
+
+*(Amended by DL-224.)* **Refusal precedence at resume.** The foreign-estate
+refusal (step 2) comes first. §1.3's resume rule comes next, before every row
+of the matrix above that repairs or acts. A root the anchor names and that
+owns its newest period reaches every refusal it reached before the rule, in
+the same words: a historical registered root after a roll still meets the
+successor claim's refusal, and a claimed head held by another root still
+names the holder. `dsl41 run --resume` also runs the rule read-only before it
+takes the lock or wires a supervisor, and the offline `dsl41 seal`, which
+resumes the root it seals, runs it before it stages anything or wires a
+supervisor. A refused detached resume or offline seal starts no supervisor;
+`resume_run` repeats the rule under both locks.
 
 **Legacy adoption is retired (DL-138).** Drafts 4–29 defined `dsl41 estate
 adopt`: a transaction that fenced a run root written before this model,
@@ -2457,6 +2496,7 @@ the producer. Silence there would read as coverage.
 | PR-06 | `baseline_id` rotates; a command composed under C1 is refused after C2 opens even when the row never moved |
 | PR-07 | a `segment` whose pins disagree with the preceding seal's `next_period` is refused; two openings of one seal — in place and fresh root, under two patch versions of dsl41 — produce byte-identical `segment` records, which requires `catalog_hash` v2 to ignore `tool_version` |
 | PR-07a | `source_bundle_hash`: `["ab","c"]` ≠ `["a","bc"]`; **reversing command-line order moves it, and both orderings reopen to their own `catalog_hash` from their own `sources.json`**; the same bytes from two original paths are two bundles |
+| PR-57 | *(DL-224)* resume refuses a root the anchor does not name: a relocated copy with its **copied** anchor and against the **original** anchor, each with the head `open`, `closed` and `claimed`, refuses naming both paths, and every file, mode and directory entry under the copy and the anchor it named is unchanged but the two lock files; a copy with a **torn tail** and one with an **empty successor segment** refuse before either is repaired; root B's tree restored at registered root A's path refuses by OWNED, naming the period and B; a historical registered root keeps its earlier refusal and words, and a reclaimed roll target refuses by the rule; the same root through a symlink and a `..` detour resumes with the anchor named, and a symlink with the DEFAULT anchor keeps its earlier refusal; both locks can be taken after a refusal; a detached `dsl41 run --resume` on a copy exits 2 and starts no supervisor; and a whole lineage restored at another path refuses the resume as well as the estate-wide read |
 
 ### 13.2 Canonical form
 

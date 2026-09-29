@@ -41,7 +41,7 @@ import pytest
 import test_nightbank_boundary as tnb
 from dsl41.attest import ATTESTATION_VERIFIED, DERIVATION_VERIFIED, verified_tier
 from dsl41.boundary import EstateAnchor, OpenHead, default_anchor_dir
-from dsl41.period import wal_path
+from dsl41.period import RuntimeProfile, read_period_manifest, wal_path
 from test_nightbank_boundary import (
     _drive,
     _invoke,
@@ -53,6 +53,7 @@ from test_nightbank_boundary import (
     _stop_engine,
     _wait_for_evidence,
 )
+from test_resume_root_authority import _tree
 from test_runner_supervisor import _kill_group, wait_for
 
 #: the one detached job the drill actually runs: a short, unconditioned box
@@ -126,7 +127,9 @@ def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch
     delete. Three refusals along the way: no anchor, a root the registry
     names but the disk does not have, and the whole lineage restored at a
     different absolute path (still a missing-registered-root refusal, not a
-    claim-digest one).
+    claim-digest one). That last lineage is also resumed, after the full
+    restore puts the JIL and properties back, and `run --resume` refuses it
+    as a root its anchor does not name (DL-224).
 
     `short_root` IS the drill's one fixed absolute path: every root, the
     anchor, the copied JIL inputs, the night's properties, and the backup
@@ -243,7 +246,6 @@ def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch
     wrong_path_read = _invoke("audit", "--estate-anchor", str(wrong_base / "engine.anchor"))
     assert wrong_path_read.exit_code == 2, wrong_path_read.output
     assert f"registry root {run_root.resolve()} is missing" in wrong_path_read.output
-    shutil.rmtree(wrong_base)
 
     # ============================ the full restore ============================
     shutil.copytree(backup_dir / "anchor", anchor_dir)
@@ -257,6 +259,33 @@ def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch
     # the restore actually put the JIL back -- SMALL_FILES was patched once,
     # above, and every helper below still reads through it
     assert any((base / "estate").glob("*.jil"))
+
+    # ---- negative, continued: the relocated lineage RESUMED. `run
+    # ---- --resume` on the relocated roll root, against the relocated
+    # ---- anchor, with the restored JIL and properties and the launch
+    # ---- options period 3 pinned (the defaults: the drill's seals passed
+    # ---- none), so only the root rule is left to refuse it (DL-224) ----
+    wrong_roll = wrong_base / "roll"
+    pinned = read_period_manifest(wrong_roll, 3)
+    assert pinned is not None and pinned.runtime_profile == RuntimeProfile()
+    untouched = _tree(wrong_base)
+    resumed = _invoke(
+        "run",
+        *(str(path) for path in local_jil),
+        "-p",
+        str(props),
+        "--run-root",
+        str(wrong_roll),
+        "--estate-anchor",
+        str(wrong_base / "engine.anchor"),
+        "--resume",
+    )
+    assert resumed.exit_code == 2, resumed.output
+    assert f"this anchor does not name {wrong_roll.resolve()}" in resumed.output
+    assert str(rolled_root.resolve()) in resumed.output
+    assert not (wrong_roll / "supervisor.pid").exists()
+    assert _tree(wrong_base) == untouched
+    shutil.rmtree(wrong_base)
 
     # ---- fresh readers only: nothing above holds an engine, a client or a
     # ---- catalog object from before the delete ----

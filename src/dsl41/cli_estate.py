@@ -431,11 +431,19 @@ async def _offline_seal(
 
     from datetime import UTC, datetime
 
-    from dsl41.boundary import SealRequest, load_bundle_catalog
+    from dsl41.boundary import SealRequest, load_bundle_catalog, precheck_resume_root
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
+    # ss1.3's resume rule (DL-224), READ-ONLY, before anything below stages
+    # C2 into the root or wires a supervisor: this sealer resumes the root,
+    # and a refused resume writes nothing but its locks. `resume_run`
+    # repeats the check under both locks.
+    try:
+        precheck_resume_root(run_root, estate_anchor)
+    except EngineError as exc:
+        return refuse(exc)
     try:
         # the period this sealer will CLOSE, which on a root with a
         # committed boundary is the one the resume below opens (DL-151):

@@ -584,6 +584,18 @@ async def _serve_run(
             load_policy(access_map, generation=1)
         except AccessError as exc:
             return refuse(exc)
+    if resume:
+        # ss1.3's resume rule (DL-224), READ-ONLY and before the lock, the
+        # same precedent as the two above: the supervisor wiring below
+        # creates its log, lock, socket and pid file, and a refused resume
+        # would leave that supervisor running. `resume_run` repeats the
+        # check authoritatively under both locks.
+        from dsl41.boundary import precheck_resume_root
+
+        try:
+            precheck_resume_root(run_root, anchor_dir)
+        except EngineError as exc:
+            return refuse(exc)
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this

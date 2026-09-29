@@ -14216,3 +14216,62 @@ relitigate an entry; append a new one.
   was cut.
   Also here: `tests/test_nightbank_deploy.py`'s `base` fixture folds into
   the shared `short_root`, the copy DL-221 named as the next to fold.
+
+- DL-224 `run --resume` refuses a root its anchor does not name; DL-219's
+  open item closes (2026-09-29)
+  Ruling: REFUSE, with no override. Resume applies a two-part rule, stated
+  in period-model ss1.3. NAMED: some registry row's `root`, the head's
+  `root` or `closing_root`, or a `claimed` head's `target_root` is this
+  root. OWNED: let P be the period of this root's newest opened segment,
+  read from its opening record; the registry row for P names this root,
+  or, with no row, the head is `claimed` with this root as target.
+  Recorded paths are normalized at comparison time (`os.path.realpath`),
+  as the claim comparison already is. NAMED alone would admit a misplaced
+  restore: root B's tree put back at registered root A's path passes
+  through A's row, and only OWNED refuses it, because the row of the
+  period its segment holds names B.
+  P is read without repair. A newest segment whose first line is empty or
+  torn never opened, so P comes from the segment before it; this is the
+  never-opened rule of ss11's matrix without the removal. When no opening
+  is readable, OWNED is not decided and NAMED alone applies; the journal
+  reader refuses such a root later in its own words.
+  Where it runs: `resume_run` checks under both locks, after the
+  foreign-estate refusal and before any repair, so no torn tail is cut,
+  no never-opened segment is removed and no seal is selected first.
+  Both CLI routes that resume run the same check read-only first.
+  `dsl41 run --resume` runs it before it takes the run-root lock or wires
+  a supervisor, beside the two read-only checks already there. The
+  offline `dsl41 seal` runs it after taking the run-root lock, which is
+  how it tells itself from a live engine, and before it stages C2 or
+  wires a supervisor. A refused detached resume or offline seal starts no
+  supervisor. The pre-check passes over a root with no sentinel, no anchor or another
+  estate's anchor, so those refusals keep their order in `resume_run`.
+  What a refused resume may touch: `leader.lock` and `anchor.lock`,
+  created or taken; the `0700` tightening of the root and the anchor
+  directory; and the directory fsyncs those imply. Nothing else. Both
+  locks are released on the way out.
+  The refusal is an `EngineError`, exit 2 through the CLI. It names the
+  anchor, this root and the recorded roots (for OWNED, period P and the
+  root its row names), gives the causes in one clause (a copy or a
+  restore at another path, or a target whose claim was reclaimed), says a
+  restore must land at the recorded path, and cites period-model ss1.3.
+  It does not call the root a copy: an abandoned roll target meets the
+  same rule. Precedence: the foreign-estate refusal first, then this
+  rule; a root that passes both reaches every refusal it reached before,
+  in the same words.
+  A symlink left at the recorded path that leads to this root satisfies
+  the rule, because the recorded path then names this root. The default
+  anchor is derived from the spelling of `--run-root`, so a resume
+  through a symlink with the default anchor is refused as having no
+  anchor, as before; naming the anchor explicitly admits it.
+  Obligation PR-57 (period-model ss13.1) holds the rule;
+  `tests/test_resume_root_authority.py` covers it, and
+  `tests/test_restore_drill.py` now also resumes the lineage it restores
+  at the wrong path, with matching launch options, and is refused.
+  Amended: period-model ss1.3, ss11 step 2 and its recovery matrix and
+  refusal precedence; runner-design's permission and resume paragraphs;
+  deployment-runbook ss2b, whose open-gap paragraph this closes and whose
+  sentence on how resume finds its root was wrong.
+  Declined: an override switch, because a relocated lineage has no safe
+  meaning without moving its recorded paths; a re-home verb that rewrites
+  them is future work.

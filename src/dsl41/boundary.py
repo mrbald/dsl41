@@ -50,6 +50,7 @@ inside the interval fail-stops instead, on DL-101's rule.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -108,7 +109,9 @@ from dsl41.period import (
     stage_manifest,
     staging_dir,
     tz_aliases_of,
+    is_opening,
     wal_path,
+    wal_segments,
     write_bundle,
     write_period_manifest,
     write_sentinel,
@@ -2806,3 +2809,132 @@ def act_on_head(
         fsync_file(wal_path(run_root, head.period_id))  # same rule at genesis finalize
         return anchor.finalize(head.period_id)
     return current
+
+
+# ------------------------------------------- whose root this is (DL-224)
+
+#: the causes and the remedy every root-authority refusal states. One
+#: clause for the causes: a copy and an abandoned roll target meet the
+#: same rule, so the refusal does not call the root "a copy"
+_ROOT_REFUSAL_TAIL = (
+    " The usual causes are a copy or a restore at another path, or a target"
+    " whose claim was reclaimed. Resume refuses such a root; a restore must land"
+    " at the recorded path (period-model ss1.3, DL-224)"
+)
+
+
+def newest_opened_period(run_root: Path) -> int | None:
+    """The `period_id` of the opening record of this root's newest OPENED
+    segment, read without repairing anything (ss1.3's OWNED half, DL-224).
+
+    A newest segment whose first line is empty or torn never opened.
+    `_drop_never_opened_segment` removes such a file when an earlier
+    segment exists; this reads the same rule without the removal, from the
+    segment before it. None when no opening is readable here: the reader
+    that refuses that root is `read_journal`, later, in its own words."""
+    segments = wal_segments(run_root)
+    if not segments:
+        return None
+    first = _first_line(wal_path(run_root, segments[-1]))
+    if _never_opened(first) and len(segments) >= 2:
+        first = _first_line(wal_path(run_root, segments[-2]))
+    try:
+        record = json.loads(first)
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not is_opening(record):
+        return None
+    period = record.get("period_id")
+    return period if isinstance(period, int) and not isinstance(period, bool) else None
+
+
+def _first_line(path: Path) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            return handle.readline()
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+
+
+def _never_opened(first: bytes) -> bool:
+    """Empty, or torn: no newline and not a JSON document. These are the
+    first lines `repair_tail` cuts to nothing."""
+    if first.endswith(b"\n"):
+        return False
+    try:
+        json.loads(first)
+    except ValueError:
+        return True
+    return False
+
+
+def named_roots(anchor: Anchor) -> set[str]:
+    """Every root the anchor names, normalized at comparison time: each
+    registry row's `root`, the head's `root` or `closing_root`, and a
+    `claimed` head's `target_root`."""
+    head = anchor.head
+    recorded = [row.root for row in anchor.periods.values()]
+    if isinstance(head, OpenHead):
+        recorded.append(head.root)
+    elif isinstance(head, ClosedHead):
+        recorded.append(head.closing_root)
+    else:
+        recorded.append(head.target_root)
+    return {normalized_root(root) for root in recorded}
+
+
+def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) -> None:
+    """ss1.3's resume rule (DL-224): the anchor NAMES this root, and this
+    root OWNS the period its newest opened segment holds.
+
+    NAMED is the early filter: a root no row and no head names is refused.
+    OWNED is the authoritative half: the registry row for that period names
+    this root, or, with no row yet, the head is this root's claim. A
+    misplaced restore passes the first through an older row and fails the
+    second. Read-only; the caller runs it before any repair of the root."""
+    here = normalized_root(run_root)
+    named = named_roots(anchor)
+    if here not in named:
+        raise EngineError(
+            f"{anchor_path}: this anchor does not name {here} -- its registry and"
+            f" head name {', '.join(sorted(named))}." + _ROOT_REFUSAL_TAIL
+        )
+    period = newest_opened_period(run_root)
+    if period is None:
+        return
+    row = anchor.row(period)
+    if row is not None:
+        owner = normalized_root(row.root)
+        if owner != here:
+            raise EngineError(
+                f"{anchor_path}: this anchor does not hold period {period} for {here}"
+                f" -- its registry row for period {period} names {owner}." + _ROOT_REFUSAL_TAIL
+            )
+        return
+    head = anchor.head
+    if isinstance(head, ClaimedHead) and normalized_root(head.target_root) == here:
+        return
+    raise EngineError(
+        f"{anchor_path}: this anchor does not hold period {period} for {here} -- no"
+        f" registry row names period {period}, and the head is {_spell(head)}, not a"
+        " claim by this root." + _ROOT_REFUSAL_TAIL
+    )
+
+
+def precheck_resume_root(run_root: Path, anchor_dir: Path | None) -> None:
+    """`require_resume_root` before any lock is taken or file written: the
+    CLI calls it before it wires a supervisor, so a refused detached resume
+    starts none.
+
+    Reads the sentinel and `anchor.json` and nothing else. A root with no
+    sentinel, no anchor, or an anchor of another estate passes through:
+    those refusals belong to `resume_run` and keep their order there. The
+    authoritative check runs again under both locks."""
+    sentinel = read_sentinel(run_root)
+    if sentinel is None:
+        return
+    anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
+    stored = anchor.read()
+    if stored is None or stored.estate_id != sentinel.estate_id:
+        return
+    require_resume_root(stored, anchor_path=anchor.path, run_root=run_root)
