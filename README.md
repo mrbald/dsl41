@@ -1224,16 +1224,17 @@ designed-but-unbuilt item.
 
 Releases are tag-driven. A push of a tag that matches `v*` starts
 [.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml)
-(DL-215). The workflow runs the whole CI workflow as its first job, builds the
-sdist and the wheel from locked inputs, smoke-tests the installed wheel with
+(DL-215). The workflow runs the whole CI workflow as its first job, checks
+that the tag is annotated and names the version in `pyproject.toml`, builds
+the sdist and the wheel, exports the locked dependency closure with hashes,
+smoke-tests the installed wheel with
 [scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh),
-and publishes only what the smoke tested. Publication needs a tag
-and uses trusted publishing (OIDC) in the `pypi` environment. The
-repository holds no PyPI token; the workflow's header comment records
-the one-time setup on pypi.org. The GitHub release that follows
-carries the sdist, the wheel, the two requirements files and
-`SHA256SUMS`. The workflow's header comment lists its jobs, and DL-215
-states the smoke contract check by check.
+and publishes only what the smoke tested. Publication needs a tag and uses
+trusted publishing (OIDC) in the `pypi` environment. The repository holds no
+PyPI token; the workflow's header comment records the one-time setup on
+pypi.org. The GitHub release that follows carries the sdist, the wheel, the
+two requirements files and `SHA256SUMS`. The workflow's header comment lists
+its jobs, and DL-215 states the smoke contract check by check.
 
 Since 1.0.0 (2026-08-26) a minor bump (1.3.0 -> 1.4.0) carries one or more
 functional units. A patch bump (1.3.0 -> 1.3.1) carries documentation or a

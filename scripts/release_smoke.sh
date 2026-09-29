@@ -50,18 +50,17 @@ bounded() {
 }
 
 # Poll COMMAND every 0.2s for up to SECS seconds (drill-lib.sh's wait_for
-# shape, at finer granularity); fail with DESCRIPTION if it never
-# succeeds. Prints no "ok:" line -- the caller's check may cover more than
-# this one wait.
-wait_until() { # wait_until SECS DESCRIPTION COMMAND...
-    local limit="$1" what="$2" tries
-    shift 2
+# shape, at finer granularity). 0 once it succeeds; 1 if SECS elapses
+# first. Prints nothing -- each caller owns its own failure message.
+wait_until() { # wait_until SECS COMMAND...
+    local limit="$1" tries
+    shift
     tries=$((limit * 5))
     for _ in $(seq 1 "$tries"); do
         "$@" && return 0
         sleep 0.2
     done
-    fail "$what: not within ${limit}s"
+    return 1
 }
 
 # SIGINT PID, then wait up to SECS for it to exit. 0 once it is gone; 2 if
@@ -266,13 +265,14 @@ check_lifecycle() {
         >"$log" 2>&1 &
     engine_pid=$!
 
-    wait_until 30 "[$profile] control socket is bound" \
-        _socket_bound "$sock" "$engine_pid" "$log" "$profile"
+    wait_until 30 _socket_bound "$sock" "$engine_pid" "$log" "$profile" \
+        || { cat "$log" >&2; fail "[$profile] no control socket after 30s"; }
     ok "[$profile] dsl41 run --detached is up (control socket bound)"
 
     bounded 30 "$venv/bin/dsl41" sendevent STARTJOB -J smoke_a -S "$sock" >/dev/null \
         || fail "[$profile] sendevent STARTJOB"
-    wait_until 30 "[$profile] smoke_a reaches SUCCESS" _job_succeeded "$venv" "$sock"
+    wait_until 30 _job_succeeded "$venv" "$sock" \
+        || fail "[$profile] smoke_a did not reach SUCCESS in 30s: $(bounded 30 "$venv/bin/dsl41" query status --brief -S "$sock" || true)"
     grep -q dsl41-smoke "$run_root/logs/smoke_a.1.out" \
         || fail "[$profile] the job's stdout log lacks its output"
     ok "[$profile] STARTJOB ran smoke_a to SUCCESS; its stdout reached the run's log"

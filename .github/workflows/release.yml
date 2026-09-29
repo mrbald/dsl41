@@ -6,8 +6,8 @@
 # DL-215: nothing is published that did not pass the whole CI gate list
 # (`gates` calls ci.yml) and the installed-artifact smoke test (`smoke` runs
 # scripts/release_smoke.sh on the very files `publish` uploads). `build`
-# works from uv.lock (`--locked`, `--frozen`) and ships the locked closure
-# beside the wheel as requirements-base.txt and requirements-ui.txt.
+# exports the closure from uv.lock with `--frozen` and ships it beside the
+# wheel as requirements-base.txt and requirements-ui.txt.
 #
 # The release jobs keep no git credentials and use no uv cache, so nothing a
 # cache or an earlier step left behind reaches the candidate.

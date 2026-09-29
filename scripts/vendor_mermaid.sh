@@ -15,7 +15,7 @@
 #   mermaid                   (MIT; dist/mermaid.min.js copied byte-exact)
 #   @mermaid-js/layout-elk    (MIT)
 #   elkjs                     (EPL-2.0; dependency of both bundles, pinned
-#                              here so the banners stay true)
+#                              in package.json so the banners stay true)
 #   cytoscape                 (MIT)
 #   cytoscape-elk             (MIT; drives elk.bundled.js on the main
 #                              thread -- no Worker, no fetch)

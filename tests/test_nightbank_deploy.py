@@ -446,9 +446,9 @@ def _drill_vars(text: str) -> dict[str, str]:
 
 def test_the_drill_names_the_same_paths_and_file_order_as_the_launcher() -> None:
     """drill-lib.sh installs at the paths dsl41-launch runs on and repeats
-    the estate file order for its own diagnostics; both must name the same
-    values, the way the units' `RequiresMountsFor=` is held equal to the
-    launcher's `RUN_ROOT`."""
+    the estate file order to feed the seal step's `--next` list; both must
+    name the same values, the way the units' `RequiresMountsFor=` is held
+    equal to the launcher's `RUN_ROOT`."""
     launcher_text = LAUNCH.read_text()
     drill_text = DRILL_LIB.read_text()
     drill_values = _drill_vars(drill_text)
