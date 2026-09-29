@@ -22,8 +22,6 @@ import asyncio
 import inspect
 import json
 import pathlib
-import shutil
-import tempfile
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -281,19 +279,6 @@ def test_pr10a_surrogate_refused_by_canon() -> None:
             canonical_bytes(value)
     with pytest.raises(CanonError):
         decode('{"v":"\\ud800"}')
-
-
-@pytest.fixture
-def short_root():
-    """A short-path base directory for the AF_UNIX control socket. pytest's
-    tmp_path lives deep under the platform temp dir and overruns sun_path once
-    `run/control.sock` is appended -- test_runner_control.py keeps the same
-    fixture for the same reason."""
-    directory = tempfile.mkdtemp(prefix="dsl41canon-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
 
 
 def test_pr10a_surrogate_refused_at_the_control_socket(short_root: Path) -> None:

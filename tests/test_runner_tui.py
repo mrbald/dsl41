@@ -25,9 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -72,17 +70,6 @@ from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
-
-
-@pytest.fixture
-def short_root():
-    """A short-path base directory for AF_UNIX control sockets (see
-    test_runner_control.py's fixture of the same name/docstring)."""
-    d = tempfile.mkdtemp(prefix="dsl41t-", dir="/tmp")
-    try:
-        yield Path(d)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 async def _serve(

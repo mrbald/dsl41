@@ -52,7 +52,6 @@ from test_runner_control import (
     _teardown,
     _versioned,
     _wait_for_async,
-    short_root,
 )
 
 from dsl41.ir import lower_source
@@ -77,8 +76,6 @@ from dsl41.runner_startup import (
     resume_run,
     start_run,
 )
-
-__all__ = ["short_root"]  # a fixture borrowed from the control tier, re-exported
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

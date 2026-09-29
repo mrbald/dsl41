@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from dsl41.oracle_state import Event
+from subprocess_harness import cli
 
 ROOT = Path(__file__).resolve().parent.parent
 NB = ROOT / "examples" / "nightbank"
@@ -40,12 +41,6 @@ def _launcher():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
-
-
-def _cli(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "dsl41", *args], capture_output=True, text=True, cwd=ROOT
-    )
 
 
 @pytest.fixture(scope="module")
@@ -67,7 +62,7 @@ def test_props_convert_anchors_to_region_local_time(props_file: Path) -> None:
 
 @pytest.mark.parametrize("files", [SMALL, BANK], ids=["small", "bank"])
 def test_estate_lints_clean(files: list[str], props_file: Path) -> None:
-    result = _cli("lint", *files, "-p", str(props_file))
+    result = cli("lint", *files, "-p", str(props_file), cwd=ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == ""  # zero findings, not merely zero errors
 
@@ -89,7 +84,7 @@ def test_small_estate_full_night_rehearsal(props_file: Path, tmp_path: Path) -> 
     }
     scenario_path = tmp_path / "scenario.json"
     scenario_path.write_text(json.dumps(scenario))
-    result = _cli(
+    result = cli(
         "rehearse",
         *SMALL,
         "-p",
@@ -100,6 +95,7 @@ def test_small_estate_full_night_rehearsal(props_file: Path, tmp_path: Path) -> 
         "2026-01-06T00:00:00",
         "--hours",
         "2",
+        cwd=ROOT,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     trace = result.stdout
@@ -186,22 +182,24 @@ def test_runbook_job_names_exist_in_an_estate(props_file: Path) -> None:
 def test_readme_pipeline_claims_hold(props_file: Path) -> None:
     """README: viz/report/uc also accept the estate (lint + rehearse are
     pinned above). Claims are CI-substantiated, not asserted (review)."""
-    report = _cli("report", *SMALL, "-p", str(props_file))
+    report = cli("report", *SMALL, "-p", str(props_file), cwd=ROOT)
     assert report.returncode == 0, report.stdout + report.stderr
-    viz = _cli("viz", "--format", "chart", *SMALL, "-p", str(props_file))
+    viz = cli("viz", "--format", "chart", *SMALL, "-p", str(props_file), cwd=ROOT)
     assert viz.returncode == 0, viz.stdout + viz.stderr
     assert "flowchart" in viz.stdout  # --format chart emits the bare chart
     page = Path(props_file).parent / "page.html"
-    html = _cli("viz", "--format", "html", "-o", str(page), *SMALL, "-p", str(props_file))
+    html = cli("viz", "--format", "html", "-o", str(page), *SMALL, "-p", str(props_file), cwd=ROOT)
     assert html.returncode == 0, html.stdout + html.stderr
     assert page.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert page.stat().st_size > 4_000_000  # the vendor payloads really embedded
     lens = Path(props_file).parent / "explore.html"
-    explore = _cli("viz", "--format", "explore", "-o", str(lens), *SMALL, "-p", str(props_file))
+    explore = cli(
+        "viz", "--format", "explore", "-o", str(lens), *SMALL, "-p", str(props_file), cwd=ROOT
+    )
     assert explore.returncode == 0, explore.stdout + explore.stderr
     assert 'id="graph-data"' in lens.read_text(encoding="utf-8")
     assert lens.stat().st_size > 1_500_000  # the cytoscape payload really embedded
-    uc = _cli("uc", *SMALL, "-p", str(props_file))
+    uc = cli("uc", *SMALL, "-p", str(props_file), cwd=ROOT)
     assert uc.returncode == 0, uc.stdout + uc.stderr
     json.loads(uc.stdout)  # a bundle, not a traceback
 

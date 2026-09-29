@@ -24,10 +24,8 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import signal
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -67,17 +65,12 @@ def _spec(root: Path, job: str, run_number: int, command: str, *, run_id: str = 
 
 
 @pytest.fixture
-def sup_root():
-    """A short base dir: pytest's tmp_path can exceed sun_path's 104-byte
-    macOS limit once supervisor.sock is appended (the same workaround
-    test_runner_supervisor.py's fixture makes, and the reason this one is not
-    imported from there -- an imported fixture shadows the name every test
-    below then takes as a parameter)."""
-    directory = tempfile.mkdtemp(prefix="dsl41i-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+def sup_root(short_root: Path) -> Path:
+    """`short_root` (conftest.py) under this file's own name: every test
+    below takes it as a parameter named `sup_root`, and importing
+    `test_runner_supervisor`'s fixture directly would shadow that name
+    rather than bind it."""
+    return short_root
 
 
 @pytest.fixture

@@ -37,7 +37,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -104,18 +103,6 @@ runner = CliRunner()
 
 
 # ------------------------------------------------------------- fixtures
-
-
-@pytest.fixture
-def night_base():
-    """A SHORT base directory. The engine binds `<run-root>/control.sock`
-    and pytest's `tmp_path` overruns `sun_path`'s 104-byte macOS limit --
-    the same workaround the leadership and supervisor tiers use."""
-    base = tempfile.mkdtemp(prefix="dsl41nb-", dir="/tmp")
-    try:
-        yield Path(base)
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
 
 
 def _night(base: Path) -> tuple[Path, Path]:
@@ -217,10 +204,15 @@ def _operator_events() -> tuple[Event, ...]:
     )
 
 
-def _open_in_place(run_root: Path, props: Path) -> None:
+def _open_in_place(run_root: Path, props: Path, *, anchor_dir: Path | None = None) -> None:
     """ss7 step 9's in-place opener, driven the way the runbook drives it:
     `run --resume` on the same root, then stop. In process, because the
-    engine only has to OPEN period 2 here, not serve it."""
+    engine only has to OPEN period 2 here, not serve it.
+
+    `anchor_dir`, when given, names the anchor explicitly --
+    `resume_run`'s default sibling `.anchor` only matches a root's OWN
+    first-genesis convention, not a root a physical roll or a restore
+    populated under a shared lineage anchor."""
     catalog, _ = _load(props)
     opened = asyncio.run(
         resume_run(
@@ -229,6 +221,7 @@ def _open_in_place(run_root: Path, props: Path) -> None:
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(), "FW": FileWatcherAdapter()},
             scheduler=Scheduler(catalog, start=RealClock().now(), default_tz="UTC"),
+            anchor_dir=anchor_dir,
         )
     )
     asyncio.run(opened.shutdown())
@@ -266,7 +259,7 @@ def _json(result) -> dict:
 # ------------------------------- RUNBOOK 15-17, 21: the live night sealed
 
 
-def test_the_night_seals_live_and_the_next_period_carries_it(night_base: Path) -> None:
+def test_the_night_seals_live_and_the_next_period_carries_it(short_root: Path) -> None:
     """RUNBOOK exercises 15, 16, 17 and 21 as one walk, between real
     processes: a night with operator activity in it is sealed through the
     control verb, period 2 opens in place and answers with period 1's
@@ -284,10 +277,10 @@ def test_the_night_seals_live_and_the_next_period_carries_it(night_base: Path) -
     the reason ss12 gives: attesting is what licenses it, and once the
     spool is gone the period can no longer be re-derived from its own
     evidence."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     socket = str(run_root / "control.sock")
 
-    with engine(night_base, run_root=run_root, files=SMALL_FILES, extra=["-p", str(props)]) as c1:
+    with engine(short_root, run_root=run_root, files=SMALL_FILES, extra=["-p", str(props)]) as c1:
         for job in QUIESCE:  # exercise 15 step 1: quiesce the triggers first
             sent = cli("sendevent", "ON_HOLD", "-J", job, "-S", socket)
             assert sent.returncode == 0, sent.stdout + sent.stderr
@@ -346,7 +339,7 @@ def test_the_night_seals_live_and_the_next_period_carries_it(night_base: Path) -
     assert isinstance(_head(run_root), ClosedHead)
 
     with engine(
-        night_base, run_root=run_root, files=SMALL_FILES, resume=True, extra=["-p", str(props)]
+        short_root, run_root=run_root, files=SMALL_FILES, resume=True, extra=["-p", str(props)]
     ) as c2:
         assert c2.proc.poll() is None
         answered = _json(cli("query", "global", "-N", "RECON_APAC", "-S", socket))
@@ -404,7 +397,7 @@ def _run_row(run_root: Path, job: str) -> dict:
 
 
 def test_a_stopped_night_seals_offline_and_the_seal_carries_the_night(
-    night_base: Path,
+    short_root: Path,
 ) -> None:
     """RUNBOOK exercise 15's second variant: nothing leads the root, so
     `dsl41 seal` takes `leader.lock` itself and performs the boundary as
@@ -414,7 +407,7 @@ def test_a_stopped_night_seals_offline_and_the_seal_carries_the_night(
     same command either way. The evidence is the estate's: a committed
     sidecar carrying the night's state, a `seal` record naming it, and a
     head that moved `open -> closed`."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     _genesis(run_root, props, events=_operator_events())
 
     sealed = _seal_offline(run_root, props, "--claimed-actor", "night-ops@nightbank")
@@ -448,7 +441,7 @@ def test_a_stopped_night_seals_offline_and_the_seal_carries_the_night(
 
 
 def test_prune_names_every_floor_and_deletes_nothing_it_was_not_asked_for(
-    night_base: Path,
+    short_root: Path,
 ) -> None:
     """RUNBOOK exercise 21's first half: `--dry-run` is a survey, and a run
     with no class named deletes nothing and says why (ss12).
@@ -457,7 +450,7 @@ def test_prune_names_every_floor_and_deletes_nothing_it_was_not_asked_for(
     deployment runbook's ss2a table lists, and the point of asserting them
     here is that they are computed from a REAL estate rather than from a
     fixture assembled to have them."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     _genesis(run_root, props, events=_operator_events())
     assert _seal_offline(run_root, props).exit_code == 0
     _open_in_place(run_root, props)
@@ -491,7 +484,7 @@ def test_prune_names_every_floor_and_deletes_nothing_it_was_not_asked_for(
 # ------------------------------------- RUNBOOK 18: the retirement note
 
 
-def test_a_night_from_before_the_boundary_era_is_refused_by_name(night_base: Path) -> None:
+def test_a_night_from_before_the_boundary_era_is_refused_by_name(short_root: Path) -> None:
     """RUNBOOK exercise 18, as DL-138 left it: a run root written before the
     periodized layout does not resume and is not adopted -- the verb is
     gone, and every read dialect it translated is retired.
@@ -499,7 +492,7 @@ def test_a_night_from_before_the_boundary_era_is_refused_by_name(night_base: Pat
     What an operator sees is a tombstone rather than a parse error: the
     refusal names the dialect on the disk and the entry that retired it,
     and `estate adopt` is not a command."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     old = run_root.parent / "old-engine"
     old.mkdir()
     (old / "journal.jsonl").write_text(
@@ -539,7 +532,7 @@ def test_a_night_from_before_the_boundary_era_is_refused_by_name(night_base: Pat
 # ------------------------------------------- RUNBOOK 19: the physical roll
 
 
-def test_the_roll_is_refused_until_the_closing_night_is_attested(night_base: Path) -> None:
+def test_the_roll_is_refused_until_the_closing_night_is_attested(short_root: Path) -> None:
     """RUNBOOK exercise 19: `run --open-from` opens period 2 in a FRESH run
     root, and refuses until the closing period is attested (ss1.3).
 
@@ -548,11 +541,11 @@ def test_the_roll_is_refused_until_the_closing_night_is_attested(night_base: Pat
     inputs. The attestation is what it imports instead, and requiring it
     BEFORE the roll is what stops an operator importing a seal nobody can
     verify."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     _genesis(run_root, props, events=_operator_events())
     assert _seal_offline(run_root, props).exit_code == 0
     anchor_dir = default_anchor_dir(run_root)
-    rolled_root = night_base / "roll"
+    rolled_root = short_root / "roll"
 
     early = _invoke(
         "run",
@@ -573,7 +566,7 @@ def test_the_roll_is_refused_until_the_closing_night_is_attested(night_base: Pat
     assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
 
     with engine(
-        night_base,
+        short_root,
         run_root=rolled_root,
         files=SMALL_FILES,
         extra=["--open-from", str(anchor_dir), "-p", str(props)],
@@ -592,7 +585,7 @@ def test_the_roll_is_refused_until_the_closing_night_is_attested(night_base: Pat
     assert stored.periods["2"].root == str(rolled_root.resolve())
 
 
-def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: Path) -> None:
+def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(short_root: Path) -> None:
     """RUNBOOK exercise 19 step 5: after a roll the estate is two
     directories, and which root holds which period is the anchor's
     registry to answer rather than the operator's to remember (PR-02f).
@@ -602,12 +595,12 @@ def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: 
     whole estate or refuses. The last step is the one that matters most
     over a real estate: take a registered root away and the total does not
     quietly shrink, it stops and says which root is gone."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     _genesis(run_root, props, events=_operator_events())
     assert _seal_offline(run_root, props).exit_code == 0
     anchor_dir = default_anchor_dir(run_root)
     assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
-    rolled = night_base / "roll"
+    rolled = short_root / "roll"
     _roll(rolled, anchor_dir, props)
 
     audited = _invoke("audit", "--estate-anchor", str(anchor_dir))
@@ -636,7 +629,7 @@ def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: 
 
     assert _invoke("runs", str(anchor_dir)).exit_code == 0
 
-    shutil.move(str(run_root), str(night_base / "archived"))
+    shutil.move(str(run_root), str(short_root / "archived"))
     for argv in (
         ("audit", "--estate-anchor", str(anchor_dir)),
         ("runs", str(anchor_dir)),
@@ -650,7 +643,7 @@ def test_the_estate_wide_reads_cover_both_roots_of_a_rolled_lineage(night_base: 
 # -------------------------------------------- RUNBOOK 20: break-glass
 
 
-def test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed(night_base: Path) -> None:
+def test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed(short_root: Path) -> None:
     """RUNBOOK exercise 20: a roll that died after it claimed the lineage
     blocks every later opener, and `estate reclaim --force` is the one
     verb that moves it (ss1.3).
@@ -661,20 +654,20 @@ def test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed(night_base: Path) -
     that they did: the next `segment` carries the actor who said so."""
     from dsl41.runner_clock import EngineError
 
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     _genesis(run_root, props, events=_operator_events())
     assert _seal_offline(run_root, props).exit_code == 0
     assert _invoke("audit", "--run-root", str(run_root)).exit_code == 0
     anchor_dir = default_anchor_dir(run_root)
 
-    lost = night_base / "lost"
+    lost = short_root / "lost"
     with pytest.raises(_Stopped):
         _roll(lost, anchor_dir, props, stop_at="after_import")
     head = _head(run_root)
     assert isinstance(head, ClaimedHead)
     shutil.rmtree(lost)  # the volume the roll was going to is gone
 
-    second = night_base / "roll"
+    second = short_root / "roll"
     with pytest.raises(EngineError, match="the head is claimed and this root does not hold it"):
         _roll(second, anchor_dir, props)
 
@@ -1191,7 +1184,7 @@ async def _reopen_detached(night: _LiveNight, catalog):
 # ------------------------------------- ss14 B1: the live boundary commits
 
 
-def test_b1_the_boundary_commits_over_a_night_in_flight(night_base: Path, monkeypatch) -> None:
+def test_b1_the_boundary_commits_over_a_night_in_flight(short_root: Path, monkeypatch) -> None:
     """period-model ss14 B1, as one walk over the worked estate.
 
     The night is detached and mid-flight: a long command live under a real
@@ -1210,7 +1203,7 @@ def test_b1_the_boundary_commits_over_a_night_in_flight(night_base: Path, monkey
     """
 
     async def scenario() -> None:
-        night = await _start_detached_night(night_base)
+        night = await _start_detached_night(short_root)
         run_root = night.run_root
         try:
             await _arrange_live_closure(night)
@@ -1478,7 +1471,7 @@ def _region_workers(catalog) -> list[str]:
 
 
 def test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s(
-    night_base: Path,
+    short_root: Path,
 ) -> None:
     """period-model ss6 steps 4-5 over the worked estate: the cutoff
     advances the oracle THROUGH T, firing every timer due at or before it,
@@ -1490,7 +1483,7 @@ def test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s(
     carried timer set; the third is carried unfired and fires in C2. A
     cutoff that reset EXCLUSIVE of T would lose the first two, and one that
     reached past T would consume the third."""
-    run_root, props = _night(night_base)
+    run_root, props = _night(short_root)
     run_root.mkdir(parents=True, exist_ok=True)
     catalog, parsed = _load(props)
     sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
@@ -1619,7 +1612,7 @@ B_CHANGE_MEMBER = (
 
 
 def test_b2_a_changed_pending_spawn_command_refuses_and_moves_nothing(
-    night_base: Path,
+    short_root: Path,
 ) -> None:
     """ss14 B2 row 1 (PR-39a): C2 changes the command of the job whose
     SPAWN is held on the passive host.
@@ -1629,7 +1622,7 @@ def test_b2_a_changed_pending_spawn_command_refuses_and_moves_nothing(
     under C1's run number the moment the host came back."""
 
     async def scenario() -> None:
-        night = await _start_detached_night(night_base)
+        night = await _start_detached_night(short_root)
         try:
             await _arrange_live_closure(night)
             assert night.engine.oracle.store.runtime(B_HELD_SPAWN).status == "RUNNING"
@@ -1647,7 +1640,7 @@ def test_b2_a_changed_pending_spawn_command_refuses_and_moves_nothing(
 
 
 def test_b2_a_changed_member_of_a_live_box_refuses_and_moves_nothing(
-    night_base: Path,
+    short_root: Path,
 ) -> None:
     """ss14 B2 row 2 (PR-42's R half): C2 changes the INACTIVE member of a
     box that is executing.
@@ -1657,7 +1650,7 @@ def test_b2_a_changed_member_of_a_live_box_refuses_and_moves_nothing(
     box's C1 execution."""
 
     async def scenario() -> None:
-        night = await _start_detached_night(night_base)
+        night = await _start_detached_night(short_root)
         try:
             await _arrange_live_closure(night)
             store = night.engine.oracle.store
@@ -1676,7 +1669,7 @@ def test_b2_a_changed_member_of_a_live_box_refuses_and_moves_nothing(
 
 
 def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
-    night_base: Path, monkeypatch: pytest.MonkeyPatch
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ss14 B2 row 3 (PR-27): the supervisor is restarted before the seal,
     so its LIST is empty.
@@ -1696,7 +1689,7 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
 
     async def scenario() -> None:
         gate: asyncio.Event | None = None
-        night = await _start_detached_night(night_base)
+        night = await _start_detached_night(short_root)
         try:
             await _arrange_live_closure(night)
             carried = json.loads(
@@ -1764,7 +1757,7 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
     asyncio.run(scenario())
 
 
-def test_b2_an_applied_spawn_with_no_binding_refuses(night_base: Path) -> None:
+def test_b2_an_applied_spawn_with_no_binding_refuses(short_root: Path) -> None:
     """ss14 B2 row 4 (PR-27): an applied SPAWN whose adapter task has not
     yet written `spawn.json`.
 
@@ -1774,7 +1767,7 @@ def test_b2_an_applied_spawn_with_no_binding_refuses(night_base: Path) -> None:
     the wait is real here, and the bound is what ends it."""
 
     async def scenario() -> None:
-        night = await _start_detached_night(night_base)
+        night = await _start_detached_night(short_root)
         try:
             gate = await _arrange_live_closure(night, park=B_UNBOUND)
             assert not (night.run_root / "runs" / f"{B_UNBOUND}.1" / "spawn.json").exists()

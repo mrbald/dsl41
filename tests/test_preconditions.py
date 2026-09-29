@@ -42,12 +42,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import shutil
 import sys
-import tempfile
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -72,6 +71,7 @@ from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
 from dsl41.runner_journal import read_journal, replay_inputs
+from subprocess_harness import cli
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -635,17 +635,6 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
 
 
-@pytest.fixture
-def short_root():
-    """AF_UNIX paths are length-limited (104 bytes on macOS), so socket tests
-    use a short base directory rather than pytest's deep tmp_path."""
-    directory = tempfile.mkdtemp(prefix="dsl41p-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
-
-
 async def _call(sock_path: Path, request: dict) -> dict:
     return await _call_line(sock_path, json.dumps(request))
 
@@ -664,6 +653,18 @@ async def _call_line(sock_path: Path, line: str) -> dict:
             await writer.wait_closed()
 
 
+async def _serve_engine(engine: Engine) -> tuple[Engine, ControlServer, asyncio.Future[Any]]:
+    """Bind a control socket at `<engine.run_root>/control.sock`, start it,
+    and drive the engine to `datetime.max` -- the shared second half of
+    every helper here and in test_recovery.py/test_hosts.py that opens an
+    engine (by `start_run` or `resume_run`) and then serves it."""
+    assert engine.run_root is not None
+    server = ControlServer(engine, engine.run_root / "control.sock")
+    await server.start()
+    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+    return engine, server, loop_task
+
+
 async def _serve(run_root: Path, text: str = _SOLO_JIL):
     engine = start_run(
         lower_source(text),
@@ -672,10 +673,7 @@ async def _serve(run_root: Path, text: str = _SOLO_JIL):
         adapters={"CMD": FakeAdapter(default=None)},
         hold_open=True,
     )
-    server = ControlServer(engine, run_root / "control.sock")
-    await server.start()
-    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-    return engine, server, loop_task
+    return await _serve_engine(engine)
 
 
 async def _teardown(engine: Engine, server: ControlServer, loop_task) -> None:
@@ -900,13 +898,7 @@ def test_an_unknown_job_is_refused_before_its_envelope_is_judged(short_root: Pat
 
 
 def _sendevent_cli(socket_path: Path, *args: str):
-    import subprocess
-
-    return subprocess.run(
-        [sys.executable, "-m", "dsl41", "sendevent", *args, "--socket", str(socket_path)],
-        capture_output=True,
-        text=True,
-    )
+    return cli("sendevent", *args, "--socket", str(socket_path))
 
 
 def test_cli_sendevent_reads_then_writes_and_a_stale_expect_exits_3(short_root: Path) -> None:

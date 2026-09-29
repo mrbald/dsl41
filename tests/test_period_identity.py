@@ -26,8 +26,6 @@ import hashlib
 import json
 import os
 import inspect
-import shutil
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -86,19 +84,6 @@ _NOW = datetime(2026, 8, 22, 3, 0, 0)
 
 
 # ------------------------------------------------------------------ helpers
-
-
-@pytest.fixture
-def short_root():
-    """A short base directory for the AF_UNIX control socket the real
-    engine binds: pytest's tmp_path overruns sun_path's limit once
-    `run/control.sock` is appended -- test_canon.py keeps the same fixture
-    for the same reason."""
-    directory = tempfile.mkdtemp(prefix="dsl41period-", dir="/tmp")
-    try:
-        yield Path(directory)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _catalog(text: str = _SOLO_JIL, *, file: str = "estate.jil") -> CatalogIR:

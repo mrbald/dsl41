@@ -72,7 +72,12 @@ from dsl41.period import (
     write_bundle,
 )
 from dsl41.runner import Engine
-from dsl41.runner_adapters import FakeAdapter, SupervisorListReply, SupervisorUnavailable
+from dsl41.runner_adapters import (
+    FakeAdapter,
+    SupervisorListReply,
+    SupervisorRunRow,
+    SupervisorUnavailable,
+)
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
@@ -1394,10 +1399,10 @@ def test_pr32_the_seal_names_the_executor_run_id_and_generation_of_every_live_ru
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "spawn.json").write_text(json.dumps({"run_id": effect.run_id}))
     engine.supervisor = _StubSupervisor(  # ss8: a detached seal proves its supervisor
-        listing={
-            "incarnation": "inc-1",
-            "runs": [{"run_id": effect.run_id, "job": "a", "run_number": 1, "wrapper_alive": True}],
-        }
+        listing=stub_listing(
+            incarnation="inc-1",
+            runs=[stub_row(run_id=effect.run_id, job="a", run_number=1, wrapper_alive=True)],
+        )
     )  # type: ignore[assignment]
     boundary = asyncio.run(
         _seal(engine, _request(engine, _stage(run_root, C2_JIL, profile=DETACHED)))
@@ -2059,20 +2064,6 @@ def test_dl171_target_period_falls_back_when_it_does_not_open_next() -> None:
 
 
 # ------------------------------------------- ss2.2 the `seal` control verb
-
-
-@pytest.fixture
-def short_root():
-    """A short-path base for AF_UNIX control sockets (test_runner_control's
-    fixture, for the same reason: `sun_path` is 104 bytes on macOS)."""
-    import shutil
-    import tempfile
-
-    base = Path(tempfile.mkdtemp(prefix="dsl41b-"))
-    try:
-        yield base
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
 
 
 def _seal_request_wire(engine, staged: StagedNextPeriod, **overrides: Any) -> dict[str, Any]:
@@ -3222,10 +3213,10 @@ def test_an_applied_binding_is_restored_into_the_outbox_at_resume(tmp_path: Path
     engine = _genesis(run_root, profile=DETACHED)
     effect = _bind_a(engine, run_root)
     engine.supervisor = _StubSupervisor(  # ss8: a detached seal proves its supervisor
-        listing={
-            "incarnation": "inc-1",
-            "runs": [{"run_id": effect.run_id, "job": "a", "run_number": 1, "wrapper_alive": True}],
-        }
+        listing=stub_listing(
+            incarnation="inc-1",
+            runs=[stub_row(run_id=effect.run_id, job="a", run_number=1, wrapper_alive=True)],
+        )
     )  # type: ignore[assignment]
     boundary = asyncio.run(
         _seal(engine, _request(engine, _stage(run_root, C2_JIL, profile=DETACHED)))
@@ -3537,28 +3528,25 @@ class _StubSupervisor:
     """Just enough of SupervisorClient for the ss8 proof: an incarnation
     and a LIST answer (or the refusal to give one).
 
-    `listing` stays the terse dict the tests already write -- `list_runs`
-    is where it becomes the real `SupervisorListSuccess`/`SupervisorRunRow`
-    the client itself returns (DL-220), through their own constructors."""
+    `listing` is the real `SupervisorListSuccess` the client itself
+    returns (DL-220), built through `stub_listing`/`stub_row` at the call
+    site -- `list_runs` hands it back as is."""
 
     def __init__(
         self,
         *,
         incarnation: str | None = "inc-1",
-        listing: dict[str, Any] | None = None,
+        listing: SupervisorListReply | None = None,
         unreachable: bool = False,
     ) -> None:
         self.incarnation = incarnation
-        self.listing = listing or {"incarnation": incarnation, "runs": []}
+        self.listing = listing or stub_listing(incarnation=incarnation)
         self.unreachable = unreachable
 
     async def list_runs(self) -> SupervisorListReply:
         if self.unreachable:
             raise SupervisorUnavailable("socket gone")
-        return stub_listing(
-            incarnation=self.listing.get("incarnation"),
-            runs=[stub_row(**r) for r in self.listing.get("runs", [])],
-        )
+        return self.listing
 
 
 def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -> None:
@@ -3572,34 +3560,34 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
     effect = _bind_a(engine, run_root)
     staged = _stage(run_root, C2_JIL, profile=DETACHED)
 
-    def row(**overrides: Any) -> dict[str, Any]:
+    def row(**overrides: Any) -> SupervisorRunRow:
         fields: dict[str, Any] = {
             "run_id": effect.run_id,
             "job": "a",
             "run_number": 1,
             "wrapper_alive": True,
         }
-        return {**fields, **overrides}
+        return stub_row(**{**fields, **overrides})
 
     cases: list[tuple[_StubSupervisor, str]] = [
         (_StubSupervisor(unreachable=True), "quiescence is unprovable"),
         (
-            _StubSupervisor(listing={"incarnation": "inc-2", "runs": [row()]}),
+            _StubSupervisor(listing=stub_listing(incarnation="inc-2", runs=[row()])),
             "restarted supervisor's history is not proof",
         ),
         (_StubSupervisor(), "not in the leased incarnation's LIST"),
         (
             _StubSupervisor(
-                listing={"incarnation": "inc-1", "runs": [row(run_id=str(uuid.uuid4()))]}
+                listing=stub_listing(incarnation="inc-1", runs=[row(run_id=str(uuid.uuid4()))])
             ),
             "identity split at the seal",
         ),
         (
             _StubSupervisor(
-                listing={
-                    "incarnation": "inc-1",
-                    "runs": [row(), row(job="b", run_number=7, run_id=str(uuid.uuid4()))],
-                }
+                listing=stub_listing(
+                    incarnation="inc-1",
+                    runs=[row(), row(job="b", run_number=7, run_id=str(uuid.uuid4()))],
+                )
             ),
             "evidence quiescence cannot account for",
         ),
@@ -3608,7 +3596,7 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
         engine.supervisor = stub  # type: ignore[assignment]
         assert fragment in asyncio.run(_refused(engine, _request(engine, staged)))
     engine.supervisor = _StubSupervisor(  # type: ignore[assignment]
-        listing={"incarnation": "inc-1", "runs": [row()]}
+        listing=stub_listing(incarnation="inc-1", runs=[row()])
     )
     boundary = asyncio.run(_seal(engine, _request(engine, staged)))
     _close(engine)
@@ -3629,18 +3617,13 @@ def test_pr27_a_dead_wrapper_in_the_list_is_history_not_unaccounted_evidence(
     effect = _bind_a(engine, run_root)
     staged = _stage(run_root, C2_JIL, profile=DETACHED)
     engine.supervisor = _StubSupervisor(  # type: ignore[assignment]
-        listing={
-            "incarnation": "inc-1",
-            "runs": [
-                {"run_id": effect.run_id, "job": "a", "run_number": 1, "wrapper_alive": True},
-                {
-                    "run_id": str(uuid.uuid4()),
-                    "job": "b",
-                    "run_number": 7,
-                    "wrapper_alive": False,
-                },
+        listing=stub_listing(
+            incarnation="inc-1",
+            runs=[
+                stub_row(run_id=effect.run_id, job="a", run_number=1, wrapper_alive=True),
+                stub_row(run_id=str(uuid.uuid4()), job="b", run_number=7, wrapper_alive=False),
             ],
-        }
+        )
     )
     boundary = asyncio.run(_seal(engine, _request(engine, staged)))
     _close(engine)

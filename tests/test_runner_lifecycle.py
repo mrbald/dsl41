@@ -26,7 +26,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
-import importlib.util
 import json
 import os
 import signal
@@ -49,6 +48,7 @@ from dsl41.runner_clock import RealClock
 from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.period import active_wal
+from subprocess_harness import mypy_report
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -225,8 +225,6 @@ def test_type_checking_alias_is_what_types_the_by_path_helpers(tmp_path: Path) -
     import-not-found ignore makes the helper Any and mypy says nothing; the
     alias resolves the real module and reports both arguments. Pinned on a
     snippet -- the two files' own shape is pinned by the tests either side."""
-    if importlib.util.find_spec("mypy") is None:  # a dev dependency, not a runtime one
-        pytest.skip("mypy is not installed")  # pragma: no cover
     # located, never imported: pulling mypy into THIS process would leave its
     # module graph resident for every later test. One invocation over both
     # probes, for the same reason -- a mypy run is the heaviest thing in this
@@ -244,23 +242,7 @@ def test_type_checking_alias_is_what_types_the_by_path_helpers(tmp_path: Path) -
         "from runner_procid import verify_alive  # type: ignore[import-not-found]\n" + bad_call,
         encoding="utf-8",
     )
-    report = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "mypy",
-            "--cache-dir",
-            str(tmp_path / "cache"),
-            str(tmp_path / "aliased.py"),
-            str(tmp_path / "bare.py"),
-        ],
-        capture_output=True,
-        text=True,
-        # resolve dsl41 from the tree under test, installed or not; two
-        # isolated snippets cannot hit the "source file found twice" that
-        # rules MYPYPATH out for the repo's own run (DL-72)
-        env={**os.environ, "MYPYPATH": str(PROCID.parent.parent)},
-    ).stdout
+    report = mypy_report(tmp_path, tmp_path / "aliased.py", tmp_path / "bare.py")
     errors = [line for line in report.splitlines() if "[arg-type]" in line]
     assert len(errors) == 2, report  # both arguments of the aliased call...
     assert all("aliased.py" in line for line in errors), report  # ...and only there

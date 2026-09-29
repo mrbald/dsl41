@@ -23,7 +23,6 @@ anything that surprised us or contradicted the design doc.
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import signal
 import subprocess
@@ -58,6 +57,7 @@ from dsl41.runner_adapters import (
     spool_names_run,
 )
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from subprocess_harness import mypy_report
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("the adapters/wrapper tier is POSIX-only", allow_module_level=True)
@@ -1053,7 +1053,7 @@ def test_dl210_close_cancels_list_queued_behind_a_stuck_writer(tmp_path: Path, m
 
         original_list = client.list_runs
 
-        async def list_runs() -> dict[str, Any]:
+        async def list_runs() -> SupervisorListReply:
             listing.set()
             return await original_list()
 
@@ -1316,8 +1316,6 @@ def test_dl220_dict_style_supervisor_run_row_access_is_a_static_error(tmp_path: 
     test_type_checking_alias_is_what_types_the_by_path_helpers: a snippet,
     one mypy invocation, MYPYPATH pointed at the source tree so `dsl41`
     resolves without an install."""
-    if importlib.util.find_spec("mypy") is None:  # a dev dependency, not a runtime one
-        pytest.skip("mypy is not installed")  # pragma: no cover
     (tmp_path / "wrong_attr.py").write_text(
         "from dsl41.runner_adapters import SupervisorRunRow\n"
         "row = SupervisorRunRow(\n"
@@ -1329,21 +1327,7 @@ def test_dl220_dict_style_supervisor_run_row_access_is_a_static_error(tmp_path: 
         "print(row['run_id'])\n",  # the removed shim's __getitem__
         encoding="utf-8",
     )
-    src_root = Path(_procid.__file__).parent.parent
-    report = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "mypy",
-            "--cache-dir",
-            str(tmp_path / "cache"),
-            str(tmp_path / "wrong_attr.py"),
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "MYPYPATH": str(src_root)},
-        timeout=60,
-    ).stdout
+    report = mypy_report(tmp_path, tmp_path / "wrong_attr.py")
     attr_errors = [line for line in report.splitlines() if "[attr-defined]" in line]
     index_errors = [line for line in report.splitlines() if "[index]" in line]
     assert len(attr_errors) == 2, report  # .wrapper_status, .get

@@ -65,7 +65,7 @@ from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import start_run
 
-from test_runner_leadership import cli, engine, short_root  # noqa: F401  (fixture)
+from test_runner_leadership import cli, engine
 
 C1_JIL = "insert_job: a\njob_type: c\ncommand: sleep 600\n"
 C2_JIL = (
