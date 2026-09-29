@@ -258,16 +258,16 @@ def _pins(request: dict[str, Any]) -> str:
     )
 
 
-def _retry_as(request: dict[str, Any], retry_verb: str | None) -> str:
-    """The exact retry: the id plus the pins, prefixed by the verb that
-    carries it when that is not the verb the operator typed."""
+def _retry_as(request: dict[str, Any], retry_command: str | None) -> str:
+    """The exact retry: the id plus the pins, prefixed by the command that
+    carries it when that is not the one the operator typed."""
     import shlex
 
     flags = f"--request-id {shlex.quote(str(request['request_id']))}{_pins(request)}"
-    return f"{retry_verb} {flags}" if retry_verb else flags
+    return f"{retry_command} {flags}" if retry_command else flags
 
 
-def _sending(request: dict[str, Any], retry_verb: str | None) -> None:
+def _sending(request: dict[str, Any], retry_command: str | None) -> None:
     """The pre-send line (DL-217): printed and flushed BEFORE the first
     write, so it survives a client that dies mid-exchange -- killed,
     interrupted, or reporting a transport failure. It is the exact-retry
@@ -279,10 +279,10 @@ def _sending(request: dict[str, Any], retry_verb: str | None) -> None:
     A RECORD, printed before every mutation whatever its outcome. The
     ADVICE to use it is the exit-4 line, which is the only one that says
     "retry ONLY as"."""
-    typer.echo(f"sending: {_retry_as(request, retry_verb)}", err=True)  # echo flushes
+    typer.echo(f"sending: {_retry_as(request, retry_command)}", err=True)  # echo flushes
 
 
-def _no_decision(request: dict[str, Any], retry_verb: str | None = None) -> None:
+def _no_decision(request: dict[str, Any], retry_command: str | None = None) -> None:
     """DL-92's fourth outcome, said out loud. The id is on stderr because it
     is the only thing that makes the retry safe, and a caller that lost the
     round trip has nowhere else to get it: the answer that would have
@@ -292,7 +292,7 @@ def _no_decision(request: dict[str, Any], retry_verb: str | None = None) -> None
     collision rather than a retry once any of them has moved."""
     typer.echo(
         f"no decision: this command may still apply. Re-read, then retry ONLY as"
-        f" {_retry_as(request, retry_verb)}",
+        f" {_retry_as(request, retry_command)}",
         err=True,
     )
 
@@ -317,7 +317,7 @@ def command_outcome(
     *,
     on_applied: Callable[[], None] | None = None,
     rejected_as_unknown: bool = False,
-    retry_verb: str | None = None,
+    retry_command: str | None = None,
 ) -> int:
     """Send one ss6 command envelope and answer with its outcome: DL-92's
     four (0 applied / 2 refused / 3 rejected / 4 unknown).
@@ -351,9 +351,9 @@ def command_outcome(
     stale the day that handler grows a decision, while the test does not
     (DL-145). Widening ss7's table is ss7's call, not this slice's.
 
-    `retry_verb` names the verb an exact retry has to be sent as when it is
-    not the one the operator typed: `release-held` sends one OFF_HOLD per
-    job, and its retry is the one-job `sendevent` (DL-217).
+    `retry_command` names the command an exact retry has to be sent as when
+    it is not the one the operator typed: `release-held` sends one OFF_HOLD
+    per job, and its retry is the one-job `sendevent` (DL-217).
     """
     import json as json_mod
 
@@ -367,14 +367,14 @@ def command_outcome(
         roundtrip,
     )
 
-    _sending(request, retry_verb)
+    _sending(request, retry_command)
     try:
         response = roundtrip(socket_path, request)
     except ControlClientError as exc:
         code = refuse(exc)
         if not exc.delivered:
             return code
-        _no_decision(request, retry_verb)
+        _no_decision(request, retry_command)
         return 4
     typer.echo(json_mod.dumps(response, sort_keys=True))
     outcome = outcome_of(response)
@@ -385,7 +385,7 @@ def command_outcome(
     if outcome == REFUSED:
         _collision(response)
     if outcome == UNKNOWN:
-        _no_decision(request, retry_verb)
+        _no_decision(request, retry_command)
     return {REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0)
 
 
