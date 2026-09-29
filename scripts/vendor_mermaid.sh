@@ -9,8 +9,9 @@
 # licenses and rationale; versions live in scripts/vendor/package.json, not
 # here. To bump one, run
 # `npm install --package-lock-only --save-exact <pkg>@<ver>`
-# in scripts/vendor, update this list and the banners, re-run, and re-check the
-# invariants below:
+# in scripts/vendor, then re-run this script and re-check the invariants
+# below; the banners derive their versions, so touch the list only when a
+# package is added or removed:
 #   mermaid                   (MIT; dist/mermaid.min.js copied byte-exact)
 #   @mermaid-js/layout-elk    (MIT)
 #   elkjs                     (EPL-2.0; dependency of both bundles, pinned

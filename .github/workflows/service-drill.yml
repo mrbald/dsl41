@@ -2,9 +2,11 @@
 # (examples/nightbank/deploy/). It installs dsl41, the launcher, the access
 # map and both units on a runner with systemd, and checks the claims the
 # example makes: the first start, a same-root restart, a detached job that
-# survives an engine stop, configuration refusals that do not restart-loop
-# -- a changed estate, a malformed map, a missing map -- and a sealed engine
-# that stays stopped until an operator opens the next period.
+# survives an engine stop, a configuration refusal (a changed estate) that
+# does not restart-loop -- the two access-map refusals prove the same
+# systemd claim and are pinned instead in tests/test_nightbank_deploy.py --
+# and a sealed engine that stays stopped until an operator opens the next
+# period.
 #
 # Manual only (workflow_dispatch). It is not part of the default gate, and
 # until a dispatched run passes, its claims are NOT RUN (DL-218). Each step
@@ -60,6 +62,8 @@ jobs:
           sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night" "$(dirname "$ROOT")"
           # nightbank's own prepare_night: data directories, properties and
           # profile, the region anchors six hours out so no calendar fires
+          # the heredoc is deliberately unquoted so $NIGHTBANK expands; it
+          # must hold no other $ or backtick
           as_dsl41 /opt/dsl41/venv/bin/python - <<PY
           import importlib.util
           from datetime import UTC, datetime, timedelta
@@ -158,24 +162,6 @@ jobs:
           ! sudo cmp -s /tmp/apac.jil.orig "$ESTATE/apac.jil" || fail "the edit did not apply"
           expect_refusal "catalog hash mismatch"
           sudo cp /tmp/apac.jil.orig "$ESTATE/apac.jil"
-          start_engine
-
-      - name: a malformed access map is refused without a restart loop
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          sudo systemctl stop "$ENGINE"
-          printf 'format_version = \n' | sudo tee "$MAP" >/dev/null
-          expect_refusal "not valid TOML"
-          install_map
-          start_engine
-
-      - name: a missing access map is refused without a restart loop
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          sudo systemctl stop "$ENGINE"
-          sudo rm "$MAP"
-          expect_refusal "cannot open"
-          install_map
           start_engine
 
       - name: a sealed engine stays stopped until the next period is opened
