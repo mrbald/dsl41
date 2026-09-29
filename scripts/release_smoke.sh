@@ -49,6 +49,35 @@ bounded() {
     fi
 }
 
+# Poll COMMAND every 0.2s for up to SECS seconds (drill-lib.sh's wait_for
+# shape, at finer granularity). 0 once it succeeds; 1 if SECS elapses
+# first. Prints nothing -- each caller owns its own failure message.
+wait_until() { # wait_until SECS COMMAND...
+    local limit="$1" tries
+    shift
+    tries=$((limit * 5))
+    for _ in $(seq 1 "$tries"); do
+        "$@" && return 0
+        sleep 0.2
+    done
+    return 1
+}
+
+# SIGINT PID, then wait up to SECS for it to exit. 0 once it is gone; 2 if
+# SIGINT itself failed (already gone); 1 if it is still running when the
+# wait ends. The two call sites turn 1 and 2 into their own message.
+stop_engine() { # stop_engine PID SECS
+    local pid="$1" limit="$2" tries
+    kill -INT "$pid" 2>/dev/null || return 2
+    tries=$((limit * 5))
+    for _ in $(seq 1 "$tries"); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -0 "$pid" 2>/dev/null || return 0
+    return 1
+}
+
 shopt -s nullglob
 wheels=("$dist"/*.whl)
 sdists=("$dist"/*.tar.gz)
@@ -67,11 +96,7 @@ run_root=""
 venv=""
 cleanup() {
     if [ -n "$engine_pid" ] && kill -0 "$engine_pid" 2>/dev/null; then
-        kill -INT "$engine_pid" 2>/dev/null || true
-        for _ in $(seq 1 50); do
-            kill -0 "$engine_pid" 2>/dev/null || break
-            sleep 0.2
-        done
+        stop_engine "$engine_pid" 10 || true
         kill -KILL "$engine_pid" 2>/dev/null || true
         wait "$engine_pid" 2>/dev/null || true
     fi
@@ -210,11 +235,26 @@ EOF
     done
 }
 
+# SOCK is bound; fails immediately, with LOG's tail, if PID died first --
+# this is not part of wait_until's own timeout
+_socket_bound() { # _socket_bound SOCK PID LOG PROFILE
+    [ -S "$1" ] && return 0
+    kill -0 "$2" 2>/dev/null || { cat "$3" >&2; fail "[$4] engine exited early"; }
+    return 1
+}
+
+_job_succeeded() { # _job_succeeded VENV SOCK
+    case "$(bounded 30 "$1/bin/dsl41" query status --brief -S "$2" || true)" in
+        *SUCCESS*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # A detached lifecycle: engine up, supervisor spawned from the installed
-# package, one job to SUCCESS, engine stopped, supervisor shut down.
-# `between` runs while the engine is live (the ui profile mounts the TUI).
+# package, one job to SUCCESS, engine stopped, supervisor shut down. The
+# ui profile also mounts the TUI while the engine is live.
 check_lifecycle() {
-    local profile="$1" between="$2"
+    local profile="$1"
     run_root="$work/run-$profile"
     local sock="$run_root/control.sock" log="$work/engine-$profile.log"
     # Not under `bounded`: with GNU timeout in between, the SIGINT below did
@@ -225,26 +265,14 @@ check_lifecycle() {
         >"$log" 2>&1 &
     engine_pid=$!
 
-    for _ in $(seq 1 150); do
-        [ -S "$sock" ] && break
-        kill -0 "$engine_pid" 2>/dev/null || { cat "$log" >&2; fail "[$profile] engine exited early"; }
-        sleep 0.2
-    done
-    [ -S "$sock" ] || { cat "$log" >&2; fail "[$profile] no control socket after 30s"; }
+    wait_until 30 _socket_bound "$sock" "$engine_pid" "$log" "$profile" \
+        || { cat "$log" >&2; fail "[$profile] no control socket after 30s"; }
     ok "[$profile] dsl41 run --detached is up (control socket bound)"
 
     bounded 30 "$venv/bin/dsl41" sendevent STARTJOB -J smoke_a -S "$sock" >/dev/null \
         || fail "[$profile] sendevent STARTJOB"
-    local status=""
-    for _ in $(seq 1 150); do
-        status="$(bounded 30 "$venv/bin/dsl41" query status --brief -S "$sock" || true)"
-        case "$status" in *SUCCESS*) break ;; esac
-        sleep 0.2
-    done
-    case "$status" in
-        *SUCCESS*) ;;
-        *) fail "[$profile] smoke_a did not reach SUCCESS in 30s: $status" ;;
-    esac
+    wait_until 30 _job_succeeded "$venv" "$sock" \
+        || fail "[$profile] smoke_a did not reach SUCCESS in 30s: $(bounded 30 "$venv/bin/dsl41" query status --brief -S "$sock" || true)"
     grep -q dsl41-smoke "$run_root/logs/smoke_a.1.out" \
         || fail "[$profile] the job's stdout log lacks its output"
     ok "[$profile] STARTJOB ran smoke_a to SUCCESS; its stdout reached the run's log"
@@ -263,14 +291,17 @@ check_lifecycle() {
     esac
     ok "[$profile] supervisor (pid $sup_pid) runs from the installed package"
 
-    "$between"
+    if [ "$profile" = ui ]; then
+        check_tui
+    fi
 
-    kill -INT "$engine_pid" || fail "[$profile] engine gone before SIGINT"
-    for _ in $(seq 1 150); do
-        kill -0 "$engine_pid" 2>/dev/null || break
-        sleep 0.2
-    done
-    kill -0 "$engine_pid" 2>/dev/null && fail "[$profile] engine still running 30s after SIGINT"
+    local stopped=0
+    stop_engine "$engine_pid" 30 || stopped=$?
+    case "$stopped" in
+        0) ;;
+        2) fail "[$profile] engine gone before SIGINT" ;;
+        *) fail "[$profile] engine still running 30s after SIGINT" ;;
+    esac
     local rc=0
     wait "$engine_pid" || rc=$?
     engine_pid=""
@@ -281,8 +312,6 @@ check_lifecycle() {
     run_root=""
     ok "[$profile] supervisor shut down"
 }
-
-nothing() { :; }
 
 # The TUI, headless: construct the app on the live socket, mount it through
 # Textual's run_test, wait for the job's row, exit.
@@ -322,7 +351,7 @@ for profile in base ui; do
     check_install "$profile"
     check_pipeline "$profile"
     if [ "$profile" = base ]; then
-        check_lifecycle base nothing
+        check_lifecycle base
         # cli_common.import_tui_or_exit_2: without the [ui] extra, `dsl41 ui`
         # refuses with exit 2 before it looks for the socket
         rc=0
@@ -332,7 +361,7 @@ for profile in base ui; do
             || fail "[base] dsl41 ui refusal text: $(cat "$work/ui.err")"
         ok "[base] dsl41 ui refuses with exit 2 and names the [ui] extra"
     else
-        check_lifecycle ui check_tui
+        check_lifecycle ui
     fi
 done
 

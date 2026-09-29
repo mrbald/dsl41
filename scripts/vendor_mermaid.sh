@@ -5,33 +5,35 @@
 # node.
 #
 # Pins live in scripts/vendor/package.json, and scripts/vendor/package-lock.json
-# fixes their transitive closure (DL-215). The list below repeats them with
-# their licenses. To bump one, run
+# fixes their transitive closure (DL-215). The list below repeats their
+# licenses and rationale; versions live in scripts/vendor/package.json, not
+# here. To bump one, run
 # `npm install --package-lock-only --save-exact <pkg>@<ver>`
-# in scripts/vendor, update this list and the banners, re-run, and re-check the
-# invariants below:
-#   mermaid 11.16.1               (MIT; dist/mermaid.min.js copied byte-exact)
-#   @mermaid-js/layout-elk 0.2.2  (MIT)
-#   elkjs 0.9.3                   (EPL-2.0; dependency of both bundles,
-#                                  pinned here so the banners stay true)
-#   cytoscape 3.33.1              (MIT)
-#   cytoscape-elk 2.3.0           (MIT; drives elk.bundled.js on the main
-#                                  thread -- no Worker, no fetch)
-#   cytoscape-context-menus 4.1.0 (MIT; its CSS is inlined in
-#                                  templates/viz_explore.html, not vendored)
-#   cytoscape-expand-collapse 4.1.1 (MIT; box collapse/expand on the explore
-#                                  page, DL-190. Its cues draw on a canvas
-#                                  layer of its own: no CSS, no customized
-#                                  built-in elements, so no WebKit caveat.
-#                                  Its maintenance status and the re-check
-#                                  trigger: src/dsl41/_vendor/README.md)
-#   @ungap/custom-elements 1.3.0  (ISC; dist min.js copied byte-exact. The
-#                                  context-menus plugin builds its menu from
-#                                  CUSTOMIZED BUILT-IN elements, which WebKit
-#                                  has never implemented -- the explore page
-#                                  loads this before the cytoscape bundle so
-#                                  Safari gets a working menu, DL-77)
-#   esbuild 0.28.2                (build tool only, nothing of it ships)
+# in scripts/vendor, then re-run this script and re-check the invariants
+# below; the banners derive their versions, so touch the list only when a
+# package is added or removed:
+#   mermaid                   (MIT; dist/mermaid.min.js copied byte-exact)
+#   @mermaid-js/layout-elk    (MIT)
+#   elkjs                     (EPL-2.0; dependency of both bundles, pinned
+#                              in package.json so the banners stay true)
+#   cytoscape                 (MIT)
+#   cytoscape-elk             (MIT; drives elk.bundled.js on the main
+#                              thread -- no Worker, no fetch)
+#   cytoscape-context-menus   (MIT; its CSS is inlined in
+#                              templates/viz_explore.html, not vendored)
+#   cytoscape-expand-collapse (MIT; box collapse/expand on the explore
+#                              page, DL-190. Its cues draw on a canvas
+#                              layer of its own: no CSS, no customized
+#                              built-in elements, so no WebKit caveat.
+#                              Its maintenance status and the re-check
+#                              trigger: src/dsl41/_vendor/README.md)
+#   @ungap/custom-elements    (ISC; dist min.js copied byte-exact. The
+#                              context-menus plugin builds its menu from
+#                              CUSTOMIZED BUILT-IN elements, which WebKit
+#                              has never implemented -- the explore page
+#                              loads this before the cytoscape bundle so
+#                              Safari gets a working menu, DL-77)
+#   esbuild                   (build tool only, nothing of it ships)
 #
 # Both non-mermaid payloads are built, not copied: the upstream packages
 # publish ESM only, and the pages need a classic <script>. esbuild output is
@@ -55,7 +57,15 @@ cd "$work"
 cp "$manifest/package.json" "$manifest/package-lock.json" .
 npm ci --no-audit --no-fund
 
-banner='/*! @mermaid-js/layout-elk 0.2.2 (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
+# The installed packages' own package.json is the single source for the
+# versions the banners quote -- scripts/vendor/package.json stays the only
+# place a version is pinned by hand.
+pkg_version() { node -p "require('./node_modules/$1/package.json').version"; }
+
+layout_elk_version="$(pkg_version @mermaid-js/layout-elk)"
+elkjs_version="$(pkg_version elkjs)"
+
+banner="/*! @mermaid-js/layout-elk $layout_elk_version (MIT) bundling elkjs $elkjs_version (EPL-2.0);"
 banner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
 banner+=' in the dsl41 distribution for full texts and source URLs. */'
 
@@ -82,9 +92,14 @@ cytoscape.use(expandCollapse);
 export default cytoscape;
 EOF
 
-cybanner='/*! cytoscape 3.33.1 (MIT) + cytoscape-elk 2.3.0 (MIT) +'
-cybanner+=' cytoscape-context-menus 4.1.0 (MIT) + cytoscape-expand-collapse 4.1.1'
-cybanner+=' (MIT) bundling elkjs 0.9.3 (EPL-2.0);'
+cytoscape_version="$(pkg_version cytoscape)"
+cytoscape_elk_version="$(pkg_version cytoscape-elk)"
+context_menus_version="$(pkg_version cytoscape-context-menus)"
+expand_collapse_version="$(pkg_version cytoscape-expand-collapse)"
+
+cybanner="/*! cytoscape $cytoscape_version (MIT) + cytoscape-elk $cytoscape_elk_version (MIT) +"
+cybanner+=" cytoscape-context-menus $context_menus_version (MIT) + cytoscape-expand-collapse $expand_collapse_version"
+cybanner+=" (MIT) bundling elkjs $elkjs_version (EPL-2.0);"
 cybanner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
 cybanner+=' in the dsl41 distribution for full texts and source URLs. */'
 

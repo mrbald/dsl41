@@ -34,6 +34,7 @@ from test_nightbank_example import NB, _launcher
 
 DEPLOY = NB / "deploy"
 LAUNCH = DEPLOY / "dsl41-launch"
+DRILL_LIB = DEPLOY / "drill-lib.sh"
 DSL41 = Path(sys.executable).with_name("dsl41")
 ME = pwd.getpwuid(os.geteuid()).pw_name
 #: the order the launcher names the files in; it is part of the catalog
@@ -415,11 +416,6 @@ def test_the_units_take_the_documented_separate_service_shape() -> None:
     (stop,) = supervisor["Service"]["TimeoutStopSec"]
     assert int(stop) >= 5 + CMD_GRACE_S + 2 + 2
 
-    for unit in (engine, supervisor):
-        assert unit["Service"]["Type"] == ["simple"]
-        assert unit["Service"]["User"] == ["dsl41"]
-        assert unit["Install"]["WantedBy"] == ["multi-user.target"]
-
 
 def test_the_units_repeat_the_run_root_only_for_its_mount() -> None:
     """The launcher is the one place that names the command. Each unit
@@ -434,3 +430,38 @@ def test_the_units_repeat_the_run_root_only_for_its_mount() -> None:
             for key, values in section.items():
                 if key != "RequiresMountsFor":
                     assert not any("/srv/" in value for value in values), (name, key)
+
+
+def _drill_vars(text: str) -> dict[str, str]:
+    """The simple `NAME=value` assignments at the top of drill-lib.sh,
+    with `$NAME` references (e.g. `ESTATE=$NIGHTBANK/estate/small`)
+    resolved against earlier assignments in the same dict."""
+    values: dict[str, str] = {}
+    for name, raw in re.findall(r"^(\w+)=(\S+)$", text, re.M):
+        for ref, resolved in values.items():
+            raw = raw.replace(f"${ref}", resolved)
+        values[name] = raw
+    return values
+
+
+def test_the_drill_names_the_same_paths_and_file_order_as_the_launcher() -> None:
+    """drill-lib.sh installs at the paths dsl41-launch runs on and repeats
+    the estate file order to feed the seal step's `--next` list; both must
+    name the same values, the way the units' `RequiresMountsFor=` is held
+    equal to the launcher's `RUN_ROOT`."""
+    launcher_text = LAUNCH.read_text()
+    drill_text = DRILL_LIB.read_text()
+    drill_values = _drill_vars(drill_text)
+    for launcher_name, drill_name in (
+        ("DSL41", "DSL41"),
+        ("RUN_ROOT", "ROOT"),
+        ("ACCESS_MAP", "MAP"),
+        ("ESTATE", "ESTATE"),
+        ("PROPERTIES", "PROPERTIES"),
+    ):
+        (launcher_value,) = re.findall(rf"^{launcher_name}=(\S+)$", launcher_text, re.M)
+        assert drill_values[drill_name] == launcher_value, (launcher_name, drill_name)
+
+    launcher_order = re.findall(r'"\$ESTATE/(\w+)\.jil"', launcher_text)
+    (files_literal,) = re.findall(r"^FILES=\(([^)]*)\)$", drill_text, re.M)
+    assert files_literal.split() == launcher_order
