@@ -184,20 +184,22 @@ def test_ui_exits_0_when_the_tui_return_code_is_none(tmp_path, monkeypatch) -> N
 #
 # `_serve_run` drives a real engine and control socket, so these need a real
 # textual import (`run`'s own `import_tui_or_exit_2` guard, unpatched) and a
-# short AF_UNIX socket path -- test_runner_tui.py's fixture and skip guard,
-# duplicated here rather than imported (that file's own docstring explains
-# why: test_runner.py duplicates test_oracle.py's small helpers the same way).
+# short AF_UNIX socket path -- conftest.py's `short_root` fixture is the
+# base, overridden below with a POSIX skip guard matching test_runner_tui.py's
+# module-level one, duplicated here rather than imported (that file's own
+# docstring explains why: test_runner.py duplicates test_oracle.py's small
+# helpers the same way).
 
 _MINIMAL_JIL = "insert_job: cc_job\njob_type: c\ncommand: x\n"
 
 
 @pytest.fixture
 def short_root():
-    """A short-path base directory for AF_UNIX control sockets (see
-    test_runner_tui.py's fixture of the same name/docstring). The platform
-    guard (NIT 12) matches test_runner_tui.py's module-level one
-    (line 73): `mkdtemp(dir="/tmp")` is POSIX-specific, and running it
-    before any check errors on a non-POSIX host instead of skipping --
+    """A short-path base directory for AF_UNIX control sockets, overriding
+    conftest.py's fixture of the same name to add a platform guard (NIT 12)
+    matching test_runner_tui.py's module-level one: `mkdtemp(dir="/tmp")`
+    is POSIX-specific, and running it before any check errors on a
+    non-POSIX host instead of skipping --
     `_skip_unless_posix_textual` below only runs INSIDE a test, after this
     fixture has already set up."""
     if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover

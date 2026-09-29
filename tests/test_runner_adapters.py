@@ -1246,6 +1246,9 @@ def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing
     import shutil
     import tempfile
 
+    # hand-rolled, not conftest.py's `short_root` fixture: this test waits for
+    # the spawned supervisor's socket to disappear before it removes the
+    # directory, so it needs to control its own cleanup timing.
     tmp_path = Path(tempfile.mkdtemp(prefix="dsl41a-", dir="/tmp"))
     (tmp_path / "runs").mkdir()
     (tmp_path / "logs").mkdir()
@@ -1300,9 +1303,30 @@ def test_dl220_a_malformed_list_reply_header_field_refuses_with_engine_error() -
         "lease": None,
         "runs": [],
     }
-    with pytest.raises(EngineError, match="malformed header") as excinfo:
+    with pytest.raises(EngineError, match=r"malformed header \(version\)") as excinfo:
         _parse_list_reply(raw)
     assert "version" in str(excinfo.value)
+
+
+def test_dl220_a_success_reply_missing_runs_is_a_header_error_not_a_row_error() -> None:
+    """A rework case: `runs` absent from an otherwise-complete `ok: true`
+    reply is a missing HEADER field, not a row -- there is no row to be
+    malformed. It must not read as `_parse_run_rows` used to: the field
+    name in the message is `runs`, and it is never "malformed run row"."""
+    from dsl41.runner_adapters import _parse_list_reply
+
+    raw = {
+        "ok": True,
+        "version": 1,
+        "supervisor_pid": 1,
+        "boot_id": "boot",
+        "incarnation": "inc-1",
+        "deadman_s": None,
+        "lease": None,
+        # "runs" deliberately absent
+    }
+    with pytest.raises(EngineError, match=r"malformed header \(runs\)"):
+        _parse_list_reply(raw)
 
 
 def test_dl220_dict_style_supervisor_run_row_access_is_a_static_error(tmp_path: Path) -> None:

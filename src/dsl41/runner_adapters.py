@@ -1146,7 +1146,7 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
             return SupervisorListSuccess.model_validate(raw)
         except ValidationError as exc:
             errors = exc.errors()
-            if any(error["loc"][0] == "runs" for error in errors):
+            if any(len(error["loc"]) > 1 and error["loc"][0] == "runs" for error in errors):
                 raise EngineError(
                     f"the supervisor's LIST reply carries a malformed run row: {exc}"
                     " (supervisor-protocol ss5)"

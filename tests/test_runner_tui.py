@@ -5,10 +5,11 @@ and web) and ss13 item 6 ("TUI: textual pilot snapshot smoke only");
 runner_tui.py's own module docstring is the normative detail for
 ControlClient (the ss10 socket client), parse_console_command (the ss11
 event-console grammar) and RunnerApp (jobs table / explain pane / log tail /
-event console). House style follows test_runner_control.py: `short_root`
-(AF_UNIX sun_path length), the `_serve`/`_teardown` harness, asyncio.run per
-scenario, the POSIX skip guard -- duplicated here rather than imported,
-matching how test_runner.py duplicates test_oracle.py's own small helpers.
+event console). House style follows test_runner_control.py: the
+`_serve`/`_teardown` harness, asyncio.run per scenario, the POSIX skip
+guard -- duplicated here rather than imported, matching how test_runner.py
+duplicates test_oracle.py's own small helpers. `short_root` (AF_UNIX
+sun_path length) is conftest.py's shared fixture, not duplicated here.
 
 Every expected outcome here was verified empirically against the real app
 before the assertion was written (CLAUDE.md: fidelity is tested, not

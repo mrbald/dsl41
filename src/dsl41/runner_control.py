@@ -1339,9 +1339,11 @@ def versioned(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _frame(request: dict[str, Any]) -> bytes:
-    """The line-delimited wire encoding of `request`, serialized before the
-    transport is touched (DL-216): an unencodable request fails as a
-    caller's error, never as a transport outcome."""
+    """The line-delimited wire encoding of `request`. The two command
+    clients call this before the transport is touched (DL-216): an
+    unencodable request fails as a caller's error, never as a transport
+    outcome. The subscribe clients frame where they always did -- inside
+    the connect, DL-216 left `subscribe` alone on purpose."""
     return json.dumps(versioned(request)).encode("utf-8") + b"\n"
 
 
@@ -1596,7 +1598,7 @@ class ControlClient:
             request: dict[str, Any] = {"cmd": "subscribe", "v": PROTOCOL_VERSION}
             if since is not None:
                 request["since"] = since
-            writer.write(json.dumps(request).encode("utf-8") + b"\n")
+            writer.write(_frame(request))
             await writer.drain()
             ack_line = await reader.readline()
             if (why := _subscribe_refusal(ack_line)) is not None:

@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from supervisor_list_doubles import stub_listing, stub_row
+from supervisor_list_doubles import stub_listing, stub_refusal, stub_row
 
 from dsl41.ast_jil import parse, render_preserve
 from dsl41.boundary import (
@@ -3571,6 +3571,10 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
 
     cases: list[tuple[_StubSupervisor, str]] = [
         (_StubSupervisor(unreachable=True), "quiescence is unprovable"),
+        (
+            _StubSupervisor(listing=stub_refusal("internal: boom")),
+            "refused LIST (internal: boom)",
+        ),
         (
             _StubSupervisor(listing=stub_listing(incarnation="inc-2", runs=[row()])),
             "restarted supervisor's history is not proof",
