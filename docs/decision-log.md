@@ -14200,14 +14200,19 @@ relitigate an entry; append a new one.
   same-root restart resumes; a detached job survives an engine stop; a
   changed estate is refused with exit 2 and is not restarted; a sealed
   engine stays stopped with exit 3 until the next period is opened in
-  place. Tier: RUN, on GitHub's Ubuntu runner; no other distribution or
-  systemd version is covered. The runbook and the drill's header say so in
+  place. Tier: RUN, on GitHub's Ubuntu 24.04 runner; no other distribution
+  or systemd version is covered. The runbook and the drill's header say so in
   place of NOT RUN. The drill stays outside the default gate and is
   dispatched again after a change to the units, the launcher or the drill.
-  The rehearsal. A manual run of `release.yml` from main with `publish` off
-  passed on Ubuntu x86_64: the whole CI workflow as `gates`, then `build`,
-  then `smoke` on Python 3.12. `publish` and `release-assets` were skipped,
-  which is what makes it a rehearsal. It passed before DL-222's pins and
-  again after them. No release was cut.
+  The rehearsal. A manual run of `release.yml` from main passed on Ubuntu
+  x86_64: the whole CI workflow as `gates`, then `build`, then `smoke` on
+  Python 3.12. A run from a branch publishes nothing, whatever its input
+  says, so `publish` and `release-assets` were skipped, and so was
+  `build`'s tag check, which runs only on a tag. The rehearsal passed
+  before DL-222's pins and again after them, which covers the pinned
+  actions that `gates`, `build` and `smoke` use. Unobserved until the next
+  tag: the tag check, the `pypi` environment's approval, the upload
+  through the pinned publish action, and the release assets. No release
+  was cut.
   Also here: `tests/test_nightbank_deploy.py`'s `base` fixture folds into
   the shared `short_root`, the copy DL-221 named as the next to fold.
