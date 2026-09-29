@@ -14183,3 +14183,31 @@ relitigate an entry; append a new one.
   file, so the option can only hide that a file differs from the one
   already published; a re-run that fails on an existing file is the signal.
   Reopen after the first publish that uploads one file and not the other.
+
+- DL-223 The service drill and the release rehearsal ran and pass on main;
+  DL-218's NOT RUN is retired (2026-09-29)
+  DL-218 shipped the service drill as `workflow_dispatch` only and marked
+  its claims NOT RUN. DL-215's release workflow had run only in parts: its
+  smoke script on macOS and in a Debian arm64 container, never the whole
+  workflow on the runner a release uses.
+  The drill. Its first dispatch failed at the first start, in the drill's
+  own helper. `drill-lib.sh` clears the engine unit's start counter with
+  `systemctl reset-failed` before every deliberate start, and systemd
+  refuses that for a unit it has not loaded yet, with exit 1. The units and
+  the launcher were not at fault, and the helper now tolerates that
+  refusal. The drill then passed every step on main at d886679: the first
+  start is a genesis beside a supervisor in its own unit and cgroup; a
+  same-root restart resumes; a detached job survives an engine stop; a
+  changed estate is refused with exit 2 and is not restarted; a sealed
+  engine stays stopped with exit 3 until the next period is opened in
+  place. Tier: RUN, on GitHub's Ubuntu runner; no other distribution or
+  systemd version is covered. The runbook and the drill's header say so in
+  place of NOT RUN. The drill stays outside the default gate and is
+  dispatched again after a change to the units, the launcher or the drill.
+  The rehearsal. A manual run of `release.yml` from main with `publish` off
+  passed on Ubuntu x86_64: the whole CI workflow as `gates`, then `build`,
+  then `smoke` on Python 3.12. `publish` and `release-assets` were skipped,
+  which is what makes it a rehearsal. It passed before DL-222's pins and
+  again after them. No release was cut.
+  Also here: `tests/test_nightbank_deploy.py`'s `base` fixture folds into
+  the shared `short_root`, the copy DL-221 named as the next to fold.
