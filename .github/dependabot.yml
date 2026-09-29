@@ -1,5 +1,6 @@
-# Action versions are pinned by major tag in the workflows; this is what moves
-# them when a major lands, rather than leaving them to rot unnoticed.
+# Action versions are pinned by commit in the workflows, with the version in a
+# trailing comment (DL-222); this is what moves them, comment included, when a
+# release lands, rather than leaving them to rot unnoticed.
 version: 2
 updates:
   - package-ecosystem: github-actions

@@ -14152,3 +14152,34 @@ relitigate an entry; append a new one.
   cluster B's, whose equality test is new); ruff, mypy and the
   arch_check blocking checks clean; an adversarial Opus review of each
   branch before its PR.
+
+- DL-222 Actions are pinned to commits and the `pypi` environment requires
+  the owner's approval; a tag ruleset and `skip-existing` are declined
+  (2026-09-29)
+  DL-215 left four owner decisions open. Every `uses:` line named a tag or
+  a branch, which the action's owner can move, and the release's `publish`
+  job holds the OIDC identity PyPI trusts. The `pypi` environment had no
+  rule, so any pushed `v*` tag published once the gates passed.
+  Ruling, the pins: all 22 `uses:` lines in the five workflows name a
+  40-hex commit, with the exact version in a trailing comment:
+  `actions/checkout` v7.0.1, `astral-sh/setup-uv` v7.6.0,
+  `actions/upload-artifact` v7.0.1, `actions/download-artifact` v8.0.1,
+  `gitleaks/gitleaks-action` v3.0.0 and `pypa/gh-action-pypi-publish`
+  v1.14.2. Each commit is the one the previous ref named on the day of the
+  change, so no run changed. The local reusable call to `ci.yml` stays a
+  path. Dependabot's `github-actions` entry maintains pins of this form and
+  rewrites the comment; its proposals now include minor and patch
+  releases, where a major tag absorbed them silently. zizmor reports no
+  `unpinned-uses` finding.
+  Ruling, the environment: `pypi` requires the owner's approval and deploys
+  only from refs that match the tag pattern `v*`. It is a repository
+  setting, not a file, so `release.yml`'s header and README's "Make a
+  release" state it. A rehearsal never reaches it: `publish` is skipped by
+  its own condition before the environment is evaluated.
+  Declined: a repository ruleset restricting who creates `v*` tags. The
+  repository has one maintainer, and the approval above already stands
+  between a tag and a publish. Reopen when a second account gains push
+  access. Declined: `skip-existing` on the upload. PyPI never replaces a
+  file, so the option can only hide that a file differs from the one
+  already published; a re-run that fails on an existing file is the signal.
+  Reopen after the first publish that uploads one file and not the other.
