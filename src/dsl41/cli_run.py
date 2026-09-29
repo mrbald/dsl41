@@ -618,7 +618,9 @@ async def _serve_run(
             # confirm under the anchor lock too, in `resume_run`'s order:
             # exit 2 tells the units never to restart, so a refusal from a
             # snapshot another process has since moved past must not stand.
-            # A root that now passes resumes exactly as any other does.
+            # A root that now passes resumes exactly as any other does. Under
+            # the locks every refusal counts -- a busy anchor lock included --
+            # since `resume_run` would raise it after the wiring below.
             refusal = resume_root_refusal(run_root, anchor_dir, locked=True)
             if refusal is not None:
                 return refuse(refusal)

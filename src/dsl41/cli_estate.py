@@ -439,8 +439,10 @@ async def _offline_seal(
     # ss1.3's resume rule (DL-224), before anything below stages C2 into the
     # root or wires a supervisor: this sealer resumes the root. A refusal
     # read without the anchor lock can be stale, so it is confirmed under
-    # it before it stands (`leader.lock` is already held); `resume_run`
-    # repeats the check under both locks either way.
+    # it before it stands (`leader.lock` is already held). Under the locks
+    # every refusal counts, a busy anchor lock included, since `resume_run`
+    # would raise it after the staging below; `resume_run` repeats the
+    # check under both locks either way.
     if resume_root_refusal(run_root, estate_anchor) is not None:
         refusal = resume_root_refusal(run_root, estate_anchor, locked=True)
         if refusal is not None:

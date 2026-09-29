@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
+import stat
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,7 @@ from dsl41.boundary import (
     default_anchor_dir,
     read_seal,
     resume_root_refusal,
+    same_root,
 )
 from dsl41.ast_jil import parse
 from dsl41.ir import lower_catalog
@@ -84,6 +87,9 @@ def _tree(*tops: Path) -> dict[tuple[int, str], tuple[str, int, bytes]]:
                 info = path.lstat()
                 if path.is_symlink():
                     seen[(index, str(path.relative_to(top)))] = ("link", 0, b"")
+                elif stat.S_ISSOCK(info.st_mode) or stat.S_ISFIFO(info.st_mode):
+                    # never copied (`_backup_copy`), so one here APPEARED
+                    seen[(index, str(path.relative_to(top)))] = ("special", info.st_mode, b"")
                 elif path.is_dir():
                     seen[(index, str(path.relative_to(top)))] = ("dir", info.st_mode, b"")
                 else:
@@ -92,11 +98,50 @@ def _tree(*tops: Path) -> dict[tuple[int, str], tuple[str, int, bytes]]:
     return seen
 
 
+def _skip_sockets(directory: str, names: list[str]) -> set[str]:
+    """`copytree`'s ignore: the sockets and FIFOs a backup tool skips."""
+    skipped = set()
+    for name in names:
+        mode = os.lstat(os.path.join(directory, name)).st_mode
+        if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode):
+            skipped.add(name)
+    return skipped
+
+
+def _backup_copy(source: Path, target: Path) -> None:
+    """A tree copied the way a backup tool copies it: regular files,
+    directories and symlinks. A live root's `control.sock` or
+    `supervisor.sock` is not copied, and `copytree` could not copy it."""
+    shutil.copytree(source, target, symlinks=True, ignore=_skip_sockets)
+
+
 def _copy(root: Path, to: Path) -> Path:
     """The root and its sibling anchor, copied to `to` and `to`'s sibling."""
-    shutil.copytree(root, to, symlinks=True)
-    shutil.copytree(default_anchor_dir(root), default_anchor_dir(to), symlinks=True)
+    _backup_copy(root, to)
+    _backup_copy(default_anchor_dir(root), default_anchor_dir(to))
     return to
+
+
+def test_pr57_the_backup_copy_skips_sockets_and_fifos(short_root: Path) -> None:
+    """Pinned on every platform: a bound socket and a FIFO in the source
+    are not copied; files, directories and symlinks are."""
+    source = short_root / "src"
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "file").write_bytes(b"kept")
+    (source / "link").symlink_to("sub/file")
+    os.mkfifo(source / "pipe")
+    bound = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        bound.bind(str(source / "control.sock"))
+        assert stat.S_ISSOCK(os.lstat(source / "control.sock").st_mode)
+        _backup_copy(source, short_root / "dst")
+    finally:
+        bound.close()
+    target = short_root / "dst"
+    assert (target / "sub" / "file").read_bytes() == b"kept"
+    assert (target / "link").is_symlink()
+    assert not os.path.lexists(target / "control.sock")
+    assert not os.path.lexists(target / "pipe")
 
 
 def _resume_virtual(run_root: Path, anchor_dir: Path | None, text: str = C1_JIL):
@@ -270,7 +315,7 @@ def test_pr57_a_restore_misplaced_at_an_older_roots_path_is_refused(tmp_path: Pa
     assert stored is not None and isinstance(stored.head, OpenHead)
     assert stored.head.period_id == 2
     root_a.rename(tmp_path / "a-moved")
-    shutil.copytree(root_b, root_a, symlinks=True)
+    _backup_copy(root_b, root_a)
     before = _tree(root_a, anchor_dir)
 
     with pytest.raises(EngineError) as refused:
@@ -372,7 +417,7 @@ def _misplaced_restore(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     """B's tree put back at A's path, the anchor still {1: A, 2: B}."""
     root_a, root_b, anchor_dir, c2 = _rolled_lineage(tmp_path)
     root_a.rename(tmp_path / "a-moved")
-    shutil.copytree(root_b, root_a, symlinks=True)
+    _backup_copy(root_b, root_a)
     return root_a, root_b, anchor_dir, c2
 
 
@@ -552,6 +597,26 @@ def test_pr57_a_symlink_with_the_default_anchor_keeps_todays_refusal(tmp_path: P
         _resume_virtual(link, None)
 
 
+def test_pr57_same_root_compares_directories_not_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`same_root`'s second half on any filesystem: with normalization
+    stubbed out, a symlink spelling of a directory differs as a string and
+    is still the same directory; another directory, and a recorded path
+    that no longer exists, are not."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr(boundary, "normalized_root", str)
+    assert boundary.normalized_root(link) != boundary.normalized_root(real)
+    assert same_root(str(link), str(real))
+    assert not same_root(str(other), str(real))
+    assert not same_root(str(tmp_path / "gone"), str(real))
+
+
 def _case_insensitive(directory: Path) -> bool:
     probe = directory / "CaseProbe"
     probe.mkdir()
@@ -630,6 +695,40 @@ def test_pr57_an_offline_seal_of_a_relocated_copy_starts_no_supervisor(
         refused = cli("seal", "--run-root", str(copy), "--next", str(short_root / "estate.jil"))
         _refused_by_the_rule(refused, original, copy)
         assert _tree(copy, default_anchor_dir(copy)) == before
+    finally:
+        _kill_group(short_root / "copy")
+        _kill_group(short_root / "run")
+
+
+@pytest.mark.parametrize("route", ["run", "seal"])
+def test_pr57_a_copy_against_a_busy_original_anchor_starts_no_supervisor(
+    short_root: Path, route: str
+) -> None:
+    """Split brain while the original leads: a copy resumed, or sealed
+    offline, against the ORIGINAL's anchor while another holder has its
+    lock. The confirmation under the locks cannot take the anchor lock,
+    and that is the command's refusal, before anything is staged or
+    wired: exit 2, no supervisor, nothing under the copy moved."""
+    try:
+        original, copy = _detached_copy(short_root)
+        anchor_dir = default_anchor_dir(original)
+        before = _tree(copy, anchor_dir)
+        holder = EstateAnchor(anchor_dir)
+        holder.acquire()
+        try:
+            jil = str(short_root / "estate.jil")
+            named = ("--estate-anchor", str(anchor_dir))
+            if route == "seal":
+                result = cli("seal", "--run-root", str(copy), "--next", jil, *named)
+            else:
+                result = cli("run", "--run-root", str(copy), "--resume", "--detached", *named, jil)
+        finally:
+            holder.release()
+        assert result.returncode == 2, result.stderr
+        assert "is held by another" in result.stderr
+        assert not (copy / "supervisor.pid").exists()
+        assert not (copy / "supervisor.sock").exists()
+        assert _tree(copy, anchor_dir) == before
     finally:
         _kill_group(short_root / "copy")
         _kill_group(short_root / "run")

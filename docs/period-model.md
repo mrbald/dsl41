@@ -2147,11 +2147,15 @@ names the holder. `dsl41 run --resume` and the offline `dsl41 seal`, which
 resumes the root it seals, also check before they stage anything or wire a
 supervisor. That first read takes no anchor lock, so its refusal is
 confirmed under both locks before the command refuses: exit 2 tells the
-units never to restart, and a stale snapshot must not cause one. Only this
-rule's refusal is reported there; any other error, a missing anchor and
-another estate's anchor pass it and are raised by `resume_run` in their
-earlier order and words. So a root that fails this rule when the command
-starts is refused with no supervisor started and nothing staged. If the
+units never to restart, and a stale snapshot must not cause one. The first
+read reports only this rule's refusal; any other error, a missing anchor
+and another estate's anchor pass it, so a root that passes the rule meets
+them in their earlier order and words. The confirmation swallows nothing:
+it runs `resume_run`'s own steps, and a busy anchor lock, a missing, corrupt
+or foreign anchor, or this rule is the command's refusal, in its own words.
+So a root that fails this rule when the command starts is refused with no
+supervisor started and nothing staged, even when its message is another
+engine's hold on the anchor. If the
 anchor changes between that first read and the locks, admission is still
 refused under both locks, and what the command staged or wired before it
 may remain. `resume_run` repeats the rule under both locks in every case.
@@ -2509,7 +2513,7 @@ the producer. Silence there would read as coverage.
 | PR-06 | `baseline_id` rotates; a command composed under C1 is refused after C2 opens even when the row never moved |
 | PR-07 | a `segment` whose pins disagree with the preceding seal's `next_period` is refused; two openings of one seal — in place and fresh root, under two patch versions of dsl41 — produce byte-identical `segment` records, which requires `catalog_hash` v2 to ignore `tool_version` |
 | PR-07a | `source_bundle_hash`: `["ab","c"]` ≠ `["a","bc"]`; **reversing command-line order moves it, and both orderings reopen to their own `catalog_hash` from their own `sources.json`**; the same bytes from two original paths are two bundles |
-| PR-57 | *(DL-224)* resume refuses a root the anchor does not name: a relocated copy with its **copied** anchor and against the **original** anchor, each with the head `open`, `closed` and `claimed`, refuses naming both paths, and every file, mode and directory entry under the copy and the anchor it named is unchanged but the two lock files; a copy with a **torn tail** and one with an **empty successor segment** refuse before either is repaired; root B's tree restored at registered root A's path refuses by OWNED, naming the period and B; a historical registered root keeps its earlier refusal and words, and a reclaimed roll target refuses by the rule; the same root through a symlink and a `..` detour resumes with the anchor named, and a symlink with the DEFAULT anchor keeps its earlier refusal; both locks can be taken after a refusal; a detached `dsl41 run --resume` on a copy exits 2 and starts no supervisor; a whole lineage restored at another path refuses the resume as well as the estate-wide read; an opening that crashed between its segment and the head CAS resumes through its own claim, and the same opening with its claim reclaimed refuses by OWNED; a misplaced restore whose newest segment is empty, torn or nested too deep to parse refuses by OWNED through the segment before it, exit 2 through the CLI; a case-variant spelling of the recorded root on a case-insensitive filesystem resumes; a refusal read from a stale anchor is overturned under the locks and the command proceeds, on both CLI routes, while a reclaim between the first read and the locks is refused under them; and a corrupt anchor on a root another engine holds still reports the holder first |
+| PR-57 | *(DL-224)* resume refuses a root the anchor does not name: a relocated copy with its **copied** anchor and against the **original** anchor, each with the head `open`, `closed` and `claimed`, refuses naming both paths, and every file, mode and directory entry under the copy and the anchor it named is unchanged but the two lock files; a copy with a **torn tail** and one with an **empty successor segment** refuse before either is repaired; root B's tree restored at registered root A's path refuses by OWNED, naming the period and B; a historical registered root keeps its earlier refusal and words, and a reclaimed roll target refuses by the rule; the same root through a symlink and a `..` detour resumes with the anchor named, and a symlink with the DEFAULT anchor keeps its earlier refusal; both locks can be taken after a refusal; a detached `dsl41 run --resume` on a copy exits 2 and starts no supervisor; a whole lineage restored at another path refuses the resume as well as the estate-wide read; an opening that crashed between its segment and the head CAS resumes through its own claim, and the same opening with its claim reclaimed refuses by OWNED; a misplaced restore whose newest segment is empty, torn or nested too deep to parse refuses by OWNED through the segment before it, exit 2 through the CLI; a case-variant spelling of the recorded root on a case-insensitive filesystem resumes, and on any filesystem two spellings of one directory are the same root while two directories are not; a copy resumed or sealed offline against the original's anchor while another holder has its lock exits 2 and starts no supervisor; a refusal read from a stale anchor is overturned under the locks and the command proceeds, on both CLI routes, while a reclaim between the first read and the locks is refused under them; and a corrupt anchor on a root another engine holds still reports the holder first |
 
 ### 13.2 Canonical form
 

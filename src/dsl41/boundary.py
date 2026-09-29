@@ -2954,47 +2954,49 @@ def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) ->
 
 def resume_root_refusal(
     run_root: Path, anchor_dir: Path | None, *, locked: bool = False
-) -> RootAuthorityError | None:
+) -> EngineError | None:
     """`require_resume_root` for a CLI route that resumes, before it stages
     anything or wires a supervisor: the refusal, or None.
 
-    Unlocked (`locked=False`) it reads the sentinel and `anchor.json` and
-    writes nothing. A snapshot read without locks can be stale, so a caller
-    that gets a refusal holds the run-root lock and asks again with
-    `locked=True`, which takes the anchor lock around the read, as
-    `resume_run` does, and releases it. Only this rule's refusal is
-    reported. Any other error on the way -- a corrupt sentinel or anchor,
-    a stray `wal/` entry, an unreadable segment, a busy anchor lock --
+    Unlocked (`locked=False`) it reads the sentinel and `anchor.json`,
+    writes nothing, and reports only this rule's refusal
+    (`RootAuthorityError`). Any other error on the way -- a corrupt
+    sentinel or anchor, a stray `wal/` entry, an unreadable segment --
     passes silently, as do a missing anchor and another estate's anchor:
-    `resume_run` raises each of those in its own order and words."""
+    `resume_run` raises each of those in its own order and words.
+
+    A snapshot read without locks can be stale, so a caller that gets a
+    refusal holds the run-root lock and asks again with `locked=True`.
+    That runs `resume_run`'s own steps -- the sentinel, the anchor lock,
+    `require`, this rule -- and releases the anchor lock. Under the locks
+    nothing is swallowed: a busy anchor lock, a missing or corrupt anchor
+    and another estate's anchor are returned as the refusal too, because
+    `resume_run` would raise the same error after the caller had staged
+    and wired. Only an error that is not an `EngineError` propagates."""
     anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
-    try:
-        sentinel = read_sentinel(run_root)
-        # read before any acquire: `acquire` creates a missing anchor
-        # directory, and a missing anchor is `require`'s refusal to make
-        stored = None if sentinel is None else anchor.read()
-        if sentinel is None or stored is None:
-            return None
-        if locked:
+    if locked:
+        try:
+            sentinel = read_sentinel(run_root)
+            if sentinel is None:
+                return None  # `resume_run` takes its no-sentinel path
             anchor.acquire()
             try:
-                stored = anchor.read()
-                _require_named_estate_root(stored, sentinel.estate_id, anchor.path, run_root)
+                current = anchor.require(sentinel.estate_id)
+                require_resume_root(current, anchor_path=anchor.path, run_root=run_root)
             finally:
                 anchor.release()
-        else:
-            _require_named_estate_root(stored, sentinel.estate_id, anchor.path, run_root)
+        except EngineError as refused:
+            return refused
+        return None
+    try:
+        sentinel = read_sentinel(run_root)
+        # read, never acquire: `acquire` creates a missing anchor
+        # directory, and a missing anchor is `require`'s refusal to make
+        stored = None if sentinel is None else anchor.read()
+        if sentinel is not None and stored is not None and stored.estate_id == sentinel.estate_id:
+            require_resume_root(stored, anchor_path=anchor.path, run_root=run_root)
     except RootAuthorityError as refused:
         return refused
     except Exception:  # noqa: BLE001 -- every other error is the locked path's to raise
         return None
     return None
-
-
-def _require_named_estate_root(
-    stored: Anchor | None, estate_id: str, anchor_path: Path, run_root: Path
-) -> None:
-    """`require_resume_root` over an anchor of this estate; a missing
-    anchor or another estate's is `require`'s refusal, not this rule's."""
-    if stored is not None and stored.estate_id == estate_id:
-        require_resume_root(stored, anchor_path=anchor_path, run_root=run_root)

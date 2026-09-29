@@ -343,7 +343,9 @@ that period yet, the head must be this root's own claim: that is the window
 an opening crashed in between its segment and the head move, and resume
 finishes it. A copy or a restore at another path is refused with exit 2,
 whether it is resumed against its copied anchor or against the original
-one. The message names the anchor, the root and the recorded root.
+one. The message names the anchor, the root and the recorded root. If the
+original engine holds the original's anchor at that moment, the refusal
+says that the anchor is held by another process instead.
 `dsl41 run --resume` and an offline `dsl41 seal` refuse such a root before
 they repair or stage anything or wire a supervisor, so no supervisor starts.
 That holds for a root that fails the rule when the command starts; if the

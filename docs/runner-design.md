@@ -589,8 +589,9 @@ named `socket_group` opens the run root to `0710` for traversal and the
 socket to `0660`, and tightens every direct child first
 (`docs/access-model.md` §8). Nothing else moves.
 *(Amended by DL-224.)* The re-tightening at resume may happen on a resume
-that is then refused by period-model §1.3's resume rule; a refusal from the
-CLI's first check returns before it. It is one of the few writes such a
+that is then refused by period-model §1.3's resume rule. A CLI refusal never
+tightens the root; its confirmation under the locks takes the anchor lock,
+which tightens the anchor directory. It is one of the few writes such a
 refusal may make: `leader.lock` and `anchor.lock`, created or taken; the
 `0700` tightening of the root and of the anchor directory; and the directory
 fsyncs those imply. None of them carries estate state.
@@ -608,8 +609,10 @@ removes no WAL, journal, segment, sidecar, `anchor.json`, claim or
 supervisor file. `dsl41 run --resume` and the offline `dsl41 seal` run the
 same check first, before they stage anything or wire a supervisor, and
 confirm a refusal under both locks before they act on it, since a read with
-no anchor lock can be stale. A root that fails the rule when the command
-starts is therefore refused with no supervisor started. The scope is this
+no anchor lock can be stale. Any refusal met under the locks -- a busy
+anchor lock, a missing, corrupt or foreign anchor, or the rule -- is the
+command's refusal, in its own words. A root that fails the rule when the
+command starts is therefore refused with no supervisor started. The scope is this
 rule: a missing anchor or another estate's anchor passes that first check
 and keeps its earlier order and side effects, and if the anchor changes
 between the first check and the locks, admission is still refused but what

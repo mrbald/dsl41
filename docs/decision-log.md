@@ -14236,7 +14236,8 @@ relitigate an entry; append a new one.
   copy is another directory, and a moved root's recorded path is gone. A
   recorded path that cannot be stat'ed is not this root. NAMED stats
   every recorded root on every resume, so a stale network path among
-  them can stall a resume.
+  them can stall a resume. The head action's claim comparison and the
+  claim id still compare normalized strings, as before this entry.
   P is read without repair. A newest segment whose first line is empty,
   torn or nested too deep to parse never opened, so P comes from the
   segment before it; this is the never-opened rule of ss11's matrix
@@ -14259,16 +14260,24 @@ relitigate an entry; append a new one.
   exit 2 through the CLI. The first read reports only that type. Any
   other error it meets (a corrupt sentinel or anchor, a stray `wal/`
   entry, an unreadable segment) passes it, as do a missing anchor and
-  another estate's anchor, so the locked path raises each in its earlier
-  order and words: a root another engine holds still says so first.
+  another estate's anchor, so a root that passes the rule meets each in
+  its earlier order and words: a root another engine holds still says so
+  first. The confirmation swallows nothing. It runs `resume_run`'s own
+  steps, and any `EngineError` it meets is the command's refusal, in its
+  own words, before anything is staged or wired: a busy anchor lock, a
+  missing, corrupt or foreign anchor, or this rule. `resume_run` would
+  raise the same error after the wiring. So a copy resumed against the
+  original's anchor while the original engine holds it is refused as
+  holding a busy lock, with no supervisor started.
   What a refusal by this rule may touch: `leader.lock` and `anchor.lock`,
   created or taken; the `0700` tightening of the root and the anchor
-  directory; and the directory fsyncs those imply. A CLI refusal returns
-  before the tightening. Nothing else is created, changed or removed, and
-  both locks are released. This holds for a root that fails the rule when
-  the CLI starts. If the anchor changes between the first read and the
-  locks, admission is still refused under both locks, and what the CLI
-  staged or wired before that may remain.
+  directory; and the directory fsyncs those imply. A CLI refusal never
+  tightens the root; its confirmation takes the anchor lock, which
+  tightens the anchor directory. Nothing else is created, changed or
+  removed, and both locks are released. This holds for a root that fails
+  the rule when the CLI starts. If the anchor changes between the first
+  read and the locks, admission is still refused under both locks, and
+  what the CLI staged or wired before that may remain.
   The refusal names the anchor, this root and the recorded roots (for
   OWNED, period P and the root its row names). It gives the causes in one
   clause: a copy or a restore at another path, a target whose claim was

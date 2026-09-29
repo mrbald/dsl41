@@ -53,7 +53,7 @@ from test_nightbank_boundary import (
     _stop_engine,
     _wait_for_evidence,
 )
-from test_resume_root_authority import _tree
+from test_resume_root_authority import _backup_copy, _tree
 from test_runner_supervisor import _kill_group, wait_for
 
 #: the one detached job the drill actually runs: a short, unconditioned box
@@ -194,10 +194,11 @@ def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch
     # it, so nothing this test creates leaks beside the tmpdir.
     backup_dir = base / "backup"
     backup_dir.mkdir()
-    shutil.copytree(anchor_dir, backup_dir / "anchor")
-    shutil.copytree(run_root, backup_dir / "root-a")
-    shutil.copytree(rolled_root, backup_dir / "root-b")
-    shutil.copytree(base / "estate", backup_dir / "estate")
+    # as a backup tool copies: files, directories and symlinks, no socket
+    _backup_copy(anchor_dir, backup_dir / "anchor")
+    _backup_copy(run_root, backup_dir / "root-a")
+    _backup_copy(rolled_root, backup_dir / "root-b")
+    _backup_copy(base / "estate", backup_dir / "estate")
     shutil.copy2(props, backup_dir / "night.properties")
 
     # ============================ destroy the originals ============================
