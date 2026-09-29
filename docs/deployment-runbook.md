@@ -338,15 +338,23 @@ paragraph recorded an open gap, DL-219's open item: `dsl41 run --resume`
 pointed directly at a relocated copy, with its own copied anchor, was not
 refused. DL-224 closes it.)* Resume applies period-model §1.3's resume rule:
 the anchor must name the `--run-root` given, and the registry row for the
-period of the root's newest segment must name it too. A copy or a restore at
-another path is refused with exit 2, whether it is resumed against its
-copied anchor or against the original one. The message names the anchor, the
-root and the recorded root. `dsl41 run --resume` refuses before it takes a
-lock, repairs anything or wires a supervisor, so a detached resume refused
-this way starts no supervisor. An offline `dsl41 seal` of such a root is
-refused the same way, before it stages anything. There is no override: restore at the
-recorded path. A symlink left at the recorded path that leads to the restored root is
-accepted, because the recorded path then names that root.
+period of the root's newest OPENED segment must name it too. With no row for
+that period yet, the head must be this root's own claim: that is the window
+an opening crashed in between its segment and the head move, and resume
+finishes it. A copy or a restore at another path is refused with exit 2,
+whether it is resumed against its copied anchor or against the original
+one. The message names the anchor, the root and the recorded root.
+`dsl41 run --resume` and an offline `dsl41 seal` refuse such a root before
+they repair or stage anything or wire a supervisor, so no supervisor starts.
+That holds for a root that fails the rule when the command starts; if the
+lineage changes under it, for instance by an `estate reclaim` run at the
+same moment, the refusal can come after the supervisor is wired. A missing
+anchor or another estate's anchor keeps its earlier refusal and order.
+There is no override: restore at the recorded path. A roll that stopped
+before its claim is also refused; run the opener (`--open-from`) again. The
+recorded path, a symlink left there that leads to the restored root, a
+case-variant spelling of it on a case-insensitive filesystem and a bind
+mount of it are the same directory and are accepted.
 `tests/test_restore_drill.py` checks this refusal on the lineage restored at
 the wrong path.
 

@@ -22,13 +22,18 @@ from pathlib import Path
 
 import pytest
 
+from dsl41 import boundary, runner_startup
 from dsl41.boundary import (
     ANCHOR_LOCK_NAME,
+    Anchor,
+    ClaimedHead,
     ClosedHead,
     EstateAnchor,
     OpenHead,
+    RootAuthorityError,
     default_anchor_dir,
     read_seal,
+    resume_root_refusal,
 )
 from dsl41.ast_jil import parse
 from dsl41.ir import lower_catalog
@@ -37,8 +42,27 @@ from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter, LocalCommandA
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_ledger import LOCK_NAME, acquire_run_root
 from dsl41.runner_startup import resume_run
-from test_boundary import C1_JIL, C2_JIL, T0, _catalog, _close, _genesis, _request, _seal, _stage
-from test_estate import _estate, _invoke, _native_root, _roll, _seal_offline, _Stopped
+from test_boundary import (
+    C1_JIL,
+    C2_JIL,
+    T0,
+    _catalog,
+    _close,
+    _crashed_between_the_segment_and_the_cas,
+    _genesis,
+    _request,
+    _seal,
+    _stage,
+)
+from test_estate import (
+    _estate,
+    _invoke,
+    _native_root,
+    _open_in_place,
+    _roll,
+    _seal_offline,
+    _Stopped,
+)
 from test_runner_leadership import engine, cli, wait_for
 from test_runner_supervisor import _kill_group
 
@@ -300,6 +324,204 @@ def test_pr57_a_reclaimed_roll_target_is_refused_by_the_rule(tmp_path: Path) -> 
     assert _tree(root_b, anchor_dir) == before
 
 
+# ------------------------------- the no-row claim exception, both ways
+
+
+def test_pr57_an_opening_that_crashed_before_its_cas_resumes_through_its_claim(
+    tmp_path: Path,
+) -> None:
+    """A real in-place opening stopped between its segment and the head
+    CAS: no registry row for period 2, and the head is this root's claim.
+    OWNED admits it through the claim, and resume finishes the opening."""
+    root = tmp_path / "a"
+    with _crashed_between_the_segment_and_the_cas(root) as (anchor, _, _):
+        stored = anchor.read()
+        assert stored is not None and isinstance(stored.head, ClaimedHead)
+        assert stored.row(2) is None and wal_path(root, 2).exists()
+    _close(_resume_virtual(root, default_anchor_dir(root), C2_JIL))
+    stored = EstateAnchor(default_anchor_dir(root)).read()
+    assert stored is not None and isinstance(stored.head, OpenHead)
+    assert stored.head.period_id == 2 and stored.row(2) is not None
+
+
+def test_pr57_a_reclaimed_in_place_opening_is_refused_by_owned(tmp_path: Path) -> None:
+    """The same crash, then the claim reclaimed. The root is still NAMED
+    through period 1's row, but its abandoned period-2 segment has no row
+    and the head is no longer its claim: OWNED refuses, touching nothing."""
+    root = tmp_path / "a"
+    with _crashed_between_the_segment_and_the_cas(root) as (anchor, committed, _):
+        anchor.reclaim(estate_id=committed.seal.estate_id, claimed_actor="ops")
+        stored = anchor.read()
+        assert stored is not None and isinstance(stored.head, ClosedHead)
+    before = _tree(root, default_anchor_dir(root))
+
+    with pytest.raises(RootAuthorityError) as refused:
+        _resume_virtual(root, default_anchor_dir(root), C2_JIL)
+    message = str(refused.value)
+    assert (
+        f"does not hold period 2 for {root.resolve()} -- no registry row names period 2" in message
+    )
+    assert "not a claim by this root" in message
+    assert _tree(root, default_anchor_dir(root)) == before
+
+
+# -------------------------- OWNED through the never-opened fallback
+
+
+def _misplaced_restore(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """B's tree put back at A's path, the anchor still {1: A, 2: B}."""
+    root_a, root_b, anchor_dir, c2 = _rolled_lineage(tmp_path)
+    root_a.rename(tmp_path / "a-moved")
+    shutil.copytree(root_b, root_a, symlinks=True)
+    return root_a, root_b, anchor_dir, c2
+
+
+@pytest.mark.parametrize("newest", [b"", b'{"rec": "seg'], ids=["empty", "torn"])
+def test_pr57_a_misplaced_restore_with_a_never_opened_segment_is_refused_by_owned(
+    tmp_path: Path, newest: bytes
+) -> None:
+    """A never-opened `wal/000003.jsonl` on the misplaced restore: P comes
+    from the segment before it, period 2, whose row names B. Without that
+    fallback P is unreadable, OWNED is skipped and the repair removes the
+    file."""
+    root_a, root_b, anchor_dir, _ = _misplaced_restore(tmp_path)
+    wal_path(root_a, 3).write_bytes(newest)
+    before = _tree(root_a, anchor_dir)
+
+    with pytest.raises(RootAuthorityError) as refused:
+        _resume_virtual(root_a, anchor_dir)
+    assert f"row for period 2 names {root_b.resolve()}" in str(refused.value)
+    assert _tree(root_a, anchor_dir) == before
+
+
+def test_pr57_a_deeply_nested_first_line_is_a_refusal_not_a_traceback(tmp_path: Path) -> None:
+    """A first line nested too deep to parse counts as not a document, as
+    the sentinel reader treats one: through the CLI the misplaced restore
+    is refused with exit 2 rather than dying on a RecursionError."""
+    root_a, root_b, anchor_dir, c2 = _misplaced_restore(tmp_path)
+    wal_path(root_a, 3).write_bytes(b"[" * 100_000)
+    result = _invoke(
+        "run", str(c2), "--run-root", str(root_a), "--estate-anchor", str(anchor_dir), "--resume"
+    )
+    assert result.exit_code == 2, result.output
+    assert f"row for period 2 names {root_b.resolve()}" in result.output
+
+
+# ---------------------------------------- the pre-check and the locks
+
+
+def _opened_in_place(tmp_path: Path) -> tuple[Path, Path, Path, Anchor]:
+    """A root that sealed period 1 offline and opened period 2 in place,
+    and the anchor as it stood between the two: `closed(1, root)`."""
+    c1, c2, c3 = _estate(tmp_path / "estate")
+    root = tmp_path / "run"
+    _native_root(root, c1)
+    assert _seal_offline(root, c2).exit_code == 0
+    stale = EstateAnchor(default_anchor_dir(root)).read()
+    assert stale is not None and isinstance(stale.head, ClosedHead)
+    _open_in_place(root, c2)
+    return root, c2, c3, stale
+
+
+async def _admitted(*_args: object, **_kwargs: object) -> None:
+    raise EngineError("admitted: resume_run was reached")
+
+
+@pytest.mark.parametrize("route", ["run", "seal"])
+def test_pr57_a_stale_refusal_is_overturned_under_the_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """The pre-check reads the anchor as it stood before an in-place
+    opening completed: period 2 has no row there and the head is not a
+    claim, so the snapshot refuses. Under the locks the current anchor
+    admits the root, and the command goes on as any resume does."""
+    root, c2, c3, stale = _opened_in_place(tmp_path)
+    real_read = EstateAnchor.read
+    monkeypatch.setattr(EstateAnchor, "read", lambda self: stale)
+    assert resume_root_refusal(root, None) is not None  # the snapshot alone refuses
+    served: list[Path] = []
+
+    def first_read_stale(self: EstateAnchor) -> Anchor | None:
+        if not served:
+            served.append(self.path)
+            return stale
+        return real_read(self)
+
+    monkeypatch.setattr(EstateAnchor, "read", first_read_stale)
+    if route == "seal":
+        result = _seal_offline(root, c3)
+        assert result.exit_code == 0, result.output  # the boundary committed
+    else:
+        # a resume that is admitted serves until stopped: stand in for it
+        monkeypatch.setattr(runner_startup, "resume_run", _admitted)
+        result = _invoke("run", str(c2), "--run-root", str(root), "--resume")
+        assert result.exit_code == 2, result.output
+        assert "admitted: resume_run was reached" in result.output
+    assert served == [default_anchor_dir(root) / "anchor.json"]
+    assert "this anchor does not" not in result.output
+
+
+@pytest.mark.parametrize("route", ["run", "seal"])
+def test_pr57_a_reclaim_after_the_pre_check_is_refused_under_the_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """B holds a durable segment and the claim, so the pre-check admits it;
+    the claim is reclaimed before the command takes its locks. `resume_run`
+    refuses under both: no leader record, no head move."""
+    c1, c2, c3 = _estate(tmp_path / "estate")
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    _native_root(root_a, c1)
+    assert _seal_offline(root_a, c2).exit_code == 0
+    assert _invoke("audit", "--run-root", str(root_a)).exit_code == 0
+    anchor_dir = default_anchor_dir(root_a)
+    with pytest.raises(_Stopped):
+        _roll(root_b, anchor_dir, c2, stop_at="after_opening_segment")
+    estate_id = read_seal(root_a, 1).estate_id
+    segment = wal_path(root_b, 2).read_bytes()
+    real = boundary.resume_root_refusal
+
+    def then_reclaim(
+        run_root: Path, anchor_dir_: Path | None, *, locked: bool = False
+    ) -> RootAuthorityError | None:
+        verdict = real(run_root, anchor_dir_, locked=locked)
+        assert verdict is None and not locked  # admitted, so never re-asked
+        anchor = EstateAnchor(anchor_dir)
+        anchor.acquire()
+        anchor.reclaim(estate_id=estate_id, claimed_actor="ops")
+        anchor.release()
+        return verdict
+
+    monkeypatch.setattr(boundary, "resume_root_refusal", then_reclaim)
+    named = ("--estate-anchor", str(anchor_dir))
+    if route == "seal":
+        result = _seal_offline(root_b, c3, *named)
+    else:
+        result = _invoke("run", str(c2), "--run-root", str(root_b), *named, "--resume")
+    assert result.exit_code == 2, result.output
+    assert f"this anchor does not name {root_b.resolve()}" in result.output
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)
+    assert wal_path(root_b, 2).read_bytes() == segment
+
+
+def test_pr57_a_corrupt_anchor_on_a_held_root_still_reports_the_holder(tmp_path: Path) -> None:
+    """The pre-check reports only the rule's refusal. A corrupt anchor.json
+    passes it, so a root another engine holds says so first, as before."""
+    root = tmp_path / "a"
+    _root_with_head(root, "open")
+    (default_anchor_dir(root) / "anchor.json").write_text("{not json\n")
+    jil = tmp_path / "estate.jil"
+    jil.write_text(C1_JIL)
+    held = acquire_run_root(root)
+    try:
+        result = _invoke("run", str(jil), "--run-root", str(root), "--resume")
+    finally:
+        held.release()
+    assert result.exit_code == 2, result.output
+    assert "is held by another" in result.output
+    assert "anchor.json" not in result.output
+
+
 # ------------------------------------------------------------- spelling
 
 
@@ -328,6 +550,26 @@ def test_pr57_a_symlink_with_the_default_anchor_keeps_todays_refusal(tmp_path: P
     link.symlink_to(root)
     with pytest.raises(EngineError, match="this lineage has no anchor"):
         _resume_virtual(link, None)
+
+
+def _case_insensitive(directory: Path) -> bool:
+    probe = directory / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (directory / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_pr57_a_case_variant_spelling_is_the_same_root(tmp_path: Path) -> None:
+    """On a case-insensitive filesystem `RUNROOT` is the directory recorded
+    as `runroot`: the same directory, so the same root. Probed, not assumed
+    from the platform."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("this filesystem is case-sensitive")
+    root = tmp_path / "runroot"
+    _root_with_head(root, "open")
+    _close(_resume_virtual(tmp_path / "RUNROOT", default_anchor_dir(root)))
 
 
 # ------------------------------------------------------ the CLI, detached

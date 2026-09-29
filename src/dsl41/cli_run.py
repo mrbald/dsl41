@@ -584,18 +584,15 @@ async def _serve_run(
             load_policy(access_map, generation=1)
         except AccessError as exc:
             return refuse(exc)
-    if resume:
-        # ss1.3's resume rule (DL-224), READ-ONLY and before the lock, the
-        # same precedent as the two above: the supervisor wiring below
-        # creates its log, lock, socket and pid file, and a refused resume
-        # would leave that supervisor running. `resume_run` repeats the
-        # check authoritatively under both locks.
-        from dsl41.boundary import precheck_resume_root
+    # ss1.3's resume rule (DL-224), READ-ONLY and before the lock, the same
+    # precedent as the two above: the supervisor wiring below creates its
+    # log, lock, socket and pid file, and a refused resume would leave that
+    # supervisor running. A refusal read without locks can be stale, so it
+    # is only acted on once the locks below confirm it; `resume_run`
+    # repeats the check under both locks either way.
+    from dsl41.boundary import resume_root_refusal
 
-        try:
-            precheck_resume_root(run_root, anchor_dir)
-        except EngineError as exc:
-            return refuse(exc)
+    unconfirmed = resume_root_refusal(run_root, anchor_dir) if resume else None
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -617,6 +614,14 @@ async def _serve_run(
     wiring: "Wiring | None" = None
     engine: "Engine | None" = None
     try:
+        if unconfirmed is not None:
+            # confirm under the anchor lock too, in `resume_run`'s order:
+            # exit 2 tells the units never to restart, so a refusal from a
+            # snapshot another process has since moved past must not stand.
+            # A root that now passes resumes exactly as any other does.
+            refusal = resume_root_refusal(run_root, anchor_dir, locked=True)
+            if refusal is not None:
+                return refuse(refusal)
         # stage period 1 UNDER the lock (period-model ss1.1): a used run root is
         # start_run's refusal to make, and repainting `catalogs/` on the way to
         # that refusal is how the shipped binary used to write `manifest/` into

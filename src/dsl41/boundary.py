@@ -2813,14 +2813,41 @@ def act_on_head(
 
 # ------------------------------------------- whose root this is (DL-224)
 
-#: the causes and the remedy every root-authority refusal states. One
+#: the causes and the remedies every root-authority refusal states. One
 #: clause for the causes: a copy and an abandoned roll target meet the
 #: same rule, so the refusal does not call the root "a copy"
 _ROOT_REFUSAL_TAIL = (
-    " The usual causes are a copy or a restore at another path, or a target"
-    " whose claim was reclaimed. Resume refuses such a root; a restore must land"
-    " at the recorded path (period-model ss1.3, DL-224)"
+    " The usual causes are a copy or a restore at another path, a target"
+    " whose claim was reclaimed, or a roll that stopped before its claim."
+    " Resume refuses such a root; a restore must land at the recorded path,"
+    " and a roll that stopped before its claim is finished by running the"
+    " opener (`dsl41 run --open-from`) again (period-model ss1.3, DL-224)"
 )
+
+
+class RootAuthorityError(EngineError):
+    """ss1.3's resume rule refused this root (DL-224).
+
+    Its own type so the lock-free pre-check can report this refusal and
+    nothing else: every other error it meets while reading belongs to the
+    locked path, which raises it in its own order and words."""
+
+
+def same_root(recorded: str, here: str) -> bool:
+    """Whether a recorded root is the root at `here` (`normalized_root`).
+
+    The same when the normalized strings are equal, or when the recorded
+    path exists and is the same directory (`os.path.samefile`): a symlink,
+    a case-variant spelling or a bind mount of the recorded path is this
+    root. A copy is another directory, and a moved root's recorded path no
+    longer exists. A recorded path that cannot be stat'ed is not this
+    root."""
+    if normalized_root(recorded) == here:
+        return True
+    try:
+        return os.path.samefile(recorded, here)
+    except (OSError, ValueError):
+        return False
 
 
 def newest_opened_period(run_root: Path) -> int | None:
@@ -2840,7 +2867,7 @@ def newest_opened_period(run_root: Path) -> int | None:
         first = _first_line(wal_path(run_root, segments[-2]))
     try:
         record = json.loads(first)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(record, dict) or not is_opening(record):
         return None
@@ -2858,20 +2885,22 @@ def _first_line(path: Path) -> bytes:
 
 def _never_opened(first: bytes) -> bool:
     """Empty, or torn: no newline and not a JSON document. These are the
-    first lines `repair_tail` cuts to nothing."""
+    first lines `repair_tail` cuts to nothing. A line nested too deep to
+    parse counts as not a document, as `period._is_period_root_line`
+    treats one."""
     if first.endswith(b"\n"):
         return False
     try:
         json.loads(first)
-    except ValueError:
+    except (ValueError, RecursionError):
         return True
     return False
 
 
-def named_roots(anchor: Anchor) -> set[str]:
-    """Every root the anchor names, normalized at comparison time: each
-    registry row's `root`, the head's `root` or `closing_root`, and a
-    `claimed` head's `target_root`."""
+def _recorded_roots(anchor: Anchor) -> list[str]:
+    """Every root the anchor records: each registry row's `root`, the
+    head's `root` or `closing_root`, and a `claimed` head's
+    `target_root`."""
     head = anchor.head
     recorded = [row.root for row in anchor.periods.values()]
     if isinstance(head, OpenHead):
@@ -2880,12 +2909,13 @@ def named_roots(anchor: Anchor) -> set[str]:
         recorded.append(head.closing_root)
     else:
         recorded.append(head.target_root)
-    return {normalized_root(root) for root in recorded}
+    return recorded
 
 
 def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) -> None:
     """ss1.3's resume rule (DL-224): the anchor NAMES this root, and this
-    root OWNS the period its newest opened segment holds.
+    root OWNS the period its newest opened segment holds. Roots compare by
+    `same_root`.
 
     NAMED is the early filter: a root no row and no head names is refused.
     OWNED is the authoritative half: the registry row for that period names
@@ -2893,48 +2923,78 @@ def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) ->
     misplaced restore passes the first through an older row and fails the
     second. Read-only; the caller runs it before any repair of the root."""
     here = normalized_root(run_root)
-    named = named_roots(anchor)
-    if here not in named:
-        raise EngineError(
+    recorded = _recorded_roots(anchor)
+    if not any(same_root(root, here) for root in recorded):
+        named = sorted({normalized_root(root) for root in recorded})
+        raise RootAuthorityError(
             f"{anchor_path}: this anchor does not name {here} -- its registry and"
-            f" head name {', '.join(sorted(named))}." + _ROOT_REFUSAL_TAIL
+            f" head name {', '.join(named)}." + _ROOT_REFUSAL_TAIL
         )
     period = newest_opened_period(run_root)
     if period is None:
         return
     row = anchor.row(period)
     if row is not None:
-        owner = normalized_root(row.root)
-        if owner != here:
-            raise EngineError(
+        if not same_root(row.root, here):
+            raise RootAuthorityError(
                 f"{anchor_path}: this anchor does not hold period {period} for {here}"
-                f" -- its registry row for period {period} names {owner}." + _ROOT_REFUSAL_TAIL
+                f" -- its registry row for period {period} names"
+                f" {normalized_root(row.root)}." + _ROOT_REFUSAL_TAIL
             )
         return
     head = anchor.head
-    if isinstance(head, ClaimedHead) and normalized_root(head.target_root) == here:
+    if isinstance(head, ClaimedHead) and same_root(head.target_root, here):
         return
-    raise EngineError(
+    raise RootAuthorityError(
         f"{anchor_path}: this anchor does not hold period {period} for {here} -- no"
         f" registry row names period {period}, and the head is {_spell(head)}, not a"
         " claim by this root." + _ROOT_REFUSAL_TAIL
     )
 
 
-def precheck_resume_root(run_root: Path, anchor_dir: Path | None) -> None:
-    """`require_resume_root` before any lock is taken or file written: the
-    CLI calls it before it wires a supervisor, so a refused detached resume
-    starts none.
+def resume_root_refusal(
+    run_root: Path, anchor_dir: Path | None, *, locked: bool = False
+) -> RootAuthorityError | None:
+    """`require_resume_root` for a CLI route that resumes, before it stages
+    anything or wires a supervisor: the refusal, or None.
 
-    Reads the sentinel and `anchor.json` and nothing else. A root with no
-    sentinel, no anchor, or an anchor of another estate passes through:
-    those refusals belong to `resume_run` and keep their order there. The
-    authoritative check runs again under both locks."""
-    sentinel = read_sentinel(run_root)
-    if sentinel is None:
-        return
+    Unlocked (`locked=False`) it reads the sentinel and `anchor.json` and
+    writes nothing. A snapshot read without locks can be stale, so a caller
+    that gets a refusal holds the run-root lock and asks again with
+    `locked=True`, which takes the anchor lock around the read, as
+    `resume_run` does, and releases it. Only this rule's refusal is
+    reported. Any other error on the way -- a corrupt sentinel or anchor,
+    a stray `wal/` entry, an unreadable segment, a busy anchor lock --
+    passes silently, as do a missing anchor and another estate's anchor:
+    `resume_run` raises each of those in its own order and words."""
     anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
-    stored = anchor.read()
-    if stored is None or stored.estate_id != sentinel.estate_id:
-        return
-    require_resume_root(stored, anchor_path=anchor.path, run_root=run_root)
+    try:
+        sentinel = read_sentinel(run_root)
+        # read before any acquire: `acquire` creates a missing anchor
+        # directory, and a missing anchor is `require`'s refusal to make
+        stored = None if sentinel is None else anchor.read()
+        if sentinel is None or stored is None:
+            return None
+        if locked:
+            anchor.acquire()
+            try:
+                stored = anchor.read()
+                _require_named_estate_root(stored, sentinel.estate_id, anchor.path, run_root)
+            finally:
+                anchor.release()
+        else:
+            _require_named_estate_root(stored, sentinel.estate_id, anchor.path, run_root)
+    except RootAuthorityError as refused:
+        return refused
+    except Exception:  # noqa: BLE001 -- every other error is the locked path's to raise
+        return None
+    return None
+
+
+def _require_named_estate_root(
+    stored: Anchor | None, estate_id: str, anchor_path: Path, run_root: Path
+) -> None:
+    """`require_resume_root` over an anchor of this estate; a missing
+    anchor or another estate's is `require`'s refusal, not this rule's."""
+    if stored is not None and stored.estate_id == estate_id:
+        require_resume_root(stored, anchor_path=anchor_path, run_root=run_root)

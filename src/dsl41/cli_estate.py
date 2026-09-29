@@ -431,19 +431,20 @@ async def _offline_seal(
 
     from datetime import UTC, datetime
 
-    from dsl41.boundary import SealRequest, load_bundle_catalog, precheck_resume_root
+    from dsl41.boundary import SealRequest, load_bundle_catalog, resume_root_refusal
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
-    # ss1.3's resume rule (DL-224), READ-ONLY, before anything below stages
-    # C2 into the root or wires a supervisor: this sealer resumes the root,
-    # and a refused resume writes nothing but its locks. `resume_run`
-    # repeats the check under both locks.
-    try:
-        precheck_resume_root(run_root, estate_anchor)
-    except EngineError as exc:
-        return refuse(exc)
+    # ss1.3's resume rule (DL-224), before anything below stages C2 into the
+    # root or wires a supervisor: this sealer resumes the root. A refusal
+    # read without the anchor lock can be stale, so it is confirmed under
+    # it before it stands (`leader.lock` is already held); `resume_run`
+    # repeats the check under both locks either way.
+    if resume_root_refusal(run_root, estate_anchor) is not None:
+        refusal = resume_root_refusal(run_root, estate_anchor, locked=True)
+        if refusal is not None:
+            return refuse(refusal)
     try:
         # the period this sealer will CLOSE, which on a root with a
         # committed boundary is the one the resume below opens (DL-151):
