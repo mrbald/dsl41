@@ -510,10 +510,10 @@ loop, and a sealed engine that stays stopped until the next period is
 opened. The access-map refusals, their messages and what they leave
 untouched are the claim of `tests/test_nightbank_deploy.py`, which runs in
 CI; the drill's claim is that systemd does not restart a refusal.
-**The drill is NOT RUN.**
-No dispatched run has passed it, and it is not part of the default gate.
-Until one passes, those behaviors are what the units are built to do, not
-what has been observed under systemd.
+The drill passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner
+(DL-223); no other distribution or systemd version has been observed. It
+is not part of the default gate: dispatch it again after a change to the
+units, the launcher or the drill.
 
 ## 4. UI surfaces
 

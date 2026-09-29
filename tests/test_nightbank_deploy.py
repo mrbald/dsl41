@@ -16,13 +16,10 @@ import os
 import pwd
 import re
 import shlex
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -41,17 +38,6 @@ ME = pwd.getpwuid(os.geteuid()).pw_name
 #: address, so a reordering is a new estate and this list pins it
 ORDER = ("amer.jil", "apac.jil", "calendars.jil", "emea.jil", "global.jil", "infra.jil")
 SHIPPED_ROOT = "/srv/dsl41/runs/nightbank-01"
-
-
-@pytest.fixture
-def base() -> Iterator[Path]:
-    """A SHORT base: the engine binds `<root>/control.sock`, and pytest's
-    tmp_path overruns macOS's 104-byte `sun_path`."""
-    made = tempfile.mkdtemp(prefix="dsl41d-", dir="/tmp")
-    try:
-        yield Path(made)
-    finally:
-        shutil.rmtree(made, ignore_errors=True)
 
 
 def _sh(launcher: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -156,25 +142,25 @@ def test_the_shipped_launcher_prints_the_supervisor_line() -> None:
     ]
 
 
-def test_the_printed_line_is_shell_quoted(base: Path) -> None:
-    launcher = _configured(base, RUN_ROOT=str(base / "it's a root"))
+def test_the_printed_line_is_shell_quoted(short_root: Path) -> None:
+    launcher = _configured(short_root, RUN_ROOT=str(short_root / "it's a root"))
     printed = _sh(launcher, "--print")
     assert printed.returncode == 0, printed.stderr
     words = shlex.split(printed.stdout)
-    assert words[words.index("--run-root") + 1] == str(base / "it's a root")
+    assert words[words.index("--run-root") + 1] == str(short_root / "it's a root")
     # every other word needs no quoting and is printed bare, as shlex.quote
     # would leave it
-    bare = [word for word in words if word != str(base / "it's a root")]
+    bare = [word for word in words if word != str(short_root / "it's a root")]
     assert all(f" {word}" in f" {printed.stdout}" for word in bare)
-    assert "'" + str(base / "it") + "'" in printed.stdout
+    assert "'" + str(short_root / "it") + "'" in printed.stdout
 
 
-def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(base: Path) -> None:
+def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(short_root: Path) -> None:
     """deployment-runbook ss3: `--resume` iff `<root>/journal.jsonl`. A
     genesis is chosen for a root that does not exist, is empty, or holds
     only what the supervisor unit put there before the first start."""
-    launcher = _configured(base, **_site(base))
-    root = base / "runs" / "nb"
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
     assert "--resume" not in shlex.split(_sh(launcher, "--print").stdout)
     root.mkdir(parents=True)
     assert "--resume" not in shlex.split(_sh(launcher, "--print").stdout)
@@ -190,13 +176,13 @@ def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(base: P
 
 @pytest.mark.parametrize("mode", [("--print",), ("engine",)])
 def test_a_root_with_contents_and_no_sentinel_is_never_a_genesis(
-    base: Path, mode: tuple[str, ...]
+    short_root: Path, mode: tuple[str, ...]
 ) -> None:
     """A root that lost its sentinel, or holds something else, is neither
     empty nor resumable: the launcher refuses rather than start a fresh
     estate beside whatever is there."""
-    launcher = _configured(base, **_site(base))
-    root = base / "runs" / "nb"
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
     (root / "wal").mkdir(parents=True)
     refused = _sh(launcher, *mode)
     assert refused.returncode == 2
@@ -204,10 +190,10 @@ def test_a_root_with_contents_and_no_sentinel_is_never_a_genesis(
     assert refused.stdout == ""
 
 
-def test_a_run_root_that_is_not_a_directory_is_refused(base: Path) -> None:
-    launcher = _configured(base, **_site(base))
-    (base / "runs").mkdir()
-    (base / "runs" / "nb").write_text("")
+def test_a_run_root_that_is_not_a_directory_is_refused(short_root: Path) -> None:
+    launcher = _configured(short_root, **_site(short_root))
+    (short_root / "runs").mkdir()
+    (short_root / "runs" / "nb").write_text("")
     refused = _sh(launcher, "--print")
     assert refused.returncode == 2
     assert "is not a directory" in refused.stderr
@@ -216,13 +202,13 @@ def test_a_run_root_that_is_not_a_directory_is_refused(base: Path) -> None:
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
 @pytest.mark.parametrize("mode", [("--print",), ("engine",)])
 def test_an_unreadable_run_root_is_refused_not_read_as_empty(
-    base: Path, mode: tuple[str, ...]
+    short_root: Path, mode: tuple[str, ...]
 ) -> None:
     """A root this user cannot search hides its sentinel, and a missing
     sentinel would otherwise mean a genesis. Exit 2, with or without
     --print, and nothing started."""
-    launcher = _configured(base, **_site(base))
-    root = base / "runs" / "nb"
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
     root.mkdir(parents=True)
     (root / "journal.jsonl").write_text("")
     root.chmod(0o000)
@@ -247,10 +233,14 @@ def test_a_usage_error_is_a_configuration_refusal(args: tuple[str, ...]) -> None
 
 
 @pytest.mark.parametrize("mode", ["engine", "supervisor", "supervisor-ready"])
-def test_a_missing_dsl41_is_a_configuration_refusal_not_a_crash(base: Path, mode: str) -> None:
+def test_a_missing_dsl41_is_a_configuration_refusal_not_a_crash(
+    short_root: Path, mode: str
+) -> None:
     """Exit 2, which the units never restart; a failed `exec` would exit
     127 and restart-loop an engine unit."""
-    launcher = _configured(base, **{**_site(base), "DSL41": str(base / "absent" / "dsl41")})
+    launcher = _configured(
+        short_root, **{**_site(short_root), "DSL41": str(short_root / "absent" / "dsl41")}
+    )
     refused = _sh(launcher, mode)
     assert refused.returncode == 2
     assert "is not executable" in refused.stderr
@@ -261,21 +251,21 @@ def test_a_missing_dsl41_is_a_configuration_refusal_not_a_crash(base: Path, mode
 
 @pytest.mark.parametrize("damage", ["missing", "malformed"])
 def test_a_configured_access_map_that_does_not_load_refuses_the_resume(
-    base: Path, damage: str
+    short_root: Path, damage: str
 ) -> None:
     """The launcher passes `--access-map` on every start and relies on
     `dsl41 run` refusing a map that does not load (access-model ss4). This
     is what the CLI does today on the RESUME path the launcher takes after
     the first start: exit 2, naming the map, before the root is read or
     written. The genesis half is `test_access.py`'s."""
-    _night(base)
-    launcher = _configured(base, **_site(base))
-    root = base / "runs" / "nb"
+    _night(short_root)
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
     root.mkdir(parents=True)
     (root / "journal.jsonl").write_text("")
-    (base / "etc").mkdir(mode=0o700)  # the map's directory stands; the map does not
+    (short_root / "etc").mkdir(mode=0o700)  # the map's directory stands; the map does not
     if damage == "malformed":
-        _write_map(base / "etc" / "access.toml", "format_version = \n")
+        _write_map(short_root / "etc" / "access.toml", "format_version = \n")
     before = sorted(p.name for p in root.iterdir())
     refused = _sh(launcher, "engine")
     assert refused.returncode == 2, refused.stdout + refused.stderr
@@ -284,7 +274,7 @@ def test_a_configured_access_map_that_does_not_load_refuses_the_resume(
     assert ("cannot open" if damage == "missing" else "not valid TOML") in refused.stderr
     assert sorted(p.name for p in root.iterdir()) == before
     assert (root / "journal.jsonl").read_text() == ""
-    assert not (base / "runs" / "nb.anchor").exists()
+    assert not (short_root / "runs" / "nb.anchor").exists()
 
 
 # ------------------------------------------------------------- end to end
@@ -310,19 +300,19 @@ def _stop(proc: subprocess.Popen[str]) -> int:
     return proc.wait(timeout=60)
 
 
-def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(base: Path) -> None:
+def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(short_root: Path) -> None:
     """The launcher's line is one `dsl41 run` accepts; its second start is
     a resume of the same root; and the reattach line the detached engine
     prints on the way out is itself a working resume, access map included."""
-    _night(base)
-    _grant_me(base / "etc" / "access.toml")
-    launcher = _configured(base, **_site(base))
-    root = base / "runs" / "nb"
+    _night(short_root)
+    _grant_me(short_root / "etc" / "access.toml")
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
     socket = root / "control.sock"
     procs: list[subprocess.Popen[str]] = []
 
     def start(argv: list[str], log: str) -> subprocess.Popen[str]:
-        with open(base / log, "w") as out:
+        with open(short_root / log, "w") as out:
             proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, text=True)
         procs.append(proc)
         _wait_up(socket, proc)
@@ -331,13 +321,13 @@ def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(base: Path) 
     try:
         first = start(["sh", str(launcher), "engine"], "first.log")
         assert _stop(first) == 0
-        first_log = (base / "first.log").read_text()
+        first_log = (short_root / "first.log").read_text()
         assert re.search(r"^dsl41-launch: engine: .*--access-map \S+$", first_log, re.M)
         assert "--resume" not in first_log.splitlines()[0]  # genesis
 
         second = start(["sh", str(launcher), "engine"], "second.log")
         assert _stop(second) == 0
-        second_log = (base / "second.log").read_text()
+        second_log = (short_root / "second.log").read_text()
         assert second_log.splitlines()[0].endswith(" --resume")
 
         reattach = re.search(r"^detached: reattach with `(.*)`$", second_log, re.M)
@@ -345,7 +335,7 @@ def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(base: Path) 
         words = shlex.split(reattach.group(1))
         # the second start already carried --resume, so the line is its own
         assert words == shlex.split(second_log.splitlines()[0].split(": ", 2)[2])
-        assert words[words.index("--access-map") + 1] == str(base / "etc" / "access.toml")
+        assert words[words.index("--access-map") + 1] == str(short_root / "etc" / "access.toml")
         third = start(words, "third.log")
         assert _stop(third) == 0
     finally:

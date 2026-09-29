@@ -8,8 +8,10 @@
 # and a sealed engine that stays stopped until an operator opens the next
 # period.
 #
-# Manual only (workflow_dispatch). It is not part of the default gate, and
-# until a dispatched run passes, its claims are NOT RUN (DL-218). Each step
+# Manual only (workflow_dispatch). It is not part of the default gate. It
+# passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223);
+# no other distribution or systemd version has been observed. Dispatch it
+# again after a change to the units, the launcher or this drill. Each step
 # sources drill-lib.sh for the paths and the waits.
 
 name: service-drill
