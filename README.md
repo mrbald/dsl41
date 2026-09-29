@@ -1306,9 +1306,10 @@ The tag must point at the commit that carries the same version in
 describe different trees. The `build` job refuses such a tag, and a
 lightweight one.
 
-Last, make sure that the `release` workflow is successful. Then read the
-project page at https://pypi.org/project/dsl41/ and the GitHub release page
-for the tag.
+Last, approve the deployment: the `publish` job waits in the run's page for
+the owner's approval of the `pypi` environment. Then make sure that the
+`release` workflow is successful. Then read the project page at
+https://pypi.org/project/dsl41/ and the GitHub release page for the tag.
 
 Note: a local `uv build` writes into the ignored `dist/` directory, and the
 exports above into the ignored `exports/` directory. They are tests of the
