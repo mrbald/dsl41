@@ -7,80 +7,101 @@
 [![Python](https://img.shields.io/pypi/pyversions/dsl41)](https://pypi.org/project/dsl41/)
 [![license](https://img.shields.io/badge/license-AGPL--3.0%20%7C%20commercial-blue)](LICENSING.md)
 
-dsl41 is a migration compiler for scheduler estates. It contains an AutoSys
-(JIL) frontend, a semantic IR, a linter, a Mermaid visualizer, a formal
-equivalence validator, and a Stonebranch Universal Controller backend. It
-also contains a Python DSL extracted from patterns found in the synthetic
-test corpus.
+dsl41 is a migration compiler and a runner for AutoSys job estates. It reads
+JIL, lowers it to a semantic IR, lints it, draws its dependency graph, proves
+two catalogs equivalent, and emits Stonebranch Universal Controller (UC)
+workflow records. A Python DSL builds catalogs, and a decompiler turns JIL
+into that DSL. The runner executes an estate under AutoSys semantics on a
+wall clock or a virtual clock. It has a control socket, a terminal UI, a
+detached supervisor for jobs that must outlive the engine, and period
+boundaries for estates that run for months.
 
-Read these documents in this order:
+## Documents
+
+Read these in this order:
+
 1. [docs/autosys-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
-2. [docs/stonebranch-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/stonebranch-semantics.md) - target model + AutoSys->UC mapping (UCS/M entries)
-3. [docs/ir-design.md](https://github.com/mrbald/dsl41/blob/main/docs/ir-design.md) - AST / IR-F / IR-G / oracle / equivalence design
-4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - statement scanner spec
+2. [docs/stonebranch-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
+3. [docs/ir-design.md](https://github.com/mrbald/dsl41/blob/main/docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
+4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - the statement scanner spec
 5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
 6. [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md) - what every reference token in the sources means
-7. [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md) - what the simulation models, refuses, or assumes: the coverage register
-8. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - shared agent contract and task-specific reading routes
+7. [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
+8. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - the shared agent contract and task-specific reading routes
+
+The runner's design is
+[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md).
+Its frozen contracts are
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md),
+[docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
+[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md),
+[docs/period-model.md](https://github.com/mrbald/dsl41/blob/main/docs/period-model.md),
+[docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md),
+and [docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md).
 
 Agent setup, verification commands, and cross-vendor review recipes are in
 [docs/agent-workflow.md](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md).
-
-Operating the runner on a server — install, systemd, web UI exposure,
-the JIL-update cycle, upgrades — is
+Operating the runner on a server (install, systemd, web UI exposure, the
+JIL-update cycle, upgrades) is
 [docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md).
 
-Status: all ten compiler phases are built and tested. The phase-11 runner
-([docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
-is also complete: 11a (engine core + bisimulation gate), 11b (process
-lifecycle tier: wrapper shim, real adapters, WAL journal, crash-recovery
-resume — spool contract frozen in
-[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)),
-11c (calendar scheduler, preflight, control socket — protocol frozen in
-[docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md)
-— headless CLI), 11d (Textual TUI), 11e (`serve` via textual-serve), and
-11f (the detached supervisor tier). Phase 12's optimistic-concurrency half
-is frozen and built (DL-103 closed S6); the contract is
-[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md).
-The remote relay and shared store that multihost execution needs are
-designed in that document's §7 and not built; the HA deployment plan that
-proposed them was withdrawn (DL-189).
-The evolution contract for every versioned protocol and durable artifact is
-[docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md);
-the access perimeter is
-[docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md).
-The scheduler obeys AutoSys calendars (DL-56/57). It
-applies standard calendar day sets directly. It applies extended
-(autocal-rule) calendars through a built-in interpreter of the doc-frozen
-SEM-36..39 semantics. The memo below has the source map.
+## Status
+
+The compiler and the runner are built and tested. Three designed items are
+not built: the remote relay and shared store that multihost execution needs
+([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+§7), rich UC condition forms with write-path verification (they need a live
+controller), and the decompiler's custom-pattern option (`--patterns`). The
+open questions that need a live instance are listed under
+[What is not built](#what-is-not-built).
+
+## Install
+
+```sh
+pip install dsl41          # the compiler and the headless runner
+pip install 'dsl41[ui]'    # adds the terminal UI and `serve`
+```
+
+Python 3.12 or newer. In a checkout, run `uv sync --frozen --extra dev`,
+then `uv run dsl41 --help`.
 
 ## CLI
 
-There is one entry point (pyproject `[project.scripts]`):
-`dsl41 = dsl41.cli:app`. Run `uv run dsl41 --help`, or install the package
-and run `dsl41` directly. Every command takes one or more JIL files, which
-together form one catalog. The commands accept `autocal_asc` calendar exports
-(`calendar` / `cycle` / `extended_calendar` / `ext_calendar` statements)
-together with job definitions. All commands share the exit-code contract:
-0 = success or clean, 1 = findings (`lint`, `equiv` only), 2 = the input
-never reached the tool (unreadable file, JIL parse error, or DL-07 lowering
-refusal). `--permit-unknown` is the DL-07 escape hatch on every command: it
-carries unknown attributes verbatim instead of a refusal.
+There is one entry point, `dsl41`. Run `uv run dsl41 --help` in a checkout,
+or install the package and run `dsl41`. Every compiler command takes one or
+more JIL files, which together form one catalog. The files may include
+`autocal_asc` calendar exports (`calendar`, `cycle`, `extended_calendar`,
+and `ext_calendar` statements) next to job definitions.
 
-### Resolve estate templating (preprocessor)
+Exit codes: 0 is success or clean. 2 means the input never reached the
+tool: an unreadable file, a JIL parse error, a lowering refusal, or a
+preflight refusal. Findings exit 1: `lint`, `equiv`, `uc --strict`, and a
+failed `decompile` check. A mid-run engine failure in `run` or `rehearse`
+exits 1 as well. `minify` refusals and a `rehearse --check-cadence`
+deviation exit 3. The control verbs `sendevent`, `host`, and `seal` spend a
+code per outcome: 0 applied, 2 refused, 3 rejected, 4 outcome unknown. On 4,
+retry with the printed `request_id` instead of re-sending. `report` exits 0
+once the report is written; the findings are in the report. Each verb's
+`--help` states its own codes.
+
+Lowering refuses unknown attributes (DL-07). `--permit-unknown` carries them
+verbatim instead. Every command that loads a catalog takes it, except
+`minify`, which refuses what it cannot classify. The same commands take
+`-p/--properties`, which resolves `~{$NAME}~` placeholders from properties
+files before parsing.
+
+### Resolve estate templating
 
 ```sh
 dsl41 resolve jobs.jil.tpl -p env.properties -o jobs.jil
 ```
 
-Estate JIL frequently contains `~{$NAME}~` placeholders. An external
-properties mechanism replaces them before the scheduler sees the text. The
-`resolve` command does the same step (DL-19). It reads `KEY=VALUE` properties
-files. Later files override earlier files. Resolution is an order-independent
-fixpoint. If a token stays unresolved, the command reports a loud error. With
-`--permit-unresolved`, the command leaves such tokens verbatim. Thus resolved
-JIL flows through the ordinary pipeline. The compiler core itself never
-models templating.
+Estate JIL often contains `~{$NAME}~` placeholders that an external
+properties mechanism replaces before the scheduler sees the text. `resolve`
+does that step. It reads `KEY=VALUE` properties files; later files override
+earlier ones. Resolution is an order-independent fixpoint. An unresolved
+token is an error, unless `--permit-unresolved` leaves it verbatim. The
+compiler core never models templating.
 
 ### Lint a catalog
 
@@ -89,9 +110,9 @@ dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 ```
 
-The command runs rules L001-L022 (IR-F rules, truth-table rules, graph rules
-over the derived graph, dangling-name rules). `--strict` is the migration
-gate: do not ship a catalog that lints dirty.
+The rules are L001-L022: IR-F rules, truth-table rules, graph rules over the
+derived graph, and dangling-name rules. `--strict` is the migration gate. Do
+not ship a catalog that lints dirty.
 
 ### Visualize the dependency graph
 
@@ -106,95 +127,85 @@ dsl41 viz --format html-chart jobs.jil -o chart.html  # that chart as a page
 dsl41 viz --format explore jobs.jil -o lens.html   # navigation page, offline
 ```
 
-`--format` picks one of five exclusive outputs — `report` (the default),
-`chart`, `html`, `html-chart`, `explore` (DL-75, DL-76). The shaping options
+`--format` picks one of five outputs: `report` (the default), `chart`,
+`html`, `html-chart`, or `explore`. The shaping options
 (`--collapse-threshold`, `--direction`, `--include-singletons`, `--elk`,
-`--fixed-scale`) apply wherever the chosen format can deliver their effect,
-and exit 2 naming the reason where it cannot (`explore` delivers all but
-`--fixed-scale`, DL-190).
+`--fixed-scale`) apply wherever the chosen format can deliver their effect.
+Where it cannot, the command exits 2 and names the reason; `explore`
+delivers all but `--fixed-scale`.
 
-The report shows each independent workflow as its own chart (largest first).
-A legend and appendices list everything that the charts omit: standalone
-admin-wrapper jobs (charted again with `--include-singletons`), assumed-edge
-assumptions, redesign flags, OR shapes, and cycles. In a chart, boxes are
-subgraphs, and edges carry their E/A/R migration class
-(solid/dashed/thick-red). The charts mark file watchers and schedules as
-triggers. Mutual exclusions appear as lock links or as a shared lock hub. If
-a box has more direct members than the collapse threshold (default 12), the
-box folds into a single node. Any Mermaid renderer works (GitHub,
-mermaid.live, IDE preview); `--fixed-scale` adds frontmatter that stops
-renderers from fit-to-width scaling each chart differently. `--format chart`
-skips the report and emits the entire estate as one bare Mermaid chart,
-ready for mermaid-cli or a live editor. `--format html` writes the whole
-report as one self-contained page (~5 MB: mermaid + ELK are embedded — see
-THIRD_PARTY_LICENSES): charts render in the browser at uniform scale with
-pan/zoom, offline, straight from `file://`. `--format html-chart` writes
-that same page holding the whole-graph chart alone, with the legend and
-without the appendices — the terminal-artifact counterpart to `chart`,
-which is bare pipeable text. `--format explore` writes a different kind of
-page (~2 MB: cytoscape + ELK + an expand-collapse extension + a
-customElements polyfill embedded — see THIRD_PARTY_LICENSES): the whole
-graph as an interactive map — click for full edge annotations, boxes that
-collapse to one node and expand again (double-click, the corner cue, the
-menu, or two toolbar buttons; `--collapse-threshold` folds the
-over-threshold top-level boxes once the first layout has placed their
-members, none without it), and navigation in three independent layers
-(DL-196): a selection, built by clicking, by a substring find that selects
-or highlights every match, or by walking a node's or the selection's
-fan-in/fan-out (direct or transitive) from the right-click menu or the
-toolbar; a sticky highlight that survives clicks, hiding and folding; and
-visibility — "hide selected", "hide others", "show all". Shift+drag the
-background to add a region to the selection (plain drag still pans, and
-ctrl or cmd work too); Escape closes an open menu or controls/help panel,
-else empties the find field if that is where you are typing, else clears
-the selection. The compact header keeps Find, its two match actions, Fit
-and Help available. Selection, Highlight, Visibility and View open panels
-over the canvas. A panel stays open for repeat commands. Close, Escape or
-an outside click dismisses it without changing the selection or view.
-Trace through boxes sits in Selection. Arrange after hiding and Locks sit
-in Visibility. Help contains the catalog totals, gestures and graph legend. The bottom
-status keeps the counts, the selected-count fit button and operation
-feedback; scroll it horizontally for a long message. Feature failures
-also show a persistent notice. Every op over the selection has an HTML
-button, so the page
-stays usable where the menu plugin cannot load (DL-77), and a control is
-disabled while the layer its op reads is empty — the selection ops while
-nothing is selected, the two highlight ops while nothing is marked.
-Dragging a selected node moves the whole selection, and a node otherwise
-moves only when a layout runs — at load, on "arrange", or after a hide op
-with "arrange after hiding" on. There is no undo. A collapse or an expand
-runs no layout at all: only the folded box's own members move, and the lock
-hubs are placed again on what is left drawn, so the rest of the picture and
-the viewport stay where the operator left them (DL-196). The "arrange"
-button lays the drawn graph out again on demand, and the "arrange after
-hiding" toggle — off by default — makes "hide selected", "hide others" and
-"show all" do the same with the space they free; "hide this node" never
-re-arranges. Off, only "hide others" and "show all" move the view, and a
-box's own bounds still follow the members it is left with. "Trace through
-boxes" (on by default) makes the walks follow the dossier: a member's
-fan-in adds every enclosing box and what gates it
-(SEM-10), its fan-out adds what an enclosing box's completion releases
-(SEM-11); off, they follow the condition edges alone (DL-190). Incoming
-arrows are an AND unless the job carries the badge ∨, which marks a
-condition the page draws as branches: each alternative's arrows are hollow
-and are coloured together when the job is clicked, a label names which
-alternation where that groups several arrows, and the details panel shows
-the condition text and its AND/OR tree (DL-191). A bare
-`n()` is a lock, draws no arrow, and now appears in that tree instead of
-nowhere. Locks are drawn too (DL-192): a mutual exclusion as a dotted link
-whose tee marks the job that waits (a complete clique of three or more as one
-hub), a resource semaphore as a hub per consumed `insert_resource` labelled
-with its capacity, both excluded from the layout, placed beside their
-members and clear of every job, never part of a fan-in or fan-out, and
-switchable off. Edges route
-orthogonally along the layout axis, so the picture keeps the layering ELK
-computed. Chrome, Safari and Firefox all drive the page, and CI runs it in
-all three on every push (tests/test_viz_explore_browser.py): Safari needs a
-polyfill for the menu plugin's customized built-in elements, vendored into
-the page (DL-77), and if a browser refuses the menu or the collapse
-extension, the page says so in its status line and every other control
-keeps working. It is a navigation lens for bank-scale estates; the report
-stays the artifact of record with the appendices.
+The report shows each independent workflow as its own chart, largest first.
+A legend and appendices list everything the charts omit: standalone
+admin-wrapper jobs (charted with `--include-singletons`), assumed-edge
+assumptions, redesign flags, OR shapes, and cycles. Boxes are subgraphs.
+Edges carry their E/A/R migration class as solid, dashed, or thick red
+arrows. File watchers and schedules are marked as triggers. Mutual
+exclusions appear as lock links or as a shared lock hub. A box with more
+direct members than the collapse threshold (default 12) folds into one
+node. Any Mermaid renderer works. `--fixed-scale` adds frontmatter that
+stops renderers from fit-to-width scaling each chart differently.
+
+`--format chart` emits the whole estate as one bare Mermaid chart for
+mermaid-cli or a live editor. `--format html` writes the report as one
+self-contained page of about 5 MB, with mermaid and ELK embedded (see
+THIRD_PARTY_LICENSES). Charts render in the browser at uniform scale with
+pan and zoom, offline, from `file://`. `--format html-chart` writes the same
+page around the whole-graph chart alone, with the legend and without the
+appendices.
+
+`--format explore` writes an interactive map of the whole graph, about 2 MB,
+with cytoscape, ELK, an expand-collapse extension, and a customElements
+polyfill embedded (see THIRD_PARTY_LICENSES). It is a navigation aid for
+large estates; the report stays the artifact of record. What the page does:
+
+- Click a node or an edge for its full annotations. The details panel shows
+  a job's condition text and its AND/OR tree.
+- Boxes collapse to one node and expand again: double-click, the corner cue,
+  the menu, or two toolbar buttons. `--collapse-threshold` folds the
+  over-threshold top-level boxes after the first layout; without it nothing
+  folds. A collapse or an expand runs no layout, so the rest of the picture
+  stays where it is.
+- Navigation has three independent layers. The selection is built by
+  clicking, by a substring find that selects or highlights every match, or
+  by walking a node's or the selection's fan-in or fan-out, direct or
+  transitive, from the right-click menu or the toolbar. The highlight is
+  sticky and survives clicks, hiding, and folding. Visibility is "hide
+  selected", "hide others", and "show all".
+- Shift+drag (or ctrl or cmd) on the background adds a region to the
+  selection; plain drag pans. Escape closes an open menu or panel, else
+  empties the find field while typing there, else clears the selection.
+- The header keeps Find, its two match actions, Fit, and Help. Selection,
+  Highlight, Visibility, and View open panels over the canvas. A panel stays
+  open for repeat commands; Close, Escape, or an outside click dismisses it.
+  Help lists the catalog totals, the gestures, and the legend. The bottom
+  status shows counts, a fit-to-selection button, and operation feedback. A
+  feature that fails to load shows a persistent notice.
+- Every operation over the selection has an HTML button, so the page works
+  where the menu plugin cannot load. A control is disabled while the layer
+  its operation reads is empty.
+- Dragging a selected node moves the whole selection. Otherwise nodes move
+  only when a layout runs: at load, on "arrange", or after a hide operation
+  when "arrange after hiding" is on (it is off by default). There is no undo.
+- "Trace through boxes" (on by default) makes walks follow box semantics: a
+  member's fan-in adds every enclosing box and what gates it, its fan-out
+  adds what an enclosing box's completion releases. Off, walks follow the
+  condition edges alone.
+- Incoming arrows are an AND unless the job carries the badge ∨. Then each
+  alternative's arrows are hollow, are coloured together when the job is
+  clicked, and a label names the alternation where it groups several arrows.
+  A bare `n()` is a lock: it draws no arrow and appears in the condition
+  tree.
+- Locks are drawn and can be switched off. A mutual exclusion is a dotted
+  link whose tee marks the waiting job; a clique of three or more is one
+  hub. A resource semaphore is a hub per consumed `insert_resource`,
+  labelled with its capacity. Locks sit outside the layout, beside their
+  members, and take no part in walks.
+- Edges route orthogonally along the layout axis.
+
+Chrome, Safari, and Firefox all drive the page, and CI runs it in all three
+on pushes to main and on pull requests. If a browser refuses the menu or
+the collapse extension, the status line says so and every other control
+keeps working.
 
 ### Migration report
 
@@ -202,12 +213,11 @@ stays the artifact of record with the appendices.
 dsl41 report jobs.jil -o report.md
 ```
 
-The command writes per-catalog markdown from the UC backend: refused (R)
-constructs, recorded per-edge assumptions (A rows), and the open U-question
-table. After the report is generated, the command always exits 0. The report
-itself is the loud channel. Use `lint --strict` as the pass/fail gate.
+The report comes from the UC backend. It lists refused (R) constructs, the
+assumption recorded on each A-classified edge, and the open U-question
+table. Use `lint --strict` as the pass/fail gate.
 
-### Emit UC workflow records (base subset)
+### Emit UC workflow records
 
 ```sh
 dsl41 uc jobs.jil -o bundle.json            # CREATE-ONLY taskWorkflow records
@@ -215,17 +225,16 @@ dsl41 uc --strict jobs.jil                  # exit 1 if anything was quarantined
 ```
 
 The command emits one `taskWorkflow` record per serializable workflow, in
-exactly the shape frozen in
-[docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md)
-(U3a, DL-55). The records use base edge conditions only (Success / Failure /
-Success/Failure), with `retainSysIds: false` and no system ids. If a workflow
-contains an edge that the base schema cannot express (a t()-derived
-condition, a variable condition), the command quarantines the whole workflow.
-Two workflows that would emit one record name quarantine as well.
-The bundle's own ledger lists every quarantined workflow with its reason.
-There is no partial workflow and no silent edge drop.
-Rich condition forms and write-path verification stay blocked on U3b
-(live controller).
+the shape frozen in
+[docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md).
+The records use base edge conditions only (Success, Failure,
+Success/Failure), with `retainSysIds: false` and no system ids. A workflow
+with an edge the base schema cannot express (a `t()`-derived condition, a
+variable condition) is quarantined whole. Two workflows that would emit one
+record are quarantined as well. The bundle's ledger lists every quarantined
+workflow with its reason. There is no partial workflow and no silent edge
+drop. Rich condition forms and write-path verification wait on a live
+controller (U3b).
 
 ### Prove two catalogs equivalent
 
@@ -236,11 +245,11 @@ dsl41 equiv new.jil -b old.jil --rename OLD=NEW --case-fold # renamed estate
 ```
 
 Tier a is structural (canonical-form diff). Tier b enumerates per-job truth
-tables. If a state space is too large, tier b defers and never fails. Tier c
+tables; if a state space is too large, tier b defers and never fails. Tier c
 compares oracle traces over seeded deterministic event scripts. Identical
-canonical hashes short-circuit to equivalent. On any divergence, the exit
-code is 1. Typical use: refactor a catalog (by hand or via
-decompile-edit-rebuild), then prove that nothing changed.
+canonical hashes short-circuit to equivalent. Any divergence exits 1.
+Typical use: refactor a catalog, by hand or by decompile-edit-rebuild, then
+prove that nothing changed.
 
 ### JIL -> DSL (decompile)
 
@@ -248,11 +257,12 @@ decompile-edit-rebuild), then prove that nothing changed.
 dsl41 decompile jobs.jil -o catalog.py
 ```
 
-The command emits a runnable Python module over the phase-10 builders. When
-you run the module, it rebuilds a catalog whose canonical form equals that of
-the original (the round-trip property, tested corpus-wide). Recognized
-structural patterns fold into builder calls from the closed DL-38 registry,
-which `dsl41 folds` lists. `--no-fold` disables the folding.
+The command emits a runnable Python module over the DSL builders. Running
+the module rebuilds a catalog whose canonical form equals the original's;
+this round-trip property is tested over the whole corpus. Recognized
+structural patterns fold into builder calls from a closed registry, which
+`dsl41 folds` lists. `--no-fold CODE` disables the named fold; the option is
+repeatable and accepts comma-separated codes.
 
 ### DSL -> JIL (build)
 
@@ -273,22 +283,42 @@ jil_text = b.to_jil()   # JIL text, byte-for-byte what the front end accepts
 catalog = b.build()     # ...or parse+lower it through the real pipeline
 ```
 
-`build()` is the in-process catalog every phase and the engine consume;
-`to_jil()` is the durable form. `dsl41 run` and the run root take JIL bytes
-only (DL-194): `python catalog.py > jobs.jil && dsl41 run jobs.jil --run-root ./run1`.
+`build()` returns the in-process catalog every phase and the engine consume.
+`to_jil()` returns the durable form. `dsl41 run` and the run root take JIL
+bytes only: `python catalog.py > jobs.jil && dsl41 run jobs.jil --run-root ./run1`.
 
-`job()` keyword names are JIL attribute names. `sequence()` wires s()-chains,
-and `parallel()` wires a fan-out and fan-in. Both refuse to merge into an
-existing condition (DL-17: no silent loss). There is no second lowering path.
-The builder generates JIL and reuses parse -> lower, so `lint`, `viz`, and
-`equiv` all apply unchanged to DSL-built catalogs. The round-trip workflow:
-`decompile` an estate to Python, edit it, run the module, and `equiv` the
-result against the original.
+`job()` keyword names are JIL attribute names. `sequence()` wires `s()`
+chains; `parallel()` wires a fan-out and a fan-in. Both refuse to merge into
+an existing condition. There is no second lowering path: the builder
+generates JIL and reuses parse and lower, so `lint`, `viz`, and `equiv`
+apply unchanged to DSL-built catalogs.
 
-### Run an estate (phase 11)
+### De-identify an estate (minify)
+
+```sh
+dsl41 minify jobs.jil globals.jil -o minified/     # one file per input
+dsl41 minify jobs.jil --mapping names.json         # write the name mapping
+```
+
+The mapping file re-identifies the estate. Never commit or share it.
+
+`minify` emits a copy of an estate that still exercises the compiler but no
+longer names the estate. The job graph, conditions and their lookbacks,
+schedules, exit-code policy, resource gates, and numeric timing hints
+survive. Names are renamed into synthetic namespaces, `command` becomes an
+inert constant, and comments and observability attributes are dropped.
+Every kept value is checked against the closed space its key claims. An
+attribute the tool cannot classify stops the run (exit 3) rather than
+guessing. A structural verify proves the result isomorphic to the original
+under the name mapping. The leak guard is a backstop, not a total check: it
+sees tokens of four or more characters that carry a letter. Read the output
+before you hand it over.
+
+### Run an estate
 
 ```sh
 dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
+dsl41 run jobs.jil --run-root ./run1 --resume   # after a stop or a crash: replay, reconcile, go on
 dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
 dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
 dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
@@ -300,90 +330,95 @@ dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both; q stops it
 dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in seconds
 dsl41 rehearse jobs.jil --check-cadence         # run counts vs cadence bounds; exit 3 on deviation
-dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays (dynamic L022)
-dsl41 rehearse jobs.jil --check-cadence --sweep flags # + per-flag replays; global-gated jobs get checked
+dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays
+dsl41 rehearse jobs.jil --check-cadence --sweep flags # + per-flag replays of global-gated jobs
 dsl41 release-held -S ./run1/control.sock       # estate-wide OFF_HOLD sweep
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
-The TUI (jobs table with pending timers and alarms, explain pane with
-per-atom condition truth, log tail, sendevent console) is the optional
-`[ui]` extra: `pip install 'dsl41[ui]'`. It is a thin client of the run's
-control socket. `sendevent`/`query` speak the same protocol. Zooming the
-log tail (`m`) turns it into a less-style pager — `/` search, `&` filter,
-`n`/`N`, `F` follow — and the operator verbs are unreachable while paging.
-`t` opens a read-only triggers view — every pending timer, calendar tick,
-and live filewatch with countdowns — and the jobs table marks the armed
-latch (SEM-32) as flag `A`. Verb keys act only while the jobs table has
-focus; kill and force ask first, naming the box members and the revision
-they will act on. F1 opens the help panel.
+`run` executes the estate on the wall clock with real processes, a
+write-ahead journal, the calendar scheduler, and a control socket. Stop it
+with SIGINT or SIGTERM. `rehearse` drives the same engine under a virtual
+clock with scripted adapters, so a day of the estate plays in seconds.
+`sendevent` and `query` are clients of the control socket; every mutation
+carries a precondition, and a `sendevent` is answered with its decision.
+
+The TUI is the optional `[ui]` extra. It is a thin client of the control
+socket: a jobs table with pending timers and alarms, an explain pane with
+per-atom condition truth, a log tail, and a sendevent console. Zooming the
+log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
+`n`/`N`, and `F` follow; the operator verbs are unreachable while paging.
+`t` opens a read-only triggers view of every pending timer, calendar tick,
+and live filewatch with countdowns. The jobs table marks an armed latch as
+flag `A`. Verb keys act only while the jobs table has focus. Kill and force
+ask first, naming the box members and the revision they act on. F1 opens
+the help panel.
 
 `host drain` is the maintenance verb: new work stops being dispatched to
-that execution host and work already running finishes. Held jobs are not
-failed and not moved — a job is only ever rerun elsewhere after the host
-is *evicted*, which needs proof the old executor is dead
+that execution host, and work already running finishes. Held jobs are not
+failed and not moved. A job is rerun elsewhere only after the host is
+evicted, which needs proof that the old executor is dead
 ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
 §8). `query status` marks a held job, because a held job otherwise reads
 RUNNING with no process behind it.
 
-The scheduler obeys `run_calendar`/`exclude_calendar` (DL-56/57). Standard
-calendar day sets apply on the job's local day (run minus exclude, SEM-31).
-The built-in autocal rule engine interprets extended calendars (SEM-36..39).
-An exhausted calendar makes the job dormant and does not cause an error.
-Before the engine starts, preflight (ss8) examines the calendar wiring:
-dangling references are errors, and empty or stale calendars cause warnings.
+The scheduler obeys `run_calendar` and `exclude_calendar`. Standard
+calendar day sets apply on the job's local day, run minus exclude. A
+built-in autocal rule engine interprets extended calendars. An exhausted
+calendar makes the job dormant; it is not an error. Before the engine
+starts, preflight examines the calendar wiring: dangling references are
+errors, and empty or stale calendars are warnings.
 
-`timezone:` names resolve the vendor's way (SEM-35/DL-62): the zone
-database first (case-insensitive), then the instance's ujo_timezones
-table — capture it read-only with `autotimezone -l` and pass the listing
-via `--timezone-map`. Without a map, a city name such as `Zurich` falls
-back to the unique zone whose city component matches (`Europe/Zurich`)
-with a preflight WARN. POSIX fixed offsets (`GMT+5`, west-positive) work;
-an unresolvable name is a preflight error naming the remedy.
+`timezone:` names resolve the vendor's way: the zone database first,
+case-insensitive, then the instance's ujo_timezones table. Capture that
+table read-only with `autotimezone -l` and pass the listing with
+`--timezone-map`. Without a map, a city name such as `Zurich` falls back to
+the unique zone whose city component matches (`Europe/Zurich`), with a
+preflight warning. POSIX fixed offsets (`GMT+5`, west-positive) work. An
+unresolvable name is a preflight error that names the remedy.
 
-### Detached mode (phase 11f)
+### Detached mode
 
-By default, a run is **tethered**: if you kill the engine, its jobs terminate
-(durably recorded even under `kill -9`, ss6a). If a long-running estate must
-survive an engine restart (an upgrade), add `--detached`:
+By default a run is tethered: if the engine dies, its jobs terminate, and
+the termination is recorded even under `kill -9`. If a long-running estate
+must survive an engine restart, such as an upgrade, add `--detached`:
 
 ```sh
 dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervisor
-# ...stop the engine (SIGINT) -- jobs keep running under the supervisor...
+# ...stop the engine (SIGINT); jobs keep running under the supervisor...
 dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
 dsl41 supervise list --run-root ./run1            # what the supervisor is holding
-dsl41 supervise shutdown --run-root ./run1        # stop it (TERM->grace->KILL)
+dsl41 supervise shutdown --run-root ./run1        # stop it (TERM, grace, KILL)
+dsl41 supervise start --run-root ./run1           # run the supervisor in the foreground
 dsl41 run jobs.jil --run-root ./run1 --detached --deadman 600  # opt into eviction
 ```
 
 A per-run-root supervisor (`runner_supervisor.py`, stdlib-only, one process
-per run root) owns the lifelines of the wrappers. Thus the parent of the jobs
-is the supervisor, not the engine. If the engine stops or crashes, the jobs
-continue to run. `--resume --detached` reconnects and **reattaches** to the
-still-alive runs (no reconciliation injection, no re-run). It also resolves,
-from the spool, any runs that finished meanwhile. The engine holds a single
-fencing lease. The socket protocol of the supervisor is frozen in
-[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
-ss5. `supervise` is read-only by default (DL-42).
+per run root) owns the lifelines of the job wrappers, so the parent of the
+jobs is the supervisor, not the engine. If the engine stops or crashes, the
+jobs continue. `--resume --detached` reconnects and reattaches to the runs
+still alive, with no re-run, and resolves from the spool any run that
+finished meanwhile. The engine holds a single fencing lease. The socket
+protocol is frozen in
+[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md).
+`supervise` is read-only unless you ask it to shut down or start.
 
-`--deadman N` trades some of what `--detached` buys, deliberately. The
-supervisor exits after N seconds with no live controller, which kills every
-job it holds by lifeline EOF — so an engine down longer than N loses its
-jobs, and that is the point: it is the only thing that bounds how long an
-unreachable host keeps running work, and therefore the only thing that makes
-`dsl41 host evict` provable rather than a guess. Without it a run root is
-never reroutable except by `--force`. Choose it longer than any planned
-engine outage.
+`--deadman N` trades some of what `--detached` buys. The supervisor exits
+after N seconds with no live controller, and every job it holds dies by
+lifeline EOF. An engine down longer than N loses its jobs. That bound is
+what makes `dsl41 host evict` provable rather than a guess; without it a
+run root is never reroutable except by `--force`. Choose N longer than any
+planned engine outage.
 
-### Serving the TUI over the web (phase 11e)
+### Serve the TUI over the web
 
 `dsl41 serve -S ./run1/control.sock` wraps
 [textual-serve](https://github.com/Textualize/textual-serve) around the
 same app. Every browser tab gets its own `dsl41 ui --socket` subprocess
-attached to the run (the ss11 one-instance-per-viewer split). The page shows
-this subprocess as a terminal. textual-serve ships **no authentication**, so
-the default bind is loopback (`127.0.0.1:8000`). To reach it from a different
-host, use a reverse proxy or an SSH tunnel, never a wider `--host`:
+attached to the run, shown as a terminal. textual-serve ships no
+authentication, so the default bind is loopback (`127.0.0.1:8000`). To reach
+it from another host, use a reverse proxy or an SSH tunnel, never a wider
+`--host`:
 
 ```sh
 # tunnel: from the operator's machine
@@ -398,11 +433,11 @@ location /dsl41/ {
 }
 ```
 
-Put authentication (basic auth, an OIDC gate, client certificates — whatever
-the estate already trusts) in that proxy layer. dsl41 has no authentication
-of its own here. The control socket is 0600 from birth (ss10). Thus `serve`
-only sees what its own user can already reach directly. It does not widen
-access. It makes existing access reachable from a browser.
+Put authentication (basic auth, an OIDC gate, client certificates) in that
+proxy layer. dsl41 has none of its own here. The control socket is mode
+0600 from birth (0660 when an access map names a socket group), so `serve`
+only reaches what its own user can already reach directly. It does not
+widen access; it makes existing access reachable from a browser.
 
 ### Run history
 
@@ -412,857 +447,512 @@ dsl41 runs ./run1 ./run2 --job extract       # multiple roots, one job
 dsl41 runs ./lineage --format json           # a lineage anchor: every period's root, in order
 ```
 
-`runs` (DL-113) folds run history from a run root's journal, manifest and
-spool — offline only, no control socket, no live engine. Point it at a
-lineage anchor directory alone and it reads every root the estate's archive
-registry names, in period order, so a rolled lineage still reads as one
-table. `--format` is `table` (default), `json`, or `csv`; every row carries
-its `catalog_hash`, so a caller can segment a series itself by watching that
-field change. A run root with no stored inputs reports its rows as
+`runs` folds run history from a run root's journal, manifest, and spool.
+It is offline only: no control socket, no live engine. Pointed at a
+lineage anchor directory, it reads every root the estate's archive registry
+names, in period order, so a rolled lineage reads as one table. `--format`
+is `table` (default), `json`, or `csv`. Every row carries its
+`catalog_hash`, so a caller can segment a series by watching that field
+change. A run root with no stored inputs reports its rows as
 `fidelity=records_only`, with a warning on stderr.
+
+### Period boundaries
+
+A long-lived estate runs as a sequence of periods under a lineage anchor.
+The contract is
+[docs/period-model.md](https://github.com/mrbald/dsl41/blob/main/docs/period-model.md).
+
+- `seal` closes the running period and commits the next one. It works live
+  through the engine, which then exits with code 3, or offline when no
+  engine holds the root. The lock decides which.
+- `run --resume` reopens the next period in the same root. `run --open-from`
+  rolls it into a fresh root; the closing period must be attested first.
+- `audit` re-derives a closed period from its opening seal, journal, spool,
+  and manifests, and writes its attestation. `verify` checks one.
+- `journal` replays a run's write-ahead log into the trace it produced,
+  across period boundaries.
+- `estate prune` deletes what retention allows and refuses the rest.
+  `--archive-inputs` writes an archive receipt, then deletes a period's
+  inputs. That step is irreversible: the period can never be re-derived
+  again, only checked against its attestation. `estate reclaim --force` is
+  the break-glass move of a stale successor claim; prove the claimant is
+  gone before you run it.
 
 ### Training sandbox (examples/nightbank)
 
-A synthetic bank overnight estate — three regions closing follow-the-sun,
-demand-driven refdata, a human approval before the start-of-day flip — for
-learning to *operate* the engine: scripted incidents (stalled feeds, hung
-jobs, failed loads) that the night does not survive without you. A whole
-night plays in ~15 real minutes on the real engine. Start with
+A synthetic bank overnight estate: three regions closing follow-the-sun,
+demand-driven refdata, and a human approval before the start-of-day flip.
+It exists for learning to operate the engine. Scripted incidents (stalled
+feeds, hung jobs, failed loads) need an operator's response. A whole night
+plays in about 15 real minutes on the real engine. Start with
 [examples/nightbank/README.md](examples/nightbank/README.md) and its
 [RUNBOOK](examples/nightbank/RUNBOOK.md) of operator exercises
-(`uv run examples/nightbank/bin/nightbank up`). Repo-only; not packaged.
+(`uv run examples/nightbank/bin/nightbank up`). Exercises 15 to 21 cover
+the period boundary: sealing a night live and offline, opening the next
+period in place, the morning-after `audit` and `verify`, rolling to a fresh
+run root, break-glass reclaim, and retention. The `deploy/` directory holds
+a launcher script and systemd units for running it as a service. The
+example is repo-only; it is not packaged.
 
-It is also the concurrency model's proving ground
+CI also uses it to test the concurrency model
 ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-§9): CI drives this night through seeded interleavings of leader failover, a
-spawn decided and never acted on, duplicated and stale completions,
-quarantine and drain, and checks that no `(job, run_number)` ever runs twice
-across them (S7b).
-
-Exercises 15 to 21 are the boundary era: sealing a night live and offline,
-opening the next period in place and seeing what crossed, the morning-after
-`audit`/`verify`, rolling to a fresh run root, break-glass reclaim, and
-retention. Exercise 18 is a retirement note: DL-138 retired every read
-dialect a pre-boundary run root was written in, and the verb that adopted
-one. CI drives the same flows end to end in
-`tests/test_nightbank_boundary.py` (DL-136).
+§9): seeded interleavings of leader failover, a spawn decided and never
+acted on, duplicated and stale completions, quarantine, and drain, with a
+check that no `(job, run_number)` ever runs twice.
 
 ## Implementation memo
 
-All ten compiler phases in DL-03 are implemented and
-tested. The build order is: ast_jil, conditions, ir, lint, derive, viz,
-oracle, equiv, backend_uc, dsl. Phase 11 (the runner,
-[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md))
-has six tiers, all built:
-
-- 11a — the sans-IO engine loop, VirtualClock, FakeAdapter, and the two
-  oracle additions, gated by the ss13 bisimulation suite
-- 11b — the process lifecycle tier (per-run wrapper shim,
-  LocalCommand/FileWatcher adapters, WAL journal, crash-recovery resume with
-  the reconciliation ladder), with the spool contract frozen in
-  [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
-- 11c — the ss5 calendar scheduler, ss8 preflight, ss10 control socket
-  (sendevent parity + queries + subscribe), and the headless
-  `run`/`rehearse`/`sendevent`/`query` CLI verbs
-- 11d — the ss11 Textual TUI (`dsl41 ui` against a running engine, or
-  `dsl41 run --ui`, with the optional `dsl41[ui]` extra)
-- 11e — `dsl41 serve` via
-  [textual-serve](https://github.com/Textualize/textual-serve), same extra
-- 11f — the ss6a Tier-1 supervisor (`dsl41 run --detached`,
-  `dsl41 supervise`), a stdlib-only `runner_supervisor.py` that speaks the
-  frozen
-  [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
-  ss5 socket protocol
-
-The suite spans 56 test files (`pytest --collect-only -q` shows the current
-count) plus the 31-file synthetic/doc-derived JIL corpus under
-`tests/corpus/`.
+The compiler modules build in this order: ast_jil, conditions, ir, lint,
+derive, viz, oracle, equiv, backend_uc, dsl (DL-03). The DSL is last by
+design. The runner sits on the oracle. There is no re-export facade: every
+consumer imports a name from the module that owns it.
 
 ### Source map
 
-- src/dsl41/__init__.py — module map docstring only (no exports). It records
-  the ten-phase build order.
-- src/dsl41/ast_jil.py — JIL statement-level scanner + AST + preserve/canonical
-  renderers. Fidelity contract F1-F4: byte-exact `render(parse(x)) == x` (F1, fuzzed
-  by F3), canonical-mode fixpoint (F2), escaped-colon torture (F4)
-- grammars/condition.lark — condition-expression grammar (lark, LALR). Single flat
-  `start` rule, & and | at equal precedence, strictly left-associative (Q1
-  resolved, DL-53 — the earlier C-style candidate rule is deleted)
-- src/dsl41/conditions.py — lark loader + Tree->Cond transformer for
-  condition/box_success/box_failure expressions. Lookback + span retention.
-- src/dsl41/ir.py — IR-F Pydantic entity models + AST->IR-F lowering. If
-  `permit_unknown` is not set, the DL-07 firewall refuses unknown attributes.
-  Calendar/cycle repeat-key lanes (`CalendarIR.conditions`, `CycleIR.periods`,
-  DL-57) keep real multi-condition/multi-period autocal exports loadable.
-- src/dsl41/lint.py — Violation model + rules L001-L022 (pure IR-F rules L001-L005/L015,
-  truth-table rules L006/L007 joined in phase 8, graph rules L008-L014 and L020-L022 over the
-  derived graph, dangling-name rules L016-L018)
-- src/dsl41/derive.py — IR-F -> IR-G: seven analysis passes that produce edges, mutex
-  pairs, box tree, same-cycle detection, M01-M36 mapping-row classification
-- src/dsl41/viz.py — IR-F + IR-G -> Markdown report of per-workflow Mermaid charts (DL-35):
-  component split, trigger/lock visual grammar, E/A/R edge-class arrows, collapse
-  threshold, appendices for everything that the charts omit
-- src/dsl41/viz_html.py — the same report content as one self-contained offline HTML
-  page (DL-70): vendored mermaid + ELK from src/dsl41/_vendor/, uniform chart scale,
-  progressive in-browser rendering with pan/zoom; the same page around the whole-graph
-  chart alone is --format html-chart (DL-76)
-- src/dsl41/viz_explore.py — IR-F + IR-G -> cytoscape.js elements for the interactive
-  navigation page (DL-71): compound-node box tree, EXT-node synthesis, edge
-  annotations in a click-details panel, ELK layout + focus/search in the browser;
-  the customElements polyfill loads ahead of the cytoscape bundle and the context
-  menu registers last, guarded, so no optional plugin can take the page (DL-77)
-- src/dsl41/oracle_state.py — the oracle's state and the vocabulary of the
-  events that move it: JobStatus/TERMINAL/EventKind/Event/TraceEntry, the frozen
-  JobRuntime, GlobalRuntime and HostRuntime rows with the semantic projection
-  that decides when a revision moves, RuntimeState (private maps, typed verbs,
-  the timer heap with its ordering token, the input transaction) and OracleError.
-  It imports nothing from the interpreter, which is why the split exists (DL-91)
-  — and why the routing table can live under the same owner without the
-  interpreter being able to read it (DL-93/94)
-- src/dsl41/oracle.py — AutoSys discrete-event semantics interpreter. Script-driven
-  completion, edge-triggered re-evaluation, per-SEM-entry trace tests, and
-  `InputBatch` — one admitted input as one store transaction
-  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §3). The state it moves lives next door in oracle_state.py
-- src/dsl41/capacity.py — the DL-50 capacity subsystem: sized buckets (machine
-  max_load, resource amounts) and the QUE_WAIT queue with its admission order. It
-  decides who may be admitted and in what order; every transition that decision
-  implies stays on the Oracle
-- src/dsl41/equiv.py — equivalence validator: canonical form + tier a (structural),
-  tier b (per-job state-space enumeration), tier c (oracle trace comparison)
-- src/dsl41/backend_uc.py — UC backend: builds the UC twin model, classifies
-  edges, emits the migration report, and serializes the U3a base CREATE-ONLY
-  record bundle
-  ([docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md) — rich
-  condition forms blocked on U3b). The UC-side twin interpreter that runs the
-  P-Mxx expected-divergence pairs against it lives at tests/uc_oracle.py since
-  DL-189; it shares Event/TraceEntry with oracle.py.
-- src/dsl41/dsl.py — builder surface (job/box/sequence/parallel) + decompiler,
-  extracted from corpus-observed patterns only (phase 10, last by design)
-- src/dsl41/minify_rules.py — what `minify` may emit (DL-207): the
-  classification table and one value predicate per key. Every attribute key and
-  every subcommand resolves to exactly one of KEEP / RENAME / REPLACE / DROP,
-  derived from what the IR models; a key in none of them stops the run rather
-  than leaking or vanishing, and a KEEP value is checked against the closed
-  space its key claims rather than assumed to be in it. Pure functions of one
-  attribute, no transform state
-- src/dsl41/minify.py — the minifier itself, behind the `minify` verb: a real
-  estate in, a de-identified one out. Renders in PRESERVE mode over an AST whose
-  trivia has been emptied, so the DL-49 pool binding and the SEM-39 date pairs
-  survive attribute order. A structural verify proves the result isomorphic to
-  the original under the name mapping, and a leak guard that cannot be switched
-  off refuses an input token that survives into the output unless the JIL
-  vocabulary, a minted name or a validated KEEP value accounts for it. The guard
-  is a BACKSTOP, not a total check: it sees tokens of four or more characters
-  that carry a letter, and it cannot see a value the table already proved to be
-  closed vocabulary — the table, not the guard, is what makes the output safe
-- src/dsl41/placeholders.py — non-core estate templating preprocessor (DL-19):
-  `~{$NAME}~` resolution from KEY=VALUE properties files (fixpoint, loud on
-  residue), behind the `resolve` verb. Nothing in the core imports it.
-- src/dsl41/autocal.py — extended-calendar rule interpreter (DL-57): pure
-  functions from the opaque CalendarIR/CycleIR carry (DL-36) to day sets per
-  the SEM-36..39 doc-freeze — the SEM-37 date-condition keyword inventory,
-  the SEM-38 filter-then-replace disposition pipeline (holiday action
-  governs holcal dates — Q8a resolved, DL-58), uniform blind `adjust`,
-  cycles, dormancy ceilings. Undocumented composition corners run on
-  pinned deterministic defaults (`# PENDING: Q8b-Q8d`, DL-59 — refusals
-  only for the genuinely uninterpretable, so an ordinary estate always
-  schedules). The runner's scheduler and preflight consume it. It is also
-  the reference implementation that a live autocal is diffed against (Q8
-  residue).
-- src/dsl41/runner.py — phase-11 engine: the single-writer loop over the oracle
-  (dispatch table, time-ordered event queue, stale-completion gate, admission and
-  the effect outbox's dispatch). DL-74 split its other subsystems into the sibling
-  modules below, with no re-export facade: every consumer imports from the module
-  that owns the name
-- src/dsl41/runner_startup.py — taking possession of a run root (DL-106): genesis,
-  resume, and concurrency-model ss7's takeover barrier — acquire, replay,
-  reconcile every execution host, retire superseded and re-drive pending, dispatch.
-  Runs once per incarnation, before the loop exists; `start_run` is the barrier's
-  degenerate case, where an empty log leaves nothing but the acquire. Split from
-  the loop because they share exactly one object, and it is the one this half
-  constructs
-- src/dsl41/runner_control.py — the ss10 control plane, both ends (DL-78): the
-  unix-socket server (sendevent parity, status/trace/explain/spec/deps/timers/
-  plan, subscribe), the wire vocabulary, and three clients — a persistent
-  async one for the TUI, a one-shot blocking one for the CLI, and a blocking
-  generator (`subscribe_lines`, DL-172) that streams the CLI's `subscribe`.
-  `subscribe`'s backfill spans WAL segments since DL-135 — bounded, newest
-  segment first — and a cursor below what the root still retains gets an
-  explicit gap marker rather than a short stream. The protocol
-  is frozen in
-  [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
-  the outer counterpart to the lifecycle tier's supervisor protocol; every
-  query handler is a pure projection of oracle state
-- src/dsl41/runner_clock.py — the ss9 time domains: the Clock protocol,
-  VirtualClock (the engine drives time; adapters may block only on it) and
-  RealClock (naive-UTC wall clock). It also holds EngineError, the shell's one
-  refusal type, because it is the bottom of the runner import DAG (DL-74)
-- src/dsl41/runner_adapters.py — the ss6 adapter contract and every adapter:
-  FakeAdapter, LocalCommandAdapter (each command under the ss6a Tier-0 wrapper),
-  FileWatcherAdapter, plus the ss6a Tier-1 detached path (SupervisorClient +
-  SupervisedCommandAdapter: SPAWN through the supervisor, await the exit push,
-  detach-stop vs oracle-kill cancellation, resume-time reattachment) and the ss7
-  spool ladder through which both the detached adapter and resume resolve an
-  interrupted run's outcome
-- src/dsl41/runner_admission.py — phase-12 stages S2+S3: the one order every
-  input takes (dedup, stamp, append, apply the time half, decide, record), the
-  record types it leaves (Attempt, ApplyResult), the typed Frontiers, the
-  DecisionIndex that answers a retry, the envelope fingerprint, and the gate as
-  a pure function of state so replay reaches the same verdict the live engine
-  did — plus the v2 envelope (parse_envelope) that makes preconditions
-  mandatory, in one function rather than one per transport
-- src/dsl41/runner_effects.py — phase-12 stage S5c: the ss5 effect outbox —
-  what the shell INTENDS to do to an execution host, recorded before it is
-  attempted, bound to the executor it is for. The three states (pending,
-  applied, indeterminate) with `outcome_unavailable` for an attempt nothing
-  can report on, supersession by exact desired state rather than by
-  generation (KILLJOB does not advance run_number, so a version check never
-  fires for the case that motivates it), and the planner that turns what the
-  oracle emitted into what the shell will do
-- src/dsl41/runner_hosts.py — phase-12 stage S5a: the ss8 execution-host
-  routing table's vocabulary — the HostCommand an operator sends, eviction's
-  three preconditions as a pure function of the row (so replay reaches the same
-  verdict without a live host to probe), the one predicate that says which
-  states route new effects, and the genesis seed that puts this engine's own
-  executor in the table
-- src/dsl41/period.py — period identity (period-model ss1.1/ss2.1, DL-130):
-  `catalog_hash` v2 (the ss3.2 canonical form with `meta` projected to
-  `{source_files}`, so a patch release cannot orphan a live estate) and the
-  ONE dispatcher every owner asks which recipes are readable -- v1 is retired
-  and refused by name (DL-138); `source_bundle_hash` (length-framed, in
-  command-line order) and the content-addressed input bundle it addresses,
-  the typed frozen `RuntimeProfile` and its `runtime_hash`, the staged and
-  committed manifest models, the `segment` record every new log opens with, and
-  since DL-144 the ARCHIVE RECEIPT (`seals/<period>.archive.json`) that says a
-  period's inputs were deleted by policy rather than lost
-- src/dsl41/classify.py — boundary classification (period-model ss10, DL-131): the
-  graph IR-G cannot give — job, box containment, global, external instance, resource,
-  machine, calendar/cycle, timezone basis and one node per RuntimeProfile field, each
-  with a stated "changed when" — with edges running from a job TO what it depends on,
-  the profile fields included. Two closures: a job's forward closure answers the R gate
-  ("is anything live job J depends on changed?"), a changed node's reverse closure plus
-  condition truth under both catalogs answers the boundary-truth diff ("whose readiness
-  flips?"). Verdicts are R (executing), A with a named assumption (latent intent) or
-  carry, one per job. Pure analysis: no disk, no socket, no clock
-- src/dsl41/seal.py — the seal artifact (period-model ss3/ss4, DL-132): the typed
-  sidecar a period ends by writing — every authoritative row, the timer heap, the
-  capacity scalars, the undelivered outbox, the three execution kinds, the
-  boundary's verdicts and the opening it commits — plus the two pure functions
-  over it, `close_runtime` and `open_from_seal`. Every section is a frozen model
-  and the wire keys are its fields, so an unknown section is a refusal; `digest`
-  is derived rather than stored; the two ss3.3 exclusions (a host's
-  `last_contact` and its deadman) are absent from the SHAPE; and
-  `next_period.baseline_id` is re-derived from `{estate_id, period_id,
-  stage_digest}` on every read, never minted. The seal OPERATION is
-  `boundary.py`, and it calls these two unchanged
-- src/dsl41/boundary.py — the boundary operation (period-model ss1.1/ss1.3/ss6–ss9/
-  ss11, DL-133): the lineage anchor and its four-state head under a lock, the
-  durable successor claim, the `period_root` sentinel and ss1.1's one ownership
-  rule, C2 staging, ss9's retry-horizon gate, the three pure validation phases,
-  ss3's three writes in the one order that is the durability argument, and ss11's
-  seal selection and head actions at resume. `seal.py` is the artifact; this is
-  what has to be true before a period may close, in what order the bytes hit the
-  disk, and who may open next
-- src/dsl41/attest.py — the attestation (period-model ss1.3/ss11, DL-134): what
-  `audit` produces and `verify` consumes, and the two rules that are not one.
-  Producing a checkpoint re-derives the period's seal from the four inputs ss11
-  names — the opening seal, the complete ordered WAL, the immutable spool, and
-  the C1/C2 manifests, plus the sentinel for the single `source` derivation.
-  `prove_derived` is that comparison as a GATE rather than as a step of one
-  verb (DL-142): `audit` asks it before it writes a checkpoint and `dsl41
-  journal` asks it before it crosses a boundary, so a sidecar forged
-  consistently with its record and the successor's opening gets one refusal
-  wherever it is met. Producing also requires the predecessor checkpoint present and verified; consuming one
-  accepts it ALONE, which is what lets a rolled root verify a chain whose
-  earlier roots are gone. "Verified" means re-derived: a sidecar that matches
-  its own canonical form proves integrity, not derivation
-- src/dsl41/estate.py — estate-level transactions over roots (period-model
-  ss1.1/ss1.3/ss7, DL-134): the PHYSICAL ROLL (`run --open-from`) — head
-  `closed`, closing period quiescent and attested, sentinel before claim, import
-  between claim and segment. Not a second semantic path: it hands the ordinary
-  machinery a root it can resume. The module's other operation, adoption from a
-  legacy estate, went with the read dialects at DL-138
-- src/dsl41/retention.py — the retention floors and the prune verb (period-model
-  ss11a/ss12, DL-135): what may never be deleted, computed from one root rather
-  than asserted — the sentinel, the anchor and its live claim, the sidecars this
-  period opened from and will close with, the current and committed-next
-  manifests, an uncommitted candidate's two files, their bundles, the newest
-  attestation, and the WAL and spool of any unattested period. Three verdicts,
-  because the spec leaves a middle: floored (refused), held (released by the head
-  moving on and kept anyway, because no class licenses it — the row says which
-  dependency is in the way) and prunable (licensed by name — an attested period's
-  terminal SPAWN tombstone, a quarantined candidate, and since DL-144 the INPUTS
-  of an archived period). Deleting a floored artifact is impossible rather than
-  merely not done: the verb iterates the prunable set alone, and the remover
-  refuses a path that is not one, is outside the run root, or holds a retained
-  artifact beneath it. DL-144 closed PR-Q3/E20 by policy: `estate prune
-  --archive-inputs` writes `seals/<period>.archive.json` before it deletes
-  anything, the receipt plus that period's attestation and sidecar become a
-  permanent floor, the period drops to the **attestation-verified** tier for
-  good, and every reader names the gap instead of answering shorter
-- src/dsl41/runner_journal.py — the ss7 inputs-only WAL: Journal (segment/leader/input/
-  advance/host/decision/effect_result/seal/dispatch/drop/preflight records, append+fsync before every
-  feed), read_journal, the two-pass replay_inputs, and the resume gate written
-  into the opening `segment`. ONE record validator sits at the read layer
-  (DL-138): a current kind proceeds, a retired one (`header`, `result`,
-  `effect`) refuses by name, an unknown one refuses as its own error, and a
-  `decision`'s `legacy_batch` is pinned three ways. Since DL-133 the records live in
-  `wal/<segment_no>.jsonl` and `journal.jsonl` holds the one-line `period_root`
-  sentinel; every reader follows the sentinel's `see` through `period.resolve_wal`.
-  `read_journal` is one segment, which is what an appender and an audit each
-  want; `read_backfill` is what a subscriber resuming across a boundary wants — the
-  retained segments walked newest first and stopped at the one holding its
-  cursor, plus the gap when the cursor is below them all (DL-135). Both meet
-  three shared checks (DL-142): `check_segment_tail` (a closed segment ends in
-  its `seal` — one text, positioned per caller), `check_segment_identity` (this
-  file sits in the estate its sentinel names and holds the period its name
-  claims) and `check_segment_adjacency` (the newer opens from the older's seal,
-  one estate, a continuous index frontier) — extracted so the subscriber inside
-  a root and the cross-period replay across roots cannot disagree about one
-  broken chain
-- src/dsl41/runner_ledger.py — phase-12 stage S6a: leadership over one run root —
-  the mutex (an flock held for the process lifetime, so nothing has to decide
-  whether the previous holder is alive), the epoch allocated by being appended to
-  the log under it, and ss7's eligibility gate on the opening record's two pins. Acquired
-  before the log is read and before the first side effect: `resume_run` replays,
-  reconciles and re-drives recorded kills, and a mutex taken after those is not
-  one
-- src/dsl41/runner_scheduler.py — the ss5 calendar scheduler (standard calendar
-  day sets and windowed extended-calendar generators, DL-56/57), turning its
-  ticks into UTC instants through src/dsl41/timezones.py
-- src/dsl41/timezones.py — SEM-35 name resolution (zoneinfo, the
-  `--timezone-map` ujo_timezones table, the DL-62 unique-city default, POSIX
-  fixed offsets) and the one naive-UTC <-> local conversion every layer
-  crosses. Phase-free: imports nothing from dsl41, so the oracle reaches the
-  same ladder as the scheduler without reaching through it (DL-163)
-- src/dsl41/runner_preflight.py — ss8 preflight: the ERROR/WARN item model and
-  its rules — job type, machine resolution through insert_machine (DL-49/52),
-  owner, calendars, timezones, resources (DL-50), oracle construction, and the
-  AND-success skeleton cycle that disables `plan`
-- src/dsl41/runner_supervisor.py — the ss6a Tier-1 supervisor (phase 11f): stdlib-only
-  (same enforced boundary as the wrapper), one per run_root. It owns the wrapper
-  lifelines, so an engine restart reattaches and does not kill jobs. It speaks the
-  frozen [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md)
-  ss5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING +
-  lease), with same-uid peer-cred and a Linux subreaper.
-- src/dsl41/runner_tui.py — the ss11 Textual TUI (optional `dsl41[ui]` extra): a thin
-  client of the control socket only (jobs table with pending timers/alarms, explain
-  pane with per-atom truth, log tail of the ss6 std files — a less-style pager when
-  focused/zoomed (DL-67), sendevent console). Subscribe is a wake-up signal, and
-  every view that the TUI shows comes from the idempotent ss10 queries.
-- src/dsl41/runner_wrapper.py — the ss6a Tier-0 per-run lifecycle recorder: stdlib-only
-  (enforced DL-42 extraction boundary). It records spawn.json/status.json durably.
-  On lifeline EOF, it kills and records. Spool contract in
-  [docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md).
-- src/dsl41/runner_procid.py — the durability liturgy (fsync/rename/fsync) and process
-  identity (boot id, (pid, start-time) PID-reuse guard, quiet group kill) the wrapper
-  and the supervisor share: one stdlib-only module both import by top-level name (DL-72)
-- src/dsl41/cli.py — the typer app assembly: it builds the app and registers every
-  verb, in help order, and owns nothing else. The verbs live one module per domain
-  beside it (DL-137): cli_common.py (the shared options, the catalog door, and the
-  readings that turn an exception or a control answer into an exit code),
-  cli_compile.py, cli_run.py, cli_control.py and cli_estate.py. The verbs are:
-  `lint`, `equiv`, `report`, `uc` (the U3a
-  record bundle — `--strict` fails on quarantine), `viz`, `decompile`,
-  `minify` (DL-207: a de-identified copy of an estate to hand over as a test
-  case — read the output before you do; the leak guard is a backstop, not a
-  total check), `folds` (the DL-38 fold registry), `resolve` (the DL-19 templating
-  preprocessor), `journal` (render-by-replay of a run WAL, crossing period
-  boundaries over re-derived seals — DL-142), `runs` (DL-113: offline run
-  history folded from one or more run roots' journal, manifest and spool —
-  or one lineage anchor, read in period order), `run` (headless executor: wall clock,
-  real processes, control socket, stop with SIGINT/SIGTERM, and `--detached` runs CMD
-  jobs under a supervisor that survives engine restarts), `rehearse` (virtual
-  clock + scripted adapters: a 24h estate in seconds, same engine path), `sendevent`,
-  `release-held` (the estate-wide OFF_HOLD sweep, one envelope per held job)
-  and `query` (clients of a running engine's control socket), `supervise`
-  (11f: `list`/`shutdown` a run-root's detached supervisor, read-only by default),
-  `ui` (the ss11 Textual TUI attached to a running engine — `run --ui` starts both
-  in one terminal), `serve` (11e: wraps textual-serve around the same app, one
-  `dsl41 ui` subprocess per browser session — optional `dsl41[ui]` extra, loopback
-  by default), and the boundary-era estate verbs — `seal` (live or offline, the
-  lock decides which), `audit` and `verify` (produce a checkpoint; consume one),
-  and `estate reclaim` / `estate prune` (DL-134, DL-135; `estate adopt` was
-  retired by DL-138).
-  Exit 2 = catalog load/usage failure everywhere, preflight refusals included.
-  Exit 1 = findings for `lint`/`equiv`, and a mid-run engine failure for
-  `run`/`rehearse`. `report` always exits 0 once generated: the report itself
-  is the loud channel.
-- src/dsl41/__main__.py — `python -m dsl41`. It is needed because `serve` spawns
-  the app of each session as `<sys.executable> -m dsl41 ui --socket <path>`.
-- scripts/arch_check.py — the DL-75 architecture gate CI runs alongside ruff and
-  mypy: stdlib-only, no LLM. Blocking checks are objective regressions (a body
-  duplicated across modules, a new private cross-module import in src/, a
-  citation token with no row in
+Front end and IR:
+
+- `src/dsl41/ast_jil.py`: the JIL statement scanner, the AST, and the
+  preserve and canonical renderers. Fidelity contract F1-F4: preserve mode
+  is byte-exact (`render(parse(x)) == x`), canonical mode is a fixpoint.
+- `grammars/condition.lark`: the condition-expression grammar (lark, LALR).
+  One flat rule; `&` and `|` have equal precedence and associate left.
+- `src/dsl41/conditions.py`: the lark loader and the Tree-to-Cond
+  transformer for `condition`, `box_success`, and `box_failure`
+  expressions, with lookbacks and span retention.
+- `src/dsl41/ir.py`: the IR-F Pydantic entity models and AST-to-IR-F
+  lowering. Unknown attributes are refused unless `permit_unknown` is set.
+  Calendar and cycle repeat-key lanes keep real autocal exports loadable.
+- `src/dsl41/lint.py`: the Violation model and rules L001-L022.
+- `src/dsl41/derive.py`: IR-F to IR-G. Seven analysis passes produce the
+  edges, mutex pairs, box tree, same-cycle detection, and the M01-M36
+  mapping-row classification.
+- `src/dsl41/classify.py`: boundary classification, what a catalog change
+  does to live work. Pure analysis: no disk, socket, or clock.
+
+Visualization:
+
+- `src/dsl41/viz.py`: the Markdown report of per-workflow Mermaid charts:
+  component split, trigger and lock grammar, E/A/R arrows, collapse
+  threshold, and the appendices.
+- `src/dsl41/viz_html.py`: the same report as one self-contained page
+  (`html`), and the whole-graph chart alone (`html-chart`). mermaid and ELK
+  are vendored under `src/dsl41/_vendor/`.
+- `src/dsl41/viz_explore.py`: the cytoscape.js elements and the page for
+  `explore`: the compound-node box tree, external-node synthesis, edge
+  annotations, condition shapes, lock hubs, ELK layout, and navigation.
+
+Semantics:
+
+- `src/dsl41/oracle_state.py`: the oracle's state and event vocabulary:
+  JobStatus, Event, TraceEntry, the frozen runtime rows, RuntimeState with
+  its typed verbs, the timer heap, and the input transaction. It imports
+  nothing from the interpreter.
+- `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
+  script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
+  one admitted input as one store transaction.
+- `src/dsl41/capacity.py`: sized buckets (machine `max_load`, resource
+  amounts) and the QUE_WAIT queue with its admission order.
+- `src/dsl41/autocal.py`: the extended-calendar rule interpreter: pure
+  functions from CalendarIR and CycleIR to day sets, per SEM-36..39.
+  Undocumented composition corners run on pinned defaults, so an ordinary
+  estate always schedules.
+- `src/dsl41/timezones.py`: SEM-35 name resolution (zoneinfo, the
+  `--timezone-map` table, the unique-city default, POSIX offsets) and the
+  one naive-UTC to local conversion. It imports nothing from dsl41.
+- `src/dsl41/equiv.py`: the canonical form and the three equivalence tiers.
+
+Backend and DSL:
+
+- `src/dsl41/backend_uc.py`: the UC twin model, edge classification, the
+  migration report, and the base CREATE-ONLY record bundle. The UC-side
+  twin interpreter that drives the expected-divergence pairs is
+  `tests/uc_oracle.py`.
+- `src/dsl41/dsl.py`: the builder surface (`job`, `box`, `sequence`,
+  `parallel`) and the decompiler, extracted from corpus-observed patterns
+  only.
+
+Tools:
+
+- `src/dsl41/placeholders.py`: `~{$NAME}~` resolution from properties
+  files, behind `resolve`. Nothing in the core imports it.
+- `src/dsl41/minify.py` and `src/dsl41/minify_rules.py`: the minifier and
+  its KEEP/RENAME/REPLACE/DROP table with one value predicate per key. A
+  key in no class stops the run.
+- `src/dsl41/simulation_register.py` and
+  `src/dsl41/simulation_register_rows.py`: the coverage register behind
+  [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md):
+  the row model and the rows as data. A test derives every surface's
+  members from the code and fails on a member with no row.
+- `src/dsl41/rehearse_check.py`: `rehearse --check-cadence`.
+
+Runner:
+
+- `src/dsl41/runner.py`: the engine: the single-writer loop over the
+  oracle, with the dispatch table, the time-ordered event queue, the
+  stale-completion gate, admission, and the effect outbox's dispatch.
+- `src/dsl41/runner_startup.py`: taking possession of a run root: genesis,
+  resume, and the takeover barrier (acquire, replay, reconcile every
+  execution host, retire superseded and re-drive pending, dispatch).
+- `src/dsl41/runner_clock.py`: the Clock protocol, VirtualClock, RealClock,
+  and EngineError.
+- `src/dsl41/runner_adapters.py`: the adapter contract and every adapter:
+  FakeAdapter, LocalCommandAdapter (each command under the wrapper),
+  FileWatcherAdapter, the detached path (SupervisorClient and
+  SupervisedCommandAdapter), and the spool ladder that resolves an
+  interrupted run's outcome.
+- `src/dsl41/runner_admission.py`: the one order every input takes (dedup,
+  stamp, append, apply, decide, record), the Attempt and ApplyResult
+  records, the decision index that answers a retry, and the envelope with
+  its mandatory preconditions.
+- `src/dsl41/runner_effects.py`: the effect outbox: what the shell intends
+  to do to an execution host, recorded before the attempt, in the states
+  pending, applied, and indeterminate.
+- `src/dsl41/runner_hosts.py`: the execution-host routing table: the
+  HostCommand vocabulary, eviction's preconditions as a pure function of
+  the row, and the genesis seed.
+- `src/dsl41/runner_access.py`: the access perimeter
+  ([docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md)):
+  the optional `--access-map`, its gates over the control verbs, denial
+  receipts, and the privileged ledger. With no map, nothing changes.
+- `src/dsl41/runner_history.py`: run history for `runs`, a projection over
+  journal, manifest, and spool.
+- `src/dsl41/runner_journal.py`: the inputs-only write-ahead log: the
+  record kinds, append and fsync before every feed, `read_journal`, the
+  two-pass `replay_inputs`, `read_backfill` for a subscriber resuming
+  across a boundary, and the segment checks (tail, identity, adjacency).
+  Records live in `wal/<segment_no>.jsonl`; `journal.jsonl` holds the
+  one-line `period_root` sentinel.
+- `src/dsl41/runner_ledger.py`: leadership over one run root: the flock
+  held for the process lifetime, the epoch allocated by appending under
+  it, and the eligibility gate on the opening record.
+- `src/dsl41/runner_scheduler.py`: the calendar scheduler: standard day
+  sets and windowed extended-calendar generators, turned into UTC instants
+  through `timezones.py`.
+- `src/dsl41/runner_preflight.py`: the ERROR/WARN item model and its
+  rules: job type, machine resolution, owner, calendars, timezones,
+  resources, oracle construction, and the AND-success skeleton cycle that
+  disables `plan`.
+- `src/dsl41/runner_control.py`: the control plane, both ends: the
+  unix-socket server (sendevent parity, queries, subscribe), the wire
+  vocabulary, and three clients (persistent async for the TUI, one-shot
+  blocking for the CLI, a blocking generator for `subscribe`). The
+  protocol is
+  [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md).
+- `src/dsl41/runner_supervisor.py`: the detached supervisor: stdlib-only,
+  one per run root. It owns the wrapper lifelines and speaks the supervisor
+  protocol (SPAWN, SIGNAL, LIST, SHUTDOWN, PING, and the lease), with
+  same-uid peer credentials and a Linux subreaper.
+- `src/dsl41/runner_wrapper.py`: the per-run wrapper, stdlib-only. It
+  records `spawn.json` and `status.json` durably, and on lifeline EOF it
+  kills and records.
+- `src/dsl41/runner_procid.py`: the durable-write sequence (fsync, rename,
+  fsync) and process identity (boot id, pid plus start time, group kill)
+  shared by the wrapper and the supervisor.
+- `src/dsl41/runner_tui.py`: the Textual TUI, a thin client of the control
+  socket. Every view comes from the idempotent queries; subscribe is only
+  a wake-up signal.
+
+Period boundary:
+
+- `src/dsl41/period.py`: period identity: `catalog_hash`,
+  `source_bundle_hash` and the content-addressed input bundle, the
+  RuntimeProfile and its hash, the staged and committed manifests, the
+  `segment` record every log opens with, and the archive receipt.
+- `src/dsl41/canon.py`: the canonical serialization behind every digest.
+- `src/dsl41/seal.py`: the seal artifact a period ends by writing, and the
+  two pure functions over it, `close_runtime` and `open_from_seal`. Every
+  section is a frozen model; an unknown section is a refusal.
+- `src/dsl41/boundary.py`: the boundary operation: the lineage anchor and
+  its head states under a lock, the successor claim, the `period_root`
+  sentinel, staging, the retry-horizon gate, validation, the three writes
+  in the one order that makes the boundary durable, and seal selection at
+  resume.
+- `src/dsl41/attest.py`: the attestation `audit` produces and `verify`
+  consumes. Producing one re-derives the period's seal from the opening
+  seal, the journal, the spool, and the manifests, and needs the
+  predecessor checkpoint. Consuming one accepts it alone, so a rolled root
+  can verify a chain whose earlier roots are gone.
+- `src/dsl41/estate.py`: the physical roll (`run --open-from`): opening a
+  lineage's next period in a fresh root.
+- `src/dsl41/retention.py`: the retention floors and `estate prune`: what
+  may never be deleted, computed from the root, with three verdicts
+  (floored, held, prunable). The remover refuses a path that is not
+  prunable, is outside the run root, or holds a retained artifact.
+
+CLI and scripts:
+
+- `src/dsl41/cli.py` builds the typer app and registers every verb in help
+  order. The verbs live one module per domain: `cli_common.py` (shared
+  options, the catalog loader, and the readings that turn an exception or a
+  control answer into an exit code), `cli_compile.py`, `cli_run.py`,
+  `cli_control.py`, and `cli_estate.py`.
+- `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
+  one `dsl41 ui` per browser session.
+- `src/dsl41/__init__.py`: the module map docstring. No exports.
+- `scripts/arch_check.py`: the architecture gate CI runs next to ruff and
+  mypy. Blocking checks: a body duplicated across modules, a new private
+  cross-module import under `src/`, a citation token with no row in
   [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md),
-  an IR-F schema change
-  without an
-  IR_VERSION bump); size checks are advisory and ratcheted against
-  scripts/arch_baseline.json. It also prints when a conceptual review is due —
-  on a trip, or on 800+ lines changed since the last `arch-review/<date>` tag.
+  a `test_...` name in the docs that no test defines, and an IR-F schema
+  change without an `IR_VERSION` bump. Size checks are advisory, ratcheted
+  against `scripts/arch_baseline.json`. It also reports when a conceptual
+  review is due.
 
 ### Tests
 
-- tests/test_ast_fidelity.py — F1-F4 round-trip fidelity, scanner structure and error
-  paths, whitespace-sensitive edge cases
-- tests/test_condition_grammar.py — grammar-level accept/reject cases, doc-derived only
-- tests/test_conditions.py — Cond model shapes, lookback semantics, span retention,
-  the `test_sem03_precedence_pinned_model_level` precedence-pinning test (DL-53)
-- tests/test_ir.py — IR-F lowering decisions: SEM-30/31/32/33/34, subcommand support
-  v1, type-inapplicable attributes
-- tests/test_lint.py — L001-L005/L015 rules plus the lint CLI exit-code contract
-- tests/test_derive.py — the seven IR-G passes plus the graph-rule lint additions
-  L008-L014
-- tests/test_viz.py — Mermaid render structure (balanced blocks, id-safety, one golden
-  render), the DL-35 markdown report (components, appendices, mutex encodings) plus
-  the viz CLI
-- tests/test_viz_html.py — the --format html page: chart parity with the markdown report,
-  JSON-embedding escape invariant, vendored-asset integrity, page defaults, appendix
-  parity; plus the --format html-chart single-chart page (DL-76) and the shaping
-  flags it delivers
-- tests/test_viz_explore.py — the --format explore page: elements emission (box parents,
-  EXT synthesis, edge classes, DL-35 label grammar, untruncated assumptions), condition
-  shapes, branch labels and the edge-to-atom match proven over the whole corpus (DL-191),
-  the lock hubs, links, tees and badges of both kinds (DL-192),
-  the same escape invariant, vendored-payload integrity (cytoscape bundle + pinned
-  customElements polyfill), script order and the guarded context menu (DL-77),
-  CLI flag absorption
-- tests/test_viz_explore_browser.py — the same page RUNNING, in chromium, webkit and
-  firefox (playwright): the initial ELK layout completes, the toolbar, search, focus,
-  "arrange after hiding" toggle, details panel, context menu, box collapse, the condition badge,
-  branch paint and condition tree, and the lock hubs, toggle and focus item all respond,
-  and nothing throws.
-  Opt-in (`DSL41_BROWSER_TESTS=1`) and skipped otherwise, so a plain `pytest -q` still
-  needs no browsers; CI's explore-page job is where it runs. Locally:
-  `uv run playwright install chromium webkit firefox`, then
-  `DSL41_BROWSER_TESTS=1 uv run pytest -q tests/test_viz_explore_browser.py`
-  (~50 s). Falsifiability is on the record: replayed against the broken tree,
-  webkit failed 9/9 on the layout that never completes (DL-77)
-- tests/test_oracle.py — AutoSys oracle trace tests against the SEM entries. They
-  cite the sparse T-ID index of dossier §8 (T01–T34 range, not contiguous —
-  T03/precedence is pinned at parse time in test_condition_grammar.py, not here).
-  Every test runs twice — Oracle-direct and Engine(VirtualClock, inert FakeAdapter)
-  via tests/bisim_harness.py — the runner-design ss13 bisimulation gate.
-- tests/test_resources.py — DL-50 resource-manager tests that need direct Oracle
-  access (bucket introspection, the cross-order safety+liveness Hypothesis
-  property), outside the bisimulation harness by design
-- tests/test_autocal.py — the SEM-36..39 doc-freeze pinned: every worked
-  example that the vendor docs contain, plus one test per Q8 pinned default or
-  refusal (`test_sem3x_*` / `test_q8x_*` naming)
-- tests/test_autocal_breadth.py — breadth over the interpreter, the
-  scheduler/preflight wiring, and the ir.py calendar lanes: SEM-37
-  token-family coverage, generation edge behavior, every expected date
-  derived by hand from the real 2026/2027 Gregorian calendar independently
-  of the code under test
-- tests/test_runner.py — phase-11a runner suite: oracle additions
-  (next_timer_due/advance), VirtualClock, engine dispatch/cancellation/horizon
-  discipline, the stale-completion gate, and the feed-only vs advance+feed and
-  oracle-vs-engine hypothesis properties. `pending_timers` reports the
-  DISPATCH order, ties included: two deadlines due at one instant keep their
-  ordering token rather than being re-sorted by job name (DL-143)
-- tests/test_runner_lifecycle.py — phase-11b lifecycle tier: wrapper process matrix
-  (pgid separation, parent-loss kills, fd hygiene), the DL-42 phase-boundary kill
-  matrix, spoofed-record/boot-flip guards, the engine-SIGKILL crash-recovery
-  integration test (tests/runner_crash_driver.py is its engine subprocess), and the
-  DL-44 review-finding regressions (kill-wins gate, advance-record replay)
-- tests/test_runner_journal.py — WAL record shapes, read_journal tolerance/refusals,
-  catalog-hash sensitivity, replay fidelity, journal-first source tagging, and the
-  `journal` CLI
-- tests/test_journal_replay.py — `dsl41 journal` ACROSS a boundary (DL-142): the
-  carry folded through the seal and the catalog switched, both read off one
-  trace over a real two-period estate; the optional-catalog ruling; and one
-  refusal per way a boundary can fail to prove out (torn tail — including the
-  two-fault precedence, broken chain, a `seal` record edited under an honest
-  sidecar, a correlated forgery of sidecar+record+opening that only
-  re-derivation catches, a segment named alone with an unattested predecessor,
-  grafted sidecar, missing sidecar, a root naming a stranger's estate, missing
-  bundle, a bundle that is not its address, a bundle that does not rebuild the
-  pinned catalog hash, missing opening manifest, a supplied catalog that
-  disagrees with the pin) — plus a three-period read that crosses two
-  boundaries and the rule that a refused crossing is never announced
-- tests/test_run_history.py — the `dsl41 runs` CLI (DL-113): per-root and
-  multi-root folding, the `--job`/`--since`/`--format` filters, a run
-  history spanning a boundary, and the `records_only` fidelity degrade for
-  a root with no stored inputs
-- tests/test_ledger.py — phase-12 stage S6: one leader per run root (a second
-  engine refused, with the holder named), the ordering that makes it worth having
-  (a refused resume leaves the log, the estate and the spool untouched), the
-  monotone epoch across terms, ss7's eligibility gate, and a real SIGKILLed holder
-  whose lock the kernel releases with nothing left to clean up (S6a); the fence,
-  which deletes the lock file and shows the usurper ACQUIRING before checking that
-  the first engine stops (S6b); and the takeover barrier — a start the previous
-  leader recorded and never dispatched is re-driven, one with no recorded intent
-  is still failed, and one the host says it is running is neither (S6c)
-- tests/test_runner_leadership.py — stage S7c: S5's routing table and S6's
-  election under real processes, for the four claims a single interpreter
-  cannot observe — the `flock` refused from a second OS process while the
-  first engine keeps serving and released by the kernel when its holder dies,
-  the inode fence lost by a real `unlink` under a live engine, the outbox
-  window between two statements with a process that really died there, and
-  an eviction bound whose inputs are produced by a live supervisor rather
-  than configured. Seconds, not minutes: the bound's arithmetic is pinned
-  under a controlled clock in test_hosts.py
-- tests/test_admission.py — phase-12 stage S2: the frozen admission order
-  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §4). CM-04 (the deadline fires before the gate reads the status it gates on),
-  CM-05 (an exact retry takes no index and moves no time) and CM-07 (two-pass
-  replay: a durable rejection is not applied, a durable application is not
-  re-decided, and an attempt with no result is applied through the gate), plus
-  the frontier invariants, the decision index, and the pre-S2 journal that
-  replays unchanged
-- tests/test_preconditions.py — phase-12 stage S3: mandatory preconditions and
-  protocol v2
-  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §0/§6). The refusals that make the mandate real (no `expect`, no version, a
-  revision from another baseline, an `expect` naming anything but the addressed
-  entity), the check itself and the boundary where a timer inside an input's own
-  batch does not invalidate it, refused-vs-rejected in the log, the retry and
-  epoch ordering of §4 step 2, replay of a rejected precondition, and the wire:
-  every door versioned, every read carrying its header, and a sendevent answered
-  with its decision rather than its receipt. Then stage S4, the operator's half
-  of the same contract: every `ok: false` a mutation can meet says whether it
-  was admitted, the shell spends a different exit code on each outcome and is
-  told the `request_id` that makes its retry safe, and `query global` gives a
-  script the read its `--expect` has to be composed from
-- tests/test_decision_record.py — the atomic `decision` record and control
-  protocol v3 (DL-118; period-model ss2.3's PR-35/PR-49, concurrency-model
-  ss4 step 7 and CM-17, control-protocol ss2/ss5): a result and its effects
-  commit as one write, the version handshake, and what the subscribe stream
-  promises about which records it carries
-- tests/test_hosts.py — phase-12 stage S5a: the ss8 routing table. CM-13 in one
-  scenario (a drain routes nothing new AND finishes what is running — either half
-  alone is easy and wrong), the re-drive that makes `passive` reversible, held-ness
-  derived rather than stored, CM-11's refusals (a host with no deadman is never
-  evictable, the bound reports the wait it has left, `--force` is attributed on the
-  row), the four outcomes over the `host` verb, a drain that survives a resume, and
-  the DL-93 pin that `oracle.py` never names a host row. Then stage S5d's
-  quarantine — a host the leader cannot reach holds new work instead of failing
-  it, clearing quarantine puts back the state it interrupted, and reaching an
-  evicted host again does not un-evict it — and the whole ss8 eviction bound
-  end to end. Then stage S5b's
-  engine half: a lease heartbeat refreshes the routing row without costing a
-  revision or a log record, the recorded interval is what the supervisor
-  reports rather than what the flag asked for, and the ss8 bound computed
-  from both
-- tests/test_effects.py — phase-12 stage S5c: the outbox. The three states and
-  `outcome_unavailable`, supersession by exact desired state (a delayed SPAWN
-  for a run KILLJOB already ended — the case a generation check waves through),
-  admission order, at-most-once application over repeated drains, a drain that
-  holds spawns while letting kills through, and the held set that is now the
-  outbox itself. The leak it closes is tested where the processes are real, in
-  tests/test_runner_supervisor.py
-- tests/test_access.py — the access perimeter (access-model ss12, DL-146),
-  its ten obligations in order: zero-config unchanged, a configured-but-invalid
-  map refuses, resolution order, gate coverage and the completeness gate,
-  denial shape and receipts, the privileged ledger, reload semantics and
-  stream revocation, filesystem modes, credential-less refusal, actor
-  overwrite — real domain, one asyncio.run per scenario
-- tests/test_runner_adapters.py — RealClock, LocalCommandAdapter end-to-end (SEM-09
-  boundary, append/stdin/profile semantics, KILLJOB kill path), FileWatcherAdapter
-  steady-size polling under VirtualClock, and the AdapterResult mapping
-- tests/test_timezones.py — the SEM-35 ladder itself (POSIX west-positive
-  offsets, the <=5-hop alias chain and its cycles, map-suppresses-city,
-  ambiguous-city refusal, autotimezone listing parsing) and the naive-UTC <->
-  local conversion at both DST edges (DL-163)
-- tests/test_runner_scheduler.py — phase-11c scheduler occurrence math (days/times/
-  start_mins, timezone + DST corners, E10 defaults), engine integration under the
-  virtual clock, resume re-anchoring + the E9 missed-tick drops, the ss8
-  preflight rule fixture pairs, and the DL-56/58 calendar rules (local-day
-  membership, run-minus-exclude, exhaustion dormancy, row-time firing —
-  E11 resolved)
-- tests/test_runner_control.py — phase-11c control socket (sendevent parity verbs,
-  status/trace/explain/plan queries, subscribe backfill/live seam, socket hygiene),
-  the DL-45 commit-discipline regression, the run/rehearse/sendevent/query CLI, and
-  the DL-46 status-response fields (pending_timers, log paths)
-- tests/test_rehearse_check.py — `rehearse --check-cadence` (DL-182/DL-184):
-  rehearse_check.py and its CLI wiring (`--check-cadence`, `--cadence-policy`,
-  `_emit_cadence_check`) over inline estates in the runner-side convention,
-  each expectation pinned to the rule in the module's docstring it exercises
-- tests/test_runner_tui.py — phase-11d TUI (skips without the [ui] extra): the
-  sendevent console parser, ControlClient against a real ControlServer (round trip,
-  reconnect, subscribe), the ss13.6 pilot smokes (table, explain atoms, pending
-  timers, log tail, key-driven STARTJOB), the DL-67 log-pager suite (search,
-  line filter, follow, verb-shadowing with its binding-drift guard), and the
-  DL-187 safety suite (table-scoped verb keys, kill/force confirmation, console
-  escape, quit posture, help panel, refused-query reporting)
-- tests/test_runner_serve.py — phase-11e `serve` and `ui` CLI: missing-socket and
-  missing-extra exit-2 paths, the constructed textual-serve command (a socket
-  path with a space is quoted), default loopback bind, bind-failure exit 2, the
-  DL-187 exit-code propagation of a crashed TUI under `ui` and `run --ui` — the
-  real textual-serve Server is always monkeypatched (ss13.6 posture, thinner
-  still: a CLI wrapper, not a pilot)
-- tests/test_runner_supervisor.py — phase-11f supervisor tier: the frozen ss5
-  socket protocol (unknown verb / bad version / malformed line, lease held /
-  expire / re-acquire fencing monotonicity / stale token, SPAWN idempotency,
-  SIGNAL pid-reuse refusal, peer-cred, stale-socket reclaim), the import-boundary
-  AST test, Linux-only subreaper, and the detached kill matrix (SIGKILL engine →
-  survive + reattach, kill -9 supervisor → spool-resolve TERMINATED, orderly
-  SHUTDOWN, detach-stop SIGINT → reattach SUCCESS, oracle KILLJOB detached).
-  Plus stage S5b's deadman (CM-10): an unwatched supervisor exits and its
-  wrappers die with it, a live leaseholder reprieves it over the same
-  interval, and one started without the flag outlives its controller. Plus
-  stage S5c's headline: a kill the engine decided and died before delivering is
-  re-driven at resume and the detached run stops — against the contrast of the
-  same journal without the effect record, where it is orphaned
-- tests/test_equiv.py — canonical form, tiers a/b/c, the L006/L007 lint rules (tested
-  here because they share equiv's truth-table machinery), and the equiv CLI
-- tests/test_backend_uc.py — edge classification, migration report, report + uc CLIs,
-  the U3a record bundle (frozen-shape golden test, CREATE-ONLY hygiene, quarantine)
-- tests/test_uc_oracle.py — UCS-entry trace semantics (UCS-01/02/03/09/13) plus the
-  P-Mxx expected-divergence pairs, driving the UC twin interpreter at
-  tests/uc_oracle.py
-- tests/test_dsl.py — the four corpus-extracted builders, cond_to_source fidelity, and
-  the decompile round-trip property
-- tests/test_placeholders.py — the DL-19 templating preprocessor: every format
-  decision in the docstring of placeholders.py pinned, plus the resolved-corpus
-  end-to-end run through the ordinary pipeline
-- tests/test_arch_check.py — the DL-75 architecture gate: each blocking check
-  (duplicate bodies, private cross-module imports, unresolvable citations, an
-  IR-F schema change without an IR_VERSION bump) and the advisory size ratchet,
-  tripped and not-tripped over tiny synthesised trees
-- tests/test_model_harness.py — phase-12 stages H and S7a: the concurrency-model
-  obligations (CM-01..CM-14,
+The suite has 64 test files (`pytest --collect-only -q` shows the current
+count) and a 31-file synthetic or doc-derived JIL corpus under
+`tests/corpus/`. Every oracle trace test runs twice, against the oracle
+directly and through the engine under a virtual clock, via
+`tests/bisim_harness.py`. The browser tests need
+`DSL41_BROWSER_TESTS=1` and installed playwright browsers
+(`uv run playwright install chromium webkit firefox`); a plain `pytest -q`
+skips them, and CI's explore-page job runs them.
+
+Compiler:
+
+- `tests/test_ast_fidelity.py`: F1-F4 round-trip fidelity, scanner
+  structure and error paths, whitespace edge cases.
+- `tests/test_condition_grammar.py`: grammar-level accept and reject
+  cases, doc-derived only; precedence is pinned here.
+- `tests/test_conditions.py`: Cond model shapes, lookback semantics, span
+  retention.
+- `tests/test_ir.py`: lowering decisions, subcommand support,
+  type-inapplicable attributes.
+- `tests/test_lint.py`: the IR-F lint rules and the lint CLI exit-code
+  contract.
+- `tests/test_derive.py`: the seven IR-G passes and the graph-rule lint
+  additions.
+- `tests/test_viz.py`: Mermaid render structure, the markdown report
+  (components, appendices, mutex encodings), and the viz CLI.
+- `tests/test_viz_html.py`: the `html` page (chart parity with the report,
+  the JSON-embedding escape invariant, vendored-asset integrity, appendix
+  parity) and the `html-chart` page.
+- `tests/test_viz_explore.py`: the `explore` page's emission: box parents,
+  external-node synthesis, edge classes, condition shapes and branch
+  labels checked over the whole corpus, lock hubs and links, the escape
+  invariant, vendored-payload integrity, script order, and CLI flag
+  absorption.
+- `tests/test_viz_explore_browser.py`: the `explore` page running in
+  chromium, webkit, and firefox: layout completes, and the toolbar, find,
+  focus, panels, context menu, collapse, condition badge, branch paint,
+  and lock controls respond without throwing.
+- `tests/test_oracle.py`: the AutoSys oracle trace tests against the SEM
+  entries.
+- `tests/test_resources.py`: resource-manager tests that need direct
+  oracle access, including the cross-order safety and liveness property.
+- `tests/test_autocal.py`: every worked example the vendor docs contain,
+  plus one test per pinned default or refusal.
+- `tests/test_autocal_breadth.py`: breadth over the interpreter, the
+  scheduler and preflight wiring, and the calendar lanes, with every
+  expected date derived by hand from the real calendar.
+- `tests/test_timezones.py`: the name-resolution ladder and the naive-UTC
+  to local conversion at both DST edges.
+- `tests/test_equiv.py`: the canonical form, tiers a, b, and c, the
+  truth-table lint rules, and the equiv CLI.
+- `tests/test_backend_uc.py`: edge classification, the migration report,
+  the report and uc CLIs, and the record bundle (frozen-shape golden test,
+  CREATE-ONLY hygiene, quarantine).
+- `tests/test_uc_oracle.py`: UCS-entry trace semantics and the
+  expected-divergence pairs, driving `tests/uc_oracle.py`.
+- `tests/test_dsl.py`: the corpus-extracted builders, condition source
+  fidelity, and the decompile round-trip property.
+- `tests/test_placeholders.py`: every format decision of the templating
+  preprocessor, plus a resolved corpus run through the pipeline.
+- `tests/test_minify.py`: the minifier's classes, naming, condition
+  rewrite, structural verify, leak guard, and CLI exit codes, with a
+  triggering and a non-triggering case per refusal.
+- `tests/test_simulation_register.py`: the coverage register's own gate:
+  every derived surface's members are computed from the code and must
+  match the rows; ids are unique; the checked document matches the rows.
+- `tests/test_classification.py`: every classifier tier row with a
+  contrast case, the profile-field sweep, both closure directions, and
+  nested containment.
+- `tests/test_arch_check.py`: each blocking check of the architecture gate
+  and the advisory size ratchet, tripped and not tripped.
+
+Runner:
+
+- `tests/test_runner.py`: the engine loop: timers, VirtualClock, dispatch,
+  cancellation, the horizon discipline, the stale-completion gate, and the
+  oracle-versus-engine properties.
+- `tests/test_runner_lifecycle.py`: the wrapper process matrix, the
+  phase-boundary kill matrix, spoofed-record and boot-flip guards, and the
+  engine-SIGKILL crash-recovery test (`tests/runner_crash_driver.py` is its
+  engine subprocess).
+- `tests/test_runner_journal.py`: WAL record shapes, read tolerance and
+  refusals, catalog-hash sensitivity, replay fidelity, and the `journal`
+  CLI.
+- `tests/test_journal_replay.py`: `dsl41 journal` across a boundary, and
+  one refusal per way a boundary can fail to prove out.
+- `tests/test_run_history.py`: the `runs` CLI: per-root and multi-root
+  folding, the filters, a history spanning a boundary, and the
+  `records_only` fidelity degrade.
+- `tests/test_run_reattach.py`: the reattach line a detached run prints
+  on exit, built from the process's own argv.
+- `tests/test_ledger.py`: one leader per run root, the monotone epoch, the
+  eligibility gate, a SIGKILLed holder, the fence, and the takeover
+  barrier.
+- `tests/test_runner_leadership.py`: routing and election under real
+  processes: the flock refused across processes and released by the
+  kernel, the inode fence, the outbox window, and a live eviction bound.
+- `tests/test_admission.py`: the frozen admission order, the frontier
+  invariants, the decision index, and two-pass replay.
+- `tests/test_preconditions.py`: mandatory preconditions and the versioned
+  wire: the refusals, the check, refused versus rejected in the log, retry
+  ordering, and the operator's exit codes and `request_id`.
+- `tests/test_decision_record.py`: the atomic `decision` record: a result
+  and its effects commit as one write, the version handshake, and what the
+  subscribe stream promises.
+- `tests/test_recovery.py`: recovering a mutation whose answer was lost:
+  every failure after the write is `delivered`, a torn line at EOF is never
+  parsed, and re-running with the printed replay flags is an exact retry.
+- `tests/test_hosts.py`: the routing table: drain, the re-drive that makes
+  `passive` reversible, held-ness derived rather than stored, eviction's
+  refusals and bound, quarantine, and the lease heartbeat.
+- `tests/test_effects.py`: the outbox: its three states, supersession by
+  exact desired state, at-most-once application, and a drain that holds
+  spawns while letting kills through.
+- `tests/test_access.py`: the access perimeter's obligations in order,
+  from zero-config unchanged to actor overwrite.
+- `tests/test_runner_adapters.py`: RealClock, LocalCommandAdapter end to
+  end, FileWatcherAdapter polling under VirtualClock, and the result
+  mapping.
+- `tests/test_runner_scheduler.py`: occurrence math, timezone and DST
+  corners, engine integration under the virtual clock, resume
+  re-anchoring, missed-tick drops, the preflight rule fixtures, and the
+  calendar rules.
+- `tests/test_runner_control.py`: the control socket verbs and queries,
+  subscribe backfill and the live seam, socket hygiene, and the run,
+  rehearse, sendevent, and query CLIs.
+- `tests/test_rehearse_check.py`: `rehearse --check-cadence` and its CLI
+  wiring over inline estates.
+- `tests/test_runner_tui.py`: the TUI (skipped without the `[ui]` extra):
+  the console parser, ControlClient against a real server, the pilot
+  smokes, the log pager, and the safety suite (table-scoped verb keys,
+  confirmations, quit posture, help panel).
+- `tests/test_runner_serve.py`: the `serve` and `ui` CLIs: missing socket
+  and missing extra, the constructed textual-serve command, loopback bind,
+  bind failure, and TUI exit-code propagation. The real server is
+  monkeypatched.
+- `tests/test_runner_supervisor.py`: the supervisor protocol, the
+  import-boundary test, the Linux subreaper, the detached kill matrix, the
+  deadman, and a kill re-driven at resume.
+- `tests/test_supervisor_backlog.py`: a full macOS listen backlog is not
+  evidence of a stale socket.
+- `tests/test_supervisor_idempotency.py`: SPAWN idempotency that outlives
+  the supervisor, driven through a crash matrix and a real subprocess.
+- `tests/test_fw_spool.py`: the file-watcher poll spool from which an
+  audit re-derives a watch's progress after a restart.
+- `tests/test_runtime_state.py`: the state owner and its revisions: frozen
+  rows, typed verbs, the timer ordering token, and one increment per
+  entity per input.
+- `tests/test_capacity_decomposition.py`: the capacity state on the
+  entities it describes and the RuntimeState invariants.
+- `tests/test_model_harness.py`: the concurrency-model obligations over
+  `tests/model_harness.py`, and the seeded fault sweep whose faults must
+  all fire.
+
+Period boundary:
+
+- `tests/test_canon.py`: the canonical form, with a golden vector of exact
+  bytes and digest.
+- `tests/test_period_identity.py`: the estate layout, the hashes, the
+  `segment` record, RuntimeProfile, and the manifests, with golden vectors.
+- `tests/test_seal_artifact.py`: the seal sidecar: a golden vector, close,
+  open, close reproducing its bytes, tamper detection over every key, the
+  ingress refusals, and one injected failure per load invariant.
+- `tests/test_boundary.py`: the genesis transaction at each crash point,
+  ownership refusals, the crash matrix over the write order, candidate
+  reuse and quarantine, the seal barrier, the `seal` control verb, and a
+  subscriber resuming across a boundary.
+- `tests/test_resume_root_authority.py`: `run --resume` and the offline
+  seal refuse a root the anchor does not name or does not own, leaving the
+  root untouched.
+- `tests/test_estate.py`: the offline and live seal, audit, the producer
+  rule's negatives, the physical roll, the attestation gate, and
+  break-glass reclaim.
+- `tests/test_retention.py`: each retention floor refused and released,
+  the structural guards, and the prune flags.
+- `tests/test_estate_wide.py`: `audit`, `journal`, `runs`, and
+  `estate prune` over a lineage rather than one root.
+- `tests/test_restore_drill.py`: backup, delete, restore at the same path,
+  and re-open over the nightbank estate.
+
+Training estate:
+
+- `tests/test_nightbank_example.py`: the estate loads, lints clean, and
+  reaches the start-of-day flip on one virtual night, plus the seeded
+  interleaving sweep.
+- `tests/test_nightbank_boundary.py`: the RUNBOOK's exercises 15 to 21 as
+  acceptance scenarios, including a detached night sealed mid-flight under
+  a real supervisor, and a check that every verb the RUNBOOK types exists.
+- `tests/test_nightbank_deploy.py`: the shipped launcher script and the
+  systemd units beside it.
+
+## What is not built
+
+- The remote relay and shared store that multihost execution needs. They
+  are designed in
   [docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §9) that single-host code can be held to today, over tests/model_harness.py —
-  a spawn log that outlives an engine crash, so a resume-driven double run is
-  visible at all. The `test_harness_*` half pins that the checkers can fail.
-  S7a added the seeded sweep: `FaultSchedule` picks what goes wrong and when
-  from a seed, and CM-14 is checked over 48 interleavings of failover, a spawn
-  decided and never acted on, duplicated and stale completions, quarantine and
-  drain. Two tests keep it honest — every fault must be planned, and every
-  fault must actually FIRE, because a driver whose faults had quietly become
-  no-ops would still report 48 green runs of a happy path
-- tests/test_classification.py — the ss10 classifier (period-model, DL-131): every
-  tier row with a CONTRAST (one estate, one change, two livenesses, two verdicts), the
-  PR-37a profile sweep derived from `RuntimeProfile.model_fields` — each field reaches
-  exactly the jobs the spec names, is modelled as a node, and `retry_horizon_us` reaches
-  no job — the PR-37
-  non-job node kinds, every ss10.3 named case with its sentence, both closure directions
-  including a case where they disagree, and containment nested two deep
-- tests/test_seal_artifact.py — the seal sidecar (period-model ss3/ss4, DL-132):
-  one golden vector with EXACT bytes and an EXACT digest over a small estate that
-  exercises every ss3.2 clause, close→open→close reproducing those bytes, two
-  openings of one seal deriving byte-identical `segment` records, tamper
-  detection swept over every top-level key, the ss3.2 ingress refusals (floats,
-  duplicate keys, an unpaired surrogate, a foreign artifact version), and one
-  injected failure per load invariant — each matched on the message only its
-  own rule produces, over a sweep whose size is derived from the module's own
-  rule count, so neither a rule added without a case nor a case caught by a
-  neighbouring rule passes unnoticed
-- tests/test_canon.py — the canonical form (period-model ss3.2, PR-08..PR-14,
-  DL-119) behind the seal: one golden vector pinning EXACT bytes and an EXACT
-  digest as literals, because equality and sensitivity tests alone would pass
-  a canonicalizer that is consistently wrong; every control character written
-  as an escape
-- tests/test_period_identity.py — period identity (period-model ss1.1/ss2.1,
-  DL-130): the estate layout, `source_bundle_hash` and `catalog_hash` v2, the
-  `segment` record, `RuntimeProfile` and the two manifests, with golden
-  vectors as exact bytes and the PR-15 sweep derived from
-  `RuntimeProfile.model_fields`, so a field added later is tested by default
-- tests/test_boundary.py — the boundary operation (period-model ss1.1/ss1.3/ss6–ss9/
-  ss11, DL-133): the genesis transaction re-run at each of its crash points, the
-  ownership refusals for a root and an anchor, the anchor fence deleted under a
-  live incumbent, ss9's gate over its own truth table, a quiet boundary committing
-  through its three writes and reopening in place with the carry intact, two
-  openings of one seal producing byte-identical `segment` records, the crash matrix
-  over ss7's write order — each pre-commit stage aborting and retrying, each
-  post-commit one fail-stopping — candidate reuse and quarantine, the FW seal
-  barrier parking a watch at its poll boundary, one held tick under C1 starting
-  exactly once after C2, the `seal` control verb with its committed-retry
-  route, and a subscriber resuming across a boundary — the backfill spanning
-  segments and stopping at the one that holds the cursor, a rolled root
-  answering a cursor it cannot honour with the gap marker, and a foreign file
-  or a torn closed segment refused on the stream rather than by a hangup
-  (DL-135)
-- tests/test_estate.py — the estate verbs (period-model ss1.3/ss7/ss11, DL-134):
-  the offline seal committing and refusing over one root, the live seal between
-  two real processes with the engine exiting code 3, audit re-deriving a seal and
-  refusing a consistently rewritten one, the producer rule's three negatives
-  (missing, corrupt, mismatched predecessor), a physical roll opening period 2 in
-  a fresh root and resuming there while the closing root refuses the same seal,
-  the attestation gate on a roll, break-glass reclaim recorded in the anchor and
-  in the next `segment`, and the retirement tombstones DL-138 left where the
-  adoption path was — `claim_root` and `plan_retention` naming the dialect they
-  found, and an `adopting` anchor refused before parse
-- tests/test_retention.py — the retention floors and `estate prune` (period-model
-  ss11a/ss12, DL-135): each itemized floor refused one case at a time and released
-  again once the head has moved past it and a later checkpoint covers it, the
-  tombstone floor over an unattested period and its lift after attestation, a
-  carried run held until the period it ended in has closed and been attested, a
-  run with no provenance and an unreadable index entry both floored, and the two
-  structural guards — a path outside the root, and a directory that holds a
-  retained artifact beneath it — then the operator's flags: `--keep-runs` per
-  job over two jobs at different run counts, an age threshold over an orphaned
-  index entry, and a removal the filesystem refuses reported while the rest of
-  that run stays whole. Every estate is built by the real machinery; the one
-  hand-written artifact is the supervisor's tombstone, reconstructed from the
-  binding the WAL already holds
-- tests/test_estate_wide.py — the estate-wide walk (period-model ss1.3,
-  PR-02f): `audit`, `journal`, `runs` and `estate prune` pointed at a lineage
-  rather than at one root, all four held to `boundary.walk_estate` — each
-  finds period 1's root through the archive registry after a physical roll,
-  reports one estate-wide result, and refuses BY NAME a root the registry
-  names and the disk does not; the lineage is built by the real machinery
-- tests/test_capacity_decomposition.py — DL-120, the capacity state on the
-  entities it describes: PR-19 (spent units survive a release), PR-19a (a
-  ghost bucket survives its resource's removal), PR-20 (a run releases the
-  vector it ACQUIRED, not what the catalog wants by then), PR-21 (waiter
-  order on the rows), PR-52 (the ownership gate covers the new state), and
-  the four `RuntimeState` invariants, both directions
-- tests/test_fw_spool.py — PR-34/PR-34a, the FW watch as evidence rather than
-  memory (period-model ss2.2, DL-129): the append-only poll spool — a `start`
-  line on dispatch, one fsynced line per poll including polls that changed
-  nothing — from which an audit re-derives the watch's progress after a
-  restart, with the two timestamps behind `next_poll_at` asserted directly
-- tests/test_supervisor_idempotency.py — PR-36, SPAWN idempotency that
-  outlives the supervisor (period-model ss11a, DL-129): the run directory as
-  the dedup store (`.by_run_id`, `receipt.json` before the fork, `reply.json`
-  as the answer first given). The crash matrix drives `Supervisor.spawn_run`
-  in process, stops it at each named write boundary and asks a fresh
-  Supervisor what the directory says; the wire tests drive a real supervisor
-  subprocess for the frozen envelope, the grammar refusal and survival across
-  a restart
-- tests/test_nightbank_example.py — examples/nightbank loads, lints clean and
-  reaches the SOD flip on one virtual-clock night; since stage S7b the seeded
-  sweep at the foot of the file drives the real 82-job night through
-  interleavings of leader failover, a spawn decided and never acted on,
-  duplicated and stale completions, quarantine and drain, checking CM-14 and
-  CM-09 over every one. The real-process path is S7c's tier
-- tests/test_nightbank_boundary.py — the boundary era over the training estate
-  (period-model ss1.3/ss7–ss9/ss11/ss11a/ss12, DL-136): the RUNBOOK's exercises
-  15–21 driven as acceptance scenarios, asserting only what an operator sees.
-  The flagship runs real processes — a night with operator activity and one
-  real job in it, ss9's horizon refusing the seal without killing the engine,
-  the forced seal and the engine's exit code 3, period 2 answering the socket
-  with period 1's globals, holds and statuses, then `audit`, `verify` and a
-  prune that takes the run's timings and leaves its row. The rest run in
-  process over the same 81-job estate: the offline seal of a stopped night,
-  the retention survey and its no-class refusal, a roll refused until the
-  closing night is attested, and break-glass reclaim after a crashed roll.
-  Then period-model ss14's scenario B (DL-143). B1 seals a DETACHED night
-  mid-flight under a real supervisor: a long command live and reattached, a
-  KILL ladder the sealer waits out, a crossing FW watch, a QUE_WAIT pair, a
-  live box with an INACTIVE member and a `pending_spawn` on a drained host,
-  with a forced seal and a late C1 retry. Its "two timers due at exactly T"
-  row is a second scenario in the virtual domain, because T is the clock at
-  the barrier and the instant is a choice only there. B2 is four tests, one
-  per ss14 row, each refusing the same estate over one change and each
-  pinning which of ss8's two refusal points answered -- readiness appends
-  nothing, a post-cutoff refusal keeps the cutoff's own admitted work.
-  A last test holds the RUNBOOK to the CLI: every `dsl41 <verb>` it types
-  must be a command this build has
-- tests/test_runtime_state.py — phase-12 stages S1b+S1c: the state owner and
-  its revisions
-  ([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
-  §3). Frozen rows, read-only map views, the validating rebuild path, each typed
-  verb for what it must and must not change, the timer ordering token, and the
-  two invariants that let the capacity pool stay outside the rows; then CM-02
-  (one increment per entity per input, and none for an input that changed
-  nothing) and CM-03 (the same property over a widened generator, its
-  expectation recomputed from the public surface rather than from the
-  implementation)
+  §7.
+- Rich UC condition forms, the live OpenAPI pull, write-path verification,
+  and the generated client (U3b). They need a live controller.
+- The decompiler's custom-pattern option (`--patterns` recognizer and
+  expander pairs).
 
-### What's not done
-
-A 2026-07-28 public-doc sweep (DL-53) closed Q1, Q4, Q5 (autosys dossier §9)
-and U2, U4, U5, U6a, U7, U8 (stonebranch Part III). Each closure is pinned to
-a dossier citation. DL-54 (same day) then resolved Q2a: zero-lookback anchors
-to the dependent job's own last end, cited verbatim. DL-54 also flipped the
-Q3 default to arm-and-wait. Now, if a false condition or a hold blocks a
-scheduled tick, the job arms, and the run is not abandoned. DL-55 (same day)
-split U3. U3a, the base CREATE-ONLY workflow record schema, is doc-frozen in
-[docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md),
-and `dsl41 uc` emits it. U3b (rich condition forms, the live
-/resources/openapi.json pull, write-path verification, and the
-generated-from-OpenAPI client, DL-08) stays blocked on a live controller.
-DL-56/DL-57 (2026-07-28/29) then doc-froze extended-calendar semantics
-(SEM-36..39) and made the runner obey calendars. This opened Q8a-Q8e (autocal
-generation corners — each a pinned default or refusal in autocal.py), Q9
-(which spelling `autocal_asc -E` emits — both accepted meanwhile), and E11
-(run_calendar without start_times/start_mins refused fail-closed). A
-2026-07-30 verified-citation sweep (DL-58 — vendor KBs and Broadcom-staff
-community answers, every citation re-fetched and examined before any pin
-moved) then closed Q2b (a never-run dependent satisfies `s(A,0)` — pin
-confirmed), Q3 (arm-and-wait confirmed with a no-expiry latch, the abandon
-switch deleted, new narrow residue Q3c — whether a member's latch survives
-across box runs), Q7 (a present fail_codes decides alone — one corner pin
-flipped in `ir.exit_is_success`: unlisted codes are SUCCESS, not
-threshold-judged), Q8a (a specified holiday action governs holcal dates —
-the disagreement refusal deleted), Q8e (CWEEK = consecutive 7-day chunks
-from each period's start), and E11 (row-time firing implemented: calendar
-rows' own HH:MM, 00:00 default, job start_times overrides).
-DL-59 (same day, a priority decision) then downgraded the remaining
-scheduler-path refusals to documented deterministic defaults, so an ordinary
-estate always loads and schedules. Q8b runs replace-then-shift, and the Q8d
-all-exclusive compounds evaluate literally.
-[docs/live-instance-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/live-instance-runbook.md)
-keeps the probe protocols. If instance access appears, these protocols can
-confirm vendor parity. DL-60 (same day) closed Q9 from one observed
-`autocal_asc` export sample, which pinned the format (`extended_calendar:`
-spelling, empty-valued keys emitted, `workday: all`, braces as condition
-grouping, `WORKD#L`, `holiday: S` without holcal, `HH:MM:SS` row tails).
-These facts carry the dossier's weakest confidence marker, **[F]**: one
-observation, not verified against TechDocs. Five interpreter/scanner gaps
-were also corrected the same day. Without the correction, each of these gaps
-refuses an ordinary export.
-Still open: Q3c, Q3d (arm x ON_ICE round-trip, DL-69), Q6 (narrowed — the
-ON_ICE atom half is now cited), Q8b-Q8d
-(autosys dossier §9), U1, U3b, U6b (stonebranch Part III), and the runner's
-E5-E10 (runner-design ss15). E8 was re-swept: a spawn-path signal-9 KB leans
-FAILURE, but the mid-run kill still needs a live instance. The questions
-with a behavior default in code (Q3c, Q3d, Q8b-Q8d, U1, U3b, E5-E10) run on a
-documented default marked `# PENDING: Qn/Un/En`. Q6 is dossier-only (no code
-switch), and U6b lives in the backend_uc migration-report question table.
-Q3c, Q3d, Q6, and Q8b-Q8d need a live AutoSys instance. U3b needs a live UC
-controller. The runner is complete through phase 11f (the detached
-supervisor tier). The custom-pattern door of the decompiler (`--patterns`
-recognizer/expander pairs, agreed alongside DL-38) remains the one
-designed-but-unbuilt item.
+Open questions run on documented defaults marked `# PENDING: <label>` in
+the code. The AutoSys questions Q3c, Q3d, Q6, and Q8b-Q8d need a live
+AutoSys instance; Q6 has no code switch. The resource-manager questions
+Qr2-Qr4 and Qr6 are stated in DL-50. The UC questions U1 and U3b need a
+live controller; U6b lives in the migration report's question table. The
+runner questions E5-E10 are in
+[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md)
+§15. The probe protocols that would settle them are in
+[docs/live-instance-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/live-instance-runbook.md).
 
 ## Release
 
 Releases are tag-driven. A push of a tag that matches `v*` starts
-[.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml)
-(DL-215). The workflow runs the whole CI workflow as its first job, checks
-that the tag is annotated and names the version in `pyproject.toml`, builds
-the sdist and the wheel, exports the locked dependency closure with hashes,
+[.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml).
+The workflow runs the whole CI workflow as its first job, checks that the
+tag is annotated and names the version in `pyproject.toml`, builds the
+sdist and the wheel, exports the locked dependency closure with hashes,
 smoke-tests the installed wheel with
 [scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh),
-and publishes only what the smoke tested. Publication needs a tag and uses
-trusted publishing (OIDC) in the `pypi` environment. The repository holds no
-PyPI token; the workflow's header comment records the one-time setup on
-pypi.org. The GitHub release that follows carries the sdist, the wheel, the
-two requirements files and `SHA256SUMS`. The workflow's header comment lists
-its jobs, and DL-215 states the smoke contract check by check.
+and publishes only what the smoke tested. Publication uses trusted
+publishing (OIDC) in the `pypi` environment, which waits for the owner's
+approval. The repository holds no PyPI token. The GitHub release that
+follows carries the sdist, the wheel, the two requirements files, and
+`SHA256SUMS`. The workflow's header comment lists its jobs and records the
+one-time trusted-publisher setup on pypi.org.
 
-Since 1.0.0 (2026-08-26) a minor bump (1.3.0 -> 1.4.0) carries one or more
-functional units. A patch bump (1.3.0 -> 1.3.1) carries documentation or a
-correction with no behavior change. A module that was never documented as an
-API may leave the package inside a minor bump; the tag message names it
-(DL-195).
+A minor bump (1.3.0 to 1.4.0) carries one or more functional units. A patch
+bump (1.3.0 to 1.3.1) carries documentation or a correction with no
+behavior change. A module that was never documented as an API may leave the
+package inside a minor bump; the tag message names it.
 
 The annotated tag's message is the release note. Its first line is the
-summary. Its body says whether the WAL format, the state-machine version or a
-protocol version moved, which is what the upgrade section of
+summary. Its body says whether the WAL format, the state-machine version, or
+a protocol version moved, which is what the upgrade section of
 [docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
-asks a release note for, and it names any Python module that left the package.
+asks a release note for, and it names any Python module that left the
+package.
 
 ### Make a release
 
-First, make sure that the working tree is clean. Make sure that `main` is
-pushed. Run the [full local gates](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md#verify-a-change).
-The list follows CI, including format checking and the scoped **100%** branch
-coverage requirement (DL-105).
+Start from a clean working tree with `main` pushed. Run the
+[full local gates](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md#verify-a-change).
+The list follows CI, including format checking and the scoped 100% branch
+coverage requirement.
 
-If the gates pass, set the new version in `pyproject.toml`. Then run `uv lock`.
-This command writes the same version into `uv.lock`. Move the install pin
-(`ver=`) in
+Set the new version in `pyproject.toml` and run `uv lock`, which writes the
+same version into `uv.lock`. Move the install pin (`ver=`) in
 [docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
-to the same version, so the pinned-install procedure names the current
-release. Build locally and compare the wheel's file list with the previous
-release's (`uv build`, then `unzip -Z1` on both): the difference must be what
-the tag message is about to say. Commit the three files and push them:
+to the same version. Build locally and compare the wheel's file list with
+the previous release's (`uv build`, then `unzip -Z1` on both): the
+difference must be what the tag message is about to say. Commit the three
+files and push them:
 
 ```sh
 git commit pyproject.toml uv.lock docs/deployment-runbook.md \
@@ -1271,8 +961,9 @@ git push origin main
 ```
 
 Rehearse the release on that commit before you tag it. A manual run of the
-workflow from a branch runs `gates`, `build` and `smoke` and publishes
-nothing, whatever its `publish` input says:
+workflow from a branch runs `gates`, `build`, and `smoke` and publishes
+nothing, whatever its `publish` input says. Publication needs a tag: a tag
+push, or a manual run from a tag with `publish` set.
 
 ```sh
 gh workflow run release.yml --ref main
@@ -1293,7 +984,7 @@ bash scripts/release_smoke.sh dist exports
 ```
 
 Then tag that commit and push the tag. The first `-m` is the summary; the
-second is the release note's body (see above):
+second is the release note's body:
 
 ```sh
 git tag -a vX.Y.Z -m "X.Y.Z: one-line summary" \
@@ -1302,21 +993,20 @@ git push origin vX.Y.Z
 ```
 
 The tag must point at the commit that carries the same version in
-`pyproject.toml`. If the two disagree, the tag and the published artifact
-describe different trees. The `build` job refuses such a tag, and a
+`pyproject.toml`. The `build` job refuses a tag that disagrees, and a
 lightweight one.
 
 Last, approve the deployment: the `publish` job waits in the run's page for
-the owner's approval of the `pypi` environment. Then make sure that the
-`release` workflow is successful. Then read the project page at
+the owner's approval of the `pypi` environment. Then check that the
+`release` workflow succeeded, and read the project page at
 https://pypi.org/project/dsl41/ and the GitHub release page for the tag.
 
-Note: a local `uv build` writes into the ignored `dist/` directory, and the
-exports above into the ignored `exports/` directory. They are tests of the
-build only. The workflow is the one publication path.
+A local `uv build` writes into the ignored `dist/` directory, and the
+exports above into the ignored `exports/` directory. They test the build
+only. The workflow is the one publication path.
 
-CAUTION: PyPI refuses a second upload of a version that exists. Do not move a
-tag after a successful publish. Release the next patch version instead.
+PyPI refuses a second upload of a version that exists. Do not move a tag
+after a successful publish. Release the next patch version instead.
 
 ## License
 
