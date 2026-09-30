@@ -1,13 +1,13 @@
 # IR Design
 
-Status: draft v0.1. This document depends on `autosys-semantics.md` (SEM-xx) and on
-`stonebranch-semantics.md` (UCS-xx, M-xx). It is normative for: the parser, the linter, the
-visualizer, the equivalence validator, the oracle, the UC backend, and the DSL decompiler.
+Status: normative for the parser, the linter, the visualizer, the equivalence validator, the
+oracle, the UC backend, and the DSL decompiler. This document depends on
+`autosys-semantics.md` (SEM-xx) and on `stonebranch-semantics.md` (UCS-xx, M-xx).
 
-Design stance (from the project reboot decision): the IR is **AutoSys-shaped first**. The IR
-captures JIL semantics faithfully. Vendor neutrality can emerge at Layer G only where the UC
-backend forces a distinction. Constitutional carry-over from dsl42: the compiler is pure, with
-no runtime. A failed translation is a loud, classified error, never silent loss.
+Design stance: the IR is **AutoSys-shaped first**. It captures JIL semantics faithfully.
+Vendor neutrality appears at Layer G only where the UC backend forces a distinction. The
+compiler is pure, with no runtime. A failed translation is a loud, classified error, never
+silent loss.
 
 ---
 
@@ -24,21 +24,20 @@ JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──�
 
 Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
 consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
-`decompile(catalog, graph)` all need the faithful layer. The linter has the same shape —
-L001–L007 and L015–L019 read IR-F, L008–L014 and L020–L022 read IR-G next to it.
+`decompile(catalog, graph)` all need the faithful layer. The linter has the same shape:
+L001–L007 and L015–L019 read IR-F; L008–L014 and L020–L022 read IR-G next to it.
 
 The four representations have four contracts:
 
 | repr | contract | loss policy |
 |---|---|---|
-| **AST** | byte-faithful syntax; `render∘parse == id` on the source text (preserve mode, F1); `render∘parse∘render == render` (canonical mode is a fixpoint, F2) | zero loss, ever. Unknown attributes, comments, ordering, and whitespace style all survive |
-| **IR-F** (faithful) | semantics-complete per SEM entries; `AST→IR-F` total on the supported attribute set, hard error on semantically load-bearing constructs we don't model | lowering can normalize syntax (abbreviations, formats) but never semantics |
-| **IR-G** (derived) | analysis product: dependency graph + classifications; regenerable from IR-F at any time (`derive` is pure) | explicitly lossy. Every loss is materialized as an annotation |
-| **UC record bundle** | CREATE-ONLY UC workflow records in the frozen base schema (`uc-edge-schema.md`), carried in one self-describing JSON bundle beside its own quarantine and exclusion ledgers; only E/A-classified edges compile | R-classified constructs become migration-report items, compile refuses to emit them silently. Twin lowering drops what UC has no edge condition for (an R row, an `n()` edge) into the bundle's exclusion ledger; an edge that SURVIVES lowering but has no base wire form withholds its whole workflow (DL-55), never part of it |
+| **AST** | byte-faithful syntax; `render∘parse == id` on the source text (preserve mode, F1); `render∘parse∘render == render` (canonical mode is a fixpoint, F2) | zero loss. Unknown attributes, comments, ordering, and whitespace style all survive |
+| **IR-F** (faithful) | semantics-complete per SEM entries; `AST→IR-F` total on the supported attribute set, hard error on semantically load-bearing constructs the IR does not model | lowering can normalize syntax (abbreviations, formats) but never semantics |
+| **IR-G** (derived) | analysis product: dependency graph plus classifications; regenerable from IR-F at any time (`derive` is pure) | explicitly lossy. Every loss is materialized as an annotation |
+| **UC record bundle** | CREATE-ONLY UC workflow records in the frozen base schema (`uc-edge-schema.md`), carried in one self-describing JSON bundle beside its own quarantine and exclusion ledgers; only E/A-classified edges compile | R-classified constructs become migration-report items; compile refuses to emit them silently. Twin lowering drops what UC has no edge condition for (an R row, an `n()` edge) into the bundle's exclusion ledger. An edge that survives lowering but has no base wire form withholds its whole workflow (DL-55), never part of it |
 
 `IR-F` is the source of truth for equivalence and simulation. Never hand-edit `IR-G`, and
-never serialize it as authority (this mirrors the `.nodebook/`-style "index is not truth"
-discipline).
+never serialize it as authority.
 
 ## 2. AST layer
 
@@ -79,10 +78,10 @@ class JilFile(BaseModel):
 Notes:
 - **No interpretation at this layer.** `condition` is a RawAttr like any other attribute.
   Lowering parses its expression. This keeps `jil→ast→jil` trivially total.
-- The shipped models carry more than the sketch above: every layout detail preserve mode needs
-  rides on the same rows (`pre_blank_lines`, `indent`, `sep`, `post`, `inline_gap`,
-  `inline_key`, `inline_sep`, `eof_blank_lines`, `final_newline`, `JilFile.file`). They are
-  trivia to the reader and load-bearing to F1.
+- The models carry more than the sketch above: every layout detail preserve mode needs rides
+  on the same rows (`pre_blank_lines`, `indent`, `sep`, `post`, `inline_gap`, `inline_key`,
+  `inline_sep`, `eof_blank_lines`, `final_newline`, `JilFile.file`). They are trivia to the
+  reader and required by F1.
 - There are four fidelity tests, F1–F4, defined in `jil-statement-syntax.md`. F1 is
   preserve-mode identity on the whole test corpus. F2 is the canonical-mode fixpoint. F3 is
   fuzz over generated JIL-shaped text and raw character soups: where parse succeeds, F1 holds.
@@ -90,8 +89,8 @@ Notes:
   value, and the rest).
 - Canonical mode (used for diffs and stored artifacts) has a stable attribute order (subcommand
   first, then a fixed key order, unknown keys alphabetically last) and a single space after the
-  colon — nothing after the colon when the value is empty. Canonical mode does NOT expand
-  abbreviations (that step is IR-level, and the AST canonical form is purely lexical).
+  colon, and nothing after the colon when the value is empty. Canonical mode does NOT expand
+  abbreviations: that step is IR-level, and the AST canonical form is purely lexical.
 
 ## 3. IR-F: condition algebra
 
@@ -110,41 +109,48 @@ class JobRef(BaseModel):
     name: str
     instance: str | None       # cross-instance '^INST' (SEM-07)
 
+class CondSpan(BaseModel):
+    start: int; end: int        # char offsets inside the attribute value; end exclusive
+
 class StatusAtom(BaseModel):
     kind: Literal["status"] = "status"
     job: JobRef; status: Status
     lookback: Lookback | None   # None == indefinite w/o explicit token
+    span: CondSpan | None       # every node carries one
 
 class ExitCodeAtom(BaseModel):
     kind: Literal["exitcode"] = "exitcode"
     job: JobRef; op: CmpOp; value: int
     lookback: Lookback | None
+    span: CondSpan | None
 
 class GlobalAtom(BaseModel):
     kind: Literal["global"] = "global"
     name: str; op: CmpOp; value: str      # lookback FORBIDDEN here (SEM-04) — see below
+    span: CondSpan | None
 
 class And(BaseModel):
-    kind: Literal["and"] = "and"; operands: list["Cond"]   # n-ary, flattened
+    kind: Literal["and"] = "and"; operands: list["Cond"]; span: CondSpan | None  # n-ary, flat
 class Or(BaseModel):
-    kind: Literal["or"] = "or"; operands: list["Cond"]
+    kind: Literal["or"] = "or"; operands: list["Cond"]; span: CondSpan | None
 class Paren(BaseModel):
-    kind: Literal["paren"] = "paren"; inner: "Cond"        # fidelity only; erased in canonical
+    kind: Literal["paren"] = "paren"; inner: "Cond"; span: CondSpan | None  # fidelity only;
+                                                                            # erased in canonical
 
 Cond = Annotated[StatusAtom|ExitCodeAtom|GlobalAtom|And|Or|Paren, Field(discriminator="kind")]
 ```
 
-- Parser precedence: **resolved (DL-53): left-associative, & and | equal precedence** —
-  per TechDocs 12.1 "The parentheses force precedence, and the equation is evaluated
-  from left to right." There is a single grammar rule (the earlier C-style candidate is
-  deleted). The pinning tests `test_sem03_flat_left_to_right_precedence_pinned` (grammar) and
+- Parser precedence: left-associative, `&` and `|` at equal precedence (DL-53), per TechDocs
+  12.1: "The parentheses force precedence, and the equation is evaluated from left to
+  right." There is a single grammar rule. The pinning tests
+  `test_sem03_flat_left_to_right_precedence_pinned` (grammar) and
   `test_sem03_precedence_pinned_model_level` (Cond model) hold this shape.
 - A lookback on a `value()` atom is impossible by construction, not by validation: the
   grammar gives `global_atom` no lookback slot, and `GlobalAtom` carries no `lookback` field.
   L003 stays in the §9 table as a reserved tripwire, and fires only if the model ever grows
   one.
-- There is no negation node (SEM-03): the atom set is closed under the actual language of
-  AutoSys.
+- There is no negation node (SEM-03): the atom set is exactly what the AutoSys condition
+  language has.
 
 ## 4. IR-F: entities
 
@@ -188,8 +194,15 @@ ExecUnion = Annotated[ExecSpec | FwSpec, Field(discriminator="kind")]
 
 class ResourceRef(BaseModel):            # one group of `resources:` (DL-21)
     name: str
-    quantity: int                        # QUANTITY, required
+    quantity: int                        # QUANTITY, required, >= 1
     free: Literal["Y","N","A"] | None    # absent = engine default, never guessed
+
+class VarSite(BaseModel):                # one $$VAR or $${VAR} occurrence in a string attr
+    attr: str                            # attribute that holds it, e.g. "command"
+    name: str                            # global variable name, no markers
+    braced: bool
+    start: int                           # char offsets into the stored attribute value
+    end: int
 
 class CondAttr(BaseModel):               # one condition-bearing attribute (DL-73)
     cond: Cond
@@ -227,7 +240,7 @@ class CatalogIR(BaseModel):              # the compilation unit
     globals_declared: dict[str, str]     # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
     machines: dict[str, MachineIR]
-    resources: dict[str, ResourceIR]     # insert_resource, opaque v1 (DL-18); `amount` is
+    resources: dict[str, ResourceIR]     # insert_resource, opaque (DL-18); `amount` is
                                          # the bucket size the oracle draws QUANTITY from
     calendars: dict[str, CalendarIR]     # autocal exports, opaque; standard+extended share
                                          # the run_calendar namespace (DL-36); repeatable
@@ -237,17 +250,20 @@ class CatalogIR(BaseModel):              # the compilation unit
     meta: CatalogMeta                    # source files, parse timestamp, tool version
 ```
 
-Important lowering rules:
-- `passthrough` is the **semantic firewall**. Three routes reach it, and only three: an
-  attribute on the allow-list of known-inert attributes; an exec-shaped attribute that is
-  inert on this job's type (a box does not execute, SEM-10); and the SEM-30 dead time cluster
-  (the time attributes plus the falsy `date_conditions` switch itself), carried so L005 can
-  see it. Anything else needs `--permit-unknown`. An unknown attribute NOT on the inert list
-  is a lowering error by default (constitutional: no silent loss of possibly-semantic
-  content). Values are the AST text with leading and trailing whitespace trimmed — syntax
-  normalization, which IR-F is allowed; the byte-exact text stays in the AST.
+Lowering rules:
+- `passthrough` is the only place an unmodeled attribute may go. Three routes reach it, and
+  only three: an attribute on the allow-list of known-inert attributes; an exec-shaped
+  attribute that is inert on this job's type (a box does not execute, SEM-10); and the SEM-30
+  dead time cluster (the time attributes plus the falsy `date_conditions` switch itself),
+  carried so L005 can see it. Anything else needs `--permit-unknown`. An unknown attribute
+  NOT on the inert list is a lowering error by default (DL-07): no silent loss of
+  possibly-semantic content. Values are the AST text with leading and trailing whitespace
+  trimmed. That is a syntax normalization, which IR-F is allowed; the byte-exact text stays
+  in the AST.
+- A job name that a statement in the compilation set already defines is a lowering error.
+  L014 sees only the case-insensitive collisions that survive.
 - The box tree is implicit via `box.box_name`. A validator materializes the tree and validates
-  it (acyclic, members exist, ≤ depth sanity). The tree itself is Layer-G derived data.
+  it (acyclic, members exist, depth at most 64). The tree itself is Layer-G derived data.
 - Every `Cond` keeps a pointer to its AST `SourceSpan` for end-to-end error reports: the
   owning attribute's span travels with the tree in `CondAttr` (DL-73), the per-node char
   offsets in each `Cond`'s own `CondSpan`.
@@ -286,6 +302,7 @@ class DerivedGraph(BaseModel):
     nodes: list[str]
     edges: list[DerivedEdge]
     mutex_groups: list[list[str]]         # from n() detector (M07)
+    bare_notrunning: dict[str, list[str]] # consumer -> the local jobs its bare n() names
     or_shapes: list[OrShape]              # M12 classifier output, each with lowering choice
     box_tree: BoxTree
     external_boundary: list[JobRef]       # every cross-instance ref: M33 from `condition`,
@@ -298,11 +315,11 @@ class DerivedGraph(BaseModel):
 
 Derivation passes (pure functions IR-F → IR-G, ordered):
 1. atom extraction → raw edges.
-2. `n()` mutex detection (deletes those edges from the edge set, adds mutex_groups) — M07.
-   Only an UNQUALIFIED, LOCAL `n()` atom under `condition` converts. An `n()` with a lookback
-   (M03), one naming a cross-instance job, and one under `box_success`/`box_failure` all stay
-   edges: there the atom is a completion predicate, not a start gate, and a mutex group cannot
-   carry the qualifier (DL-12).
+2. `n()` mutex detection (deletes those edges from the edge set, adds mutex_groups and
+   records `bare_notrunning`) — M07. Only an UNQUALIFIED, LOCAL `n()` atom under `condition`
+   converts. An `n()` with a lookback (M03), one naming a cross-instance job, and one under
+   `box_success`/`box_failure` all stay edges: there the atom is a completion predicate, not
+   a start gate, and a mutex group cannot carry the qualifier (DL-12).
 3. same-cycle analysis (trigger cadence inference from schedule blocks + box tree) →
    classify M01 vs M02, set cls/assumption. One rule runs BEFORE the atom-shape branches: an
    atom naming a local producer the catalog does not define is redesign on M02 whatever its
@@ -314,7 +331,7 @@ Derivation passes (pure functions IR-F → IR-G, ordered):
    pattern).
 6. run_window presence → M27 (R).
 7. structural: parallel antichains & chains detection (feeds DSL decompiler), and cycle
-   detection. Both run over the LOCAL job→job edges of `condition` origin only — the M15/M16
+   detection. Both run over the LOCAL job→job edges of `condition` origin only: the M15/M16
    box-override edges describe completion folding, not flow, and would fabricate cycles out of
    ordinary box behavior (DL-12). A cycle here is legal AutoSys but a linter warning: possible
    tight loop / re-trigger pattern.
@@ -328,38 +345,38 @@ Canonicalization `C(IR-F)`:
 - Erase `Paren`. Flatten nested And/And, Or/Or. Sort operand lists by a stable structural key,
   drop duplicate operands, and collapse a one-operand And/Or to that operand.
 - Normalize schedule lists (sorted times, dedup). The trigger lists sort on their own, with
-  one exception: SEM-34 pairs each `must_start`/`must_complete` entry with a `start_time` BY
-  POSITION, so those lists sort as ONE row set and a duplicate row collapses whole (DL-151). A
-  single relative offset covering several start times has no pairing to lose and stays as it
-  is. Empty the
-  `annotations` dict in the comparison view; no tier compares annotations today. This is the
-  dict only — `must_start` and `must_complete` are annotation-CLASS semantics but live on
-  `ScheduleBlock`, so they stay in the compare and a difference in them is tier (a)'s to
-  report.
-- Job identity: names are case-sensitive (JIL job names are case-sensitive on UNIX targets —
+  one exception. SEM-34 pairs each `must_start`/`must_complete` entry with a `start_time` BY
+  POSITION, so those lists sort as ONE row set, and a duplicate row collapses whole (DL-151).
+  A single relative offset covering several start times has no pairing to lose and stays as
+  it is. Empty the `annotations` dict in the comparison view; no tier compares annotations.
+  This is the dict only. `must_start` and `must_complete` are annotation-CLASS semantics but
+  live on `ScheduleBlock`, so they stay in the compare, and a difference in them is tier
+  (a)'s to report.
+- Job identity: names are case-sensitive (JIL job names are case-sensitive on UNIX targets;
   [?] the Windows-instance behavior is an open question). Canonical compare takes a
   `--case-fold` override.
 - Rename maps: equivalence accepts an explicit `old→new` name bijection and applies it before
   the compare. It maps job names, `box_name` links, and LOCAL job refs inside all three
-  condition attributes. A cross-instance ref is identity in both halves — neither the job name
-  nor the instance is renamed — and so are global names, v1.
+  condition attributes. A cross-instance ref is identity in both halves: neither its job name
+  nor its instance is renamed. Global names are identity too.
 
 Tier (a): `C(A) == C(B)` structural equality (Pydantic model equality on canonical form).
 Tier (b): per-job condition equivalence by finite-state enumeration, not by a truth table over
-independent atom booleans — independent atoms cannot see that `s(x)&f(x)` is unsatisfiable,
+independent atom booleans: independent atoms cannot see that `s(x)&f(x)` is unsatisfiable,
 which is L006's own flagship case. Each referenced job scope contributes its status, an
 ON_ICE flag, an age bucket cut by the referenced lookback windows, a zero-freshness flag, and
-a last exit code over the comparison cutpoints; each referenced global contributes its literal,
-numeric and string cutpoints, and UNSET (a marker OUTSIDE the string domain, so no literal
-can be read as unset — DL-151). Atoms then evaluate as functions of that state, so
-status exclusion and window nesting hold by construction. Guard the computation with a
-state-space ceiling of 2^18; past it, the condition reports "too large, tier-c only" —
-inconclusive, never divergent. The `dd` BDD fallback is deliberately not taken v1 (DL-14): no
-new dependency for a path the corpus has never needed. Tier (b) also compares the derived
-graph, as exact equality of canonical edge tuples, mutex groups and box tree — the v1 stand-in
-for a bisimulation check, which is NOT implemented. Tier (b) reads the jobs the two catalogs
-have in COMMON, and its graph half compares edges, mutex groups and the box tree, not the node
-list: which jobs exist at all is tier (a)'s question, so run tier (a) beside it.
+a last exit code over the comparison cutpoints. Each referenced global contributes its
+literal, numeric and string cutpoints, and UNSET, a marker OUTSIDE the string domain, so no
+literal can be read as unset (DL-151). Atoms then evaluate as functions of that state, so
+status exclusion and window nesting hold by construction. The computation has a state-space
+ceiling of 2^18. Past it, the condition reports "too large, tier-c only": inconclusive,
+never divergent. A BDD library (`dd`) as the fallback past the ceiling is deliberately not
+used (DL-14): no new dependency for a path the corpus has never needed. Tier (b) also
+compares the derived graph, as exact equality of canonical edge tuples, mutex groups and box
+tree; a bisimulation check is not implemented.
+Tier (b) reads the jobs the two catalogs have in COMMON, and its graph half compares edges,
+mutex groups and the box tree, not the node list: which jobs exist at all is tier (a)'s
+question, so run tier (a) beside it.
 Tier (c): oracle trace comparison (below), over the `(at, job, transition)` projection of each
 trace. `cause` is excluded: it carries names and wording, not semantics.
 
@@ -388,9 +405,12 @@ class Oracle:                             # one concrete interpreter, no protoco
     def trace(self) -> list[TraceEntry]          # ordered (at, job, transition, cause)
 ```
 
+`Event`, `TraceEntry`, `RuntimeState` and its rows live in `oracle_state.py`; the interpreter
+in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91).
+
 - Deterministic: single logical clock. One `feed()` first fires every timer due at or before
   its stamp, in time order, and drains each cascade; the injected event goes second. Within a
-  cascade the queue is FIFO — the event, then its consequences in insertion order, jobs in
+  cascade the queue is FIFO: the event, then its consequences in insertion order, jobs in
   catalog order. Feed times must be non-decreasing. A cascade is never a mixed-kind queue, so
   the (event kind priority, insertion order) tie-break has no observable cross-kind half to
   define.
@@ -398,14 +418,14 @@ class Oracle:                             # one concrete interpreter, no protoco
 - Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)`, written one
   test per behavior. Tier (c) scripts come from the caller; `equiv_scripts()` is a seeded
   deterministic generator so CLI runs reproduce. The expected-divergence pairs (P-Mxx) are
-  fixed scripts run through both interpreters. hypothesis fuzzes oracle and canonical-form
+  fixed scripts run through both interpreters. Hypothesis fuzzes oracle and canonical-form
   properties beside all three; it does not author the scripts.
-- The oracle DOES model machines/load and `resources:` as capacity buckets (DL-50). A job
+- The oracle models machines/load and `resources:` as capacity buckets (DL-50). A job
   acquires an atomic demand vector (job_load vs machine max_load, QUANTITY vs insert_resource
   `amount`) before RUNNING. If the job cannot acquire the vector, it goes to QUE_WAIT (a real
   status). The oracle admits it later, in deterministic order, on the terminal release of a
-  holder. These stay non-goals in v1: definition-time mutations (SEM-16, including mid-run
-  resource replenishment) and agent failures.
+  holder. Non-goals: definition-time mutations (SEM-16, including mid-run resource
+  replenishment) and agent failures.
 
 ## 8. Serialization & identity
 
@@ -413,29 +433,30 @@ class Oracle:                             # one concrete interpreter, no protoco
   indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.2"`. One
   catalog is one file. The output is deterministic (diff-able in git).
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
-  round-trip test in `tests/test_ir.py` is what makes it a claim rather than a promise
-  (DL-193). No CLI verb reads or writes an IR-F file: `dsl41 run` consumes JIL bytes only,
+  round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
+  writes an IR-F file: `dsl41 run` consumes JIL bytes only,
   because JIL is the input of record (DL-51) and the run root stores the byte-exact
-  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge — `to_jil()` renders a
+  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge: `to_jil()` renders a
   module to JIL, and a decompiled module writes it on stdout.
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
-- Hashing: `catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
-  short-circuit, and the migration report uses it to pin the verified content. `equiv` and
-  `period` canonicalise differently and on purpose, so each takes its own hash over its own
-  projection rather than over `dump_catalog`'s output.
+- Hashing: `equiv.catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
+  short-circuit, and the migration report uses it to pin the verified content. The period
+  model's `catalog_hash_v2` (`period.py`; `period-model.md` §1.1, over the §3.2 canonical
+  form) is a different hash over a different projection, versioned on its own. The two
+  canonicalize differently on purpose, so neither hashes `dump_catalog`'s output.
 
 ## 9. Linter architecture (findings, not treatments)
 
-`Violation(code, severity, message, jobs, span, detail)` — verbatim carry-over of the proven
-schedule-validator pattern (stable codes, `exit_code(strict)`, `--strict`). Rule inventory v1
-follows, with each rule traceable to a SEM/M row:
+`Violation(code, severity, message, jobs, span, detail)`, with stable codes,
+`exit_code(strict)`, and `--strict`. The rule inventory follows; each rule is traceable to a
+SEM/M row:
 
 | code | severity | rule | source |
 |---|---|---|---|
 | L001 | error | a condition-bearing attribute (`condition`, `box_success`, `box_failure`) references an undefined local job, or a job on an instance with no insert_xinst | SEM-06/SEM-07 |
-| L002 | error/warn | unresolved global reference: no insert_global, and no producer in the catalog. "Producer" is a textual heuristic over command strings (DL-11) — a command containing `SET_GLOBAL` is read as producing every `-G NAME=`-shaped assignment in it. Severity splits by read site (DL-25): a `$$VAR` substitution site is an error (a stale or empty value lands in a command line), a `v(NAME)` condition atom is a warn (a comparison waiting on an external setter can be an intended cross-system gate) | SEM-08 |
-| L003 | error | lookback on `value()` atom — a reserved tripwire: the grammar and the model already make the shape unbuildable (§3), so the rule fires only if `GlobalAtom` ever grows the field | SEM-04 |
+| L002 | error/warn | unresolved global reference: no insert_global, and no producer in the catalog. "Producer" is a textual heuristic over command strings (DL-11): a command containing `SET_GLOBAL` is read as producing every `-G NAME=`-shaped assignment in it. Severity splits by read site (DL-25): a `$$VAR` substitution site is an error (a stale or empty value lands in a command line); a `v(NAME)` condition atom is a warn (a comparison waiting on an external setter can be an intended cross-system gate) | SEM-08 |
+| L003 | error | lookback on `value()` atom, a reserved tripwire: the grammar and the model already make the shape unbuildable (§3), so the rule fires only if `GlobalAtom` ever grows the field | SEM-04 |
 | L004 | error | start_times+start_mins / days_of_week+run_calendar | SEM-31 |
 | L005 | warn | time attributes present, date_conditions falsy (dead config) | SEM-30 |
 | L006 | warn | contradiction: `s(x)&f(x)` same lookback scope | tier-b engine |
@@ -443,49 +464,48 @@ follows, with each rule traceable to a SEM/M row:
 | L008 | warn | box_success/box_failure references non-member (hung-RUNNING risk) | SEM-12/M16 |
 | L009 | warn | unqualified `s()` feeding a scheduled consumer (stale-latch bug) | SEM-01/R1 |
 | L010 | warn | derived-graph cycle | §5 pass 7 |
-| L011 | warn | dangling job: no schedule, no derived wiring in or out (edges, globals, mutex groups), no box membership either way, and not an FW source — only reachable by a manual sendevent | hygiene |
+| L011 | warn | dangling job: no schedule, no derived wiring in or out (edges, globals, mutex groups), no box membership either way, and not an FW source; only reachable by a manual sendevent | hygiene |
 | L012 | info | `n()` atoms → mutex candidates (suggest M07 modeling) | M07 |
 | L013 | warn | box member with own schedule (double-gate; often unintended) | SEM-31 note |
-| L014 | error | job names that collide case-insensitively, which UC addresses as one task. An exact duplicate never reaches the linter — lowering refuses it (§4) | UCS-12 |
-| L015 | warn/info | lookback format pitfalls in raw — single-digit minutes (`2.5` = 2h05m) warn; bare-hours (`30` = 30h) info, valid + unambiguous, DL-24 — parse-time | SEM-04 |
-| L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
-| L017 | warn | dangling machine reference — only when the set defines ≥1 machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
-| L018 | warn | dangling calendar reference — run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries ≥1 calendar/cycle (DL-36) | M24 |
-| L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, cited-resolved DL-58) have no UC-side arm concept — per-estate migration-attention item | SEM-32/M02 |
-| L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer — an iced producer satisfies its atoms — while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
-| L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with ≥2 wake sources and ≥1 unqualified latching atom can fire more than once per cycle — up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources = start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways — flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
-| L022 | info | stranded-on-failure consumer, L021's under-fire twin: a condition-only, unboxed consumer misses at least one cycle when a producer it cannot do without fails and no start gate in the estate reads that failure — release waits for that producer's next SUCCESS (its own next tick, a rerun, or an operator; indefinite only for an unscheduled producer). "Cannot do without" is tier-b — the producer's status pinned to FAILURE, the condition asked whether any state still satisfies it — so OR escapes and `f()`/`d()`/`e()` gates stay quiet. "Reads that failure" = a live consumer's start-gate `f`/`d`/`t`/`e` edge from the producer or an ancestor box (SEM-11 default fold; overrides can defeat it — accepted quiet-direction approximation; box-override edges classify a fold and start nothing, so they do not count). Alarms cannot exempt — observability, not control flow (DL-32); SEM-14 terminators kill, they release nothing. Scheduled consumers (L019's arm story), box members (the hung-box family), skip-translated jobs on either side, and cross-instance producers are out of scope. Info: an inventory of where control flow ends, not a defect list (DL-181) | SEM-01/SEM-11 |
+| L014 | error | job names that collide case-insensitively, which UC addresses as one task. An exact duplicate never reaches the linter: lowering refuses it (§4) | UCS-12 |
+| L015 | warn/info | lookback format pitfalls in raw: single-digit minutes (`2.5` = 2h05m) warn; bare hours (`30` = 30h) info, valid and unambiguous (DL-24); parse-time | SEM-04 |
+| L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (the UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
+| L017 | warn | dangling machine reference, only when the set defines at least one machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
+| L018 | warn | dangling calendar reference: run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries at least one calendar/cycle (DL-36) | M24 |
+| L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, DL-58) have no UC-side arm concept; a per-estate migration-attention item | SEM-32/M02 |
+| L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer, because an iced producer satisfies its atoms, while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
+| L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with at least two wake sources and at least one unqualified latching atom can fire more than once per cycle, up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources are start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways, because flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
+| L022 | info | stranded-on-failure consumer, L021's counterpart: a condition-only, unboxed consumer misses at least one cycle when a producer it cannot do without fails and no start gate in the estate reads that failure; release waits for that producer's next SUCCESS (its own next tick, a rerun, or an operator; indefinite only for an unscheduled producer). "Cannot do without" is tier-b: the producer's status pinned to FAILURE, the condition asked whether any state still satisfies it, so OR escapes and `f()`/`d()`/`e()` gates stay quiet. "Reads that failure" is a live consumer's start-gate `f`/`d`/`t`/`e` edge from the producer or an ancestor box (SEM-11 default fold; overrides can defeat it, an accepted quiet-direction approximation; box-override edges classify a fold and start nothing, so they do not count). Alarms cannot exempt: observability, not control flow (DL-32); SEM-14 terminators kill, they release nothing. Scheduled consumers (L019's arm case), box members (the hung-box family), skip-translated jobs on either side, and cross-instance producers are out of scope. Info: an inventory of where control flow ends, not a defect list (DL-181) | SEM-01/SEM-11 |
 
 ## 10. Design decisions D1–D4
 
-Three of the four are closed. The numbers stay: they are cited in the sources.
+The numbers are cited in the sources and stay.
 
-- D1: `Cond` sharing between `condition` and `box_success/box_failure` is done above. CLOSED as
-  its own "probably yes": Layer-G derives edges from box-override refs, classed M15 for a
-  reference transitively inside the box and M16 for a non-member, global, or cross-instance one
-  (§5 pass 5).
-- D2: DSL surface — SHIPPED as phase 10. `dsl41 decompile` emits a runnable builder module over
-  IR-F. The flow verbs are `job()`, `box()`, `sequence()`, `parallel()`, `mutex()` and
-  `contend()`, beside the declaration verbs (`global_()`, `machine()`, `resource()`,
-  `xinst()`, the calendar family). The fold registry is closed at T-001–T-007 (DL-38). The
-  surface was extracted from corpus patterns, never designed ahead.
-- D3: UC record emission templates — the base subset is SHIPPED (U3a, DL-55: CREATE-ONLY
-  records per docs/uc-edge-schema.md). Rich condition forms come after U3b (live openapi.json).
-  This is the one still open, and it is gated on U3b, not on a decision.
-- D4: CLOSED, yes: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one
-  comparator reads both traces.
+- D1: `Cond` is shared between `condition` and `box_success/box_failure`. Layer-G derives
+  edges from box-override refs, classed M15 for a reference transitively inside the box and
+  M16 for a non-member, global, or cross-instance one (§5 pass 5).
+- D2: the DSL surface, phase 10 of the DL-03 build order and last by design. `dsl41
+  decompile` emits a runnable builder module over IR-F. The flow
+  verbs are `job()`, `box()`, `sequence()`, `parallel()`, `mutex()` and `contend()`, beside
+  the declaration verbs (`global_()`, `machine()`, `resource()`, `xinst()`, the calendar
+  family). The fold registry is closed at T-001–T-007 (DL-38). The surface is extracted from
+  corpus patterns, never designed ahead of them.
+- D3: UC record emission. The base subset is emitted (U3a, DL-55: CREATE-ONLY records per
+  docs/uc-edge-schema.md). Rich condition forms wait on U3b (a live controller's
+  openapi.json). D3 is open on U3b alone, not on a decision.
+- D4: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one comparator
+  reads both traces.
 
-## 11. What Q1/Q2/Q3 resolution changes (impact ledger)
+## 11. Impact ledger: where Q1/Q2/Q3 live
 
-- Q1 (precedence): RESOLVED (DL-53), as predicted — one lark rule + canonical sort
-  stability. There is no model change.
-- Q2 (lookback-0 anchor): Q2a RESOLVED (DL-54), nearly as predicted — oracle evaluation
-  plus one runtime field (`JobRuntime.last_end_at`) and evaluator threading. The IR models
-  were untouched. Q2b (first-run corner) RESOLVED (DL-58) with zero code change — the
-  citation agreed with the implemented pin.
-- Q3 (time-trigger with false conds): default flipped to arm-and-wait (DL-54), RESOLVED by
-  citation (DL-58, abandon switch deleted). The changes are the oracle scheduling semantics
-  (`JobRuntime.armed` + the releasable-gate latch) and the predicted L-rule, which landed as
-  L019. There is no `ScheduleBlock` flag (nothing suggests it is configurable). The
-  box-arm-scope residue is Q3c (oracle-side pin).
-As intended, the IR shape was stable across all three. Resolution cost no model change.
+- Q1 (precedence): one lark rule, left-associative at equal precedence, and canonical sort
+  stability (DL-53); §3. No model change.
+- Q2 (lookback-0 anchor): a zero lookback anchors to the dependent job's own last end,
+  `JobRuntime.last_end_at`, threaded through the evaluator (Q2a, DL-54). When the dependent
+  has never ended, the zero-lookback qualifier is satisfied; the producer's status must still
+  match (Q2b, DL-58). The IR models carry nothing for it.
+- Q3 (time trigger with false conditions): arm-and-wait, with no expiry (DL-54, DL-58). The
+  oracle holds it in `JobRuntime.armed` and the releasable-gate latch; L019 flags the
+  UC-side gap. There is no `ScheduleBlock` switch, because nothing suggests the behavior is
+  configurable. The residue is Q3c, the arm's scope inside a box: the pinned default is that
+  a member's unconsumed arm ends with the box run, until a live instance settles it.
