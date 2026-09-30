@@ -12,6 +12,9 @@ Use a trusted checkout and the locked development environment:
 uv sync --frozen --extra dev
 ```
 
+CI installs with `--locked`, which also checks the lock against `pyproject.toml`;
+a stale lock passes `--frozen` locally and fails in CI.
+
 Project model defaults live in `.codex/config.toml` and
 `.claude/settings.json`. The boss uses those frontier defaults at xhigh.
 Codex loads project configuration only in trusted projects.
@@ -46,16 +49,21 @@ uv run coverage report
 ```
 
 The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
-annotated executable spec that left the package with DL-189, and nothing
-else held it to the type gate (DL-193).
+annotated executable spec under `tests/`, and nothing else holds it to the
+type gate (DL-193).
 
 The coverage invocation runs the full suite once.
 The coverage report enforces the scoped branch-coverage requirement.
-Keep this list aligned with `.github/workflows/ci.yml`.
+Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
+it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
+(DL-218); it needs Linux.
+`scripts/arch_check.py --spec-status` prints every specification with its spec
+review status (DL-225); it is advisory, and the `spec-review` skill runs one pass
+per document.
 CI measures coverage in a separate `coverage` job on Python 3.14 only
-(DL-211), and that job is also the suite's only 3.14 leg: `sys.monitoring` makes branch measurement nearly free there, and
-the same measurement costs 2-3x on the C tracer every other supported
-version uses.
+(DL-211), and that job is also the suite's only 3.14 leg. `sys.monitoring`
+makes branch measurement nearly free there; the same measurement costs 2-3x
+on the C tracer every other supported version uses.
 For browser changes, also follow its browser job: collect the opt-in tests,
 verify that they ran, and exercise the interactions in Chromium, WebKit,
 and Firefox. A skipped suite is not validation.
@@ -81,15 +89,16 @@ Agreement complements tests; it does not replace them.
 For a read-only Claude peer, put the complete brief in a scratch file:
 
 ```sh
-claude --print --effort xhigh --permission-mode default \
+claude --print --effort xhigh --permission-mode manual \
   --tools 'Read,Glob,Grep' --strict-mcp-config \
   --no-session-persistence --output-format json < brief.md > review.json
 ```
 
 Run from the repository root and verify the returned model.
-Use the configured model explicitly when launching from another directory.
-In the installed CLI, a nested-directory probe selected a different model
-despite the root settings file. Do not infer settings loading from memory loading.
+Use the configured model explicitly when launching from another directory: a
+probe of the installed CLI from a nested directory selected a different model,
+and the cause is not established (`docs/agent-harness-review.md`).
+Do not infer settings loading from memory loading.
 The restricted tool list excludes skill invocation; add `Skill` only when needed.
 If the brief names evidence outside the checkout, grant that specific directory
 with `--add-dir`; permission denials are not review findings.
@@ -104,7 +113,8 @@ codex exec --sandbox read-only --ephemeral --json \
   -c model_reasoning_effort='"xhigh"' - < brief.md > review.jsonl
 ```
 
-Run from the repository and verify the selected model.
+Run from the repository. The JSON output does not identify the served model;
+record the selection and that gap, as Setup says.
 Use an ordinary persistent session if later resumption is needed.
 Keep existing permission controls. Do not bypass them to make a peer run succeed.
 
