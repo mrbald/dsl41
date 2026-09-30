@@ -1,20 +1,22 @@
 # Simulation coverage register
 
 This register lists every behaviour the simulation side of dsl41 can meet
-and says what it does with it. The compiler side already fails closed:
-lowering refuses unknown attributes (DL-07), the UC backend refuses R-rows
-and records every A-row assumption, and `minify` refuses what it cannot
-classify. The simulation side carried pinned defaults with `PENDING` markers
-and unmarked choices. This register closes that gap by classification, not
-by frequency. If a construct can occur, it is modelled, refused, or listed
-here as an explicit assumption.
+and says what it does with it. The compiler side fails closed: lowering
+refuses unknown attributes (DL-07), the UC backend refuses R-rows and
+records every A-row assumption, and `minify` refuses what it cannot
+classify. The simulation side runs on classified choices and on pinned
+defaults. Each default is a `provisional` row, and the `marker` column
+says whether the code carries a `PENDING` marker for it. This register
+lists them by classification, not by frequency. If a construct can occur,
+it is modelled, refused, or listed here as an explicit assumption.
 
 Each row has one of four classes.
 
 - `supported`: the behaviour is modelled; the citation says how.
 - `provisional`: a pinned default under an open question. The label names
-  the question. The `marker` column says `yes` when the code carries a
-  `PENDING` marker for it, and the `protocol` column names the runbook
+  its open question; a row with no label says so and cites where the
+  default is pinned. The `marker` column says `yes` when the code carries
+  a `PENDING` marker for it, and the `protocol` column names the runbook
   section that would settle it.
 - `refused`: the behaviour is refused loudly; the citation is the refusing
   site.
@@ -23,9 +25,11 @@ Each row has one of four classes.
 
 Two readings are distinct. A static finding is exposure: the input may make
 the behaviour apply. A runtime finding is an application: it did apply.
-Rows here describe exposure. Collectors that record applications arrive
-slice by slice; a row whose detector reads `none` has scope fixtures but no
-collector yet, and no run output may claim it was assessed.
+Rows here describe exposure. No collector records applications. The
+`detector` column says how far a row's scope is proven: `generic` means the
+test proves the scope fixtures with a static detector, `none` means scope
+fixtures only, and `unreachable` means no input reaches the member. No run
+output may claim a row was assessed.
 
 Three limits hold for every row. A replay against recorded history proves
 agreement on that history only. A probe result binds to the scheduler and
@@ -36,11 +40,13 @@ says how far.
 The rows are data in `src/dsl41/simulation_register_rows.py`. The table
 below is generated from them by `scripts/render_simulation_coverage.py`,
 and `tests/test_simulation_register.py` fails when the two differ. The same
-test derives the domain of every surface from the code's own inventories,
-so a new attribute, token, event kind, status, profile field, adapter or
-wrapper outcome, event provenance, trace marker, preflight code, calendar
-serialization, closed Literal alternative, or `PENDING` marker site without
-a row fails the suite.
+test derives the domain of every surface except `runtime` and
+`adapter_policy` from the code's own inventories (attributes, tokens, event
+kinds, statuses, profile fields, adapter and wrapper outcomes, event
+provenances, trace markers, preflight codes, calendar serializations,
+closed Literal alternatives, `PENDING` marker sites, and the rest), so a
+member of any derived surface without a row, or a row whose member is gone,
+fails the suite.
 
 <!-- register:begin -->
 
