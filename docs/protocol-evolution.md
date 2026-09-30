@@ -1,13 +1,13 @@
 # Protocol evolution — how a dialect enters service, and how it leaves
 
-Status: **normative (2026-08-21, DL-138).** This document is the contract that
-every versioned protocol and every durable artifact in the runner is held to.
-It answers four questions: what each protocol tolerates, how long an instance
-of it can still arrive, how a new dialect enters service, and what must be true
-before an old one is retired. *(Amended by DL-150, a conformance round against
-the shipped readers, by DL-151, which paid the code debts that round
-recorded, and by DL-157, which ruled the one column DL-150 found the matrix
-without; every amendment below carries its own marker.)*
+Status: **normative (DL-138; amended by DL-147, DL-150, DL-151, DL-157,
+DL-158, DL-168, DL-170 and DL-217).** A change to what this document fixes
+requires a decision-log entry, and each amendment is cited where it
+applies. This
+document is the contract that every versioned protocol and every durable
+artifact in the runner is held to. It answers four questions: what each
+protocol tolerates, how long an instance of it can still arrive, how a new
+dialect enters service, and what must be true before an old one is retired.
 
 It invents no rule for any protocol. Each tolerance rule lives in the document
 that defines it — `docs/control-protocol.md` §2, `docs/supervisor-protocol.md`
@@ -64,30 +64,19 @@ written against.
 | **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5) | ignored | refused as `unsupported_version`, and the refusal does not close the connection | refused, the same as unsupported | the request that carries it, as the control socket | as the control socket |
 | **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | refused by construction — no carrier defaults it | the estate | not retired — **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
 
-*(Amended by DL-150.* Two rows added — the **wrapper input spec** and the
-**access role map**, both versioned surfaces the matrix did not cover. The
-archive receipt joined the closed row. Both socket rows' lifetime was corrected
-from the connection to the request. The carriers and gates of
-`catalog_hash_version` and `state_machine_version` were widened to the closed
-artifacts that also hold them.*)*
+DL-150 added the **wrapper input spec** and **access role map** rows, the
+archive receipt's place in the closed row, the request-scoped lifetime of
+both socket rows, and the closed-artifact carriers and gates of
+`catalog_hash_version` and `state_machine_version`.
 
-*(Amended by DL-157.)* One column added: **absent VERSION** — the question
-DL-150 found the matrix asking nothing about. The ruling is per class, not
-per row. A row already strict on an unknown field is strict on a missing
-version too: the closed-artifact row's own logic — §3.2 puts every typed
-field on the wire, so an unknown field is corruption — applies to an absent
-field the same way, because no retained instance omits one. A row already
-tolerant of an unknown field stays tolerant of a missing version, and today
-that is one row: the wrapper-owned spool files, the shape
-`runner_procid.spool_version_supported` already had before this entry. This
-discharges DL-150's open item whole: the closed class is ruled and the
-tolerant class is ruled too, so no half of the missing-version question is
-still open. `staged_manifest.json` was found, during this same entry's own
-verification, silently defaulting an absent field the same way the other
-four had -- the fifth reader on the closed row, not a fourth exception to
-it -- and DL-157 fixed it in the same pass rather than shipping the row
-with a named outlier in it. The closed row now refuses absence uniformly,
-with nothing left latent.
+The **absent VERSION** column (DL-157) is ruled per class, not per row. A
+row already strict on an unknown field is strict on a missing version too:
+the closed-artifact row's own logic, that §3.2 puts every typed field on
+the wire so an unknown field is corruption, applies to an absent field the
+same way, because no retained instance omits one. A row already tolerant
+of an unknown field stays tolerant of a missing version, and that is one
+row: the wrapper-owned spool files (`runner_procid.spool_version_supported`).
+The closed row refuses absence uniformly, `staged_manifest.json` included.
 
 ### Notes on the rows
 
@@ -97,8 +86,8 @@ unknown `rec` inside a version-matched segment is corruption, not an extension
 this reader is too old to see. The dispatch is three-way at one place: current,
 retired, unknown. Silently skipping an unrecognised kind would let a reader
 walk past evidence and report a complete replay.
-*(Amended by DL-158:)* the event alphabet inside an `input` record's `kind`
-field is a second strict discriminator under this same discipline: an event
+The event alphabet inside an `input` record's `kind` field is a second
+strict discriminator (DL-158) under this same discipline: an event
 kind outside the reading build's alphabet refuses by name at replay, and the
 alphabet grows only as an entry-in-service — reader and writer in one
 release, §2's order.
@@ -121,21 +110,19 @@ an unknown field is corruption: nothing legitimate can produce one. The
 tolerant estate files share the writer-side canonical form, but their readers
 take the fields they need — a writer rule is not a reader refusal.
 
-*(Amended by DL-157.)* The same logic rules an absent field, not only an
-unrecognised one: §3.2's canonical form has no optional
-`artifact_format_version`, so a retained instance missing the key is not a
-narrower dialect this binary declines to read — it is not this artifact.
-Sentinel, Anchor, Claim, Candidate and `staged_manifest.json` now require
-the key before validating the rest of the document, in the sentinel
-reader's own style (`period.py`'s `read_sentinel`, `boundary.py`'s
-`EstateAnchor.read`, `EstateAnchor.read_claim`, `read_candidate` and
-`read_staged_manifest`); the seal sidecar and the attestation already
-refused an absent version by construction — the seal through its digest,
-the attestation through its own explicit check. `staged_manifest.json`
-was the fifth instance of the same gap, found while this entry was being
-verified rather than named ahead of it, and fixed in the same pass.
+The same logic rules an absent field, not only an unrecognised one
+(DL-157): §3.2's canonical form has no optional `artifact_format_version`,
+so a retained instance missing the key is not a narrower dialect this
+binary declines to read; it is not this artifact. Sentinel, Anchor, Claim,
+Candidate and `staged_manifest.json` require the key before validating the
+rest of the document, in the sentinel reader's own style (`period.py`'s
+`read_sentinel`, `boundary.py`'s `EstateAnchor.read`,
+`EstateAnchor.read_claim`, `read_candidate` and `read_staged_manifest`);
+the seal sidecar and the attestation refuse an absent version by
+construction, the seal through its digest, the attestation through its own
+explicit check.
 
-*(Amended by DL-168.)* A third gate, beside unknown and absent: a field
+A third gate (DL-168), beside unknown and absent: a field
 of the WRONG TYPE is refused too, never coerced. **A closed artifact or
 staged identity is validated strict in the JSON sense from its bytes; a
 wire ingress of one is validated strict from its payload** — `true` never
@@ -143,35 +130,32 @@ becomes `1`, and a numeric string never becomes the int it spells.
 `boundary._read_artifact` (`read_candidate`, `read_staged_manifest`) reads
 `model_validate_json(raw, strict=True)`, the period manifest's own
 mechanism (§1, the note above this one); `StagedManifest` and `Candidate`
-also carry `strict=True` in their own model config, belt beside that
-brace, for a future caller that builds either from a lax `model_validate`
-directly. That belt is TOP-LEVEL only: `StagedManifest.runtime_profile`
+also carry `strict=True` in their own model config, a second check beside
+the first, for a future caller that builds either from a lax
+`model_validate` directly. That model-level check is TOP-LEVEL only: `StagedManifest.runtime_profile`
 is a nested `RuntimeProfile` field, and pydantic validates a nested-model
 field under ITS OWN config regardless of the outer model's `strict=True`
 (only a call-time override, as `_read_artifact` uses, cascades into it) —
 `Candidate.next_period` is the one exception, because `StagedNextPeriod`
-carries `strict=True` of its own. `StagedNextPeriod` — the wire's own copy
-of a staged identity,
-validated at `runner_control.py`'s `_seal` — gained the same `strict=True`;
-every field there is a scalar, so the config alone closes the wire
-ingress, with no call-time override to remember. Anchor and claim were
-found still lax by this entry's own verification and are UNFIXED,
-same status as an open item on this row: `EstateAnchor.read`'s
-`head.period_id` and `EstateAnchor.read_claim`'s `next_period` both still
-coerce (`tests/test_boundary.py`'s two `xfail` cases are the citable
-record).
+carries `strict=True` of its own. `StagedNextPeriod`, the wire's own copy
+of a staged identity, validated at `runner_control.py`'s `_seal`, carries
+the same `strict=True`; every field there is a scalar, so the config alone
+closes the wire ingress, with no call-time override to remember. Anchor
+and claim are lax, an open item on this row: `EstateAnchor.read`'s
+`head.period_id` and `EstateAnchor.read_claim`'s `next_period` both coerce
+(`tests/test_boundary.py`'s two `xfail` cases are the citable record).
 
-*(Amended by DL-170.)* `SealRequest` -- the wire's own copy of the seal
-ENVELOPE that carries `next_period`, validated at the same `_seal` --
-gained `strict=True` too, for the six fields DL-168's paragraph did not
-reach: `baseline_id`, `epoch`, `request_id`, `stage_digest`,
-`force_seal`, `claimed_actor`. `runner_control._seal_wire_error` still
-runs first on the live socket and still owns the pinned refusal PROSE
+`SealRequest`, the wire's own copy of the seal ENVELOPE that carries
+`next_period`, validated at the same `_seal`, carries `strict=True` too
+(DL-170), for six more fields: `baseline_id`, `epoch`, `request_id`,
+`stage_digest`, `force_seal`, `claimed_actor`.
+`runner_control._seal_wire_error` runs first on the live socket and owns
+the pinned refusal PROSE
 this row's strictness rule does not promise -- a `ValidationError`
 speaks pydantic's vocabulary, not the operator's. The model's
-`strict=True` is the belt that reaches `cli_estate.py`'s offline retry
+`strict=True` is the check that reaches `cli_estate.py`'s offline retry
 route too, which builds a `SealRequest` directly and sits behind no wire
-gate at all. One field is not fully covered by either belt alone:
+gate at all. One field is not fully covered by either check alone:
 `claimed_actor=request.get("claimed_actor") or ""` launders a falsy
 non-string into a legal empty string before the model ever sees it, so
 for that one field `_seal_wire_error` is the only check there is, not a
@@ -183,9 +167,8 @@ from the engine that reads them. A field added by a newer writer must not stop
 an older reader. A `version` the reader does not implement must stop it: the
 version exists to say the meaning changed.
 
-*(Amended by DL-151, at the build of the refusal this row had always asked
-for.)* Until then no reader looked at the `spawn.json` / `status.json`
-`version` at all. Both now do, each in its own vocabulary: the engine reads
+Both readers check the `spawn.json` / `status.json` `version` (DL-151),
+each in its own vocabulary: the engine reads
 an unsupported version as an UNREAD record, which costs a `status.json` its
 outcome and lands the run on `exit_status_unobservable` rather than letting
 a record whose meaning changed decide a verdict; the supervisor reads it as
@@ -193,16 +176,13 @@ PRESENT AND UNREADABLE, never as absence, because in its §11a table absence
 authorizes a spawn. `true` and `1.0` are not the integer 1 on either side.
 An **absent** `version` is refused by neither.
 
-*(Amended by DL-157.)* That used to be this contract declining to rule
-rather than ruling — the columns covered an unknown FIELD and an unsupported
-VERSION and not a MISSING one, and a rule invented here would have settled
-the open question DL-150 recorded by guess. It is ruled now, by class, not
-by inventing a reason for this one row: `spawn.json` and `status.json` are
-the **tolerant** case, the shape the general rule takes for a row already
-tolerant of an unknown field — an absent `version` passes here for the same
-reason an unknown field does, and this is the one row in the whole matrix
-where that is true, because it is the one row whose version-shaped
-discriminator is not `artifact_format_version`.
+An absent `version` on this row is ruled by class, not by a reason invented
+for the row (DL-157): `spawn.json` and `status.json` are the **tolerant**
+case, the shape the general rule takes for a row already tolerant of an
+unknown field. An absent `version` passes here for the same reason an
+unknown field does, and this is the one row in the whole matrix where that
+is true, because it is the one row whose version-shaped discriminator is
+not `artifact_format_version`.
 
 **The wrapper input spec is strict on fields, beside a spool it writes
 tolerantly, and the fingerprint is why.** A spool file is read for the fields a
@@ -210,11 +190,11 @@ reader needs. The input spec is hashed **whole**: a replayed SPAWN is answered
 from `receipt.json`'s `spec_fingerprint`, a sha256 over the canonical form of
 the §2 object with `lifeline_fd` removed (`docs/supervisor-protocol.md` §3,
 period-model §11a). That hash is injective only over pinned types. An unpinned
-key would let two specs that differ compare equal, and the answer to a replay
-would be a stranger's. Tolerance is safe on a record read field by field and
+key would let two specs that differ compare equal, and a replay would be
+answered from another spec's receipt. Tolerance is safe on a record read field by field and
 unsafe on one hashed as a whole.
 
-The version on this row is paid for **after** the fork. The wrapper exits,
+The version on this row is checked **after** the fork. The wrapper exits,
 writes no spawn record, and the engine reads the absence — supervisor-protocol
 §3's E7 case. The two ends can be different builds: the engine composes the
 spec, and the supervisor forks the wrapper file beside its own module, across
@@ -238,12 +218,12 @@ connection is read normally. `subscribe` is the one request that outlives its
 answer — it owns its connection until hangup (`control-protocol.md` §5) — so
 that one instance ends with the connection.
 
-*(Amended by DL-217.)* **An additive answer field is not a new dialect.**
-The basis is `control-protocol.md` §2: consumers must ignore unknown
-fields. A field added to an answer is therefore read by every current
-client as it was before. It takes no version bump, and none of the four
-steps in this document's §2. The first one is
-`original_decision` on a `sendevent` or `host` collision refusal
+**An additive answer field is not a new dialect** (DL-217). The basis is
+`control-protocol.md` §2: consumers must ignore unknown fields. A field
+added to an answer is therefore read by every current client as it was
+before. It takes no version bump, and none of the four steps in this
+document's §2. An example is `original_decision` on a `sendevent` or
+`host` collision refusal
 (`control-protocol.md` §3). It nests the earlier decision under its own
 key, so a client that ignores it still reads the refusal as a refusal.
 DL-217 records it, and two tests in `tests/test_recovery.py` hold it:
@@ -277,12 +257,9 @@ A new dialect enters in four steps, in this order.
 4. **Retire.** The old dialect leaves under §3's gate, which is usually much
    later, and sometimes never.
 
-*(Amended by DL-150: the paragraph below used to state the durable-row rule as
-if it held everywhere, which contradicts §3's socket paragraph.)*
-
 Steps 1 to 3 may land in one release. **On a durable row, step 4 may not join
-them**: at step 3 every old instance still exists, so the retirement gate is not
-met by construction.
+them** (DL-150): at step 3 every old instance still exists, so the retirement
+gate is not met by construction.
 
 **On a wire row it may.** Nothing durable holds a wire dialect, so the gate is
 met by construction (§3) and the only question left is whether any client still
@@ -316,7 +293,7 @@ from every root the operator keeps, whatever its retention verdict:
   prunable artifact can stay readable indefinitely. "Prunable" is a verdict,
   not a deletion.
 
-*(Amended by DL-150.)* **"Exists" is scoped to what the operator keeps.** A copy that has left the
+**"Exists" is scoped to what the operator keeps** (DL-150). A copy that has left the
 retained set — an archive tape, a colleague's laptop, a root restored from a
 backup years later — is not an instance this gate can see, and waiting for it
 would mean never retiring anything. That is exactly why §6 exists: the gate
@@ -346,9 +323,7 @@ including proofs held in roots the rewriter cannot reach.
 > **pre-production reset**: a dialect is retired without §2's lifecycle, and
 > every artifact written before the reset becomes unreadable.
 
-*(Amended by DL-150: the clause used to read "without the §3 gate", which
-contradicts DL-138's own classification — the gate is MET, trivially. What a
-reset skips is the lifecycle, not the gate.)*
+The clause skips the lifecycle, not the §3 gate (DL-150).
 
 The clause is honest only because of its condition. With no estate anywhere,
 the §3 gate is met trivially — there is no instance to be absent — and the
@@ -360,8 +335,8 @@ collapse to the last one.
 the gate wants.** The two are not the same sentence, and the entry has to
 supply both. No production estate is what makes it credible that no instance
 was ever written; it is not by itself proof of it. An entry that shows only
-the first has shown that nobody is watching, which is a different claim from
-"there is nothing to find".
+the first has shown that no estate would notice, which is a different claim
+from "there is nothing to find".
 
 **DL-138 is the first use of this clause, and once production exists it is the
 last.** An entry claiming it must state the condition it is claiming, so that a
@@ -396,8 +371,8 @@ The rules:
   "this was never legal", which is the difference between an old root and a
   corrupt one.
 
-*(Amended by DL-150.)* A **registry** is the shape a tombstone takes when the
-discriminator has many values: a table beside the reader, one row per retired value. Where the
+A **registry** is the shape a tombstone takes when the discriminator has
+many values (DL-150): a table beside the reader, one row per retired value. Where the
 discriminator has two — a boolean field whose one legal value is now `false` —
 the refusal lives at that field's validator and no table is built. A table over
 one row is a table nobody consults. The four rules above still bind it: the
@@ -418,9 +393,8 @@ One decision-log entry, plus **dispatcher tests on every affected row**:
 Cases 3 and 4 are tested separately. A single test that feeds a message which
 is both unknown-field and unknown-version proves neither.
 
-*(Amended by DL-150: case 4 used to read "on every row without exception",
-which DL-147's perimeter row had already made untrue.)* One row has no version,
-and it is the only exception to case 4: the perimeter
+One row has no version, and it is the only exception to case 4
+(DL-150): the perimeter
 journal, by construction, because no engine dispatches it (DL-147). A row may
 join that exception only the way this one did — by an entry showing that
 nothing reads the artifact for a decision. "We did not add one" is not a
@@ -428,9 +402,8 @@ construction.
 
 ## 8. The first executed retirement
 
-DL-138 retired seven dialects at once, under the reset clause of §5.
-*(Amended by DL-150: this table said six. `legacy_batch: true` was missing, and
-it is refused by name, naming DL-138, like the other six.)*
+DL-138 retired seven dialects at once, under the reset clause of §5
+(DL-150).
 
 | dialect | row | replaced by |
 | --- | --- | --- |
