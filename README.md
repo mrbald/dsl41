@@ -696,7 +696,8 @@ CLI and scripts:
   a `test_...` name in the docs that no test defines, and an IR-F schema
   change without an `IR_VERSION` bump. Size checks are advisory, ratcheted
   against `scripts/arch_baseline.json`. It also reports when a conceptual
-  review is due.
+  review is due, and which specifications under `docs/` are due a spec
+  review (`--spec-status` prints the table).
 
 ### Tests
 
@@ -768,8 +769,9 @@ Compiler:
 - `tests/test_classification.py`: every classifier tier row with a
   contrast case, the profile-field sweep, both closure directions, and
   nested containment.
-- `tests/test_arch_check.py`: each blocking check of the architecture gate
-  and the advisory size ratchet, tripped and not tripped.
+- `tests/test_arch_check.py`: each blocking check of the architecture gate,
+  the advisory size ratchet, and the spec-review status, tripped and not
+  tripped.
 
 Runner:
 
